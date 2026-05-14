@@ -362,6 +362,347 @@ git add framework/src/queue framework/src/lib.rs framework/tests/queue.rs
 git commit -m "feat(queue): Job trait + Queue facade + in-process driver + fake"
 ```
 
+- [ ] **Step 5: Per-job metadata + `#[job(...)]` macro — failing test**
+
+Laravel 13 added `#[Tries]` / `#[Backoff]` / `#[Timeout]` / `#[FailOnTimeout]`
+attributes on job classes. Mirror them as `#[job(tries = ..., backoff = ...,
+timeout = ..., fail_on_timeout = ...)]`. Backoff schedule is a Laravel-style
+comma-separated duration list (`"2s,5s,30s"`).
+
+```rust
+// framework/tests/queue.rs — append
+use std::time::Duration;
+use suprnova::queue::BackoffSchedule;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[suprnova::job(tries = 5, backoff = "2s,5s,30s", timeout = "90s", fail_on_timeout = true)]
+struct ResilientJob {
+    payload: String,
+}
+
+#[async_trait]
+impl Job for ResilientJob {
+    fn job_name() -> &'static str { "ResilientJob" }
+    async fn handle(self) -> Result<(), FrameworkError> { Ok(()) }
+}
+
+#[test]
+fn job_macro_emits_metadata_overrides() {
+    assert_eq!(ResilientJob::tries(), 5);
+    assert_eq!(
+        ResilientJob::backoff(),
+        BackoffSchedule::Sequence(vec![
+            Duration::from_secs(2),
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+        ])
+    );
+    assert_eq!(ResilientJob::timeout(), Some(Duration::from_secs(90)));
+    assert!(ResilientJob::fail_on_timeout());
+}
+
+#[test]
+fn job_without_macro_uses_trait_defaults() {
+    assert_eq!(AddNumbers::tries(), 1);
+    assert_eq!(AddNumbers::backoff(), BackoffSchedule::None);
+    assert_eq!(AddNumbers::timeout(), None);
+    assert!(!AddNumbers::fail_on_timeout());
+}
+```
+
+- [ ] **Step 6: Run — expect failure**
+
+```bash
+cargo test -p suprnova --test queue job_macro_emits_metadata_overrides
+```
+
+Expected: FAIL — `BackoffSchedule` not in scope; trait methods missing.
+
+- [ ] **Step 7: Implement Job trait metadata + `#[job]` proc macro**
+
+```rust
+// framework/src/queue/mod.rs — extend the Job trait
+use std::time::Duration;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackoffSchedule {
+    /// No backoff — retry immediately.
+    None,
+    /// Apply a fixed delay between retries.
+    Fixed(Duration),
+    /// Apply a per-attempt sequence; last entry is reused for any
+    /// attempts beyond the sequence length.
+    Sequence(Vec<Duration>),
+}
+
+impl BackoffSchedule {
+    pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
+        match self {
+            BackoffSchedule::None => Duration::ZERO,
+            BackoffSchedule::Fixed(d) => *d,
+            BackoffSchedule::Sequence(s) => {
+                let idx = (attempt as usize).saturating_sub(1).min(s.len().saturating_sub(1));
+                s.get(idx).copied().unwrap_or(Duration::ZERO)
+            }
+        }
+    }
+}
+
+#[async_trait]
+pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
+    fn job_name() -> &'static str
+    where
+        Self: Sized;
+    async fn handle(self) -> Result<(), FrameworkError>;
+
+    /// Maximum attempts (default 1 — no retry).
+    fn tries() -> u32 where Self: Sized { 1 }
+    /// Delay schedule between retries.
+    fn backoff() -> BackoffSchedule where Self: Sized { BackoffSchedule::None }
+    /// Hard timeout per attempt.
+    fn timeout() -> Option<Duration> where Self: Sized { None }
+    /// Whether timeout counts as a permanent failure (no further retries).
+    fn fail_on_timeout() -> bool where Self: Sized { false }
+}
+```
+
+```rust
+// suprnova-macros/src/job.rs (new file)
+use proc_macro::TokenStream;
+use quote::quote;
+use syn::{parse_macro_input, AttributeArgs, ItemStruct, Lit, Meta, NestedMeta};
+
+pub fn job_attribute(args: TokenStream, input: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(args as AttributeArgs);
+    let input = parse_macro_input!(input as ItemStruct);
+    let name = &input.ident;
+
+    let mut tries: Option<proc_macro2::TokenStream> = None;
+    let mut backoff_expr: Option<proc_macro2::TokenStream> = None;
+    let mut timeout_expr: Option<proc_macro2::TokenStream> = None;
+    let mut fail_on_timeout = false;
+
+    for arg in args {
+        let NestedMeta::Meta(Meta::NameValue(nv)) = arg else { continue };
+        let key = nv.path.get_ident().map(|i| i.to_string()).unwrap_or_default();
+        match (key.as_str(), nv.lit) {
+            ("tries", Lit::Int(n)) => {
+                let v = n.base10_parse::<u32>().expect("tries must be u32");
+                tries = Some(quote! { #v });
+            }
+            ("backoff", Lit::Str(s)) => {
+                backoff_expr = Some(parse_backoff_literal(&s.value()));
+            }
+            ("timeout", Lit::Str(s)) => {
+                let d = humantime::parse_duration(&s.value())
+                    .expect("timeout must parse as humantime duration");
+                let secs = d.as_secs();
+                let nanos = d.subsec_nanos();
+                timeout_expr = Some(quote! {
+                    ::std::option::Option::Some(
+                        ::std::time::Duration::new(#secs, #nanos)
+                    )
+                });
+            }
+            ("fail_on_timeout", Lit::Bool(b)) => fail_on_timeout = b.value(),
+            _ => {}
+        }
+    }
+
+    let tries_impl = tries.map(|t| quote! { fn tries() -> u32 { #t } });
+    let backoff_impl = backoff_expr.map(|b| quote! { fn backoff() -> ::suprnova::queue::BackoffSchedule { #b } });
+    let timeout_impl = timeout_expr.map(|t| quote! { fn timeout() -> ::std::option::Option<::std::time::Duration> { #t } });
+    let fail_impl = if fail_on_timeout {
+        Some(quote! { fn fail_on_timeout() -> bool { true } })
+    } else {
+        None
+    };
+
+    quote! {
+        #input
+
+        #[automatically_derived]
+        impl #name {
+            #tries_impl
+            #backoff_impl
+            #timeout_impl
+            #fail_impl
+        }
+    }
+    .into()
+}
+
+fn parse_backoff_literal(s: &str) -> proc_macro2::TokenStream {
+    let durations: Vec<_> = s
+        .split(',')
+        .map(|p| {
+            let d = humantime::parse_duration(p.trim())
+                .expect("backoff entry must parse as humantime duration");
+            let secs = d.as_secs();
+            let nanos = d.subsec_nanos();
+            quote! { ::std::time::Duration::new(#secs, #nanos) }
+        })
+        .collect();
+    if durations.len() == 1 {
+        let d = &durations[0];
+        quote! { ::suprnova::queue::BackoffSchedule::Fixed(#d) }
+    } else {
+        quote! { ::suprnova::queue::BackoffSchedule::Sequence(vec![ #(#durations),* ]) }
+    }
+}
+```
+
+```rust
+// suprnova-macros/src/lib.rs — append
+mod job;
+#[proc_macro_attribute]
+pub fn job(args: TokenStream, input: TokenStream) -> TokenStream {
+    job::job_attribute(args, input)
+}
+```
+
+> **Note:** The `#[job(...)]` macro emits an inherent `impl` on the
+> struct that provides metadata methods. Because the `Job` trait's
+> methods all have default impls, the inherent-impl methods shadow
+> them via Rust's method resolution. Verify with `cargo expand` that
+> the generated methods are called from `<ResilientJob as Job>::tries()`
+> sites in the dispatch path.
+
+**Driver dispatch must read these:** the in-process driver and the
+sea-streamer driver (Task 3) read `J::tries()` / `J::backoff()` /
+`J::timeout()` / `J::fail_on_timeout()` from the registered handler's
+type and apply retry / timeout policy accordingly. Extend
+`worker::register::<J>` to capture these as `FnOnce` closures alongside
+the deserializer.
+
+- [ ] **Step 8: Run — expect pass**
+
+```bash
+cargo test -p suprnova --test queue job_macro_emits_metadata_overrides job_without_macro_uses_trait_defaults
+```
+
+Expected: both pass.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add framework/src/queue/mod.rs suprnova-macros framework/Cargo.toml framework/tests/queue.rs
+git commit -m "feat(queue): #[job(tries, backoff, timeout, fail_on_timeout)] attribute"
+```
+
+- [ ] **Step 10: `Queue::route` — class-to-queue routing (L13)**
+
+Failing test:
+
+```rust
+// framework/tests/queue.rs — append
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct PodcastJob { id: i64 }
+
+#[async_trait]
+impl Job for PodcastJob {
+    fn job_name() -> &'static str { "PodcastJob" }
+    async fn handle(self) -> Result<(), FrameworkError> { Ok(()) }
+}
+
+#[tokio::test]
+async fn queue_route_pins_a_job_to_a_specific_connection_and_queue() {
+    Queue::route::<PodcastJob>("redis", "podcasts").await;
+    let route = Queue::route_for::<PodcastJob>().await;
+    assert_eq!(route.as_deref(), Some(("redis", "podcasts")));
+}
+```
+
+- [ ] **Step 11: Implement `Queue::route`**
+
+```rust
+// framework/src/queue/mod.rs — append impl Queue block
+use dashmap::DashMap;
+use std::any::TypeId;
+
+static ROUTES: OnceLock<DashMap<TypeId, (String, String)>> = OnceLock::new();
+
+fn routes() -> &'static DashMap<TypeId, (String, String)> {
+    ROUTES.get_or_init(DashMap::new)
+}
+
+impl Queue {
+    /// Pin a job type to a specific connection + queue.
+    ///
+    /// Calls to `Queue::push::<J>` route to the named driver if the
+    /// type has a registered route; otherwise they use the default
+    /// driver installed by `Queue::use_*()`.
+    pub async fn route<J: Job>(connection: impl Into<String>, queue: impl Into<String>) {
+        routes().insert(TypeId::of::<J>(), (connection.into(), queue.into()));
+    }
+
+    /// Read the route for a job type (test/inspection only).
+    pub async fn route_for<J: Job>() -> Option<(&'static str, &'static str)> {
+        routes()
+            .get(&TypeId::of::<J>())
+            .map(|kv| (Box::leak(kv.0.clone().into_boxed_str()) as &str,
+                       Box::leak(kv.1.clone().into_boxed_str()) as &str))
+    }
+}
+```
+
+The push path consults the routes table:
+
+```rust
+// framework/src/queue/mod.rs — modify Queue::push
+impl Queue {
+    pub async fn push<J: Job>(job: J) -> Result<(), FrameworkError> {
+        if testing::is_active() {
+            return testing::record(&job);
+        }
+        // Route lookup
+        let route = routes().get(&TypeId::of::<J>()).map(|kv| kv.value().clone());
+        let payload = serde_json::to_value(&job)
+            .map_err(|e| FrameworkError::internal(format!("encode job: {}", e)))?;
+        match route {
+            Some((connection, queue)) => {
+                // Look up the named driver and push to its queue.
+                let named = NAMED_DRIVERS
+                    .get()
+                    .and_then(|map| map.get(&connection).cloned())
+                    .ok_or_else(|| FrameworkError::internal(format!(
+                        "no named queue driver for connection '{}'", connection
+                    )))?;
+                named.push_to_queue(J::job_name(), &queue, payload).await
+            }
+            None => {
+                let driver = DRIVER
+                    .get()
+                    .ok_or_else(|| FrameworkError::internal("queue driver not initialized"))?;
+                driver.push(J::job_name(), payload).await
+            }
+        }
+    }
+}
+```
+
+> **Implementation note:** Add `push_to_queue(job_name, queue, payload)`
+> to the `QueueDriver` trait alongside `push`. For drivers that don't
+> support multiple queues (in-process), default the impl to call `push`
+> ignoring the `queue` arg. For sea-streamer / database drivers, route
+> to a different stream/table per `queue` name.
+
+Also add a `NAMED_DRIVERS: OnceLock<DashMap<String, Arc<dyn QueueDriver>>>`
+and a `Queue::register_driver(connection_name, driver)` API.
+
+- [ ] **Step 12: Run — expect pass**
+
+```bash
+cargo test -p suprnova --test queue queue_route_pins_a_job
+```
+
+- [ ] **Step 13: Commit**
+
+```bash
+git add framework/src/queue/mod.rs framework/tests/queue.rs
+git commit -m "feat(queue): Queue::route — pin job classes to a named connection+queue"
+```
+
 ---
 
 ## Task 3: sea-streamer-backed Queue driver
@@ -1507,7 +1848,722 @@ git commit -m "feat(app): queued welcome email job + login throttle dogfood"
 
 ---
 
-## Task 10: Workspace lint + final verification + roadmap update
+## Task 10: Bus facade — sync command bus + batches + chains + fake
+
+Laravel's `Bus::dispatch($job)` runs a job synchronously inside the
+current process; `Bus::batch([...])` runs N jobs in parallel with a
+completion callback; `Bus::chain([...])` runs N jobs sequentially with
+a failure short-circuit. Built on the existing `Job` trait (Task 2) —
+no new transport.
+
+**Files:** `framework/src/bus/mod.rs`, `framework/src/bus/testing.rs`
+
+- [ ] **Step 1: Write failing test**
+
+```rust
+// framework/tests/bus.rs
+use suprnova::{async_trait, Bus, FrameworkError, Job};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
+
+static COUNTER: AtomicI64 = AtomicI64::new(0);
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct Increment { by: i64 }
+
+#[async_trait]
+impl Job for Increment {
+    fn job_name() -> &'static str { "Increment" }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        COUNTER.fetch_add(self.by, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct AlwaysFails;
+
+#[async_trait]
+impl Job for AlwaysFails {
+    fn job_name() -> &'static str { "AlwaysFails" }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Err(FrameworkError::internal("intentional"))
+    }
+}
+
+#[tokio::test]
+async fn bus_dispatch_runs_job_synchronously() {
+    COUNTER.store(0, Ordering::SeqCst);
+    Bus::dispatch(Increment { by: 7 }).await.unwrap();
+    assert_eq!(COUNTER.load(Ordering::SeqCst), 7);
+}
+
+#[tokio::test]
+async fn bus_batch_runs_jobs_in_parallel_and_reports_results() {
+    COUNTER.store(0, Ordering::SeqCst);
+    let report = Bus::batch(vec![
+        Increment { by: 1 },
+        Increment { by: 2 },
+        Increment { by: 3 },
+    ])
+    .dispatch()
+    .await;
+
+    assert_eq!(COUNTER.load(Ordering::SeqCst), 6);
+    assert_eq!(report.successful, 3);
+    assert_eq!(report.failed, 0);
+}
+
+#[tokio::test]
+async fn bus_chain_stops_at_first_failure() {
+    COUNTER.store(0, Ordering::SeqCst);
+    let result = Bus::chain()
+        .then(Increment { by: 10 })
+        .then(AlwaysFails)
+        .then(Increment { by: 999 }) // should NOT run
+        .dispatch()
+        .await;
+
+    assert!(result.is_err());
+    assert_eq!(COUNTER.load(Ordering::SeqCst), 10);
+}
+
+#[tokio::test]
+async fn bus_fake_records_dispatched_jobs() {
+    let _guard = Bus::fake();
+    Bus::dispatch(Increment { by: 1 }).await.unwrap();
+    Bus::dispatch(Increment { by: 2 }).await.unwrap();
+    suprnova::bus::testing::assert_dispatched::<Increment>(|j| j.by == 1);
+    suprnova::bus::testing::assert_dispatched::<Increment>(|j| j.by == 2);
+    suprnova::bus::testing::assert_dispatched_count::<Increment>(2);
+}
+```
+
+- [ ] **Step 2: Run — expect failure**
+
+```bash
+cargo test -p suprnova --test bus
+```
+
+- [ ] **Step 3: Implement Bus facade**
+
+```rust
+// framework/src/bus/mod.rs
+//! Synchronous command bus on top of the `Job` trait.
+
+pub mod testing;
+
+use crate::queue::Job;
+use crate::FrameworkError;
+
+pub struct Bus;
+
+impl Bus {
+    /// Run a job synchronously in the current task. Returns the
+    /// `handle()` result.
+    pub async fn dispatch<J: Job>(job: J) -> Result<(), FrameworkError> {
+        if testing::is_active() {
+            return testing::record(&job);
+        }
+        job.handle().await
+    }
+
+    /// Build a batch — N jobs that run concurrently.
+    pub fn batch<J: Job>(jobs: Vec<J>) -> BatchBuilder<J> {
+        BatchBuilder { jobs }
+    }
+
+    /// Build a chain — N jobs that run sequentially. The chain
+    /// short-circuits on the first error.
+    pub fn chain() -> ChainBuilder {
+        ChainBuilder { steps: Vec::new() }
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn fake() -> testing::BusFakeGuard {
+        testing::install_fake()
+    }
+}
+
+pub struct BatchBuilder<J: Job> {
+    jobs: Vec<J>,
+}
+
+pub struct BatchReport {
+    pub successful: usize,
+    pub failed: usize,
+    pub errors: Vec<FrameworkError>,
+}
+
+impl<J: Job + Clone> BatchBuilder<J> {
+    pub async fn dispatch(self) -> BatchReport {
+        let futures = self.jobs.into_iter().map(|j| async move { j.handle().await });
+        let results = futures::future::join_all(futures).await;
+
+        let mut successful = 0;
+        let mut failed = 0;
+        let mut errors = Vec::new();
+        for r in results {
+            match r {
+                Ok(()) => successful += 1,
+                Err(e) => {
+                    failed += 1;
+                    errors.push(e);
+                }
+            }
+        }
+        BatchReport { successful, failed, errors }
+    }
+}
+
+type BoxJob = Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Result<(), FrameworkError>> + Send>;
+
+pub struct ChainBuilder {
+    steps: Vec<BoxJob>,
+}
+
+impl ChainBuilder {
+    pub fn then<J: Job>(mut self, job: J) -> Self {
+        self.steps.push(Box::new(move || {
+            Box::pin(async move { job.handle().await })
+        }));
+        self
+    }
+
+    pub async fn dispatch(self) -> Result<(), FrameworkError> {
+        for step in self.steps {
+            step().await?;
+        }
+        Ok(())
+    }
+}
+```
+
+```rust
+// framework/src/bus/testing.rs
+//! `Bus::fake()` — record dispatched jobs without running them.
+
+use crate::FrameworkError;
+use crate::queue::Job;
+use std::any::TypeId;
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+#[derive(Default)]
+struct FakeStore {
+    dispatched: HashMap<TypeId, Vec<serde_json::Value>>,
+}
+
+static FAKE: Mutex<Option<FakeStore>> = Mutex::new(None);
+
+pub(crate) fn is_active() -> bool {
+    FAKE.lock().unwrap().is_some()
+}
+
+pub(crate) fn record<J: Job>(job: &J) -> Result<(), FrameworkError> {
+    if let Some(store) = FAKE.lock().unwrap().as_mut() {
+        let v = serde_json::to_value(job)
+            .map_err(|e| FrameworkError::internal(format!("encode: {}", e)))?;
+        store.dispatched.entry(TypeId::of::<J>()).or_default().push(v);
+    }
+    Ok(())
+}
+
+pub fn install_fake() -> BusFakeGuard {
+    *FAKE.lock().unwrap() = Some(FakeStore::default());
+    BusFakeGuard
+}
+
+pub struct BusFakeGuard;
+impl Drop for BusFakeGuard {
+    fn drop(&mut self) {
+        *FAKE.lock().unwrap() = None;
+    }
+}
+
+pub fn assert_dispatched<J: Job>(pred: impl Fn(&J) -> bool) {
+    let g = FAKE.lock().unwrap();
+    let store = g.as_ref().expect("Bus::fake() must be active");
+    let bucket = store.dispatched.get(&TypeId::of::<J>());
+    let any_match = bucket
+        .map(|b| {
+            b.iter()
+                .filter_map(|v| serde_json::from_value::<J>(v.clone()).ok())
+                .any(|j| pred(&j))
+        })
+        .unwrap_or(false);
+    assert!(any_match, "expected matching {} to be dispatched", J::job_name());
+}
+
+pub fn assert_dispatched_count<J: Job>(expected: usize) {
+    let g = FAKE.lock().unwrap();
+    let store = g.as_ref().expect("Bus::fake() must be active");
+    let count = store.dispatched.get(&TypeId::of::<J>()).map(|b| b.len()).unwrap_or(0);
+    assert_eq!(count, expected, "{} dispatched count mismatch", J::job_name());
+}
+```
+
+```rust
+// framework/src/lib.rs — append
+pub mod bus;
+pub use bus::Bus;
+```
+
+- [ ] **Step 4: Run — expect pass**
+
+```bash
+cargo test -p suprnova --test bus
+```
+
+Expected: 4 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add framework/src/bus framework/src/lib.rs framework/tests/bus.rs
+git commit -m "feat(bus): Bus facade — sync dispatch + batch + chain + fake"
+```
+
+---
+
+## Task 11: Cache tags + atomic locks + Cache::touch
+
+Three Cache extensions that round out the parity story: tag-based
+flushing, atomic locks (cluster-aware via Redis SET NX), and the
+L13 `Cache::touch` that extends TTL without re-storing the value.
+The existing `Cache::remember` / `get` / `put` / `forever` /
+`forget` / `flush` / `increment` / `decrement` stay unchanged.
+
+**Files:** `framework/src/cache/tags.rs`, `framework/src/cache/lock.rs`,
+extend `framework/src/cache/mod.rs`, `framework/src/cache/redis.rs`,
+`framework/src/cache/memory.rs`.
+
+- [ ] **Step 1: Write failing test**
+
+```rust
+// framework/tests/cache_extensions.rs
+use std::time::Duration;
+use suprnova::Cache;
+
+#[tokio::test]
+async fn cache_tags_flush_only_keys_tagged_with_that_tag() {
+    Cache::tags(&["users"]).put("user:1", &"alice", None).await.unwrap();
+    Cache::tags(&["users"]).put("user:2", &"bob", None).await.unwrap();
+    Cache::tags(&["posts"]).put("post:1", &"hello", None).await.unwrap();
+
+    Cache::tags(&["users"]).flush().await.unwrap();
+
+    assert!(Cache::get::<String>("user:1").await.unwrap().is_none());
+    assert!(Cache::get::<String>("user:2").await.unwrap().is_none());
+    assert_eq!(Cache::get::<String>("post:1").await.unwrap().as_deref(), Some("hello"));
+}
+
+#[tokio::test]
+async fn cache_lock_acquires_and_releases() {
+    let lock = Cache::lock("import-1", Duration::from_secs(5)).await.unwrap();
+    assert!(lock.acquired());
+
+    let contender = Cache::lock("import-1", Duration::from_secs(5)).await.unwrap();
+    assert!(!contender.acquired(), "second lock on same key should fail until release");
+
+    drop(lock);
+    tokio::task::yield_now().await;
+
+    let after_release = Cache::lock("import-1", Duration::from_secs(5)).await.unwrap();
+    assert!(after_release.acquired());
+}
+
+#[tokio::test]
+async fn cache_lock_get_runs_callback_only_once_for_concurrent_callers() {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static CALLS: AtomicI64 = AtomicI64::new(0);
+    CALLS.store(0, Ordering::SeqCst);
+
+    let a = Cache::lock("import-2", Duration::from_secs(5)).get(|| async {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        "result".to_string()
+    });
+    let b = Cache::lock("import-2", Duration::from_secs(5)).get(|| async {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        "result".to_string()
+    });
+
+    let (ra, rb) = tokio::join!(a, b);
+    // One of them got the lock and computed; the other returned the cached value.
+    assert!(ra.is_ok() && rb.is_ok());
+    assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn cache_touch_extends_ttl_without_changing_value() {
+    Cache::put("session:abc", &"data", Some(Duration::from_secs(5))).await.unwrap();
+    Cache::touch("session:abc", Duration::from_secs(60)).await.unwrap();
+    // Verify the value is unchanged
+    assert_eq!(Cache::get::<String>("session:abc").await.unwrap().as_deref(), Some("data"));
+    // Driver-specific TTL inspection is left to the redis-aware test;
+    // for in-memory the assertion is just that the value persists.
+}
+```
+
+- [ ] **Step 2: Implement tags**
+
+```rust
+// framework/src/cache/tags.rs
+use crate::{Cache, FrameworkError};
+use serde::Serialize;
+use std::time::Duration;
+
+/// Tag-scoped cache operations. Each tagged `put` also writes the key
+/// into the tag's index set (`tag:{tag_name}`). `flush` reads the
+/// index set and deletes every member, then deletes the index itself.
+pub struct TaggedCache {
+    tags: Vec<String>,
+}
+
+impl TaggedCache {
+    pub(crate) fn new(tags: Vec<String>) -> Self {
+        Self { tags }
+    }
+
+    pub async fn put<T: Serialize>(
+        &self,
+        key: &str,
+        value: &T,
+        ttl: Option<Duration>,
+    ) -> Result<(), FrameworkError> {
+        Cache::put(key, value, ttl).await?;
+        for tag in &self.tags {
+            Cache::sadd(&format!("tag:{}", tag), key).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn flush(&self) -> Result<(), FrameworkError> {
+        for tag in &self.tags {
+            let index_key = format!("tag:{}", tag);
+            let members: Vec<String> = Cache::smembers(&index_key).await?;
+            for k in members {
+                Cache::forget(&k).await?;
+            }
+            Cache::forget(&index_key).await?;
+        }
+        Ok(())
+    }
+}
+
+impl Cache {
+    pub fn tags(tags: &[&str]) -> TaggedCache {
+        TaggedCache::new(tags.iter().map(|s| (*s).to_string()).collect())
+    }
+
+    /// Set-add — driver-specific implementation. Redis uses SADD; the
+    /// in-memory store uses a `DashMap<String, HashSet<String>>`.
+    pub(crate) async fn sadd(set_key: &str, member: &str) -> Result<(), FrameworkError> {
+        Self::store()?.sadd(set_key, member).await
+    }
+
+    pub(crate) async fn smembers(set_key: &str) -> Result<Vec<String>, FrameworkError> {
+        Self::store()?.smembers(set_key).await
+    }
+}
+```
+
+Add `sadd` + `smembers` to the `CacheStore` trait in
+`framework/src/cache/store.rs` and implement them on `InMemoryCache`
+(using a parallel `DashMap<String, HashSet<String>>`) and `RedisCache`
+(`SADD` / `SMEMBERS`).
+
+- [ ] **Step 3: Implement locks**
+
+```rust
+// framework/src/cache/lock.rs
+use crate::{Cache, FrameworkError};
+use std::future::Future;
+use std::time::Duration;
+use uuid::Uuid;
+
+/// An atomic lock acquired via Redis `SET key value NX EX seconds`
+/// (or the in-memory `DashMap::insert_if_absent` equivalent). Drops
+/// itself by deleting the key — IF the held token still matches, so
+/// a slow lock owner can't accidentally release a successor's lock.
+pub struct CacheLock {
+    key: String,
+    token: String,
+    acquired: bool,
+    ttl: Duration,
+}
+
+impl CacheLock {
+    pub fn acquired(&self) -> bool {
+        self.acquired
+    }
+
+    /// Run `f` while holding the lock. If the lock is already held,
+    /// poll the cached result key instead. The callback's return
+    /// value is stored at `{key}:result` for the duration of `ttl`.
+    pub async fn get<F, Fut, T>(self, f: F) -> Result<T, FrameworkError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = T>,
+        T: serde::Serialize + serde::de::DeserializeOwned + Clone,
+    {
+        let result_key = format!("{}:result", self.key);
+        if self.acquired {
+            let value = f().await;
+            Cache::put(&result_key, &value, Some(self.ttl)).await?;
+            Ok(value)
+        } else {
+            // Wait briefly for the lock holder to publish the result
+            let started = std::time::Instant::now();
+            loop {
+                if let Some(v) = Cache::get::<T>(&result_key).await? {
+                    return Ok(v);
+                }
+                if started.elapsed() > self.ttl {
+                    return Err(FrameworkError::internal(format!(
+                        "timeout waiting for lock '{}'", self.key
+                    )));
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
+}
+
+impl Drop for CacheLock {
+    fn drop(&mut self) {
+        if self.acquired {
+            let key = self.key.clone();
+            let token = self.token.clone();
+            tokio::spawn(async move {
+                // Best-effort safe release: only delete if our token still matches.
+                let _ = Cache::release_lock_if_token_matches(&key, &token).await;
+            });
+        }
+    }
+}
+
+impl Cache {
+    pub async fn lock(key: &str, ttl: Duration) -> Result<CacheLock, FrameworkError> {
+        let token = Uuid::new_v4().to_string();
+        let store = Self::store()?;
+        let acquired = store.set_if_absent(key, &token, ttl).await?;
+        Ok(CacheLock {
+            key: key.to_string(),
+            token,
+            acquired,
+            ttl,
+        })
+    }
+
+    pub(crate) async fn release_lock_if_token_matches(
+        key: &str,
+        token: &str,
+    ) -> Result<(), FrameworkError> {
+        Self::store()?.release_if_token_matches(key, token).await
+    }
+}
+```
+
+Extend `CacheStore`:
+```rust
+// framework/src/cache/store.rs — append to trait CacheStore
+#[async_trait]
+pub trait CacheStore: Send + Sync {
+    // existing methods ...
+
+    async fn sadd(&self, set_key: &str, member: &str) -> Result<(), FrameworkError>;
+    async fn smembers(&self, set_key: &str) -> Result<Vec<String>, FrameworkError>;
+    async fn set_if_absent(&self, key: &str, value: &str, ttl: Duration) -> Result<bool, FrameworkError>;
+    async fn release_if_token_matches(&self, key: &str, token: &str) -> Result<(), FrameworkError>;
+    async fn touch(&self, key: &str, ttl: Duration) -> Result<(), FrameworkError>;
+}
+```
+
+Implement on both `InMemoryCache` (use `DashMap` + per-key tokio
+`Notify` for the lock wait) and `RedisCache` (`SET NX EX`, `SADD`,
+`SMEMBERS`, `EXPIRE` for touch, Lua script for safe release).
+
+- [ ] **Step 4: Implement `Cache::touch`**
+
+```rust
+// framework/src/cache/mod.rs — append to impl Cache
+impl Cache {
+    /// Extend `key`'s TTL to `ttl` (Laravel 13's `Cache::touch`).
+    ///
+    /// No-op if the key doesn't exist. Doesn't modify the stored value.
+    pub async fn touch(key: &str, ttl: Duration) -> Result<(), FrameworkError> {
+        Self::store()?.touch(key, ttl).await
+    }
+}
+```
+
+- [ ] **Step 5: Run — expect pass**
+
+```bash
+cargo test -p suprnova --test cache_extensions
+```
+
+Expected: 4 passed.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add framework/src/cache framework/tests/cache_extensions.rs
+git commit -m "feat(cache): tags + atomic locks + Cache::touch (L13)"
+```
+
+---
+
+## Task 12: Memcached cache driver
+
+Round out the cache driver story. Redis is shipped; DragonflyDB
+works through the Redis driver; **Memcached** is the remaining
+Laravel-canonical backend with no first-class support.
+
+**Files:** `framework/src/cache/memcached.rs`,
+modify `framework/src/cache/mod.rs` (bootstrap).
+
+- [ ] **Step 1: Add dep**
+
+```toml
+# framework/Cargo.toml
+memcache-async = "0.7"  # or `memcache` if a tokio-friendly fork lands
+```
+
+- [ ] **Step 2: Write failing test**
+
+```rust
+// framework/tests/cache_memcached.rs
+#![cfg(feature = "memcached")]
+
+use suprnova::Cache;
+
+#[tokio::test]
+async fn memcached_put_get_forget_round_trip() {
+    if std::env::var("MEMCACHED_URL").is_err() {
+        eprintln!("skipping: MEMCACHED_URL not set");
+        return;
+    }
+
+    Cache::use_memcached(std::env::var("MEMCACHED_URL").unwrap()).await.unwrap();
+    Cache::put("mc:1", &"hello", None).await.unwrap();
+    assert_eq!(Cache::get::<String>("mc:1").await.unwrap().as_deref(), Some("hello"));
+    Cache::forget("mc:1").await.unwrap();
+    assert!(Cache::get::<String>("mc:1").await.unwrap().is_none());
+}
+```
+
+- [ ] **Step 3: Implement `MemcachedCache`**
+
+```rust
+// framework/src/cache/memcached.rs
+use super::store::CacheStore;
+use crate::FrameworkError;
+use async_trait::async_trait;
+use std::time::Duration;
+
+pub struct MemcachedCache {
+    client: memcache_async::Client,
+    prefix: String,
+}
+
+impl MemcachedCache {
+    pub async fn connect(url: &str, prefix: &str) -> Result<Self, FrameworkError> {
+        let client = memcache_async::Client::connect(url)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("memcached: {}", e)))?;
+        Ok(Self { client, prefix: prefix.to_string() })
+    }
+
+    fn key(&self, k: &str) -> String {
+        format!("{}{}", self.prefix, k)
+    }
+}
+
+#[async_trait]
+impl CacheStore for MemcachedCache {
+    async fn get_raw(&self, key: &str) -> Result<Option<String>, FrameworkError> {
+        let k = self.key(key);
+        let result = self.client.get(&k).await
+            .map_err(|e| FrameworkError::internal(format!("memcached get: {}", e)))?;
+        Ok(result.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+    }
+    async fn set_raw(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), FrameworkError> {
+        let k = self.key(key);
+        let secs = ttl.map(|d| d.as_secs() as u32).unwrap_or(0);
+        self.client.set(&k, value.as_bytes(), secs).await
+            .map_err(|e| FrameworkError::internal(format!("memcached set: {}", e)))?;
+        Ok(())
+    }
+    async fn forget(&self, key: &str) -> Result<bool, FrameworkError> {
+        let k = self.key(key);
+        let _ = self.client.delete(&k).await;
+        Ok(true)
+    }
+    // sadd / smembers / set_if_absent / release_if_token_matches:
+    // memcached doesn't support sets natively. Either:
+    //   (a) emulate via serialized JSON arrays at a tag-index key
+    //       (with race conditions you accept), or
+    //   (b) return FrameworkError::unsupported() for these methods
+    //       and document that tag flushing / atomic locks require
+    //       Redis or in-memory.
+    // Recommendation: (b) — Memcached users get put/get/forget; tags
+    // and locks require a more capable backend.
+    async fn sadd(&self, _set: &str, _member: &str) -> Result<(), FrameworkError> {
+        Err(FrameworkError::internal("memcached driver does not support cache tags"))
+    }
+    async fn smembers(&self, _set: &str) -> Result<Vec<String>, FrameworkError> {
+        Err(FrameworkError::internal("memcached driver does not support cache tags"))
+    }
+    async fn set_if_absent(&self, _k: &str, _v: &str, _ttl: Duration) -> Result<bool, FrameworkError> {
+        Err(FrameworkError::internal("memcached driver does not support atomic locks; use Redis or in-process"))
+    }
+    async fn release_if_token_matches(&self, _k: &str, _t: &str) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+    async fn touch(&self, key: &str, ttl: Duration) -> Result<(), FrameworkError> {
+        let k = self.key(key);
+        let secs = ttl.as_secs() as u32;
+        self.client.touch(&k, secs).await
+            .map_err(|e| FrameworkError::internal(format!("memcached touch: {}", e)))?;
+        Ok(())
+    }
+    // ... implement flush, increment, decrement
+}
+```
+
+- [ ] **Step 4: Wire the driver**
+
+```rust
+// framework/src/cache/mod.rs — add Cache::use_memcached
+impl Cache {
+    pub async fn use_memcached(url: impl AsRef<str>) -> Result<(), FrameworkError> {
+        let prefix = Config::get::<CacheConfig>().unwrap_or_default().prefix;
+        let cache = memcached::MemcachedCache::connect(url.as_ref(), &prefix).await?;
+        App::bind::<dyn CacheStore>(Arc::new(cache));
+        Ok(())
+    }
+}
+```
+
+- [ ] **Step 5: Run — expect pass (or skipped without server)**
+
+```bash
+MEMCACHED_URL=tcp://127.0.0.1:11211 cargo test -p suprnova --test cache_memcached --features memcached
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add framework/src/cache framework/Cargo.toml framework/tests/cache_memcached.rs
+git commit -m "feat(cache): Memcached driver (no tags/locks — those need Redis or in-process)"
+```
+
+---
+
+## Task 13: Workspace lint + final verification + roadmap update
 
 - [ ] **Step 1: Clippy + tests**
 
@@ -1532,8 +2588,12 @@ Move from "Missing"/"Partial" to "Production-ready":
 
 | Spec item | Covered by |
 |-----------|------------|
-| Queue facade + Job trait | Task 2 |
-| In-process Queue driver | Task 2 |
+| Queue facade + Job trait | Task 2 Steps 1-4 |
+| In-process Queue driver | Task 2 Steps 1-4 |
+| `#[job(tries, backoff, timeout, fail_on_timeout)]` attribute (L13) | Task 2 Steps 5-9 |
+| `BackoffSchedule` (None / Fixed / Sequence) | Task 2 Steps 5-9 |
+| `Queue::route::<JobType>(connection, queue)` (L13) | Task 2 Steps 10-13 |
+| Named driver registry (`Queue::register_driver`) | Task 2 Steps 10-13 |
 | sea-streamer Queue (Redis/Kafka) | Task 3 |
 | QueueWorker consumer | Task 3 |
 | Queue::fake() | Task 2 |
@@ -1548,6 +2608,11 @@ Move from "Missing"/"Partial" to "Production-ready":
 | ThrottleMiddleware | Task 8 |
 | Redis-Lua atomic window | Task 8 |
 | App dogfood | Task 9 |
+| `Bus::dispatch` (sync) + `Bus::batch` + `Bus::chain` + `Bus::fake` | Task 10 |
+| Cache tags (`Cache::tags(&[...]).put/flush`) | Task 11 |
+| Cache atomic locks (`Cache::lock(key, ttl).get(callback)`) | Task 11 |
+| `Cache::touch(key, ttl)` — TTL extension (L13) | Task 11 |
+| Memcached cache driver | Task 12 |
 
 **Placeholder scan:** Clean. `> API verification:` and `> Refactor note:` flag concrete files and trait signatures to confirm before implementation.
 
