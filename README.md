@@ -171,7 +171,7 @@ Change a field in Rust, regenerate types, and TypeScript will catch any mismatch
 
 ## Documentation
 
-Ready to build something? Check out the [full documentation](https://suprnova.dev/) to get started.
+Ready to build something? Check out the [full documentation](https://suprnova.app/) to get started.
 
 ## Roadmap
 

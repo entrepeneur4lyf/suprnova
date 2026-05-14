@@ -86,7 +86,7 @@ impl InertiaSharedData for AppSharedData {
             Prop::Eager(suprnova::serde_json::json!({
                 "user": {
                     "name": "Demo User",
-                    "email": "demo@suprnova.dev",
+                    "email": "demo@suprnova.app",
                 }
             })),
         );
