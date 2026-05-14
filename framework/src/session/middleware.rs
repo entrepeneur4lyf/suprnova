@@ -171,16 +171,25 @@ impl SessionMiddleware {
 #[async_trait]
 impl Middleware for SessionMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
-        // Get session ID from cookie or generate new one. Inbound
-        // values are AES-256-GCM ciphertext when Crypt is initialized;
-        // any decrypt failure (tamper, key rotation, plaintext leftover
-        // from a pre-cut deploy) silently produces a fresh session ID.
-        // No per-request log spam — this path is hit on every visitor
-        // whose cookie was set under a previous key.
+        // Read the session ID from the inbound cookie. Two modes:
+        // - Crypt initialized (APP_KEY set): cookie value is AES-256-GCM
+        //   ciphertext; decrypt-failure (tamper, key rotation, pre-cut
+        //   plaintext) silently mints a fresh session ID. No per-request
+        //   log spam.
+        // - Crypt NOT initialized (no APP_KEY): outbound cookies are
+        //   plaintext, so inbound reads must accept the raw value as
+        //   the session ID. Without this, every request would mint a
+        //   new session and sessions would be silently non-functional.
         let session_id = match request.cookie(&self.config.cookie_name) {
-            Some(raw) => Cookie::read_encrypted(&raw)
-                .ok()
-                .unwrap_or_else(generate_session_id),
+            Some(raw) => {
+                if crate::crypto::Crypt::is_initialized() {
+                    Cookie::read_encrypted(&raw)
+                        .ok()
+                        .unwrap_or_else(generate_session_id)
+                } else {
+                    raw
+                }
+            }
             None => generate_session_id(),
         };
 

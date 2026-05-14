@@ -102,6 +102,14 @@ impl Crypt {
 ///
 /// Tests must serialize themselves via a `Mutex<()>` because the global
 /// `CRYPT_KEY` is shared.
+///
+/// **Test-only — do not call from production code.** The double-leading-
+/// underscore name signals "internal test fixture, not API." Marked
+/// `#[doc(hidden)]` to keep it out of public rustdoc. A proper
+/// `testing` cargo feature flag would gate this; until that flag is
+/// added (see roadmap), the leading underscores + doc(hidden) are
+/// the available signal.
+#[doc(hidden)]
 pub fn _test_install_key(key: EncryptionKey) -> bool {
     CRYPT_KEY.set(key).is_ok()
 }

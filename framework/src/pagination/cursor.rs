@@ -41,14 +41,29 @@ impl<T> CursorPaginator<T> {
         }
     }
 
-    /// Decode a cursor produced by [`Self::encode_cursor`]. First
-    /// attempts encrypted decode via `Crypt::decrypt_string`; on
-    /// failure falls back to plain base64 (for backward compatibility
-    /// with cursors emitted under an uninitialized Crypt).
+    /// Decode a cursor produced by [`Self::encode_cursor`].
+    ///
+    /// **Security:** When `Crypt` is initialized, ONLY the encrypted
+    /// path is used. Any decrypt failure (tampering, wrong key,
+    /// truncation) is propagated as an error — there is NO fallback
+    /// to plain base64, because that would let an attacker bypass the
+    /// AEAD integrity check by submitting a base64-encoded boundary
+    /// value of their choice.
+    ///
+    /// When `Crypt` is NOT initialized (deployment without `APP_KEY`),
+    /// the plain base64 path is the only path available. Cursors in
+    /// that mode are not tamper-resistant; this is documented as a
+    /// limitation of running without an encryption key.
     pub fn decode_cursor(wire: &str) -> Result<String, FrameworkError> {
-        if let Ok(plain) = Crypt::decrypt_string(wire) {
-            return Ok(plain);
+        if Crypt::is_initialized() {
+            // With a key installed, only the authenticated path is valid.
+            // A failure here means the cursor was tampered, truncated,
+            // or generated under a different key — never trust it.
+            return Crypt::decrypt_string(wire);
         }
+        // No key installed: plain base64 is the only option. Cursors
+        // emitted in this mode are not tamper-resistant; deployments
+        // that need integrity must set APP_KEY.
         let bytes = URL_SAFE_NO_PAD.decode(wire.trim()).map_err(|e| {
             FrameworkError::internal(format!("Cursor decode failed: {e}"))
         })?;
@@ -85,14 +100,16 @@ mod tests {
     }
 
     #[test]
-    fn cursor_decode_handles_legacy_plain_base64() {
+    fn cursor_decode_rejects_plain_base64_when_crypt_initialized() {
+        // Security regression test: when Crypt has a key, an
+        // attacker-crafted plain-base64 cursor MUST be rejected. The
+        // fallback exists ONLY for deployments without APP_KEY.
         let _g = CURSOR_LOCK.lock().unwrap();
         ensure_key();
-        // A cursor emitted under a different (or no) key: plain base64
-        // of "legacy-value"
-        let legacy = URL_SAFE_NO_PAD.encode(b"legacy-value");
-        let decoded = CursorPaginator::<i32>::decode_cursor(&legacy).unwrap();
-        assert_eq!(decoded, "legacy-value");
+        let attacker_cursor = URL_SAFE_NO_PAD.encode(b"42"); // any plain int
+        // Should fail because Crypt is initialized; only AEAD-verified
+        // cursors are accepted.
+        assert!(CursorPaginator::<i32>::decode_cursor(&attacker_cursor).is_err());
     }
 
     #[test]

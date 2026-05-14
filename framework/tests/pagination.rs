@@ -206,5 +206,5 @@ fn inertia_paginate_facade_produces_inertia_response() {
     // Just exercise the facade — we don't try to serialize the full
     // Inertia response here (that path runs through ScrollConfig
     // resolvers which need an InertiaContext / request).
-    let _resp = suprnova::Inertia::paginate("users", p);
+    let _resp = suprnova::Inertia::paginate("Users/Index", "users", p);
 }
