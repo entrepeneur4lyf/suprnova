@@ -14,6 +14,7 @@ pub mod logging;
 pub mod middleware;
 pub mod routing;
 pub mod schedule;
+pub mod sse;
 pub mod workflow;
 pub mod server;
 pub mod session;
@@ -61,6 +62,7 @@ pub use routing::{
     IntoGroupItem, RouteBuilder, RouteDefBuilder, Router,
 };
 pub use schedule::{CronExpression, DayOfWeek, Schedule, Task, TaskBuilder, TaskEntry, TaskResult};
+pub use sse::SseEvent;
 pub use workflow::{
     start_named, StepStatus, WorkflowConfig, WorkflowContext, WorkflowHandle, WorkflowStatus,
     WorkflowWorker,

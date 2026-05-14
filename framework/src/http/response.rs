@@ -85,6 +85,34 @@ impl HttpResponse {
         }
     }
 
+    /// Build a Server-Sent Events response from a `Stream` of
+    /// [`SseEvent`](crate::sse::SseEvent) values.
+    ///
+    /// Sets the four headers an SSE response must carry:
+    /// - `Content-Type: text/event-stream` — the spec'd MIME
+    /// - `Cache-Control: no-cache` — proxies must not cache event streams
+    /// - `Connection: keep-alive` — explicit even on HTTP/1.1 default
+    /// - `X-Accel-Buffering: no` — nginx-specific, disables proxy
+    ///   buffering so events flush to the client immediately. Harmless
+    ///   on non-nginx; nginx defaults break SSE without it.
+    ///
+    /// Each `SseEvent` is serialized via [`SseEvent::to_wire`] and
+    /// pushed through the streaming body. The connection stays open
+    /// until the producing stream ends or the client disconnects.
+    pub fn sse<S>(stream: S) -> Self
+    where
+        S: Stream<Item = crate::sse::SseEvent> + Send + Sync + 'static,
+    {
+        use futures::StreamExt;
+        let byte_stream = stream.map(|evt| Ok::<Bytes, Infallible>(evt.to_wire()));
+        Self::stream_bytes(byte_stream)
+            .header("Content-Type", "text/event-stream")
+            .header("Cache-Control", "no-cache")
+            .header("Connection", "keep-alive")
+            // Disable nginx proxy buffering. No-op when not behind nginx.
+            .header("X-Accel-Buffering", "no")
+    }
+
     /// Build a streaming response from a `Stream` of `Bytes` chunks.
     ///
     /// The stream is wrapped into an `http_body::Frame` per chunk and
