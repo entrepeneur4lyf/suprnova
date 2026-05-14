@@ -2,15 +2,17 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Ship the four Suprnova-specific value-add tracks that Laravel either lacks or gatekeeps behind one backend. Every consumer picks their stack and Suprnova has a first-class driver — `Vector::store("docs").upsert(...)` works the same whether the user runs Qdrant, Weaviate, Milvus, LanceDB, pgvector, MariaDB VECTOR, or LibSQL. Same trait surface; different config URL.
+**Goal:** Ship the four Suprnova-specific value-add tracks that Laravel either lacks or gatekeeps behind one backend. Every consumer picks their stack and Suprnova has a first-class driver — `Vector::store("docs").insert(...)` works the same whether the user runs Qdrant, Weaviate, Milvus, LanceDB, pgvector, Pinecone, Chroma, Redis, OpenSearch, Elasticsearch (vector mode), MariaDB VECTOR, or LibSQL. Same trait surface; different config URL.
 
-**Architecture:** Each subsystem is a trait + driver registry following the same pattern as `CacheStore` / `MailTransport` / `QueueDriver` from earlier phases. The user's `bootstrap.rs` calls `Vector::use_qdrant(...)` (or any driver) to bind a driver; the facade routes all calls through it. Drivers live behind feature flags so consumers only compile in the backends they use.
+**Architecture (Vectors):** Adopt **[`embex`](https://github.com/bridgerust/bridgerust)** (MIT/Apache-2.0) — the "Universal Vector Database Client" from BridgeRust — as the Vector foundation. embex ships a `VectorDatabase` trait plus production adapters for **10 backends** out of the box: Chroma, Elasticsearch (vector mode), LanceDB, Milvus, OpenSearch, pgvector, Pinecone, Qdrant, Redis (Redis Stack), Weaviate. We add MariaDB VECTOR and LibSQL as Suprnova-shipped adapters implementing the same trait — that brings us to **12 backends**, including the two `[[no-gatekeeping]]` proofs Laravel can't offer. Vendored at `reference/bridgerust-main/`. The `Vector::*` facade thinly re-exports `bridge-embex-core` + `bridge-embex-client` so we inherit SIMD-accelerated similarity ops (`Point::cosine_similarity`, `l2_distance`, `dot_product`) for free.
+
+**Architecture (Graph / Timeseries / Search):** Each remaining subsystem is a trait + driver registry following the same pattern as `CacheStore` / `MailTransport` / `QueueDriver` from earlier phases. The user's `bootstrap.rs` calls `Graph::use_neo4j(...)` / `Timeseries::use_influxdb(...)` / `Search::use_meilisearch(...)` to bind a driver; the facade routes all calls through it. Drivers live behind feature flags so consumers only compile in the backends they use.
 
 **Tech Stack per area:**
-- **Vectors:** `qdrant-client`, `lancedb`, `weaviate-client`, `milvus-sdk-rust`, `sqlx` for pgvector / MariaDB / LibSQL
+- **Vectors:** `bridge-embex-core` + `bridge-embex-client` (`path = "../reference/bridgerust-main/crates/embex/*"`) for 10 adapters; our own MariaDB + LibSQL impls of `VectorDatabase` for the remaining two
 - **Graphs:** `neo4rs` (Neo4j Bolt), `arangors`, `surrealdb`, `bolt-proto`-based for MemGraph (Bolt-compat)
 - **Time-series:** `influxdb` 0.7, `tokio-postgres` for TimescaleDB (Postgres extension), `clickhouse` 0.13, `quest-client` (or HTTP fallback)
-- **Search:** `meilisearch-sdk` 0.27, `typesense` 0.7, `elasticsearch` 8.x, `algoliasearch` 1.x
+- **Search:** `meilisearch-sdk` 0.27, `typesense` 0.7, `elasticsearch` 8.x text mode, `algoliasearch` 1.x. (Note: Elasticsearch + OpenSearch appear in both Vector and Search lists — same cluster, different operations: vector search via embex, full-text search via this track's `SearchIndex` trait.)
 
 ---
 
@@ -44,283 +46,442 @@ framework/src/{area}/
 
 ---
 
-## Task 1: VectorStore trait + Vector facade
+## Task 1: Vector facade — adopt embex
 
-**Files:** `framework/src/vector/mod.rs`, `framework/src/vector/driver/mod.rs`
+**Files:** `framework/src/vector/mod.rs`, `framework/Cargo.toml`
 
-- [ ] **Step 1: Write failing test (with in-memory fake)**
+The Suprnova `Vector` facade is a thin re-export over embex's
+`VectorDatabase` trait + `EmbexClient`. We do NOT define a parallel
+`VectorStore` trait — embex's already covers what we need (`insert`,
+`search`, `delete`, `update_metadata`, `create_collection`,
+`delete_collection`, `scroll`), exposes a rich filter system, and
+ships SIMD-accelerated similarity ops on `Point`.
+
+- [ ] **Step 1: Add embex deps**
+
+```toml
+# framework/Cargo.toml — [dependencies]
+bridge-embex-core = { path = "../reference/bridgerust-main/crates/embex/core" }
+bridge-embex-client = { path = "../reference/bridgerust-main/crates/embex/client" }
+
+# Optional adapter feature flags (each adapter is its own embex crate).
+# See Task 2 for the per-backend toml.
+```
+
+- [ ] **Step 2: Write failing test**
 
 ```rust
 // framework/tests/vector.rs
-use suprnova::{Vector, vector::{VectorStore, Embedding}};
+use suprnova::vector::{Point, Vector, VectorDatabase};
+use std::collections::HashMap;
 
 #[tokio::test]
-async fn in_memory_vector_store_upsert_and_search() {
-    Vector::use_memory();
-    let store = Vector::store("docs").unwrap();
-    store
-        .upsert(&[
-            ("doc-1", Embedding::new(vec![1.0, 0.0, 0.0]), serde_json::json!({"title": "Rust"})),
-            ("doc-2", Embedding::new(vec![0.0, 1.0, 0.0]), serde_json::json!({"title": "Go"})),
-            ("doc-3", Embedding::new(vec![0.0, 0.0, 1.0]), serde_json::json!({"title": "Java"})),
-        ])
-        .await
-        .unwrap();
+async fn facade_resolves_registered_backend() {
+    Vector::register("docs", make_test_backend().await).await;
+    let db = Vector::store("docs").unwrap();
 
-    let results = store.similar(Embedding::new(vec![0.9, 0.1, 0.0]), 2).await.unwrap();
-    assert_eq!(results.len(), 2);
-    assert_eq!(results[0].id, "doc-1"); // closest to [1, 0, 0]
+    let schema = bridge_embex_core::types::CollectionSchema {
+        name: "docs".into(),
+        dimension: 3,
+        metric: bridge_embex_core::types::DistanceMetric::Cosine,
+    };
+    db.create_collection(&schema).await.unwrap();
+
+    let mut metadata = HashMap::new();
+    metadata.insert("title".to_string(), serde_json::json!("Rust"));
+    let p = Point::new("doc-1", vec![1.0, 0.0, 0.0]).with_metadata(metadata);
+
+    db.insert("docs", vec![p]).await.unwrap();
+
+    let query = bridge_embex_core::types::VectorQuery {
+        collection: "docs".into(),
+        vector: Some(vec![0.9, 0.1, 0.0]),
+        filter: None,
+        top_k: 1,
+        offset: None,
+        include_vector: false,
+        include_metadata: true,
+        aggregations: vec![],
+    };
+    let resp = db.search(&query).await.unwrap();
+    assert_eq!(resp.results.len(), 1);
+    assert_eq!(resp.results[0].id, "doc-1");
 }
 
 #[tokio::test]
 async fn unknown_store_returns_error() {
-    let result = Vector::store("nonexistent");
-    assert!(result.is_err());
+    assert!(Vector::store("nonexistent").is_err());
 }
 
-#[tokio::test]
-async fn delete_removes_id_from_store() {
-    Vector::use_memory();
-    let store = Vector::store("docs").unwrap();
-    store
-        .upsert(&[("a", Embedding::new(vec![1.0, 0.0]), serde_json::json!({}))])
-        .await
-        .unwrap();
-    store.delete(&["a"]).await.unwrap();
-    let results = store.similar(Embedding::new(vec![1.0, 0.0]), 1).await.unwrap();
-    assert!(results.is_empty());
+// `make_test_backend` constructs a backend for the test. For the
+// in-memory case, we wrap a HashMap behind embex's VectorDatabase
+// trait (see Task 5 — MemoryAdapter — which is our own trait impl).
+async fn make_test_backend() -> std::sync::Arc<dyn VectorDatabase> {
+    std::sync::Arc::new(suprnova::vector::drivers::memory::MemoryAdapter::new())
 }
 ```
 
-- [ ] **Step 2: Implement**
+- [ ] **Step 3: Implement facade**
 
 ```rust
 // framework/src/vector/mod.rs
-//! Vector store facade. Same trait, many drivers — Laravel
-//! gatekeeps to pgvector; we ship Qdrant, Weaviate, Milvus, LanceDB,
-//! pgvector, MariaDB VECTOR, and LibSQL.
+//! Vector store facade — re-exports embex's `VectorDatabase` trait
+//! so consumers can write storage-agnostic code, plus a process-
+//! global registry indexed by string name.
 //!
 //! ```ignore
-//! Vector::use_qdrant("http://localhost:6334").await?;
-//! let store = Vector::store("docs")?;
-//! store.upsert(&[("d1", embedding, metadata)]).await?;
-//! let hits = store.similar(query_embedding, 10).await?;
+//! use suprnova::vector::{Point, Vector};
+//!
+//! Vector::register("docs", bridge_embex_qdrant::QdrantAdapter::new(url).await?).await;
+//! let db = Vector::store("docs")?;
+//! db.insert("docs", vec![Point::new("id", embedding)]).await?;
 //! ```
 
-pub mod driver;
 pub mod drivers;
-pub mod testing;
+
+pub use bridge_embex_core::db::VectorDatabase;
+pub use bridge_embex_core::types::{
+    Aggregation, AggregateResult, CollectionSchema, DistanceMetric, Filter, MetadataUpdate, Point,
+    ScrollResponse, SearchResponse, SearchResult, VectorQuery,
+};
+pub use bridge_embex_core::error::{Error as VectorError, Result as VectorResult};
 
 use crate::FrameworkError;
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
-pub use driver::VectorStore;
-
-/// A vector with optional dimension tag — drivers verify dimension
-/// matches the configured index at upsert time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Embedding {
-    pub values: Vec<f32>,
-}
-
-impl Embedding {
-    pub fn new(values: Vec<f32>) -> Self {
-        Self { values }
-    }
-    pub fn dim(&self) -> usize {
-        self.values.len()
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct VectorMatch {
-    pub id: String,
-    pub score: f32,
-    pub metadata: serde_json::Value,
-}
+static REGISTRY: Mutex<Option<HashMap<String, Arc<dyn VectorDatabase>>>> = Mutex::new(None);
 
 pub struct Vector;
 
 impl Vector {
-    pub fn store(name: &str) -> Result<Arc<dyn VectorStore>, FrameworkError> {
-        driver::get(name)
+    /// Register a vector backend under `name`. The backend is any
+    /// type implementing `VectorDatabase` — embex's adapters or our
+    /// own (MariaDB / LibSQL / in-memory).
+    pub async fn register(name: impl Into<String>, backend: Arc<dyn VectorDatabase>) {
+        let mut g = REGISTRY.lock().unwrap();
+        let map = g.get_or_insert_with(HashMap::new);
+        map.insert(name.into(), backend);
     }
 
-    pub fn use_memory() {
-        driver::register("default", Arc::new(drivers::memory::MemoryVectorStore::new()));
-        // Convenience: also bind under "docs" for the common case.
-        driver::register("docs", Arc::new(drivers::memory::MemoryVectorStore::new()));
+    pub fn store(name: &str) -> Result<Arc<dyn VectorDatabase>, FrameworkError> {
+        let g = REGISTRY.lock().unwrap();
+        g.as_ref()
+            .and_then(|m| m.get(name).cloned())
+            .ok_or_else(|| FrameworkError::internal(format!("vector store '{}' not registered", name)))
     }
 
+    /// Test helper — clear the registry.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn reset() {
+        let mut g = REGISTRY.lock().unwrap();
+        *g = None;
+    }
+}
+```
+
+```rust
+// framework/src/lib.rs
+pub mod vector;
+pub use vector::{Point, Vector, VectorDatabase, VectorQuery, SearchResult};
+```
+
+- [ ] **Step 4: Run — expect failure (MemoryAdapter not implemented yet)**
+
+```bash
+cargo test -p suprnova --test vector
+```
+
+Expected: compile error — `MemoryAdapter` referenced but defined in Task 5.
+
+- [ ] **Step 5: Commit (skeleton — tests pass after Task 5)**
+
+```bash
+git add framework/Cargo.toml framework/src/vector/mod.rs framework/src/lib.rs framework/tests/vector.rs
+git commit -m "feat(vector): adopt embex VectorDatabase trait + Vector::register/store facade"
+```
+
+---
+
+## Task 2: Enable embex adapters — Qdrant + LanceDB + Weaviate + Milvus
+
+**Files:** `framework/Cargo.toml`
+
+Four backends, one task — each is a feature-gated `path = "..."`
+dependency on the matching embex adapter crate. No driver code to
+write; embex already implemented all four.
+
+- [ ] **Step 1: Cargo features + deps**
+
+```toml
+# framework/Cargo.toml — [features]
+vector-qdrant = ["dep:bridge-embex-qdrant"]
+vector-lancedb = ["dep:bridge-embex-lancedb"]
+vector-weaviate = ["dep:bridge-embex-weaviate"]
+vector-milvus = ["dep:bridge-embex-milvus"]
+
+# [dependencies]
+bridge-embex-qdrant = { path = "../reference/bridgerust-main/crates/embex/adapters/qdrant", optional = true }
+bridge-embex-lancedb = { path = "../reference/bridgerust-main/crates/embex/adapters/lancedb", optional = true }
+bridge-embex-weaviate = { path = "../reference/bridgerust-main/crates/embex/adapters/weaviate", optional = true }
+bridge-embex-milvus = { path = "../reference/bridgerust-main/crates/embex/adapters/milvus", optional = true }
+```
+
+- [ ] **Step 2: Convenience constructors on `Vector`**
+
+```rust
+// framework/src/vector/mod.rs — append impl Vector
+impl Vector {
     #[cfg(feature = "vector-qdrant")]
-    pub async fn use_qdrant(name: impl Into<String>, url: impl Into<String>) -> Result<(), FrameworkError> {
-        let store = drivers::qdrant::QdrantVectorStore::new(url.into(), name.clone().into()).await?;
-        driver::register(name.into(), Arc::new(store));
+    pub async fn use_qdrant(
+        name: impl Into<String>,
+        url: impl Into<String>,
+    ) -> Result<(), FrameworkError> {
+        let adapter = bridge_embex_qdrant::QdrantAdapter::new(&url.into())
+            .await
+            .map_err(|e| FrameworkError::internal(format!("qdrant: {}", e)))?;
+        Self::register(name, Arc::new(adapter)).await;
         Ok(())
     }
 
     #[cfg(feature = "vector-lancedb")]
-    pub async fn use_lancedb(name: impl Into<String>, path: impl Into<String>) -> Result<(), FrameworkError> {
-        let store = drivers::lancedb::LanceDbStore::new(path.into(), name.clone().into()).await?;
-        driver::register(name.into(), Arc::new(store));
-        Ok(())
-    }
-
-    #[cfg(feature = "vector-pgvector")]
-    pub async fn use_pgvector(name: impl Into<String>, url: impl Into<String>, dim: usize) -> Result<(), FrameworkError> {
-        let store = drivers::pgvector::PgVectorStore::new(url.into(), name.clone().into(), dim).await?;
-        driver::register(name.into(), Arc::new(store));
-        Ok(())
-    }
-
-    #[cfg(feature = "vector-mariadb")]
-    pub async fn use_mariadb(name: impl Into<String>, url: impl Into<String>, dim: usize) -> Result<(), FrameworkError> {
-        let store = drivers::mariadb::MariaDbVectorStore::new(url.into(), name.clone().into(), dim).await?;
-        driver::register(name.into(), Arc::new(store));
-        Ok(())
-    }
-
-    #[cfg(feature = "vector-libsql")]
-    pub async fn use_libsql(name: impl Into<String>, url: impl Into<String>, dim: usize) -> Result<(), FrameworkError> {
-        let store = drivers::libsql::LibSqlVectorStore::new(url.into(), name.clone().into(), dim).await?;
-        driver::register(name.into(), Arc::new(store));
-        Ok(())
-    }
-}
-```
-
-```rust
-// framework/src/vector/driver/mod.rs
-use crate::FrameworkError;
-use async_trait::async_trait;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
-#[async_trait]
-pub trait VectorStore: Send + Sync {
-    async fn upsert(
-        &self,
-        records: &[(&str, super::Embedding, serde_json::Value)],
-    ) -> Result<(), FrameworkError>;
-
-    async fn similar(
-        &self,
-        query: super::Embedding,
-        k: usize,
-    ) -> Result<Vec<super::VectorMatch>, FrameworkError>;
-
-    async fn delete(&self, ids: &[&str]) -> Result<(), FrameworkError>;
-
-    async fn count(&self) -> Result<u64, FrameworkError> {
-        Ok(0) // optional override
-    }
-}
-
-static REGISTRY: Mutex<Option<HashMap<String, Arc<dyn VectorStore>>>> = Mutex::new(None);
-
-pub fn register(name: impl Into<String>, store: Arc<dyn VectorStore>) {
-    let mut g = REGISTRY.lock().unwrap();
-    let map = g.get_or_insert_with(HashMap::new);
-    map.insert(name.into(), store);
-}
-
-pub fn get(name: &str) -> Result<Arc<dyn VectorStore>, FrameworkError> {
-    let g = REGISTRY.lock().unwrap();
-    g.as_ref()
-        .and_then(|m| m.get(name).cloned())
-        .ok_or_else(|| FrameworkError::internal(format!("vector store '{}' not registered", name)))
-}
-```
-
-- [ ] **Step 3: Implement in-memory driver**
-
-```rust
-// framework/src/vector/drivers/memory.rs
-use super::super::{driver::VectorStore, Embedding, VectorMatch};
-use crate::FrameworkError;
-use async_trait::async_trait;
-use std::collections::HashMap;
-use std::sync::RwLock;
-
-pub struct MemoryVectorStore {
-    records: RwLock<HashMap<String, (Embedding, serde_json::Value)>>,
-}
-
-impl MemoryVectorStore {
-    pub fn new() -> Self {
-        Self {
-            records: RwLock::new(HashMap::new()),
-        }
-    }
-}
-
-#[async_trait]
-impl VectorStore for MemoryVectorStore {
-    async fn upsert(
-        &self,
-        records: &[(&str, Embedding, serde_json::Value)],
+    pub async fn use_lancedb(
+        name: impl Into<String>,
+        path: impl Into<String>,
     ) -> Result<(), FrameworkError> {
-        let mut store = self.records.write().unwrap();
-        for (id, emb, meta) in records {
-            store.insert(id.to_string(), (emb.clone(), meta.clone()));
-        }
+        let adapter = bridge_embex_lancedb::LanceDbAdapter::new(&path.into())
+            .await
+            .map_err(|e| FrameworkError::internal(format!("lancedb: {}", e)))?;
+        Self::register(name, Arc::new(adapter)).await;
         Ok(())
     }
 
-    async fn similar(
-        &self,
-        query: Embedding,
-        k: usize,
-    ) -> Result<Vec<VectorMatch>, FrameworkError> {
-        let store = self.records.read().unwrap();
-        let mut scored: Vec<VectorMatch> = store
-            .iter()
-            .map(|(id, (emb, meta))| VectorMatch {
-                id: id.clone(),
-                score: cosine_similarity(&query.values, &emb.values),
-                metadata: meta.clone(),
-            })
-            .collect();
-        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(k);
-        Ok(scored)
-    }
-
-    async fn delete(&self, ids: &[&str]) -> Result<(), FrameworkError> {
-        let mut store = self.records.write().unwrap();
-        for id in ids {
-            store.remove(*id);
-        }
+    #[cfg(feature = "vector-weaviate")]
+    pub async fn use_weaviate(
+        name: impl Into<String>,
+        url: impl Into<String>,
+        api_key: Option<String>,
+    ) -> Result<(), FrameworkError> {
+        let adapter = bridge_embex_weaviate::WeaviateAdapter::new(&url.into(), api_key)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("weaviate: {}", e)))?;
+        Self::register(name, Arc::new(adapter)).await;
         Ok(())
     }
 
-    async fn count(&self) -> Result<u64, FrameworkError> {
-        Ok(self.records.read().unwrap().len() as u64)
+    #[cfg(feature = "vector-milvus")]
+    pub async fn use_milvus(
+        name: impl Into<String>,
+        url: impl Into<String>,
+    ) -> Result<(), FrameworkError> {
+        let adapter = bridge_embex_milvus::MilvusAdapter::new(&url.into())
+            .await
+            .map_err(|e| FrameworkError::internal(format!("milvus: {}", e)))?;
+        Self::register(name, Arc::new(adapter)).await;
+        Ok(())
     }
-}
-
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 {
-        return 0.0;
-    }
-    dot / (norm_a * norm_b)
 }
 ```
+
+> **Constructor verification:** Each embex adapter's `new()` signature
+> may take different args (URL, API key, options struct). Read each
+> adapter's `src/lib.rs` to confirm the exact public constructor
+> before wiring. Use what's there; do not invent.
+
+- [ ] **Step 3: Integration tests (docker-compose-gated)**
+
+```rust
+// framework/tests/vector.rs — append
+#[tokio::test]
+#[ignore = "requires qdrant on :6334 — docker compose up qdrant"]
+async fn qdrant_round_trip() {
+    suprnova::Vector::use_qdrant("docs", "http://localhost:6334").await.unwrap();
+    // ... same insert+search assertion as the facade test ...
+}
+
+// Similar tests for lancedb (file path), weaviate, milvus.
+```
+
+- [ ] **Step 4: Run smoke test (Qdrant)**
+
+```bash
+docker run -d --rm --name qdrant -p 6334:6334 qdrant/qdrant
+cargo test -p suprnova --features vector-qdrant --test vector -- --ignored qdrant
+docker stop qdrant
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add framework/Cargo.toml framework/src/vector/mod.rs framework/tests/vector.rs
+git commit -m "feat(vector): enable embex adapters — Qdrant, LanceDB, Weaviate, Milvus"
+```
+
+---
+
+## Task 3: Enable embex adapters — pgvector + Chroma + Pinecone + Redis
+
+**Files:** `framework/Cargo.toml`, `framework/src/vector/mod.rs`
+
+Four more backends, identical shape to Task 2. pgvector + Pinecone
+are the popular hosted/embedded picks; Chroma is the dev-favorite;
+Redis (Redis Stack) is the "we already run Redis" win.
+
+- [ ] **Step 1: Cargo features + deps**
+
+```toml
+# framework/Cargo.toml — [features]
+vector-pgvector = ["dep:bridge-embex-pgvector"]
+vector-chroma = ["dep:bridge-embex-chroma"]
+vector-pinecone = ["dep:bridge-embex-pinecone"]
+vector-redis = ["dep:bridge-embex-redis"]
+
+# [dependencies]
+bridge-embex-pgvector = { path = "../reference/bridgerust-main/crates/embex/adapters/pgvector", optional = true }
+bridge-embex-chroma = { path = "../reference/bridgerust-main/crates/embex/adapters/chroma", optional = true }
+bridge-embex-pinecone = { path = "../reference/bridgerust-main/crates/embex/adapters/pinecone", optional = true }
+bridge-embex-redis = { path = "../reference/bridgerust-main/crates/embex/adapters/redis", optional = true }
+```
+
+- [ ] **Step 2: Convenience constructors**
+
+```rust
+// framework/src/vector/mod.rs — append
+impl Vector {
+    #[cfg(feature = "vector-pgvector")]
+    pub async fn use_pgvector(
+        name: impl Into<String>,
+        url: impl Into<String>,
+    ) -> Result<(), FrameworkError> {
+        let adapter = bridge_embex_pgvector::PgVectorAdapter::new(&url.into())
+            .await
+            .map_err(|e| FrameworkError::internal(format!("pgvector: {}", e)))?;
+        Self::register(name, Arc::new(adapter)).await;
+        Ok(())
+    }
+
+    #[cfg(feature = "vector-chroma")]
+    pub async fn use_chroma(
+        name: impl Into<String>,
+        url: impl Into<String>,
+    ) -> Result<(), FrameworkError> {
+        let adapter = bridge_embex_chroma::ChromaAdapter::new(&url.into())
+            .await
+            .map_err(|e| FrameworkError::internal(format!("chroma: {}", e)))?;
+        Self::register(name, Arc::new(adapter)).await;
+        Ok(())
+    }
+
+    #[cfg(feature = "vector-pinecone")]
+    pub async fn use_pinecone(
+        name: impl Into<String>,
+        api_key: impl Into<String>,
+        environment: impl Into<String>,
+    ) -> Result<(), FrameworkError> {
+        let adapter = bridge_embex_pinecone::PineconeAdapter::new(&api_key.into(), &environment.into())
+            .await
+            .map_err(|e| FrameworkError::internal(format!("pinecone: {}", e)))?;
+        Self::register(name, Arc::new(adapter)).await;
+        Ok(())
+    }
+
+    #[cfg(feature = "vector-redis")]
+    pub async fn use_redis(
+        name: impl Into<String>,
+        url: impl Into<String>,
+    ) -> Result<(), FrameworkError> {
+        let adapter = bridge_embex_redis::RedisAdapter::new(&url.into())
+            .await
+            .map_err(|e| FrameworkError::internal(format!("redis: {}", e)))?;
+        Self::register(name, Arc::new(adapter)).await;
+        Ok(())
+    }
+}
+```
+
+- [ ] **Step 3: Integration tests + commit**
+
+```bash
+git add framework/Cargo.toml framework/src/vector/mod.rs
+git commit -m "feat(vector): enable embex adapters — pgvector, Chroma, Pinecone, Redis"
+```
+
+---
+
+## Task 4: Enable embex adapters — Elasticsearch + OpenSearch (vector mode)
+
+**Files:** `framework/Cargo.toml`, `framework/src/vector/mod.rs`
+
+Both Elasticsearch and OpenSearch ship kNN / dense-vector indexes.
+embex's adapters target the same cluster as the Search-track
+`SearchIndex` driver (see Task 10), but for vector ops instead of
+text — same cluster, different operations.
+
+- [ ] **Step 1: Cargo features + deps**
+
+```toml
+vector-elasticsearch = ["dep:bridge-embex-elasticsearch"]
+vector-opensearch = ["dep:bridge-embex-opensearch"]
+
+bridge-embex-elasticsearch = { path = "../reference/bridgerust-main/crates/embex/adapters/elasticsearch", optional = true }
+bridge-embex-opensearch = { path = "../reference/bridgerust-main/crates/embex/adapters/opensearch", optional = true }
+```
+
+- [ ] **Step 2: Constructors**
+
+```rust
+// framework/src/vector/mod.rs — append
+impl Vector {
+    #[cfg(feature = "vector-elasticsearch")]
+    pub async fn use_elasticsearch_vector(
+        name: impl Into<String>,
+        url: impl Into<String>,
+    ) -> Result<(), FrameworkError> {
+        let adapter = bridge_embex_elasticsearch::ElasticsearchAdapter::new(&url.into())
+            .await
+            .map_err(|e| FrameworkError::internal(format!("elasticsearch: {}", e)))?;
+        Self::register(name, Arc::new(adapter)).await;
+        Ok(())
+    }
+
+    #[cfg(feature = "vector-opensearch")]
+    pub async fn use_opensearch(
+        name: impl Into<String>,
+        url: impl Into<String>,
+    ) -> Result<(), FrameworkError> {
+        let adapter = bridge_embex_opensearch::OpenSearchAdapter::new(&url.into())
+            .await
+            .map_err(|e| FrameworkError::internal(format!("opensearch: {}", e)))?;
+        Self::register(name, Arc::new(adapter)).await;
+        Ok(())
+    }
+}
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add framework/Cargo.toml framework/src/vector/mod.rs
+git commit -m "feat(vector): enable embex adapters — Elasticsearch + OpenSearch (vector mode)"
+```
+
+---
+
+## Task 5: Suprnova-shipped adapters — In-memory + MariaDB VECTOR + LibSQL
+
+**Files:** `framework/src/vector/drivers/{memory,mariadb,libsql}.rs`
+
+Three adapters we write ourselves, implementing embex's
+`VectorDatabase` trait. The in-memory adapter is the default test
+backend. MariaDB + LibSQL are the `[[no-gatekeeping]]` proofs —
+Laravel restricts vectors to pgvector; we ship two more SQL-native
+options.
+
+- [ ] **Step 1: In-memory MemoryAdapter**
 
 ```rust
 // framework/src/vector/drivers/mod.rs
 pub mod memory;
-
-#[cfg(feature = "vector-qdrant")]
-pub mod qdrant;
-#[cfg(feature = "vector-lancedb")]
-pub mod lancedb;
-#[cfg(feature = "vector-pgvector")]
-pub mod pgvector;
 #[cfg(feature = "vector-mariadb")]
 pub mod mariadb;
 #[cfg(feature = "vector-libsql")]
@@ -328,504 +489,437 @@ pub mod libsql;
 ```
 
 ```rust
-// framework/src/lib.rs
-pub mod vector;
-pub use vector::{Vector, Embedding, VectorMatch};
+// framework/src/vector/drivers/memory.rs
+//! In-memory vector adapter implementing embex's VectorDatabase
+//! trait. Default test backend; not for production.
+
+use async_trait::async_trait;
+use bridge_embex_core::db::VectorDatabase;
+use bridge_embex_core::error::{Error, Result};
+use bridge_embex_core::types::*;
+use std::collections::HashMap;
+use std::sync::RwLock;
+
+#[derive(Default)]
+pub struct MemoryAdapter {
+    collections: RwLock<HashMap<String, CollectionState>>,
+}
+
+struct CollectionState {
+    schema: CollectionSchema,
+    points: HashMap<String, Point>,
+}
+
+impl MemoryAdapter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl VectorDatabase for MemoryAdapter {
+    async fn create_collection(&self, schema: &CollectionSchema) -> Result<()> {
+        let mut store = self.collections.write().unwrap();
+        store.insert(
+            schema.name.clone(),
+            CollectionState {
+                schema: schema.clone(),
+                points: HashMap::new(),
+            },
+        );
+        Ok(())
+    }
+
+    async fn delete_collection(&self, name: &str) -> Result<()> {
+        self.collections.write().unwrap().remove(name);
+        Ok(())
+    }
+
+    async fn insert(&self, collection: &str, points: Vec<Point>) -> Result<()> {
+        let mut store = self.collections.write().unwrap();
+        let coll = store.get_mut(collection).ok_or_else(|| Error::CollectionNotFound(collection.to_string()))?;
+        for p in points {
+            coll.points.insert(p.id.clone(), p);
+        }
+        Ok(())
+    }
+
+    async fn search(&self, query: &VectorQuery) -> Result<SearchResponse> {
+        let store = self.collections.read().unwrap();
+        let coll = store.get(&query.collection).ok_or_else(|| Error::CollectionNotFound(query.collection.clone()))?;
+        let q = query
+            .vector
+            .as_ref()
+            .ok_or_else(|| Error::InvalidQuery("vector required".into()))?;
+
+        let mut scored: Vec<(f32, &Point)> = coll
+            .points
+            .values()
+            .map(|p| {
+                let score = bridge_core::simd::cosine_similarity(q, &p.vector);
+                (score, p)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let results: Vec<SearchResult> = scored
+            .into_iter()
+            .take(query.top_k)
+            .map(|(score, p)| SearchResult {
+                id: p.id.clone(),
+                score,
+                vector: query.include_vector.then(|| p.vector.clone()),
+                metadata: if query.include_metadata { p.metadata.clone() } else { None },
+            })
+            .collect();
+
+        Ok(SearchResponse {
+            results,
+            aggregations: HashMap::new(),
+        })
+    }
+
+    async fn delete(&self, collection: &str, ids: Vec<String>) -> Result<()> {
+        let mut store = self.collections.write().unwrap();
+        let coll = store.get_mut(collection).ok_or_else(|| Error::CollectionNotFound(collection.to_string()))?;
+        for id in ids {
+            coll.points.remove(&id);
+        }
+        Ok(())
+    }
+
+    async fn update_metadata(&self, collection: &str, updates: Vec<MetadataUpdate>) -> Result<()> {
+        let mut store = self.collections.write().unwrap();
+        let coll = store.get_mut(collection).ok_or_else(|| Error::CollectionNotFound(collection.to_string()))?;
+        for u in updates {
+            if let Some(p) = coll.points.get_mut(&u.id) {
+                p.metadata = Some(u.metadata);
+            }
+        }
+        Ok(())
+    }
+
+    async fn scroll(&self, collection: &str, offset: Option<String>, limit: usize) -> Result<ScrollResponse> {
+        let store = self.collections.read().unwrap();
+        let coll = store.get(collection).ok_or_else(|| Error::CollectionNotFound(collection.to_string()))?;
+        let mut points: Vec<Point> = coll.points.values().cloned().collect();
+        points.sort_by(|a, b| a.id.cmp(&b.id));
+        let start = match offset {
+            Some(o) => points.iter().position(|p| p.id == o).map(|i| i + 1).unwrap_or(0),
+            None => 0,
+        };
+        let end = (start + limit).min(points.len());
+        let next_offset = if end < points.len() { points.get(end - 1).map(|p| p.id.clone()) } else { None };
+        Ok(ScrollResponse {
+            points: points[start..end].to_vec(),
+            next_offset,
+        })
+    }
+}
 ```
 
-- [ ] **Step 4: Run — expect pass**
+> **`MetadataUpdate` / `ScrollResponse` / `Error` shapes:** Read
+> `reference/bridgerust-main/crates/embex/core/src/types.rs` to
+> confirm exact field names — the sketch above tracks `types.rs`
+> reading from this plan, but adjust to whatever embex's tip-of-tree
+> actually exposes.
 
-```bash
-cargo test -p suprnova --test vector
+- [ ] **Step 2: MariaDB VECTOR adapter**
+
+```rust
+// framework/src/vector/drivers/mariadb.rs
+//! MariaDB 11.7+ VECTOR adapter. Schema:
+//!
+//! ```sql
+//! CREATE TABLE <collection> (
+//!     id VARCHAR(255) PRIMARY KEY,
+//!     embedding VECTOR(<dim>) NOT NULL,
+//!     metadata JSON,
+//!     VECTOR INDEX (embedding)
+//! );
+//! ```
+
+use async_trait::async_trait;
+use bridge_embex_core::db::VectorDatabase;
+use bridge_embex_core::error::{Error, Result};
+use bridge_embex_core::types::*;
+use sqlx::MySqlPool;
+use std::collections::HashMap;
+
+pub struct MariaDbAdapter {
+    pool: MySqlPool,
+}
+
+impl MariaDbAdapter {
+    pub async fn new(url: &str) -> Result<Self> {
+        let pool = MySqlPool::connect(url)
+            .await
+            .map_err(|e| Error::Connection(e.to_string()))?;
+        Ok(Self { pool })
+    }
+}
+
+#[async_trait]
+impl VectorDatabase for MariaDbAdapter {
+    async fn create_collection(&self, schema: &CollectionSchema) -> Result<()> {
+        let ddl = format!(
+            "CREATE TABLE IF NOT EXISTS {} (id VARCHAR(255) PRIMARY KEY, embedding VECTOR({}) NOT NULL, metadata JSON, VECTOR INDEX (embedding))",
+            schema.name, schema.dimension
+        );
+        sqlx::query(&ddl)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn delete_collection(&self, name: &str) -> Result<()> {
+        sqlx::query(&format!("DROP TABLE IF EXISTS {}", name))
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn insert(&self, collection: &str, points: Vec<Point>) -> Result<()> {
+        for p in points {
+            let vec_str = format!("[{}]", p.vector.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(","));
+            let metadata_json = p.metadata.map(|m| serde_json::to_string(&m).unwrap_or_default()).unwrap_or("{}".into());
+            let sql = format!(
+                "INSERT INTO {} (id, embedding, metadata) VALUES (?, VEC_FromText(?), ?) \
+                 ON DUPLICATE KEY UPDATE embedding = VEC_FromText(?), metadata = ?",
+                collection
+            );
+            sqlx::query(&sql)
+                .bind(&p.id)
+                .bind(&vec_str)
+                .bind(&metadata_json)
+                .bind(&vec_str)
+                .bind(&metadata_json)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| Error::Storage(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    async fn search(&self, query: &VectorQuery) -> Result<SearchResponse> {
+        let q = query.vector.as_ref().ok_or_else(|| Error::InvalidQuery("vector required".into()))?;
+        let vec_str = format!("[{}]", q.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(","));
+        let sql = format!(
+            "SELECT id, metadata, VEC_DISTANCE_COSINE(embedding, VEC_FromText(?)) AS score \
+             FROM {} ORDER BY score LIMIT ?",
+            query.collection
+        );
+        let rows: Vec<(String, Option<String>, f32)> = sqlx::query_as(&sql)
+            .bind(&vec_str)
+            .bind(query.top_k as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let results = rows
+            .into_iter()
+            .map(|(id, meta, score)| SearchResult {
+                id,
+                score: 1.0 - score, // VEC_DISTANCE_COSINE returns distance, we want similarity
+                vector: None,
+                metadata: meta.and_then(|s| serde_json::from_str(&s).ok()),
+            })
+            .collect();
+        Ok(SearchResponse { results, aggregations: HashMap::new() })
+    }
+
+    async fn delete(&self, collection: &str, ids: Vec<String>) -> Result<()> {
+        for id in ids {
+            sqlx::query(&format!("DELETE FROM {} WHERE id = ?", collection))
+                .bind(&id)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| Error::Storage(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    async fn update_metadata(&self, collection: &str, updates: Vec<MetadataUpdate>) -> Result<()> {
+        for u in updates {
+            let json = serde_json::to_string(&u.metadata).unwrap_or_default();
+            sqlx::query(&format!("UPDATE {} SET metadata = ? WHERE id = ?", collection))
+                .bind(&json)
+                .bind(&u.id)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| Error::Storage(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    async fn scroll(&self, collection: &str, offset: Option<String>, limit: usize) -> Result<ScrollResponse> {
+        let after = offset.unwrap_or_default();
+        let sql = format!(
+            "SELECT id, metadata FROM {} WHERE id > ? ORDER BY id LIMIT ?",
+            collection
+        );
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(&sql)
+            .bind(&after)
+            .bind(limit as i64 + 1)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        let has_more = rows.len() > limit;
+        let mut rows = rows;
+        if has_more { rows.pop(); }
+        let next_offset = if has_more { rows.last().map(|(id, _)| id.clone()) } else { None };
+        let points = rows
+            .into_iter()
+            .map(|(id, meta)| Point {
+                id,
+                vector: vec![],
+                metadata: meta.and_then(|s| serde_json::from_str(&s).ok()),
+            })
+            .collect();
+        Ok(ScrollResponse { points, next_offset })
+    }
+}
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: LibSQL adapter**
 
-```bash
-git add framework/src/vector framework/src/lib.rs framework/tests/vector.rs
-git commit -m "feat(vector): Vector facade + VectorStore trait + in-memory driver"
+```rust
+// framework/src/vector/drivers/libsql.rs
+//! LibSQL vector adapter using the libsql_vector extension. Schema:
+//!
+//! ```sql
+//! CREATE TABLE <collection> (id TEXT PRIMARY KEY, embedding F32_BLOB(<dim>), metadata TEXT);
+//! CREATE INDEX <collection>_idx ON <collection>(libsql_vector_idx(embedding));
+//! ```
+
+use async_trait::async_trait;
+use bridge_embex_core::db::VectorDatabase;
+use bridge_embex_core::error::{Error, Result};
+use bridge_embex_core::types::*;
+use libsql::{Builder, Database};
+use std::collections::HashMap;
+
+pub struct LibSqlAdapter {
+    db: Database,
+}
+
+impl LibSqlAdapter {
+    pub async fn new(url: &str) -> Result<Self> {
+        let db = Builder::new_remote(url.to_string(), String::new())
+            .build()
+            .await
+            .map_err(|e| Error::Connection(e.to_string()))?;
+        Ok(Self { db })
+    }
+}
+
+#[async_trait]
+impl VectorDatabase for LibSqlAdapter {
+    async fn create_collection(&self, schema: &CollectionSchema) -> Result<()> {
+        let conn = self.db.connect().map_err(|e| Error::Connection(e.to_string()))?;
+        conn.execute(
+            &format!(
+                "CREATE TABLE IF NOT EXISTS {} (id TEXT PRIMARY KEY, embedding F32_BLOB({}), metadata TEXT)",
+                schema.name, schema.dimension
+            ),
+            (),
+        )
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+        conn.execute(
+            &format!(
+                "CREATE INDEX IF NOT EXISTS {}_idx ON {}(libsql_vector_idx(embedding))",
+                schema.name, schema.name
+            ),
+            (),
+        )
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn delete_collection(&self, name: &str) -> Result<()> {
+        let conn = self.db.connect().map_err(|e| Error::Connection(e.to_string()))?;
+        conn.execute(&format!("DROP TABLE IF EXISTS {}", name), ())
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    // insert / search / delete / update_metadata / scroll follow the
+    // same shape as MariaDbAdapter; only the SQL functions differ:
+    //   vector32(?) instead of VEC_FromText(?)
+    //   vector_distance_cos(...) instead of VEC_DISTANCE_COSINE(...)
+    // Full impl mirrors MariaDbAdapter — implementer fills in.
+
+    async fn insert(&self, collection: &str, points: Vec<Point>) -> Result<()> {
+        let _ = (collection, points);
+        unimplemented!("mirror MariaDbAdapter::insert with libsql syntax")
+    }
+    async fn search(&self, query: &VectorQuery) -> Result<SearchResponse> {
+        let _ = query;
+        unimplemented!("mirror MariaDbAdapter::search with vector_distance_cos")
+    }
+    async fn delete(&self, collection: &str, ids: Vec<String>) -> Result<()> {
+        let _ = (collection, ids);
+        unimplemented!()
+    }
+    async fn update_metadata(&self, collection: &str, updates: Vec<MetadataUpdate>) -> Result<()> {
+        let _ = (collection, updates);
+        unimplemented!()
+    }
+    async fn scroll(&self, collection: &str, offset: Option<String>, limit: usize) -> Result<ScrollResponse> {
+        let _ = (collection, offset, limit);
+        unimplemented!()
+    }
+}
 ```
 
----
-
-## Task 2: Qdrant vector driver
-
-**Files:** `framework/src/vector/drivers/qdrant.rs`, `framework/Cargo.toml`
-
-- [ ] **Step 1: Add feature + dep**
+- [ ] **Step 4: Cargo features + deps**
 
 ```toml
-# framework/Cargo.toml
-[features]
-default = []
-vector-qdrant = ["dep:qdrant-client"]
-vector-lancedb = ["dep:lancedb"]
-vector-pgvector = ["dep:sqlx"]
+# framework/Cargo.toml — [features]
 vector-mariadb = ["dep:sqlx"]
 vector-libsql = ["dep:libsql"]
 
-[dependencies]
-qdrant-client = { version = "1.10", optional = true }
-lancedb = { version = "0.10", optional = true }
+# [dependencies]
 libsql = { version = "0.5", optional = true }
 # sqlx already present from earlier phases
 ```
 
-- [ ] **Step 2: Integration test (gated)**
+- [ ] **Step 5: Vector constructor convenience**
 
 ```rust
-// framework/tests/vector.rs — append
-#[tokio::test]
-#[ignore = "requires qdrant on localhost:6334 — docker run -p 6334:6334 qdrant/qdrant"]
-async fn qdrant_round_trip() {
-    suprnova::Vector::use_qdrant("docs", "http://localhost:6334").await.unwrap();
-    let store = suprnova::Vector::store("docs").unwrap();
-    store
-        .upsert(&[("q-1", suprnova::Embedding::new(vec![0.1; 384]), serde_json::json!({"src": "test"}))])
-        .await
-        .unwrap();
-    let hits = store.similar(suprnova::Embedding::new(vec![0.1; 384]), 5).await.unwrap();
-    assert!(!hits.is_empty());
+// framework/src/vector/mod.rs — append
+impl Vector {
+    #[cfg(feature = "vector-mariadb")]
+    pub async fn use_mariadb(name: impl Into<String>, url: impl Into<String>) -> Result<(), FrameworkError> {
+        let adapter = drivers::mariadb::MariaDbAdapter::new(&url.into())
+            .await
+            .map_err(|e| FrameworkError::internal(format!("mariadb: {}", e)))?;
+        Self::register(name, Arc::new(adapter)).await;
+        Ok(())
+    }
+
+    #[cfg(feature = "vector-libsql")]
+    pub async fn use_libsql(name: impl Into<String>, url: impl Into<String>) -> Result<(), FrameworkError> {
+        let adapter = drivers::libsql::LibSqlAdapter::new(&url.into())
+            .await
+            .map_err(|e| FrameworkError::internal(format!("libsql: {}", e)))?;
+        Self::register(name, Arc::new(adapter)).await;
+        Ok(())
+    }
 }
 ```
 
-- [ ] **Step 3: Implement**
-
-```rust
-// framework/src/vector/drivers/qdrant.rs
-use crate::vector::{driver::VectorStore, Embedding, VectorMatch};
-use crate::FrameworkError;
-use async_trait::async_trait;
-use qdrant_client::{
-    qdrant::{
-        CreateCollection, Distance, PointStruct, SearchPoints, Value, VectorParams, VectorsConfig,
-    },
-    Qdrant,
-};
-use std::collections::HashMap;
-
-pub struct QdrantVectorStore {
-    client: Qdrant,
-    collection: String,
-}
-
-impl QdrantVectorStore {
-    pub async fn new(url: String, collection: String) -> Result<Self, FrameworkError> {
-        let client = Qdrant::from_url(&url)
-            .build()
-            .map_err(|e| FrameworkError::internal(format!("qdrant: {}", e)))?;
-
-        // Create the collection if missing. The dim is inferred on
-        // first upsert; for cleanliness we expose a separate
-        // `ensure_collection(dim, distance)` instead.
-        Ok(Self { client, collection })
-    }
-
-    pub async fn ensure_collection(&self, dim: u64) -> Result<(), FrameworkError> {
-        let _ = self
-            .client
-            .create_collection(CreateCollection {
-                collection_name: self.collection.clone(),
-                vectors_config: Some(VectorsConfig {
-                    config: Some(qdrant_client::qdrant::vectors_config::Config::Params(VectorParams {
-                        size: dim,
-                        distance: Distance::Cosine as i32,
-                        ..Default::default()
-                    })),
-                }),
-                ..Default::default()
-            })
-            .await; // ignore "already exists"
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl VectorStore for QdrantVectorStore {
-    async fn upsert(
-        &self,
-        records: &[(&str, Embedding, serde_json::Value)],
-    ) -> Result<(), FrameworkError> {
-        if let Some((_, first_emb, _)) = records.first() {
-            self.ensure_collection(first_emb.dim() as u64).await?;
-        }
-        let points: Vec<PointStruct> = records
-            .iter()
-            .map(|(id, emb, meta)| {
-                let mut payload: HashMap<String, Value> = HashMap::new();
-                if let serde_json::Value::Object(obj) = meta {
-                    for (k, v) in obj {
-                        payload.insert(k.clone(), serde_to_qdrant(v));
-                    }
-                }
-                PointStruct::new(id.to_string(), emb.values.clone(), payload)
-            })
-            .collect();
-        self.client
-            .upsert_points(qdrant_client::qdrant::UpsertPoints {
-                collection_name: self.collection.clone(),
-                points,
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| FrameworkError::internal(format!("qdrant upsert: {}", e)))?;
-        Ok(())
-    }
-
-    async fn similar(
-        &self,
-        query: Embedding,
-        k: usize,
-    ) -> Result<Vec<VectorMatch>, FrameworkError> {
-        let resp = self
-            .client
-            .search_points(SearchPoints {
-                collection_name: self.collection.clone(),
-                vector: query.values,
-                limit: k as u64,
-                with_payload: Some(true.into()),
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| FrameworkError::internal(format!("qdrant search: {}", e)))?;
-
-        Ok(resp
-            .result
-            .into_iter()
-            .map(|p| VectorMatch {
-                id: p
-                    .id
-                    .map(|i| format!("{:?}", i.point_id_options))
-                    .unwrap_or_default(),
-                score: p.score,
-                metadata: qdrant_payload_to_json(&p.payload),
-            })
-            .collect())
-    }
-
-    async fn delete(&self, ids: &[&str]) -> Result<(), FrameworkError> {
-        self.client
-            .delete_points(qdrant_client::qdrant::DeletePoints {
-                collection_name: self.collection.clone(),
-                points: Some(
-                    qdrant_client::qdrant::PointsSelector::from(
-                        ids.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-                    ),
-                ),
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| FrameworkError::internal(format!("qdrant delete: {}", e)))?;
-        Ok(())
-    }
-}
-
-fn serde_to_qdrant(v: &serde_json::Value) -> Value {
-    match v {
-        serde_json::Value::String(s) => s.clone().into(),
-        serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0).into(),
-        serde_json::Value::Bool(b) => (*b).into(),
-        _ => v.to_string().into(),
-    }
-}
-
-fn qdrant_payload_to_json(payload: &HashMap<String, Value>) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
-    for (k, v) in payload {
-        map.insert(k.clone(), serde_json::Value::String(format!("{:?}", v.kind)));
-    }
-    serde_json::Value::Object(map)
-}
-```
-
-> **API verification:** `qdrant-client` 1.10 has gone through several major changes. Verify exact types (`PointStruct::new`, `SearchPoints` shape, payload conversion) via `cargo doc -p qdrant-client --open --no-deps`. The payload→JSON round-trip in particular needs the implementer to map every Qdrant `Value::Kind` variant to its JSON analogue, not just stringify.
-
-- [ ] **Step 4: Smoke test**
+- [ ] **Step 6: Run + commit**
 
 ```bash
-docker run -d --rm --name qdrant -p 6334:6334 qdrant/qdrant
-cargo test -p suprnova --test vector -- --ignored qdrant
-docker stop qdrant
-```
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add framework/src/vector/drivers/qdrant.rs framework/Cargo.toml
-git commit -m "feat(vector): Qdrant driver behind vector-qdrant feature flag"
-```
-
----
-
-## Task 3: LanceDB vector driver
-
-**Files:** `framework/src/vector/drivers/lancedb.rs`
-
-- [ ] **Step 1: Implement** (LanceDB is embedded — no separate server)
-
-```rust
-// framework/src/vector/drivers/lancedb.rs
-use crate::vector::{driver::VectorStore, Embedding, VectorMatch};
-use crate::FrameworkError;
-use async_trait::async_trait;
-use lancedb::{connect, Connection, Table};
-
-pub struct LanceDbStore {
-    table: Table,
-}
-
-impl LanceDbStore {
-    pub async fn new(path: String, table_name: String) -> Result<Self, FrameworkError> {
-        let conn = connect(&path)
-            .execute()
-            .await
-            .map_err(|e| FrameworkError::internal(format!("lancedb open: {}", e)))?;
-        let table = match conn.open_table(&table_name).execute().await {
-            Ok(t) => t,
-            Err(_) => {
-                // Create the table with a schema on first use.
-                // LanceDB needs an Arrow schema; build minimal:
-                // id: Utf8, vector: FixedSizeList<Float32>, metadata: Utf8 (JSON).
-                // For brevity, this sketch defers schema definition
-                // to the implementer per LanceDB's current API; the
-                // builder pattern is `conn.create_table(name, batches).execute()`.
-                return Err(FrameworkError::internal(
-                    "lancedb table missing; create with explicit schema before first use",
-                ));
-            }
-        };
-        Ok(Self { table })
-    }
-}
-
-#[async_trait]
-impl VectorStore for LanceDbStore {
-    async fn upsert(
-        &self,
-        records: &[(&str, Embedding, serde_json::Value)],
-    ) -> Result<(), FrameworkError> {
-        // Build an Arrow RecordBatch from records, then call
-        // `self.table.add(...)` or `merge_insert(...)` for upsert.
-        // Full impl: see lancedb examples; the structure is:
-        //   let schema = self.table.schema().await?;
-        //   let batch = build_batch(schema, records)?;
-        //   self.table.merge_insert(&["id"]).execute(reader).await?;
-        Err(FrameworkError::internal("lancedb upsert: implementer to wire Arrow RecordBatch"))
-    }
-
-    async fn similar(
-        &self,
-        query: Embedding,
-        k: usize,
-    ) -> Result<Vec<VectorMatch>, FrameworkError> {
-        let results = self
-            .table
-            .vector_search(query.values)
-            .map_err(|e| FrameworkError::internal(format!("lancedb search: {}", e)))?
-            .limit(k)
-            .execute()
-            .await
-            .map_err(|e| FrameworkError::internal(format!("lancedb execute: {}", e)))?;
-        // Convert Arrow result stream → VectorMatch list.
-        // Implementer: read each batch's id/_distance/metadata columns.
-        let _ = results;
-        Ok(vec![])
-    }
-
-    async fn delete(&self, ids: &[&str]) -> Result<(), FrameworkError> {
-        let predicate = format!(
-            "id IN ({})",
-            ids.iter()
-                .map(|s| format!("'{}'", s.replace('\'', "''")))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        self.table
-            .delete(&predicate)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("lancedb delete: {}", e)))?;
-        Ok(())
-    }
-}
-```
-
-> **Implementer scope:** LanceDB driver is the largest of the four — Arrow integration takes real work. Allocate a separate agent task; the upsert + similar methods need the Arrow RecordBatch round-trip wired in full. Reference: `lancedb` crate's `examples/` directory.
-
-- [ ] **Step 2: Commit**
-
-```bash
-git add framework/src/vector/drivers/lancedb.rs
-git commit -m "feat(vector): LanceDB driver behind vector-lancedb feature (Arrow round-trip TBD)"
-```
-
----
-
-## Task 4: pgvector + MariaDB VECTOR + LibSQL drivers (SQL-backed vectors)
-
-**Files:** `framework/src/vector/drivers/{pgvector,mariadb,libsql}.rs`
-
-- [ ] **Step 1: Pattern — each SQL backend uses raw SQL via `sqlx` / `libsql`**
-
-```rust
-// framework/src/vector/drivers/pgvector.rs
-use crate::vector::{driver::VectorStore, Embedding, VectorMatch};
-use crate::FrameworkError;
-use async_trait::async_trait;
-use sqlx::PgPool;
-
-pub struct PgVectorStore {
-    pool: PgPool,
-    table: String,
-    dim: usize,
-}
-
-impl PgVectorStore {
-    pub async fn new(url: String, table: String, dim: usize) -> Result<Self, FrameworkError> {
-        let pool = PgPool::connect(&url)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("postgres: {}", e)))?;
-        // Ensure extension + table.
-        sqlx::query("CREATE EXTENSION IF NOT EXISTS vector")
-            .execute(&pool)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("vector ext: {}", e)))?;
-        let ddl = format!(
-            "CREATE TABLE IF NOT EXISTS {} (id TEXT PRIMARY KEY, embedding VECTOR({}) NOT NULL, metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb)",
-            table, dim
-        );
-        sqlx::query(&ddl)
-            .execute(&pool)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("create table: {}", e)))?;
-        Ok(Self { pool, table, dim })
-    }
-}
-
-#[async_trait]
-impl VectorStore for PgVectorStore {
-    async fn upsert(
-        &self,
-        records: &[(&str, Embedding, serde_json::Value)],
-    ) -> Result<(), FrameworkError> {
-        for (id, emb, meta) in records {
-            if emb.dim() != self.dim {
-                return Err(FrameworkError::internal(format!(
-                    "embedding dim {} != store dim {}", emb.dim(), self.dim
-                )));
-            }
-            let emb_str = format!(
-                "[{}]",
-                emb.values.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(",")
-            );
-            let sql = format!(
-                "INSERT INTO {} (id, embedding, metadata) VALUES ($1, $2::vector, $3) \
-                 ON CONFLICT (id) DO UPDATE SET embedding = EXCLUDED.embedding, metadata = EXCLUDED.metadata",
-                self.table
-            );
-            sqlx::query(&sql)
-                .bind(id)
-                .bind(emb_str)
-                .bind(meta)
-                .execute(&self.pool)
-                .await
-                .map_err(|e| FrameworkError::internal(format!("pgvector upsert: {}", e)))?;
-        }
-        Ok(())
-    }
-
-    async fn similar(
-        &self,
-        query: Embedding,
-        k: usize,
-    ) -> Result<Vec<VectorMatch>, FrameworkError> {
-        let q_str = format!(
-            "[{}]",
-            query.values.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(",")
-        );
-        let sql = format!(
-            "SELECT id, metadata, 1 - (embedding <=> $1::vector) AS score \
-             FROM {} ORDER BY embedding <=> $1::vector LIMIT $2",
-            self.table
-        );
-        let rows = sqlx::query_as::<_, (String, serde_json::Value, f32)>(&sql)
-            .bind(q_str)
-            .bind(k as i64)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("pgvector search: {}", e)))?;
-        Ok(rows
-            .into_iter()
-            .map(|(id, meta, score)| VectorMatch {
-                id,
-                score,
-                metadata: meta,
-            })
-            .collect())
-    }
-
-    async fn delete(&self, ids: &[&str]) -> Result<(), FrameworkError> {
-        let sql = format!("DELETE FROM {} WHERE id = ANY($1)", self.table);
-        sqlx::query(&sql)
-            .bind(ids)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("pgvector delete: {}", e)))?;
-        Ok(())
-    }
-}
-```
-
-```rust
-// framework/src/vector/drivers/mariadb.rs
-// Same shape, but using MariaDB 11.7+'s VECTOR() data type and
-// VEC_DISTANCE_COSINE / VEC_FromText(...) helpers. The DDL:
-//   CREATE TABLE docs (id VARCHAR(255) PRIMARY KEY, embedding VECTOR(384) NOT NULL, metadata JSON, VECTOR INDEX (embedding))
-// SELECT id, VEC_DISTANCE_COSINE(embedding, VEC_FromText(?)) AS score FROM docs ORDER BY score LIMIT ?
-```
-
-```rust
-// framework/src/vector/drivers/libsql.rs
-// LibSQL exposes vector via the libsql_vector extension. Schema:
-//   CREATE TABLE docs (id TEXT PRIMARY KEY, embedding F32_BLOB(384), metadata TEXT)
-//   CREATE INDEX docs_idx ON docs(libsql_vector_idx(embedding))
-// Query: SELECT id, metadata, vector_distance_cos(embedding, vector32(?)) AS score FROM docs ORDER BY score LIMIT ?
-```
-
-- [ ] **Step 2: Commit each driver as its own commit**
-
-```bash
-git commit -m "feat(vector): pgvector driver — postgres VECTOR + COSINE distance"
-git commit -m "feat(vector): MariaDB driver — MariaDB 11.7 VECTOR() + VEC_DISTANCE_COSINE"
-git commit -m "feat(vector): LibSQL driver — libsql_vector extension + F32_BLOB"
-```
-
----
-
-## Task 5: Weaviate + Milvus vector drivers
-
-**Files:** `framework/src/vector/drivers/{weaviate,milvus}.rs`
-
-- [ ] **Step 1: Implement** (HTTP-based clients; Weaviate has `weaviate-client` crate, Milvus has `milvus-sdk-rust`)
-
-```rust
-// framework/src/vector/drivers/weaviate.rs
-// Use the official weaviate-client crate. The store name maps to a
-// Weaviate "Class"; metadata becomes class properties; embeddings
-// are stored against `_vector`. Upsert via `data().creator()` calls.
-```
-
-```rust
-// framework/src/vector/drivers/milvus.rs
-// milvus-sdk-rust exposes Collection / Schema / FieldSchema. Store
-// name → collection name. Schema: id (varchar), embedding (float_vector),
-// metadata (json).
-```
-
-- [ ] **Step 2: Commit each**
-
-```bash
-git commit -m "feat(vector): Weaviate driver"
-git commit -m "feat(vector): Milvus driver"
+cargo test -p suprnova --test vector
+git add framework/src/vector/drivers framework/src/vector/mod.rs framework/Cargo.toml
+git commit -m "feat(vector): Suprnova-shipped adapters — MemoryAdapter + MariaDB VECTOR + LibSQL"
 ```
 
 ---
