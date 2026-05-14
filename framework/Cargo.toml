@@ -37,3 +37,6 @@ chrono = { version = "0.4", features = ["serde"] }
 bcrypt = "0.15"
 rand = "0.8"
 clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry", "smallvec", "parking_lot"] }
+uuid = { version = "1", features = ["v4", "fast-rng", "serde"] }
