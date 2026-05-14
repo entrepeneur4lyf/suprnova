@@ -9,6 +9,7 @@ pub mod error;
 pub mod hashing;
 pub mod http;
 pub mod inertia;
+pub mod logging;
 pub mod middleware;
 pub mod routing;
 pub mod schedule;
