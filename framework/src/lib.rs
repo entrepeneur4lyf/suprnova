@@ -46,8 +46,8 @@ pub use http::{
     Request, Response, ResponseExt, SameSite,
 };
 pub use http_client::{
-    assert_not_sent, assert_sent, fake_response, ClientResponse, Http, HttpFakeGuard,
-    RecordedRequest, RequestBuilder,
+    assert_not_sent, assert_sent, fake_response, ClientResponse, Http, RecordedRequest,
+    RequestBuilder,
 };
 pub use session::{
     session, session_mut, SessionConfig, SessionData, SessionMiddleware, SessionStore,

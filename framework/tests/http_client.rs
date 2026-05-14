@@ -1,4 +1,7 @@
-//! Integration tests for `Http` and `Http::fake()`.
+//! Integration tests for `Http` and `Http::fake`.
+//!
+//! `Http::fake` uses `tokio::task_local!` for fake-state isolation, so
+//! tests in this file run in parallel without any explicit locking.
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -11,13 +14,6 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use suprnova::{assert_not_sent, assert_sent, fake_response, Http};
-
-// Http uses a process-wide fake-state OnceLock that intercepts every
-// outbound request while a fake guard is alive. Any test in this file
-// that sends a real or fake request must hold this lock for its
-// duration — otherwise tests running in parallel would either trip the
-// other test's fake or pollute its capture.
-static HTTP_LOCK: Mutex<()> = Mutex::new(());
 
 /// One-shot echo server. Accepts a single connection, captures the
 /// inbound request, replies with a JSON body that includes the
@@ -83,6 +79,7 @@ async fn spawn_echo() -> (SocketAddr, Arc<Mutex<Option<EchoCapture>>>) {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct EchoCapture {
     method: String,
     uri: String,
@@ -93,7 +90,6 @@ struct EchoCapture {
 
 #[tokio::test]
 async fn get_returns_200() {
-    let _g = HTTP_LOCK.lock().unwrap();
     let (addr, _cap) = spawn_echo().await;
     let url = format!("http://{}/ping", addr);
     let resp = Http::get(&url).send().await.expect("send");
@@ -105,7 +101,6 @@ async fn get_returns_200() {
 
 #[tokio::test]
 async fn post_json_echoes() {
-    let _g = HTTP_LOCK.lock().unwrap();
     let (addr, cap) = spawn_echo().await;
     let url = format!("http://{}/echo", addr);
     let payload = serde_json::json!({"hello": "world"});
@@ -126,7 +121,6 @@ async fn post_json_echoes() {
 
 #[tokio::test]
 async fn bearer_token_sets_auth_header() {
-    let _g = HTTP_LOCK.lock().unwrap();
     let (addr, cap) = spawn_echo().await;
     let url = format!("http://{}/secure", addr);
     let resp = Http::get(&url)
@@ -146,7 +140,6 @@ async fn bearer_token_sets_auth_header() {
 
 #[tokio::test]
 async fn basic_auth_sets_auth_header() {
-    let _g = HTTP_LOCK.lock().unwrap();
     let (addr, cap) = spawn_echo().await;
     let url = format!("http://{}/secure", addr);
     let resp = Http::get(&url)
@@ -168,46 +161,89 @@ async fn basic_auth_sets_auth_header() {
 
 #[tokio::test]
 async fn fake_intercepts_and_records() {
-    let _g = HTTP_LOCK.lock().unwrap();
-    let _guard = Http::fake();
-    fake_response(
-        "POST",
-        "/api/users",
-        201,
-        serde_json::json!({"id": 42, "name": "Ada"}),
-    );
+    Http::fake(|| async {
+        fake_response(
+            "POST",
+            "/api/users",
+            201,
+            serde_json::json!({"id": 42, "name": "Ada"}),
+        );
 
-    let resp = Http::post("https://example.com/api/users")
-        .json(&serde_json::json!({"name": "Ada"}))
-        .send()
-        .await
-        .expect("send");
+        let resp = Http::post("https://example.com/api/users")
+            .json(&serde_json::json!({"name": "Ada"}))
+            .send()
+            .await
+            .expect("send");
 
-    assert_eq!(resp.status(), 201);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["id"], 42);
+        assert_eq!(resp.status(), 201);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["id"], 42);
 
-    assert_sent(|r| r.method == "POST" && r.url.contains("/api/users"));
+        assert_sent(|r| r.method == "POST" && r.url.contains("/api/users"));
+    })
+    .await;
 }
 
 #[tokio::test]
 async fn fake_assert_not_sent_passes_when_clean() {
-    let _g = HTTP_LOCK.lock().unwrap();
-    let _guard = Http::fake();
-    // No requests sent — assert_not_sent must not panic.
-    assert_not_sent(|r| r.url.contains("anything"));
+    Http::fake(|| async {
+        // No requests sent — assert_not_sent must not panic.
+        assert_not_sent(|r| r.url.contains("anything"));
+    })
+    .await;
 }
 
 #[tokio::test]
 async fn fake_unmatched_request_returns_default_200() {
-    let _g = HTTP_LOCK.lock().unwrap();
-    let _guard = Http::fake();
-    // No canned response queued — request still succeeds with 200 {}
-    let resp = Http::get("https://example.com/anything")
-        .send()
-        .await
-        .expect("send");
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body.is_object());
+    Http::fake(|| async {
+        // No canned response queued — request still succeeds with 200 {}
+        let resp = Http::get("https://example.com/anything")
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body.is_object());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn parallel_fakes_are_isolated() {
+    // Two concurrent fake scopes on independent tasks must not see
+    // each other's recorded requests or canned responses. This is the
+    // whole point of moving FAKE_STATE to task_local.
+    let h1 = tokio::spawn(async {
+        Http::fake(|| async {
+            fake_response("GET", "/one", 200, serde_json::json!({"who": "one"}));
+            let r = Http::get("https://x.test/one").send().await.unwrap();
+            let body: serde_json::Value = r.json().await.unwrap();
+            assert_eq!(body["who"], "one");
+            // Only our own send is visible.
+            assert_sent(|r| r.url.contains("/one"));
+            assert_not_sent(|r| r.url.contains("/two"));
+        })
+        .await;
+    });
+    let h2 = tokio::spawn(async {
+        Http::fake(|| async {
+            fake_response("GET", "/two", 200, serde_json::json!({"who": "two"}));
+            let r = Http::get("https://x.test/two").send().await.unwrap();
+            let body: serde_json::Value = r.json().await.unwrap();
+            assert_eq!(body["who"], "two");
+            assert_sent(|r| r.url.contains("/two"));
+            assert_not_sent(|r| r.url.contains("/one"));
+        })
+        .await;
+    });
+    h1.await.unwrap();
+    h2.await.unwrap();
+}
+
+#[tokio::test]
+#[should_panic(expected = "Http fake helpers called outside an Http::fake")]
+async fn fake_response_outside_scope_panics() {
+    // Without an active Http::fake scope, fake helpers must panic
+    // loudly instead of touching uninitialized state.
+    fake_response("GET", "/", 200, serde_json::json!({}));
 }

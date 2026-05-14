@@ -11,6 +11,12 @@ Until a 1.0 release, breaking changes are landed as hard cuts.
   sessions become unreadable after deploy. Set `APP_KEY` (base64
   URL-safe, no padding, 32 bytes) before deploying. Pre-1.0 hard cut,
   no migration path.
+- `Http::fake()` is now a closure-scoped async API:
+  `Http::fake(|| async { ... }).await` instead of `let _g = Http::fake();`.
+  Backing state moved from a process-wide `Mutex` to
+  `tokio::task_local!`, so tests no longer need an `HTTP_LOCK` and
+  can run in parallel. The dropped type `HttpFakeGuard` is removed
+  from public re-exports.
 
 ### Added
 

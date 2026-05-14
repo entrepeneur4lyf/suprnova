@@ -5,12 +5,15 @@
 //! `reqwest::Client` uses rustls for TLS, has a 30s default timeout, and
 //! identifies itself with the `suprnova/<version>` user agent.
 //!
-//! For tests, [`Http::fake()`] swaps in an in-memory recorder that
-//! captures every outbound request and returns canned responses queued
-//! via `fake_response(...)`.
+//! For tests, [`Http::fake`] runs your async closure inside a
+//! `tokio::task_local!` scope. Every outbound request from inside that
+//! scope is captured into an in-memory recorder and answered with the
+//! canned responses you've queued via `fake_response(...)`. Because the
+//! state is task-local, tests can run in parallel without coordinating.
 
 pub(crate) mod fake;
 
+use std::future::Future;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -19,9 +22,7 @@ use serde::Serialize;
 
 use crate::FrameworkError;
 
-pub use fake::{
-    assert_not_sent, assert_sent, fake_response, HttpFakeGuard, RecordedRequest,
-};
+pub use fake::{assert_not_sent, assert_sent, fake_response, RecordedRequest};
 
 static REQWEST_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
@@ -66,13 +67,40 @@ impl Http {
         RequestBuilder::new(Method::Delete, url.into())
     }
 
-    /// Install a fake recorder for the current process. While the
-    /// returned [`HttpFakeGuard`] is alive, every `RequestBuilder::send`
-    /// is intercepted: the request is captured, and a canned response
-    /// queued via [`fake_response`] is returned. When the guard drops,
-    /// the recorder is uninstalled and real reqwest calls resume.
-    pub fn fake() -> HttpFakeGuard {
-        fake::install_fake()
+    /// Run an async test body inside a fake-HTTP scope.
+    ///
+    /// Every `RequestBuilder::send` invoked from inside `f` (on the
+    /// same task or any child task spawned via `tokio::spawn` that
+    /// inherits this task-local) is intercepted: the request is
+    /// captured, and a canned response queued via [`fake_response`] is
+    /// returned. Tests in different tasks see different fake states,
+    /// so parallel test execution is safe.
+    ///
+    /// Returns whatever the closure returns.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use suprnova::{Http, fake_response, assert_sent};
+    ///
+    /// Http::fake(|| async {
+    ///     fake_response("POST", "/api/users", 201, serde_json::json!({"id": 1}));
+    ///     let resp = Http::post("https://example.com/api/users")
+    ///         .json(&serde_json::json!({"name": "Ada"}))
+    ///         .send()
+    ///         .await
+    ///         .unwrap();
+    ///     assert_eq!(resp.status(), 201);
+    ///     assert_sent(|r| r.method == "POST" && r.url.contains("/api/users"));
+    /// })
+    /// .await;
+    /// ```
+    pub async fn fake<F, Fut, T>(f: F) -> T
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = T>,
+    {
+        fake::install_fake_scope(f).await
     }
 }
 

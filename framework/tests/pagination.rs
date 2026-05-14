@@ -6,8 +6,7 @@
 //! which uses `DB::connection()` internally — sees a connection.
 
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, Database, DbBackend, EntityTrait, Schema, Set,
-    Statement,
+    ActiveModelTrait, ConnectionTrait, Database, DbBackend, EntityTrait, Schema, Set, Statement,
 };
 use serde::Serialize;
 use serde_json::json;
