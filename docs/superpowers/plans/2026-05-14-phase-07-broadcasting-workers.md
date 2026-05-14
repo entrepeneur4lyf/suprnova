@@ -1085,7 +1085,340 @@ git commit -m "feat(app): OrderChannel + payments_poll supervised worker dogfood
 
 ---
 
-## Task 10: Workspace lint + verification + roadmap update
+## Task 10: TypeScript broadcast client for React/Vue/Svelte starters
+
+Laravel ships `laravel-echo` (TS) so frontends consume the WebSocket
+server typed and ergonomic. We ship the same shape for Suprnova:
+typed channel subscribers (`useChannel`, `usePrivateChannel`,
+`usePresenceChannel`) emitted from `#[channel(...)]` macro
+registrations via `suprnova generate-types --with-broadcast-client`.
+
+**Files:**
+- Create: `suprnova-cli/src/templates/files/shared/broadcast-client/broadcast.ts` — framework-agnostic client core
+- Create: `suprnova-cli/src/templates/files/frontend/react/lib/use-channel.tsx` — React hooks
+- Create: `suprnova-cli/src/templates/files/frontend/vue/lib/use-channel.ts` — Vue composables
+- Create: `suprnova-cli/src/templates/files/frontend/svelte/lib/use-channel.svelte.ts` — Svelte 5 runes
+- Modify: `suprnova-cli/src/commands/generate_types.rs` — add `--with-broadcast-client` flag; read `#[channel(...)]` registrations from the workspace and emit a typed `Channels` map
+- Modify: `suprnova-cli/src/templates/scaffold_frontend.rs` — copy the appropriate `use-channel.*` file into the new project
+
+- [ ] **Step 1: Write failing test — Rust side: `generate-types` emits typed channel map**
+
+```rust
+// suprnova-cli/tests/generate_broadcast_client.rs
+use std::process::Command;
+use tempfile::tempdir;
+
+#[test]
+fn generate_types_emits_typed_channel_definitions() {
+    let dir = tempdir().unwrap();
+    let app_dir = dir.path().join("app");
+    std::fs::create_dir_all(&app_dir).unwrap();
+
+    std::fs::write(
+        app_dir.join("channels.rs"),
+        r#"
+        use suprnova::broadcast::channel;
+        #[channel("orders.{id}")]
+        pub struct OrderChannel { pub id: i64 }
+        #[channel("rooms.{room_id}", presence)]
+        pub struct RoomChannel { pub room_id: String }
+        "#,
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_suprnova"))
+        .args(["generate-types", "--with-broadcast-client", "--out", "channels.d.ts"])
+        .current_dir(&dir)
+        .output()
+        .expect("run suprnova");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let ts = std::fs::read_to_string(dir.path().join("channels.d.ts")).unwrap();
+    assert!(ts.contains("export type ChannelMap = {"));
+    assert!(ts.contains("\"orders.{id}\": { id: number };"));
+    assert!(ts.contains("\"rooms.{room_id}\": Presence<{ room_id: string }>;"));
+}
+```
+
+- [ ] **Step 2: Run — expect failure**
+
+```bash
+cargo test -p suprnova-cli --test generate_broadcast_client
+```
+
+- [ ] **Step 3: Implement the `--with-broadcast-client` flag**
+
+```rust
+// suprnova-cli/src/commands/generate_types.rs — extend
+pub struct GenerateTypesArgs {
+    pub out: PathBuf,
+    pub with_broadcast_client: bool,
+}
+
+pub fn run(args: GenerateTypesArgs) -> anyhow::Result<()> {
+    let inertia_types = scan_inertia_props()?;
+    let channels = if args.with_broadcast_client {
+        Some(scan_channels()?)
+    } else {
+        None
+    };
+
+    let mut emitted = String::new();
+    emitted.push_str(&render_inertia_types(&inertia_types));
+    if let Some(channels) = &channels {
+        emitted.push_str("\n\n");
+        emitted.push_str(&render_channel_map(channels));
+    }
+    std::fs::write(&args.out, emitted)?;
+    Ok(())
+}
+
+fn scan_channels() -> anyhow::Result<Vec<ChannelDecl>> {
+    // Use syn to parse every .rs file in the workspace; pull out
+    // structs annotated with #[channel("...")] or #[channel("...", presence)].
+    // Map struct field types to TS types (i64 → number, String → string, etc.).
+    // ChannelDecl = { template: String, presence: bool, field_record_ts: String }
+    todo!("walk workspace .rs files; parse with syn; emit ChannelDecl per #[channel]")
+}
+
+fn render_channel_map(channels: &[ChannelDecl]) -> String {
+    let mut s = String::from("export type ChannelMap = {\n");
+    for c in channels {
+        let ts_type = if c.presence {
+            format!("Presence<{}>", c.field_record_ts)
+        } else {
+            c.field_record_ts.clone()
+        };
+        s.push_str(&format!("  \"{}\": {};\n", c.template, ts_type));
+    }
+    s.push_str("};\n\n");
+    s.push_str("export type Presence<T> = T & { members: PresenceMember<T>[] };\n");
+    s.push_str("export interface PresenceMember<T> { id: string; data: T; }\n");
+    s
+}
+```
+
+> The `todo!()` in `scan_channels` is a known placeholder; replace with
+> the actual syn-walker before the step's commit. Use
+> `suprnova-cli/src/commands/generate_types.rs::scan_inertia_props` as
+> the reference shape — same pattern, different attribute.
+
+- [ ] **Step 4: Implement the framework-agnostic TypeScript client**
+
+```typescript
+// suprnova-cli/src/templates/files/shared/broadcast-client/broadcast.ts
+//
+// Suprnova broadcast client — opens a WebSocket to /broadcast and
+// routes typed events to subscribers per channel name.
+
+import type { ChannelMap } from "../../channels.d.ts";
+
+type ChannelName = keyof ChannelMap;
+type EventPayload = { event: string; data: unknown };
+
+class BroadcastConnection {
+  private ws: WebSocket | null = null;
+  private listeners = new Map<string, Set<(payload: EventPayload) => void>>();
+  private auth: (channel: string) => Promise<string | null>;
+
+  constructor(opts: { url?: string; auth: (channel: string) => Promise<string | null> } = { auth: async () => null }) {
+    this.auth = opts.auth;
+    if (typeof window !== "undefined") {
+      const url = opts.url ?? `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/broadcast`;
+      this.connect(url);
+    }
+  }
+
+  private connect(url: string) {
+    this.ws = new WebSocket(url);
+    this.ws.addEventListener("message", (e) => {
+      try {
+        const msg = JSON.parse(e.data) as { channel: string; event: string; data: unknown };
+        const bucket = this.listeners.get(msg.channel);
+        if (bucket) bucket.forEach((cb) => cb({ event: msg.event, data: msg.data }));
+      } catch {
+        // ignore malformed
+      }
+    });
+    this.ws.addEventListener("close", () => {
+      setTimeout(() => this.connect(url), 1000);
+    });
+  }
+
+  async subscribe<K extends ChannelName>(
+    channel: K,
+    onEvent: (payload: EventPayload) => void,
+  ): Promise<() => void> {
+    const authToken = await this.auth(channel as string);
+    this.ws?.send(JSON.stringify({ subscribe: channel, auth: authToken }));
+    const bucket = this.listeners.get(channel as string) ?? new Set();
+    bucket.add(onEvent);
+    this.listeners.set(channel as string, bucket);
+    return () => {
+      bucket.delete(onEvent);
+      this.ws?.send(JSON.stringify({ unsubscribe: channel }));
+    };
+  }
+}
+
+let _instance: BroadcastConnection | null = null;
+export function broadcast(): BroadcastConnection {
+  if (!_instance) _instance = new BroadcastConnection({
+    auth: async (channel) => {
+      const r = await fetch("/broadcast/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() },
+        body: JSON.stringify({ channel }),
+      });
+      if (!r.ok) return null;
+      const j = await r.json();
+      return j.auth as string;
+    },
+  });
+  return _instance;
+}
+
+function csrfToken(): string {
+  const meta = document.querySelector('meta[name="csrf-token"]');
+  return meta?.getAttribute("content") ?? "";
+}
+
+export type { ChannelMap };
+```
+
+- [ ] **Step 5: Implement React hooks**
+
+```tsx
+// suprnova-cli/src/templates/files/frontend/react/lib/use-channel.tsx
+import { useEffect, useState } from "react";
+import { broadcast, type ChannelMap } from "../../broadcast-client/broadcast";
+
+export function useChannel<K extends keyof ChannelMap>(
+  channel: K,
+  event: string,
+  onEvent: (data: unknown) => void,
+) {
+  useEffect(() => {
+    let unsub: (() => void) | undefined;
+    broadcast().subscribe(channel, ({ event: e, data }) => {
+      if (e === event) onEvent(data);
+    }).then((u) => { unsub = u; });
+    return () => { if (unsub) unsub(); };
+  }, [channel, event, onEvent]);
+}
+
+export function usePresenceChannel<K extends keyof ChannelMap>(channel: K) {
+  const [members, setMembers] = useState<unknown[]>([]);
+  useEffect(() => {
+    let unsub: (() => void) | undefined;
+    broadcast().subscribe(channel, ({ event, data }) => {
+      if (event === "presence.sync") setMembers((data as { members: unknown[] }).members);
+      if (event === "presence.joined") setMembers((m) => [...m, data]);
+      if (event === "presence.left") setMembers((m) => m.filter((x) => x !== data));
+    }).then((u) => { unsub = u; });
+    return () => { if (unsub) unsub(); };
+  }, [channel]);
+  return members;
+}
+```
+
+- [ ] **Step 6: Implement Vue composables**
+
+```ts
+// suprnova-cli/src/templates/files/frontend/vue/lib/use-channel.ts
+import { onMounted, onUnmounted, ref } from "vue";
+import { broadcast, type ChannelMap } from "../../broadcast-client/broadcast";
+
+export function useChannel<K extends keyof ChannelMap>(
+  channel: K,
+  event: string,
+  onEvent: (data: unknown) => void,
+) {
+  let unsub: (() => void) | undefined;
+  onMounted(async () => {
+    unsub = await broadcast().subscribe(channel, ({ event: e, data }) => {
+      if (e === event) onEvent(data);
+    });
+  });
+  onUnmounted(() => unsub?.());
+}
+
+export function usePresenceChannel<K extends keyof ChannelMap>(channel: K) {
+  const members = ref<unknown[]>([]);
+  let unsub: (() => void) | undefined;
+  onMounted(async () => {
+    unsub = await broadcast().subscribe(channel, ({ event, data }) => {
+      if (event === "presence.sync") members.value = (data as { members: unknown[] }).members;
+      if (event === "presence.joined") members.value = [...members.value, data];
+      if (event === "presence.left") members.value = members.value.filter((x) => x !== data);
+    });
+  });
+  onUnmounted(() => unsub?.());
+  return members;
+}
+```
+
+- [ ] **Step 7: Implement Svelte 5 runes**
+
+```ts
+// suprnova-cli/src/templates/files/frontend/svelte/lib/use-channel.svelte.ts
+import { onMount, onDestroy } from "svelte";
+import { broadcast, type ChannelMap } from "../../broadcast-client/broadcast";
+
+export function useChannel<K extends keyof ChannelMap>(
+  channel: K,
+  event: string,
+  onEvent: (data: unknown) => void,
+) {
+  let unsub: (() => void) | undefined;
+  onMount(async () => {
+    unsub = await broadcast().subscribe(channel, ({ event: e, data }) => {
+      if (e === event) onEvent(data);
+    });
+  });
+  onDestroy(() => unsub?.());
+}
+
+export function usePresenceChannel<K extends keyof ChannelMap>(channel: K) {
+  const members = $state<unknown[]>([]);
+  let unsub: (() => void) | undefined;
+  onMount(async () => {
+    unsub = await broadcast().subscribe(channel, ({ event, data }) => {
+      if (event === "presence.sync") {
+        members.length = 0;
+        members.push(...(data as { members: unknown[] }).members);
+      }
+      if (event === "presence.joined") members.push(data);
+      if (event === "presence.left") {
+        const idx = members.indexOf(data);
+        if (idx >= 0) members.splice(idx, 1);
+      }
+    });
+  });
+  onDestroy(() => unsub?.());
+  return members;
+}
+```
+
+- [ ] **Step 8: Run — expect pass**
+
+```bash
+cargo test -p suprnova-cli --test generate_broadcast_client
+cd app/frontend && pnpm typecheck   # verify generated channels.d.ts type-checks
+```
+
+Expected: cargo test passes; frontend typecheck clean.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add suprnova-cli/src/commands/generate_types.rs suprnova-cli/src/templates/files/shared/broadcast-client suprnova-cli/src/templates/files/frontend/react/lib suprnova-cli/src/templates/files/frontend/vue/lib suprnova-cli/src/templates/files/frontend/svelte/lib suprnova-cli/tests/generate_broadcast_client.rs
+git commit -m "feat(broadcast): TypeScript client + React/Vue/Svelte channel hooks"
+```
+
+---
+
+## Task 11: Workspace lint + verification + roadmap update
 
 - [ ] **Step 1: Clippy + tests**
 
@@ -1120,6 +1453,8 @@ Move from "Missing" to "Production-ready":
 | Worker::supervise | Task 8 |
 | Exponential backoff restart | Task 8 |
 | Dogfood | Task 9 |
+| TypeScript broadcast client (`use-channel.*` per framework) | Task 10 |
+| `generate-types --with-broadcast-client` typed `ChannelMap` emit | Task 10 |
 
 ---
 
