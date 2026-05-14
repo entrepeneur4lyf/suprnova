@@ -5,9 +5,14 @@
 [![Crates.io](https://img.shields.io/crates/v/suprnova.svg)](https://crates.io/crates/suprnova)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Build web applications in Rust with the developer experience you love from Laravel and Rails. suprnova gives you expressive routing, powerful tooling, and batteries-included features—without sacrificing Rust's performance.
+Build web applications in Rust with the developer experience you love from Laravel and Rails. Suprnova gives you expressive routing, powerful tooling, and batteries-included features — without sacrificing Rust's performance.
 
-[Website](https://suprnova.dev/) | [Documentation](https:suprnovauprnova.dev/)
+Familiar API surface (`Auth::login(user)`, `Cache::remember(...)`,
+`Mail::to(...)`, `Event::dispatch(...)`); first-class Inertia 3 + React 19 /
+Vue 3 / Svelte 5 starters; no gatekeeping on backends (vector DBs, graph
+DBs, queues, mailers — pick the right tool, not the framework author's
+favorite). See **[ROADMAP.md](./ROADMAP.md)** for the design principles,
+what's shipped, and what's coming.
 
 ## Quick Start
 
@@ -51,9 +56,11 @@ async fn store(_req: Request) -> Response {
 ## Why suprnova?
 
 - **Familiar patterns** — Routes, controllers, middleware, service container
-- **CLI generators** — `suprnova make:controllesuprnova `suprnova makesuprnovadel`, `suprnova migrate`
-- **Database built-in** — Migrations, ORM, query builder
-- **Modern frontend** — First-class Inertia.js + React with automatic TypeScript types
+- **CLI generators** — `suprnova make:controller`, `suprnova make:model`, `suprnova migrate`, `suprnova ssr:start`
+- **Database built-in** — SeaORM-backed, migrations, query builder, three drivers (MySQL, Postgres, SQLite)
+- **Modern frontend** — First-class Inertia 3 + **React 19 / Vue 3 / Svelte 5** starters with automatic TypeScript types
+- **Real concurrency** — Tokio-native; long-lived connections, in-process workers, async-by-default — no request-per-process model
+- **No backend gatekeeping** — Trait + driver for every domain; pick the right tool for the job
 - **Rust performance** — All the safety and speed, none of the ceremony
 
 ## Durable Workflows
@@ -165,6 +172,21 @@ Change a field in Rust, regenerate types, and TypeScript will catch any mismatch
 ## Documentation
 
 Ready to build something? Check out the [full documentation](https://suprnova.dev/) to get started.
+
+## Roadmap
+
+See **[ROADMAP.md](./ROADMAP.md)** for the strategic plan: design
+principles ("Laravel-ish, not Laravel-clone" / "no gatekeeping" /
+"diverge intentionally where Rust makes things better"), what's shipped
+today (Inertia v3 protocol-complete, Auth, Session, Schedule, Workflow,
+Routing, Container, Database), and the remaining tracks (Logging,
+Events, HTTP client, Filesystem, Mail, Queue, Broadcasting via
+WebSocket, and the differentiation track for vector / graph / search /
+time-series DBs).
+
+The working agreement: **full implementations only, well tested,
+production-ready. No deferring. No partial scaffolds.** A track ships
+when it's done, not when it has a prototype.
 
 ## License
 
