@@ -2,7 +2,7 @@ use super::config::{Frontend, InertiaConfig};
 use super::flash;
 use super::prop::{
     DeferConfig, DeferOptions, InertiaRequestExt, MergeConfig, MergeStrategy, OnceConfig,
-    OnceOptions, PartialFilter, Prop, PropResolver,
+    OnceOptions, PartialFilter, Prop, PropResolver, ScrollConfig, ScrollMetadata,
 };
 use crate::container::App;
 use crate::csrf::csrf_token;
@@ -245,6 +245,58 @@ impl InertiaResponse {
         self
     }
 
+    /// Attach an infinite-scroll prop with an eager value. The
+    /// framework normalizes the data shape: the value lands in `props`
+    /// and the pagination metadata is emitted under `scrollProps`. The
+    /// client's `<InfiniteScroll>` component reads both to drive
+    /// next/previous fetches.
+    ///
+    /// On fresh visits (no `X-Inertia-Infinite-Scroll-Merge-Intent`
+    /// header), `scrollProps[key].reset` is `true` so the client clears
+    /// its accumulator. On subsequent fetches, the merge direction is
+    /// driven by the header (`append` / `prepend`).
+    ///
+    /// Maps to Laravel's `Inertia::scroll(...)`.
+    pub fn scroll<V: Serialize>(
+        self,
+        key: impl Into<String>,
+        metadata: ScrollMetadata,
+        value: V,
+    ) -> Self {
+        let v = to_value_or_die(&value);
+        let resolver = eager_resolver(v);
+        self.attach_scroll(key.into(), metadata, resolver)
+    }
+
+    /// Attach an infinite-scroll prop whose value is produced by an
+    /// async resolver. Useful when the paginated data requires a DB
+    /// query or other async work — common for real scroll loaders.
+    pub fn scroll_with<F, Fut, V>(
+        self,
+        key: impl Into<String>,
+        metadata: ScrollMetadata,
+        resolver: F,
+    ) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<V, FrameworkError>> + Send + 'static,
+        V: Serialize + 'static,
+    {
+        let resolver = make_resolver(resolver);
+        self.attach_scroll(key.into(), metadata, resolver)
+    }
+
+    fn attach_scroll(
+        mut self,
+        key: String,
+        metadata: ScrollMetadata,
+        resolver: PropResolver,
+    ) -> Self {
+        self.props
+            .insert(key, Prop::Scroll(ScrollConfig { resolver, metadata }));
+        self
+    }
+
     /// Attach a flash value to this response. Appears under the
     /// top-level `flash` field of the page object (not under `props`).
     /// Use for one-shot toasts / success messages.
@@ -368,6 +420,15 @@ impl InertiaResponse {
             .header("X-Inertia-Error-Bag")
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        // `X-Inertia-Infinite-Scroll-Merge-Intent` tells the server
+        // whether a follow-up infinite-scroll fetch wants the new chunk
+        // appended or prepended to the existing accumulator. When the
+        // header is absent this is a fresh visit and the scroll prop
+        // emits `reset: true` so the client clears state.
+        let scroll_intent: Option<String> = req
+            .header("X-Inertia-Infinite-Scroll-Merge-Intent")
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| s == "append" || s == "prepend");
 
         let Self {
             component,
@@ -433,9 +494,15 @@ impl InertiaResponse {
             merged.insert(k, v);
         }
 
-        let (materialized, metadata) =
-            resolve_props(merged, &filter, &except_once, &reset_keys, error_bag.as_deref())
-                .await?;
+        let (materialized, metadata) = resolve_props(
+            merged,
+            &filter,
+            &except_once,
+            &reset_keys,
+            error_bag.as_deref(),
+            scroll_intent.as_deref(),
+        )
+        .await?;
 
         // Combine response-builder flash + task-local flash bag (App::flash).
         let mut flash = response_flash;
@@ -482,7 +549,7 @@ impl InertiaResponse {
             preserve_fragment,
         } = self;
         let (materialized, metadata) =
-            resolve_props(props, filter, &[], &[], None)
+            resolve_props(props, filter, &[], &[], None, None)
                 .await
                 .expect("test resolver should not fail");
         let resolved_encrypt_history = encrypt_history
@@ -531,6 +598,16 @@ struct PageMetadata {
     deep_merge: Vec<String>,
     match_props_on: Vec<String>,
     once: IndexMap<String, OnceMetadataEntry>,
+    /// Infinite-scroll metadata: prop name → its `ScrollProp` payload
+    /// (plus a `reset` flag computed from the merge-intent header).
+    scroll: IndexMap<String, ScrollMetadataEntry>,
+}
+
+struct ScrollMetadataEntry {
+    metadata: ScrollMetadata,
+    /// `true` when the client should clear its accumulator before
+    /// applying this response (no merge-intent header present).
+    reset: bool,
 }
 
 struct OnceMetadataEntry {
@@ -562,6 +639,14 @@ enum TaskOutcome {
         expires_at: Option<i64>,
         value: Value,
     },
+    Scroll {
+        key: String,
+        value: Value,
+        metadata: ScrollMetadata,
+        /// `Some("append")` / `Some("prepend")` propagates to mergeProps/
+        /// prependProps; `None` is a fresh visit and emits `reset: true`.
+        intent: Option<String>,
+    },
 }
 
 /// Parse a CSV header into a deduped list of trimmed, non-empty values.
@@ -590,6 +675,7 @@ async fn resolve_props(
     except_once: &[String],
     reset_keys: &[String],
     error_bag: Option<&str>,
+    scroll_intent: Option<&str>,
 ) -> Result<(serde_json::Map<String, Value>, PageMetadata), FrameworkError> {
     let mut materialized = serde_json::Map::new();
     let mut metadata = PageMetadata::default();
@@ -693,6 +779,22 @@ async fn resolve_props(
                     }));
                 }
             }
+            Prop::Scroll(c) => {
+                if filter.should_include_eager(&key) {
+                    let resolver = c.resolver;
+                    let metadata = c.metadata;
+                    let intent = scroll_intent.map(|s| s.to_string());
+                    tasks.push(Box::pin(async move {
+                        let v = resolver().await?;
+                        Ok(TaskOutcome::Scroll {
+                            key,
+                            value: v,
+                            metadata,
+                            intent,
+                        })
+                    }));
+                }
+            }
             Prop::Once(c) => {
                 let client_has_cached =
                     !c.fresh && except_once.iter().any(|k| k == &c.cache_key);
@@ -756,6 +858,29 @@ async fn resolve_props(
                     OnceMetadataEntry {
                         prop_name: key,
                         expires_at,
+                    },
+                );
+            }
+            TaskOutcome::Scroll {
+                key,
+                value,
+                metadata: scroll_meta,
+                intent,
+            } => {
+                materialized.insert(key.clone(), value);
+                // Direction of merge: client header drives. No header →
+                // fresh visit → no merge metadata + reset: true.
+                let reset = intent.is_none();
+                match intent.as_deref() {
+                    Some("append") => metadata.merge.push(key.clone()),
+                    Some("prepend") => metadata.merge_prepend.push(key.clone()),
+                    _ => {}
+                }
+                metadata.scroll.insert(
+                    key,
+                    ScrollMetadataEntry {
+                        metadata: scroll_meta,
+                        reset,
                     },
                 );
             }
@@ -922,6 +1047,39 @@ fn build_page_object(
             "sharedProps".to_string(),
             Value::Array(shared_keys.into_iter().map(Value::String).collect()),
         );
+    }
+
+    // `scrollProps` carries infinite-scroll pagination metadata,
+    // keyed by prop name. The `reset` flag tells the client whether
+    // this response is a fresh page load (clear accumulator) or a
+    // follow-up next/previous fetch (preserve accumulator).
+    if !metadata.scroll.is_empty() {
+        let scroll = metadata
+            .scroll
+            .iter()
+            .map(|(prop_key, entry)| {
+                let mut m = serde_json::Map::new();
+                m.insert(
+                    "pageName".to_string(),
+                    Value::String(entry.metadata.page_name.clone()),
+                );
+                m.insert(
+                    "previousPage".to_string(),
+                    entry.metadata.previous_page.clone().unwrap_or(Value::Null),
+                );
+                m.insert(
+                    "nextPage".to_string(),
+                    entry.metadata.next_page.clone().unwrap_or(Value::Null),
+                );
+                m.insert(
+                    "currentPage".to_string(),
+                    entry.metadata.current_page.clone().unwrap_or(Value::Null),
+                );
+                m.insert("reset".to_string(), Value::Bool(entry.reset));
+                (prop_key.clone(), Value::Object(m))
+            })
+            .collect::<serde_json::Map<_, _>>();
+        page.insert("scrollProps".to_string(), Value::Object(scroll));
     }
 
     Value::Object(page)

@@ -146,6 +146,66 @@ pub struct MergeConfig {
     pub strategy: MergeStrategy,
 }
 
+/// Pagination metadata for an infinite-scroll prop.
+///
+/// Mirrors the Inertia v3 `ScrollProp` shape (see
+/// `inertia-3.1.1/packages/core/src/types.ts:213`). Page identifiers are
+/// `serde_json::Value` to support both offset pagination (numbers) and
+/// cursor pagination (strings), matching Laravel's `paginate()`,
+/// `simplePaginate()`, and `cursorPaginate()`.
+#[derive(Clone, Debug)]
+pub struct ScrollMetadata {
+    /// The query-string parameter name (e.g. `"page"`, `"cursor"`).
+    /// The client puts the next page identifier under this key when
+    /// fetching the next chunk.
+    pub page_name: String,
+    /// Identifier for the previous page; `None` means "we're at the
+    /// first page, no previous fetch possible".
+    pub previous_page: Option<Value>,
+    /// Identifier for the next page; `None` means "we're at the last
+    /// page, no further fetch".
+    pub next_page: Option<Value>,
+    /// Identifier for the current page.
+    pub current_page: Option<Value>,
+}
+
+impl ScrollMetadata {
+    /// Build new metadata with the given page-name parameter.
+    pub fn new(page_name: impl Into<String>) -> Self {
+        Self {
+            page_name: page_name.into(),
+            previous_page: None,
+            next_page: None,
+            current_page: None,
+        }
+    }
+
+    /// Set the current page identifier.
+    pub fn current<V: Into<Value>>(mut self, page: V) -> Self {
+        self.current_page = Some(page.into());
+        self
+    }
+
+    /// Set the previous-page identifier (None = no previous page).
+    pub fn previous<V: Into<Value>>(mut self, page: V) -> Self {
+        self.previous_page = Some(page.into());
+        self
+    }
+
+    /// Set the next-page identifier (None = no next page).
+    pub fn next<V: Into<Value>>(mut self, page: V) -> Self {
+        self.next_page = Some(page.into());
+        self
+    }
+}
+
+/// Configuration for a [`Prop::Scroll`] entry.
+#[derive(Clone)]
+pub struct ScrollConfig {
+    pub resolver: PropResolver,
+    pub metadata: ScrollMetadata,
+}
+
 /// Configuration for a [`Prop::Once`] entry.
 #[derive(Clone)]
 pub struct OnceConfig {
@@ -246,6 +306,13 @@ pub enum Prop {
     /// have the key (or when the server forces refresh via `fresh()`).
     /// Maps to `Inertia::once(...)`.
     Once(OnceConfig),
+
+    /// Infinite-scroll prop — resolver returns a paginated chunk. The
+    /// framework emits the value, attaches pagination metadata under
+    /// `scrollProps`, and decides append/prepend/reset based on the
+    /// client's `X-Inertia-Infinite-Scroll-Merge-Intent` header. Maps
+    /// to Laravel's `Inertia::scroll(...)`.
+    Scroll(ScrollConfig),
 }
 
 impl std::fmt::Debug for Prop {
@@ -266,6 +333,11 @@ impl std::fmt::Debug for Prop {
                 .field("cache_key", &c.cache_key)
                 .field("expires_at", &c.expires_at)
                 .field("fresh", &c.fresh)
+                .finish_non_exhaustive(),
+            Prop::Scroll(c) => f
+                .debug_struct("Scroll")
+                .field("page_name", &c.metadata.page_name)
+                .field("current_page", &c.metadata.current_page)
                 .finish_non_exhaustive(),
         }
     }
@@ -292,17 +364,23 @@ impl Prop {
     pub fn is_deferred(&self) -> bool {
         matches!(
             self,
-            Prop::Lazy(_) | Prop::Optional(_) | Prop::Defer(_) | Prop::Once(_) | Prop::Merge(_)
+            Prop::Lazy(_)
+                | Prop::Optional(_)
+                | Prop::Defer(_)
+                | Prop::Once(_)
+                | Prop::Merge(_)
+                | Prop::Scroll(_)
         )
     }
 
     /// Call the resolver associated with this prop, if any.
     ///
     /// Returns the produced value for the closure-backed variants (Lazy,
-    /// Optional, Defer, Merge, Once) and the existing value for Eager /
-    /// Always. The full request-aware materialization — including
-    /// `deferredProps` / `mergeProps` / `onceProps` metadata emission —
-    /// lives in `InertiaResponse::resolve` and uses this method internally.
+    /// Optional, Defer, Merge, Once, Scroll) and the existing value for
+    /// Eager / Always. The full request-aware materialization — including
+    /// `deferredProps` / `mergeProps` / `onceProps` / `scrollProps`
+    /// metadata emission — lives in `InertiaResponse::resolve` and uses
+    /// this method internally.
     pub async fn resolve(self) -> Result<Value, FrameworkError> {
         match self {
             Prop::Eager(v) | Prop::Always(v) => Ok(v),
@@ -310,6 +388,7 @@ impl Prop {
             Prop::Defer(c) => (c.resolver)().await,
             Prop::Merge(c) => (c.resolver)().await,
             Prop::Once(c) => (c.resolver)().await,
+            Prop::Scroll(c) => (c.resolver)().await,
         }
     }
 }
@@ -419,16 +498,19 @@ impl PartialFilter {
     /// Dispatch the per-variant inclusion predicate.
     ///
     /// `Defer` follows the same "must be explicitly requested" rule as
-    /// `Optional`; `Merge` and `Once` follow `Eager`. For `Once`, the
-    /// `X-Inertia-Except-Once-Props` header is *not* consulted here —
-    /// the caller passes that through to the page-object builder
-    /// separately because it interacts with cache-key vs prop-key.
+    /// `Optional`; `Merge`, `Once`, and `Scroll` follow `Eager`. For
+    /// `Once`, the `X-Inertia-Except-Once-Props` header is *not*
+    /// consulted here — the caller passes that through to the
+    /// page-object builder separately because it interacts with
+    /// cache-key vs prop-key.
     pub fn should_include(&self, key: &str, prop: &Prop) -> bool {
         match prop {
             Prop::Always(_) => true,
-            Prop::Eager(_) | Prop::Lazy(_) | Prop::Merge(_) | Prop::Once(_) => {
-                self.should_include_eager(key)
-            }
+            Prop::Eager(_)
+            | Prop::Lazy(_)
+            | Prop::Merge(_)
+            | Prop::Once(_)
+            | Prop::Scroll(_) => self.should_include_eager(key),
             Prop::Optional(_) | Prop::Defer(_) => self.should_include_optional(key),
         }
     }

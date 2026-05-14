@@ -12,7 +12,7 @@ pub use conversion_middleware::Inertia303Middleware;
 pub use encrypt_middleware::EncryptHistoryMiddleware;
 pub use prop::{
     DeferConfig, DeferOptions, InertiaRequestExt, MergeConfig, MergeStrategy, OnceConfig,
-    OnceOptions, PartialFilter, Prop, PropFuture, PropResolver,
+    OnceOptions, PartialFilter, Prop, PropFuture, PropResolver, ScrollConfig, ScrollMetadata,
 };
 pub use response::InertiaResponse;
 pub use shared::{InertiaRegistry, InertiaSharedData};

@@ -1426,6 +1426,185 @@ async fn preserve_fragment_survives_partial_reload_filter() {
     assert_eq!(page["preserveFragment"], true);
 }
 
+// ---- Infinite scroll: Inertia::scroll() + scrollProps + merge intent ----
+
+use suprnova::ScrollMetadata;
+
+#[tokio::test]
+async fn scroll_initial_visit_emits_metadata_with_reset_true() {
+    let req = MockReq::new("/users").inertia();
+    let resp = InertiaResponse::new("Users/Index")
+        .scroll(
+            "users",
+            ScrollMetadata::new("page").current(1).next(2),
+            serde_json::json!([{"id": 1, "name": "Alice"}]),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    // Value is in props.
+    assert_eq!(page["props"]["users"][0]["name"], "Alice");
+    // Pagination metadata in scrollProps with reset: true (fresh load).
+    let scroll = &page["scrollProps"]["users"];
+    assert_eq!(scroll["pageName"], "page");
+    assert_eq!(scroll["currentPage"], 1);
+    assert_eq!(scroll["nextPage"], 2);
+    assert_eq!(scroll["previousPage"], serde_json::Value::Null);
+    assert_eq!(scroll["reset"], true);
+    // No merge metadata on initial visit.
+    let obj = page.as_object().unwrap();
+    assert!(!obj.contains_key("mergeProps") || obj["mergeProps"].as_array().unwrap().is_empty());
+    assert!(
+        !obj.contains_key("prependProps")
+            || obj["prependProps"].as_array().unwrap().is_empty()
+    );
+}
+
+#[tokio::test]
+async fn scroll_append_intent_emits_merge_props_no_reset() {
+    let req = MockReq::new("/users")
+        .inertia()
+        .header("X-Inertia-Infinite-Scroll-Merge-Intent", "append");
+    let resp = InertiaResponse::new("Users/Index")
+        .scroll(
+            "users",
+            ScrollMetadata::new("page").current(2).next(3).previous(1),
+            serde_json::json!([{"id": 21}]),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    let scroll = &page["scrollProps"]["users"];
+    assert_eq!(scroll["reset"], false, "append fetch must not reset");
+    let merge: Vec<&str> = page["mergeProps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(merge.contains(&"users"));
+}
+
+#[tokio::test]
+async fn scroll_prepend_intent_emits_prepend_props_no_reset() {
+    let req = MockReq::new("/users")
+        .inertia()
+        .header("X-Inertia-Infinite-Scroll-Merge-Intent", "prepend");
+    let resp = InertiaResponse::new("Users/Index")
+        .scroll(
+            "users",
+            ScrollMetadata::new("page").current(0).previous(-1).next(1),
+            serde_json::json!([{"id": 0}]),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    assert_eq!(page["scrollProps"]["users"]["reset"], false);
+    let prepend: Vec<&str> = page["prependProps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(prepend.contains(&"users"));
+}
+
+#[tokio::test]
+async fn scroll_unknown_intent_treated_as_fresh() {
+    // Invalid intent values (only "append" / "prepend" are valid) must
+    // not be silently accepted as append — they fall back to fresh
+    // (reset: true) so the client doesn't accumulate junk.
+    let req = MockReq::new("/users")
+        .inertia()
+        .header("X-Inertia-Infinite-Scroll-Merge-Intent", "garbage");
+    let resp = InertiaResponse::new("Users/Index")
+        .scroll(
+            "users",
+            ScrollMetadata::new("page").current(1).next(2),
+            serde_json::json!([]),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(page["scrollProps"]["users"]["reset"], true);
+}
+
+#[tokio::test]
+async fn scroll_with_async_resolver_runs_closure() {
+    let req = MockReq::new("/users").inertia();
+    let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = call_count.clone();
+    let resp = InertiaResponse::new("Users/Index")
+        .scroll_with(
+            "users",
+            ScrollMetadata::new("page").current(1),
+            move || {
+                let c = counter.clone();
+                async move {
+                    c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok::<_, suprnova::FrameworkError>(serde_json::json!([{"id": 1}]))
+                }
+            },
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(page["props"]["users"][0]["id"], 1);
+    assert_eq!(page["scrollProps"]["users"]["currentPage"], 1);
+}
+
+#[tokio::test]
+async fn scroll_props_field_omitted_when_no_scroll_props() {
+    let req = MockReq::new("/").inertia();
+    let resp = InertiaResponse::new("Home")
+        .with("title", "x")
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(!page.as_object().unwrap().contains_key("scrollProps"));
+}
+
+#[tokio::test]
+async fn scroll_metadata_handles_string_cursor() {
+    // Cursor pagination uses string identifiers, not numbers.
+    let req = MockReq::new("/posts").inertia();
+    let resp = InertiaResponse::new("Posts/Index")
+        .scroll(
+            "posts",
+            ScrollMetadata::new("cursor")
+                .current("c-100")
+                .next("c-200")
+                .previous("c-50"),
+            serde_json::json!([]),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let scroll = &page["scrollProps"]["posts"];
+    assert_eq!(scroll["pageName"], "cursor");
+    assert_eq!(scroll["currentPage"], "c-100");
+    assert_eq!(scroll["nextPage"], "c-200");
+}
+
 // ---- Purpose: prefetch header ----
 
 #[tokio::test]
