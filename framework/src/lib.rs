@@ -4,6 +4,7 @@ pub mod cache;
 pub mod config;
 pub mod container;
 pub mod context;
+pub mod crypto;
 pub mod csrf;
 pub mod database;
 pub mod error;
