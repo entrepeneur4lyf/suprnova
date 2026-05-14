@@ -36,4 +36,7 @@ routes! {
 
     // SSE dogfood — streams UserRegistered broadcast events
     get!("/events/stream", controllers::sse_example::stream).name("events.stream"),
+
+    // Phase 2 dogfood — cursor pagination over a 100-user fixture
+    get!("/api/users", controllers::paginated_users::index).name("api.users.index"),
 }
