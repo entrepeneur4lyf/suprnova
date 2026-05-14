@@ -10,6 +10,7 @@ pub mod database;
 pub mod error;
 pub mod hashing;
 pub mod http;
+pub mod http_client;
 pub mod events;
 pub mod inertia;
 pub mod logging;
@@ -42,6 +43,10 @@ pub use hashing::{hash, needs_rehash, verify, DEFAULT_COST as HASH_DEFAULT_COST}
 pub use http::{
     json, text, Cookie, CookieOptions, FormRequest, FromParam, FromRequest, HttpResponse, Redirect,
     Request, Response, ResponseExt, SameSite,
+};
+pub use http_client::{
+    assert_not_sent, assert_sent, fake_response, ClientResponse, Http, HttpFakeGuard,
+    RecordedRequest, RequestBuilder,
 };
 pub use session::{
     session, session_mut, SessionConfig, SessionData, SessionMiddleware, SessionStore,
