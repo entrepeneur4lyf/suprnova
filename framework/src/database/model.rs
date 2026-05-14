@@ -1,4 +1,4 @@
-//! Model traits for Kit ORM
+//! Model traits for suprnova ORM
 //!
 //! Provides Laravel-like active record pattern over SeaORM entities.
 
@@ -19,7 +19,7 @@ use crate::error::FrameworkError;
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::database::Model;
+/// use suprnova::database::Model;
 /// use sea_orm::entity::prelude::*;
 ///
 /// #[derive(Clone, Debug, DeriveEntityModel)]
@@ -36,8 +36,8 @@ use crate::error::FrameworkError;
 ///
 /// impl ActiveModelBehavior for ActiveModel {}
 ///
-/// // Add Kit's Model trait
-/// impl kit::database::Model for Entity {}
+/// // Add suprnova's Model trait
+/// impl suprnova::database::Model for Entity {}
 ///
 /// // Now you can use:
 /// let users = Entity::all().await?;
@@ -146,12 +146,12 @@ where
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::database::{Model, ModelMut};
+/// use suprnova::database::{Model, ModelMut};
 /// use sea_orm::Set;
 ///
 /// // Implement both traits
-/// impl kit::database::Model for Entity {}
-/// impl kit::database::ModelMut for Entity {}
+/// impl suprnova::database::Model for Entity {}
+/// impl suprnova::database::ModelMut for Entity {}
 ///
 /// // Insert a new record
 /// let new_user = user::ActiveModel {

@@ -1,11 +1,11 @@
-//! Application builder for Kit framework
+//! Application builder for suprnova framework
 //!
-//! Provides a fluent builder API to configure and run a Kit application.
+//! Provides a fluent builder API to configure and run a suprnova application.
 //!
 //! # Example
 //!
 //! ```rust,ignore
-//! use kit::Application;
+//! use suprnova::Application;
 //!
 //! #[tokio::main]
 //! async fn main() {
@@ -27,10 +27,10 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
-/// CLI structure for Kit applications
+/// CLI structure for suprnova applications
 #[derive(Parser)]
 #[command(name = "app")]
-#[command(about = "Kit application server and utilities")]
+#[command(about = "suprnova application server and utilities")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -80,9 +80,9 @@ enum Commands {
     WorkflowWork,
 }
 
-/// Application builder for Kit framework
+/// Application builder for suprnova framework
 ///
-/// Use this to configure and run your Kit application with a fluent API.
+/// Use this to configure and run your suprnova application with a fluent API.
 pub struct Application<M = NoMigrator>
 where
     M: MigratorTrait,
@@ -372,16 +372,16 @@ where
         }
 
         println!("==============================================");
-        println!("  Kit Scheduler Daemon");
+        println!("  suprnova Scheduler Daemon");
         println!("==============================================");
         println!();
-        println!("  Note: Create tasks with `kit make:task <name>`");
+        println!("  Note: Create tasks with `suprnova make:task <name>`");
         println!("  Press Ctrl+C to stop");
         println!();
         println!("==============================================");
 
         eprintln!("Scheduler daemon is not yet configured.");
-        eprintln!("Create a scheduled task with: kit make:task <name>");
+        eprintln!("Create a scheduled task with: suprnova make:task <name>");
         eprintln!("Then register it in src/schedule.rs");
     }
 
@@ -395,14 +395,14 @@ where
 
         println!("Running scheduled tasks...");
         eprintln!("Scheduler is not yet configured.");
-        eprintln!("Create a scheduled task with: kit make:task <name>");
+        eprintln!("Create a scheduled task with: suprnova make:task <name>");
     }
 
     async fn list_scheduled_tasks() {
         println!("Registered scheduled tasks:");
         println!();
         eprintln!("No scheduled tasks registered.");
-        eprintln!("Create a scheduled task with: kit make:task <name>");
+        eprintln!("Create a scheduled task with: suprnova make:task <name>");
     }
 
     async fn run_workflow_worker_internal(
@@ -413,7 +413,7 @@ where
         }
 
         println!("==============================================");
-        println!("  Kit Workflow Worker");
+        println!("  suprnova Workflow Worker");
         println!("==============================================");
         println!();
         println!("  Press Ctrl+C to stop");

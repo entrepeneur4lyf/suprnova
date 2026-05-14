@@ -1,0 +1,105 @@
+name: Publish Crates
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      force_publish:
+        description: "Publish even if the workspace version has not changed"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine Publish Eligibility
+        id: publish_check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+          FORCE_PUBLISH: ${{ inputs.force_publish }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$FORCE_PUBLISH" = "true" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -z "${BEFORE_SHA:-}" ]; then
+            BEFORE_SHA=$(git rev-parse HEAD^ 2>/dev/null || true)
+          fi
+
+          if [ -z "${BEFORE_SHA:-}" ] || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          current_version=$(python3 - <<'PY'
+          import tomllib, pathlib
+          data = tomllib.loads(pathlib.Path("Cargo.toml").read_text())
+          print(data["workspace"]["package"]["version"])
+          PY
+          )
+
+          previous_version=$(python3 - <<'PY' "$BEFORE_SHA"
+          import subprocess, sys, tomllib
+          before_sha = sys.argv[1]
+          content = subprocess.check_output(["git", "show", f"{before_sha}:Cargo.toml"]).decode()
+          data = tomllib.loads(content)
+          print(data["workspace"]["package"]["version"])
+          PY
+          )
+
+          if [ "$current_version" != "$previous_version" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "publish=false" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        if: steps.publish_check.outputs.publish == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install System Dependencies
+        if: steps.publish_check.outputs.publish == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libsqlite3-dev libpq-dev
+
+      - name: Publish suprnova-macros
+        if: steps.publish_check.outputs.publish == 'true'
+        run: cargo publish -p suprnova-macros
+
+      - name: Wait For Crates.io Index
+        if: steps.publish_check.outputs.publish == 'true'
+        run: sleep 30
+
+      - name: Publish suprnova
+        if: steps.publish_check.outputs.publish == 'true'
+        run: cargo publish -p suprnova
+
+      - name: Wait For Crates.io Index
+        if: steps.publish_check.outputs.publish == 'true'
+        run: sleep 30
+
+      - name: Publish suprnova-cli
+        if: steps.publish_check.outputs.publish == 'true'
+        run: cargo publish -p suprnova-cli

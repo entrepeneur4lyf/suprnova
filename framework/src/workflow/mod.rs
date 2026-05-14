@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use kit::{workflow, workflow_step, start_workflow, FrameworkError};
+//! use suprnova::{workflow, workflow_step, start_workflow, FrameworkError};
 //!
 //! #[workflow_step]
 //! async fn fetch_user(user_id: i64) -> Result<String, FrameworkError> {
@@ -31,7 +31,7 @@
 //! // handle.wait().await?;
 //!
 //! // Run worker (separate process):
-//! // kit workflow:work
+//! // suprnova workflow:work
 //! ```
 
 pub mod config;
@@ -93,7 +93,7 @@ impl WorkflowWorker {
 
     /// Create a worker with a custom config
     pub fn with_config(config: WorkflowConfig) -> Self {
-        let random: u64 = rand::thread_rng().gen();
+        let random: u64 = rand::thread_rng().r#gen();
         let worker_id = format!("{}-{}", std::process::id(), random);
         Self {
             config: Arc::new(config),
@@ -188,16 +188,18 @@ async fn process_claimed_workflow(
 #[macro_export]
 macro_rules! start_workflow {
     ($workflow:path $(, $arg:expr)* $(,)?) => {{
-        let __name = stringify!($workflow);
-        let __name = if __name.contains("::") {
-            __name.to_string()
-        } else {
-            format!("{}::{}", module_path!(), __name)
-        };
-        let __name = __name.replace(' ', "");
-        let __input = ::kit::serde_json::to_string(&( $($arg,)* ))
-            .map_err(|e| ::kit::FrameworkError::internal(format!("Workflow input serialize error: {}", e)))?;
-        ::kit::workflow::start_named(&__name, &__input).await
+        async {
+            let __name = stringify!($workflow);
+            let __name = if __name.contains("::") {
+                __name.to_string()
+            } else {
+                format!("{}::{}", module_path!(), __name)
+            };
+            let __name = __name.replace(' ', "");
+            let __input = ::suprnova::serde_json::to_string(&( $($arg,)* ))
+                .map_err(|e| ::suprnova::FrameworkError::internal(format!("Workflow input serialize error: {}", e)))?;
+            ::suprnova::workflow::start_named(&__name, &__input).await
+        }
     }};
 }
 
@@ -206,6 +208,7 @@ mod tests {
     use super::*;
     use crate::testing::TestDatabase;
     use sea_orm_migration::prelude::*;
+    use suprnova_macros::{workflow, workflow_step};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static ALWAYS_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -250,9 +253,10 @@ mod tests {
             .expect("workflow insert");
 
         let ctx = WorkflowContext::new(handle.id(), Duration::from_secs(30));
+        let ctx_inner = ctx.clone();
         let _ = ctx
-            .enter(async {
-                ctx.run_step_with_input("cache-step", serde_json::to_string(&()).unwrap(), || async {
+            .enter(async move {
+                ctx_inner.run_step_with_input("cache-step", serde_json::to_string(&()).unwrap(), || async {
                     CACHE_CALLS.fetch_add(1, Ordering::SeqCst);
                     Ok::<_, FrameworkError>(42)
                 })
@@ -262,9 +266,10 @@ mod tests {
             .await;
 
         let ctx2 = WorkflowContext::new(handle.id(), Duration::from_secs(30));
+        let ctx2_inner = ctx2.clone();
         let value = ctx2
-            .enter(async {
-                ctx2.run_step_with_input("cache-step", serde_json::to_string(&()).unwrap(), || async {
+            .enter(async move {
+                ctx2_inner.run_step_with_input("cache-step", serde_json::to_string(&()).unwrap(), || async {
                     CACHE_CALLS.fetch_add(1, Ordering::SeqCst);
                     Ok::<_, FrameworkError>(99)
                 })
@@ -351,6 +356,15 @@ mod tests {
 
     pub struct CreateWorkflowsTable;
 
+    impl MigrationName for CreateWorkflowsTable {
+        // Explicit, file-stable version. `DeriveMigrationName` derives from
+        // the parent module path, which collides with `CreateWorkflowStepsTable`
+        // because both live in the same `tests` module.
+        fn name(&self) -> &str {
+            "m20240101_000001_create_workflows"
+        }
+    }
+
     #[async_trait::async_trait]
     impl MigrationTrait for CreateWorkflowsTable {
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
@@ -433,6 +447,12 @@ mod tests {
     }
 
     pub struct CreateWorkflowStepsTable;
+
+    impl MigrationName for CreateWorkflowStepsTable {
+        fn name(&self) -> &str {
+            "m20240101_000002_create_workflow_steps"
+        }
+    }
 
     #[async_trait::async_trait]
     impl MigrationTrait for CreateWorkflowStepsTable {

@@ -1,4 +1,4 @@
-use kit::env;
+use suprnova::env;
 
 /// Mail configuration
 #[derive(Debug, Clone)]
@@ -29,7 +29,7 @@ impl MailConfig {
             username: env("MAIL_USERNAME", "".to_string()),
             password: env("MAIL_PASSWORD", "".to_string()),
             from_address: env("MAIL_FROM_ADDRESS", "hello@example.com".to_string()),
-            from_name: env("MAIL_FROM_NAME", "Kit App".to_string()),
+            from_name: env("MAIL_FROM_NAME", "suprnova App".to_string()),
         }
     }
 }

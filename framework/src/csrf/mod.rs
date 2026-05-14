@@ -1,4 +1,4 @@
-//! CSRF protection for Kit framework
+//! CSRF protection for suprnova framework
 //!
 //! Provides Laravel-like CSRF protection using per-session tokens.
 //!
@@ -14,7 +14,7 @@
 //! Add the middleware after SessionMiddleware:
 //!
 //! ```rust,ignore
-//! use kit::{global_middleware, SessionMiddleware, CsrfMiddleware, SessionConfig};
+//! use suprnova::{global_middleware, SessionMiddleware, CsrfMiddleware, SessionConfig};
 //!
 //! pub async fn register() {
 //!     let config = SessionConfig::from_env();
@@ -51,7 +51,7 @@ use crate::session::get_csrf_token;
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::csrf::csrf_token;
+/// use suprnova::csrf::csrf_token;
 ///
 /// if let Some(token) = csrf_token() {
 ///     // Use token in response
@@ -66,7 +66,7 @@ pub fn csrf_token() -> Option<String> {
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::csrf::csrf_meta_tag;
+/// use suprnova::csrf::csrf_meta_tag;
 ///
 /// let meta = csrf_meta_tag();
 /// // Returns: <meta name="csrf-token" content="...">
@@ -82,7 +82,7 @@ pub fn csrf_meta_tag() -> String {
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::csrf::csrf_field;
+/// use suprnova::csrf::csrf_field;
 ///
 /// let field = csrf_field();
 /// // Returns: <input type="hidden" name="_token" value="...">

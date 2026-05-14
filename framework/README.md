@@ -1,21 +1,21 @@
-# Kit-RS
+# suprnova-RS
 
 A Laravel-inspired web framework for Rust.
 
 ## Installation
 
-Add Kit to your `Cargo.toml`:
+Add suprnova to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-kit = { package = "kit-rs", version = "0.1" }
+suprnova = { packagsuprnova "suprnova", version = "0.1" }
 tokio = { version = "1", features = ["full"] }
 ```
 
 ## Quick Start
 
 ```rust
-use kit::{json_response, text, Router, Server, Request, Response};
+use suprnova::{json_response, text, Router, Server, Request, Response};
 
 #[tokio::main]
 async fn main() {
@@ -31,7 +31,7 @@ async fn main() {
 }
 
 async fn index(_req: Request) -> Response {
-    text("Welcome to Kit!")
+    text("Welcome to suprnova!")
 }
 
 async fn show_user(req: Request) -> Response {
@@ -53,11 +53,11 @@ async fn show_user(req: Request) -> Response {
 
 ## CLI Tool
 
-Use the Kit CLI to scaffold new projects:
+Use the suprnova CLI to scaffold new projects:
 
 ```bash
-cargo install kit-cli
-kit new myapp
+cargo install suprnova-cli
+suprnova new myapp
 ```
 
 ## License

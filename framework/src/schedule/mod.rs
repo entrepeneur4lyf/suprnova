@@ -1,4 +1,4 @@
-//! Task Scheduler module for Kit framework
+//! Task Scheduler module for suprnova framework
 //!
 //! Provides a Laravel-like task scheduling system with support for:
 //! - Trait-based tasks (implement `Task`)
@@ -10,7 +10,7 @@
 //! ## Using Trait-Based Tasks
 //!
 //! ```rust,ignore
-//! use kit::{Task, TaskResult};
+//! use suprnova::{Task, TaskResult};
 //! use async_trait::async_trait;
 //!
 //! pub struct CleanupLogsTask;
@@ -37,7 +37,7 @@
 //! ## Using Closure-Based Tasks
 //!
 //! ```rust,ignore
-//! use kit::Schedule;
+//! use suprnova::Schedule;
 //!
 //! pub fn register(schedule: &mut Schedule) {
 //!     // Simple closure task
@@ -68,13 +68,13 @@
 //!
 //! ```bash
 //! # Run due tasks once (for cron)
-//! kit schedule:run
+//! suprnova schedule:run
 //!
 //! # Run as daemon (continuous)
-//! kit schedule:work
+//! suprnova schedule:work
 //!
 //! # List all scheduled tasks
-//! kit schedule:list
+//! suprnova schedule:list
 //! ```
 
 pub mod builder;
@@ -95,7 +95,7 @@ use crate::error::FrameworkError;
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::Schedule;
+/// use suprnova::Schedule;
 ///
 /// pub fn register(schedule: &mut Schedule) {
 ///     // Register a struct implementing Task trait
@@ -254,7 +254,7 @@ impl Default for Schedule {
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::{schedule_task, Schedule};
+/// use suprnova::{schedule_task, Schedule};
 ///
 /// pub fn register(schedule: &mut Schedule) {
 ///     schedule.add(

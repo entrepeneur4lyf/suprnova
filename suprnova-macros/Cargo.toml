@@ -1,0 +1,18 @@
+[package]
+name = "suprnova-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Procedural macros for Suprnova framework"
+repository = "https://github.com/entrepeneur4lyf/suprnova"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "parsing"] }
+serde = { version = "1", features = ["derive"] }
+serde_derive_internals = "0.29"
+regex = "1"

@@ -1,6 +1,6 @@
 //! example_action action
 
-use kit::injectable;
+use suprnova::injectable;
 
 #[injectable]
 pub struct ExampleAction {

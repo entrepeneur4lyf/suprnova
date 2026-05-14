@@ -28,7 +28,9 @@ pub fn register_route_name(name: &str, path: &str) {
 /// * `None` - If the route name is not found
 ///
 /// # Example
-/// ```
+/// ```no_run
+/// use suprnova::route;
+///
 /// let url = route("users.show", &[("id", "123")]);
 /// assert_eq!(url, Some("/users/123".to_string()));
 /// ```

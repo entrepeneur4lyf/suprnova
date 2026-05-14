@@ -3,12 +3,12 @@
 //! This file contains custom implementations for the Todo model.
 //! The base entity is auto-generated in src/models/entities/todos.rs
 //!
-//! This file is NEVER overwritten by `kit db:sync` - your custom code is safe here.
+//! This file is NEVER overwritten by `suprnova db:sync` - your custom code is safe here.
 
 // Re-export the auto-generated entity
 pub use super::entities::todos::*;
 
-use kit::database::{ModelMut, QueryBuilder};
+use suprnova::database::{ModelMut, QueryBuilder};
 use sea_orm::{entity::prelude::*, Set};
 
 /// Type alias for convenient access
@@ -20,8 +20,8 @@ pub type Todo = Model;
 
 impl ActiveModelBehavior for ActiveModel {}
 
-impl kit::database::Model for Entity {}
-impl kit::database::ModelMut for Entity {}
+impl suprnova::database::Model for Entity {}
+impl suprnova::database::ModelMut for Entity {}
 
 // ============================================================================
 // ELOQUENT-LIKE API
@@ -72,7 +72,7 @@ impl Model {
     /// ```rust,ignore
     /// let updated = record.set_field("new_value").update().await?;
     /// ```
-    pub async fn update(self) -> Result<Self, kit::FrameworkError> {
+    pub async fn update(self) -> Result<Self, suprnova::FrameworkError> {
         let active = self.to_active_model();
         Entity::update_one(active).await
     }
@@ -83,7 +83,7 @@ impl Model {
     /// ```rust,ignore
     /// record.delete().await?;
     /// ```
-    pub async fn delete(self) -> Result<u64, kit::FrameworkError> {
+    pub async fn delete(self) -> Result<u64, suprnova::FrameworkError> {
         Entity::delete_by_pk(self.id).await
     }
 
@@ -135,7 +135,7 @@ impl TodoBuilder {
     ///     .insert()
     ///     .await?;
     /// ```
-    pub async fn insert(self) -> Result<Model, kit::FrameworkError> {
+    pub async fn insert(self) -> Result<Model, suprnova::FrameworkError> {
         let active = self.build();
         Entity::insert_one(active).await
     }
@@ -158,7 +158,7 @@ impl TodoBuilder {
 
 // Example custom finder:
 // impl Model {
-//     pub async fn find_by_email(email: &str) -> Result<Option<Self>, kit::FrameworkError> {
+//     pub async fn find_by_email(email: &str) -> Result<Option<Self>, suprnova::FrameworkError> {
 //         Self::query().filter(Column::Email.eq(email)).first().await
 //     }
 // }

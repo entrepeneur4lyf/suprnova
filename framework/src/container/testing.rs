@@ -5,7 +5,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use kit::testing::{TestContainer, TestContainerGuard};
+//! use suprnova::testing::{TestContainer, TestContainerGuard};
 //!
 //! #[tokio::test]
 //! async fn test_with_fake_service() {

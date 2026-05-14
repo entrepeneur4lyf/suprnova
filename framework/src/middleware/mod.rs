@@ -1,4 +1,4 @@
-//! Middleware system for Kit framework
+//! Middleware system for suprnova framework
 //!
 //! This module provides Laravel 12.x-style middleware support with:
 //! - Global middleware (runs on all routes)
@@ -8,7 +8,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use kit::{async_trait, Middleware, Next, Request, Response, HttpResponse};
+//! use suprnova::{async_trait, Middleware, Next, Request, Response, HttpResponse};
 //!
 //! pub struct AuthMiddleware;
 //!
@@ -55,7 +55,7 @@ pub type BoxedMiddleware = Arc<dyn Fn(Request, Next) -> MiddlewareFuture + Send 
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::{async_trait, Middleware, Next, Request, Response, HttpResponse};
+/// use suprnova::{async_trait, Middleware, Next, Request, Response, HttpResponse};
 ///
 /// pub struct LoggingMiddleware;
 ///

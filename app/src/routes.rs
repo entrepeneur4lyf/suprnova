@@ -1,4 +1,4 @@
-use kit::{get, group, post, routes};
+use suprnova::{get, group, post, routes};
 
 use crate::controllers;
 use crate::middleware::AuthMiddleware;

@@ -21,7 +21,7 @@ use validator::Validate;
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::FormRequest;
+/// use suprnova::FormRequest;
 /// use serde::Deserialize;
 /// use validator::Validate;
 ///

@@ -1,7 +1,7 @@
-//! Kit Application Entry Point
+//! suprnova Application Entry Point
 
 use app::{bootstrap, config, migrations, routes};
-use kit::Application;
+use suprnova::Application;
 
 #[tokio::main]
 async fn main() {

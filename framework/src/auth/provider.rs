@@ -17,8 +17,8 @@ use crate::error::FrameworkError;
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::auth::{UserProvider, Authenticatable};
-/// use kit::FrameworkError;
+/// use suprnova::auth::{UserProvider, Authenticatable};
+/// use suprnova::FrameworkError;
 /// use async_trait::async_trait;
 /// use std::sync::Arc;
 ///

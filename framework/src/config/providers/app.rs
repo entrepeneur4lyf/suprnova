@@ -17,7 +17,7 @@ impl AppConfig {
     /// Build config from environment variables
     pub fn from_env() -> Self {
         Self {
-            name: env("APP_NAME", "Kit Application".to_string()),
+            name: env("APP_NAME", "suprnova Application".to_string()),
             environment: Environment::detect(),
             debug: env("APP_DEBUG", true),
             url: env("APP_URL", "http://localhost:8080".to_string()),

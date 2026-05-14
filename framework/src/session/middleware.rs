@@ -1,4 +1,4 @@
-//! Session middleware for Kit framework
+//! Session middleware for suprnova framework
 
 use crate::http::cookie::{Cookie, SameSite};
 use crate::http::Response;
@@ -25,7 +25,7 @@ thread_local! {
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::session::session;
+/// use suprnova::session::session;
 ///
 /// if let Some(session) = session() {
 ///     let name: Option<String> = session.get("name");
@@ -40,7 +40,7 @@ pub fn session() -> Option<SessionData> {
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::session::session_mut;
+/// use suprnova::session::session_mut;
 ///
 /// session_mut(|session| {
 ///     session.put("name", "John");

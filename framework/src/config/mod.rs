@@ -1,4 +1,4 @@
-//! Configuration module for Kit framework
+//! Configuration module for suprnova framework
 //!
 //! This module provides Laravel-like configuration management including:
 //! - Automatic `.env` file loading with environment-based precedence
@@ -8,7 +8,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use kit::{Config, ServerConfig};
+//! use suprnova::{Config, ServerConfig};
 //!
 //! fn main() {
 //!     // Initialize config (loads .env files)
@@ -53,7 +53,7 @@ impl Config {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use kit::Config;
+    /// use suprnova::Config;
     ///
     /// let env = Config::init(std::path::Path::new("."));
     /// println!("Running in {} environment", env);
@@ -73,7 +73,7 @@ impl Config {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use kit::{Config, ServerConfig};
+    /// use suprnova::{Config, ServerConfig};
     ///
     /// let server_config = Config::get::<ServerConfig>().unwrap();
     /// println!("Port: {}", server_config.port);
@@ -90,7 +90,7 @@ impl Config {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use kit::Config;
+    /// use suprnova::Config;
     ///
     /// #[derive(Clone)]
     /// struct DatabaseConfig {

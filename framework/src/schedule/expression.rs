@@ -40,7 +40,7 @@ impl DayOfWeek {
 /// # Examples
 ///
 /// ```rust,ignore
-/// use kit::CronExpression;
+/// use suprnova::CronExpression;
 ///
 /// // Every minute
 /// let expr = CronExpression::every_minute();

@@ -36,7 +36,7 @@ pub trait TaskHandler: Send + Sync {
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::{Task, TaskResult};
+/// use suprnova::{Task, TaskResult};
 /// use async_trait::async_trait;
 ///
 /// pub struct CleanupLogsTask;

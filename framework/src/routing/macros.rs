@@ -3,7 +3,7 @@
 //! This module provides a clean, declarative way to define routes:
 //!
 //! ```rust,ignore
-//! use kit::{routes, get, post, put, delete, group};
+//! use suprnova::{routes, get, post, put, delete, group};
 //!
 //! routes! {
 //!     get!("/", controllers::home::index).name("home"),
@@ -591,7 +591,7 @@ impl IntoGroupItem for GroupDef {
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::{routes, get, post, group};
+/// use suprnova::{routes, get, post, group};
 ///
 /// routes! {
 ///     get!("/", controllers::home::index),
@@ -636,7 +636,7 @@ macro_rules! group {
 ///
 /// # Example
 /// ```rust,ignore
-/// use kit::{routes, get, post, put, delete};
+/// use suprnova::{routes, get, post, put, delete};
 /// use crate::controllers;
 /// use crate::middleware::AuthMiddleware;
 ///

@@ -1,7 +1,7 @@
 //! Todo actions
 
-use kit::database::{Model, ModelMut};
-use kit::injectable;
+use suprnova::database::{Model, ModelMut};
+use suprnova::injectable;
 use sea_orm::Set;
 
 use crate::models::todos;
@@ -10,7 +10,7 @@ use crate::models::todos;
 pub struct CreateRandomTodoAction;
 
 impl CreateRandomTodoAction {
-    pub async fn execute(&self) -> Result<todos::Model, kit::error::FrameworkError> {
+    pub async fn execute(&self) -> Result<todos::Model, suprnova::error::FrameworkError> {
         let random_num = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -34,7 +34,7 @@ impl CreateRandomTodoAction {
 pub struct ListTodosAction;
 
 impl ListTodosAction {
-    pub async fn execute(&self) -> Result<Vec<todos::Model>, kit::error::FrameworkError> {
+    pub async fn execute(&self) -> Result<Vec<todos::Model>, suprnova::error::FrameworkError> {
         todos::Entity::all().await
     }
 }

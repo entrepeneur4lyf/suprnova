@@ -1,11 +1,11 @@
 [package]
-name = "kit-rs"
+name = "suprnova"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "A Laravel-inspired web framework for Rust"
-repository = "https://github.com/dayemsiddiqui/kit"
-homepage = "https://github.com/dayemsiddiqui/kit"
+repository = "https://github.com/entrepeneur4lyf/suprnova"
+homepage = "https://github.com/entrepeneur4lyf/suprnova"
 keywords = ["web", "framework", "async", "http", "server"]
 categories = ["web-programming::http-server", "asynchronous"]
 readme = "README.md"
@@ -20,12 +20,14 @@ matchit = "0.8"
 async-trait = "0.1"
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-kit-macros = { path = "../kit-macros", version = "0.1" }
+serde_json = { version = "1", features = ["preserve_order"] }
+indexmap = { version = "2", features = ["serde"] }
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+suprnova-macros = { path = "../suprnova-macros", version = "0.1" }
 dotenvy = "0.15"
 inventory = "0.3"
-sea-orm = { version = "1.0", features = ["sqlx-postgres", "sqlx-sqlite", "runtime-tokio-native-tls", "macros"] }
-sea-orm-migration = "1.0"
+sea-orm = { version = "1.0", features = ["sqlx-mysql", "sqlx-postgres", "sqlx-sqlite", "runtime-tokio-native-tls", "macros"] }
+sea-orm-migration = { version = "1.0", features = ["sqlx-mysql", "sqlx-postgres", "sqlx-sqlite", "runtime-tokio-native-tls"] }
 thiserror = "1.0"
 redis = { version = "0.25", features = ["tokio-comp", "connection-manager"] }
 validator = { version = "0.18", features = ["derive"] }

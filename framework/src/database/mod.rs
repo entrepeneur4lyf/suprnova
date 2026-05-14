@@ -1,11 +1,11 @@
-//! Database module for Kit framework
+//! Database module for suprnova framework
 //!
 //! Provides a SeaORM-based ORM with Laravel-like API.
 //!
 //! # Quick Start
 //!
 //! ```rust,ignore
-//! use kit::{Config, DB, DatabaseConfig};
+//! use suprnova::{Config, DB, DatabaseConfig};
 //!
 //! // 1. Register database config (in config/mod.rs)
 //! Config::register(DatabaseConfig::from_env());
@@ -24,6 +24,8 @@
 //!
 //! ```env
 //! DATABASE_URL=postgres://user:pass@localhost:5432/mydb
+//! # or for MySQL:
+//! DATABASE_URL=mysql://user:pass@localhost:3306/mydb
 //! # or for SQLite:
 //! DATABASE_URL=sqlite://./database.db
 //!
@@ -56,7 +58,7 @@ pub use testing::TestDatabase;
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::{injectable, Database};
+/// use suprnova::{injectable, Database};
 ///
 /// #[injectable]
 /// pub struct CreateUserAction {
@@ -83,7 +85,7 @@ use crate::{App, Config};
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::{DB, DatabaseConfig, Config};
+/// use suprnova::{DB, DatabaseConfig, Config};
 ///
 /// // Initialize (usually in bootstrap.rs)
 /// Config::register(DatabaseConfig::from_env());
@@ -191,7 +193,7 @@ impl DB {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use kit::database::DB;
+    /// use suprnova::database::DB;
     /// use sea_orm::{Set, ActiveModelTrait};
     ///
     /// let new_todo = todos::ActiveModel {

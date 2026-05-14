@@ -14,7 +14,7 @@ use thiserror::Error;
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::HttpError;
+/// use suprnova::HttpError;
 ///
 /// #[derive(Debug)]
 /// struct UserNotFoundError { user_id: i32 }
@@ -51,7 +51,7 @@ pub trait HttpError: std::error::Error + Send + Sync + 'static {
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::{AppError, FrameworkError};
+/// use suprnova::{AppError, FrameworkError};
 ///
 /// pub async fn process() -> Result<(), FrameworkError> {
 ///     if invalid {
@@ -232,7 +232,7 @@ impl std::error::Error for ValidationErrors {}
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::{App, FrameworkError, Response};
+/// use suprnova::{App, FrameworkError, Response};
 ///
 /// pub async fn index(_req: Request) -> Response {
 ///     let service = App::resolve::<MyService>()?;  // Returns FrameworkError on failure
@@ -246,7 +246,7 @@ impl std::error::Error for ValidationErrors {}
 /// use of the `?` operator:
 ///
 /// ```rust,ignore
-/// use kit::{DB, FrameworkError};
+/// use suprnova::{DB, FrameworkError};
 /// use sea_orm::ActiveModelTrait;
 ///
 /// pub async fn create_todo() -> Result<Todo, FrameworkError> {

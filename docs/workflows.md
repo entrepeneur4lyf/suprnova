@@ -1,14 +1,14 @@
 # Workflows
 
-Kit includes a durable, Postgres‑backed workflow engine with step persistence and automatic retries. Workflows resume from the last successful step on retry.
+suprnova includes a durable, Postgres‑backed workflow engine with step persistence and automatic retries. Workflows resume from the last successful step on retry.
 
 ## Install Migrations
 
 Run the install command once per app, then migrate:
 
 ```bash
-kit workflow:install
-kit migrate
+suprnova workflow:install
+suprnova migrate
 ```
 
 This creates two tables:
@@ -21,7 +21,7 @@ This creates two tables:
 Use attribute macros to define steps and workflows. Steps are cached automatically when invoked inside a workflow.
 
 ```rust
-use kit::{workflow, workflow_step, start_workflow, FrameworkError};
+use suprnova::{workflow, workflow_step, start_workflow, FrameworkError};
 
 #[workflow_step]
 async fn fetch_user(user_id: i64) -> Result<String, FrameworkError> {
@@ -57,7 +57,7 @@ let status = handle.wait().await?;
 Run workers as a separate process in production (similar to scheduled jobs):
 
 ```bash
-kit workflow:work
+suprnova workflow:work
 ```
 
 ## Configuration

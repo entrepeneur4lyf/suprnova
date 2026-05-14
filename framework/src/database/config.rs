@@ -1,4 +1,4 @@
-//! Database configuration for Kit framework
+//! Database configuration for suprnova framework
 
 use crate::config::{env, env_optional};
 
@@ -6,6 +6,7 @@ use crate::config::{env, env_optional};
 #[derive(Debug, Clone, PartialEq)]
 pub enum DatabaseType {
     Postgres,
+    Mysql,
     Sqlite,
     Unknown,
 }
@@ -23,7 +24,7 @@ pub enum DatabaseType {
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::{Config, DatabaseConfig};
+/// use suprnova::{Config, DatabaseConfig};
 ///
 /// // Register from environment
 /// Config::register(DatabaseConfig::from_env());
@@ -70,6 +71,8 @@ impl DatabaseConfig {
     pub fn database_type(&self) -> DatabaseType {
         if self.url.starts_with("postgres://") || self.url.starts_with("postgresql://") {
             DatabaseType::Postgres
+        } else if self.url.starts_with("mysql://") {
+            DatabaseType::Mysql
         } else if self.url.starts_with("sqlite://") || self.url.starts_with("sqlite:") {
             DatabaseType::Sqlite
         } else {

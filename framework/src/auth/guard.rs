@@ -18,7 +18,7 @@ use super::provider::UserProvider;
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::Auth;
+/// use suprnova::Auth;
 ///
 /// // Check if authenticated
 /// if Auth::check() {
@@ -163,7 +163,7 @@ impl Auth {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use kit::Auth;
+    /// use suprnova::Auth;
     ///
     /// if let Some(user) = Auth::user().await? {
     ///     println!("Logged in as user {}", user.auth_identifier());
@@ -203,7 +203,7 @@ impl Auth {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use kit::Auth;
+    /// use suprnova::Auth;
     /// use crate::models::users::User;
     ///
     /// if let Some(user) = Auth::user_as::<User>().await? {

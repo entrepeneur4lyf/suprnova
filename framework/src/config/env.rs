@@ -99,7 +99,7 @@ pub fn load_dotenv(project_root: &Path) -> Environment {
 ///
 /// # Example
 /// ```
-/// use kit::config::env;
+/// use suprnova::config::env;
 ///
 /// let port: u16 = env("SERVER_PORT", 8080);
 /// let host = env("SERVER_HOST", "127.0.0.1".to_string());
@@ -117,8 +117,8 @@ pub fn env<T: std::str::FromStr>(key: &str, default: T) -> T {
 /// Panics if the environment variable is not set or cannot be parsed
 ///
 /// # Example
-/// ```
-/// use kit::config::env_required;
+/// ```no_run
+/// use suprnova::config::env_required;
 ///
 /// let secret: String = env_required("APP_SECRET");
 /// ```
@@ -138,7 +138,7 @@ pub fn env_required<T: std::str::FromStr>(key: &str) -> T {
 ///
 /// # Example
 /// ```
-/// use kit::config::env_optional;
+/// use suprnova::config::env_optional;
 ///
 /// let debug: Option<bool> = env_optional("APP_DEBUG");
 /// ```

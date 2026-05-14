@@ -20,7 +20,7 @@ use async_trait::async_trait;
 /// # Usage
 ///
 /// ```rust,ignore
-/// use kit::{global_middleware, CsrfMiddleware};
+/// use suprnova::{global_middleware, CsrfMiddleware};
 ///
 /// global_middleware!(CsrfMiddleware::new());
 /// ```

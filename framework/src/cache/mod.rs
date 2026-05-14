@@ -1,4 +1,4 @@
-//! Cache module for Kit framework
+//! Cache module for suprnova framework
 //!
 //! Provides a Redis-backed cache with automatic in-memory fallback.
 //!
@@ -9,7 +9,7 @@
 //! an in-memory cache.
 //!
 //! ```rust,ignore
-//! use kit::Cache;
+//! use suprnova::Cache;
 //! use std::time::Duration;
 //!
 //! // Store a value with 1 hour TTL
@@ -55,7 +55,7 @@ use std::time::Duration;
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::Cache;
+/// use suprnova::Cache;
 /// use std::time::Duration;
 ///
 /// // Store with TTL

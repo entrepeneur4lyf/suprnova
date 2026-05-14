@@ -1,21 +1,21 @@
-# Kit
+# suprnova
 
 **A Laravel-inspired web framework for Rust**
 
-[![Crates.io](https://img.shields.io/crates/v/kit.svg)](https://crates.io/crates/kit)
+[![Crates.io](https://img.shields.io/crates/v/suprnova.svg)](https://crates.io/crates/suprnova)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Build web applications in Rust with the developer experience you love from Laravel and Rails. Kit gives you expressive routing, powerful tooling, and batteries-included features—without sacrificing Rust's performance.
+Build web applications in Rust with the developer experience you love from Laravel and Rails. suprnova gives you expressive routing, powerful tooling, and batteries-included features—without sacrificing Rust's performance.
 
-[Website](https://kit-rs.dev/) | [Documentation](https://kit-rs.dev/)
+[Website](https://suprnova.dev/) | [Documentation](https:suprnovauprnova.dev/)
 
 ## Quick Start
 
 ```bash
-cargo install kit-cli
-kit new myapp
+cargo install suprnova-cli
+suprnova new myapp
 cd myapp
-kit serve
+suprnova serve
 ```
 
 Your app is now running at `http://localhost:8000`
@@ -25,7 +25,7 @@ Your app is now running at `http://localhost:8000`
 If you've used Laravel or Rails, this will feel familiar:
 
 ```rust
-use kit::{get, post, routes, json_response, Request, Response};
+use suprnova::{get, post, routes, json_response, Request, Response};
 
 routes! {
     get("/", index),
@@ -34,7 +34,7 @@ routes! {
 }
 
 async fn index(_req: Request) -> Response {
-    json_response!({ "message": "Welcome to Kit!" })
+    json_response!({ "message": "Welcome to suprnova!" })
 }
 
 async fn show(req: Request) -> Response {
@@ -48,20 +48,20 @@ async fn store(_req: Request) -> Response {
 }
 ```
 
-## Why Kit?
+## Why suprnova?
 
 - **Familiar patterns** — Routes, controllers, middleware, service container
-- **CLI generators** — `kit make:controller`, `kit make:model`, `kit migrate`
+- **CLI generators** — `suprnova make:controllesuprnova `suprnova makesuprnovadel`, `suprnova migrate`
 - **Database built-in** — Migrations, ORM, query builder
 - **Modern frontend** — First-class Inertia.js + React with automatic TypeScript types
 - **Rust performance** — All the safety and speed, none of the ceremony
 
 ## Durable Workflows
 
-Kit includes a Postgres-backed workflow engine with durable steps and retries.
+suprnova includes a Postgres-backed workflow engine with durable steps and retries.
 
 ```rust
-use kit::{workflow, workflow_step, start_workflow, FrameworkError};
+use suprnova::{workflow, workflow_step, start_workflow, FrameworkError};
 
 #[workflow_step]
 async fn fetch_user(user_id: i64) -> Result<String, FrameworkError> {
@@ -88,17 +88,17 @@ async fn welcome_flow(user_id: i64) -> Result<(), FrameworkError> {
 Run the worker in production:
 
 ```bash
-kit workflow:work
+suprnova workflow:work
 ```
 
 ## End-to-End Type Safety
 
-Kit provides automatic TypeScript type generation from your Rust structs. Define your props once in Rust, and use them with full type safety in React.
+suprnova provides automatic TypeScript type generation from your Rust structs. Define your props once in Rust, and use them with full type safety in React.
 
 **Define props in Rust:**
 
 ```rust
-use kit::{InertiaProps, inertia_response, Request, Response};
+use suprnova::{InertiaProps, inertia_response, Request, Response};
 
 #[derive(InertiaProps)]
 pub struct User {
@@ -126,7 +126,7 @@ pub async fn index(_req: Request) -> Response {
 **Run type generation:**
 
 ```bash
-kit generate-types
+suprnova generate-types
 ```
 
 **TypeScript types are auto-generated:**
@@ -164,7 +164,7 @@ Change a field in Rust, regenerate types, and TypeScript will catch any mismatch
 
 ## Documentation
 
-Ready to build something? Check out the [full documentation](https://kit-rs.dev/) to get started.
+Ready to build something? Check out the [full documentation](https://suprnova.dev/) to get started.
 
 ## License
 

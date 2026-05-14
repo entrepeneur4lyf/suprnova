@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use kit::test_database;
+//! use suprnova::test_database;
 //!
 //! #[tokio::test]
 //! async fn test_create_user() {
@@ -38,7 +38,7 @@ use crate::error::FrameworkError;
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::testing::TestDatabase;
+/// use suprnova::testing::TestDatabase;
 /// use crate::migrations::Migrator;
 ///
 /// #[tokio::test]
@@ -82,7 +82,7 @@ impl TestDatabase {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use kit::testing::TestDatabase;
+    /// use suprnova::testing::TestDatabase;
     /// use crate::migrations::Migrator;
     ///
     /// #[tokio::test]
@@ -143,13 +143,13 @@ impl TestDatabase {
 /// Create a test database with default migrator
 ///
 /// This macro creates a `TestDatabase` using `crate::migrations::Migrator` as the
-/// default migrator. This follows the Kit convention where migrations are defined
+/// default migrator. This follows the suprnova convention where migrations are defined
 /// in `src/migrations/mod.rs`.
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::test_database;
+/// use suprnova::test_database;
 ///
 /// #[tokio::test]
 /// async fn test_user_creation() {

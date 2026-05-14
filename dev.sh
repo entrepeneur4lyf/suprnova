@@ -15,7 +15,7 @@ fi
 
 # Generate TypeScript types from InertiaProps
 echo "Generating TypeScript types..."
-(cd app && ../target/debug/kit generate-types 2>/dev/null || true)
+(cd app && ../target/debug/suprnova generate-types 2>/dev/null || true)
 
 # Start Vite dev server in background
 echo "Starting Vite dev server on http://localhost:5173..."
@@ -24,6 +24,6 @@ echo "Starting Vite dev server on http://localhost:5173..."
 # Give Vite a moment to start
 sleep 2
 
-# Start Kit server
-echo "Starting Kit server on http://localhost:8080..."
+# Start Suprnova server
+echo "Starting Suprnova server on http://localhost:8080..."
 cargo run -p app

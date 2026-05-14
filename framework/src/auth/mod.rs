@@ -1,10 +1,10 @@
-//! Authentication module for Kit framework
+//! Authentication module for suprnova framework
 //!
 //! Provides Laravel-like authentication with guards and middleware.
 //!
 //! # Overview
 //!
-//! Kit provides a simple, session-based authentication system:
+//! suprnova provides a simple, session-based authentication system:
 //!
 //! - `Auth` facade for login/logout operations
 //! - `AuthMiddleware` for protecting routes
@@ -15,7 +15,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use kit::{Auth, AuthMiddleware, GuestMiddleware};
+//! use suprnova::{Auth, AuthMiddleware, GuestMiddleware};
 //!
 //! // In a controller
 //! if Auth::check() {

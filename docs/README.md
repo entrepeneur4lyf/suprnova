@@ -1,6 +1,6 @@
-# Kit Framework Documentation
+# suprnova Framework Documentation
 
-Welcome to the Kit framework documentation. Kit is a modern, Laravel-inspired web framework for Rust.
+Welcome to the suprnova framework documentatsuprnova. Suprnova is a modern, Laravel-inspired web framework for Rust.
 
 ## Table of Contents
 

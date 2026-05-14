@@ -1,4 +1,4 @@
-use kit::{json_response, redirect, route, Request, Response, ResponseExt};
+use suprnova::{json_response, redirect, route, Request, Response, ResponseExt};
 
 pub async fn index(_req: Request) -> Response {
     json_response!({

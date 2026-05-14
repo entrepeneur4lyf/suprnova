@@ -1,4 +1,4 @@
-//! Cookie handling for Kit framework
+//! Cookie handling for suprnova framework
 //!
 //! Provides Laravel-like cookie API with secure defaults.
 
@@ -48,7 +48,7 @@ impl Default for CookieOptions {
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::Cookie;
+/// use suprnova::Cookie;
 /// use std::time::Duration;
 ///
 /// let cookie = Cookie::new("session", "abc123")

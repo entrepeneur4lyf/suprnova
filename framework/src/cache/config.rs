@@ -1,4 +1,4 @@
-//! Cache configuration for Kit framework
+//! Cache configuration for suprnova framework
 
 use crate::config::{env, env_optional};
 
@@ -7,13 +7,13 @@ use crate::config::{env, env_optional};
 /// # Environment Variables
 ///
 /// - `REDIS_URL` - Redis connection URL (default: redis://127.0.0.1:6379)
-/// - `REDIS_PREFIX` - Key prefix for cache entries (default: "kit_cache:")
+/// - `REDIS_PREFIX` - Key prefix for cache entries (default: "suprnova_cache:")
 /// - `CACHE_DEFAULT_TTL` - Default TTL in seconds, 0 = no expiration (default: 3600)
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::{Config, CacheConfig};
+/// use suprnova::{Config, CacheConfig};
 ///
 /// // Register from environment
 /// Config::register(CacheConfig::from_env());
@@ -39,7 +39,7 @@ impl CacheConfig {
     pub fn from_env() -> Self {
         Self {
             url: env_optional("REDIS_URL").unwrap_or_else(|| "redis://127.0.0.1:6379".to_string()),
-            prefix: env("REDIS_PREFIX", "kit_cache:".to_string()),
+            prefix: env("REDIS_PREFIX", "suprnova_cache:".to_string()),
             default_ttl: env("CACHE_DEFAULT_TTL", 3600),
         }
     }

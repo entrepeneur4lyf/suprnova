@@ -1,4 +1,4 @@
-//! Service auto-registration for Kit framework
+//! Service auto-registration for suprnova framework
 //!
 //! This module provides automatic service registration via macros:
 //! - `#[service(ConcreteType)]` - auto-register trait bindings
@@ -7,7 +7,7 @@
 //! # Example - Trait binding
 //!
 //! ```rust,ignore
-//! use kit::service;
+//! use suprnova::service;
 //!
 //! // Auto-register: dyn CacheStore → RedisCache
 //! #[service(RedisCache)]
@@ -26,7 +26,7 @@
 //! # Example - Concrete singleton
 //!
 //! ```rust,ignore
-//! use kit::injectable;
+//! use suprnova::injectable;
 //!
 //! #[injectable]
 //! pub struct AppState {

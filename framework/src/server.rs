@@ -2,7 +2,6 @@ use crate::cache::Cache;
 use crate::config::{Config, ServerConfig};
 use crate::container::App;
 use crate::http::{HttpResponse, Request};
-use crate::inertia::InertiaContext;
 use crate::middleware::{Middleware, MiddlewareChain, MiddlewareRegistry};
 use crate::routing::Router;
 use bytes::Bytes;
@@ -88,7 +87,7 @@ impl Server {
         let addr: SocketAddr = self.get_addr();
         let listener = TcpListener::bind(addr).await?;
 
-        println!("Kit server running on http://{}", addr);
+        println!("suprnova server running on http://{}", addr);
 
         let router = self.router;
         let middleware = Arc::new(self.middleware);
@@ -123,33 +122,34 @@ async fn handle_request(
     let path = req.uri().path().to_string();
     let query = req.uri().query().unwrap_or("");
 
-    // Built-in health check endpoint at /_kit/health
+    // Built-in health check endpoint at /_suprnova/health
     // Uses framework prefix to avoid conflicts with user-defined routes
-    if path == "/_kit/health" && method == hyper::Method::GET {
+    if path == "/_suprnova/health" && method == hyper::Method::GET {
         return health_response(query).await;
     }
 
-    // Set up Inertia context from request headers
-    let is_inertia = req
-        .headers()
-        .get("X-Inertia")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v == "true")
-        .unwrap_or(false);
+    // Inertia context comes off the live Request via header helpers
+    // (`req.is_inertia()`, `req.inertia_version()`, etc.) — no global state.
+    //
+    // Per-request Inertia flash bag scoped via tokio::task_local. The bag
+    // is drained by `InertiaResponse::resolve` at response build time.
+    let flash_bag = crate::inertia::flash::new_bag();
 
-    let inertia_version = req
-        .headers()
-        .get("X-Inertia-Version")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.to_string());
+    let response = crate::inertia::flash::FLASH_BAG.scope(flash_bag, async move {
+        handle_request_inner(router, middleware_registry, req, method, &path).await
+    }).await;
 
-    InertiaContext::set(InertiaContext {
-        path: path.clone(),
-        is_inertia,
-        version: inertia_version,
-    });
+    response
+}
 
-    let response = match router.match_route(&method, &path) {
+async fn handle_request_inner(
+    router: Arc<Router>,
+    middleware_registry: Arc<MiddlewareRegistry>,
+    req: hyper::Request<hyper::body::Incoming>,
+    method: hyper::Method,
+    path: &str,
+) -> hyper::Response<Full<Bytes>> {
+    let response = match router.match_route(&method, path) {
         Some((handler, params)) => {
             let request = Request::new(req).with_params(params);
 
@@ -160,7 +160,7 @@ async fn handle_request(
             chain.extend(middleware_registry.global_middleware().iter().cloned());
 
             // 2. Add route-level middleware (already boxed)
-            let route_middleware = router.get_route_middleware(&path);
+            let route_middleware = router.get_route_middleware(path);
             chain.extend(route_middleware);
 
             // 3. Execute chain with handler
@@ -197,15 +197,14 @@ async fn handle_request(
         }
     };
 
-    // Clear context after request
-    InertiaContext::clear();
-
     response
 }
 
-/// Built-in health check endpoint at /_kit/health
+
+
+/// Built-in health check endpoint at /_suprnova/health
 /// Returns {"status": "ok", "timestamp": "..."} by default
-/// Add ?db=true to also check database connectivity (/_kit/health?db=true)
+/// Add ?db=true to also check database connectivity (/_suprnova/health?db=true)
 async fn health_response(query: &str) -> hyper::Response<Full<Bytes>> {
     use chrono::Utc;
     use serde_json::json;

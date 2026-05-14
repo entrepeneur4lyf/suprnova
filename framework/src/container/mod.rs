@@ -10,7 +10,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use kit::{App, bind, singleton, service};
+//! use suprnova::{App, bind, singleton, service};
 //!
 //! // Define a service trait with auto-registration
 //! #[service(RealHttpClient)]
@@ -59,6 +59,9 @@ enum Binding {
 pub struct Container {
     /// Type bindings: TypeId -> Binding
     bindings: HashMap<TypeId, Binding>,
+    /// Inertia shared-data registry. One per Container instance — scoped
+    /// to either the global app or a `TestContainer::fake()` test override.
+    inertia: Arc<crate::inertia::InertiaRegistry>,
 }
 
 impl Container {
@@ -66,7 +69,13 @@ impl Container {
     pub fn new() -> Self {
         Self {
             bindings: HashMap::new(),
+            inertia: Arc::new(crate::inertia::InertiaRegistry::new()),
         }
+    }
+
+    /// Get the Inertia shared-data registry for this container.
+    pub fn inertia(&self) -> &Arc<crate::inertia::InertiaRegistry> {
+        &self.inertia
     }
 
     /// Register a singleton instance (shared across all resolutions)
@@ -191,7 +200,7 @@ impl Default for Container {
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::{App, bind, singleton};
+/// use suprnova::{App, bind, singleton};
 ///
 /// // Register services at startup using macros
 /// singleton!(DatabaseConnection::new(&url));
@@ -399,6 +408,106 @@ impl App {
     /// Called automatically by `Server::from_config()`.
     pub fn boot_services() {
         provider::bootstrap();
+    }
+
+    /// Resolve the active Inertia registry — test override if set, else
+    /// the global container's. Used by both `App::inertia_share*` writes
+    /// and `InertiaResponse::resolve` reads so tests that swap a
+    /// `TestContainer::fake()` guard get clean isolation.
+    pub fn inertia_registry() -> Arc<crate::inertia::InertiaRegistry> {
+        // Test override first (thread-local). The check pattern mirrors
+        // `App::get` / `App::make` — see those for the rationale.
+        let test = TEST_CONTAINER.with(|c| {
+            c.borrow()
+                .as_ref()
+                .map(|container| container.inertia.clone())
+        });
+        if let Some(reg) = test {
+            return reg;
+        }
+
+        // Fall back to the global container, lazy-initializing if necessary
+        // so callers don't have to remember to call `App::init` first.
+        let container =
+            APP_CONTAINER.get_or_init(|| RwLock::new(Container::new()));
+        container.read().unwrap().inertia.clone()
+    }
+
+    /// Register a synchronous Inertia shared prop. Included in every
+    /// Inertia response (unless filtered by partial reload). Last write
+    /// wins for a given key — call once per key at bootstrap time.
+    ///
+    /// Writes to the active container's registry: production writes to
+    /// the global container; tests using `TestContainer::fake()` write
+    /// to the per-test override.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// App::inertia_share("appName", "Suprnova");
+    /// App::inertia_share("appVersion", env!("CARGO_PKG_VERSION"));
+    /// ```
+    pub fn inertia_share<V: serde::Serialize>(key: impl Into<String>, value: V) {
+        Self::inertia_registry().share_value(key, value);
+    }
+
+    /// Register an async lazy Inertia shared prop. The resolver runs on
+    /// every Inertia response where the prop is needed (i.e. not excluded
+    /// by partial-reload filtering). Use when the shared value requires
+    /// async work — DB lookups, HTTP calls, etc.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// App::inertia_share_lazy("locale", || async {
+    ///     Ok::<_, FrameworkError>(detect_locale().await)
+    /// });
+    /// ```
+    pub fn inertia_share_lazy<F, Fut, V>(key: impl Into<String>, resolver: F)
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<V, crate::error::FrameworkError>> + Send + 'static,
+        V: serde::Serialize + 'static,
+    {
+        Self::inertia_registry().share_lazy(key, resolver);
+    }
+
+    /// Register the singleton [`crate::inertia::InertiaSharedData`]
+    /// implementation. The framework calls `share(&req)` on every Inertia
+    /// response, letting you produce per-request shared data
+    /// (authenticated user, locale, flash messages, ...).
+    pub fn register_inertia_shared(provider: Arc<dyn crate::inertia::InertiaSharedData>) {
+        Self::inertia_registry().register_trait(provider);
+    }
+
+    /// Register an Inertia shared *once* prop — resolved on the first
+    /// page that needs it, then cached on the client across navigations.
+    /// Maps to `Inertia::shareOnce($k, fn() => ...)`.
+    ///
+    /// Use for shared data that's expensive to compute but rarely
+    /// changes — locale lists, plan catalogs, navigation menus, etc.
+    /// The client tracks the cache key and the framework skips the
+    /// resolver via `X-Inertia-Except-Once-Props` on subsequent visits.
+    pub fn inertia_share_once<F, Fut, V>(key: impl Into<String>, resolver: F)
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<V, crate::error::FrameworkError>> + Send + 'static,
+        V: serde::Serialize + 'static,
+    {
+        Self::inertia_registry().share_once(key, resolver);
+    }
+
+    /// Push a value into the current request's flash bag. Drained by
+    /// the next Inertia response and emitted under `page.flash`. The
+    /// flash bag is scoped per request via `tokio::task_local!` and is
+    /// silently a no-op if called outside an HTTP request (e.g. from
+    /// a background worker).
+    ///
+    /// Cross-redirect persistence (Laravel's classic flash semantics)
+    /// requires session-flash integration — see
+    /// [`flash`](crate::inertia::flash) module docs.
+    pub fn flash<V: serde::Serialize>(key: impl Into<String>, value: V) {
+        let v = serde_json::to_value(&value)
+            .expect("App::flash value must serialize cleanly");
+        crate::inertia::flash::push(key.into(), v);
     }
 }
 

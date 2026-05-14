@@ -3,11 +3,11 @@ resolver = "2"
 members = [
     "framework",
     "app",
-    "kit-cli",
-    "kit-macros",
+    "suprnova-cli",
+    "suprnova-macros",
 ]
 
 [workspace.package]
-version = "0.1.67"
-edition = "2021"
+version = "0.1.0"
+edition = "2024"
 license = "MIT"

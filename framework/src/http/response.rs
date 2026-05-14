@@ -39,6 +39,18 @@ impl HttpResponse {
         }
     }
 
+    /// Create an HTML response. Sets `Content-Type: text/html; charset=utf-8`.
+    pub fn html(body: impl Into<String>) -> Self {
+        Self {
+            status: 200,
+            body: body.into(),
+            headers: vec![(
+                "Content-Type".to_string(),
+                "text/html; charset=utf-8".to_string(),
+            )],
+        }
+    }
+
     /// Set the HTTP status code
     pub fn status(mut self, status: u16) -> Self {
         self.status = status;
@@ -56,7 +68,7 @@ impl HttpResponse {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use kit::{Cookie, HttpResponse};
+    /// use suprnova::{Cookie, HttpResponse};
     ///
     /// let response = HttpResponse::text("OK")
     ///     .cookie(Cookie::new("session", "abc123"))

@@ -1,4 +1,4 @@
-//! Testing utilities for Kit framework
+//! Testing utilities for suprnova framework
 //!
 //! Provides Jest-like testing helpers including:
 //! - `expect!` macro for fluent assertions with clear expected/received output
@@ -9,8 +9,8 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use kit::{describe, test, expect};
-//! use kit::testing::TestDatabase;
+//! use suprnova::{describe, test, expect};
+//! use suprnova::testing::TestDatabase;
 //!
 //! describe!("UserService", {
 //!     test!("creates a user", async fn(db: TestDatabase) {

@@ -1,4 +1,4 @@
-//! Session management for Kit framework
+//! Session management for suprnova framework
 //!
 //! Provides Laravel-like session handling with database storage.
 //!
@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use kit::session::{session, session_mut};
+//! use suprnova::session::{session, session_mut};
 //!
 //! // Read from session
 //! if let Some(s) = session() {
@@ -32,7 +32,7 @@
 //! Add the `SessionMiddleware` to your bootstrap:
 //!
 //! ```rust,ignore
-//! use kit::{global_middleware, SessionMiddleware, SessionConfig};
+//! use suprnova::{global_middleware, SessionMiddleware, SessionConfig};
 //!
 //! pub async fn register() {
 //!     let config = SessionConfig::from_env();

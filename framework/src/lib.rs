@@ -17,7 +17,7 @@ pub mod server;
 pub mod session;
 pub mod testing;
 
-extern crate self as kit;
+extern crate self as suprnova;
 
 pub use app::Application;
 pub use auth::{Auth, Authenticatable, AuthMiddleware, GuestMiddleware, UserProvider};
@@ -38,7 +38,11 @@ pub use http::{
 pub use session::{
     session, session_mut, SessionConfig, SessionData, SessionMiddleware, SessionStore,
 };
-pub use inertia::{InertiaConfig, InertiaContext, InertiaResponse};
+pub use inertia::{
+    DeferConfig, DeferOptions, Frontend, InertiaConfig, InertiaRegistry, InertiaRequestExt,
+    InertiaResponse, InertiaSharedData, InertiaVersionMiddleware, MergeConfig, MergeStrategy,
+    OnceConfig, OnceOptions, PartialFilter, Prop, PropFuture, PropResolver,
+};
 pub use middleware::{
     register_global_middleware, Middleware, MiddlewareFuture, MiddlewareRegistry, Next,
 };
@@ -63,6 +67,10 @@ pub use async_trait::async_trait;
 #[doc(hidden)]
 pub use inventory;
 
+// Re-export indexmap so consumers implementing InertiaSharedData
+// don't need to depend on it separately.
+pub use indexmap;
+
 // Re-export for macro usage
 #[doc(hidden)]
 pub use serde_json;
@@ -75,22 +83,22 @@ pub use validator;
 pub use validator::Validate;
 
 // Re-export the proc-macros for compile-time component validation and type safety
-pub use kit_macros::domain_error;
-pub use kit_macros::handler;
-pub use kit_macros::inertia_response;
-pub use kit_macros::injectable;
-pub use kit_macros::redirect;
-pub use kit_macros::request;
-pub use kit_macros::service;
-pub use kit_macros::workflow;
-pub use kit_macros::workflow_step;
-pub use kit_macros::FormRequest as FormRequestDerive;
-pub use kit_macros::InertiaProps;
-pub use kit_macros::kit_test;
+pub use suprnova_macros::domain_error;
+pub use suprnova_macros::handler;
+pub use suprnova_macros::inertia_response;
+pub use suprnova_macros::injectable;
+pub use suprnova_macros::redirect;
+pub use suprnova_macros::request;
+pub use suprnova_macros::service;
+pub use suprnova_macros::workflow;
+pub use suprnova_macros::workflow_step;
+pub use suprnova_macros::FormRequest as FormRequestDerive;
+pub use suprnova_macros::InertiaProps;
+pub use suprnova_macros::suprnova_test;
 
 // Re-export Jest-like testing macros
-pub use kit_macros::describe;
-pub use kit_macros::test;
+pub use suprnova_macros::describe;
+pub use suprnova_macros::test;
 
 #[macro_export]
 macro_rules! json_response {
@@ -115,7 +123,7 @@ macro_rules! text_response {
 ///
 /// ```rust,ignore
 /// // In bootstrap.rs
-/// use kit::global_middleware;
+/// use suprnova::global_middleware;
 /// use crate::middleware;
 ///
 /// pub fn register() {
@@ -135,7 +143,7 @@ macro_rules! global_middleware {
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::expect;
+/// use suprnova::expect;
 ///
 /// expect!(actual).to_equal(expected);
 /// expect!(result).to_be_ok();

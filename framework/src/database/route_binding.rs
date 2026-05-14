@@ -5,10 +5,10 @@
 //! # Automatic Route Model Binding
 //!
 //! Route model binding is automatic for all SeaORM models whose Entity implements
-//! `kit::database::Model`. Simply use the Model type as a handler parameter:
+//! `suprnova::database::Model`. Simply use the Model type as a handler parameter:
 //!
 //! ```rust,ignore
-//! use kit::{handler, json_response, Response};
+//! use suprnova::{handler, json_response, Response};
 //! use crate::models::user;
 //!
 //! // Just use the Model in your handler - binding is automatic!
@@ -39,8 +39,8 @@ use sea_orm::{EntityTrait, ModelTrait as SeaModelTrait, PrimaryKeyTrait};
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::database::RouteBinding;
-/// use kit::FrameworkError;
+/// use suprnova::database::RouteBinding;
+/// use suprnova::FrameworkError;
 ///
 /// #[async_trait]
 /// impl RouteBinding for user::Model {
@@ -82,7 +82,7 @@ pub trait RouteBinding: Sized + Send {
 /// Trait for automatic route model binding
 ///
 /// This trait is automatically implemented for all SeaORM models whose Entity
-/// implements `kit::database::Model`. You don't need to implement this manually.
+/// implements `suprnova::database::Model`. You don't need to implement this manually.
 ///
 /// Unlike [`RouteBinding`], this trait doesn't require a `param_name()` method.
 /// The parameter name is derived from the handler function signature.
@@ -114,7 +114,7 @@ pub trait AutoRouteBinding: Sized + Send {
 /// Blanket implementation of AutoRouteBinding for all SeaORM models
 ///
 /// This automatically implements route model binding for any SeaORM Model type
-/// whose Entity implements `kit::database::Model`. Supports any primary key type
+/// whose Entity implements `suprnova::database::Model`. Supports any primary key type
 /// that implements `FromStr` (i32, i64, String, UUID, etc.).
 #[async_trait]
 impl<M, E> AutoRouteBinding for M
@@ -146,7 +146,7 @@ where
 /// Convenience macro to implement RouteBinding for a SeaORM model
 ///
 /// **DEPRECATED**: This macro is no longer needed. Route model binding is now
-/// automatic for any model whose Entity implements `kit::database::Model`.
+/// automatic for any model whose Entity implements `suprnova::database::Model`.
 /// Simply use the Model type in your handler parameter.
 ///
 /// This macro implements the `RouteBinding` trait for a model, enabling
@@ -161,7 +161,7 @@ where
 /// # Example
 ///
 /// ```rust,ignore
-/// use kit::route_binding;
+/// use suprnova::route_binding;
 ///
 /// // In your model file (e.g., models/user.rs)
 /// route_binding!(Entity, Model, "user");
