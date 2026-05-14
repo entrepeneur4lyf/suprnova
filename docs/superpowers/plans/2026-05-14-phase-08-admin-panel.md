@@ -1011,7 +1011,195 @@ git commit -m "feat(app): dogfood admin panel — users + posts tables"
 
 ---
 
-## Task 12: Workspace lint + verification + roadmap update
+## Task 12: Queue inspector composite view
+
+Laravel ships Horizon for queue introspection (job inspector, retry,
+failure detail, throughput charts). The runtime story is already a
+Phase 5 win — sea-streamer's decoupled read/process/ack loops match
+Horizon's throughput natively. The remaining gap is the inspector UI.
+We ship it as a TOML-config admin page on top of the existing
+Phase 8 admin pattern: zero bespoke admin code, just a queue-aware
+composite view that reads from the queue backend's job/failure tables.
+
+**Files:**
+- Create: `framework/src/queue/inspector.rs` — `QueueInspector` trait + driver impls
+- Create: `framework/src/queue/inspector_handler.rs` — admin HTTP handler reading the inspector
+- Modify: `framework/src/queue/streamer.rs` — implement `QueueInspector` for sea-streamer (read pending/processed/failed counts + paginated jobs)
+- Modify: `framework/src/queue/database.rs` — same for the database driver
+- Create: `app/admin/queue.toml` — dogfood the queue-inspector TOML config
+- Modify: `app/frontend/pages/Admin/QueueInspector.tsx` (or similar) — auto-rendered from the TOML
+
+- [ ] **Step 1: Write failing test — QueueInspector trait + sea-streamer impl**
+
+```rust
+// framework/tests/queue_inspector.rs
+use suprnova::queue::{Queue, QueueInspector, QueueStats, QueuedJob};
+
+#[tokio::test]
+async fn inspector_reports_pending_processed_failed_counts() {
+    Queue::use_in_process().await;
+    Queue::register::<AddNumbers>().await;
+    Queue::push(AddNumbers { a: 1, b: 1 }).await.unwrap();
+    Queue::push(AddNumbers { a: 2, b: 2 }).await.unwrap();
+
+    let inspector = Queue::inspector().expect("inspector available");
+    let stats: QueueStats = inspector.stats("default").await.unwrap();
+    assert!(stats.pending >= 0);
+    assert_eq!(stats.failed, 0);
+}
+
+#[tokio::test]
+async fn inspector_lists_failed_jobs_with_payload_and_error() {
+    Queue::use_in_process().await;
+    Queue::register::<AlwaysFails>().await;
+    Queue::push(AlwaysFails).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let inspector = Queue::inspector().expect("inspector available");
+    let failed: Vec<QueuedJob> = inspector.failed("default", 0, 10).await.unwrap();
+    assert!(!failed.is_empty());
+    assert!(failed[0].error.as_deref().unwrap_or("").contains("intentional"));
+}
+
+#[tokio::test]
+async fn inspector_retries_a_failed_job() {
+    // Setup as above, then retry by id, then verify it no longer appears in failed.
+    // Concrete assertion depends on driver semantics:
+    //   - database driver: failed row is deleted and re-inserted into pending
+    //   - sea-streamer: message is re-published to the original stream
+}
+```
+
+- [ ] **Step 2: Run — expect failure**
+
+```bash
+cargo test -p suprnova --test queue_inspector
+```
+
+- [ ] **Step 3: Implement `QueueInspector` trait**
+
+```rust
+// framework/src/queue/inspector.rs
+use crate::FrameworkError;
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QueueStats {
+    pub pending: u64,
+    pub processed: u64,
+    pub failed: u64,
+    pub jobs_per_minute: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QueuedJob {
+    pub id: String,
+    pub job_name: String,
+    pub payload: serde_json::Value,
+    pub attempts: u32,
+    pub last_attempt_at: Option<DateTime<Utc>>,
+    pub error: Option<String>,
+}
+
+#[async_trait]
+pub trait QueueInspector: Send + Sync {
+    async fn stats(&self, queue: &str) -> Result<QueueStats, FrameworkError>;
+    async fn pending(&self, queue: &str, offset: u64, limit: u64) -> Result<Vec<QueuedJob>, FrameworkError>;
+    async fn failed(&self, queue: &str, offset: u64, limit: u64) -> Result<Vec<QueuedJob>, FrameworkError>;
+    async fn retry(&self, queue: &str, job_id: &str) -> Result<(), FrameworkError>;
+    async fn forget(&self, queue: &str, job_id: &str) -> Result<(), FrameworkError>;
+}
+
+impl crate::queue::Queue {
+    /// Returns an inspector for the active queue driver, or None for
+    /// drivers that don't support introspection (in-process by default).
+    pub fn inspector() -> Option<std::sync::Arc<dyn QueueInspector>> {
+        crate::queue::INSPECTOR_REGISTRY.get().and_then(|r| r.current())
+    }
+}
+```
+
+> **Driver implementations:**
+> - **In-process** — no persistent storage; return `None` from
+>   `Queue::inspector()`. Optional: maintain an in-memory ring buffer
+>   of recent failures for `dev` mode.
+> - **Database** — a `failed_jobs` table + the existing `jobs` table.
+>   `stats` runs aggregate `COUNT(*)` queries. `failed` selects from
+>   `failed_jobs`. `retry` deletes from `failed_jobs` and re-inserts
+>   into `jobs`. Throughput stats from a rolling timestamp index.
+> - **sea-streamer Redis/Kafka** — pending = `XLEN`; failed lives in a
+>   dedicated `{stream}:failed` stream. `retry` reads the failed
+>   message and `XADD`s back to the original stream. Throughput from
+>   stream metadata.
+
+- [ ] **Step 4: Run — expect pass**
+
+```bash
+cargo test -p suprnova --test queue_inspector
+```
+
+Expected: at least the in-process tests pass; driver-specific tests
+need their backend so gate them via feature flag (`memcached`/`redis`/etc).
+
+- [ ] **Step 5: Wire admin TOML composite view**
+
+```toml
+# app/admin/queue.toml
+[composite_view]
+slug = "queue"
+title = "Queue Inspector"
+icon = "queue"
+
+[[panels]]
+type = "stats"
+source = "queue.stats"
+fields = ["pending", "processed", "failed", "jobs_per_minute"]
+
+[[panels]]
+type = "table"
+title = "Pending"
+source = "queue.pending"
+columns = ["id", "job_name", "attempts", "last_attempt_at"]
+actions = ["forget"]
+
+[[panels]]
+type = "table"
+title = "Failed"
+source = "queue.failed"
+columns = ["id", "job_name", "error", "last_attempt_at"]
+actions = ["retry", "forget"]
+
+[policies]
+view = "AdminPolicy::queue_view"
+retry = "AdminPolicy::queue_retry"
+```
+
+Extend the admin loader (Task 3) to recognize `[composite_view]` with
+`source = "queue.*"` as a built-in source backed by the
+`QueueInspector` trait (vs entity-backed tables from Task 4).
+
+- [ ] **Step 6: Frontend — auto-render the composite view**
+
+The admin SPA (Task 9) reads the resolved TOML config and renders:
+- `stats` panel as a horizontal counter row
+- `table` panels as paginated tables with the declared actions
+
+This works because composite views were already designed for
+relation-joining in Task 8; "built-in source" is one more enum
+variant on the `composite_view.source` field.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add framework/src/queue/inspector.rs framework/src/queue/inspector_handler.rs framework/src/queue/streamer.rs framework/src/queue/database.rs framework/tests/queue_inspector.rs app/admin/queue.toml app/frontend/pages/Admin
+git commit -m "feat(admin): queue inspector composite view (Horizon equivalent)"
+```
+
+---
+
+## Task 13: Workspace lint + verification + roadmap update
 
 - [ ] **Step 1: Clippy + tests**
 
@@ -1043,6 +1231,8 @@ Move from "Missing" to "Production-ready":
 | Frontend admin SPA | Task 9 |
 | make:admin generator | Task 10 |
 | App dogfood | Task 11 |
+| QueueInspector trait + driver impls (database, sea-streamer) | Task 12 |
+| Queue inspector composite-view TOML (Horizon equivalent) | Task 12 |
 
 **Placeholder scan:** `> Storage shape:` and `> Generic impl complexity:` notes flag concrete decisions to make (Mutex vs OnceLock; macro-driven vs per-entity hand-written providers). `> router.add_route API:` flags a routing-layer extension that may be needed.
 
