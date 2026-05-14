@@ -140,6 +140,115 @@ pub struct InertiaConfig {
     /// Overridable per-request via `EncryptHistoryMiddleware` and
     /// per-response via `InertiaResponse::encrypt_history(bool)`.
     pub encrypt_history_default: bool,
+    /// Server-side rendering configuration. See [`SsrConfig`].
+    pub ssr: SsrConfig,
+}
+
+/// SSR (server-side rendering) configuration.
+///
+/// Suprnova talks to an out-of-process SSR worker — usually the
+/// `@inertiajs/{vue3,react,svelte}/server` `createServer()` bundle run
+/// under Node, Bun, or Deno — over HTTP loopback. The worker accepts
+/// a JSON page object on `POST /render` and returns
+/// `{ head: string[], body: string }`. Configure the worker URL here;
+/// boot it separately (e.g. `suprnova ssr:start`).
+#[derive(Clone, Debug)]
+pub struct SsrConfig {
+    /// When `false`, SSR is fully off and the HTML shell renders empty
+    /// `<div id="app">` for the client to hydrate. Default: `false`.
+    pub enabled: bool,
+    /// URL of the running SSR worker (e.g. `http://127.0.0.1:13714`).
+    /// The framework posts to `<url>/render`.
+    pub url: String,
+    /// Request timeout for the SSR call. Past this, the response falls
+    /// back to CSR. Keep tight in production — a hung worker shouldn't
+    /// block real users.
+    pub timeout: std::time::Duration,
+    /// When `true`, SSR errors propagate as 500s instead of falling
+    /// back to CSR. Useful in CI / tests; never set `true` in
+    /// production unless you also have a watchdog.
+    pub throw_on_error: bool,
+    /// Glob-style path patterns excluded from SSR. Matching paths
+    /// render CSR-only even when `enabled` is `true`. Each pattern
+    /// supports `*` (anything-not-slash) and `**` (anything).
+    pub excluded_paths: Vec<String>,
+}
+
+impl Default for SsrConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: "http://127.0.0.1:13714".to_string(),
+            timeout: std::time::Duration::from_secs(5),
+            throw_on_error: false,
+            excluded_paths: Vec::new(),
+        }
+    }
+}
+
+impl SsrConfig {
+    /// Check whether the given request path is excluded from SSR.
+    pub fn is_path_excluded(&self, path: &str) -> bool {
+        self.excluded_paths
+            .iter()
+            .any(|pat| glob_match(pat, path))
+    }
+}
+
+/// Tiny glob matcher: `*` matches a single non-`/` segment, `**`
+/// matches any number of characters (including `/`). Designed for
+/// route-pattern matching, not full POSIX globs.
+fn glob_match(pattern: &str, path: &str) -> bool {
+    glob_match_inner(pattern.as_bytes(), path.as_bytes())
+}
+
+fn glob_match_inner(pat: &[u8], path: &[u8]) -> bool {
+    let (mut pi, mut si) = (0, 0);
+    let (mut star_pi, mut star_si): (Option<usize>, usize) = (None, 0);
+    while si < path.len() {
+        if pi < pat.len() {
+            let c = pat[pi];
+            if c == b'*' {
+                // `**` = match any, including '/'
+                let double = pi + 1 < pat.len() && pat[pi + 1] == b'*';
+                if double {
+                    pi += 2;
+                    star_pi = Some(pi);
+                    star_si = si;
+                    // double-star can match zero chars too
+                    continue;
+                } else {
+                    // single `*` = match anything except '/'
+                    pi += 1;
+                    star_pi = Some(pi);
+                    star_si = si;
+                    continue;
+                }
+            } else if c == path[si] {
+                pi += 1;
+                si += 1;
+                continue;
+            }
+        }
+        if let Some(sp) = star_pi {
+            // Resume the previous star, consume one more char.
+            // For single-`*` we forbid `/` in the consumed window.
+            let one_more = path[star_si];
+            let prev_was_double = sp >= 2 && pat[sp - 1] == b'*' && pat[sp - 2] == b'*';
+            if !prev_was_double && one_more == b'/' {
+                return false;
+            }
+            star_si += 1;
+            si = star_si;
+            pi = sp;
+        } else {
+            return false;
+        }
+    }
+    while pi < pat.len() && pat[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pat.len()
 }
 
 impl Default for InertiaConfig {
@@ -153,6 +262,7 @@ impl Default for InertiaConfig {
             frontend,
             default_title: "Suprnova".to_string(),
             encrypt_history_default: false,
+            ssr: SsrConfig::default(),
         }
     }
 }
@@ -210,6 +320,37 @@ impl InertiaConfig {
 
     pub fn encrypt_history(mut self, on: bool) -> Self {
         self.encrypt_history_default = on;
+        self
+    }
+
+    /// Enable SSR with the given worker URL.
+    pub fn ssr(mut self, url: impl Into<String>) -> Self {
+        self.ssr.enabled = true;
+        self.ssr.url = url.into();
+        self
+    }
+
+    /// Disable SSR explicitly (the default).
+    pub fn ssr_disabled(mut self) -> Self {
+        self.ssr.enabled = false;
+        self
+    }
+
+    /// Set the SSR request timeout.
+    pub fn ssr_timeout(mut self, t: std::time::Duration) -> Self {
+        self.ssr.timeout = t;
+        self
+    }
+
+    /// Make SSR failures hard errors instead of falling back to CSR.
+    pub fn ssr_throw_on_error(mut self, on: bool) -> Self {
+        self.ssr.throw_on_error = on;
+        self
+    }
+
+    /// Add a path pattern excluded from SSR.
+    pub fn ssr_exclude(mut self, pattern: impl Into<String>) -> Self {
+        self.ssr.excluded_paths.push(pattern.into());
         self
     }
 }

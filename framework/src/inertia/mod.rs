@@ -5,9 +5,11 @@ pub(crate) mod flash;
 mod prop;
 mod response;
 mod shared;
+pub(crate) mod ssr;
 mod version_middleware;
 
-pub use config::{Frontend, InertiaConfig, VersionResolver};
+pub use config::{Frontend, InertiaConfig, SsrConfig, VersionResolver};
+pub use ssr::SsrResponse;
 pub use conversion_middleware::Inertia303Middleware;
 pub use encrypt_middleware::EncryptHistoryMiddleware;
 pub use prop::{

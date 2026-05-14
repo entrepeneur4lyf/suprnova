@@ -1,6 +1,6 @@
 import './app.css'
 import { createInertiaApp } from '@inertiajs/vue3'
-import { createApp, h, type DefineComponent } from 'vue'
+import { createApp, createSSRApp, h, type DefineComponent } from 'vue'
 import axios from 'axios'
 
 // Configure axios defaults for CSRF protection
@@ -21,8 +21,17 @@ createInertiaApp({
     return pages[`./pages/${name}.vue`]
   },
   setup({ el, App, props, plugin }) {
-    createApp({ render: () => h(App, props) })
-      .use(plugin)
-      .mount(el)
+    // SSR-aware: when the server pre-rendered, the mount node carries
+    // `data-server-rendered="true"` and we must hydrate. Without this
+    // check, SSR markup gets destroyed and re-rendered on the client.
+    if (el.hasAttribute('data-server-rendered')) {
+      createSSRApp({ render: () => h(App, props) })
+        .use(plugin)
+        .mount(el)
+    } else {
+      createApp({ render: () => h(App, props) })
+        .use(plugin)
+        .mount(el)
+    }
   },
 })

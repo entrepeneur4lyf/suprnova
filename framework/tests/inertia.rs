@@ -1426,6 +1426,177 @@ async fn preserve_fragment_survives_partial_reload_filter() {
     assert_eq!(page["preserveFragment"], true);
 }
 
+// ---- Tier 4: SSR ----
+//
+// These tests spawn a tiny localhost HTTP server that mimics the
+// `@inertiajs/{...}/server` SSR worker — accepts `POST /render` with
+// the page object, returns `{head, body}`. We then resolve an Inertia
+// response with SSR enabled pointed at this worker and inspect the
+// generated HTML shell.
+
+mod ssr_tests {
+    use super::*;
+    use http_body_util::Full;
+    use hyper::body::Bytes;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use std::convert::Infallible;
+    use std::net::SocketAddr;
+    use suprnova::{InertiaConfig, InertiaResponse};
+
+    /// Spawn a one-shot SSR worker bound to 127.0.0.1:0. The worker
+    /// always returns `head: [<title>SSR</title>]` and `body: <pre-rendered/>`.
+    /// Returns the socket address it's listening on.
+    async fn spawn_mock_ssr() -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => break,
+                };
+                tokio::spawn(async move {
+                    let io = TokioIo::new(stream);
+                    let svc =
+                        service_fn(|_req: hyper::Request<hyper::body::Incoming>| async move {
+                            let body = serde_json::json!({
+                                "head": ["<title>SSR Title</title>", "<meta name=\"ssr\" content=\"yes\">"],
+                                "body": "<main id=\"ssr\">SSR rendered content</main>",
+                            });
+                            let payload = serde_json::to_vec(&body).unwrap();
+                            Ok::<_, Infallible>(
+                                hyper::Response::builder()
+                                    .status(200)
+                                    .header("content-type", "application/json")
+                                    .body(Full::new(Bytes::from(payload)))
+                                    .unwrap(),
+                            )
+                        });
+                    let _ = http1::Builder::new().serve_connection(io, svc).await;
+                });
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn ssr_disabled_by_default_produces_empty_mount() {
+        let req = MockReq::new("/"); // non-XHR initial visit
+        let resp = InertiaResponse::new("Home")
+            .with("title", "Hi")
+            .resolve(&req)
+            .await
+            .unwrap();
+        let body = body_to_string(resp.into_hyper().into_body());
+        assert!(!body.contains("data-server-rendered"));
+        assert!(body.contains("<div id=\"app\""));
+    }
+
+    #[tokio::test]
+    async fn ssr_enabled_injects_head_and_body_with_data_attr() {
+        let addr = spawn_mock_ssr().await;
+        let cfg = InertiaConfig::new().ssr(format!("http://{}", addr));
+        let req = MockReq::new("/");
+        let resp = InertiaResponse::new("Home")
+            .with_config(cfg)
+            .with("title", "Hi")
+            .resolve(&req)
+            .await
+            .unwrap();
+        let body = body_to_string(resp.into_hyper().into_body());
+
+        assert!(
+            body.contains("data-server-rendered=\"true\""),
+            "expected data-server-rendered on mount; body:\n{}",
+            body
+        );
+        assert!(body.contains("<title>SSR Title</title>"));
+        assert!(body.contains("<meta name=\"ssr\" content=\"yes\">"));
+        assert!(body.contains("<main id=\"ssr\">SSR rendered content</main>"));
+    }
+
+    #[tokio::test]
+    async fn ssr_worker_unreachable_falls_back_to_csr() {
+        // Point at a port nothing is listening on. Default
+        // throw_on_error=false → falls back silently.
+        let cfg = InertiaConfig::new().ssr("http://127.0.0.1:1");
+        let req = MockReq::new("/");
+        let resp = InertiaResponse::new("Home")
+            .with_config(cfg)
+            .resolve(&req)
+            .await
+            .unwrap();
+        let body = body_to_string(resp.into_hyper().into_body());
+        assert!(!body.contains("data-server-rendered"));
+    }
+
+    #[tokio::test]
+    async fn ssr_throw_on_error_propagates_error() {
+        let cfg = InertiaConfig::new()
+            .ssr("http://127.0.0.1:1")
+            .ssr_throw_on_error(true);
+        let req = MockReq::new("/");
+        let result = InertiaResponse::new("Home")
+            .with_config(cfg)
+            .resolve(&req)
+            .await;
+        assert!(
+            result.is_err(),
+            "throw_on_error=true must propagate worker failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn ssr_excluded_path_skips_worker() {
+        // Even with a working worker, excluded paths render CSR.
+        let addr = spawn_mock_ssr().await;
+        let cfg = InertiaConfig::new()
+            .ssr(format!("http://{}", addr))
+            .ssr_exclude("/admin/**");
+        let req = MockReq::new("/admin/users");
+        let resp = InertiaResponse::new("Admin/Users")
+            .with_config(cfg)
+            .resolve(&req)
+            .await
+            .unwrap();
+        let body = body_to_string(resp.into_hyper().into_body());
+        assert!(!body.contains("data-server-rendered"));
+    }
+
+    #[tokio::test]
+    async fn ssr_xhr_request_does_not_invoke_worker() {
+        // For Inertia XHRs we return JSON, not HTML — SSR is irrelevant.
+        // We bind a worker that would PANIC if called; if SSR is invoked
+        // erroneously, the request stalls or errors.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handler_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called = handler_called.clone();
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                called.store(true, std::sync::atomic::Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+        let cfg = InertiaConfig::new().ssr(format!("http://{}", addr));
+        let req = MockReq::new("/").inertia();
+        let resp = InertiaResponse::new("Home")
+            .with_config(cfg)
+            .resolve(&req)
+            .await
+            .unwrap();
+        let _ = body_to_string(resp.into_hyper().into_body());
+        // Slack for spurious accept races: we only assert the SSR
+        // handler was NOT triggered.
+        assert!(
+            !handler_called.load(std::sync::atomic::Ordering::SeqCst),
+            "XHR responses must not contact the SSR worker"
+        );
+    }
+}
+
 // ---- Infinite scroll: Inertia::scroll() + scrollProps + merge intent ----
 
 use suprnova::ScrollMetadata;

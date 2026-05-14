@@ -134,10 +134,17 @@ async fn handle_request(
     // Per-request Inertia flash bag scoped via tokio::task_local. The bag
     // is drained by `InertiaResponse::resolve` at response build time.
     let flash_bag = crate::inertia::flash::new_bag();
+    let ssr_disabled = crate::inertia::ssr::new_disable_ssr_flag();
 
-    let response = crate::inertia::flash::FLASH_BAG.scope(flash_bag, async move {
-        handle_request_inner(router, middleware_registry, req, method, &path).await
-    }).await;
+    let response = crate::inertia::flash::FLASH_BAG
+        .scope(flash_bag, async move {
+            crate::inertia::ssr::DISABLE_SSR
+                .scope(ssr_disabled, async move {
+                    handle_request_inner(router, middleware_registry, req, method, &path).await
+                })
+                .await
+        })
+        .await;
 
     response
 }

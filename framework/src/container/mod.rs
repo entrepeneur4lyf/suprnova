@@ -509,6 +509,14 @@ impl App {
             .expect("App::flash value must serialize cleanly");
         crate::inertia::flash::push(key.into(), v);
     }
+
+    /// Disable Inertia SSR for the remainder of this request. Equivalent
+    /// to Laravel's `Inertia::disable_ssr()`. The response falls back
+    /// to client-side rendering even when `InertiaConfig::ssr.enabled`
+    /// is `true`. Idempotent; no-op outside a request scope.
+    pub fn disable_ssr_for_request() {
+        crate::inertia::ssr::disable_ssr_for_request();
+    }
 }
 
 /// Bind a trait to a singleton implementation (auto-wraps in Arc)

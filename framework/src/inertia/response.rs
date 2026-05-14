@@ -523,11 +523,20 @@ impl InertiaResponse {
             shared_keys,
         );
 
-        Ok(if is_inertia_request {
-            build_json_response(&page)
+        if is_inertia_request {
+            Ok(build_json_response(&page))
         } else {
-            build_html_response(&page, &config, title.as_deref())
-        })
+            // SSR runs only for HTML (non-XHR) visits. XHR is a JSON
+            // page-object response and never needs prerender.
+            let ssr_result =
+                super::ssr::render(&config.ssr, &req.path().to_string(), &page).await?;
+            Ok(build_html_response(
+                &page,
+                &config,
+                title.as_deref(),
+                ssr_result.as_ref(),
+            ))
+        }
     }
 
     /// Build the page object without producing an HTTP response — used by
@@ -1134,6 +1143,7 @@ fn build_html_response(
     page: &Value,
     config: &InertiaConfig,
     title_override: Option<&str>,
+    ssr: Option<&super::ssr::SsrResponse>,
 ) -> HttpResponse {
     let title = title_override.unwrap_or(&config.default_title);
     let page_json = serde_json::to_string(page).unwrap_or_else(|_| "{}".to_string());
@@ -1148,6 +1158,20 @@ fn build_html_response(
         render_prod_head()
     };
 
+    // SSR injection. The worker returns `head` as a list of HTML
+    // snippets (title, meta, etc.) and `body` as the prerendered app
+    // shell. When present we add `data-server-rendered="true"` so the
+    // client hydrates instead of re-rendering.
+    let ssr_head = ssr
+        .map(|s| s.head.join("\n"))
+        .unwrap_or_default();
+    let ssr_body = ssr.map(|s| s.body.as_str()).unwrap_or("");
+    let ssr_attr = if ssr.is_some() {
+        " data-server-rendered=\"true\""
+    } else {
+        ""
+    };
+
     let html = format!(
         "<!DOCTYPE html>\n\
          <html lang=\"en\">\n\
@@ -1156,16 +1180,20 @@ fn build_html_response(
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n\
          <meta name=\"csrf-token\" content=\"{csrf}\">\n\
          <title>{title}</title>\n\
+         {ssr_head}\
          {head}\
          </head>\n\
          <body>\n\
-         <div id=\"app\" data-page=\"{page}\"></div>\n\
+         <div id=\"app\"{ssr_attr} data-page=\"{page}\">{ssr_body}</div>\n\
          </body>\n\
          </html>",
         csrf = csrf_attr,
         title = title_html,
+        ssr_head = ssr_head,
         head = head_extras,
         page = page_attr,
+        ssr_attr = ssr_attr,
+        ssr_body = ssr_body,
     );
 
     HttpResponse::html(html).header("Vary", "X-Inertia")
