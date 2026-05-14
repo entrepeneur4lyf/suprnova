@@ -3,6 +3,7 @@ pub mod docker_compose;
 pub mod docker_init;
 pub mod generate_routes;
 pub mod generate_types;
+pub mod key_generate;
 pub mod make_action;
 pub mod make_controller;
 pub mod make_error;

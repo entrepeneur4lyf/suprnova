@@ -209,6 +209,10 @@ pub fn print_help() {
     help_line("docker:compose", "Generate docker-compose.yml");
     br();
 
+    println!("  {}", style("SECURITY").bold().underlined());
+    help_line("key:generate", "Mint a fresh APP_KEY (AES-256, base64)");
+    br();
+
     println!("  {}", style("OTHER").bold().underlined());
     help_line("generate-types", "Generate TS types from Rust structs");
     help_line("web:run", "Run web server (production)");

@@ -3539,6 +3539,7 @@ dependencies = [
 name = "suprnova-cli"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "chrono",
  "clap",
  "console",
@@ -3547,9 +3548,11 @@ dependencies = [
  "dotenvy",
  "notify",
  "notify-debouncer-mini",
+ "rand 0.8.6",
  "regex",
  "sea-orm",
  "sea-orm-migration",
+ "suprnova",
  "syn 2.0.117",
  "tokio",
  "toml",

@@ -190,6 +190,14 @@ enum Commands {
         #[arg(long, default_value = "2000")]
         timeout_ms: u64,
     },
+    /// Generate a new APP_KEY (32-byte AES-256, base64 URL-safe, no padding)
+    #[command(name = "key:generate")]
+    KeyGenerate {
+        /// Print only the key (no surrounding hint text). Suitable for
+        /// `APP_KEY=$(suprnova key:generate --show)`.
+        #[arg(long)]
+        show: bool,
+    },
 }
 
 fn main() {
@@ -300,6 +308,9 @@ fn main() {
         }
         Commands::SsrCheck { url, timeout_ms } => {
             commands::ssr_check::run(url, timeout_ms);
+        }
+        Commands::KeyGenerate { show } => {
+            commands::key_generate::run(show);
         }
     }
 }

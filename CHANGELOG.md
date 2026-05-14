@@ -30,6 +30,10 @@ Until a 1.0 release, breaking changes are landed as hard cuts.
   nonce; `encrypt_string` / `decrypt_string` / `encrypt<T>` /
   `decrypt<T>`. `Crypt::init` runs at `Server::from_config` boot from
   the environment.
+- `suprnova key:generate` CLI command — mints a fresh 32-byte AES-256
+  key encoded URL-safe base64 (no padding). `--show` prints only the
+  key for use in `APP_KEY=$(suprnova key:generate --show)`; the
+  default form prints the key plus shell hints.
 - `Http` facade (`http_client::*`) — `get` / `post` / `put` / `patch` /
   `delete` return a `RequestBuilder`; `.send().await` produces a
   `ClientResponse` newtype around `reqwest::Response`. rustls TLS, 30s

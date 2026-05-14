@@ -30,3 +30,14 @@ sea-orm = { version = "1.0", features = ["sqlx-sqlite", "sqlx-mysql", "sqlx-post
 chrono = "0.4"
 toml = "0.8"
 regex = "1"
+# `key:generate` mints a 32-byte AES-256 key encoded URL-safe-no-pad
+# base64 — same wire format as `suprnova::EncryptionKey::to_base64`.
+# We duplicate the six primitives instead of pulling `suprnova` into
+# the CLI binary, which would drag every framework transitive dep
+# along (`tokio`-full + `reqwest` + SeaORM, etc).
+rand = "0.8"
+base64 = "0.22"
+
+[dev-dependencies]
+# Verify generated keys round-trip through the framework's loader.
+suprnova = { path = "../framework", version = "0.1" }
