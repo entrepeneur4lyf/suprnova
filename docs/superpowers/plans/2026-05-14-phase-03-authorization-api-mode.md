@@ -1356,6 +1356,349 @@ git add framework/src/resources framework/src/lib.rs suprnova-macros framework/t
 git commit -m "feat(resources): JsonResource trait + derive for typed API responses"
 ```
 
+- [ ] **Step 7: Add JSON:API spec compliance — `JsonApiResource` peer trait**
+
+Laravel 13 ships JSON:API-compliant resources (`{"data": {"type", "id",
+"attributes", "relationships"}, "included": [...], "links": {...},
+"meta": {...}}`). We add it as a strict peer to the loose `JsonResource`
+so consumers pick: loose for ad-hoc shapes, strict for spec compliance.
+
+Write the failing test first:
+
+```rust
+// framework/tests/json_resources.rs — append
+use suprnova::{JsonApiResource, JsonApiResourceExt, JsonApiRelationships};
+use serde_json::json;
+
+#[derive(serde::Serialize, suprnova::JsonApiResourceDerive)]
+#[resource(model = "User", api_type = "users", id_field = "id")]
+struct UserApiResource {
+    #[jsonapi(id)]
+    pub id: i64,
+    #[jsonapi(attribute)]
+    pub email: String,
+}
+
+#[test]
+fn jsonapi_resource_emits_spec_envelope() {
+    let user = User { id: 7, email: "alice@example.com".into(), password_hash: "x".into() };
+    let resource = UserApiResource::from(user);
+    let envelope = resource.to_json_api();
+
+    assert_eq!(envelope["data"]["type"], "users");
+    assert_eq!(envelope["data"]["id"], "7");
+    assert_eq!(envelope["data"]["attributes"]["email"], "alice@example.com");
+    assert!(envelope["data"]["attributes"].get("id").is_none(),
+        "id must not appear inside attributes (lives on data top-level)");
+}
+
+#[test]
+fn jsonapi_collection_emits_data_array_with_meta_and_links() {
+    let users = vec![
+        User { id: 1, email: "a@e.com".into(), password_hash: "x".into() },
+        User { id: 2, email: "b@e.com".into(), password_hash: "y".into() },
+    ];
+    let resources: Vec<UserApiResource> = users.into_iter().map(UserApiResource::from).collect();
+    let envelope = resources
+        .to_json_api_collection()
+        .with_meta(json!({ "total": 2 }))
+        .with_link("self", "/users")
+        .build();
+
+    let arr = envelope["data"].as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["type"], "users");
+    assert_eq!(arr[0]["id"], "1");
+    assert_eq!(envelope["meta"]["total"], 2);
+    assert_eq!(envelope["links"]["self"], "/users");
+}
+
+#[test]
+fn jsonapi_resource_with_relationships_and_included() {
+    // A Post resource that includes its author user.
+    let post = Post { id: 5, title: "Hi".into(), author_id: 7 };
+    let author = User { id: 7, email: "alice@example.com".into(), password_hash: "x".into() };
+
+    let post_resource = PostApiResource::from(post);
+    let envelope = post_resource
+        .to_json_api_builder()
+        .with_relationship(
+            "author",
+            JsonApiRelationships::single("users", "7"),
+        )
+        .with_included(vec![UserApiResource::from(author).to_json_api_data()])
+        .build();
+
+    assert_eq!(envelope["data"]["relationships"]["author"]["data"]["type"], "users");
+    assert_eq!(envelope["data"]["relationships"]["author"]["data"]["id"], "7");
+    assert_eq!(envelope["included"][0]["type"], "users");
+    assert_eq!(envelope["included"][0]["id"], "7");
+}
+```
+
+Plus add `Post` + `PostApiResource` fixtures alongside the existing
+`User` ones at the top of the test file.
+
+- [ ] **Step 8: Run — expect failure**
+
+```bash
+cargo test -p suprnova --test json_resources jsonapi
+```
+
+Expected: FAIL (`JsonApiResource` not defined).
+
+- [ ] **Step 9: Implement `JsonApiResource` trait + derive**
+
+```rust
+// framework/src/resources/mod.rs — append below JsonResourceExt
+
+use serde_json::{json, Value};
+
+/// JSON:API spec-compliant resource (https://jsonapi.org/format/).
+///
+/// A `JsonApiResource` knows three things the loose `JsonResource`
+/// doesn't:
+/// 1. Its `type` string (Laravel's `JSONAPI_TYPE`)
+/// 2. Which field carries the id (string-coerced per spec)
+/// 3. Which fields belong under `attributes` (vs the top-level `data`)
+pub trait JsonApiResource: Serialize {
+    /// The JSON:API `type` member.
+    fn jsonapi_type() -> &'static str;
+
+    /// Stringified id for this resource (spec requires `"id"` always
+    /// be a string).
+    fn jsonapi_id(&self) -> String;
+
+    /// The `attributes` object for this resource. Default impl uses
+    /// the `Serialize` impl and strips the id field — derive macro
+    /// overrides this with field-explicit emission.
+    fn jsonapi_attributes(&self) -> Value {
+        let mut v = serde_json::to_value(self).unwrap_or(Value::Null);
+        if let Value::Object(ref mut map) = v {
+            map.remove("id");
+        }
+        v
+    }
+
+    /// Build the `data` envelope for this single resource.
+    fn to_json_api_data(&self) -> Value {
+        json!({
+            "type": Self::jsonapi_type(),
+            "id": self.jsonapi_id(),
+            "attributes": self.jsonapi_attributes(),
+        })
+    }
+
+    /// Wrap the data envelope in a top-level JSON:API document.
+    fn to_json_api(&self) -> Value {
+        json!({ "data": self.to_json_api_data() })
+    }
+
+    /// Open a builder for adding relationships, included, links, meta.
+    fn to_json_api_builder(&self) -> JsonApiBuilder {
+        JsonApiBuilder::single(self.to_json_api_data())
+    }
+}
+
+/// Builder for a JSON:API document with optional relationships,
+/// included, links, and meta.
+pub struct JsonApiBuilder {
+    data: Value,
+    included: Vec<Value>,
+    links: serde_json::Map<String, Value>,
+    meta: Option<Value>,
+    relationships: serde_json::Map<String, Value>,
+}
+
+impl JsonApiBuilder {
+    pub(crate) fn single(data: Value) -> Self {
+        Self {
+            data,
+            included: vec![],
+            links: serde_json::Map::new(),
+            meta: None,
+            relationships: serde_json::Map::new(),
+        }
+    }
+
+    pub(crate) fn collection(data: Vec<Value>) -> Self {
+        Self {
+            data: Value::Array(data),
+            included: vec![],
+            links: serde_json::Map::new(),
+            meta: None,
+            relationships: serde_json::Map::new(),
+        }
+    }
+
+    pub fn with_relationship(mut self, name: impl Into<String>, rel: Value) -> Self {
+        self.relationships.insert(name.into(), rel);
+        self
+    }
+
+    pub fn with_included(mut self, included: Vec<Value>) -> Self {
+        self.included.extend(included);
+        self
+    }
+
+    pub fn with_link(mut self, rel: impl Into<String>, href: impl Into<String>) -> Self {
+        self.links.insert(rel.into(), Value::String(href.into()));
+        self
+    }
+
+    pub fn with_meta(mut self, meta: Value) -> Self {
+        self.meta = Some(meta);
+        self
+    }
+
+    pub fn build(mut self) -> Value {
+        // Attach relationships back onto the data object if any were
+        // declared. For collections, callers should declare relationships
+        // per-element before building.
+        if !self.relationships.is_empty() {
+            if let Value::Object(ref mut data_obj) = self.data {
+                data_obj.insert("relationships".into(), Value::Object(self.relationships));
+            }
+        }
+
+        let mut doc = serde_json::Map::new();
+        doc.insert("data".into(), self.data);
+        if !self.included.is_empty() {
+            doc.insert("included".into(), Value::Array(self.included));
+        }
+        if !self.links.is_empty() {
+            doc.insert("links".into(), Value::Object(self.links));
+        }
+        if let Some(meta) = self.meta {
+            doc.insert("meta".into(), meta);
+        }
+        Value::Object(doc)
+    }
+}
+
+/// Helpers for building `relationships` payloads per JSON:API spec.
+pub struct JsonApiRelationships;
+
+impl JsonApiRelationships {
+    /// Single relationship: `{"data": {"type": "...", "id": "..."}}`.
+    pub fn single(rel_type: &str, rel_id: &str) -> Value {
+        json!({ "data": { "type": rel_type, "id": rel_id } })
+    }
+
+    /// To-many relationship: `{"data": [{"type": "...", "id": "..."}, ...]}`.
+    pub fn many(items: impl IntoIterator<Item = (String, String)>) -> Value {
+        let data: Vec<Value> = items
+            .into_iter()
+            .map(|(t, i)| json!({ "type": t, "id": i }))
+            .collect();
+        json!({ "data": data })
+    }
+}
+
+/// Collection helper for `Vec<T: JsonApiResource>`.
+pub trait JsonApiResourceExt {
+    fn to_json_api_collection(&self) -> JsonApiBuilder;
+}
+
+impl<T: JsonApiResource> JsonApiResourceExt for Vec<T> {
+    fn to_json_api_collection(&self) -> JsonApiBuilder {
+        let data: Vec<Value> = self.iter().map(|t| t.to_json_api_data()).collect();
+        JsonApiBuilder::collection(data)
+    }
+}
+```
+
+```rust
+// suprnova-macros/src/json_api_resource.rs (new file)
+use proc_macro::TokenStream;
+use quote::quote;
+use syn::{parse_macro_input, DeriveInput};
+
+pub fn derive_json_api_resource(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+
+    // Read `#[resource(model = "...", api_type = "users", id_field = "id")]`
+    let (model_path, api_type, id_field) = parse_resource_attrs(&input.attrs);
+    let model_ident = syn::Ident::new(&model_path, name.span());
+    let id_field_ident = syn::Ident::new(&id_field, name.span());
+
+    let fields = extract_named_fields(&input.data);
+    let field_inits = fields.iter().map(|f| {
+        let ident = f.ident.as_ref().unwrap();
+        quote! { #ident: model.#ident }
+    });
+
+    // Collect attribute field names (everything except #[jsonapi(id)])
+    let attr_field_names: Vec<_> = fields
+        .iter()
+        .filter(|f| !has_jsonapi_id_attr(f))
+        .map(|f| f.ident.as_ref().unwrap())
+        .collect();
+
+    let expanded = quote! {
+        impl ::std::convert::From<#model_ident> for #name {
+            fn from(model: #model_ident) -> Self {
+                Self {
+                    #(#field_inits,)*
+                }
+            }
+        }
+
+        impl ::suprnova::resources::JsonApiResource for #name {
+            fn jsonapi_type() -> &'static str { #api_type }
+            fn jsonapi_id(&self) -> ::std::string::String {
+                self.#id_field_ident.to_string()
+            }
+            fn jsonapi_attributes(&self) -> ::serde_json::Value {
+                ::serde_json::json!({
+                    #( stringify!(#attr_field_names): self.#attr_field_names, )*
+                })
+            }
+        }
+    };
+    expanded.into()
+}
+
+// parse_resource_attrs / extract_named_fields / has_jsonapi_id_attr:
+// reuse the patterns from suprnova-macros/src/json_resource.rs; helper
+// fns live in suprnova-macros/src/utils.rs.
+```
+
+```rust
+// suprnova-macros/src/lib.rs — append
+mod json_api_resource;
+
+#[proc_macro_derive(JsonApiResourceDerive, attributes(resource, jsonapi))]
+pub fn derive_json_api_resource(input: TokenStream) -> TokenStream {
+    json_api_resource::derive_json_api_resource(input)
+}
+```
+
+```rust
+// framework/src/lib.rs — append
+pub use resources::{
+    JsonApiBuilder, JsonApiRelationships, JsonApiResource, JsonApiResourceExt,
+};
+pub use suprnova_macros::JsonApiResourceDerive;
+```
+
+- [ ] **Step 10: Run — expect pass**
+
+```bash
+cargo test -p suprnova --test json_resources
+```
+
+Expected: all 5 tests pass (the 2 original loose-resource tests plus
+the 3 new spec-compliant tests).
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add framework/src/resources framework/src/lib.rs suprnova-macros framework/tests/json_resources.rs
+git commit -m "feat(resources): JsonApiResource — JSON:API spec-compliant peer to JsonResource"
+```
+
 ---
 
 ## Task 10: `suprnova new --api` scaffolder
@@ -1586,7 +1929,8 @@ git push
 | Passkeys/WebAuthn | Task 6 |
 | Magic Links | Task 7 |
 | Bearer token middleware (API auth) | Task 8 |
-| JsonResource trait + derive | Task 9 |
+| JsonResource trait + derive (loose envelope) | Task 9 Steps 1-6 |
+| `JsonApiResource` — JSON:API spec-compliant peer (`data` with `type`/`id`/`attributes`, `relationships`, `included`, `links`, `meta`) | Task 9 Steps 7-11 |
 | `suprnova new --api` | Task 10 |
 | App dogfood | Task 11 |
 
