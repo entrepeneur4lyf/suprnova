@@ -57,6 +57,11 @@ impl HttpResponse {
         self
     }
 
+    /// Get the configured HTTP status code.
+    pub fn status_code(&self) -> u16 {
+        self.status
+    }
+
     /// Add a header to the response
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));

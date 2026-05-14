@@ -39,9 +39,10 @@ pub use session::{
     session, session_mut, SessionConfig, SessionData, SessionMiddleware, SessionStore,
 };
 pub use inertia::{
-    DeferConfig, DeferOptions, Frontend, InertiaConfig, InertiaRegistry, InertiaRequestExt,
-    InertiaResponse, InertiaSharedData, InertiaVersionMiddleware, MergeConfig, MergeStrategy,
-    OnceConfig, OnceOptions, PartialFilter, Prop, PropFuture, PropResolver,
+    DeferConfig, DeferOptions, EncryptHistoryMiddleware, Frontend, Inertia303Middleware,
+    InertiaConfig, InertiaRegistry, InertiaRequestExt, InertiaResponse, InertiaSharedData,
+    InertiaVersionMiddleware, MergeConfig, MergeStrategy, OnceConfig, OnceOptions, PartialFilter,
+    Prop, PropFuture, PropResolver,
 };
 pub use middleware::{
     register_global_middleware, Middleware, MiddlewareFuture, MiddlewareRegistry, Next,

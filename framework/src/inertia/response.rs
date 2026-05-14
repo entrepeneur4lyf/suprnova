@@ -28,6 +28,15 @@ pub struct InertiaResponse {
     flash: serde_json::Map<String, Value>,
     config: InertiaConfig,
     title: Option<String>,
+    /// Per-response history-encryption override. `Some(true)` forces
+    /// encryption on, `Some(false)` forces off, `None` defers to the
+    /// middleware task-local + config default. Maps to
+    /// `Inertia::encryptHistory($bool)`.
+    encrypt_history: Option<bool>,
+    /// When `true`, the page object carries `clearHistory: true` so the
+    /// client rotates its history-encryption key. Maps to
+    /// `Inertia::clearHistory()`.
+    clear_history: bool,
 }
 
 impl InertiaResponse {
@@ -39,6 +48,8 @@ impl InertiaResponse {
             flash: serde_json::Map::new(),
             config: InertiaConfig::default(),
             title: None,
+            encrypt_history: None,
+            clear_history: false,
         }
     }
 
@@ -234,6 +245,32 @@ impl InertiaResponse {
         self
     }
 
+    /// Force history encryption on or off for this response. Overrides
+    /// both [`EncryptHistoryMiddleware`](crate::EncryptHistoryMiddleware)
+    /// and [`InertiaConfig::encrypt_history_default`](crate::InertiaConfig::encrypt_history_default).
+    /// Maps to `Inertia::encryptHistory($bool)`.
+    pub fn encrypt_history(mut self, on: bool) -> Self {
+        self.encrypt_history = Some(on);
+        self
+    }
+
+    /// Mark this response so the client rotates its history-encryption
+    /// key. Subsequent attempts to decrypt prior history entries fail
+    /// and the client refetches them. Maps to `Inertia::clearHistory()`.
+    pub fn clear_history(mut self) -> Self {
+        self.clear_history = true;
+        self
+    }
+
+    /// Build a `409 Conflict` external-redirect response. The client
+    /// performs `window.location = url`, doing a full page navigation
+    /// (not an Inertia SPA visit). Maps to `Inertia::location($url)`.
+    pub fn location(url: impl AsRef<str>) -> HttpResponse {
+        HttpResponse::text("")
+            .status(409)
+            .header("X-Inertia-Location", url.as_ref())
+    }
+
     /// Internal helper used by the `inertia_response!` macro to unfold a
     /// typed `Props` struct into individual eager props without re-serializing.
     ///
@@ -276,7 +313,15 @@ impl InertiaResponse {
             flash: response_flash,
             config,
             title,
+            encrypt_history,
+            clear_history,
         } = self;
+
+        // History-encryption precedence: per-response override (handler
+        // wins) > middleware task_local > config default.
+        let resolved_encrypt_history = encrypt_history
+            .or_else(flash::encrypt_history_flag)
+            .unwrap_or(config.encrypt_history_default);
 
         // Layer props in precedence order (later writes override earlier):
         //   1. Static shared registry  (App::inertia_share, App::inertia_share_lazy)
@@ -305,7 +350,16 @@ impl InertiaResponse {
             flash.insert(k, v);
         }
 
-        let page = build_page_object(&component, materialized, &config, url, &metadata, flash);
+        let page = build_page_object(
+            &component,
+            materialized,
+            &config,
+            url,
+            &metadata,
+            flash,
+            resolved_encrypt_history,
+            clear_history,
+        );
 
         Ok(if is_inertia_request {
             build_json_response(&page)
@@ -328,12 +382,25 @@ impl InertiaResponse {
             flash,
             config,
             title: _,
+            encrypt_history,
+            clear_history,
         } = self;
         let (materialized, metadata) =
             resolve_props(props, filter, &[])
                 .await
                 .expect("test resolver should not fail");
-        build_page_object(&component, materialized, &config, url, &metadata, flash)
+        let resolved_encrypt_history = encrypt_history
+            .unwrap_or(config.encrypt_history_default);
+        build_page_object(
+            &component,
+            materialized,
+            &config,
+            url,
+            &metadata,
+            flash,
+            resolved_encrypt_history,
+            clear_history,
+        )
     }
 
     /// Build a `409 Conflict` response indicating an asset version mismatch.
@@ -586,6 +653,8 @@ fn build_page_object(
     url: String,
     metadata: &PageMetadata,
     flash: serde_json::Map<String, Value>,
+    encrypt_history: bool,
+    clear_history: bool,
 ) -> Value {
     let mut page = serde_json::Map::new();
     page.insert(
@@ -595,6 +664,16 @@ fn build_page_object(
     page.insert("props".to_string(), Value::Object(materialized_props));
     page.insert("url".to_string(), Value::String(url));
     page.insert("version".to_string(), Value::String(config.version.clone()));
+
+    // Per spec, `encryptHistory` is only emitted when `true`, and
+    // `clearHistory` likewise. Falsy values are omitted to keep the
+    // page object lean.
+    if encrypt_history {
+        page.insert("encryptHistory".to_string(), Value::Bool(true));
+    }
+    if clear_history {
+        page.insert("clearHistory".to_string(), Value::Bool(true));
+    }
 
     if !flash.is_empty() {
         page.insert("flash".to_string(), Value::Object(flash));

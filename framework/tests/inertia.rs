@@ -1138,6 +1138,100 @@ async fn share_once_via_app_registers_once_prop() {
     assert!(page["onceProps"]["countries"].is_object());
 }
 
+// ---- Tier 3: history encryption, location, 303 middleware ----
+
+#[tokio::test]
+async fn encrypt_history_per_response_emits_flag() {
+    let req = MockReq::new("/").inertia();
+    let resp = InertiaResponse::new("Home")
+        .encrypt_history(true)
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(page["encryptHistory"], true);
+}
+
+#[tokio::test]
+async fn encrypt_history_omitted_when_false_or_unset() {
+    let req = MockReq::new("/").inertia();
+    let resp = InertiaResponse::new("Home").resolve(&req).await.unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(!page.as_object().unwrap().contains_key("encryptHistory"));
+
+    let req = MockReq::new("/").inertia();
+    let resp = InertiaResponse::new("Home")
+        .encrypt_history(false)
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(!page.as_object().unwrap().contains_key("encryptHistory"));
+}
+
+#[tokio::test]
+async fn clear_history_emits_flag_only_when_set() {
+    let req = MockReq::new("/").inertia();
+    let resp = InertiaResponse::new("Home")
+        .clear_history()
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(page["clearHistory"], true);
+
+    let req = MockReq::new("/").inertia();
+    let resp = InertiaResponse::new("Home").resolve(&req).await.unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(!page.as_object().unwrap().contains_key("clearHistory"));
+}
+
+#[tokio::test]
+async fn encrypt_history_per_response_overrides_config_default() {
+    let cfg = suprnova::InertiaConfig::new().encrypt_history(true);
+    let req = MockReq::new("/").inertia();
+    let resp = InertiaResponse::new("Home")
+        .with_config(cfg)
+        .encrypt_history(false)
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    // Per-response false beats config-default true.
+    assert!(!page.as_object().unwrap().contains_key("encryptHistory"));
+}
+
+#[tokio::test]
+async fn encrypt_history_config_default_applies_when_no_override() {
+    let cfg = suprnova::InertiaConfig::new().encrypt_history(true);
+    let req = MockReq::new("/").inertia();
+    let resp = InertiaResponse::new("Home")
+        .with_config(cfg)
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(page["encryptHistory"], true);
+}
+
+#[tokio::test]
+async fn inertia_location_returns_409_with_x_inertia_location() {
+    let resp = InertiaResponse::location("https://example.com/external");
+    let hyper_resp = resp.into_hyper();
+    assert_eq!(hyper_resp.status(), 409);
+    assert_eq!(
+        hyper_resp.headers().get("X-Inertia-Location").unwrap(),
+        "https://example.com/external"
+    );
+}
+
 // ---- version-mismatch middleware ----
 //
 // These tests drive the middleware directly via the Middleware trait

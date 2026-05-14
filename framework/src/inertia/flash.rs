@@ -40,6 +40,22 @@ tokio::task_local! {
     pub(crate) static FLASH_BAG: Arc<Mutex<HashMap<String, Value>>>;
 }
 
+tokio::task_local! {
+    /// Per-request history-encryption flag set by
+    /// [`EncryptHistoryMiddleware`](crate::inertia::EncryptHistoryMiddleware).
+    /// Read by `InertiaResponse::resolve` alongside the per-response
+    /// override and the config default. See the v3 history-encryption
+    /// docs for protocol details.
+    pub(crate) static ENCRYPT_HISTORY: bool;
+}
+
+/// Whether the active request has been marked for history encryption
+/// by [`EncryptHistoryMiddleware`]. Returns `None` when no middleware
+/// has set the flag; the caller should fall back to the config default.
+pub(crate) fn encrypt_history_flag() -> Option<bool> {
+    ENCRYPT_HISTORY.try_with(|b| *b).ok()
+}
+
 /// Push a value into the current request's flash bag.
 ///
 /// Silently no-ops when there is no active flash scope (e.g. called

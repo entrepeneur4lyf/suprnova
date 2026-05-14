@@ -70,6 +70,11 @@ pub struct InertiaConfig {
     /// Default `<title>` for the HTML shell. Per-response title overrides
     /// via `InertiaResponse::title(...)`.
     pub default_title: String,
+    /// Whether Inertia responses encrypt their browser history state by
+    /// default. Maps to Laravel's `config('inertia.history.encrypt')`.
+    /// Overridable per-request via `EncryptHistoryMiddleware` and
+    /// per-response via `InertiaResponse::encrypt_history(bool)`.
+    pub encrypt_history_default: bool,
 }
 
 impl Default for InertiaConfig {
@@ -82,6 +87,7 @@ impl Default for InertiaConfig {
             development: true,
             frontend,
             default_title: "Suprnova".to_string(),
+            encrypt_history_default: false,
         }
     }
 }
@@ -121,6 +127,11 @@ impl InertiaConfig {
 
     pub fn default_title(mut self, title: impl Into<String>) -> Self {
         self.default_title = title.into();
+        self
+    }
+
+    pub fn encrypt_history(mut self, on: bool) -> Self {
+        self.encrypt_history_default = on;
         self
     }
 }

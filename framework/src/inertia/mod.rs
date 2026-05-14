@@ -1,4 +1,6 @@
 mod config;
+mod conversion_middleware;
+mod encrypt_middleware;
 pub(crate) mod flash;
 mod prop;
 mod response;
@@ -6,6 +8,8 @@ mod shared;
 mod version_middleware;
 
 pub use config::{Frontend, InertiaConfig};
+pub use conversion_middleware::Inertia303Middleware;
+pub use encrypt_middleware::EncryptHistoryMiddleware;
 pub use prop::{
     DeferConfig, DeferOptions, InertiaRequestExt, MergeConfig, MergeStrategy, OnceConfig,
     OnceOptions, PartialFilter, Prop, PropFuture, PropResolver,
