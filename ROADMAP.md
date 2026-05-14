@@ -130,6 +130,15 @@ is what makes Rust frameworks reach 80% production-ready and stall.
 - HTTP request/response (inbound great; outbound HTTP client missing)
 - Container scoped bindings (singletons work; per-request scoping
   underspecified)
+- Schema DSL + Query Builder facades (migrations work via SeaORM's
+  migration types, but no Laravel-shape `Schema::create("users", |t| { ... })`
+  builder; no entity-less `Query::table("users").where(...).get()`
+  for ad-hoc queries). **Foundation: re-export
+  [`sea-query`](https://github.com/SeaQL/sea-query) 1.0
+  (MIT/Apache-2.0)** — it's already a transitive dep via SeaORM, so
+  exposing `suprnova::schema::*` and `suprnova::query::*` as thin
+  re-export facades is free leverage. Covers MySQL/Postgres/SQLite
+  with the same DSL.
 
 **Missing - the rest of this document.**
 
@@ -226,20 +235,32 @@ multipart parsing + validation + temp staging on the inbound side.
 Both halves matter: storage drivers handle where a file goes, upload
 handling determines how it arrives. Controllers touch both.
 
-**Storage drivers (outbound):**
-- Local (with subdir scoping)
-- S3 and S3-compatible (R2, MinIO, Backblaze B2, DigitalOcean Spaces,
-  Wasabi) — built on **[`s3-rs`](https://crates.io/crates/s3)** as
-  the primary driver. Lean, modern, MinIO + RustFS integration-tested,
-  presigned URLs + multipart, small dep surface. Purpose-built for
-  the multi-provider story we need.
-- Google Cloud Storage
-- Azure Blob
-- In-memory (for tests)
+**Foundation: [`opendal`](https://opendal.apache.org/) (Apache-2.0).**
+A unified data-access trait over 40+ storage backends from the Apache
+foundation. We adopt it as the storage abstraction layer; every
+`Storage::disk(...)` driver is an opendal `Operator` under a
+Suprnova-named alias. Switching backends is one config-value change.
+Matches our "no gatekeeping" philosophy: S3, Azure Blob, GCS, local
+FS, in-memory, HTTP, WebDAV, FTP/SFTP, IPFS, and many more all ship
+through the same facade — Laravel's Flysystem is the closest analog
+but has fewer adapters and no streaming-first design. (Validated by
+loco's choice of the same library.)
 
-Optional `s3-aws` feature flag for the AWS-SDK driver — needed only for
-users who require STS / AssumeRole / IMDS / cross-account IAM patterns
-the lean client doesn't cover. Default install stays slim.
+**Storage drivers (outbound):**
+- Local (`services-fs`) — with subdir scoping
+- S3 and S3-compatible (R2, MinIO, Backblaze B2, DigitalOcean Spaces,
+  Wasabi) via `services-s3`
+- Azure Blob via `services-azblob`
+- Google Cloud Storage via `services-gcs`
+- In-memory (`services-memory`) — for tests
+- All other opendal-supported backends (Aliyun OSS, Tencent COS, IPFS,
+  WebDAV, etc.) are wired through the same `Storage::disk(...)` facade
+  with a single feature-flag flip.
+
+For users requiring STS / AssumeRole / IMDS / cross-account IAM
+patterns beyond what opendal's S3 service handles, an optional
+`s3-aws` feature flag pulls in `aws-sdk-s3` as an alternate driver.
+Default install stays slim.
 
 All first-class. **Rust gun:** streaming `AsyncRead` / `AsyncWrite`
 everywhere - no `file_get_contents()` patterns that materialize 4GB
@@ -298,7 +319,7 @@ the framework's type-safety stance, with `minijinja` as a runtime
 alternative for hot-reload).
 
 **Rust gun:** mail building is synchronous and fast; sending is
-async on the in-process queue (Track 6) so a controller can
+async on the in-process queue (Track 7) so a controller can
 `Mail::queue(welcome_email)` and return without blocking. No separate
 queue worker needed for transactional mail. lettre's connection pool
 means a burst of `Mail::send` calls reuses an open SMTP/TLS session
@@ -488,13 +509,33 @@ impl SendInvoice {
 Queue::push(SendInvoice { order_id: 42 }).await?;
 ```
 
-**Drivers:** Redis, database (default for new apps), RabbitMQ, NATS,
-Amazon SQS, in-process.
+**Foundation: [`sea-streamer`](https://github.com/SeaQL/sea-streamer)
+0.5 (MIT/Apache-2.0).** A backend-agnostic stream processing toolkit
+with first-class **Redis Streams** and **Kafka** backends behind a
+common trait, plus file + stdio backends for testing and dev. We
+adopt it as the underlying transport for the Queue (and reuse it for
+fanout in Broadcasting, Track 8). Redis Streams as a queue backend
+gives us consumer groups, per-message acknowledgment, and replay —
+strictly better than the Redis-list pattern Laravel uses. Kafka comes
+free in the same package; the same `Queue::push` call targets either
+by changing one URL. The vendored reference lives at
+`reference/sea-streamer-0.5.2/` for cross-checking.
+
+**Drivers:** Redis Streams (sea-streamer), Kafka (sea-streamer),
+database (default for new apps — Postgres / MySQL / SQLite), NATS,
+Amazon SQS, in-process. File-based queue (also via sea-streamer)
+ships as a dev/test backend with replayable history — a regression
+captured as a `.ss` file can be replayed deterministically.
 
 **Rust gun:** the in-process driver runs jobs on Tokio tasks in the
-same process - for monolith apps, zero infrastructure required. Real
-backends for when you need scale-out. Job retries, backoff, fail-handler
-hooks. Built-in dead-letter-queue.
+same process — for monolith apps, zero infrastructure required. Real
+backends for when you need scale-out. Job retries, backoff,
+fail-handler hooks. Built-in dead-letter-queue. With sea-streamer
+under the hood, the read/process/ack loops are decoupled so a
+single worker can saturate throughput on the I/O-bound legs while
+processing in parallel — Laravel Horizon's whole reason to exist
+is matching this for Redis-list queues; we get it natively because
+Redis Streams + decoupled loops are built in.
 
 **Cache extensions.** Atomic locks, tags.
 
@@ -574,6 +615,14 @@ your HTTP handlers. No separate broadcast server. Channels are typed;
 presence and private auth are compile-time-checked. Built on
 `tokio-tungstenite`.
 
+**Multi-process fanout.** When you scale beyond one server,
+`sea-streamer` (foundation library from Track 7) handles
+inter-process pub/sub via Redis Streams or Kafka. Each
+WebSocket-handling process subscribes to a stream key
+(`channel:orders.42`) and re-broadcasts received events to its
+locally-connected clients. Same library, same code path, different
+URL — no separate fanout service to deploy.
+
 **Presence channels** — `PresenceChannel<RoomId>` knows who's
 connected, server-side, in real time. Joining/leaving fires `Event`s
 that other listeners (or other connected clients) react to.
@@ -637,11 +686,89 @@ Small individually, big collectively.
   We have some of this; needs filling in.
 - **Process** - `Process::run("git status").output().await`. Wraps
   `tokio::process`. Small.
+- **Schedule polish** — natural-language cron strings via
+  [`english-to-cron`](https://crates.io/crates/english-to-cron):
+  `Schedule::call(send_digests).at("every day at 8am")` compiles to
+  the right cron expression at runtime. Cribbed from loco's DX win.
+- **`suprnova doctor`** — diagnostic command that validates env vars,
+  config files, DB connectivity, migration state, and Inertia/SSR
+  worker reachability. First port-of-call when a new dev clones the
+  repo and `serve` fails. Modeled on `cargo loco doctor`.
 
 > **Note on testing helpers.** `Mail::fake()` / `Queue::fake()` /
 > `Event::fake()` / `Http::fake()` are *not* polish items. They ship
 > with their respective tracks per Philosophy rule 4. They appear here
 > only as a cross-reference, not as deferred work.
+
+### Track 11 - Admin Panel
+
+CRUD on every entity, search, RBAC views, audit trails. Production
+apps need this by month one — Laravel ships Nova / Filament; Rails
+ships ActiveAdmin / Avo / RailsAdmin. Real Rust apps deserve the
+same productivity boost. **Inspired by [SeaORM Pro](https://www.sea-ql.org/sea-orm-pro/)'s
+TOML-driven config pattern** (which itself is loco-bound today, so
+we crib the design and build our own implementation against the
+Suprnova HTTP layer + auth + policies).
+
+**TOML-config approach.** A file at `admin/tables/users.toml`
+declares which columns show, which relations expand, which actions
+appear, and which policies gate them. No UI code required for the
+common case. Override with a custom Inertia page when you need
+bespoke UX.
+
+```toml
+[table]
+entity = "users"
+title = "Users"
+icon = "user"
+
+[[columns]]
+field = "email"
+sortable = true
+searchable = true
+
+[[columns]]
+field = "created_at"
+format = "datetime"
+
+[policies]
+view = "UserPolicy::view"
+edit = "UserPolicy::edit"
+delete = "UserPolicy::delete"
+
+[audit]
+enabled = true
+```
+
+**Architecture.** The admin panel is a separate Inertia app served
+at `/admin` (configurable). It reuses Suprnova's auth, routing,
+policies (Track 5), and migrations — no separate framework
+underneath. Built on our React / Vue / Svelte starter (user picks
+at scaffold time; default React 19). Gated with an `[admin]`
+middleware that requires an `is_admin` claim or a `super_admin`
+role from Track 5's Authorization layer.
+
+**Composite views.** SeaORM Pro's `composite_tables` pattern
+translated to TOML: declare a "Sales Order" view that joins
+`sales_order_header` with `sales_order_detail` and `customer`, all
+rendered in one page with related-record navigation.
+
+**RBAC.** Built on top of Track 5's Authorization. Policies declared
+in TOML reference our `#[policy]` impls — the admin panel does not
+invent a parallel auth system. Same Gate trips for both end users
+and admin staff.
+
+**Audit trail.** Opt-in per table via `[audit] enabled = true`. The
+framework writes a row to `audits` on every create/update/delete
+with the acting user id, table, row id, action, and a JSON diff of
+the changed columns. Powers "who edited this record" queries
+without instrumenting each controller.
+
+**Rust gun:** every admin read goes through the same SeaORM entity
++ Policy gate as the application — no "admin bypass" path that
+silently skips authorization (a recurring source of pwned Laravel
+apps). Streaming pagination over millions of rows because we use
+async cursors, not `LIMIT N OFFSET M` page joins.
 
 ## Recommended sequencing
 
@@ -684,14 +811,19 @@ moment at full strength — Phase 1 already shipped SSE for the simpler
 cases. This is the demo that gets a Laravel dev to say "wait, you can
 do that in one process?"
 
-**Phase 8: Differentiation** *(ongoing)*
+**Phase 8: Admin Panel** *(4–5 weeks)*
+TOML-driven CRUD + RBAC + audit trails over every entity. Depends
+on Authorization (Phase 3) and Filesystem (Phase 4) shipping first.
+The "you can ship a real product on month four" moment.
+
+**Phase 9: Differentiation** *(ongoing)*
 Vectors, graphs, search, time-series. Driven by real consumer needs
 (`nation-x.com` will exercise some). Ship one when the demand exists;
 the others queue up behind.
 
-**Phase 9: Polish** *(parallel with phases above)*
-Translation, Support helpers, Process, scoped bindings, routing extras.
-These fit between bigger pieces.
+**Phase 10: Polish** *(parallel with phases above)*
+Translation, Support helpers, Process, scoped bindings, routing extras,
+`english-to-cron`, `suprnova doctor`. These fit between bigger pieces.
 
 ## How a Laravel dev experiences this
 
