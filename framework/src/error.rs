@@ -207,6 +207,67 @@ impl ValidationErrors {
             "errors": self.errors
         })
     }
+
+    /// Return a new `ValidationErrors` containing only the entries whose
+    /// field name appears in `keep`. Used by Precognition's
+    /// `Precognition-Validate-Only` header — the server runs full
+    /// validation but reports errors only for the fields the client
+    /// asked about.
+    pub fn retain_fields(&self, keep: &[String]) -> Self {
+        let kept = self
+            .errors
+            .iter()
+            .filter(|(k, _)| keep.iter().any(|w| w == *k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        Self { errors: kept }
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn retain_fields_keeps_only_listed() {
+        let mut errs = ValidationErrors::new();
+        errs.add("email", "invalid");
+        errs.add("password", "too short");
+        errs.add("name", "required");
+        let kept = errs.retain_fields(&["email".to_string(), "name".to_string()]);
+        assert!(kept.errors.contains_key("email"));
+        assert!(kept.errors.contains_key("name"));
+        assert!(!kept.errors.contains_key("password"));
+    }
+
+    #[test]
+    fn retain_fields_empty_keep_returns_empty() {
+        let mut errs = ValidationErrors::new();
+        errs.add("email", "invalid");
+        let kept = errs.retain_fields(&[]);
+        assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn retain_fields_no_match_returns_empty() {
+        let mut errs = ValidationErrors::new();
+        errs.add("email", "invalid");
+        let kept = errs.retain_fields(&["nonexistent".to_string()]);
+        assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn precognition_success_status_204() {
+        let e = FrameworkError::PrecognitionSuccess;
+        assert_eq!(e.status_code(), 204);
+    }
+
+    #[test]
+    fn precognition_failure_status_422() {
+        let errs = ValidationErrors::new();
+        let e = FrameworkError::PrecognitionFailure(errs);
+        assert_eq!(e.status_code(), 422);
+    }
 }
 
 impl Default for ValidationErrors {
@@ -332,6 +393,25 @@ pub enum FrameworkError {
         /// The expected type (e.g., "i32", "uuid")
         expected_type: &'static str,
     },
+
+    /// Precognition validation passed (204 No Content)
+    ///
+    /// Returned by `FormRequest::extract` when the request carries a
+    /// `Precognition: true` header and the (possibly field-filtered)
+    /// validation passed. The controller body is skipped. The response
+    /// converter emits 204 with `Precognition: true`,
+    /// `Precognition-Success: true`, `Vary: Precognition`.
+    #[error("Precognition validation passed")]
+    PrecognitionSuccess,
+
+    /// Precognition validation failed (422 Unprocessable Entity)
+    ///
+    /// Same shape as `Validation` but the response converter adds the
+    /// `Precognition: true` + `Vary: Precognition` headers so the
+    /// client (and any intermediary cache) sees the Precognition
+    /// envelope.
+    #[error("Precognition validation failed")]
+    PrecognitionFailure(ValidationErrors),
 }
 
 impl FrameworkError {
@@ -390,6 +470,8 @@ impl FrameworkError {
             Self::Unauthorized => 403,
             Self::ModelNotFound { .. } => 404,
             Self::ParamParse { .. } => 400,
+            Self::PrecognitionSuccess => 204,
+            Self::PrecognitionFailure(_) => 422,
         }
     }
 

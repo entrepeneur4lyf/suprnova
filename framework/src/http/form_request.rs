@@ -81,6 +81,24 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send {
             return Err(FrameworkError::Unauthorized);
         }
 
+        // Detect Precognition envelope BEFORE consuming the body so
+        // we know how to short-circuit. The client sends:
+        //   Precognition: true                       — opt into the protocol
+        //   Precognition-Validate-Only: a,b,c        — filter errors to these fields
+        let is_precognition = req
+            .header("Precognition")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let validate_only: Vec<String> = req
+            .header("Precognition-Validate-Only")
+            .map(|raw| {
+                raw.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
         // Get content type before consuming body
         let content_type = req.content_type().map(|s| s.to_string());
 
@@ -92,8 +110,34 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send {
             _ => parse_json(&bytes)?,
         };
 
-        // Validate the parsed data
-        if let Err(errors) = data.validate() {
+        // Run validation. Precognition runs the same validators as a
+        // real submission — we just decide what to do with the result.
+        let validation_result = data.validate();
+
+        if is_precognition {
+            return match validation_result {
+                Ok(()) => Err(FrameworkError::PrecognitionSuccess),
+                Err(errors) => {
+                    let errs = ValidationErrors::from_validator(errors);
+                    let filtered = if validate_only.is_empty() {
+                        // No filter — return all errors as the failure.
+                        errs
+                    } else {
+                        errs.retain_fields(&validate_only)
+                    };
+                    if filtered.is_empty() {
+                        // All real errors were on fields the client
+                        // didn't ask about → success for what was asked.
+                        Err(FrameworkError::PrecognitionSuccess)
+                    } else {
+                        Err(FrameworkError::PrecognitionFailure(filtered))
+                    }
+                }
+            };
+        }
+
+        // Non-Precognition: standard flow.
+        if let Err(errors) = validation_result {
             return Err(FrameworkError::Validation(
                 ValidationErrors::from_validator(errors),
             ));

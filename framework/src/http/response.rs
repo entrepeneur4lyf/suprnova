@@ -300,6 +300,28 @@ impl From<RedirectRouteBuilder> for Response {
 /// framework errors as appropriate HTTP responses.
 impl From<crate::error::FrameworkError> for HttpResponse {
     fn from(err: crate::error::FrameworkError) -> HttpResponse {
+        // Precognition gets early-exit treatment: success → 204 with
+        // headers and no body; failure → 422 with errors body and the
+        // Precognition envelope. Both responses carry `Vary: Precognition`
+        // so caches don't confuse Precognition responses with regular
+        // form-submission responses.
+        match &err {
+            crate::error::FrameworkError::PrecognitionSuccess => {
+                return HttpResponse::new()
+                    .status(204)
+                    .header("Precognition", "true")
+                    .header("Precognition-Success", "true")
+                    .header("Vary", "Precognition");
+            }
+            crate::error::FrameworkError::PrecognitionFailure(errors) => {
+                return HttpResponse::json(errors.to_json())
+                    .status(422)
+                    .header("Precognition", "true")
+                    .header("Vary", "Precognition");
+            }
+            _ => {}
+        }
+
         let status = err.status_code();
         let body = match &err {
             crate::error::FrameworkError::ParamError { param_name } => {
@@ -341,5 +363,38 @@ impl From<crate::error::AppError> for HttpResponse {
         // Convert AppError -> FrameworkError -> HttpResponse
         let framework_err: crate::error::FrameworkError = err.into();
         framework_err.into()
+    }
+}
+
+#[cfg(test)]
+mod precognition_response_tests {
+    use super::*;
+    use crate::error::{FrameworkError, ValidationErrors};
+
+    #[test]
+    fn precognition_success_returns_204_with_envelope() {
+        let resp: HttpResponse = FrameworkError::PrecognitionSuccess.into();
+        let hyper = resp.into_hyper();
+        assert_eq!(hyper.status(), 204);
+        assert_eq!(hyper.headers().get("Precognition").unwrap(), "true");
+        assert_eq!(
+            hyper.headers().get("Precognition-Success").unwrap(),
+            "true"
+        );
+        assert_eq!(hyper.headers().get("Vary").unwrap(), "Precognition");
+    }
+
+    #[test]
+    fn precognition_failure_returns_422_with_envelope_and_errors() {
+        let mut errs = ValidationErrors::new();
+        errs.add("email", "must be valid");
+        let resp: HttpResponse =
+            FrameworkError::PrecognitionFailure(errs).into();
+        let hyper = resp.into_hyper();
+        assert_eq!(hyper.status(), 422);
+        assert_eq!(hyper.headers().get("Precognition").unwrap(), "true");
+        // No Precognition-Success on failures.
+        assert!(hyper.headers().get("Precognition-Success").is_none());
+        assert_eq!(hyper.headers().get("Vary").unwrap(), "Precognition");
     }
 }
