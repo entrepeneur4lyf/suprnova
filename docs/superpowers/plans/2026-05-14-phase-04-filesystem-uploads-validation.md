@@ -934,6 +934,204 @@ git add framework/src/validation/rule.rs framework/tests/validation_rules.rs
 git commit -m "feat(validation): Rule trait with Required/Email/Min/Max built-ins"
 ```
 
+- [ ] **Step 5: Conditional rule objects — failing test**
+
+Laravel ships declarative conditional rules (`required_if:other,val`,
+`required_with:other`, `required_unless:other,val`) so consumers don't
+have to drop into an `after_validation` closure for trivial conditional
+requireds. We mirror the API as rule objects that read other field
+values from a `&FormContext` map.
+
+```rust
+// framework/tests/validation_rules.rs — append
+use suprnova::validation::{
+    ContextualRule, FormContext,
+    rules::{RequiredIf, RequiredWith, RequiredUnless},
+};
+use std::collections::HashMap;
+
+fn ctx(pairs: &[(&str, &str)]) -> FormContext {
+    pairs.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect()
+}
+
+#[test]
+fn required_if_triggers_when_other_field_matches() {
+    let rule = RequiredIf { other: "billing_type", value: "card" };
+    let c = ctx(&[("billing_type", "card")]);
+    assert!(rule.passes("4111111111111111", &c).is_ok(), "present + matching = ok");
+    assert!(rule.passes("", &c).is_err(), "empty + matching = err");
+
+    let c2 = ctx(&[("billing_type", "invoice")]);
+    assert!(rule.passes("", &c2).is_ok(), "empty + not matching = ok (rule inactive)");
+}
+
+#[test]
+fn required_with_triggers_when_other_field_present() {
+    let rule = RequiredWith { other: "address_line_1" };
+    let c = ctx(&[("address_line_1", "1 Main St")]);
+    assert!(rule.passes("12345", &c).is_ok());
+    assert!(rule.passes("", &c).is_err());
+
+    let c2 = ctx(&[]);
+    assert!(rule.passes("", &c2).is_ok(), "other absent → rule inactive");
+}
+
+#[test]
+fn required_unless_triggers_when_other_field_does_not_match() {
+    let rule = RequiredUnless { other: "subscription", value: "free" };
+    let c_free = ctx(&[("subscription", "free")]);
+    assert!(rule.passes("", &c_free).is_ok(), "matching unless = inactive");
+
+    let c_paid = ctx(&[("subscription", "pro")]);
+    assert!(rule.passes("billing_token", &c_paid).is_ok());
+    assert!(rule.passes("", &c_paid).is_err());
+}
+```
+
+- [ ] **Step 6: Run — expect failure**
+
+```bash
+cargo test -p suprnova --test validation_rules required_if required_with required_unless
+```
+
+Expected: FAIL (`ContextualRule` etc. not defined).
+
+- [ ] **Step 7: Implement contextual rules**
+
+```rust
+// framework/src/validation/rule.rs — append below the existing Rule mod
+
+use std::collections::HashMap;
+
+/// Map of "other field name → its current string value", supplied to
+/// rules that need to read sibling fields during validation.
+pub type FormContext = HashMap<String, String>;
+
+/// A rule that needs visibility into other form fields. Distinct
+/// trait from `Rule` so the validation runner can dispatch to either
+/// shape without type erasure tricks.
+pub trait ContextualRule {
+    fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String>;
+}
+
+/// Bridge — every `Rule` is trivially a `ContextualRule` that ignores
+/// the context.
+impl<R: Rule> ContextualRule for R {
+    fn passes(&self, value: &str, _ctx: &FormContext) -> Result<(), String> {
+        <R as Rule>::passes(self, value)
+    }
+}
+
+pub mod rules {
+    use super::{ContextualRule, FormContext, Rule};
+
+    fn is_blank(value: &str) -> bool {
+        value.trim().is_empty()
+    }
+
+    /// `required_if:other_field,value` — value is required iff
+    /// `ctx[other_field] == value`.
+    pub struct RequiredIf {
+        pub other: &'static str,
+        pub value: &'static str,
+    }
+    impl ContextualRule for RequiredIf {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String> {
+            let other_matches = ctx
+                .get(self.other)
+                .map(|v| v == self.value)
+                .unwrap_or(false);
+            if other_matches && is_blank(value) {
+                Err(format!("required when {} is {}", self.other, self.value))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// `required_with:other_field` — value is required iff
+    /// `ctx[other_field]` exists and is non-blank.
+    pub struct RequiredWith {
+        pub other: &'static str,
+    }
+    impl ContextualRule for RequiredWith {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String> {
+            let other_present = ctx
+                .get(self.other)
+                .map(|v| !is_blank(v))
+                .unwrap_or(false);
+            if other_present && is_blank(value) {
+                Err(format!("required when {} is present", self.other))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// `required_unless:other_field,value` — value is required UNLESS
+    /// `ctx[other_field] == value`.
+    pub struct RequiredUnless {
+        pub other: &'static str,
+        pub value: &'static str,
+    }
+    impl ContextualRule for RequiredUnless {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String> {
+            let other_matches = ctx
+                .get(self.other)
+                .map(|v| v == self.value)
+                .unwrap_or(false);
+            if !other_matches && is_blank(value) {
+                Err(format!("required unless {} is {}", self.other, self.value))
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+```
+
+- [ ] **Step 8: Wire ContextualRule into the FormRequest validation runner**
+
+Open `framework/src/http/form_request.rs` (or wherever the
+`#[derive(FormRequest)]` runner currently lives) and add a path so a
+`#[validate(rule = "...")]` annotation can target `ContextualRule`
+implementors. The macro generates a per-field check that builds a
+`FormContext` from all sibling fields then calls
+`rule.passes(value, &ctx)`.
+
+The macro attribute extension:
+
+```rust
+#[derive(FormRequest)]
+pub struct BillingForm {
+    pub billing_type: String,
+
+    #[validate(rule = "RequiredIf { other: \"billing_type\", value: \"card\" }")]
+    pub card_number: String,
+}
+```
+
+> **Implementation note:** The macro stringifies the rule expression
+> and emits `let __rule = #expr; __rule.passes(&self.#field, &__ctx)`.
+> Build `__ctx` once per validate call by serializing every field of
+> `self` to its `Display`/`ToString` impl and collecting into a
+> `FormContext`.
+
+- [ ] **Step 9: Run — expect pass**
+
+```bash
+cargo test -p suprnova --test validation_rules
+```
+
+Expected: all 7 rule tests pass (4 unconditional + 3 conditional).
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add framework/src/validation/rule.rs framework/src/http/form_request.rs suprnova-macros framework/tests/validation_rules.rs
+git commit -m "feat(validation): ContextualRule + RequiredIf/RequiredWith/RequiredUnless"
+```
+
 ---
 
 ## Task 7: ErrorBag — named-scope validation errors
@@ -1218,7 +1416,8 @@ git push
 | MaxSize byte-boundary rejection | Task 5 |
 | Image magic-bytes validator | Task 5 |
 | store_as direct-to-disk | Task 5 |
-| Rule objects | Task 6 |
+| Rule objects (Required/Email/Min/Max/Unique) | Task 6 Steps 1-4 |
+| ContextualRule + RequiredIf/RequiredWith/RequiredUnless (conditional rule objects) | Task 6 Steps 5-10 |
 | ErrorBag named scopes | Task 7 |
 | after_validation hook | Task 8 |
 | App dogfood | Task 9 |
