@@ -173,18 +173,198 @@ fn empty_guard() -> TelemetryGuard {
     }
 }
 
-/// Install the global `tracing` subscriber and (later) the OpenTelemetry
-/// SDK pipelines.
+/// Install the global `tracing` subscriber and (when applicable) the
+/// OpenTelemetry SDK pipelines.
 ///
-/// Currently installs the standard fmt layer driven by [`LogConfig`].
-/// The OTel provider installation is wired in the next sub-task.
+/// Behavior:
+///
+/// 1. Always installs the standard fmt layer driven by [`LogConfig`].
+/// 2. When compiled with `feature = "otel"` **and** `otel_config.is_enabled()`,
+///    additionally:
+///    - builds OTLP HTTP-proto exporters for traces, metrics, and logs;
+///    - wraps each in an SDK provider with the configured service-name
+///      resource;
+///    - installs the providers globally so any code can call
+///      `opentelemetry::global::tracer(...)` / `meter(...)`;
+///    - installs a [`TraceContextPropagator`](opentelemetry_sdk::propagation::TraceContextPropagator)
+///      for W3C trace-context propagation;
+///    - registers a `tracing-opentelemetry` layer so every `tracing::span`
+///      becomes an OTel span automatically;
+///    - registers the `opentelemetry-appender-tracing` bridge so every
+///      `tracing::event` is forwarded to the OTel log pipeline as well.
 ///
 /// Idempotent: a second call is a no-op (the subscriber install returns
 /// an error which we silently absorb so tests can call this repeatedly).
 pub fn init_telemetry(log_config: LogConfig, otel_config: OtelConfig) -> TelemetryGuard {
-    let _ = &otel_config; // silence unused warning until the OTel block lands
+    #[cfg(feature = "otel")]
+    {
+        if otel_config.is_enabled() {
+            return init_telemetry_with_otel(log_config, otel_config);
+        }
+    }
+    let _ = otel_config; // silence unused warning when feature is off
     install_base_subscriber(&log_config);
     empty_guard()
+}
+
+#[cfg(feature = "otel")]
+fn init_telemetry_with_otel(log_config: LogConfig, otel_config: OtelConfig) -> TelemetryGuard {
+    use crate::logging::config::LogFormat;
+    use crate::logging::init::build_env_filter;
+    use opentelemetry::global;
+    use opentelemetry::KeyValue;
+    use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+    use opentelemetry_otlp::WithExportConfig;
+    use opentelemetry_sdk::logs::SdkLoggerProvider;
+    use opentelemetry_sdk::metrics::SdkMeterProvider;
+    use opentelemetry_sdk::trace::SdkTracerProvider;
+    use opentelemetry_sdk::Resource;
+    use opentelemetry_semantic_conventions::resource as semconv;
+    use tracing_subscriber::fmt;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    // Endpoint is guaranteed Some by is_enabled(); unwrap is safe.
+    let endpoint = otel_config.endpoint.clone().unwrap_or_default();
+
+    // Resource is shared across all three signals.
+    let resource = Resource::builder()
+        .with_attributes(vec![
+            KeyValue::new(semconv::SERVICE_NAME, otel_config.service_name.clone()),
+            KeyValue::new(semconv::SERVICE_VERSION, otel_config.service_version.clone()),
+        ])
+        .build();
+
+    // --- Traces ---
+    let span_exporter = match opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .with_endpoint(&endpoint)
+        .build()
+    {
+        Ok(exp) => exp,
+        Err(err) => {
+            tracing::error!(
+                ?err,
+                "failed to build OTLP span exporter; continuing without traces"
+            );
+            install_base_subscriber(&log_config);
+            return empty_guard();
+        }
+    };
+    let tracer_provider = SdkTracerProvider::builder()
+        .with_batch_exporter(span_exporter)
+        .with_resource(resource.clone())
+        .build();
+    global::set_tracer_provider(tracer_provider.clone());
+
+    // --- Metrics ---
+    let metric_exporter = match opentelemetry_otlp::MetricExporter::builder()
+        .with_http()
+        .with_endpoint(&endpoint)
+        .build()
+    {
+        Ok(exp) => exp,
+        Err(err) => {
+            tracing::error!(
+                ?err,
+                "failed to build OTLP metric exporter; continuing without metrics"
+            );
+            // Tracer is installed; still safe. Keep returning an
+            // OTel-enabled guard so traces still flush on shutdown.
+            install_base_subscriber(&log_config);
+            return TelemetryGuard {
+                shutdown_called: Arc::new(AtomicBool::new(false)),
+                legacy: false,
+                tracer_provider: Some(tracer_provider),
+                meter_provider: None,
+                logger_provider: None,
+            };
+        }
+    };
+    let meter_provider = SdkMeterProvider::builder()
+        .with_periodic_exporter(metric_exporter)
+        .with_resource(resource.clone())
+        .build();
+    global::set_meter_provider(meter_provider.clone());
+
+    // --- Logs ---
+    let log_exporter = match opentelemetry_otlp::LogExporter::builder()
+        .with_http()
+        .with_endpoint(&endpoint)
+        .build()
+    {
+        Ok(exp) => exp,
+        Err(err) => {
+            tracing::error!(
+                ?err,
+                "failed to build OTLP log exporter; continuing without log export"
+            );
+            install_base_subscriber(&log_config);
+            return TelemetryGuard {
+                shutdown_called: Arc::new(AtomicBool::new(false)),
+                legacy: false,
+                tracer_provider: Some(tracer_provider),
+                meter_provider: Some(meter_provider),
+                logger_provider: None,
+            };
+        }
+    };
+    let logger_provider = SdkLoggerProvider::builder()
+        .with_batch_exporter(log_exporter)
+        .with_resource(resource)
+        .build();
+
+    // --- Propagation ---
+    crate::telemetry::propagation::install_trace_context_propagator();
+
+    // --- Wire layers into the global subscriber ---
+    //
+    // `OpenTelemetryLayer<S, T>` is parameterized on the subscriber type
+    // `S` it wraps, so we have to build the bridge layers fresh inside
+    // each format arm — the inferred `S` differs between Pretty and Json
+    // (different concrete fmt::Layer types) and a single layer instance
+    // can only commit to one `S`.
+    let env_filter = build_env_filter(&log_config.level);
+    let tracer = global::tracer("suprnova");
+
+    // try_init() returns Err if a global default is already set (e.g.
+    // tests). That's fine; the existing subscriber wins and we still
+    // hand back a guard for orderly shutdown of the providers we built.
+    match log_config.format {
+        LogFormat::Pretty => {
+            let subscriber = tracing_subscriber::registry()
+                .with(env_filter)
+                .with(
+                    fmt::layer()
+                        .with_target(true)
+                        .with_thread_ids(false)
+                        .pretty(),
+                )
+                .with(tracing_opentelemetry::layer().with_tracer(tracer))
+                .with(OpenTelemetryTracingBridge::new(&logger_provider));
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        }
+        LogFormat::Json => {
+            let subscriber = tracing_subscriber::registry()
+                .with(env_filter)
+                .with(
+                    fmt::layer()
+                        .json()
+                        .with_target(true)
+                        .with_current_span(true),
+                )
+                .with(tracing_opentelemetry::layer().with_tracer(tracer))
+                .with(OpenTelemetryTracingBridge::new(&logger_provider));
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        }
+    }
+
+    TelemetryGuard {
+        shutdown_called: Arc::new(AtomicBool::new(false)),
+        legacy: false,
+        tracer_provider: Some(tracer_provider),
+        meter_provider: Some(meter_provider),
+        logger_provider: Some(logger_provider),
+    }
 }
 
 #[cfg(test)]
@@ -256,4 +436,16 @@ mod tests {
         clear_env();
     }
 
+    #[cfg(feature = "otel")]
+    #[test]
+    fn init_telemetry_no_endpoint_stays_noop() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_env();
+        let guard = init_telemetry(LogConfig::default(), OtelConfig::from_env());
+        assert!(guard.tracer_provider.is_none());
+        assert!(guard.meter_provider.is_none());
+        assert!(guard.logger_provider.is_none());
+        // Acknowledge the guard so Drop doesn't warn.
+        guard.mark_shutdown_for_legacy();
+    }
 }
