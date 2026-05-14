@@ -81,7 +81,7 @@ pub fn assert_sent(predicate: impl Fn(&RecordedRequest) -> bool) {
     let Some(s) = state.as_ref() else {
         panic!("assert_sent called without an active Http::fake() guard");
     };
-    if !s.recorded.iter().any(|r| predicate(r)) {
+    if !s.recorded.iter().any(predicate) {
         panic!(
             "assert_sent: no recorded request matched the predicate. \
              Recorded: {:#?}",
@@ -97,7 +97,7 @@ pub fn assert_not_sent(predicate: impl Fn(&RecordedRequest) -> bool) {
     let Some(s) = state.as_ref() else {
         panic!("assert_not_sent called without an active Http::fake() guard");
     };
-    if let Some(hit) = s.recorded.iter().find(|r| predicate(r)) {
+    if let Some(hit) = s.recorded.iter().find(|r| predicate(*r)) {
         panic!("assert_not_sent: forbidden request was sent: {:#?}", hit);
     }
 }
