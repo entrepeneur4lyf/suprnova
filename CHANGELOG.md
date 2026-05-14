@@ -38,6 +38,11 @@ Until a 1.0 release, breaking changes are landed as hard cuts.
   `basic_auth` / `timeout`.
 - `Http::fake()` test guard with `fake_response(method, url_substring,
   status, body)` + `assert_sent` / `assert_not_sent`.
+- `RequestBuilder::retry(max_attempts, base_backoff)` — exponential
+  backoff retries for transient failures and 5xx responses. 4xx
+  short-circuits to no retry; connect/timeout errors during a single
+  attempt retry. For `503` responses, the wait is the larger of the
+  computed backoff and the `Retry-After` header (delta-seconds).
 - `LengthAwarePaginator` + `CursorPaginator` + `Pagination::length_aware`
   / `Pagination::cursor` over SeaORM `Select<E>`. Cursors are encrypted
   via `Crypt` (plain-base64 fallback when `Crypt` is uninitialized) and

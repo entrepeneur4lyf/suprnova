@@ -144,6 +144,19 @@ pub(crate) enum Body {
     Raw(Bytes),
 }
 
+/// Retry policy attached to a [`RequestBuilder`].
+///
+/// Created with [`RequestBuilder::retry`]. Retries on transient
+/// failures (connect/timeout, HTTP 5xx). The delay between attempt
+/// `n` and attempt `n+1` is `base_backoff * 2^(n-1)`. For HTTP 503,
+/// the larger of the computed backoff and any `Retry-After` header is
+/// used.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RetryPolicy {
+    pub(crate) max_attempts: u32,
+    pub(crate) base_backoff: Duration,
+}
+
 /// Builder for an outbound HTTP request. Created via the [`Http`] facade.
 pub struct RequestBuilder {
     pub(crate) method: Method,
@@ -151,6 +164,7 @@ pub struct RequestBuilder {
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) body: Option<Body>,
     pub(crate) timeout: Option<Duration>,
+    pub(crate) retry: Option<RetryPolicy>,
 }
 
 impl RequestBuilder {
@@ -161,6 +175,7 @@ impl RequestBuilder {
             headers: Vec::new(),
             body: None,
             timeout: None,
+            retry: None,
         }
     }
 
@@ -215,34 +230,126 @@ impl RequestBuilder {
         self.header("Authorization", format!("Basic {}", encoded))
     }
 
-    /// Execute the request. When [`Http::fake`] is active, returns the
-    /// matched canned response instead of hitting the network.
-    pub async fn send(self) -> Result<ClientResponse, FrameworkError> {
-        if fake::is_fake_active() {
-            return Ok(fake::intercept(&self));
-        }
-
-        let mut req = client().request(self.method.into_reqwest(), &self.url);
-
-        for (k, v) in &self.headers {
-            req = req.header(k.as_str(), v.as_str());
-        }
-        if let Some(t) = self.timeout {
-            req = req.timeout(t);
-        }
-        match self.body {
-            Some(Body::Json(v)) => req = req.json(&v),
-            Some(Body::Form(v)) => req = req.form(&v),
-            Some(Body::Raw(bytes)) => req = req.body(bytes.to_vec()),
-            None => {}
-        }
-
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| FrameworkError::internal(format!("Http::send failed: {e}")))?;
-        Ok(ClientResponse::real(resp))
+    /// Configure transient-failure retries.
+    ///
+    /// `max_attempts` is the total number of attempts including the
+    /// first try (so `max_attempts=4` retries up to three times).
+    /// `base_backoff` is the initial delay; subsequent delays double
+    /// (100ms → 200 → 400 → 800ms for four attempts at 100ms base).
+    ///
+    /// A response is considered transient and eligible for retry if:
+    /// - The send fails before we have a response (connect / timeout /
+    ///   DNS errors).
+    /// - The response status is 5xx (any server-side failure).
+    ///
+    /// Responses with 4xx are returned as-is — client errors are not
+    /// retried. 2xx/3xx are returned as-is. After exhausting retries
+    /// the last response (or the last error) is returned to the
+    /// caller. For 503, the wait between attempts is the maximum of
+    /// the computed backoff and the `Retry-After` header (parsed as a
+    /// delta-seconds integer).
+    ///
+    /// Calling `.retry()` again replaces the previous policy.
+    pub fn retry(mut self, max_attempts: u32, base_backoff: Duration) -> Self {
+        let attempts = max_attempts.max(1);
+        self.retry = Some(RetryPolicy {
+            max_attempts: attempts,
+            base_backoff,
+        });
+        self
     }
+
+    /// Execute the request. When [`Http::fake`] is active, returns the
+    /// matched canned response instead of hitting the network. If a
+    /// retry policy is configured via [`Self::retry`], transient
+    /// failures and 5xx responses are retried with exponential
+    /// backoff (see [`Self::retry`] for the rules).
+    pub async fn send(self) -> Result<ClientResponse, FrameworkError> {
+        let policy = self.retry;
+        let max_attempts = policy.map(|p| p.max_attempts).unwrap_or(1);
+
+        let mut last_err: Option<FrameworkError> = None;
+        for attempt in 1..=max_attempts {
+            let outcome = if fake::is_fake_active() {
+                Ok::<ClientResponse, FrameworkError>(fake::intercept(&self))
+            } else {
+                build_and_send(&self).await
+            };
+
+            match outcome {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let is_transient = (500..600).contains(&status);
+                    if is_transient && attempt < max_attempts {
+                        if let Some(p) = policy {
+                            let backoff = backoff_for(attempt, p.base_backoff);
+                            let wait = if status == 503 {
+                                std::cmp::max(backoff, retry_after_from(&resp))
+                            } else {
+                                backoff
+                            };
+                            tokio::time::sleep(wait).await;
+                            continue;
+                        }
+                    }
+                    return Ok(resp);
+                }
+                Err(e) => {
+                    if let Some(p) = policy.filter(|_| attempt < max_attempts) {
+                        let backoff = backoff_for(attempt, p.base_backoff);
+                        last_err = Some(e);
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            FrameworkError::internal("Http::send retries exhausted without a response")
+        }))
+    }
+}
+
+/// Single attempt at the request. No retry logic, no fake interception.
+async fn build_and_send(builder: &RequestBuilder) -> Result<ClientResponse, FrameworkError> {
+    let mut req = client().request(builder.method.into_reqwest(), &builder.url);
+
+    for (k, v) in &builder.headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+    if let Some(t) = builder.timeout {
+        req = req.timeout(t);
+    }
+    match &builder.body {
+        Some(Body::Json(v)) => req = req.json(v),
+        Some(Body::Form(v)) => req = req.form(v),
+        Some(Body::Raw(bytes)) => req = req.body(bytes.to_vec()),
+        None => {}
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| FrameworkError::internal(format!("Http::send failed: {e}")))?;
+    Ok(ClientResponse::real(resp))
+}
+
+/// `base_backoff * 2^(attempt-1)`. Saturating math so 64-bit multiply
+/// can't overflow if the caller passes a wild `base_backoff`.
+fn backoff_for(attempt: u32, base_backoff: Duration) -> Duration {
+    let factor: u64 = 1u64 << (attempt.saturating_sub(1).min(32));
+    base_backoff.saturating_mul(factor as u32)
+}
+
+/// Parse a `Retry-After: <seconds>` header. HTTP-date form is not
+/// supported here; integer delta-seconds is the only shape this honors.
+/// Returns `Duration::ZERO` if missing or unparseable.
+fn retry_after_from(resp: &ClientResponse) -> Duration {
+    resp.header("Retry-After")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::ZERO)
 }
 
 /// Outbound response. Wraps `reqwest::Response` (real) or in-memory

@@ -101,7 +101,7 @@ pub fn assert_sent(predicate: impl Fn(&RecordedRequest) -> bool) {
 /// Must be called inside a `Http::fake(...)` scope.
 pub fn assert_not_sent(predicate: impl Fn(&RecordedRequest) -> bool) {
     with_state(|s| {
-        if let Some(hit) = s.recorded.iter().find(|r| predicate(*r)) {
+        if let Some(hit) = s.recorded.iter().find(|r| predicate(r)) {
             panic!("assert_not_sent: forbidden request was sent: {:#?}", hit);
         }
     });

@@ -259,6 +259,141 @@ async fn into_inner_returns_ok_for_real_response() {
     assert_eq!(inner.status().as_u16(), 200);
 }
 
+/// Spawn a server that replies based on a queue of canned responses
+/// (status, optional `Retry-After` seconds, body). Each accepted
+/// connection is served by popping one element; once the queue is
+/// empty, every later connection gets `200 {}`.
+async fn spawn_canned(
+    canned: Vec<(u16, Option<u64>, &'static str)>,
+) -> (SocketAddr, Arc<Mutex<usize>>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let count: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let count_for_task = count.clone();
+    let queue = Arc::new(Mutex::new(canned));
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let io = TokioIo::new(stream);
+            let queue = queue.clone();
+            let count = count_for_task.clone();
+            let svc = service_fn(move |_req: hyper::Request<Incoming>| {
+                let queue = queue.clone();
+                let count = count.clone();
+                async move {
+                    *count.lock().unwrap() += 1;
+                    let next = queue.lock().unwrap().pop();
+                    // pop from end; reverse the input ordering when populating
+                    let (status, retry_after, body) =
+                        next.unwrap_or((200, None, "{}"));
+                    let mut builder = hyper::Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json");
+                    if let Some(secs) = retry_after {
+                        builder = builder.header("retry-after", secs.to_string());
+                    }
+                    Ok::<_, Infallible>(
+                        builder.body(Full::new(Bytes::from_static(body.as_bytes()))).unwrap(),
+                    )
+                }
+            });
+            tokio::spawn(async move {
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(io, svc)
+                    .await;
+            });
+        }
+    });
+    (addr, count)
+}
+
+#[tokio::test]
+async fn retry_5xx_then_succeeds() {
+    // Populate queue so the FIRST pop is the first response served.
+    // pop() reads from the END, so reverse the intended order.
+    let mut canned: Vec<(u16, Option<u64>, &'static str)> = vec![
+        (503, None, "{\"err\":1}"),
+        (503, None, "{\"err\":2}"),
+        (200, None, "{\"ok\":true}"),
+    ];
+    canned.reverse();
+    let (addr, count) = spawn_canned(canned).await;
+    let url = format!("http://{}/x", addr);
+    let resp = Http::get(&url)
+        .retry(4, std::time::Duration::from_millis(5))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["ok"], true);
+    assert_eq!(*count.lock().unwrap(), 3, "expected 3 attempts");
+}
+
+#[tokio::test]
+async fn retry_exhausted_returns_last_5xx() {
+    // Three 500s; max_attempts=3 → all three consumed.
+    let mut canned: Vec<(u16, Option<u64>, &'static str)> = vec![
+        (500, None, "{\"err\":1}"),
+        (500, None, "{\"err\":2}"),
+        (500, None, "{\"err\":3}"),
+    ];
+    canned.reverse();
+    let (addr, count) = spawn_canned(canned).await;
+    let url = format!("http://{}/x", addr);
+    let resp = Http::get(&url)
+        .retry(3, std::time::Duration::from_millis(5))
+        .send()
+        .await
+        .expect("send returns the last response, not an error");
+    assert_eq!(resp.status(), 500);
+    assert_eq!(*count.lock().unwrap(), 3, "expected 3 attempts");
+}
+
+#[tokio::test]
+async fn retry_not_attempted_on_4xx() {
+    let (addr, count) = spawn_canned(vec![(404, None, "{\"err\":\"nf\"}")]).await;
+    let url = format!("http://{}/x", addr);
+    let resp = Http::get(&url)
+        .retry(5, std::time::Duration::from_millis(5))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 404);
+    assert_eq!(*count.lock().unwrap(), 1, "4xx must not retry");
+}
+
+#[tokio::test]
+async fn retry_honors_retry_after_header_on_503() {
+    // First response: 503 with Retry-After: 1 (1 second).
+    // Second response: 200.
+    // Base backoff is 1ms — far below the 1s Retry-After. We assert
+    // the wait between attempts honors the larger of the two by
+    // checking the elapsed wall clock.
+    let mut canned: Vec<(u16, Option<u64>, &'static str)> =
+        vec![(503, Some(1), "{}"), (200, None, "{\"ok\":true}")];
+    canned.reverse();
+    let (addr, _count) = spawn_canned(canned).await;
+    let url = format!("http://{}/x", addr);
+    let start = std::time::Instant::now();
+    let resp = Http::get(&url)
+        .retry(3, std::time::Duration::from_millis(1))
+        .send()
+        .await
+        .expect("send");
+    let elapsed = start.elapsed();
+    assert_eq!(resp.status(), 200);
+    // The 1s Retry-After must dominate the 1ms base backoff. Allow a
+    // little slack but require at least 900ms.
+    assert!(
+        elapsed >= std::time::Duration::from_millis(900),
+        "Retry-After=1s not honored; elapsed={:?}",
+        elapsed
+    );
+}
+
 #[tokio::test]
 async fn into_inner_returns_err_for_fake_response() {
     Http::fake(|| async {
