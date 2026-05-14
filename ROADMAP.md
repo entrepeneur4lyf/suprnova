@@ -164,6 +164,37 @@ is what makes Rust frameworks reach 80% production-ready and stall.
   + `hidden_add` / `hidden_get` (separate bag, excluded from
   `all()`). Scoped via `tokio::task_local!`; `RequestIdMiddleware`
   seeds `_request_id` automatically.
+- **Encryption** - AES-256-GCM via the `aes-gcm` crate. `EncryptionKey`
+  loads a 32-byte key from `APP_KEY` (base64-url-no-pad) or generates
+  one. `Crypt::encrypt_string` / `decrypt_string` / `encrypt<T>` /
+  `decrypt<T>` use a 12-byte random nonce per call, empty AAD; wire
+  format is base64-url-no-pad over `nonce || ciphertext || tag`.
+  `Crypt::init` runs at `Server::from_config` boot.
+- **HTTP client** - `Http::get` / `post` / `put` / `patch` / `delete`
+  return a `RequestBuilder` with `json` / `form` / `body` / `header` /
+  `bearer_token` / `basic_auth` / `timeout` and a single-shot `send`.
+  Backed by reqwest 0.12 with rustls (single TLS backend shared with
+  the OTel exporter), 30s default timeout, `suprnova/<version>`
+  user-agent. `ClientResponse` exposes `status` / `header` / `json` /
+  `text` / `bytes` / `into_inner`. `Http::fake()` returns an
+  `HttpFakeGuard` that intercepts every outbound request — queue
+  canned responses with `fake_response(method, url_substring, status,
+  body)`; assert via `assert_sent` / `assert_not_sent`.
+- **Pagination** - `LengthAwarePaginator` (`data`/`total`/`per_page`/
+  `current_page`/`last_page`) and `CursorPaginator`
+  (`data`/`next_cursor`/`prev_cursor`). `Pagination::length_aware` runs
+  COUNT(*) + OFFSET/LIMIT against a SeaORM `Select<E>`;
+  `Pagination::cursor` walks an `order_col` ASC with keyset filters.
+  Cursors are AES-256-GCM-encrypted via `Crypt` (plain-base64 fallback
+  with `tracing::warn!` when `Crypt` is uninitialized). `IntoInertiaScroll`
+  trait maps either paginator into `(ScrollMetadata, Vec<T>)`.
+  `Inertia::paginate(key, paginator)` and
+  `InertiaResponse::paginate(key, paginator)` wire a paginator into a
+  scroll prop in one line.
+- **Encrypted session cookies** - session cookies are now AES-256-GCM
+  encrypted using the `APP_KEY` installed at server boot. Pre-1.0 hard
+  cut: existing plaintext sessions silently become unreadable after
+  deploy and clients get a fresh session ID.
 
 **Partial - needs filling in:**
 
@@ -171,8 +202,8 @@ is what makes Rust frameworks reach 80% production-ready and stall.
   objects, no after-hooks, no error-bag-as-first-class)
 - Cache (Redis + in-memory drivers; needs tags, locks, rate-limiter)
 - Cookie (via session; standalone API unclear)
-- HTTP request/response (inbound great + streaming responses now
-  ship; outbound HTTP client still missing — Phase 2)
+- HTTP request/response (inbound great + streaming responses ship;
+  outbound `Http` client + `Http::fake()` shipped in Phase 2)
 - Container scoped bindings (singletons work; per-request scoping
   underspecified)
 - Schema DSL + Query Builder facades (migrations work via SeaORM's
