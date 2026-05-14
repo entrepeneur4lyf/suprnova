@@ -6,6 +6,10 @@ use crate::middleware::AuthMiddleware;
 routes! {
     get!("/", controllers::home::index).name("home"),
     get!("/redirect-example", controllers::user::redirect_example),
+    get!(
+        "/preserve-fragment-example",
+        controllers::user::preserve_fragment_example
+    ),
     get!("/config", controllers::config_example::show).name("config.show"),
 
     // User routes group

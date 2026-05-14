@@ -127,6 +127,12 @@ pub struct Redirect {
     location: String,
     query_params: Vec<(String, String)>,
     status: u16,
+    /// When `true`, on conversion to `Response` we flash
+    /// `_inertia.preserve_fragment = true` into the session so the
+    /// destination's `InertiaResponse` emits `preserveFragment: true`
+    /// in its page object. Maps to Laravel's
+    /// `redirect(...)->preserveFragment()`.
+    preserve_fragment: bool,
 }
 
 impl Redirect {
@@ -136,6 +142,7 @@ impl Redirect {
             location: path.into(),
             query_params: Vec::new(),
             status: 302,
+            preserve_fragment: false,
         }
     }
 
@@ -146,8 +153,11 @@ impl Redirect {
             params: std::collections::HashMap::new(),
             query_params: Vec::new(),
             status: 302,
+            preserve_fragment: false,
         }
     }
+
+
 
     /// Add a query parameter
     pub fn query(mut self, key: &str, value: impl Into<String>) -> Self {
@@ -158,6 +168,22 @@ impl Redirect {
     /// Set status to 301 (Moved Permanently)
     pub fn permanent(mut self) -> Self {
         self.status = 301;
+        self
+    }
+
+    /// Carry the URL fragment from the originating request across this
+    /// redirect to the destination. On conversion to a `Response`, this
+    /// flashes `_inertia.preserve_fragment = true` into the session;
+    /// the next Inertia response (which is the redirect destination)
+    /// picks up the flag and emits `preserveFragment: true` in its
+    /// page object, telling the client to keep the URL hash.
+    ///
+    /// Requires `SessionMiddleware` to be active (it normally is).
+    /// Without a session scope, the flag is silently dropped.
+    ///
+    /// Maps to Laravel's `redirect(...)->preserveFragment()`.
+    pub fn preserve_fragment(mut self) -> Self {
+        self.preserve_fragment = true;
         self
     }
 
@@ -176,9 +202,23 @@ impl Redirect {
     }
 }
 
+/// Flash `_inertia.preserve_fragment = true` into the session when the
+/// redirect's preserve-fragment flag is set. Shared between the
+/// `From<Redirect>` and `From<RedirectRouteBuilder>` impls so they
+/// can't drift on flash behavior. No-op outside a `SessionMiddleware`
+/// scope (silently dropped — by design, for tests / partial setups).
+fn flash_preserve_fragment_if_set(preserve: bool) {
+    if preserve {
+        crate::session::session_mut(|s| {
+            s.flash("_inertia.preserve_fragment", true);
+        });
+    }
+}
+
 /// Auto-convert Redirect to Response
 impl From<Redirect> for Response {
     fn from(redirect: Redirect) -> Response {
+        flash_preserve_fragment_if_set(redirect.preserve_fragment);
         Ok(HttpResponse::new()
             .status(redirect.status)
             .header("Location", redirect.build_url()))
@@ -191,6 +231,7 @@ pub struct RedirectRouteBuilder {
     params: std::collections::HashMap<String, String>,
     query_params: Vec<(String, String)>,
     status: u16,
+    preserve_fragment: bool,
 }
 
 impl RedirectRouteBuilder {
@@ -209,6 +250,13 @@ impl RedirectRouteBuilder {
     /// Set status to 301 (Moved Permanently)
     pub fn permanent(mut self) -> Self {
         self.status = 301;
+        self
+    }
+
+    /// Carry the URL fragment across this redirect. See
+    /// [`Redirect::preserve_fragment`] for details.
+    pub fn preserve_fragment(mut self) -> Self {
+        self.preserve_fragment = true;
         self
     }
 
@@ -232,9 +280,14 @@ impl RedirectRouteBuilder {
 /// Auto-convert RedirectRouteBuilder to Response
 impl From<RedirectRouteBuilder> for Response {
     fn from(redirect: RedirectRouteBuilder) -> Response {
+        // Route lookup runs first; if the named route is missing, we
+        // return a 500 and intentionally skip the flash — otherwise
+        // a stray `_inertia.preserve_fragment` would land on whatever
+        // page the user navigates to next.
         let url = redirect.build_url().ok_or_else(|| {
             HttpResponse::text(format!("Route '{}' not found", redirect.name)).status(500)
         })?;
+        flash_preserve_fragment_if_set(redirect.preserve_fragment);
         Ok(HttpResponse::new()
             .status(redirect.status)
             .header("Location", url))

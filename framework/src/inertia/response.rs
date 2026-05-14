@@ -37,12 +37,14 @@ pub struct InertiaResponse {
     /// client rotates its history-encryption key. Maps to
     /// `Inertia::clearHistory()`.
     clear_history: bool,
-    /// When `true`, the page object carries `preserveFragment: true` so
-    /// the client carries its current URL fragment (`#anchor`) over to
-    /// the new URL when this page is rendered as the destination of a
-    /// redirect. Maps to `Inertia::preserveFragment()` / Laravel's
-    /// `redirect()->preserveFragment()` (set on the destination response).
-    preserve_fragment: bool,
+    /// Per-response override for the `preserveFragment` page-object
+    /// flag. `None` defers to the session-flash flag set by
+    /// `Redirect::preserve_fragment()`; `Some(true)` forces on;
+    /// `Some(false)` forces off, defeating any inbound flashed `true`.
+    /// Maps to `Inertia::preserveFragment()` per-response, with the
+    /// session-flash mechanism mirroring Laravel's
+    /// `redirect()->preserveFragment()` chainable.
+    preserve_fragment: Option<bool>,
 }
 
 impl InertiaResponse {
@@ -56,7 +58,7 @@ impl InertiaResponse {
             title: None,
             encrypt_history: None,
             clear_history: false,
-            preserve_fragment: false,
+            preserve_fragment: None,
         }
     }
 
@@ -270,21 +272,37 @@ impl InertiaResponse {
     }
 
     /// Set the `preserveFragment` flag on the page object. When the
-    /// client receives a page with this flag set, it carries over the
-    /// fragment (`#anchor`) from the current URL to the new URL. Useful
-    /// for redirects where the destination should keep the original
-    /// fragment. Maps to Laravel's `redirect(...)->preserveFragment()`
-    /// — set on the destination response, not on the redirect itself.
+    /// client receives a page with this flag set, it carries the URL
+    /// fragment (`#anchor`) over to the new URL when this page is the
+    /// destination of a redirect.
+    ///
+    /// Precedence: per-response wins over the session-flash flag set
+    /// by [`Redirect::preserve_fragment`](crate::Redirect::preserve_fragment).
+    /// Specifically, `.preserve_fragment(false)` defeats an inbound
+    /// flashed `true`, so a destination controller can opt out of the
+    /// fragment carry even when the redirect requested it.
     pub fn preserve_fragment(mut self, on: bool) -> Self {
-        self.preserve_fragment = on;
+        self.preserve_fragment = Some(on);
         self
     }
 
     /// Build a `409 Conflict` external-redirect response. The client
     /// performs `window.location = url`, doing a full page navigation
     /// (not an Inertia SPA visit). Maps to `Inertia::location($url)`.
+    ///
+    /// **When to use which redirect form:**
+    /// - [`Redirect::to`](crate::Redirect::to) — standard 302/303 with
+    ///   `Location` header. The normal case for redirects after form
+    ///   submission inside the Inertia app.
+    /// - [`InertiaResponse::redirect`](Self::redirect) — 409 +
+    ///   `X-Inertia-Redirect` for soft Inertia SPA navigation; use
+    ///   when the redirect must carry a `#fragment` (server `Location`
+    ///   headers can't carry fragments through Inertia XHR).
+    /// - [`InertiaResponse::location`](Self::location) — 409 +
+    ///   `X-Inertia-Location` for full-page reload via
+    ///   `window.location`; use to leave the Inertia app entirely.
     pub fn location(url: impl AsRef<str>) -> HttpResponse {
-        HttpResponse::text("")
+        HttpResponse::new()
             .status(409)
             .header("X-Inertia-Location", url.as_ref())
     }
@@ -297,8 +315,11 @@ impl InertiaResponse {
     /// target is still inside the Inertia app.
     ///
     /// Maps to the Inertia v3 `X-Inertia-Redirect` protocol header.
+    /// For standard server-side redirects (no fragment, plain
+    /// post-form-submission) use [`Redirect::to`](crate::Redirect::to)
+    /// instead — the auto-303 middleware will rewrite 302→303 for non-GET.
     pub fn redirect(url: impl AsRef<str>) -> HttpResponse {
-        HttpResponse::text("")
+        HttpResponse::new()
             .status(409)
             .header("X-Inertia-Redirect", url.as_ref())
     }
@@ -356,6 +377,18 @@ impl InertiaResponse {
             .or_else(flash::encrypt_history_flag)
             .unwrap_or(config.encrypt_history_default);
 
+        // preserve-fragment precedence: per-response override > session
+        // flash (set by `Redirect::preserve_fragment()`) > false. The
+        // session lookup is a no-op outside a `SessionMiddleware` scope.
+        // `get_flash` removes the entry, so the flag is one-shot.
+        let flashed_preserve_fragment = crate::session::session_mut(|s| {
+            s.get_flash::<bool>("_inertia.preserve_fragment")
+        })
+        .flatten()
+        .unwrap_or(false);
+        let resolved_preserve_fragment =
+            preserve_fragment.unwrap_or(flashed_preserve_fragment);
+
         // Layer props in precedence order (later writes override earlier):
         //   1. Static shared registry  (App::inertia_share, App::inertia_share_lazy)
         //   2. Trait-registered shared data (InertiaSharedData::share)
@@ -392,7 +425,7 @@ impl InertiaResponse {
             flash,
             resolved_encrypt_history,
             clear_history,
-            preserve_fragment,
+            resolved_preserve_fragment,
         );
 
         Ok(if is_inertia_request {
@@ -426,6 +459,9 @@ impl InertiaResponse {
                 .expect("test resolver should not fail");
         let resolved_encrypt_history = encrypt_history
             .unwrap_or(config.encrypt_history_default);
+        // Test helper doesn't run inside a session scope, so we never
+        // pick up a flashed flag here — only the explicit override.
+        let resolved_preserve_fragment = preserve_fragment.unwrap_or(false);
         build_page_object(
             &component,
             materialized,
@@ -435,14 +471,14 @@ impl InertiaResponse {
             flash,
             resolved_encrypt_history,
             clear_history,
-            preserve_fragment,
+            resolved_preserve_fragment,
         )
     }
 
     /// Build a `409 Conflict` response indicating an asset version mismatch.
     /// The client follows `X-Inertia-Location` for a fresh full-page visit.
     pub fn version_conflict(new_url: &str) -> HttpResponse {
-        HttpResponse::text("")
+        HttpResponse::new()
             .status(409)
             .header("X-Inertia-Location", new_url)
     }

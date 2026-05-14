@@ -48,8 +48,29 @@ pub mod store;
 pub use config::SessionConfig;
 pub use driver::DatabaseSessionDriver;
 pub use middleware::{
-    auth_user_id, clear_auth_user, clear_session, generate_csrf_token, generate_session_id,
+    auth_user_id, clear_auth_user, generate_csrf_token, generate_session_id,
     get_csrf_token, invalidate_session, is_authenticated, regenerate_session_id, session,
-    session_mut, set_auth_user, set_session, take_session, SessionMiddleware,
+    session_mut, set_auth_user, SessionMiddleware,
 };
 pub use store::{SessionData, SessionStore};
+
+// Test helpers — these mirror the per-request session scope that
+// `SessionMiddleware` sets up at runtime. Crates outside the framework
+// shouldn't need these; they exist for unit/integration tests that
+// drive code paths reading the session without booting a full server.
+#[doc(hidden)]
+pub fn new_session_slot_for_test()
+-> std::sync::Arc<std::sync::Mutex<Option<SessionData>>> {
+    std::sync::Arc::new(std::sync::Mutex::new(Some(SessionData::new(
+        "test_session".to_string(),
+        "test_csrf_token".to_string(),
+    ))))
+}
+
+#[doc(hidden)]
+pub async fn session_scope_for_test<F: std::future::Future>(
+    slot: std::sync::Arc<std::sync::Mutex<Option<SessionData>>>,
+    fut: F,
+) -> F::Output {
+    middleware::SESSION_CONTEXT.scope(slot, fut).await
+}

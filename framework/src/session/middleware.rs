@@ -6,16 +6,24 @@ use crate::middleware::{Middleware, Next};
 use crate::Request;
 use async_trait::async_trait;
 use rand::Rng;
-use std::cell::RefCell;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use super::config::SessionConfig;
 use super::driver::DatabaseSessionDriver;
 use super::store::{SessionData, SessionStore};
 
-// Thread-local session context for storing the current request's session data
-thread_local! {
-    static SESSION_CONTEXT: RefCell<Option<SessionData>> = const { RefCell::new(None) };
+// Per-request session slot. `tokio::task_local!` (not `thread_local!`)
+// so the binding survives `.await` points that resume on a different
+// worker thread — the same fix applied to `InertiaContext` in Tier 0.
+//
+// The slot is `Arc<Mutex<Option<SessionData>>>` rather than a bare
+// `RefCell` because (a) the future inside `SESSION_CONTEXT.scope` may
+// move between threads (so we need `Send + Sync`), and (b) the
+// middleware needs to read the saved session back out *after* the
+// scope returns. Closures passed to `session_mut` do not await, so a
+// synchronous `std::sync::Mutex` is sound — guards drop before `.await`.
+tokio::task_local! {
+    pub(crate) static SESSION_CONTEXT: Arc<Mutex<Option<SessionData>>>;
 }
 
 /// Get the current session (read-only)
@@ -32,7 +40,10 @@ thread_local! {
 /// }
 /// ```
 pub fn session() -> Option<SessionData> {
-    SESSION_CONTEXT.with(|ctx| ctx.borrow().clone())
+    SESSION_CONTEXT
+        .try_with(|slot| slot.lock().unwrap().clone())
+        .ok()
+        .flatten()
 }
 
 /// Get the current session and modify it
@@ -50,29 +61,39 @@ pub fn session_mut<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut SessionData) -> R,
 {
-    SESSION_CONTEXT.with(|ctx| {
-        let mut session_opt = ctx.borrow_mut();
-        session_opt.as_mut().map(f)
-    })
+    SESSION_CONTEXT
+        .try_with(|slot| slot.lock().unwrap().as_mut().map(f))
+        .ok()
+        .flatten()
 }
 
-/// Set the session context for the current request
-pub fn set_session(session: SessionData) {
-    SESSION_CONTEXT.with(|ctx| {
-        *ctx.borrow_mut() = Some(session);
+/// Set the session context for the current request. Internal helper —
+/// not part of the public surface. Tests should use the
+/// `new_session_slot_for_test` / `session_scope_for_test` helpers
+/// in [`crate::session`] instead.
+#[allow(dead_code)]
+pub(crate) fn set_session(session: SessionData) {
+    let _ = SESSION_CONTEXT.try_with(|slot| {
+        *slot.lock().unwrap() = Some(session);
     });
 }
 
-/// Clear the session context
-pub fn clear_session() {
-    SESSION_CONTEXT.with(|ctx| {
-        *ctx.borrow_mut() = None;
+/// Clear the session context. Internal — see [`set_session`].
+#[allow(dead_code)]
+pub(crate) fn clear_session() {
+    let _ = SESSION_CONTEXT.try_with(|slot| {
+        *slot.lock().unwrap() = None;
     });
 }
 
-/// Take the session out of the context (for saving)
-pub fn take_session() -> Option<SessionData> {
-    SESSION_CONTEXT.with(|ctx| ctx.borrow_mut().take())
+/// Take the session out of the context. Internal — used by
+/// `SessionMiddleware` for the save step.
+#[allow(dead_code)]
+pub(crate) fn take_session() -> Option<SessionData> {
+    SESSION_CONTEXT
+        .try_with(|slot| slot.lock().unwrap().take())
+        .ok()
+        .flatten()
 }
 
 /// Generate a cryptographically secure session ID
@@ -163,14 +184,16 @@ impl Middleware for SessionMiddleware {
         // Age flash data from previous request
         session.age_flash_data();
 
-        // Store session in thread-local context
-        set_session(session);
+        // Bind the session to a `tokio::task_local!` so it survives
+        // `.await` points that resume on a different worker thread.
+        // Handlers read/write through `session()` / `session_mut()`.
+        let slot: Arc<Mutex<Option<SessionData>>> = Arc::new(Mutex::new(Some(session)));
+        let response = SESSION_CONTEXT
+            .scope(slot.clone(), next(request))
+            .await;
 
-        // Process the request
-        let response = next(request).await;
-
-        // Get the potentially modified session
-        let session = take_session();
+        // Take the potentially-modified session back out of the slot.
+        let session = slot.lock().unwrap().take();
 
         // Save session and add cookie to response
         if let Some(session) = session {

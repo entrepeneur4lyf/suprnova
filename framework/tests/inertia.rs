@@ -1305,6 +1305,277 @@ async fn inertia_redirect_distinct_from_location() {
     assert!(location.headers().get("X-Inertia-Location").is_some());
 }
 
+#[tokio::test]
+async fn preserve_fragment_flows_through_html_shell_data_page() {
+    // Initial (non-XHR) visit returns the HTML shell with the page object
+    // embedded in the `data-page` attribute on `<div id="app">`. Verify
+    // `preserveFragment: true` survives that path the same as the XHR path.
+    let req = MockReq::new("/article/new"); // no X-Inertia → HTML response
+    let resp = InertiaResponse::new("Article/Show")
+        .preserve_fragment(true)
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+
+    // The HTML shell HTML-escapes the JSON page object inside `data-page`.
+    // `"preserveFragment":true` becomes `&quot;preserveFragment&quot;:true`.
+    assert!(
+        body.contains("&quot;preserveFragment&quot;:true"),
+        "expected escaped preserveFragment:true in data-page; body was:\n{}",
+        body
+    );
+}
+
+#[tokio::test]
+async fn preserve_fragment_survives_partial_reload_filter() {
+    // `preserveFragment` is a top-level page-object flag, not a prop, so
+    // partial-reload filtering (which only filters `props`) must not
+    // affect it. Drive a partial reload with `X-Inertia-Partial-Component`
+    // + `X-Inertia-Partial-Data` and verify the flag still emits.
+    let req = MockReq::new("/article")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Article/Show")
+        .header("X-Inertia-Partial-Data", "title");
+    let resp = InertiaResponse::new("Article/Show")
+        .preserve_fragment(true)
+        .with("title", "Welcome")
+        .with("body", "long content")
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    // Partial filter limited props to `title` only.
+    assert_eq!(page["props"]["title"], "Welcome");
+    assert!(page["props"].as_object().unwrap().get("body").is_none());
+    // …but the top-level flag is unaffected.
+    assert_eq!(page["preserveFragment"], true);
+}
+
+// ---- Cross-redirect carry: Redirect::preserve_fragment() round-trip ----
+//
+// These tests drive the full chain: a `Redirect::preserve_fragment()`
+// chainable flashes `_inertia.preserve_fragment` to the session, and
+// the next request's `InertiaResponse::resolve()` consumes the flag
+// and emits `preserveFragment: true`. Each test scopes the session
+// via `session_scope_for_test` (mirroring what `SessionMiddleware`
+// does at runtime) so the `task_local!` slot is bound.
+
+#[tokio::test]
+async fn redirect_preserve_fragment_flashes_session_flag() {
+    use suprnova::Redirect;
+    use suprnova::session::{new_session_slot_for_test, session_scope_for_test};
+
+    let slot = new_session_slot_for_test();
+    session_scope_for_test(slot.clone(), async {
+        let _: suprnova::Response = Redirect::to("/article/new")
+            .preserve_fragment()
+            .into();
+    })
+    .await;
+
+    // The chainable should have set a *new* flash entry (before aging).
+    let s = slot.lock().unwrap();
+    let session = s.as_ref().expect("session present");
+    assert!(
+        session.has("_flash.new._inertia.preserve_fragment"),
+        "expected new-flash entry after Redirect::preserve_fragment() conversion"
+    );
+}
+
+#[tokio::test]
+async fn redirect_route_preserve_fragment_flashes_session_flag() {
+    // The `RedirectRouteBuilder::From<...>` impl has a separate code
+    // path (it can short-circuit on missing route). Ensure
+    // `.preserve_fragment()` flashes on the happy path too — they
+    // share a helper but the helper must actually be called from both.
+    use suprnova::Redirect;
+    use suprnova::routing::register_route_name;
+    use suprnova::session::{new_session_slot_for_test, session_scope_for_test};
+
+    // Register a route with a unique name so this test doesn't collide
+    // with other tests touching the process-global route registry.
+    register_route_name(
+        "_test_redirect_preserve_fragment_target",
+        "/test/article/new",
+    );
+
+    let slot = new_session_slot_for_test();
+    session_scope_for_test(slot.clone(), async {
+        let resp: suprnova::Response = Redirect::route("_test_redirect_preserve_fragment_target")
+            .preserve_fragment()
+            .into();
+        assert!(resp.is_ok(), "route should resolve");
+    })
+    .await;
+
+    let s = slot.lock().unwrap();
+    let session = s.as_ref().expect("session present");
+    assert!(
+        session.has("_flash.new._inertia.preserve_fragment"),
+        "RedirectRouteBuilder::preserve_fragment must flash the same key as Redirect::preserve_fragment"
+    );
+}
+
+#[tokio::test]
+async fn redirect_route_missing_does_not_flash() {
+    // When the route doesn't exist, From<RedirectRouteBuilder> returns
+    // a 500 Err. Skipping the flash is intentional — otherwise a stray
+    // `_inertia.preserve_fragment` would attach to whatever page the
+    // user navigates to next.
+    use suprnova::Redirect;
+    use suprnova::session::{new_session_slot_for_test, session_scope_for_test};
+
+    let slot = new_session_slot_for_test();
+    session_scope_for_test(slot.clone(), async {
+        let resp: suprnova::Response = Redirect::route("_test_nonexistent_route_xyz")
+            .preserve_fragment()
+            .into();
+        assert!(resp.is_err(), "missing route should yield Err");
+    })
+    .await;
+
+    let s = slot.lock().unwrap();
+    let session = s.as_ref().expect("session present");
+    assert!(
+        !session.has("_flash.new._inertia.preserve_fragment"),
+        "missing-route 500 must NOT flash a stray preserve-fragment"
+    );
+}
+
+#[tokio::test]
+async fn inertia_resolve_picks_up_flashed_preserve_fragment() {
+    use suprnova::session::{new_session_slot_for_test, session_scope_for_test};
+
+    let slot = new_session_slot_for_test();
+    // Pre-populate as if a previous request flashed it and the session
+    // middleware aged it (moving `_flash.new.*` → `_flash.old.*`).
+    {
+        let mut g = slot.lock().unwrap();
+        let s = g.as_mut().unwrap();
+        s.put("_flash.old._inertia.preserve_fragment", true);
+    }
+    let req = MockReq::new("/article/new").inertia();
+    let page: serde_json::Value = session_scope_for_test(slot.clone(), async move {
+        let resp = InertiaResponse::new("Article/Show")
+            .resolve(&req)
+            .await
+            .unwrap();
+        let body = body_to_string(resp.into_hyper().into_body());
+        serde_json::from_str(&body).unwrap()
+    })
+    .await;
+    assert_eq!(page["preserveFragment"], true);
+}
+
+#[tokio::test]
+async fn per_response_false_defeats_flashed_true() {
+    // Advisor's critical negative test: explicit `preserve_fragment(false)`
+    // on the destination must override a flashed `true` from a redirect.
+    use suprnova::session::{new_session_slot_for_test, session_scope_for_test};
+
+    let slot = new_session_slot_for_test();
+    {
+        let mut g = slot.lock().unwrap();
+        let s = g.as_mut().unwrap();
+        s.put("_flash.old._inertia.preserve_fragment", true);
+    }
+    let req = MockReq::new("/article").inertia();
+    let page: serde_json::Value = session_scope_for_test(slot.clone(), async move {
+        let resp = InertiaResponse::new("Article/Show")
+            .preserve_fragment(false)
+            .resolve(&req)
+            .await
+            .unwrap();
+        let body = body_to_string(resp.into_hyper().into_body());
+        serde_json::from_str(&body).unwrap()
+    })
+    .await;
+    assert!(
+        !page.as_object().unwrap().contains_key("preserveFragment"),
+        "preserve_fragment(false) must defeat a flashed true"
+    );
+}
+
+#[tokio::test]
+async fn flashed_preserve_fragment_is_one_shot() {
+    // After one Inertia response consumes the flashed flag, the next
+    // response in the same session must NOT see it again.
+    use suprnova::session::{new_session_slot_for_test, session_scope_for_test};
+
+    let slot = new_session_slot_for_test();
+    {
+        let mut g = slot.lock().unwrap();
+        let s = g.as_mut().unwrap();
+        s.put("_flash.old._inertia.preserve_fragment", true);
+    }
+
+    // First resolve consumes the flash.
+    let req1 = MockReq::new("/article").inertia();
+    let page1: serde_json::Value = session_scope_for_test(slot.clone(), async move {
+        let resp = InertiaResponse::new("Article/Show")
+            .resolve(&req1)
+            .await
+            .unwrap();
+        let body = body_to_string(resp.into_hyper().into_body());
+        serde_json::from_str(&body).unwrap()
+    })
+    .await;
+    assert_eq!(page1["preserveFragment"], true);
+
+    // Second resolve sees nothing (same session, but flash was drained).
+    let req2 = MockReq::new("/article").inertia();
+    let page2: serde_json::Value = session_scope_for_test(slot.clone(), async move {
+        let resp = InertiaResponse::new("Article/Show")
+            .resolve(&req2)
+            .await
+            .unwrap();
+        let body = body_to_string(resp.into_hyper().into_body());
+        serde_json::from_str(&body).unwrap()
+    })
+    .await;
+    assert!(
+        !page2.as_object().unwrap().contains_key("preserveFragment"),
+        "second resolve must not see a re-emitted preserveFragment"
+    );
+}
+
+#[tokio::test]
+async fn no_session_scope_silently_drops_preserve_fragment_flash() {
+    // Defensive: Redirect::preserve_fragment() outside a session scope
+    // is a documented no-op. It must not panic. The destination
+    // response (also outside session scope) sees no flag.
+    use suprnova::Redirect;
+
+    let _: suprnova::Response = Redirect::to("/x").preserve_fragment().into();
+    let req = MockReq::new("/x").inertia();
+    let resp = InertiaResponse::new("X").resolve(&req).await.unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(!page.as_object().unwrap().contains_key("preserveFragment"));
+}
+
+#[tokio::test]
+async fn three_browser_history_flags_combine_without_coupling() {
+    // encryptHistory, clearHistory, preserveFragment are independent
+    // top-level fields. Setting all three should emit all three with
+    // value `true` and not interfere with each other.
+    let req = MockReq::new("/secure").inertia();
+    let resp = InertiaResponse::new("Secure/Page")
+        .encrypt_history(true)
+        .clear_history()
+        .preserve_fragment(true)
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(page["encryptHistory"], true);
+    assert_eq!(page["clearHistory"], true);
+    assert_eq!(page["preserveFragment"], true);
+}
+
 // ---- version-mismatch middleware ----
 //
 // These tests drive the middleware directly via the Middleware trait

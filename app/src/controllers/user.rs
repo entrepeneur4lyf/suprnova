@@ -38,3 +38,13 @@ pub async fn redirect_example(_req: Request) -> Response {
         .query("sort", "name")
         .into()
 }
+
+/// Example: Inertia redirect that preserves the URL fragment across
+/// the redirect. The destination's `InertiaResponse` will emit
+/// `preserveFragment: true` so the client carries over its current
+/// `#anchor` to the new URL.
+///
+/// Maps to Laravel's `redirect()->preserveFragment()`.
+pub async fn preserve_fragment_example(_req: Request) -> Response {
+    redirect!("users.index").preserve_fragment().into()
+}
