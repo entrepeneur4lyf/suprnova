@@ -2,9 +2,10 @@ use crate::cache::Cache;
 use crate::config::{Config, ServerConfig};
 use crate::container::App;
 use crate::http::{HttpResponse, Request};
-use crate::logging::{init_subscriber, LogConfig, RequestIdMiddleware};
+use crate::logging::{LogConfig, RequestIdMiddleware};
 use crate::middleware::{into_boxed, Middleware, MiddlewareChain, MiddlewareRegistry};
 use crate::routing::Router;
+use crate::telemetry::{init_telemetry, OtelConfig};
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
@@ -88,8 +89,11 @@ impl Server {
     }
 
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Initialize the global tracing subscriber from env (idempotent).
-        init_subscriber(LogConfig::from_env());
+        // Initialize the global tracing subscriber (and OTel pipelines
+        // when the `otel` feature is enabled + an endpoint is set).
+        // The guard owns the SDK providers and flushes them on Ctrl-C
+        // or SIGTERM. Idempotent across calls.
+        let guard = init_telemetry(LogConfig::from_env(), OtelConfig::from_env());
 
         // Bootstrap cache (Redis with in-memory fallback)
         Cache::bootstrap().await;
@@ -103,24 +107,65 @@ impl Server {
         let middleware = Arc::new(self.middleware);
 
         loop {
-            let (stream, _) = listener.accept().await?;
-            let io = TokioIo::new(stream);
-            let router = router.clone();
-            let middleware = middleware.clone();
-
-            tokio::spawn(async move {
-                let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+            tokio::select! {
+                accept = listener.accept() => {
+                    let (stream, _) = accept?;
+                    let io = TokioIo::new(stream);
                     let router = router.clone();
                     let middleware = middleware.clone();
-                    async move { Ok::<_, Infallible>(handle_request(router, middleware, req).await) }
-                });
 
-                if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
-                    tracing::error!(?err, "error serving connection");
+                    tokio::spawn(async move {
+                        let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                            let router = router.clone();
+                            let middleware = middleware.clone();
+                            async move {
+                                Ok::<_, Infallible>(handle_request(router, middleware, req).await)
+                            }
+                        });
+
+                        if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
+                            tracing::error!(?err, "error serving connection");
+                        }
+                    });
                 }
-            });
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("shutdown signal received (Ctrl-C)");
+                    break;
+                }
+                _ = wait_terminate() => {
+                    tracing::info!("SIGTERM received");
+                    break;
+                }
+            }
+        }
+
+        // Flush buffered telemetry before returning. Safe to call when
+        // OTel is disabled — guard just no-ops.
+        guard.shutdown().await;
+        Ok(())
+    }
+}
+
+/// Wait for SIGTERM on Unix. On non-Unix platforms returns a future that
+/// never resolves, so the `tokio::select!` arm stays parked.
+#[cfg(unix)]
+async fn wait_terminate() {
+    use tokio::signal::unix::{signal, SignalKind};
+    match signal(SignalKind::terminate()) {
+        Ok(mut sig) => {
+            sig.recv().await;
+        }
+        Err(err) => {
+            tracing::warn!(?err, "failed to install SIGTERM handler; \
+                Ctrl-C is still honored");
+            std::future::pending::<()>().await;
         }
     }
+}
+
+#[cfg(not(unix))]
+async fn wait_terminate() {
+    std::future::pending::<()>().await;
 }
 
 async fn handle_request(
