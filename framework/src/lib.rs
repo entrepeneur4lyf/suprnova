@@ -15,6 +15,7 @@ pub mod events;
 pub mod inertia;
 pub mod logging;
 pub mod middleware;
+pub mod pagination;
 pub mod routing;
 pub mod schedule;
 pub mod sse;
@@ -56,10 +57,13 @@ pub use logging::{
 };
 pub use events::{ErrorOccurred, Event, EventDispatcher, EventFacade, Listener};
 pub use inertia::{
-    DeferConfig, DeferOptions, EncryptHistoryMiddleware, Frontend, Inertia303Middleware,
+    DeferConfig, DeferOptions, EncryptHistoryMiddleware, Frontend, Inertia, Inertia303Middleware,
     InertiaConfig, InertiaRegistry, InertiaRequestExt, InertiaResponse, InertiaSharedData,
     InertiaVersionMiddleware, MergeConfig, MergeStrategy, OnceConfig, OnceOptions, PartialFilter,
     Prop, PropFuture, PropResolver, ScrollConfig, ScrollMetadata, VersionResolver,
+};
+pub use pagination::{
+    CursorPaginator, IntoInertiaScroll, LengthAwarePaginator, Pagination,
 };
 pub use middleware::{
     register_global_middleware, Middleware, MiddlewareFuture, MiddlewareRegistry, Next,

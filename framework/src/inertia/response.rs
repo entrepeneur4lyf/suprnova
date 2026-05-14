@@ -308,6 +308,24 @@ impl InertiaResponse {
         self
     }
 
+    /// Attach a paginator (`LengthAwarePaginator` or `CursorPaginator`)
+    /// as a scroll prop under `key`. The paginator's metadata becomes
+    /// the prop's `ScrollMetadata`; its rows become the prop value.
+    ///
+    /// Equivalent to `.scroll(key, paginator.into_inertia_scroll().0, paginator.into_inertia_scroll().1)`,
+    /// but reads better at the call site.
+    pub fn paginate<T>(
+        self,
+        key: &'static str,
+        paginator: impl crate::pagination::IntoInertiaScroll<T>,
+    ) -> Self
+    where
+        T: Serialize + 'static,
+    {
+        let (meta, data) = paginator.into_inertia_scroll();
+        self.scroll(key, meta, data)
+    }
+
     /// Attach a flash value to this response. Appears under the
     /// top-level `flash` field of the page object (not under `props`).
     /// Use for one-shot toasts / success messages.
