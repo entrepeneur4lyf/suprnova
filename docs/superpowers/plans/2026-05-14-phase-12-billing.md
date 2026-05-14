@@ -15,31 +15,41 @@ The bridge: a single `WebhookHandler` per provider receives the raw payload, ask
 
 **Why PayRail over Hyperswitch:** PayRail is a library; Hyperswitch is a deployment. PayRail's 13 builtin providers cover the markets Laravel Cashier doesn't reach — Mobile Money for African markets (Lipila, MTN MoMo, M-Pesa, Airtel, Orange) and crypto rails (Circle, Coinbase, Bridge, Binance) — without our consumers running a separate payments-router service.
 
-**Paddle note:** Paddle is not in PayRail's `BuiltinProvider` enum. v1 of Phase 12 ships without Paddle; if a consumer needs it, the path is (a) fork PayRail into workspace as `suprnova-payrail` and add a `Paddle` variant, or (b) contribute upstream. Documented under "Out of v1 scope" below.
+**Paddle as a peer backend.** Paddle is **Merchant of Record** — it owns subscription lifecycle, tax computation, dunning retries, and invoice generation itself. That's a fundamentally different ownership model from PayRail-routed providers (Stripe / PayPal / Lipila / etc.) where we drive the lifecycle. We integrate Paddle via the unofficial [`paddle-rust-sdk`](https://github.com/peterprototypes/paddle-rust-sdk) 0.18.0 (Apache-2.0) as a **peer** to PayRail, not subordinate to it.
 
-**Tech Stack:** `payrail` (`path = "../reference/payrail-0.1.5/crates/payrail"`, feature `all-providers`), `printpdf` 0.7 for invoice PDFs, reuses Phase 1 events, Phase 5 mail, Phase 5 queue (for period-end charging job), Phase 2 HTTP (for billing-portal URL retrieval where the provider needs it).
+The `Billable` trait surface stays unified — `user.subscribe("pro", provider, price_id)` works for both — but internal dispatch routes to either PayRail or Paddle SDK based on the `BillingBackend` enum we introduce. Lifecycle ownership:
+
+| Provider category | Lifecycle owner | Our DB role | Period charging |
+|---|---|---|---|
+| PayRail-routed (Stripe, PayPal, Lipila, MTN MoMo, M-Pesa, Airtel, Orange, Flutterwave, Paystack, Circle, Coinbase, Bridge, Binance) | **Us** | Source of truth | Our `ChargeSubscriptionJob` (Phase 5 Queue) |
+| Paddle | **Paddle** | Mirror of Paddle's state | Paddle handles it; we react to webhooks |
+
+**Tech Stack:** `payrail` (`path = "../reference/payrail-0.1.5/crates/payrail"`, feature `all-providers`), `paddle-rust-sdk` (`path = "../reference/paddle-rust-sdk-0.18.0"`), `printpdf` 0.7 for invoice PDFs, reuses Phase 1 events, Phase 5 mail, Phase 5 queue (for period-end charging job — PayRail-routed subs only), Phase 2 HTTP.
 
 ---
 
 ## File Structure
 
 **New files:**
-- `framework/src/billing/mod.rs` — `Billable` trait, `Subscription` model, facade
-- `framework/src/billing/subscription.rs` — lifecycle state machine
+- `framework/src/billing/mod.rs` — `Billable` trait, `BillingBackend` enum, `Subscription` model, facade
+- `framework/src/billing/backend.rs` — `BillingBackend` enum with `PayRail` / `Paddle` variants
+- `framework/src/billing/payrail_backend.rs` — PayRail-routed implementation (we own lifecycle)
+- `framework/src/billing/paddle_backend.rs` — Paddle SDK wrapper (Paddle owns lifecycle)
+- `framework/src/billing/subscription.rs` — local subscription model (source of truth for PayRail; mirror for Paddle)
 - `framework/src/billing/invoice.rs` — `Invoice` struct + PDF rendering
-- `framework/src/billing/period_job.rs` — `ChargeSubscriptionJob` (period-end charging)
-- `framework/src/billing/webhook.rs` — per-provider webhook handlers, PayRail-bridge
-- `framework/src/billing/events.rs` — typed framework events
-- `framework/src/billing/portal.rs` — customer-portal URL builders (provider-specific)
+- `framework/src/billing/period_job.rs` — `ChargeSubscriptionJob` (PayRail-routed only)
+- `framework/src/billing/webhook.rs` — webhook handlers, dispatch to PayRail or Paddle verification
+- `framework/src/billing/events.rs` — typed framework events (unified across backends)
+- `framework/src/billing/portal.rs` — customer-portal URL builders (Stripe via Http; Paddle's customer-portal URL via SDK)
 - `framework/src/billing/migrations/m_create_subscriptions_table.rs`
 - `framework/src/billing/migrations/m_create_invoices_table.rs`
 - `framework/src/billing/migrations/m_add_billing_columns_to_users.rs`
-- `framework/tests/billing.rs` — end-to-end with PayRail mock provider
+- `framework/tests/billing.rs` — end-to-end with both backends
 - `app/src/listeners/billing_listener.rs` — dogfood
 
 **Modified files:**
-- `framework/Cargo.toml` — add `payrail = { path = "../reference/payrail-0.1.5/crates/payrail", features = ["all-providers"] }`, `printpdf`
-- `framework/src/lib.rs` — re-export `Billable`, `Subscription`, `Invoice`
+- `framework/Cargo.toml` — add `payrail`, `paddle-rust-sdk`, `printpdf`
+- `framework/src/lib.rs` — re-export `Billable`, `BillingBackend`, `Subscription`, `Invoice`
 
 ---
 
@@ -52,6 +62,7 @@ The bridge: a single `WebhookHandler` per provider receives the raw payload, ask
 ```toml
 # framework/Cargo.toml — [dependencies]
 payrail = { path = "../reference/payrail-0.1.5/crates/payrail", features = ["all-providers"] }
+paddle-rust-sdk = { path = "../reference/paddle-rust-sdk-0.18.0" }
 printpdf = "0.7"
 ```
 
@@ -69,8 +80,9 @@ cargo check --workspace
 //   id BIGINT PRIMARY KEY AUTO_INCREMENT,
 //   user_id BIGINT NOT NULL,
 //   name VARCHAR(64) NOT NULL,             -- "default" | "pro" | "addons" | ...
-//   provider VARCHAR(32) NOT NULL,          -- "Stripe" | "PayPal" | "Lipila" | ...
-//   provider_subscription_id VARCHAR(128),  -- PayRail ProviderReference for the subscription, when the rails offer one
+//   backend VARCHAR(16) NOT NULL,           -- "payrail" | "paddle"  (distinguishes lifecycle owner)
+//   provider VARCHAR(32) NOT NULL,          -- "Stripe" | "PayPal" | "Lipila" | "Paddle" | ...
+//   provider_subscription_id VARCHAR(128),  -- PayRail ProviderReference OR Paddle subscription id
 //   price_id VARCHAR(128) NOT NULL,
 //   status VARCHAR(32) NOT NULL,            -- "trialing" | "active" | "past_due" | "cancelled" | "incomplete"
 //   trial_ends_at DATETIME,
@@ -115,6 +127,7 @@ cargo check --workspace
 //   ADD COLUMN stripe_customer_id VARCHAR(128),
 //   ADD COLUMN paypal_customer_id VARCHAR(128),
 //   ADD COLUMN lipila_customer_id VARCHAR(128),
+//   ADD COLUMN paddle_customer_id VARCHAR(128),
 //   ADD COLUMN preferred_payment_provider VARCHAR(32),
 //   ADD COLUMN trial_ends_at DATETIME;
 ```
@@ -241,17 +254,44 @@ use async_trait::async_trait;
 use payrail::PaymentProvider;
 use std::sync::OnceLock;
 
+/// Which backend handles a given subscription. Persisted in the
+/// `subscriptions.backend` column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BillingBackend {
+    /// PayRail-routed providers (Stripe, PayPal, Lipila, MTN MoMo,
+    /// M-Pesa, Airtel, Orange, Flutterwave, Paystack, Circle,
+    /// Coinbase, Bridge, Binance). We own the subscription lifecycle;
+    /// our DB is the source of truth.
+    PayRail,
+    /// Paddle (Merchant of Record). Paddle owns the subscription
+    /// lifecycle; our DB mirrors Paddle's state from webhooks.
+    Paddle,
+}
+
 /// The configured PayRail client. Initialized once in bootstrap.
 static PAYRAIL: OnceLock<payrail::PayRailClient> = OnceLock::new();
+/// The configured Paddle client. Initialized once in bootstrap.
+static PADDLE: OnceLock<paddle_rust_sdk::Paddle> = OnceLock::new();
 
 pub fn set_payrail(client: payrail::PayRailClient) {
     let _ = PAYRAIL.set(client);
+}
+
+pub fn set_paddle(client: paddle_rust_sdk::Paddle) {
+    let _ = PADDLE.set(client);
 }
 
 pub(crate) fn payrail() -> Result<&'static payrail::PayRailClient, FrameworkError> {
     PAYRAIL
         .get()
         .ok_or_else(|| FrameworkError::internal("payrail client not initialized — call billing::set_payrail in bootstrap"))
+}
+
+pub(crate) fn paddle() -> Result<&'static paddle_rust_sdk::Paddle, FrameworkError> {
+    PADDLE
+        .get()
+        .ok_or_else(|| FrameworkError::internal("paddle client not initialized — call billing::set_paddle in bootstrap"))
 }
 
 /// Trait implemented on user models for billing operations.
@@ -639,11 +679,25 @@ pub async fn use_standard() -> Result<(), FrameworkError> {
         .build()
         .map_err(|e| FrameworkError::internal(format!("payrail build: {}", e)))?;
     set_payrail(client);
+
+    // Paddle is a peer backend, not a PayRail provider. Wire it
+    // separately when PADDLE_API_KEY is set.
+    #[cfg(feature = "billing-paddle")]
+    if let Ok(key) = std::env::var("PADDLE_API_KEY") {
+        let env = match std::env::var("PADDLE_ENV").as_deref() {
+            Ok("production") => paddle_rust_sdk::Paddle::PRODUCTION,
+            _ => paddle_rust_sdk::Paddle::SANDBOX,
+        };
+        let paddle_client = paddle_rust_sdk::Paddle::new(key, env)
+            .map_err(|e| FrameworkError::internal(format!("paddle init: {}", e)))?;
+        set_paddle(paddle_client);
+    }
+
     Ok(())
 }
 ```
 
-> **PayRail config types:** The exact `StripeConfig` / `PayPalConfig` / `LipilaConfig` constructor signatures live in `reference/payrail-0.1.5/crates/payrail/src/providers/<provider>/`. Use them; the sketch above is illustrative.
+> **PayRail config types:** The exact `StripeConfig` / `PayPalConfig` / `LipilaConfig` constructor signatures live in `reference/payrail-0.1.5/crates/payrail/src/providers/<provider>/`. The Paddle constructor (`Paddle::new(api_key, Paddle::SANDBOX)`) is in `reference/paddle-rust-sdk-0.18.0/src/lib.rs`. Use them; the sketch above is illustrative.
 
 - [ ] **Step 2: Wire from app bootstrap**
 
@@ -662,7 +716,8 @@ billing-stripe = ["payrail/stripe"]
 billing-paypal = ["payrail/paypal"]
 billing-lipila = ["payrail/lipila"]
 billing-mobile-money = ["payrail/mobile-money"]
-billing-all = ["billing-stripe", "billing-paypal", "billing-lipila", "billing-mobile-money"]
+billing-paddle = []   # paddle-rust-sdk is unconditional in [dependencies]; the feature gates the bootstrap branch
+billing-all = ["billing-stripe", "billing-paypal", "billing-lipila", "billing-mobile-money", "billing-paddle"]
 ```
 
 - [ ] **Step 4: Commit**
@@ -755,15 +810,22 @@ pub fn handle(
 ) -> impl Fn(Request) -> futures::future::BoxFuture<'static, Response> + Clone {
     move |req: Request| {
         Box::pin(async move {
-            // 1. Read headers + body
+            let raw_body = req.into_body_bytes().await?;
+
+            // Route by provider — Paddle has its own signature scheme
+            // (MaximumVariance HMAC); PayRail providers all flow
+            // through PayRail's verify_and_normalize_webhook.
+            if provider_name == "paddle" {
+                return handle_paddle_webhook(req_headers_clone(&req), &raw_body).await;
+            }
+
+            // PayRail-routed providers
             let signature = req
                 .header("stripe-signature")
                 .or_else(|| req.header("paypal-transmission-sig"))
                 .or_else(|| req.header("x-lipila-signature"))
                 .unwrap_or_default();
-            let raw_body = req.into_body_bytes().await?;
 
-            // 2. Map provider name → PaymentProvider
             let provider = match provider_name {
                 "stripe" => PaymentProvider::Stripe,
                 "paypal" => PaymentProvider::PayPal,
@@ -771,7 +833,6 @@ pub fn handle(
                 other => PaymentProvider::other(other),
             };
 
-            // 3. Verify + normalize via PayRail
             let client = payrail()?;
             let webhook_request = WebhookRequest::new(provider.clone(), &raw_body, &signature);
             let event: PaymentEvent = client
@@ -779,11 +840,106 @@ pub fn handle(
                 .await
                 .map_err(|e| FrameworkError::internal(format!("webhook verify: {}", e)))?;
 
-            // 4. React in our state machine + dispatch typed events
             handle_normalized_event(event).await?;
             json_response!({ "received": true })
         })
     }
+}
+
+/// Paddle webhook handler — uses paddle-rust-sdk's MaximumVariance
+/// HMAC signature verification, then normalizes Paddle event types
+/// into our typed framework events.
+async fn handle_paddle_webhook(
+    headers: HashMap<String, String>,
+    raw_body: &[u8],
+) -> Response {
+    use paddle_rust_sdk::webhooks::MaximumVariance;
+
+    let secret = std::env::var("PADDLE_WEBHOOK_SECRET")
+        .map_err(|_| FrameworkError::internal("PADDLE_WEBHOOK_SECRET not set"))?;
+    let signature_header = headers
+        .get("paddle-signature")
+        .cloned()
+        .ok_or_else(|| FrameworkError::internal("missing paddle-signature header"))?;
+
+    let body_str = std::str::from_utf8(raw_body)
+        .map_err(|e| FrameworkError::internal(format!("body utf8: {}", e)))?;
+
+    let verified: serde_json::Value = MaximumVariance::new(&secret)
+        .verify(&signature_header, body_str)
+        .map_err(|e| FrameworkError::internal(format!("paddle webhook verify: {}", e)))?;
+
+    let event_type = verified["event_type"].as_str().unwrap_or_default();
+    let data = &verified["data"];
+
+    match event_type {
+        "subscription.created" | "subscription.activated" => {
+            let sub_id = persist_paddle_subscription(data).await?;
+            let _ = crate::Event::dispatch(SubscriptionCreated {
+                user_id: extract_paddle_user_id(data).await.unwrap_or(0),
+                subscription_id: sub_id,
+                plan: data["items"][0]["price"]["id"].as_str().unwrap_or_default().to_string(),
+                provider: "Paddle".into(),
+            })
+            .await;
+        }
+        "subscription.canceled" => {
+            mirror_paddle_cancellation(data).await?;
+            let _ = crate::Event::dispatch(SubscriptionCancelled {
+                user_id: extract_paddle_user_id(data).await.unwrap_or(0),
+                subscription_name: data["custom_data"]["subscription_name"]
+                    .as_str()
+                    .unwrap_or("default")
+                    .to_string(),
+                immediate: data["scheduled_change"].is_null(),
+            })
+            .await;
+        }
+        "transaction.completed" => {
+            let invoice_id = persist_paddle_invoice_paid(data).await?;
+            let _ = crate::Event::dispatch(InvoicePaid {
+                user_id: extract_paddle_user_id(data).await.unwrap_or(0),
+                invoice_id,
+                amount_cents: data["details"]["totals"]["total"].as_str()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0),
+                currency: data["currency_code"].as_str().unwrap_or("USD").to_string(),
+                provider: "Paddle".into(),
+            })
+            .await;
+        }
+        "transaction.payment_failed" => {
+            let invoice_id = persist_paddle_invoice_failed(data).await?;
+            let _ = crate::Event::dispatch(InvoicePaymentFailed {
+                user_id: extract_paddle_user_id(data).await.unwrap_or(0),
+                invoice_id,
+                reason: data["payments"][0]["error_code"].as_str().unwrap_or("payment failed").to_string(),
+            })
+            .await;
+        }
+        _ => {
+            tracing::debug!(event_type, "unhandled paddle event");
+        }
+    }
+
+    json_response!({ "received": true })
+}
+
+// Persistence stubs — implementer wires SeaORM ActiveModel writes
+// against the local subscriptions / invoices tables. For Paddle
+// subscriptions, these mirror Paddle's state into our DB.
+async fn persist_paddle_subscription(_data: &serde_json::Value) -> Result<i64, FrameworkError> { unimplemented!() }
+async fn mirror_paddle_cancellation(_data: &serde_json::Value) -> Result<(), FrameworkError> { unimplemented!() }
+async fn persist_paddle_invoice_paid(_data: &serde_json::Value) -> Result<i64, FrameworkError> { unimplemented!() }
+async fn persist_paddle_invoice_failed(_data: &serde_json::Value) -> Result<i64, FrameworkError> { unimplemented!() }
+async fn extract_paddle_user_id(_data: &serde_json::Value) -> Option<i64> {
+    // Look up via custom_data.user_id or via paddle_customer_id column on users.
+    None
+}
+
+fn req_headers_clone(_req: &Request) -> HashMap<String, String> {
+    // Implementer: borrow before consumption, or pass headers through.
+    HashMap::new()
 }
 
 async fn handle_normalized_event(event: PaymentEvent) -> Result<(), FrameworkError> {
@@ -1278,9 +1434,9 @@ Commit + push.
 
 ## Out of v1 scope
 
-- **Paddle.** Not in PayRail's `BuiltinProvider` enum and PayRail doesn't expose a provider extension trait. Path forward if a consumer needs Paddle: (a) fork PayRail into the workspace as `suprnova-payrail` and add a `Paddle` variant + provider module, or (b) contribute upstream. Documented; not implemented.
 - **Tax computation.** Stripe Tax / Paddle's MoR model handles this — consumers configure on the provider side. We don't compute tax ourselves.
-- **Dunning automation beyond status-only.** We mark `past_due` and dispatch `InvoicePaymentFailed`; the app's listener decides what to do (email retry, account suspension). Sophisticated dunning (multi-step retry schedules, grace periods, payment-method-update reminders) is consumer-app concern.
+- **Dunning automation beyond status-only for PayRail-routed.** We mark `past_due` and dispatch `InvoicePaymentFailed`; the app's listener decides what to do (email retry, account suspension). Paddle subs get Paddle's built-in dunning automatically. Sophisticated PayRail-side dunning (multi-step retry schedules, grace periods, payment-method-update reminders) is consumer-app concern.
+- **In-app payment-method update UI for Paddle.** Paddle's customer portal handles it; we just redirect via `Billable::billing_portal_url`.
 
 ---
 
@@ -1289,14 +1445,17 @@ Commit + push.
 | Spec item | Covered by | Source |
 |---|---|---|
 | PayRail bootstrap + provider configuration | Task 3 | PayRail |
-| Billable user trait | Task 2 | Ours |
-| Subscription model + state machine | Task 2 | Ours |
-| Provider customer creation | Task 2 | PayRail |
-| Webhook signature verification + normalization | Task 4 | PayRail |
-| Typed subscription events | Task 4 | Ours (Phase 1 EventDispatcher) |
-| Period-end charging job | Task 5 | Ours + Phase 5 Queue + Schedule |
+| Paddle bootstrap (API key + sandbox/production env) | Task 3 | paddle-rust-sdk |
+| Billable user trait (unified across backends) | Task 2 | Ours |
+| BillingBackend enum routing (PayRail vs Paddle) | Task 2 | Ours |
+| Subscription model + state machine (source of truth for PayRail; mirror for Paddle) | Task 2 | Ours |
+| Provider customer creation | Task 2 | PayRail / paddle-rust-sdk |
+| PayRail webhook signature verification + normalization | Task 4 | PayRail |
+| Paddle webhook MaximumVariance HMAC verification | Task 4 | paddle-rust-sdk |
+| Typed subscription events (unified across backends) | Task 4 | Ours (Phase 1 EventDispatcher) |
+| Period-end charging job (PayRail-routed only — Paddle drives its own) | Task 5 | Ours + Phase 5 Queue + Schedule |
 | Invoice PDF | Task 6 | Ours (printpdf) |
-| Customer portal URL builders | Task 7 | Ours (per-provider HTTP via Phase 2) |
+| Customer portal URL builders (Stripe via Http; Paddle via SDK) | Task 7 | Ours + paddle-rust-sdk |
 | App dogfood (listeners + webhook routes) | Task 8 | — |
 
 **Architectural correctness:** PayRail owns the payment-rails layer (charges, refunds, captures, webhook normalization, multi-provider routing). We own the subscription business logic (lifecycle, invoices, period-end charging, portal redirects). The bridge between them is `webhook.rs` (normalize → react → dispatch typed events) and `period_job.rs` (state machine → PayRail charge).
