@@ -323,6 +323,34 @@ impl From<crate::error::FrameworkError> for HttpResponse {
         }
 
         let status = err.status_code();
+        let message = err.to_string();
+        let request_id = crate::logging::current_request_id().map(|id| id.as_str().to_string());
+
+        if status >= 500 {
+            tracing::error!(
+                status,
+                error = %message,
+                request_id = ?request_id,
+                "framework error"
+            );
+            // Dispatch ErrorOccurred. Spawn so we don't block response
+            // conversion on listener execution.
+            let evt = crate::events::ErrorOccurred {
+                error_message: message.clone(),
+                status_code: status,
+                request_id: request_id.clone(),
+            };
+            tokio::spawn(async move {
+                let _ = crate::events::EventFacade::dispatch(evt).await;
+            });
+        } else if status >= 400 {
+            tracing::warn!(
+                status,
+                error = %message,
+                request_id = ?request_id,
+                "client error"
+            );
+        }
         let body = match &err {
             crate::error::FrameworkError::ParamError { param_name } => {
                 serde_json::json!({

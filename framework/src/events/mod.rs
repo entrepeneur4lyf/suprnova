@@ -28,9 +28,11 @@
 //! EventFacade::dispatch(UserRegistered { user_id: 42 }).await?;
 //! ```
 
+mod builtins;
 mod dispatcher;
 pub mod testing;
 
+pub use builtins::ErrorOccurred;
 pub use dispatcher::{Event as EventFacade, EventDispatcher};
 
 use crate::FrameworkError;

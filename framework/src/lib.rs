@@ -43,7 +43,7 @@ pub use session::{
 pub use logging::{
     current_request_id, init_subscriber, LogConfig, LogFormat, RequestId, RequestIdMiddleware,
 };
-pub use events::{Event, EventDispatcher, EventFacade, Listener};
+pub use events::{ErrorOccurred, Event, EventDispatcher, EventFacade, Listener};
 pub use inertia::{
     DeferConfig, DeferOptions, EncryptHistoryMiddleware, Frontend, Inertia303Middleware,
     InertiaConfig, InertiaRegistry, InertiaRequestExt, InertiaResponse, InertiaSharedData,

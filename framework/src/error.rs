@@ -494,6 +494,63 @@ impl FrameworkError {
             expected_type,
         }
     }
+
+    /// Wrap this error with a context string. The status code is
+    /// preserved; the display becomes `"<ctx>: <original>"`.
+    ///
+    /// Use this when an error needs to be re-raised with operation
+    /// context:
+    ///
+    /// ```ignore
+    /// db.insert(user).await
+    ///     .map_err(FrameworkError::from)
+    ///     .map_err(|e| e.context("creating new user"))?;
+    /// ```
+    pub fn context(self, ctx: impl Into<String>) -> Self {
+        let prefix = ctx.into();
+        let status = self.status_code();
+        let original = self.to_string();
+        Self::Domain {
+            message: format!("{}: {}", prefix, original),
+            status_code: status,
+        }
+    }
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+
+    #[test]
+    fn context_prepends_to_message_preserving_status() {
+        let inner = FrameworkError::internal("disk full");
+        assert_eq!(inner.status_code(), 500);
+
+        let wrapped = inner.context("writing user avatar");
+        assert!(wrapped.to_string().contains("writing user avatar"));
+        assert!(wrapped.to_string().contains("disk full"));
+        assert_eq!(wrapped.status_code(), 500);
+    }
+
+    #[test]
+    fn context_preserves_non_500_status_codes() {
+        let inner = FrameworkError::param("user_id");
+        assert_eq!(inner.status_code(), 400);
+        let wrapped = inner.context("decoding request");
+        assert_eq!(wrapped.status_code(), 400);
+        assert!(wrapped.to_string().contains("decoding request"));
+    }
+
+    #[test]
+    fn context_chains_multiple_layers() {
+        let err = FrameworkError::internal("io error")
+            .context("reading config")
+            .context("loading service");
+        let msg = err.to_string();
+        assert!(msg.contains("loading service"));
+        assert!(msg.contains("reading config"));
+        assert!(msg.contains("io error"));
+    }
 }
 
 // Implement From<DbErr> for automatic error conversion with ?

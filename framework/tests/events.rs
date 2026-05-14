@@ -1,0 +1,39 @@
+//! Integration tests for the events subsystem and error→event bridge.
+
+use std::sync::Mutex;
+use suprnova::{ErrorOccurred, EventFacade, FrameworkError, HttpResponse};
+
+// Tests in this file share the global event fake store, so they must
+// run serially.
+static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[tokio::test]
+async fn server_error_dispatches_error_occurred() {
+    let _serial = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = EventFacade::fake();
+
+    let err = FrameworkError::internal("boom");
+    let _resp: HttpResponse = err.into();
+
+    // The dispatch is spawned; yield + small sleep to let it land.
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    suprnova::events::testing::assert_dispatched::<ErrorOccurred>(|e| {
+        e.status_code == 500 && e.error_message.contains("boom")
+    });
+}
+
+#[tokio::test]
+async fn client_error_does_not_dispatch_error_occurred() {
+    let _serial = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = EventFacade::fake();
+
+    let err = FrameworkError::param("name");
+    let _resp: HttpResponse = err.into();
+
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    suprnova::events::testing::assert_not_dispatched::<ErrorOccurred>(|_| true);
+}
