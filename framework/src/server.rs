@@ -216,10 +216,10 @@ async fn wait_terminate() {
     std::future::pending::<()>().await;
 }
 
-/// Serve a single inbound `hyper::Request<Incoming>` against `router`
-/// + `middleware_registry`, returning the framework's
-/// `hyper::Response<BoxBody<Bytes, Infallible>>` exactly the way
-/// `Server::run` does internally.
+/// Serve a single inbound `hyper::Request<Incoming>` against the
+/// supplied `router` and `middleware_registry`, returning the
+/// framework's `hyper::Response<BoxBody<Bytes, Infallible>>` exactly
+/// the way `Server::run` does internally.
 ///
 /// Intended for tests and embedders that want to wire the framework
 /// into their own hyper service loop. `Server::run` is the production
