@@ -229,10 +229,17 @@ handling determines how it arrives. Controllers touch both.
 **Storage drivers (outbound):**
 - Local (with subdir scoping)
 - S3 and S3-compatible (R2, MinIO, Backblaze B2, DigitalOcean Spaces,
-  Wasabi)
+  Wasabi) — built on **[`s3-rs`](https://crates.io/crates/s3)** as
+  the primary driver. Lean, modern, MinIO + RustFS integration-tested,
+  presigned URLs + multipart, small dep surface. Purpose-built for
+  the multi-provider story we need.
 - Google Cloud Storage
 - Azure Blob
 - In-memory (for tests)
+
+Optional `s3-aws` feature flag for the AWS-SDK driver — needed only for
+users who require STS / AssumeRole / IMDS / cross-account IAM patterns
+the lean client doesn't cover. Default install stays slim.
 
 All first-class. **Rust gun:** streaming `AsyncRead` / `AsyncWrite`
 everywhere - no `file_get_contents()` patterns that materialize 4GB
@@ -289,6 +296,17 @@ Two separate but related stories that together cover the gap between
 this thing to this resource." Every real app needs this on day one.
 Laravel ships Gates, Policies, and Sanctum for it; Suprnova ships the
 typed equivalents.
+
+**Foundation: [`torii-rs`](https://github.com/cmackenzie1/torii-rs).**
+We adopt `torii-core` + `torii-storage-seaorm` as the auth-method
+foundation (skipping `torii-axum` since we have our own HTTP layer).
+This gives us password + **OAuth/OIDC** + **Passkeys/WebAuthn** +
+**Magic Links** + session management without reinventing months of
+careful crypto work. MIT-licensed. The `suprnova::auth::{passkey,
+oauth, magic_link, password}` facades are thin adapters over torii;
+the existing session-based auth we ship today becomes one option
+among several. If upstream churn becomes painful, we fork into the
+workspace as `suprnova-torii` at a pinned version.
 
 **Authorization (Gates + Policies).**
 
@@ -496,12 +514,20 @@ load that PHP-style "increment + check" implementations leak.
 
 ```rust
 Notify::send(&user, OrderShipped { order_id })
-    .via(&["mail", "slack", "database"]).await?;
+    .via(&["mail", "slack", "database", "web-push"]).await?;
 ```
 
 Channels: mail, Slack, Discord, SMS via Twilio, database, webhook,
-broadcast (Track 8). Depends on Mail (Track 4) and Broadcasting
-(Track 8).
+**browser push (Web Push API)** via
+[`web-push`](https://crates.io/crates/web-push) (Apache-2.0,
+HTTP-ECE + VAPID), broadcast (Track 8). Depends on Mail (Track 4)
+and Broadcasting (Track 8).
+
+The `web-push` channel is worth calling out: Laravel needs the
+community `laravel-notification-channels/webpush` package for this;
+Suprnova ships it as a first-class channel. A controller that
+dispatches an `OrderShipped` notification reaches all four channels
+(email + DB record + Slack + browser push) in one call.
 
 ### Track 8 - Real-time at full strength (where Rust eats Laravel's lunch)
 
