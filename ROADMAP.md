@@ -275,8 +275,21 @@ request body).
 `Mail::to(user).send(WelcomeEmail::new(user))`. Same drivers-everywhere
 story.
 
-**Drivers:** SMTP, AWS SES, Postmark, SendGrid, Mailgun, Resend,
-log (dev/test mode that records sends for assertions).
+**Foundation: [`lettre`](https://github.com/lettre/lettre) 0.11.x
+(MIT).** lettre gives us the `Message` builder (MIME, multipart,
+attachments, headers, DKIM), the SMTP transport with built-in
+connection pooling, and tokio-native async via the `tokio1-rustls`
+feature. We pin it as the email primitives layer; every Suprnova
+mail driver ships a `lettre::Message` over its preferred wire.
+`#[derive(Mailable)]` is a thin proc macro that compiles to a
+`lettre::Message` builder. The vendored reference lives at
+`reference/lettre-0.11.22/` for cross-checking while we wrap it.
+
+**Drivers:** SMTP and sendmail (lettre native transports), AWS SES,
+Postmark, SendGrid, Mailgun, Resend (our own HTTP `Transport` impls
+that accept `lettre::Message` and POST via the provider API), log
+and file (dev/test modes that record sends for assertions —
+`Mail::fake()` + `Mail::assert_sent(...)`).
 
 **Mailables.** Typed templates with `#[derive(Mailable)]` macro that
 provides `to()`, `subject()`, `view()`. Template engine: pick one and
@@ -287,7 +300,9 @@ alternative for hot-reload).
 **Rust gun:** mail building is synchronous and fast; sending is
 async on the in-process queue (Track 6) so a controller can
 `Mail::queue(welcome_email)` and return without blocking. No separate
-queue worker needed for transactional mail.
+queue worker needed for transactional mail. lettre's connection pool
+means a burst of `Mail::send` calls reuses an open SMTP/TLS session
+instead of negotiating a new handshake per message.
 
 ### Track 5 - Authorization + API mode
 
