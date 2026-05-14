@@ -6,69 +6,408 @@ use serde::Serialize;
 use crate::crypto::Crypt;
 use crate::FrameworkError;
 
+/// Direction a cursor advances in. The first page always uses
+/// [`CursorDirection::Next`] implicitly (the caller passes `None`).
+/// Page-to-page cursors carry their direction in the wire payload so
+/// `Pagination::cursor` knows whether to filter `gt`/asc (next) or
+/// `lt`/desc (prev).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorDirection {
+    /// Cursor identifies the upper boundary already shown; the next
+    /// page is the strictly greater rows.
+    Next,
+    /// Cursor identifies the lower boundary already shown; the previous
+    /// page is the strictly lesser rows.
+    Prev,
+}
+
+impl CursorDirection {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            CursorDirection::Next => "next",
+            CursorDirection::Prev => "prev",
+        }
+    }
+
+    pub(crate) fn from_str(s: &str) -> Result<Self, FrameworkError> {
+        match s {
+            "next" => Ok(CursorDirection::Next),
+            "prev" => Ok(CursorDirection::Prev),
+            other => Err(FrameworkError::internal(format!(
+                "Cursor direction must be 'next' or 'prev', got '{other}'"
+            ))),
+        }
+    }
+}
+
 /// Paginator that emits opaque cursor strings instead of page numbers.
 ///
 /// Equivalent to Laravel's `CursorPaginator`. Returned by
 /// [`Pagination::cursor`](crate::pagination::Pagination::cursor).
+///
+/// The boundary value carried in `next_cursor` / `prev_cursor` is the
+/// last (or first) row's primary-sort column, encoded as a typed
+/// SeaORM [`sea_orm::Value`] so dialects (Postgres, MySQL, SQLite)
+/// receive the correctly-typed bind without any string coercion.
 #[derive(Debug, Clone, Serialize)]
 pub struct CursorPaginator<T> {
     /// The rows on this page.
     pub data: Vec<T>,
     /// Cursor to fetch the next page, or `None` at the last page.
     pub next_cursor: Option<String>,
-    /// Cursor for the previous page. Always `None` in v1
-    /// (single-direction cursor). Tracked here so adding a backward
-    /// path later does not break the API.
+    /// Cursor to fetch the previous page, or `None` on the first page
+    /// (when the caller passed `cursor: None`).
     pub prev_cursor: Option<String>,
 }
 
+/// Wire envelope serialized into the cursor before encryption /
+/// base64.
+///
+/// `t` is the SeaORM `Value` variant discriminator — exactly the
+/// variant name (`"Int"`, `"BigInt"`, `"Uuid"`,
+/// `"ChronoDateTimeUtc"`, etc.) — so the decoded `Value` re-binds with
+/// the same SQL type the original column emitted. `v` is the value,
+/// JSON-serialized in the natural form for that variant. `d` is the
+/// scan direction (`"next"` or `"prev"`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CursorPayload {
+    pub t: String,
+    pub v: serde_json::Value,
+    pub d: String,
+}
+
 impl<T> CursorPaginator<T> {
-    /// Encode a cursor boundary value. When `Crypt` is initialized,
-    /// the value is AES-256-GCM encrypted and base64-url-no-pad
-    /// encoded (using the same wire format as `Crypt::encrypt_string`).
-    /// When `Crypt` is not initialized, falls back to plain
-    /// base64-url-no-pad with a one-time `tracing::warn!`.
-    pub fn encode_cursor(value: &str) -> String {
-        match Crypt::encrypt_string(value) {
-            Ok(wire) => wire,
+    /// Encode a typed boundary `sea_orm::Value` plus scan direction
+    /// into the wire cursor. When `Crypt` is initialized, the cursor
+    /// is AES-256-GCM authenticated; otherwise it falls back to plain
+    /// base64 (and tracing emits a warn).
+    pub(crate) fn encode_value(
+        value: &sea_orm::Value,
+        direction: CursorDirection,
+    ) -> Result<String, FrameworkError> {
+        let (t, v) = value_to_tagged_json(value)?;
+        let payload = CursorPayload {
+            t,
+            v,
+            d: direction.as_str().to_string(),
+        };
+        let json = serde_json::to_string(&payload).map_err(|e| {
+            FrameworkError::internal(format!("Cursor payload JSON encode failed: {e}"))
+        })?;
+        match Crypt::encrypt_string(&json) {
+            Ok(wire) => Ok(wire),
             Err(_) => {
                 tracing::warn!(
                     "Crypt not initialized — cursors will be plain base64. \
                      Set APP_KEY before deploying."
                 );
-                URL_SAFE_NO_PAD.encode(value.as_bytes())
+                Ok(URL_SAFE_NO_PAD.encode(json.as_bytes()))
             }
         }
     }
 
-    /// Decode a cursor produced by [`Self::encode_cursor`].
-    ///
-    /// **Security:** When `Crypt` is initialized, ONLY the encrypted
-    /// path is used. Any decrypt failure (tampering, wrong key,
-    /// truncation) is propagated as an error — there is NO fallback
-    /// to plain base64, because that would let an attacker bypass the
-    /// AEAD integrity check by submitting a base64-encoded boundary
-    /// value of their choice.
-    ///
-    /// When `Crypt` is NOT initialized (deployment without `APP_KEY`),
-    /// the plain base64 path is the only path available. Cursors in
-    /// that mode are not tamper-resistant; this is documented as a
-    /// limitation of running without an encryption key.
-    pub fn decode_cursor(wire: &str) -> Result<String, FrameworkError> {
-        if Crypt::is_initialized() {
+    /// Decode the wire cursor into a typed `sea_orm::Value` plus the
+    /// scan direction it was emitted with.
+    pub(crate) fn decode_value(
+        wire: &str,
+    ) -> Result<(sea_orm::Value, CursorDirection), FrameworkError> {
+        let json = if Crypt::is_initialized() {
             // With a key installed, only the authenticated path is valid.
-            // A failure here means the cursor was tampered, truncated,
-            // or generated under a different key — never trust it.
-            return Crypt::decrypt_string(wire);
-        }
-        // No key installed: plain base64 is the only option. Cursors
-        // emitted in this mode are not tamper-resistant; deployments
-        // that need integrity must set APP_KEY.
-        let bytes = URL_SAFE_NO_PAD.decode(wire.trim()).map_err(|e| {
-            FrameworkError::internal(format!("Cursor decode failed: {e}"))
+            Crypt::decrypt_string(wire)?
+        } else {
+            let bytes = URL_SAFE_NO_PAD
+                .decode(wire.trim())
+                .map_err(|e| FrameworkError::internal(format!("Cursor decode failed: {e}")))?;
+            String::from_utf8(bytes)
+                .map_err(|e| FrameworkError::internal(format!("Cursor not UTF-8: {e}")))?
+        };
+        let payload: CursorPayload = serde_json::from_str(&json).map_err(|e| {
+            FrameworkError::internal(format!("Cursor payload JSON decode failed: {e}"))
         })?;
-        String::from_utf8(bytes)
-            .map_err(|e| FrameworkError::internal(format!("Cursor not UTF-8: {e}")))
+        let value = tagged_json_to_value(&payload.t, payload.v)?;
+        let direction = CursorDirection::from_str(&payload.d)?;
+        Ok((value, direction))
+    }
+
+    /// Encode a cursor boundary as a plain string. **Legacy helper**
+    /// preserved only so callers that manually wrap a string cursor
+    /// (e.g. controllers that don't go through `Pagination::cursor`)
+    /// keep working. New code should use `Pagination::cursor` directly
+    /// — the typed cursor encoding is automatic.
+    ///
+    /// Internally this calls [`Self::encode_value`] with a
+    /// `Value::String` variant and `CursorDirection::Next`.
+    pub fn encode_cursor(value: &str) -> String {
+        Self::encode_value(
+            &sea_orm::Value::String(Some(Box::new(value.to_string()))),
+            CursorDirection::Next,
+        )
+        .unwrap_or_else(|_| URL_SAFE_NO_PAD.encode(value.as_bytes()))
+    }
+
+    /// Decode a cursor produced by [`Self::encode_cursor`] back to its
+    /// string payload. **Legacy helper** — see [`Self::encode_cursor`].
+    pub fn decode_cursor(wire: &str) -> Result<String, FrameworkError> {
+        let (value, _dir) = Self::decode_value(wire)?;
+        match value {
+            sea_orm::Value::String(Some(s)) => Ok(*s),
+            sea_orm::Value::String(None) => Ok(String::new()),
+            // Other variants stringify via Debug.
+            other => Ok(format!("{other:?}")),
+        }
+    }
+}
+
+/// Convert a SeaORM `Value` into the cursor wire shape. Returns the
+/// variant discriminator string plus a JSON value.
+fn value_to_tagged_json(
+    v: &sea_orm::Value,
+) -> Result<(String, serde_json::Value), FrameworkError> {
+    use sea_orm::Value;
+    let pair: (&'static str, serde_json::Value) = match v {
+        Value::Bool(Some(b)) => ("Bool", serde_json::json!(b)),
+        Value::Bool(None) => ("Bool", serde_json::Value::Null),
+        Value::TinyInt(Some(i)) => ("TinyInt", serde_json::json!(i)),
+        Value::TinyInt(None) => ("TinyInt", serde_json::Value::Null),
+        Value::SmallInt(Some(i)) => ("SmallInt", serde_json::json!(i)),
+        Value::SmallInt(None) => ("SmallInt", serde_json::Value::Null),
+        Value::Int(Some(i)) => ("Int", serde_json::json!(i)),
+        Value::Int(None) => ("Int", serde_json::Value::Null),
+        Value::BigInt(Some(i)) => ("BigInt", serde_json::json!(i)),
+        Value::BigInt(None) => ("BigInt", serde_json::Value::Null),
+        Value::TinyUnsigned(Some(i)) => ("TinyUnsigned", serde_json::json!(i)),
+        Value::TinyUnsigned(None) => ("TinyUnsigned", serde_json::Value::Null),
+        Value::SmallUnsigned(Some(i)) => ("SmallUnsigned", serde_json::json!(i)),
+        Value::SmallUnsigned(None) => ("SmallUnsigned", serde_json::Value::Null),
+        Value::Unsigned(Some(i)) => ("Unsigned", serde_json::json!(i)),
+        Value::Unsigned(None) => ("Unsigned", serde_json::Value::Null),
+        Value::BigUnsigned(Some(i)) => ("BigUnsigned", serde_json::json!(i)),
+        Value::BigUnsigned(None) => ("BigUnsigned", serde_json::Value::Null),
+        Value::Float(Some(f)) => ("Float", serde_json::json!(f)),
+        Value::Float(None) => ("Float", serde_json::Value::Null),
+        Value::Double(Some(f)) => ("Double", serde_json::json!(f)),
+        Value::Double(None) => ("Double", serde_json::Value::Null),
+        Value::String(Some(s)) => ("String", serde_json::json!(**s)),
+        Value::String(None) => ("String", serde_json::Value::Null),
+        Value::Char(Some(c)) => ("Char", serde_json::json!(c.to_string())),
+        Value::Char(None) => ("Char", serde_json::Value::Null),
+        Value::Bytes(Some(b)) => (
+            "Bytes",
+            serde_json::json!(URL_SAFE_NO_PAD.encode(b.as_slice())),
+        ),
+        Value::Bytes(None) => ("Bytes", serde_json::Value::Null),
+        Value::Uuid(Some(u)) => ("Uuid", serde_json::json!(u.to_string())),
+        Value::Uuid(None) => ("Uuid", serde_json::Value::Null),
+        Value::ChronoDate(Some(d)) => ("ChronoDate", serde_json::json!(d.to_string())),
+        Value::ChronoDate(None) => ("ChronoDate", serde_json::Value::Null),
+        Value::ChronoTime(Some(t)) => ("ChronoTime", serde_json::json!(t.to_string())),
+        Value::ChronoTime(None) => ("ChronoTime", serde_json::Value::Null),
+        Value::ChronoDateTime(Some(dt)) => {
+            ("ChronoDateTime", serde_json::json!(dt.to_string()))
+        }
+        Value::ChronoDateTime(None) => ("ChronoDateTime", serde_json::Value::Null),
+        Value::ChronoDateTimeUtc(Some(dt)) => (
+            "ChronoDateTimeUtc",
+            serde_json::json!(dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
+        ),
+        Value::ChronoDateTimeUtc(None) => ("ChronoDateTimeUtc", serde_json::Value::Null),
+        Value::ChronoDateTimeLocal(Some(dt)) => (
+            "ChronoDateTimeLocal",
+            serde_json::json!(dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
+        ),
+        Value::ChronoDateTimeLocal(None) => ("ChronoDateTimeLocal", serde_json::Value::Null),
+        Value::ChronoDateTimeWithTimeZone(Some(dt)) => (
+            "ChronoDateTimeWithTimeZone",
+            serde_json::json!(dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
+        ),
+        Value::ChronoDateTimeWithTimeZone(None) => {
+            ("ChronoDateTimeWithTimeZone", serde_json::Value::Null)
+        }
+        Value::Decimal(Some(d)) => ("Decimal", serde_json::json!(d.to_string())),
+        Value::Decimal(None) => ("Decimal", serde_json::Value::Null),
+        Value::BigDecimal(Some(d)) => ("BigDecimal", serde_json::json!(d.to_string())),
+        Value::BigDecimal(None) => ("BigDecimal", serde_json::Value::Null),
+        other => {
+            return Err(FrameworkError::internal(format!(
+                "Cursor: SeaORM Value variant {other:?} is not supported as a cursor \
+                 boundary. Use a column whose type maps to a scalar variant \
+                 (integers, floats, bool, string, bytes, uuid, datetime, decimal)."
+            )));
+        }
+    };
+    Ok((pair.0.to_string(), pair.1))
+}
+
+/// Inverse of [`value_to_tagged_json`]. Validates that JSON shape
+/// matches the claimed discriminator.
+fn tagged_json_to_value(
+    tag: &str,
+    v: serde_json::Value,
+) -> Result<sea_orm::Value, FrameworkError> {
+    use sea_orm::Value;
+    let bad = |what: &str| {
+        FrameworkError::internal(format!(
+            "Cursor: tag '{tag}' payload could not be parsed as {what}"
+        ))
+    };
+    if v.is_null() {
+        return Ok(match tag {
+            "Bool" => Value::Bool(None),
+            "TinyInt" => Value::TinyInt(None),
+            "SmallInt" => Value::SmallInt(None),
+            "Int" => Value::Int(None),
+            "BigInt" => Value::BigInt(None),
+            "TinyUnsigned" => Value::TinyUnsigned(None),
+            "SmallUnsigned" => Value::SmallUnsigned(None),
+            "Unsigned" => Value::Unsigned(None),
+            "BigUnsigned" => Value::BigUnsigned(None),
+            "Float" => Value::Float(None),
+            "Double" => Value::Double(None),
+            "String" => Value::String(None),
+            "Char" => Value::Char(None),
+            "Bytes" => Value::Bytes(None),
+            "Uuid" => Value::Uuid(None),
+            "ChronoDate" => Value::ChronoDate(None),
+            "ChronoTime" => Value::ChronoTime(None),
+            "ChronoDateTime" => Value::ChronoDateTime(None),
+            "ChronoDateTimeUtc" => Value::ChronoDateTimeUtc(None),
+            "ChronoDateTimeLocal" => Value::ChronoDateTimeLocal(None),
+            "ChronoDateTimeWithTimeZone" => Value::ChronoDateTimeWithTimeZone(None),
+            "Decimal" => Value::Decimal(None),
+            "BigDecimal" => Value::BigDecimal(None),
+            other => {
+                return Err(FrameworkError::internal(format!(
+                    "Cursor: unknown variant tag '{other}'"
+                )));
+            }
+        });
+    }
+
+    match tag {
+        "Bool" => v.as_bool().map(|b| Value::Bool(Some(b))).ok_or_else(|| bad("bool")),
+        "TinyInt" => v
+            .as_i64()
+            .and_then(|i| i8::try_from(i).ok())
+            .map(|i| Value::TinyInt(Some(i)))
+            .ok_or_else(|| bad("i8")),
+        "SmallInt" => v
+            .as_i64()
+            .and_then(|i| i16::try_from(i).ok())
+            .map(|i| Value::SmallInt(Some(i)))
+            .ok_or_else(|| bad("i16")),
+        "Int" => v
+            .as_i64()
+            .and_then(|i| i32::try_from(i).ok())
+            .map(|i| Value::Int(Some(i)))
+            .ok_or_else(|| bad("i32")),
+        "BigInt" => v.as_i64().map(|i| Value::BigInt(Some(i))).ok_or_else(|| bad("i64")),
+        "TinyUnsigned" => v
+            .as_u64()
+            .and_then(|i| u8::try_from(i).ok())
+            .map(|i| Value::TinyUnsigned(Some(i)))
+            .ok_or_else(|| bad("u8")),
+        "SmallUnsigned" => v
+            .as_u64()
+            .and_then(|i| u16::try_from(i).ok())
+            .map(|i| Value::SmallUnsigned(Some(i)))
+            .ok_or_else(|| bad("u16")),
+        "Unsigned" => v
+            .as_u64()
+            .and_then(|i| u32::try_from(i).ok())
+            .map(|i| Value::Unsigned(Some(i)))
+            .ok_or_else(|| bad("u32")),
+        "BigUnsigned" => v
+            .as_u64()
+            .map(|i| Value::BigUnsigned(Some(i)))
+            .ok_or_else(|| bad("u64")),
+        "Float" => v
+            .as_f64()
+            .map(|f| Value::Float(Some(f as f32)))
+            .ok_or_else(|| bad("f32")),
+        "Double" => v
+            .as_f64()
+            .map(|f| Value::Double(Some(f)))
+            .ok_or_else(|| bad("f64")),
+        "String" => v
+            .as_str()
+            .map(|s| Value::String(Some(Box::new(s.to_string()))))
+            .ok_or_else(|| bad("string")),
+        "Char" => v
+            .as_str()
+            .and_then(|s| {
+                let mut it = s.chars();
+                let c = it.next()?;
+                if it.next().is_none() { Some(c) } else { None }
+            })
+            .map(|c| Value::Char(Some(c)))
+            .ok_or_else(|| bad("char")),
+        "Bytes" => v
+            .as_str()
+            .and_then(|s| URL_SAFE_NO_PAD.decode(s).ok())
+            .map(|b| Value::Bytes(Some(Box::new(b))))
+            .ok_or_else(|| bad("base64-bytes")),
+        "Uuid" => v
+            .as_str()
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .map(|u| Value::Uuid(Some(Box::new(u))))
+            .ok_or_else(|| bad("uuid")),
+        "ChronoDate" => v
+            .as_str()
+            .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+            .map(|d| Value::ChronoDate(Some(Box::new(d))))
+            .ok_or_else(|| bad("chrono::NaiveDate")),
+        "ChronoTime" => v
+            .as_str()
+            .and_then(|s| {
+                chrono::NaiveTime::parse_from_str(s, "%H:%M:%S%.f")
+                    .or_else(|_| chrono::NaiveTime::parse_from_str(s, "%H:%M:%S"))
+                    .ok()
+            })
+            .map(|t| Value::ChronoTime(Some(Box::new(t))))
+            .ok_or_else(|| bad("chrono::NaiveTime")),
+        "ChronoDateTime" => v
+            .as_str()
+            .and_then(|s| {
+                chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
+                    .or_else(|_| {
+                        chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
+                    })
+                    .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
+                    .ok()
+            })
+            .map(|dt| Value::ChronoDateTime(Some(Box::new(dt))))
+            .ok_or_else(|| bad("chrono::NaiveDateTime")),
+        "ChronoDateTimeUtc" => v
+            .as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| Value::ChronoDateTimeUtc(Some(Box::new(dt.with_timezone(&chrono::Utc)))))
+            .ok_or_else(|| bad("chrono::DateTime<Utc>")),
+        "ChronoDateTimeLocal" => v
+            .as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| Value::ChronoDateTimeLocal(Some(Box::new(dt.with_timezone(&chrono::Local)))))
+            .ok_or_else(|| bad("chrono::DateTime<Local>")),
+        "ChronoDateTimeWithTimeZone" => v
+            .as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| Value::ChronoDateTimeWithTimeZone(Some(Box::new(dt))))
+            .ok_or_else(|| bad("chrono::DateTime<FixedOffset>")),
+        "Decimal" => v
+            .as_str()
+            .and_then(|s| s.parse::<rust_decimal::Decimal>().ok())
+            .map(|d| Value::Decimal(Some(Box::new(d))))
+            .ok_or_else(|| bad("rust_decimal::Decimal")),
+        "BigDecimal" => v
+            .as_str()
+            .and_then(|s| {
+                use std::str::FromStr;
+                bigdecimal::BigDecimal::from_str(s).ok()
+            })
+            .map(|d| Value::BigDecimal(Some(Box::new(d))))
+            .ok_or_else(|| bad("bigdecimal::BigDecimal")),
+        other => Err(FrameworkError::internal(format!(
+            "Cursor: unknown variant tag '{other}'"
+        ))),
     }
 }
 
@@ -88,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_cursor_round_trip() {
+    fn encrypted_cursor_round_trip_string_legacy_api() {
         let _g = CURSOR_LOCK.lock().unwrap();
         ensure_key();
         let wire = CursorPaginator::<i32>::encode_cursor("user-42");
@@ -101,22 +440,108 @@ mod tests {
 
     #[test]
     fn cursor_decode_rejects_plain_base64_when_crypt_initialized() {
-        // Security regression test: when Crypt has a key, an
-        // attacker-crafted plain-base64 cursor MUST be rejected. The
-        // fallback exists ONLY for deployments without APP_KEY.
+        // Security regression: when Crypt has a key, an attacker-
+        // crafted plain-base64 cursor MUST be rejected.
         let _g = CURSOR_LOCK.lock().unwrap();
         ensure_key();
-        let attacker_cursor = URL_SAFE_NO_PAD.encode(b"42"); // any plain int
-        // Should fail because Crypt is initialized; only AEAD-verified
-        // cursors are accepted.
-        assert!(CursorPaginator::<i32>::decode_cursor(&attacker_cursor).is_err());
+        let attacker = URL_SAFE_NO_PAD.encode(br#"{"t":"BigInt","v":42,"d":"next"}"#);
+        assert!(CursorPaginator::<i32>::decode_value(&attacker).is_err());
     }
 
     #[test]
     fn cursor_decode_rejects_garbage() {
         let _g = CURSOR_LOCK.lock().unwrap();
         ensure_key();
-        // Not valid base64, not valid Crypt ciphertext
-        assert!(CursorPaginator::<i32>::decode_cursor("!!! not base64 !!!").is_err());
+        assert!(CursorPaginator::<i32>::decode_value("!!! not base64 !!!").is_err());
+    }
+
+    #[test]
+    fn value_bigint_round_trip() {
+        let _g = CURSOR_LOCK.lock().unwrap();
+        ensure_key();
+        let v = sea_orm::Value::BigInt(Some(9_876_543_210_i64));
+        let wire = CursorPaginator::<i32>::encode_value(&v, CursorDirection::Next).unwrap();
+        let (got, dir) = CursorPaginator::<i32>::decode_value(&wire).unwrap();
+        assert!(matches!(got, sea_orm::Value::BigInt(Some(n)) if n == 9_876_543_210));
+        assert_eq!(dir, CursorDirection::Next);
+    }
+
+    #[test]
+    fn value_int32_round_trip_preserves_variant() {
+        // Important: encoding an Int(i32) must decode back as Int —
+        // not BigInt — or Postgres int4 columns will see the wrong bind.
+        let _g = CURSOR_LOCK.lock().unwrap();
+        ensure_key();
+        let v = sea_orm::Value::Int(Some(42_i32));
+        let wire = CursorPaginator::<i32>::encode_value(&v, CursorDirection::Next).unwrap();
+        let (got, _dir) = CursorPaginator::<i32>::decode_value(&wire).unwrap();
+        assert!(
+            matches!(got, sea_orm::Value::Int(Some(n)) if n == 42_i32),
+            "expected Int(42), got {got:?}"
+        );
+    }
+
+    #[test]
+    fn value_uuid_round_trip() {
+        let _g = CURSOR_LOCK.lock().unwrap();
+        ensure_key();
+        let u = uuid::Uuid::from_u128(0x1234_5678_90ab_cdef_fedc_ba09_8765_4321_u128);
+        let v = sea_orm::Value::Uuid(Some(Box::new(u)));
+        let wire = CursorPaginator::<i32>::encode_value(&v, CursorDirection::Prev).unwrap();
+        let (got, dir) = CursorPaginator::<i32>::decode_value(&wire).unwrap();
+        match got {
+            sea_orm::Value::Uuid(Some(decoded)) => assert_eq!(*decoded, u),
+            other => panic!("expected Uuid, got {other:?}"),
+        }
+        assert_eq!(dir, CursorDirection::Prev);
+    }
+
+    #[test]
+    fn value_datetime_utc_round_trip() {
+        let _g = CURSOR_LOCK.lock().unwrap();
+        ensure_key();
+        let dt: chrono::DateTime<chrono::Utc> = chrono::DateTime::parse_from_rfc3339(
+            "2026-05-14T18:30:00.123456789Z",
+        )
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+        let v = sea_orm::Value::ChronoDateTimeUtc(Some(Box::new(dt)));
+        let wire = CursorPaginator::<i32>::encode_value(&v, CursorDirection::Next).unwrap();
+        let (got, _dir) = CursorPaginator::<i32>::decode_value(&wire).unwrap();
+        match got {
+            sea_orm::Value::ChronoDateTimeUtc(Some(decoded)) => assert_eq!(*decoded, dt),
+            other => panic!("expected ChronoDateTimeUtc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_string_round_trip() {
+        let _g = CURSOR_LOCK.lock().unwrap();
+        ensure_key();
+        let v = sea_orm::Value::String(Some(Box::new("sn-1@example.com".to_string())));
+        let wire = CursorPaginator::<i32>::encode_value(&v, CursorDirection::Next).unwrap();
+        let (got, _dir) = CursorPaginator::<i32>::decode_value(&wire).unwrap();
+        match got {
+            sea_orm::Value::String(Some(s)) => assert_eq!(*s, "sn-1@example.com"),
+            other => panic!("expected Value::String, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_unknown_tag_rejected() {
+        let _g = CURSOR_LOCK.lock().unwrap();
+        ensure_key();
+        let bad = r#"{"t":"NotAVariant","v":42,"d":"next"}"#;
+        let wire = Crypt::encrypt_string(bad).unwrap();
+        assert!(CursorPaginator::<i32>::decode_value(&wire).is_err());
+    }
+
+    #[test]
+    fn value_direction_tampering_rejected() {
+        let _g = CURSOR_LOCK.lock().unwrap();
+        ensure_key();
+        let bad = r#"{"t":"BigInt","v":1,"d":"sideways"}"#;
+        let wire = Crypt::encrypt_string(bad).unwrap();
+        assert!(CursorPaginator::<i32>::decode_value(&wire).is_err());
     }
 }

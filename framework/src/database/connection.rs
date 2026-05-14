@@ -74,6 +74,18 @@ impl DbConnection {
         })
     }
 
+    /// Wrap an existing SeaORM `DatabaseConnection` as a `DbConnection`.
+    ///
+    /// Intended for tests and advanced setups that build their own
+    /// connection (e.g. in-memory SQLite via `sea_orm::Database::connect`)
+    /// and want it visible to `DB::connection()` after registering it
+    /// in the container.
+    pub fn from_raw(conn: sea_orm::DatabaseConnection) -> Self {
+        Self {
+            inner: Arc::new(conn),
+        }
+    }
+
     /// Get a reference to the underlying SeaORM connection
     ///
     /// Use this when you need to execute raw SeaORM queries.

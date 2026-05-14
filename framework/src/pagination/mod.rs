@@ -6,11 +6,14 @@ pub mod cursor;
 pub mod inertia;
 pub mod length_aware;
 
-pub use cursor::CursorPaginator;
+pub use cursor::{CursorDirection, CursorPaginator};
 pub use inertia::IntoInertiaScroll;
 pub use length_aware::LengthAwarePaginator;
 
-use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Select};
+use sea_orm::{
+    ColumnTrait, EntityTrait, ModelTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+    Select,
+};
 
 use crate::FrameworkError;
 
@@ -41,18 +44,34 @@ impl Pagination {
         Ok(LengthAwarePaginator::new(data, total, per_page, page))
     }
 
-    /// Run a cursor-based paginate. The cursor encodes the boundary
-    /// value of `order_col` from the last row of the previous page;
-    /// the next page is selected with `order_col > cursor` ordered
-    /// ASC. `prev_cursor` is `None` in v1 (single-direction).
+    /// Run a cursor-based paginate over the active DB connection.
     ///
-    /// `T::Model` must store the order column as a value that
-    /// `to_string()`s into a stable cursor. The boundary value is
-    /// re-parsed by SeaORM as the column's native type via the
-    /// `serde_json::Value::String -> ColumnDef` coercion that SeaORM's
-    /// `filter` does on string columns. For typed cursors over
-    /// non-string columns, callers should compose the cursor outside
-    /// this helper.
+    /// Cursors carry a typed [`sea_orm::Value`] of the `order_col`
+    /// boundary plus a direction (`next`/`prev`). The cursor is opaque
+    /// AES-256-GCM-encrypted (when `APP_KEY` is set; otherwise plain
+    /// base64).
+    ///
+    /// # Behavior
+    ///
+    /// - `cursor == None`: first page. Returns the first `per_page`
+    ///   rows ASC by `order_col`. `prev_cursor` is `None`; `next_cursor`
+    ///   is set iff more rows remain.
+    /// - `cursor == Some(<next>)`: forward step. Returns rows strictly
+    ///   greater than the boundary, ASC. `prev_cursor` points back at
+    ///   this page's first row; `next_cursor` is set iff more rows
+    ///   remain.
+    /// - `cursor == Some(<prev>)`: backward step. Returns rows strictly
+    ///   less than the boundary, fetched DESC then reversed to ASC.
+    ///   `prev_cursor` is set iff more rows lie before; `next_cursor`
+    ///   points at this page's last row (back toward the caller's
+    ///   origin).
+    ///
+    /// `order_col` should be a column with a total order suitable for
+    /// keyset pagination — typically the primary key. Any SeaORM
+    /// `Value` variant (`Int`, `BigInt`, `Uuid`, datetimes, decimals,
+    /// strings, bytes, …) is supported; the dialect adapter binds the
+    /// variant natively so Postgres / MySQL / SQLite all see the
+    /// right SQL type.
     pub async fn cursor<E, C>(
         query: Select<E>,
         cursor: Option<&str>,
@@ -62,66 +81,107 @@ impl Pagination {
     where
         E: EntityTrait<Column = C>,
         E::Model: Send + Sync,
-        C: ColumnTrait,
+        C: ColumnTrait + Copy,
     {
         let db = crate::DB::connection()?;
         let conn = db.inner();
 
-        let boundary: Option<String> = match cursor {
-            Some(c) => Some(CursorPaginator::<E::Model>::decode_cursor(c)?),
+        let decoded = match cursor {
+            Some(c) => Some(CursorPaginator::<E::Model>::decode_value(c)?),
             None => None,
         };
 
-        let mut q = query.order_by_asc(order_col);
-        if let Some(b) = &boundary {
-            q = q.filter(order_col.gt(b.clone()));
-        }
-        // Fetch one extra row to detect whether there's a next page
-        let mut rows = q.limit(per_page + 1).all(conn).await?;
+        let (rows, scan_direction) = match &decoded {
+            None => {
+                let rows = query
+                    .order_by_asc(order_col)
+                    .limit(per_page + 1)
+                    .all(conn)
+                    .await?;
+                (rows, CursorDirection::Next)
+            }
+            Some((boundary, CursorDirection::Next)) => {
+                let rows = query
+                    .order_by_asc(order_col)
+                    .filter(order_col.gt(boundary.clone()))
+                    .limit(per_page + 1)
+                    .all(conn)
+                    .await?;
+                (rows, CursorDirection::Next)
+            }
+            Some((boundary, CursorDirection::Prev)) => {
+                let mut rows = query
+                    .order_by_desc(order_col)
+                    .filter(order_col.lt(boundary.clone()))
+                    .limit(per_page + 1)
+                    .all(conn)
+                    .await?;
+                rows.reverse();
+                (rows, CursorDirection::Prev)
+            }
+        };
 
-        let next_cursor = if rows.len() as u64 > per_page {
-            // The (per_page)-th row (0-indexed: index per_page-1) is the
-            // last row of THIS page. The extra row past it tells us
-            // there's more; cursor encodes the last *kept* row's column
-            // value so the next request requests rows strictly greater.
-            rows.truncate(per_page as usize);
-            // SAFETY: rows.len() == per_page > 0
-            let last = rows.last().unwrap();
-            let value = sea_orm::ModelTrait::get(last, order_col);
-            let boundary_string = value_to_cursor_string(&value);
-            Some(CursorPaginator::<E::Model>::encode_cursor(&boundary_string))
-        } else {
-            None
+        // After the fetch:
+        //   - Next scan: rows are ASC; overflow row (if any) is at END.
+        //   - Prev scan: DESC-fetched then reversed → rows are ASC;
+        //     overflow row (if any) is at START.
+        let mut rows = rows;
+        let overflow = rows.len() as u64 > per_page;
+        if overflow {
+            match scan_direction {
+                CursorDirection::Next => {
+                    rows.truncate(per_page as usize);
+                }
+                CursorDirection::Prev => {
+                    let drop = rows.len() - per_page as usize;
+                    rows.drain(0..drop);
+                }
+            }
+        }
+
+        let entered_via_next = matches!(decoded, Some((_, CursorDirection::Next)));
+        let entered_via_prev = matches!(decoded, Some((_, CursorDirection::Prev)));
+
+        // next_cursor: a forward cursor pinned at this page's last row.
+        let next_cursor = {
+            let has_next = match scan_direction {
+                CursorDirection::Next => overflow,
+                CursorDirection::Prev => true, // back-scan ⇒ we always came FROM further forward
+            };
+            if has_next && !rows.is_empty() {
+                let last = rows.last().unwrap();
+                let v = last.get(order_col);
+                Some(CursorPaginator::<E::Model>::encode_value(
+                    &v,
+                    CursorDirection::Next,
+                )?)
+            } else {
+                None
+            }
+        };
+
+        // prev_cursor: a backward cursor pinned at this page's first row.
+        let prev_cursor = {
+            let has_prev = match scan_direction {
+                CursorDirection::Next => entered_via_next || entered_via_prev,
+                CursorDirection::Prev => overflow,
+            };
+            if has_prev && !rows.is_empty() {
+                let first = rows.first().unwrap();
+                let v = first.get(order_col);
+                Some(CursorPaginator::<E::Model>::encode_value(
+                    &v,
+                    CursorDirection::Prev,
+                )?)
+            } else {
+                None
+            }
         };
 
         Ok(CursorPaginator {
             data: rows,
             next_cursor,
-            prev_cursor: None,
+            prev_cursor,
         })
-    }
-}
-
-/// Convert a SeaORM dynamic `Value` to a string suitable for use as a
-/// keyset cursor boundary. Only the simple-scalar variants are
-/// supported; everything else is rendered via `Debug` as a last resort
-/// (callers should not pass such columns).
-fn value_to_cursor_string(v: &sea_orm::Value) -> String {
-    use sea_orm::Value;
-    match v {
-        Value::String(Some(s)) => (**s).clone(),
-        Value::String(None) => String::new(),
-        Value::TinyInt(Some(i)) => i.to_string(),
-        Value::SmallInt(Some(i)) => i.to_string(),
-        Value::Int(Some(i)) => i.to_string(),
-        Value::BigInt(Some(i)) => i.to_string(),
-        Value::TinyUnsigned(Some(i)) => i.to_string(),
-        Value::SmallUnsigned(Some(i)) => i.to_string(),
-        Value::Unsigned(Some(i)) => i.to_string(),
-        Value::BigUnsigned(Some(i)) => i.to_string(),
-        Value::Float(Some(f)) => f.to_string(),
-        Value::Double(Some(f)) => f.to_string(),
-        Value::Bool(Some(b)) => b.to_string(),
-        _ => format!("{:?}", v),
     }
 }

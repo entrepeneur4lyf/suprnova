@@ -1,5 +1,9 @@
 //! Integration tests for `LengthAwarePaginator`, `CursorPaginator`,
 //! `Pagination::length_aware`/`cursor`, and the Inertia bridge.
+//!
+//! The cursor tests stand up a real in-memory SQLite database via the
+//! `TestContainer` thread-local override so `Pagination::cursor` —
+//! which uses `DB::connection()` internally — sees a connection.
 
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, Database, DbBackend, EntityTrait, Schema, Set,
@@ -7,7 +11,10 @@ use sea_orm::{
 };
 use serde::Serialize;
 use serde_json::json;
-use suprnova::{CursorPaginator, IntoInertiaScroll, LengthAwarePaginator};
+use suprnova::testing::TestContainer;
+use suprnova::{
+    CursorPaginator, DbConnection, IntoInertiaScroll, LengthAwarePaginator, Pagination,
+};
 
 // Toy in-memory SQLite entity used by the integration tests.
 mod toy {
@@ -53,7 +60,7 @@ fn total_zero_yields_empty_data() {
 
 // --- SeaORM integration via in-memory SQLite ---
 
-async fn make_db_with_25_rows() -> sea_orm::DatabaseConnection {
+async fn make_db_with_n_rows(n: i32) -> sea_orm::DatabaseConnection {
     let conn = Database::connect("sqlite::memory:").await.unwrap();
     let schema = Schema::new(DbBackend::Sqlite);
     let stmt = schema.create_table_from_entity(toy::Entity);
@@ -61,7 +68,7 @@ async fn make_db_with_25_rows() -> sea_orm::DatabaseConnection {
         .await
         .unwrap();
 
-    for i in 1..=25i32 {
+    for i in 1..=n {
         let m = toy::ActiveModel {
             id: Set(i),
             name: Set(format!("item-{:02}", i)),
@@ -77,40 +84,22 @@ async fn make_db_with_25_rows() -> sea_orm::DatabaseConnection {
     conn
 }
 
-/// Bridge: call Pagination::length_aware against a connection we
-/// register into the App container. The DB::connection lookup goes
-/// through there.
-async fn install_db(conn: sea_orm::DatabaseConnection) {
-    // DbConnection::from_existing isn't a public ctor — wire via the
-    // public init_with helper using a config that produces this
-    // connection. Simpler: bypass and use sea-orm directly for the
-    // SeaORM-integration tests, since `Pagination::length_aware` only
-    // wraps the same calls. We assert against the connection directly.
-    let _ = conn;
+/// Mount a SeaORM connection on the thread-local test container so
+/// `DB::connection()` resolves to it inside `Pagination::cursor`.
+fn install_db(conn: sea_orm::DatabaseConnection) {
+    let db = DbConnection::from_raw(conn);
+    TestContainer::singleton(db);
 }
 
 #[tokio::test]
 async fn seaorm_length_aware_page_2_returns_10_rows() {
-    let conn = make_db_with_25_rows().await;
-    install_db(conn.clone()).await;
+    let _guard = TestContainer::fake();
+    let conn = make_db_with_n_rows(25).await;
+    install_db(conn.clone());
 
-    // Manually reproduce what Pagination::length_aware does — this is
-    // the integration check that the paginator's math matches SeaORM's
-    // ground truth (so we can ship Pagination::length_aware confidently
-    // without wiring a full DB container into the test).
-    use sea_orm::{PaginatorTrait, QuerySelect};
-    let total = toy::Entity::find().count(&conn).await.unwrap();
-    assert_eq!(total, 25);
-    let per_page = 10;
-    let page = 2;
-    let offset = (page - 1) * per_page;
-    let data = toy::Entity::find()
-        .offset(offset)
-        .limit(per_page)
-        .all(&conn)
+    let p = Pagination::length_aware::<toy::Entity>(toy::Entity::find(), 10, 2)
         .await
         .unwrap();
-    let p = LengthAwarePaginator::new(data, total, per_page, page);
     assert_eq!(p.total, 25);
     assert_eq!(p.per_page, 10);
     assert_eq!(p.current_page, 2);
@@ -120,46 +109,30 @@ async fn seaorm_length_aware_page_2_returns_10_rows() {
 }
 
 #[tokio::test]
-async fn seaorm_cursor_walks_forward_until_exhausted() {
-    let conn = make_db_with_25_rows().await;
-
-    // Build a cursor-walker manually using CursorPaginator's encode/decode
-    // helpers — same wire format as Pagination::cursor. Crypt may not be
-    // initialized in this test, in which case plain-base64 fallback applies.
-    use sea_orm::{QueryFilter, QueryOrder, QuerySelect};
+async fn pagination_cursor_walks_forward_until_exhausted() {
+    let _guard = TestContainer::fake();
+    let conn = make_db_with_n_rows(25).await;
+    install_db(conn);
 
     let per_page: u64 = 10;
     let mut visited: Vec<i32> = Vec::new();
     let mut cursor: Option<String> = None;
 
     for _ in 0..10 {
-        let boundary: Option<String> = match cursor.as_deref() {
-            Some(c) => Some(CursorPaginator::<toy::Model>::decode_cursor(c).unwrap()),
-            None => None,
-        };
-        let mut q = toy::Entity::find().order_by_asc(toy::Column::Id);
-        if let Some(b) = &boundary {
-            let as_i32: i32 = b.parse().unwrap();
-            q = q.filter(toy::Column::Id.gt(as_i32));
-        }
-        let mut rows = q.limit(per_page + 1).all(&conn).await.unwrap();
-        let has_more = rows.len() as u64 > per_page;
-        if has_more {
-            rows.truncate(per_page as usize);
-        }
-        let count_this_page = rows.len();
-        let last_id = rows.last().map(|r| r.id);
-        for r in rows {
+        let page = Pagination::cursor::<toy::Entity, toy::Column>(
+            toy::Entity::find(),
+            cursor.as_deref(),
+            per_page,
+            toy::Column::Id,
+        )
+        .await
+        .unwrap();
+
+        for r in &page.data {
             visited.push(r.id);
         }
-        cursor = if has_more {
-            Some(CursorPaginator::<toy::Model>::encode_cursor(
-                &last_id.unwrap().to_string(),
-            ))
-        } else {
-            None
-        };
-        if count_this_page == 0 || cursor.is_none() {
+        cursor = page.next_cursor.clone();
+        if cursor.is_none() {
             break;
         }
     }
@@ -167,6 +140,91 @@ async fn seaorm_cursor_walks_forward_until_exhausted() {
     assert_eq!(visited.len(), 25);
     assert_eq!(visited.first(), Some(&1));
     assert_eq!(visited.last(), Some(&25));
+}
+
+#[tokio::test]
+async fn pagination_cursor_emits_prev_cursor_on_page_2() {
+    let _guard = TestContainer::fake();
+    let conn = make_db_with_n_rows(25).await;
+    install_db(conn);
+
+    // Page 1 — first page, prev_cursor must be None.
+    let page1 = Pagination::cursor::<toy::Entity, toy::Column>(
+        toy::Entity::find(),
+        None,
+        10,
+        toy::Column::Id,
+    )
+    .await
+    .unwrap();
+    assert!(page1.prev_cursor.is_none(), "first page must have no prev_cursor");
+    let next1 = page1.next_cursor.clone().expect("page 1 should have a next cursor");
+    let page1_ids: Vec<i32> = page1.data.iter().map(|r| r.id).collect();
+    assert_eq!(page1_ids, (1..=10).collect::<Vec<i32>>());
+
+    // Page 2 — using page 1's next_cursor.
+    let page2 = Pagination::cursor::<toy::Entity, toy::Column>(
+        toy::Entity::find(),
+        Some(&next1),
+        10,
+        toy::Column::Id,
+    )
+    .await
+    .unwrap();
+    let page2_ids: Vec<i32> = page2.data.iter().map(|r| r.id).collect();
+    assert_eq!(page2_ids, (11..=20).collect::<Vec<i32>>());
+    let prev2 = page2.prev_cursor.clone().expect("page 2 must emit a prev_cursor");
+
+    // Following page 2's prev_cursor takes us back to page 1's rows.
+    let back = Pagination::cursor::<toy::Entity, toy::Column>(
+        toy::Entity::find(),
+        Some(&prev2),
+        10,
+        toy::Column::Id,
+    )
+    .await
+    .unwrap();
+    let back_ids: Vec<i32> = back.data.iter().map(|r| r.id).collect();
+    assert_eq!(
+        back_ids,
+        (1..=10).collect::<Vec<i32>>(),
+        "prev_cursor from page 2 must return to page 1's contents"
+    );
+    // back has 10 rows and there are no more rows before id=1 → no prev.
+    assert!(
+        back.prev_cursor.is_none(),
+        "walked back to the first page; prev_cursor should be None"
+    );
+    // We came from page 2, so we always have a way forward.
+    assert!(back.next_cursor.is_some());
+}
+
+#[tokio::test]
+async fn pagination_cursor_last_page_no_next() {
+    let _guard = TestContainer::fake();
+    let conn = make_db_with_n_rows(25).await;
+    install_db(conn);
+
+    let mut cursor: Option<String> = None;
+    let mut last_page_rows: Vec<i32> = Vec::new();
+    for _ in 0..10 {
+        let p = Pagination::cursor::<toy::Entity, toy::Column>(
+            toy::Entity::find(),
+            cursor.as_deref(),
+            10,
+            toy::Column::Id,
+        )
+        .await
+        .unwrap();
+        last_page_rows = p.data.iter().map(|r| r.id).collect();
+        if p.next_cursor.is_none() {
+            // Last page reached. With 25 rows, this is page 3 (rows 21..=25).
+            assert_eq!(last_page_rows, (21..=25).collect::<Vec<i32>>());
+            return;
+        }
+        cursor = p.next_cursor;
+    }
+    panic!("walked too many pages; last page: {last_page_rows:?}");
 }
 
 // --- IntoInertiaScroll wiring ---
@@ -187,12 +245,12 @@ fn cursor_into_inertia_scroll() {
     let p: CursorPaginator<String> = CursorPaginator {
         data: vec!["row-1".to_string(), "row-2".to_string()],
         next_cursor: Some("opaque-next".to_string()),
-        prev_cursor: None,
+        prev_cursor: Some("opaque-prev".to_string()),
     };
     let (meta, data) = p.into_inertia_scroll();
     assert_eq!(meta.page_name, "cursor");
     assert_eq!(meta.next_page, Some(json!("opaque-next")));
-    assert_eq!(meta.previous_page, None);
+    assert_eq!(meta.previous_page, Some(json!("opaque-prev")));
     assert_eq!(data.len(), 2);
 }
 

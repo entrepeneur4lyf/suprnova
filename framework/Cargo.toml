@@ -44,6 +44,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry", "smallvec", "parking_lot"] }
 uuid = { version = "1", features = ["v4", "fast-rng", "serde"] }
 dashmap = "6"
+# Pinned to versions sea-orm 1.1.x exposes via `with-rust_decimal` / `with-bigdecimal`.
+# Used by the `pagination` module to round-trip `sea_orm::Value::Decimal` /
+# `Value::BigDecimal` boundaries in cursor payloads.
+rust_decimal = "1"
+bigdecimal = "0.4"
 
 # OpenTelemetry — optional, gated behind the `otel` feature. Default OFF.
 # Pinned to the 0.31.x line because `tracing-opentelemetry 0.32.1` (latest)
