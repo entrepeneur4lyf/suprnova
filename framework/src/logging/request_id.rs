@@ -48,6 +48,38 @@ pub fn current_request_id() -> Option<RequestId> {
     REQUEST_ID.try_with(|id| id.clone()).ok()
 }
 
+use crate::http::{Request, Response};
+use crate::middleware::Next;
+use async_trait::async_trait;
+
+/// Middleware that ensures every request has a `RequestId` scoped in
+/// `REQUEST_ID`. If the inbound request carries an `X-Request-Id`
+/// header, that value is reused; otherwise a fresh UUID v4 is
+/// generated. The id is echoed back as `X-Request-Id` on the response
+/// (both success and error variants).
+pub struct RequestIdMiddleware;
+
+#[async_trait]
+impl crate::middleware::Middleware for RequestIdMiddleware {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        let id = request
+            .header("x-request-id")
+            .map(RequestId::from_string)
+            .unwrap_or_else(RequestId::new);
+        let id_str = id.as_str().to_string();
+
+        let result = REQUEST_ID
+            .scope(id, async move { next(request).await })
+            .await;
+
+        // Echo X-Request-Id on both success and error variants.
+        match result {
+            Ok(resp) => Ok(resp.header("X-Request-Id", id_str)),
+            Err(resp) => Err(resp.header("X-Request-Id", id_str)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

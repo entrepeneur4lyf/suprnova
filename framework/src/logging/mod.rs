@@ -8,4 +8,4 @@ pub mod config;
 pub mod request_id;
 
 pub use config::{LogConfig, LogFormat};
-pub use request_id::{current_request_id, RequestId, REQUEST_ID};
+pub use request_id::{current_request_id, RequestId, RequestIdMiddleware, REQUEST_ID};
