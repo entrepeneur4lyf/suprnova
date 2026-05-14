@@ -21,3 +21,4 @@ Cargo.lock
 reference/
 docs/parity/
 docs/superpowers/
+.claude/
