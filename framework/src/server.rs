@@ -2,7 +2,8 @@ use crate::cache::Cache;
 use crate::config::{Config, ServerConfig};
 use crate::container::App;
 use crate::http::{HttpResponse, Request};
-use crate::middleware::{Middleware, MiddlewareChain, MiddlewareRegistry};
+use crate::logging::{init_subscriber, LogConfig, RequestIdMiddleware};
+use crate::middleware::{into_boxed, Middleware, MiddlewareChain, MiddlewareRegistry};
 use crate::routing::Router;
 use bytes::Bytes;
 use http_body_util::Full;
@@ -81,13 +82,16 @@ impl Server {
     }
 
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Initialize the global tracing subscriber from env (idempotent).
+        init_subscriber(LogConfig::from_env());
+
         // Bootstrap cache (Redis with in-memory fallback)
         Cache::bootstrap().await;
 
         let addr: SocketAddr = self.get_addr();
         let listener = TcpListener::bind(addr).await?;
 
-        println!("suprnova server running on http://{}", addr);
+        tracing::info!(%addr, "suprnova server listening");
 
         let router = self.router;
         let middleware = Arc::new(self.middleware);
@@ -106,7 +110,7 @@ impl Server {
                 });
 
                 if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
-                    eprintln!("Error serving connection: {:?}", err);
+                    tracing::error!(?err, "error serving connection");
                 }
             });
         }
@@ -163,6 +167,10 @@ async fn handle_request_inner(
             // Build middleware chain
             let mut chain = MiddlewareChain::new();
 
+            // 0. RequestId is always outermost so spans + events emitted
+            //    downstream carry the per-request id automatically.
+            chain.push(into_boxed(RequestIdMiddleware));
+
             // 1. Add global middleware
             chain.extend(middleware_registry.global_middleware().iter().cloned());
 
@@ -184,6 +192,9 @@ async fn handle_request_inner(
 
                 // Build middleware chain for fallback
                 let mut chain = MiddlewareChain::new();
+
+                // 0. RequestId is always outermost (same as the matched-route path).
+                chain.push(into_boxed(RequestIdMiddleware));
 
                 // 1. Add global middleware
                 chain.extend(middleware_registry.global_middleware().iter().cloned());
