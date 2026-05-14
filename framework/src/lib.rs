@@ -8,6 +8,7 @@ pub mod database;
 pub mod error;
 pub mod hashing;
 pub mod http;
+pub mod events;
 pub mod inertia;
 pub mod logging;
 pub mod middleware;
@@ -42,6 +43,7 @@ pub use session::{
 pub use logging::{
     current_request_id, init_subscriber, LogConfig, LogFormat, RequestId, RequestIdMiddleware,
 };
+pub use events::{Event, EventDispatcher, EventFacade, Listener};
 pub use inertia::{
     DeferConfig, DeferOptions, EncryptHistoryMiddleware, Frontend, Inertia303Middleware,
     InertiaConfig, InertiaRegistry, InertiaRequestExt, InertiaResponse, InertiaSharedData,
