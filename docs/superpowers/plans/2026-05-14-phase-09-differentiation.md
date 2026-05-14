@@ -1854,7 +1854,7 @@ docker-compose down
 - [ ] **Step 3: Update ROADMAP "Where we are"**
 
 Move from "Missing" to "Production-ready":
-- Vector DBs (Qdrant, Weaviate, Milvus, LanceDB, pgvector, MariaDB, LibSQL)
+- Vector DBs via embex: Qdrant, Weaviate, Milvus, LanceDB, pgvector, Pinecone, Chroma, Redis, Elasticsearch, OpenSearch — plus our own MariaDB VECTOR + LibSQL adapters implementing embex's VectorDatabase trait (12 total)
 - Graph DBs (Neo4j, ArangoDB, SurrealDB, MemGraph)
 - Time-series (InfluxDB, TimescaleDB, ClickHouse, QuestDB)
 - Search (Meilisearch, Typesense, Elasticsearch, Algolia)
@@ -1873,11 +1873,11 @@ git push
 
 | Spec item | Covered by |
 |-----------|------------|
-| Vector facade + VectorStore trait | Task 1 |
-| Qdrant driver | Task 2 |
-| LanceDB driver | Task 3 |
-| pgvector / MariaDB / LibSQL drivers | Task 4 |
-| Weaviate / Milvus drivers | Task 5 |
+| Vector facade — re-export embex VectorDatabase trait | Task 1 |
+| Qdrant + LanceDB + Weaviate + Milvus adapters (embex) | Task 2 |
+| pgvector + Chroma + Pinecone + Redis adapters (embex) | Task 3 |
+| Elasticsearch + OpenSearch vector adapters (embex) | Task 4 |
+| In-memory + MariaDB VECTOR + LibSQL adapters (ours) | Task 5 |
 | Graph facade + GraphStore trait | Task 6 |
 | Neo4j driver (+ MemGraph via Bolt-compat) | Task 6 |
 | ArangoDB / SurrealDB drivers | Task 7 |
