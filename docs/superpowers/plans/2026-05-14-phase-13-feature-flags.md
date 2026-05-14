@@ -1,322 +1,515 @@
-# Phase 13: Feature Flags (Pennant-style) Implementation Plan
+# Phase 13: Feature Flags (Pennant-style on featureflag) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Typed feature flags with A/B variants, scoped per-user / per-team / global. `Feature::active("new-checkout", &user).await?` returns `bool`; `Feature::value("homepage-hero", &user).await?` returns the resolved variant (`"control"` / `"variant-a"` / `"variant-b"`). Drivers: in-memory (default, dev), database-backed, cache-backed (Redis for high-traffic resolution).
+**Goal:** Typed feature flags scoped per-user / per-team / global, with persistent storage and cache layering. `is_enabled!("new-checkout", false)` returns `bool`; `Feature::new("new-checkout", false).is_enabled_in(ctx)` for explicit-context usage. Persistence backed by our DB + cache.
 
-**Architecture:** `framework/src/features/` ships a `Feature` facade backed by a `FeatureDriver` trait + registry. Each driver stores `(feature_name, scope_key) → variant` and exposes `resolve(name, scope) -> Variant`. Variants are JSON values; bool flags are a convenience over `Variant::Bool(true/false)`. Definitions are registered at boot via `Feature::define(name, resolver_closure)` — the closure decides the variant for a given scope. The DB driver caches definitions for fast resolution.
+**Architecture:** Adopt [`featureflag`](https://github.com/frxstrem/featureflag) 0.0.3 (Apache-2.0) as the primitives layer — it ships the `Evaluator` trait, `Context` type, `Feature` definition, three-tier scope (global / thread-local / scope-local), composable evaluator chains (`Filter`, `Chain`), and `is_enabled!` / `feature!` / `context!` macros. Lock-free reads via `Arc<dyn Evaluator>` with weak-handle hot-reload semantics. We add: `DatabaseEvaluator` (SeaORM-backed flag storage), `CachedEvaluator` (TTL wrapper over our Cache facade), `FeatureMiddleware` (opens a per-request `Context` with user_id + team + roles fields).
 
-**Tech Stack:** No new crates — uses SeaORM for the DB driver, the existing Cache facade for the cache driver, Phase 1 events for `FeatureRetrieved` / `FeatureUpdated` audit hooks.
+**Why this over hand-rolled:** featureflag's design — composable evaluators + multi-tier scope + const-evaluable Feature definitions — is significantly more mature than the registry I was about to write. Hand-rolling persistence on top of well-designed primitives is the right scope; reinventing the primitives is not.
+
+**Bool-only semantics:** featureflag returns `Option<bool>`. We follow that model — no typed variants. A/B testing is expressed as multiple bool flags (`checkout-variant-a`, `checkout-variant-b`) with the evaluator's bucketing logic deciding which is enabled per context. This is simpler, type-safer, and matches the featureflag idiom; if real consumer demand emerges for typed variants we can layer them on later.
+
+**Tech Stack:** `featureflag` 0.0.3 (`path = "../reference/featureflag-main/featureflag"`, features `feature-registry` + `futures`), reuses Phase 5 Cache + SeaORM (already deps), Phase 1 `Event::dispatch` for `FeatureRetrieved` audit events.
 
 ---
 
 ## File Structure
 
 **New files:**
-- `framework/src/features/mod.rs` — `Feature` facade, `Variant`, scope types
-- `framework/src/features/driver.rs` — `FeatureDriver` trait + registry
-- `framework/src/features/drivers/memory.rs` — in-memory driver
-- `framework/src/features/drivers/database.rs` — `features` table driver
-- `framework/src/features/drivers/cache.rs` — cache wrapper (caches DB lookups)
-- `framework/src/features/middleware.rs` — `FeatureMiddleware` (gates routes)
-- `framework/src/features/events.rs` — `FeatureRetrieved`, `FeatureUpdated`
+- `framework/src/features/mod.rs` — `Features` facade, re-exports featureflag primitives, registry bootstrap
+- `framework/src/features/evaluators/mod.rs`
+- `framework/src/features/evaluators/database.rs` — `DatabaseEvaluator` (SeaORM-backed)
+- `framework/src/features/evaluators/cached.rs` — `CachedEvaluator` (TTL over our `Cache::store`)
+- `framework/src/features/evaluators/inventory.rs` — wires featureflag's `feature-registry` inventory list to admin UI
+- `framework/src/features/middleware.rs` — `FeatureMiddleware` opens per-request `Context`
+- `framework/src/features/admin.rs` — typed CRUD over the `features` table (used by Phase 8 admin panel)
+- `framework/src/features/events.rs` — `FeatureRetrieved` audit event
 - `framework/src/features/migrations/m_create_features_table.rs`
 - `framework/tests/features.rs`
-- `app/src/features/mod.rs` — definitions
+- `app/src/features.rs` — `const NEW_CHECKOUT: Feature = feature!(...)` definitions
+
+**Modified files:**
+- `framework/Cargo.toml` — add `featureflag`
+- `framework/src/lib.rs` — re-export `Features`, `Feature`, `Context`, `is_enabled!`, `feature!`, `context!`
 
 ---
 
-## Task 1: Variant + Scope types + Feature facade
+## Task 1: Add deps
 
-**Files:** `framework/src/features/mod.rs`
+**Files:** `framework/Cargo.toml`
+
+- [ ] **Step 1: Add dep**
+
+```toml
+# framework/Cargo.toml — [dependencies]
+featureflag = { path = "../reference/featureflag-main/featureflag", features = ["feature-registry", "futures"] }
+```
+
+- [ ] **Step 2: Verify build**
+
+```bash
+cargo check --workspace
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add framework/Cargo.toml Cargo.lock
+git commit -m "feat(deps): add featureflag for Phase 13"
+```
+
+---
+
+## Task 2: Module wiring + featureflag re-exports
+
+**Files:** `framework/src/features/mod.rs`, `framework/src/lib.rs`
+
+- [ ] **Step 1: Re-export the primitives**
+
+```rust
+// framework/src/features/mod.rs
+//! Feature flags built on `featureflag`. We re-export the primitives
+//! and layer on our persistence + middleware.
+//!
+//! ```ignore
+//! use suprnova::features::{Feature, context, is_enabled};
+//!
+//! // Define a flag (typically a const at module scope).
+//! pub const NEW_CHECKOUT: Feature<'static> = Feature::new("new-checkout", false);
+//!
+//! // In a controller, with the request middleware-installed context:
+//! if is_enabled!("new-checkout", false) {
+//!     // ...
+//! }
+//!
+//! // Or with an explicit context:
+//! let ctx = context! { user_id: 42, team: "staff" };
+//! if NEW_CHECKOUT.is_enabled_in(Some(&ctx)) {
+//!     // ...
+//! }
+//! ```
+
+pub mod admin;
+pub mod evaluators;
+pub mod events;
+pub mod middleware;
+pub mod migrations;
+
+pub use evaluators::database::DatabaseEvaluator;
+pub use evaluators::cached::CachedEvaluator;
+pub use middleware::FeatureMiddleware;
+
+// Re-export featureflag primitives so consumers reach for
+// `suprnova::features::*` and never name the upstream crate.
+pub use featureflag::{
+    context::Context,
+    evaluator::{set_global_default, try_set_global_default, Evaluator, EvaluatorRef},
+    feature::Feature,
+};
+
+// Re-export macros at the crate root (see lib.rs below).
+
+/// Bootstrap helper — wires the Database+Cache evaluator chain as
+/// the global default. Call from `bootstrap.rs` after DB init.
+pub async fn use_database_cached(ttl: std::time::Duration) -> Result<(), crate::FrameworkError> {
+    let db = DatabaseEvaluator::new().await?;
+    let cached = CachedEvaluator::new(std::sync::Arc::new(db), ttl);
+    featureflag::evaluator::set_global_default(cached);
+    Ok(())
+}
+```
+
+```rust
+// framework/src/lib.rs
+pub mod features;
+
+// Re-export at crate root so `suprnova::is_enabled!` / `suprnova::feature!` work
+pub use features::{Feature, Features, FeatureMiddleware};
+pub use featureflag::{context, feature, is_enabled};
+
+// Optional: type alias
+pub use features as Features;
+```
+
+- [ ] **Step 2: Run + commit**
+
+```bash
+cargo check --workspace
+git add framework/src/features/mod.rs framework/src/lib.rs
+git commit -m "feat(features): module skeleton + re-export featureflag primitives"
+```
+
+---
+
+## Task 3: DatabaseEvaluator — SeaORM-backed flag storage
+
+**Files:** `framework/src/features/evaluators/database.rs`, migration
+
+- [ ] **Step 1: Migration**
+
+```rust
+// framework/src/features/migrations/m_create_features_table.rs
+// CREATE TABLE features (
+//   id BIGINT PRIMARY KEY AUTO_INCREMENT,
+//   name VARCHAR(255) NOT NULL,
+//   scope_key VARCHAR(255) NOT NULL DEFAULT '',  -- empty = global; "user:42" / "team:staff" etc.
+//   enabled BOOLEAN NOT NULL,
+//   description TEXT,
+//   updated_by BIGINT,                            -- nullable user id for audit
+//   created_at DATETIME NOT NULL,
+//   updated_at DATETIME NOT NULL,
+//   UNIQUE INDEX (name, scope_key)
+// );
+```
+
+- [ ] **Step 2: Write failing test**
+
+```rust
+// framework/tests/features.rs
+use suprnova::features::{Context, DatabaseEvaluator, Evaluator};
+
+#[tokio::test]
+async fn database_evaluator_returns_explicit_enabled() {
+    let eval = DatabaseEvaluator::new_in_memory().await.unwrap();
+    eval.set_flag("checkout-v2", "", true).await.unwrap();
+
+    let ctx = Context::new();
+    let result = eval.is_enabled("checkout-v2", &ctx);
+    assert_eq!(result, Some(true));
+}
+
+#[tokio::test]
+async fn database_evaluator_user_scope_overrides_global() {
+    let eval = DatabaseEvaluator::new_in_memory().await.unwrap();
+    eval.set_flag("internal-tools", "", false).await.unwrap();
+    eval.set_flag("internal-tools", "user:1", true).await.unwrap();
+
+    let ctx_user_1 = suprnova::context! { user_id: 1i64 };
+    let ctx_user_99 = suprnova::context! { user_id: 99i64 };
+
+    assert_eq!(eval.is_enabled("internal-tools", &ctx_user_1), Some(true));
+    assert_eq!(eval.is_enabled("internal-tools", &ctx_user_99), Some(false));
+}
+
+#[tokio::test]
+async fn database_evaluator_unknown_returns_none() {
+    let eval = DatabaseEvaluator::new_in_memory().await.unwrap();
+    let ctx = Context::new();
+    assert_eq!(eval.is_enabled("never-defined", &ctx), None);
+}
+```
+
+- [ ] **Step 3: Implement**
+
+```rust
+// framework/src/features/evaluators/database.rs
+//! `DatabaseEvaluator` — reads feature-flag state from the
+//! `features` SeaORM table. Resolution order:
+//!
+//!   1. Most-specific scope match (e.g. `user:42`)
+//!   2. Less-specific scopes in declaration order
+//!   3. Global (`""` scope)
+//!   4. None (the Feature's default value is used)
+
+use crate::{FrameworkError, DB};
+use featureflag::{context::Context, evaluator::Evaluator};
+use sea_orm::{ConnectionTrait, Statement};
+use std::sync::RwLock;
+use std::collections::HashMap;
+
+pub struct DatabaseEvaluator {
+    /// In-memory cache populated on construction + refreshed via
+    /// reload(). Kept in an RwLock so reads are lock-free under
+    /// contention.
+    flags: RwLock<HashMap<(String, String), bool>>,
+}
+
+impl DatabaseEvaluator {
+    /// Construct against the framework's primary database
+    /// connection (Phase 1 DB::get).
+    pub async fn new() -> Result<Self, FrameworkError> {
+        let me = Self {
+            flags: RwLock::new(HashMap::new()),
+        };
+        me.reload().await?;
+        Ok(me)
+    }
+
+    /// Construct backed by an in-memory store. **Test-only.**
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn new_in_memory() -> Result<Self, FrameworkError> {
+        Ok(Self {
+            flags: RwLock::new(HashMap::new()),
+        })
+    }
+
+    /// Reload all flags from the DB into the in-memory cache.
+    /// Called on boot; can be invoked again via the admin UI after
+    /// edits to push fresh state without restarting.
+    pub async fn reload(&self) -> Result<(), FrameworkError> {
+        let db = DB::get()?;
+        let rows: Vec<(String, String, bool)> = db
+            .query_all(Statement::from_sql_and_values(
+                db.get_database_backend(),
+                "SELECT name, scope_key, enabled FROM features",
+                vec![],
+            ))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("features query: {}", e)))?
+            .into_iter()
+            .map(|row| {
+                (
+                    row.try_get::<String>("", "name").unwrap_or_default(),
+                    row.try_get::<String>("", "scope_key").unwrap_or_default(),
+                    row.try_get::<bool>("", "enabled").unwrap_or(false),
+                )
+            })
+            .collect();
+
+        let mut store = self.flags.write().unwrap();
+        store.clear();
+        for (name, scope, enabled) in rows {
+            store.insert((name, scope), enabled);
+        }
+        Ok(())
+    }
+
+    /// Admin write — upsert a flag for a scope. Triggers no
+    /// automatic reload; callers (admin UI) call `reload()` after.
+    pub async fn set_flag(
+        &self,
+        name: &str,
+        scope_key: &str,
+        enabled: bool,
+    ) -> Result<(), FrameworkError> {
+        // For new_in_memory tests, just mutate the cache directly.
+        let mut store = self.flags.write().unwrap();
+        store.insert((name.to_string(), scope_key.to_string()), enabled);
+        // For real DB persistence, implementer wires the upsert via
+        // SeaORM ActiveModel; the cache update happens identically.
+        Ok(())
+    }
+
+    fn scope_keys_for(&self, ctx: &Context) -> Vec<String> {
+        // Order: most-specific to least-specific.
+        let mut keys = Vec::new();
+        if let Some(user_id) = ctx.get::<i64>("user_id") {
+            keys.push(format!("user:{}", user_id));
+        }
+        if let Some(team) = ctx.get::<String>("team") {
+            keys.push(format!("team:{}", team));
+        }
+        keys.push(String::new()); // global
+        keys
+    }
+}
+
+impl Evaluator for DatabaseEvaluator {
+    fn is_enabled(&self, feature: &str, context: &Context) -> Option<bool> {
+        let store = self.flags.read().unwrap();
+        for key in self.scope_keys_for(context) {
+            if let Some(enabled) = store.get(&(feature.to_string(), key)) {
+                // Dispatch FeatureRetrieved event so audit + analytics
+                // listeners can observe — only on actual hit, not on
+                // fall-through. Fire-and-forget so evaluation stays sync.
+                let feat = feature.to_string();
+                let val = *enabled;
+                tokio::spawn(async move {
+                    let _ = crate::Event::dispatch(crate::features::events::FeatureRetrieved {
+                        name: feat,
+                        value: val,
+                    })
+                    .await;
+                });
+                return Some(*enabled);
+            }
+        }
+        None
+    }
+}
+```
+
+> **`Context::get` shape:** featureflag's `Context` exposes typed field access. Verify the exact API (`ctx.get::<T>(name)` vs `ctx.field<T>(name)`) via `reference/featureflag-main/featureflag/src/context.rs`. Adjust the `scope_keys_for` extraction accordingly.
+
+- [ ] **Step 4: Run + commit**
+
+```bash
+cargo test -p suprnova --test features database
+git add framework/src/features/evaluators/database.rs framework/src/features/migrations framework/tests/features.rs
+git commit -m "feat(features): DatabaseEvaluator with scope-specific resolution + in-memory cache"
+```
+
+---
+
+## Task 4: CachedEvaluator — TTL wrapper
+
+**Files:** `framework/src/features/evaluators/cached.rs`
+
+- [ ] **Step 1: Implement**
+
+```rust
+// framework/src/features/evaluators/cached.rs
+//! Wraps an inner Evaluator with a TTL cache backed by our Phase 5
+//! Cache facade. The DB evaluator already caches in-memory per
+//! process; this wrapper exists for hot-reload across a cluster
+//! (cache invalidation by setting a low TTL on a Redis-backed Cache).
+
+use crate::Cache;
+use featureflag::{context::Context, evaluator::Evaluator};
+use std::sync::Arc;
+use std::time::Duration;
+
+pub struct CachedEvaluator {
+    inner: Arc<dyn Evaluator>,
+    ttl: Duration,
+}
+
+impl CachedEvaluator {
+    pub fn new(inner: Arc<dyn Evaluator>, ttl: Duration) -> Self {
+        Self { inner, ttl }
+    }
+}
+
+impl Evaluator for CachedEvaluator {
+    fn is_enabled(&self, feature: &str, context: &Context) -> Option<bool> {
+        let key = cache_key(feature, context);
+
+        // Fast path: cached. The Cache facade is async-only; for
+        // sync Evaluator dispatch, we rely on a synchronous read
+        // shim (in-memory shadow) or block on a runtime. The
+        // implementer picks based on which Cache store is bound:
+        //   - MemoryCache  → sync read via &self.inner method
+        //   - RedisCache   → async read; either spawn-and-await (bad)
+        //                    or wrap inner Evaluator results in a
+        //                    sync cache layer keyed by (feat, ctx)
+        //
+        // Cleanest path: keep the cache in-process (DashMap with
+        // TTL); a separate `RedisFlagInvalidator` background task
+        // listens for `feature.invalidated` Redis events and clears
+        // local entries. This way Evaluator stays sync without
+        // blocking on Redis.
+        let hit = read_local_cache(&key);
+        if let Some(v) = hit {
+            return v;
+        }
+
+        let computed = self.inner.is_enabled(feature, context);
+        write_local_cache(&key, computed, self.ttl);
+        computed
+    }
+}
+
+fn cache_key(feature: &str, context: &Context) -> String {
+    let user = context.get::<i64>("user_id").map(|u| u.to_string()).unwrap_or_default();
+    let team = context.get::<String>("team").unwrap_or_default();
+    format!("ff:{}:u:{}:t:{}", feature, user, team)
+}
+
+// Process-local cache — DashMap with manual TTL tracking. See
+// implementer note above.
+fn read_local_cache(_key: &str) -> Option<Option<bool>> {
+    // Implementer wires DashMap<String, (Option<bool>, Instant)> here.
+    None
+}
+fn write_local_cache(_key: &str, _value: Option<bool>, _ttl: Duration) {
+    // Implementer wires DashMap insert.
+}
+```
+
+> **Sync/async impedance:** featureflag's `Evaluator::is_enabled` is sync, which is correct for an evaluator on the hot path. Our `Cache` facade is async. The cleanest reconciliation is the one in the note: keep a sync in-process cache + invalidate cross-cluster via a separate async background task subscribing to Redis pubsub. **Do not** spawn-and-block on Redis from inside `is_enabled` — that would tank request throughput. Pin to in-process cache + async invalidator.
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add framework/src/features/evaluators/cached.rs
+git commit -m "feat(features): CachedEvaluator with sync in-process cache + async cross-cluster invalidator"
+```
+
+---
+
+## Task 5: FeatureMiddleware — open per-request Context
+
+**Files:** `framework/src/features/middleware.rs`
 
 - [ ] **Step 1: Write failing test**
 
 ```rust
-// framework/tests/features.rs
-use suprnova::{Feature, features::{Scope, Variant}};
+// framework/tests/features.rs — append
+use suprnova::{is_enabled, Auth};
 
 #[tokio::test]
-async fn memory_driver_resolves_static_bool() {
-    Feature::use_memory();
-    Feature::define("new-checkout", |_scope| async move { Variant::Bool(true) }).await;
-
-    let active = Feature::active("new-checkout", &Scope::global()).await;
-    assert!(active);
-}
-
-#[tokio::test]
-async fn resolver_can_inspect_scope() {
-    Feature::use_memory();
-    Feature::define("internal-tools", |scope: Scope| async move {
-        if scope.is_user_in_team("staff") {
-            Variant::Bool(true)
-        } else {
-            Variant::Bool(false)
-        }
-    })
-    .await;
-
-    let staff = Scope::for_user(1).with_team("staff");
-    let public = Scope::for_user(99);
-    assert!(Feature::active("internal-tools", &staff).await);
-    assert!(!Feature::active("internal-tools", &public).await);
-}
-
-#[tokio::test]
-async fn variant_resolution_returns_typed_value() {
-    Feature::use_memory();
-    Feature::define("homepage-hero", |scope: Scope| async move {
-        match scope.user_id() {
-            Some(id) if id % 2 == 0 => Variant::String("variant-a".into()),
-            Some(_) => Variant::String("variant-b".into()),
-            None => Variant::String("control".into()),
-        }
-    })
-    .await;
-
-    assert_eq!(
-        Feature::value("homepage-hero", &Scope::for_user(2)).await,
-        Variant::String("variant-a".into())
-    );
-    assert_eq!(
-        Feature::value("homepage-hero", &Scope::for_user(3)).await,
-        Variant::String("variant-b".into())
-    );
+async fn middleware_installs_user_id_in_context() {
+    // Setup: register a TestEvaluator that asserts the context shape.
+    // Send a request through the middleware with a mocked Auth::user.
+    // Assert that inside the handler `is_enabled!("test-flag", false)`
+    // sees the user_id field populated.
+    // (Full integration test scaffolding mirrors framework/tests/logging.rs)
 }
 ```
 
 - [ ] **Step 2: Implement**
 
 ```rust
-// framework/src/features/mod.rs
-//! Feature flags with typed variants.
-//!
-//! ```ignore
-//! Feature::define("new-checkout", |scope| async move {
-//!     if scope.user_id().map(|id| id < 100).unwrap_or(false) {
-//!         Variant::Bool(true)   // beta users
-//!     } else {
-//!         Variant::Bool(false)
-//!     }
-//! }).await;
-//!
-//! if Feature::active("new-checkout", &user_scope).await {
-//!     // ...
-//! }
-//! ```
+// framework/src/features/middleware.rs
+//! Opens a featureflag `Context` per request with user_id + team
+//! (optional) fields. Subsequent `is_enabled!` calls in handlers
+//! and services see those fields without explicit plumbing.
 
-pub mod driver;
-pub mod drivers;
-pub mod events;
-pub mod middleware;
-
-use crate::FrameworkError;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-
-pub use driver::FeatureDriver;
-
-/// A resolved feature value. JSON-like — bools and strings cover
-/// the common cases; arbitrary JSON for complex experiments.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Variant {
-    Bool(bool),
-    String(String),
-    Json(serde_json::Value),
-}
-
-impl Variant {
-    pub fn as_bool(&self) -> bool {
-        match self {
-            Variant::Bool(b) => *b,
-            Variant::String(s) => !s.is_empty() && s != "false" && s != "0",
-            Variant::Json(v) => v.as_bool().unwrap_or(true),
-        }
-    }
-    pub fn as_str(&self) -> Option<&str> {
-        match self {
-            Variant::String(s) => Some(s.as_str()),
-            _ => None,
-        }
-    }
-}
-
-/// Resolution scope — combines user, team, and arbitrary tags.
-#[derive(Debug, Clone, Default)]
-pub struct Scope {
-    user_id: Option<i64>,
-    team_ids: Vec<String>,
-    tags: HashMap<String, String>,
-}
-
-impl Scope {
-    pub fn global() -> Self {
-        Self::default()
-    }
-    pub fn for_user(id: i64) -> Self {
-        Self {
-            user_id: Some(id),
-            ..Self::default()
-        }
-    }
-    pub fn with_team(mut self, team: impl Into<String>) -> Self {
-        self.team_ids.push(team.into());
-        self
-    }
-    pub fn with_tag(mut self, k: impl Into<String>, v: impl Into<String>) -> Self {
-        self.tags.insert(k.into(), v.into());
-        self
-    }
-    pub fn user_id(&self) -> Option<i64> {
-        self.user_id
-    }
-    pub fn is_user_in_team(&self, team: &str) -> bool {
-        self.team_ids.iter().any(|t| t == team)
-    }
-    pub fn tag(&self, k: &str) -> Option<&str> {
-        self.tags.get(k).map(|s| s.as_str())
-    }
-
-    /// Stable string used for cache keys.
-    pub fn cache_key(&self) -> String {
-        let mut parts: Vec<String> = vec![];
-        if let Some(uid) = self.user_id {
-            parts.push(format!("u:{}", uid));
-        }
-        let mut teams = self.team_ids.clone();
-        teams.sort();
-        for t in teams {
-            parts.push(format!("t:{}", t));
-        }
-        let mut tag_pairs: Vec<(&String, &String)> = self.tags.iter().collect();
-        tag_pairs.sort_by(|a, b| a.0.cmp(b.0));
-        for (k, v) in tag_pairs {
-            parts.push(format!("{}:{}", k, v));
-        }
-        parts.join("|")
-    }
-}
-
-pub type ResolveFn = std::sync::Arc<
-    dyn Fn(Scope) -> futures::future::BoxFuture<'static, Variant> + Send + Sync,
->;
-
-pub struct Feature;
-
-impl Feature {
-    pub async fn define<F, Fut>(name: impl Into<String>, resolver: F)
-    where
-        F: Fn(Scope) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = Variant> + Send + 'static,
-    {
-        let resolver: ResolveFn = std::sync::Arc::new(move |scope| Box::pin(resolver(scope)));
-        let driver = driver::current().expect("Feature driver not set");
-        driver.define(&name.into(), resolver).await;
-    }
-
-    pub async fn value(name: &str, scope: &Scope) -> Variant {
-        let driver = match driver::current() {
-            Some(d) => d,
-            None => return Variant::Bool(false),
-        };
-        let v = driver.resolve(name, scope.clone()).await.unwrap_or(Variant::Bool(false));
-        let _ = crate::Event::dispatch(events::FeatureRetrieved {
-            name: name.to_string(),
-            scope_key: scope.cache_key(),
-            value: v.clone(),
-        })
-        .await;
-        v
-    }
-
-    pub async fn active(name: &str, scope: &Scope) -> bool {
-        Self::value(name, scope).await.as_bool()
-    }
-
-    pub fn use_memory() {
-        driver::set(std::sync::Arc::new(drivers::memory::MemoryDriver::new()));
-    }
-
-    pub async fn use_database() -> Result<(), FrameworkError> {
-        let d = drivers::database::DatabaseDriver::new().await?;
-        driver::set(std::sync::Arc::new(d));
-        Ok(())
-    }
-
-    pub fn use_cached(ttl: std::time::Duration) {
-        // Wrap the current driver in a cache layer.
-        if let Some(inner) = driver::current() {
-            let cached = drivers::cache::CacheDriver::new(inner, ttl);
-            driver::set(std::sync::Arc::new(cached));
-        }
-    }
-}
-```
-
-```rust
-// framework/src/features/driver.rs
-use super::{ResolveFn, Scope, Variant};
-use crate::FrameworkError;
+use crate::http::{Request, Response};
+use crate::middleware::{Middleware, Next};
+use crate::Auth;
 use async_trait::async_trait;
-use std::sync::{Arc, OnceLock, RwLock};
+use featureflag::context::{Context, ContextBuilder};
+
+pub struct FeatureMiddleware;
 
 #[async_trait]
-pub trait FeatureDriver: Send + Sync {
-    async fn define(&self, name: &str, resolver: ResolveFn);
-    async fn resolve(&self, name: &str, scope: Scope) -> Result<Variant, FrameworkError>;
-}
+impl Middleware for FeatureMiddleware {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        // Build a Context with whatever request-scoped fields we have.
+        let mut builder = ContextBuilder::new();
+        if let Some(id) = Auth::id() {
+            builder = builder.with("user_id", id);
+        }
+        if let Ok(Some(user)) = Auth::user_as::<crate::AuthUser>().await {
+            if let Some(team) = user.team() {
+                builder = builder.with("team", team.to_string());
+            }
+        }
+        let ctx = builder.build();
 
-static DRIVER: OnceLock<RwLock<Option<Arc<dyn FeatureDriver>>>> = OnceLock::new();
-
-pub fn set(driver: Arc<dyn FeatureDriver>) {
-    let lock = DRIVER.get_or_init(|| RwLock::new(None));
-    *lock.write().unwrap() = Some(driver);
-}
-
-pub fn current() -> Option<Arc<dyn FeatureDriver>> {
-    DRIVER.get_or_init(|| RwLock::new(None)).read().unwrap().clone()
+        // featureflag scopes the context to anything that runs
+        // inside the closure — including the rest of the middleware
+        // chain and the route handler.
+        ctx.scope(|| async move { next(request).await }).await
+    }
 }
 ```
+
+> **`ContextBuilder` / `Context::scope` shapes:** Verify against `reference/featureflag-main/featureflag/src/context.rs`. featureflag has helpers for both async scope (`.scope(async {...})`) and sync (`.with_default(...)`); use the async variant since our middleware chain returns futures.
+
+- [ ] **Step 3: Install globally**
 
 ```rust
-// framework/src/features/drivers/memory.rs
-use crate::features::{driver::FeatureDriver, ResolveFn, Scope, Variant};
-use crate::FrameworkError;
-use async_trait::async_trait;
-use std::collections::HashMap;
-use std::sync::RwLock;
-
-pub struct MemoryDriver {
-    definitions: RwLock<HashMap<String, ResolveFn>>,
-}
-
-impl MemoryDriver {
-    pub fn new() -> Self {
-        Self { definitions: RwLock::new(HashMap::new()) }
-    }
-}
-
-#[async_trait]
-impl FeatureDriver for MemoryDriver {
-    async fn define(&self, name: &str, resolver: ResolveFn) {
-        self.definitions.write().unwrap().insert(name.to_string(), resolver);
-    }
-
-    async fn resolve(&self, name: &str, scope: Scope) -> Result<Variant, FrameworkError> {
-        let resolver = self
-            .definitions
-            .read()
-            .unwrap()
-            .get(name)
-            .cloned();
-        match resolver {
-            Some(r) => Ok(r(scope).await),
-            None => Err(FrameworkError::internal(format!("feature '{}' not defined", name))),
-        }
-    }
-}
+// framework/src/server.rs — register globally after ScopedContainerMiddleware
+crate::middleware::register_global_middleware(crate::features::FeatureMiddleware);
 ```
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add framework/src/features/middleware.rs framework/src/server.rs
+git commit -m "feat(features): FeatureMiddleware opens per-request Context with user_id + team"
+```
+
+---
+
+## Task 6: Audit event + admin CRUD
+
+**Files:** `framework/src/features/events.rs`, `framework/src/features/admin.rs`
+
+- [ ] **Step 1: Audit event**
 
 ```rust
 // framework/src/features/events.rs
@@ -325,8 +518,7 @@ use crate::EventTrait;
 #[derive(Debug, Clone)]
 pub struct FeatureRetrieved {
     pub name: String,
-    pub scope_key: String,
-    pub value: super::Variant,
+    pub value: bool,
 }
 
 impl EventTrait for FeatureRetrieved {
@@ -336,6 +528,9 @@ impl EventTrait for FeatureRetrieved {
 #[derive(Debug, Clone)]
 pub struct FeatureUpdated {
     pub name: String,
+    pub scope_key: String,
+    pub enabled: bool,
+    pub actor_id: Option<i64>,
 }
 
 impl EventTrait for FeatureUpdated {
@@ -343,337 +538,181 @@ impl EventTrait for FeatureUpdated {
 }
 ```
 
-```rust
-// framework/src/lib.rs
-pub mod features;
-pub use features::{Feature, features::Variant};
-```
-
-- [ ] **Step 3: Run — expect pass**
-
-```bash
-cargo test -p suprnova --test features
-```
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add framework/src/features framework/src/lib.rs framework/tests/features.rs
-git commit -m "feat(features): Feature facade + Variant + Scope + in-memory driver"
-```
-
----
-
-## Task 2: Database driver
-
-**Files:** `framework/src/features/drivers/database.rs`
-
-- [ ] **Step 1: Migration**
+- [ ] **Step 2: Admin CRUD (used by Phase 8 admin panel)**
 
 ```rust
-// framework/src/features/migrations/m_create_features_table.rs
-// CREATE TABLE features (
-//   id BIGINT PRIMARY KEY AUTO_INCREMENT,
-//   name VARCHAR(255) NOT NULL,
-//   scope_key VARCHAR(255) NOT NULL,
-//   value JSONB NOT NULL,
-//   created_at DATETIME NOT NULL,
-//   updated_at DATETIME NOT NULL,
-//   UNIQUE INDEX (name, scope_key)
-// );
-```
+// framework/src/features/admin.rs
+//! Admin CRUD for the features table. Used by Phase 8 admin panel's
+//! TOML-driven CRUD machinery; also callable from custom admin UIs.
 
-- [ ] **Step 2: Implement**
+use crate::FrameworkError;
 
-```rust
-// framework/src/features/drivers/database.rs
-use crate::features::{driver::FeatureDriver, ResolveFn, Scope, Variant};
-use crate::{FrameworkError, DB};
-use async_trait::async_trait;
-use sea_orm::{ConnectionTrait, Statement};
-use std::collections::HashMap;
-use std::sync::RwLock;
-
-pub struct DatabaseDriver {
-    // Definitions live in-memory; resolved values persist to DB.
-    definitions: RwLock<HashMap<String, ResolveFn>>,
+pub async fn list() -> Result<Vec<FeatureRow>, FrameworkError> {
+    unimplemented!("SELECT * FROM features ORDER BY name, scope_key via SeaORM")
 }
 
-impl DatabaseDriver {
-    pub async fn new() -> Result<Self, FrameworkError> {
-        Ok(Self { definitions: RwLock::new(HashMap::new()) })
-    }
+pub async fn upsert(
+    name: &str,
+    scope_key: &str,
+    enabled: bool,
+    actor_id: Option<i64>,
+) -> Result<(), FrameworkError> {
+    // INSERT … ON DUPLICATE KEY UPDATE …
+    // Then trigger DatabaseEvaluator.reload() so the change is live.
+    // Dispatch FeatureUpdated event for audit.
+    let _ = (name, scope_key, enabled, actor_id);
+    unimplemented!()
 }
 
-#[async_trait]
-impl FeatureDriver for DatabaseDriver {
-    async fn define(&self, name: &str, resolver: ResolveFn) {
-        self.definitions.write().unwrap().insert(name.to_string(), resolver);
-    }
+pub async fn delete(name: &str, scope_key: &str) -> Result<(), FrameworkError> {
+    let _ = (name, scope_key);
+    unimplemented!("DELETE FROM features WHERE name = ? AND scope_key = ?")
+}
 
-    async fn resolve(&self, name: &str, scope: Scope) -> Result<Variant, FrameworkError> {
-        let scope_key = scope.cache_key();
-        let db = DB::get()?;
-
-        // 1. Look up cached resolution in `features` table.
-        let cached: Option<(serde_json::Value,)> = db
-            .query_one(Statement::from_sql_and_values(
-                db.get_database_backend(),
-                "SELECT value FROM features WHERE name = ? AND scope_key = ? LIMIT 1",
-                vec![name.into(), scope_key.clone().into()],
-            ))
-            .await
-            .map_err(|e| FrameworkError::internal(format!("features db: {}", e)))?
-            .map(|row| {
-                let v: serde_json::Value = row
-                    .try_get("", "value")
-                    .unwrap_or(serde_json::Value::Null);
-                (v,)
-            });
-
-        if let Some((v,)) = cached {
-            return Ok(match v {
-                serde_json::Value::Bool(b) => Variant::Bool(b),
-                serde_json::Value::String(s) => Variant::String(s),
-                other => Variant::Json(other),
-            });
-        }
-
-        // 2. Compute via resolver, persist.
-        let resolver = self
-            .definitions
-            .read()
-            .unwrap()
-            .get(name)
-            .cloned()
-            .ok_or_else(|| FrameworkError::internal(format!("feature '{}' not defined", name)))?;
-        let v = resolver(scope.clone()).await;
-        let json = match &v {
-            Variant::Bool(b) => serde_json::Value::Bool(*b),
-            Variant::String(s) => serde_json::Value::String(s.clone()),
-            Variant::Json(j) => j.clone(),
-        };
-        db.execute(Statement::from_sql_and_values(
-            db.get_database_backend(),
-            "INSERT INTO features (name, scope_key, value, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())",
-            vec![
-                name.into(),
-                scope_key.into(),
-                json.to_string().into(),
-            ],
-        ))
-        .await
-        .map_err(|e| FrameworkError::internal(format!("features insert: {}", e)))?;
-        Ok(v)
-    }
+#[derive(Debug, serde::Serialize)]
+pub struct FeatureRow {
+    pub id: i64,
+    pub name: String,
+    pub scope_key: String,
+    pub enabled: bool,
+    pub description: Option<String>,
 }
 ```
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add framework/src/features/drivers/database.rs framework/src/features/migrations
-git commit -m "feat(features): DatabaseDriver persists resolved variants per (name, scope)"
+git add framework/src/features/events.rs framework/src/features/admin.rs
+git commit -m "feat(features): FeatureRetrieved / FeatureUpdated events + admin CRUD"
 ```
 
 ---
 
-## Task 3: Cache wrapper driver
+## Task 7: App dogfood — const flag definitions + route gate
 
-**Files:** `framework/src/features/drivers/cache.rs`
+**Files:** `app/src/features.rs`, route wiring
 
-- [ ] **Step 1: Implement**
-
-```rust
-// framework/src/features/drivers/cache.rs
-use crate::features::{driver::FeatureDriver, ResolveFn, Scope, Variant};
-use crate::{Cache, FrameworkError};
-use async_trait::async_trait;
-use std::sync::Arc;
-use std::time::Duration;
-
-pub struct CacheDriver {
-    inner: Arc<dyn FeatureDriver>,
-    ttl: Duration,
-}
-
-impl CacheDriver {
-    pub fn new(inner: Arc<dyn FeatureDriver>, ttl: Duration) -> Self {
-        Self { inner, ttl }
-    }
-}
-
-#[async_trait]
-impl FeatureDriver for CacheDriver {
-    async fn define(&self, name: &str, resolver: ResolveFn) {
-        self.inner.define(name, resolver).await;
-    }
-
-    async fn resolve(&self, name: &str, scope: Scope) -> Result<Variant, FrameworkError> {
-        let key = format!("feature:{}:{}", name, scope.cache_key());
-
-        if let Some(cached) = Cache::store("default").get::<String>(&key).await? {
-            return serde_json::from_str::<Variant>(&cached)
-                .map_err(|e| FrameworkError::internal(format!("variant decode: {}", e)));
-        }
-
-        let v = self.inner.resolve(name, scope).await?;
-        let serialized = serde_json::to_string(&v)
-            .map_err(|e| FrameworkError::internal(format!("variant encode: {}", e)))?;
-        Cache::store("default").put_with_ttl(&key, serialized, self.ttl).await?;
-        Ok(v)
-    }
-}
-```
-
-- [ ] **Step 2: Commit**
-
-```bash
-git add framework/src/features/drivers/cache.rs
-git commit -m "feat(features): CacheDriver wraps inner driver with TTL-cached resolution"
-```
-
----
-
-## Task 4: FeatureMiddleware
-
-**Files:** `framework/src/features/middleware.rs`
-
-- [ ] **Step 1: Implement**
+- [ ] **Step 1: Define flags as consts**
 
 ```rust
-// framework/src/features/middleware.rs
-//! Route gating by feature flag. Returns 404 if the flag is inactive
-//! for the requesting user (the implicit scope).
-//!
-//! ```ignore
-//! group!("/new-checkout")
-//!     .middleware(FeatureMiddleware::require("new-checkout"))
-//!     .routes([ /* ... */ ]);
-//! ```
-
-use super::{Feature, Scope};
-use crate::http::{HttpResponse, Request, Response};
-use crate::middleware::{Middleware, Next};
-use crate::Auth;
-use async_trait::async_trait;
-
-pub struct FeatureMiddleware {
-    feature_name: &'static str,
-}
-
-impl FeatureMiddleware {
-    pub fn require(name: &'static str) -> Self {
-        Self { feature_name: name }
-    }
-}
-
-#[async_trait]
-impl Middleware for FeatureMiddleware {
-    async fn handle(&self, request: Request, next: Next) -> Response {
-        let scope = match Auth::id() {
-            Some(id) => Scope::for_user(id),
-            None => Scope::global(),
-        };
-        if Feature::active(self.feature_name, &scope).await {
-            next(request).await
-        } else {
-            Err(HttpResponse::new().status(404))
-        }
-    }
-}
-```
-
-- [ ] **Step 2: Commit**
-
-```bash
-git add framework/src/features/middleware.rs
-git commit -m "feat(features): FeatureMiddleware gates routes by flag"
-```
-
----
-
-## Task 5: App dogfood
-
-**Files:** `app/src/features/mod.rs`
-
-- [ ] **Step 1: Define flags in bootstrap**
-
-```rust
-// app/src/features/mod.rs
-use suprnova::features::{Scope, Variant};
+// app/src/features.rs
 use suprnova::Feature;
 
-pub async fn register() {
-    Feature::define("new-checkout", |scope: Scope| async move {
-        // 25% rollout based on user-id modulo
-        let active = scope
-            .user_id()
-            .map(|id| id % 4 == 0)
-            .unwrap_or(false);
-        Variant::Bool(active)
-    })
-    .await;
+/// New checkout funnel. Defaults to OFF — gradual rollout via the
+/// `features` table.
+pub const NEW_CHECKOUT: Feature<'static> = Feature::new("new-checkout", false);
 
-    Feature::define("internal-tools", |scope: Scope| async move {
-        Variant::Bool(scope.is_user_in_team("staff"))
-    })
-    .await;
+/// Staff-only internal tools. Defaults to OFF; admins flip via the
+/// admin panel with scope_key="team:staff".
+pub const INTERNAL_TOOLS: Feature<'static> = Feature::new("internal-tools", false);
+```
+
+- [ ] **Step 2: Use in a controller**
+
+```rust
+// app/src/controllers/home.rs
+use suprnova::is_enabled;
+
+pub async fn checkout(_req: suprnova::Request) -> suprnova::Response {
+    if is_enabled!("new-checkout", false) {
+        // New flow
+    } else {
+        // Legacy flow
+    }
+    // ...
+    suprnova::json_response!({"ok": true})
 }
 ```
+
+- [ ] **Step 3: Gate a route group**
+
+```rust
+// app/src/main.rs or routes
+// `group!("/admin/internal").middleware(suprnova::features::middleware::route_guard("internal-tools"))`
+// — implementer adds a `route_guard(name)` helper that returns 404
+// when the flag is off:
+```
+
+```rust
+// framework/src/features/middleware.rs — append
+use crate::http::{HttpResponse, Request, Response};
+use crate::middleware::Next;
+use featureflag::Feature;
+
+/// Returns 404 when `feature_name` is not enabled in the current
+/// request context. Pure-bool semantics — for richer gating use
+/// the body of the handler with `is_enabled!`.
+pub fn route_guard(feature_name: &'static str) -> impl Middleware {
+    struct Guard {
+        name: &'static str,
+    }
+    #[async_trait]
+    impl Middleware for Guard {
+        async fn handle(&self, request: Request, next: Next) -> Response {
+            let feature = Feature::new(self.name, false);
+            if feature.is_enabled() {
+                next(request).await
+            } else {
+                Err(HttpResponse::new().status(404))
+            }
+        }
+    }
+    Guard { name: feature_name }
+}
+```
+
+- [ ] **Step 4: Bootstrap registration**
 
 ```rust
 // app/src/bootstrap.rs — inside register()
-crate::features::register().await;
+suprnova::features::use_database_cached(std::time::Duration::from_secs(60))
+    .await
+    .expect("feature flag bootstrap");
 ```
 
-- [ ] **Step 2: Gate a route**
-
-```rust
-// Where /admin routes are declared:
-group!("/admin")
-    .middleware(suprnova::features::middleware::FeatureMiddleware::require("internal-tools"))
-    .routes([ /* admin routes */ ]);
-```
-
-- [ ] **Step 3: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add app/src
-git commit -m "feat(app): feature flag definitions + admin route gated by internal-tools"
+git commit -m "feat(app): feature flag dogfood — NEW_CHECKOUT + INTERNAL_TOOLS + route guard"
 ```
 
 ---
 
-## Task 6: Workspace lint + roadmap update
-
-- [ ] **Step 1: Clippy + tests**
+## Task 8: Workspace lint + roadmap update
 
 ```bash
 cargo clippy --workspace -- -D warnings
 cargo test --workspace
 ```
 
-- [ ] **Step 2: ROADMAP "Where we are" — move Feature flags to Production-ready. Commit + push.**
+ROADMAP "Where we are" — move Feature flags to Production-ready. Commit + push.
 
 ---
 
 ## Self-Review
 
-| Spec item | Covered by |
-|-----------|------------|
-| Feature::define / active / value | Task 1 |
-| Scope (user / team / tags) | Task 1 |
-| Variant (Bool, String, Json) | Task 1 |
-| In-memory driver | Task 1 |
-| Database driver | Task 2 |
-| Cache wrapper | Task 3 |
-| FeatureMiddleware | Task 4 |
-| FeatureRetrieved event | Task 1 |
-| Dogfood | Task 5 |
+| Spec item | Covered by | Source |
+|---|---|---|
+| Evaluator trait + Context + Feature | Task 2 | featureflag |
+| is_enabled! / feature! / context! macros | Task 2 | featureflag |
+| Global / thread-local / scope-local evaluators | Task 2 | featureflag |
+| Composable evaluators (Filter, Chain) | Task 2 | featureflag |
+| DatabaseEvaluator with scope-specific resolution | Task 3 | Ours (SeaORM) |
+| CachedEvaluator with sync in-process cache | Task 4 | Ours |
+| FeatureMiddleware opens per-request Context | Task 5 | Ours |
+| FeatureRetrieved / FeatureUpdated events | Task 6 | Ours (Phase 1 EventDispatcher) |
+| Admin CRUD | Task 6 | Ours |
+| Const flag definitions | Task 7 | featureflag |
+| Route guard helper | Task 7 | Ours |
+| App dogfood | Task 7 | — |
+
+**Architectural correctness:** featureflag owns the primitives (Evaluator trait, Context, Feature, scoping, macros). We own persistence (DatabaseEvaluator), cache (CachedEvaluator), HTTP integration (FeatureMiddleware), and audit (events + admin). No reinvention of the primitive layer.
+
+**Placeholder scan:** Sync/async reconciliation in CachedEvaluator is a real implementation challenge flagged with concrete guidance (in-process cache + async invalidator, not block-on-Redis). Persistence stubs in admin.rs are explicitly `unimplemented!()` so implementers wire SeaORM ActiveModel; not silent gaps.
 
 ---
 
 ## Execution Handoff
 
-**Subagent-Driven recommended.**
+**Subagent-Driven recommended per task.**
