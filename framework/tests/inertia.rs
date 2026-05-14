@@ -2400,7 +2400,9 @@ mod version_mw {
 
 // ---- helpers ----
 
-fn body_to_string(body: http_body_util::Full<bytes::Bytes>) -> String {
+fn body_to_string(
+    body: http_body_util::combinators::BoxBody<bytes::Bytes, std::convert::Infallible>,
+) -> String {
     use http_body_util::BodyExt;
     let bytes = futures_lite_block_on(async move { body.collect().await.unwrap().to_bytes() });
     String::from_utf8(bytes.to_vec()).unwrap()

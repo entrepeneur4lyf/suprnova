@@ -1,11 +1,45 @@
 use super::cookie::Cookie;
 use bytes::Bytes;
-use http_body_util::Full;
+use futures::Stream;
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full, StreamBody};
+use std::convert::Infallible;
+
+/// The body of an [`HttpResponse`].
+///
+/// Static bodies are the common case — fully buffered `Bytes` produced
+/// by `HttpResponse::text` / `json` / `html`. Streaming bodies back
+/// SSE, chunked downloads, and any other long-lived response surface
+/// (added in Task 16/17 of the observability foundation work). Both
+/// branches collapse to a single `BoxBody<Bytes, Infallible>` when
+/// converted to a hyper response, so callers downstream (the server,
+/// middleware) see a uniform body type.
+pub enum Body {
+    /// Fully buffered body.
+    Static(Bytes),
+    /// Streaming body. The stream yields raw `Bytes` chunks that are
+    /// wrapped into `http_body::Frame::data(...)` at send time. We use
+    /// `Infallible` for the error type because every chunk producer in
+    /// the framework is responsible for turning its own errors into a
+    /// terminal SSE/stream message before the stream ends — there is
+    /// no place to surface a transport-level error to the client mid-
+    /// response, so the body must be infallible.
+    Stream(BoxBody<Bytes, Infallible>),
+}
+
+impl std::fmt::Debug for Body {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Body::Static(b) => f.debug_tuple("Static").field(b).finish(),
+            Body::Stream(_) => f.debug_tuple("Stream").field(&"<stream>").finish(),
+        }
+    }
+}
 
 /// HTTP Response builder providing Laravel-like response creation
 pub struct HttpResponse {
     status: u16,
-    body: String,
+    body: Body,
     headers: Vec<(String, String)>,
 }
 
@@ -16,7 +50,7 @@ impl HttpResponse {
     pub fn new() -> Self {
         Self {
             status: 200,
-            body: String::new(),
+            body: Body::Static(Bytes::new()),
             headers: Vec::new(),
         }
     }
@@ -25,7 +59,7 @@ impl HttpResponse {
     pub fn text(body: impl Into<String>) -> Self {
         Self {
             status: 200,
-            body: body.into(),
+            body: Body::Static(Bytes::from(body.into())),
             headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
         }
     }
@@ -34,7 +68,7 @@ impl HttpResponse {
     pub fn json(body: serde_json::Value) -> Self {
         Self {
             status: 200,
-            body: body.to_string(),
+            body: Body::Static(Bytes::from(body.to_string())),
             headers: vec![("Content-Type".to_string(), "application/json".to_string())],
         }
     }
@@ -43,11 +77,40 @@ impl HttpResponse {
     pub fn html(body: impl Into<String>) -> Self {
         Self {
             status: 200,
-            body: body.into(),
+            body: Body::Static(Bytes::from(body.into())),
             headers: vec![(
                 "Content-Type".to_string(),
                 "text/html; charset=utf-8".to_string(),
             )],
+        }
+    }
+
+    /// Build a streaming response from a `Stream` of `Bytes` chunks.
+    ///
+    /// The stream is wrapped into an `http_body::Frame` per chunk and
+    /// boxed into a uniform `BoxBody<Bytes, Infallible>` so the rest
+    /// of the framework treats streaming and static responses the same
+    /// way. Used by [`HttpResponse::sse`] and any future chunked
+    /// response surface.
+    ///
+    /// The stream's error type is `Infallible` by design — see
+    /// [`Body::Stream`] for rationale.
+    ///
+    /// `Sync` is required because `BoxBody` is a shared trait object;
+    /// every tokio channel adapter (`ReceiverStream`,
+    /// `BroadcastStream`) and `futures::stream::iter` already satisfy
+    /// this, so callers don't normally have to do anything special.
+    pub fn stream_bytes<S>(stream: S) -> Self
+    where
+        S: Stream<Item = Result<Bytes, Infallible>> + Send + Sync + 'static,
+    {
+        use futures::StreamExt;
+        let framed = stream.map(|chunk| chunk.map(hyper::body::Frame::data));
+        let stream_body = StreamBody::new(framed);
+        Self {
+            status: 200,
+            body: Body::Stream(BoxBody::new(stream_body)),
+            headers: Vec::new(),
         }
     }
 
@@ -88,15 +151,23 @@ impl HttpResponse {
         Ok(self)
     }
 
-    /// Convert to hyper response
-    pub fn into_hyper(self) -> hyper::Response<Full<Bytes>> {
+    /// Convert to hyper response. The body is always a
+    /// `BoxBody<Bytes, Infallible>` so the server can hand any
+    /// `HttpResponse` — static or streaming — to `hyper` without
+    /// branching on the body shape.
+    pub fn into_hyper(self) -> hyper::Response<BoxBody<Bytes, Infallible>> {
         let mut builder = hyper::Response::builder().status(self.status);
 
         for (name, value) in self.headers {
             builder = builder.header(name, value);
         }
 
-        builder.body(Full::new(Bytes::from(self.body))).unwrap()
+        let body: BoxBody<Bytes, Infallible> = match self.body {
+            Body::Static(bytes) => Full::new(bytes).map_err(|never| match never {}).boxed(),
+            Body::Stream(body) => body,
+        };
+
+        builder.body(body).unwrap()
     }
 }
 
@@ -391,6 +462,40 @@ impl From<crate::error::AppError> for HttpResponse {
         // Convert AppError -> FrameworkError -> HttpResponse
         let framework_err: crate::error::FrameworkError = err.into();
         framework_err.into()
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    use bytes::Bytes;
+    use futures::stream;
+    use http_body_util::BodyExt;
+    use std::convert::Infallible;
+
+    #[tokio::test]
+    async fn streaming_response_emits_chunks_in_order() {
+        let chunks: Vec<Result<Bytes, Infallible>> = vec![
+            Ok(Bytes::from_static(b"chunk1\n")),
+            Ok(Bytes::from_static(b"chunk2\n")),
+        ];
+        let resp = HttpResponse::stream_bytes(stream::iter(chunks))
+            .header("Content-Type", "text/plain")
+            .into_hyper();
+
+        assert_eq!(
+            resp.headers().get("Content-Type").unwrap(),
+            "text/plain"
+        );
+        let collected = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&collected[..], b"chunk1\nchunk2\n");
+    }
+
+    #[tokio::test]
+    async fn static_body_round_trips_through_into_hyper() {
+        let resp = HttpResponse::text("hello world").into_hyper();
+        let collected = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&collected[..], b"hello world");
     }
 }
 

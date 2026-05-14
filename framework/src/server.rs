@@ -6,7 +6,8 @@ use crate::logging::{init_subscriber, LogConfig, RequestIdMiddleware};
 use crate::middleware::{into_boxed, Middleware, MiddlewareChain, MiddlewareRegistry};
 use crate::routing::Router;
 use bytes::Bytes;
-use http_body_util::Full;
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -14,6 +15,11 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+
+/// Alias for the body type the server returns into hyper. All
+/// `HttpResponse` variants (static + streaming) collapse to this so
+/// the service signature stays uniform.
+type ServerBody = BoxBody<Bytes, Infallible>;
 
 pub struct Server {
     router: Arc<Router>,
@@ -121,7 +127,7 @@ async fn handle_request(
     router: Arc<Router>,
     middleware_registry: Arc<MiddlewareRegistry>,
     req: hyper::Request<hyper::body::Incoming>,
-) -> hyper::Response<Full<Bytes>> {
+) -> hyper::Response<ServerBody> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     let query = req.uri().query().unwrap_or("");
@@ -159,7 +165,7 @@ async fn handle_request_inner(
     req: hyper::Request<hyper::body::Incoming>,
     method: hyper::Method,
     path: &str,
-) -> hyper::Response<Full<Bytes>> {
+) -> hyper::Response<ServerBody> {
     let response = match router.match_route(&method, path) {
         Some((handler, params)) => {
             let request = Request::new(req).with_params(params);
@@ -223,7 +229,7 @@ async fn handle_request_inner(
 /// Built-in health check endpoint at /_suprnova/health
 /// Returns {"status": "ok", "timestamp": "..."} by default
 /// Add ?db=true to also check database connectivity (/_suprnova/health?db=true)
-async fn health_response(query: &str) -> hyper::Response<Full<Bytes>> {
+async fn health_response(query: &str) -> hyper::Response<ServerBody> {
     use chrono::Utc;
     use serde_json::json;
 
@@ -253,7 +259,11 @@ async fn health_response(query: &str) -> hyper::Response<Full<Bytes>> {
     hyper::Response::builder()
         .status(200)
         .header("Content-Type", "application/json")
-        .body(Full::new(Bytes::from(body)))
+        .body(
+            Full::new(Bytes::from(body))
+                .map_err(|never| match never {})
+                .boxed(),
+        )
         .unwrap()
 }
 
