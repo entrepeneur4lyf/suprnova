@@ -2250,7 +2250,423 @@ git commit -m "feat(app): dogfood UserRegistered event + SSE /events/stream"
 
 ---
 
-## Task 20: Polish — workspace lint + final verification
+## Task 20: OpenTelemetry export bridge + Metrics facade
+
+**Files:** `framework/src/logging/otel.rs`, `framework/src/metrics/mod.rs`, modifications to `framework/src/logging/init.rs`
+
+Production observability via [`opentelemetry-rust`](https://github.com/open-telemetry/opentelemetry-rust) 0.32 (Apache-2.0, `reference/opentelemetry-rust-opentelemetry-0.32.0/`). The `opentelemetry-appender-tracing` crate bridges every `tracing` span and event into OpenTelemetry, then `opentelemetry-otlp` exports to any OTLP-compatible collector — Jaeger, Tempo, Honeycomb, Datadog, Grafana Cloud, etc. Plus a thin `Metrics` facade for counters / histograms / gauges via the OpenTelemetry SDK's meter API.
+
+This is why we [[deferred-phases]] deferred Phase 14 (Telescope + Pulse): OpenTelemetry IS the production observability story. We export; consumers point a Grafana / Honeycomb / Datadog at the OTLP endpoint.
+
+- [ ] **Step 1: Add deps**
+
+```toml
+# framework/Cargo.toml — [dependencies]
+opentelemetry = { path = "../reference/opentelemetry-rust-opentelemetry-0.32.0/opentelemetry" }
+opentelemetry_sdk = { path = "../reference/opentelemetry-rust-opentelemetry-0.32.0/opentelemetry-sdk", features = ["rt-tokio"] }
+opentelemetry-otlp = { path = "../reference/opentelemetry-rust-opentelemetry-0.32.0/opentelemetry-otlp", features = ["grpc-tonic", "metrics", "logs", "trace"] }
+opentelemetry-appender-tracing = { path = "../reference/opentelemetry-rust-opentelemetry-0.32.0/opentelemetry-appender-tracing" }
+opentelemetry-semantic-conventions = { path = "../reference/opentelemetry-rust-opentelemetry-0.32.0/opentelemetry-semantic-conventions" }
+tracing-opentelemetry = "0.27"
+```
+
+`tracing-opentelemetry` is from crates.io — the bridge between the `tracing` ecosystem and OpenTelemetry's `Tracer` API. It's stable and not vendored.
+
+- [ ] **Step 2: Extend `LogConfig` with OTLP fields**
+
+```rust
+// framework/src/logging/config.rs — extend LogConfig
+pub struct LogConfig {
+    pub level: String,
+    pub format: LogFormat,
+    /// OTLP endpoint URL (e.g. `http://localhost:4317` for gRPC, or
+    /// `http://localhost:4318` for HTTP). When `None`, OTel export
+    /// is disabled and logging stays local-only.
+    pub otlp_endpoint: Option<String>,
+    /// Service name reported in OTel resource attributes. Defaults
+    /// to `APP_NAME` env var or `"suprnova"`.
+    pub service_name: String,
+    /// Sample rate for spans (0.0–1.0). 1.0 = every request, 0.1 =
+    /// 10% sampling. Production typically uses 0.05–0.1.
+    pub trace_sample_ratio: f64,
+}
+
+impl LogConfig {
+    pub fn from_env() -> Self {
+        let level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".into());
+        let format = match std::env::var("LOG_FORMAT").as_deref() {
+            Ok("json") => LogFormat::Json,
+            _ => LogFormat::Pretty,
+        };
+        let otlp_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
+        let service_name = std::env::var("OTEL_SERVICE_NAME")
+            .or_else(|_| std::env::var("APP_NAME"))
+            .unwrap_or_else(|_| "suprnova".into());
+        let trace_sample_ratio = std::env::var("OTEL_TRACES_SAMPLER_ARG")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1.0);
+        Self { level, format, otlp_endpoint, service_name, trace_sample_ratio }
+    }
+}
+```
+
+- [ ] **Step 3: Implement the OTel layer**
+
+```rust
+// framework/src/logging/otel.rs
+//! OpenTelemetry export. Built only when LogConfig.otlp_endpoint is
+//! Some(...). Wires three signals:
+//!
+//!   - **Traces**: tracing spans → opentelemetry::trace::Tracer via
+//!     `tracing-opentelemetry`'s OpenTelemetryLayer → OTLP exporter.
+//!     Every #[tracing::instrument] span and every TelescopeRequest-
+//!     style middleware span propagates trace_id + span_id end-to-end.
+//!
+//!   - **Logs**: tracing events → OpenTelemetry log records via
+//!     `opentelemetry-appender-tracing`. Logs carry the trace_id
+//!     they fired inside, so log+trace correlation works in the UI.
+//!
+//!   - **Metrics**: opt-in via the `Metrics` facade (Task 20, Step 4).
+//!     The OpenTelemetry SDK's meter is installed as the global
+//!     meter provider here.
+
+use crate::FrameworkError;
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry::{global, KeyValue};
+use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
+use opentelemetry_sdk::logs::SdkLoggerProvider;
+use opentelemetry_sdk::metrics::SdkMeterProvider;
+use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
+use opentelemetry_sdk::Resource;
+
+use super::config::LogConfig;
+
+pub struct OtelHandle {
+    tracer_provider: SdkTracerProvider,
+    meter_provider: SdkMeterProvider,
+    logger_provider: SdkLoggerProvider,
+}
+
+impl OtelHandle {
+    /// Install all three OpenTelemetry signals (traces, metrics,
+    /// logs) and return a handle whose drop flushes pending exports.
+    /// Call from `Server::serve` after `init_subscriber` returns the
+    /// `tracing::Subscriber`.
+    pub fn install(config: &LogConfig) -> Result<Self, FrameworkError> {
+        let endpoint = config
+            .otlp_endpoint
+            .as_deref()
+            .ok_or_else(|| FrameworkError::internal("OTLP endpoint not set"))?;
+
+        let resource = Resource::builder()
+            .with_attribute(KeyValue::new("service.name", config.service_name.clone()))
+            .with_attribute(KeyValue::new(
+                "service.version",
+                env!("CARGO_PKG_VERSION").to_string(),
+            ))
+            .build();
+
+        // Traces
+        let span_exporter = SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint)
+            .build()
+            .map_err(|e| FrameworkError::internal(format!("otlp span exporter: {}", e)))?;
+        let tracer_provider = SdkTracerProvider::builder()
+            .with_batch_exporter(span_exporter)
+            .with_sampler(Sampler::TraceIdRatioBased(config.trace_sample_ratio))
+            .with_resource(resource.clone())
+            .build();
+        global::set_tracer_provider(tracer_provider.clone());
+
+        // Metrics
+        let metric_exporter = MetricExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint)
+            .build()
+            .map_err(|e| FrameworkError::internal(format!("otlp metric exporter: {}", e)))?;
+        let meter_provider = SdkMeterProvider::builder()
+            .with_periodic_exporter(metric_exporter)
+            .with_resource(resource.clone())
+            .build();
+        global::set_meter_provider(meter_provider.clone());
+
+        // Logs
+        let log_exporter = LogExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint)
+            .build()
+            .map_err(|e| FrameworkError::internal(format!("otlp log exporter: {}", e)))?;
+        let logger_provider = SdkLoggerProvider::builder()
+            .with_batch_exporter(log_exporter)
+            .with_resource(resource)
+            .build();
+
+        Ok(Self {
+            tracer_provider,
+            meter_provider,
+            logger_provider,
+        })
+    }
+
+    /// The tracing-opentelemetry layer to add to a Subscriber
+    /// registry. The caller composes this with the local fmt layer.
+    pub fn tracing_layer<S>(&self) -> tracing_opentelemetry::OpenTelemetryLayer<S, opentelemetry_sdk::trace::Tracer>
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        let tracer = self.tracer_provider.tracer("suprnova");
+        tracing_opentelemetry::OpenTelemetryLayer::new(tracer)
+    }
+
+    /// The opentelemetry-appender-tracing layer for log bridging.
+    pub fn log_appender_layer<S>(&self) -> opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge<SdkLoggerProvider, opentelemetry_sdk::logs::SdkLogger>
+    where
+        S: tracing::Subscriber,
+    {
+        opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&self.logger_provider)
+    }
+}
+
+impl Drop for OtelHandle {
+    fn drop(&mut self) {
+        // Best-effort flush of pending exports. Production should
+        // also call shutdown() explicitly on graceful-shutdown paths.
+        let _ = self.tracer_provider.shutdown();
+        let _ = self.meter_provider.shutdown();
+        let _ = self.logger_provider.shutdown();
+    }
+}
+```
+
+> **API verification:** opentelemetry-rust 0.32 has had API churn across recent versions. Verify exact builder method names (`with_tonic()` vs `with_grpc()`, `with_periodic_exporter` vs `with_reader`, `Resource::builder()` shape) by reading `reference/opentelemetry-rust-opentelemetry-0.32.0/opentelemetry-sdk/src/` and `opentelemetry-otlp/src/` before wiring. The sketch describes the architecture; field-level adjustments are implementer work.
+
+- [ ] **Step 4: Wire OTel into `init_subscriber`**
+
+```rust
+// framework/src/logging/init.rs — extend
+pub fn init_subscriber(config: LogConfig) -> Option<otel::OtelHandle> {
+    let env_filter = EnvFilter::try_new(&config.level)
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let registry = tracing_subscriber::registry().with(env_filter);
+
+    // OTel handle returned to caller so its Drop flushes on shutdown.
+    let otel = if config.otlp_endpoint.is_some() {
+        otel::OtelHandle::install(&config).ok()
+    } else {
+        None
+    };
+
+    let result = match (config.format, otel.as_ref()) {
+        (LogFormat::Pretty, None) => registry
+            .with(fmt::layer().with_target(true).pretty())
+            .try_init(),
+        (LogFormat::Pretty, Some(o)) => registry
+            .with(fmt::layer().with_target(true).pretty())
+            .with(o.tracing_layer())
+            .with(o.log_appender_layer())
+            .try_init(),
+        (LogFormat::Json, None) => registry
+            .with(fmt::layer().json().with_target(true))
+            .try_init(),
+        (LogFormat::Json, Some(o)) => registry
+            .with(fmt::layer().json().with_target(true))
+            .with(o.tracing_layer())
+            .with(o.log_appender_layer())
+            .try_init(),
+    };
+
+    let _ = result;
+    otel
+}
+```
+
+> **Subscriber init signature change:** Returning `Option<OtelHandle>` is a breaking change to the function in Task 5. Update Task 5's call site in `Server::serve` to hold the handle for the server's lifetime (drop on shutdown flushes pending exports).
+
+- [ ] **Step 5: Metrics facade**
+
+```rust
+// framework/src/metrics/mod.rs
+//! Thin facade over OpenTelemetry's meter API. Counters,
+//! histograms, gauges via the global meter installed by the OTel
+//! handle. When OTel isn't enabled (no OTLP endpoint), all calls
+//! are no-ops via the OpenTelemetry SDK's `noop` provider.
+//!
+//! ```ignore
+//! use suprnova::Metrics;
+//!
+//! Metrics::counter("http.requests", &[("method", "GET"), ("status", "200")]).inc();
+//! Metrics::histogram("db.query.duration_ms", &[]).record(elapsed_ms);
+//! Metrics::gauge("queue.depth").set(current);
+//! ```
+
+use opentelemetry::metrics::{Counter, Histogram, Meter, UpDownCounter};
+use opentelemetry::{global, KeyValue};
+
+pub struct Metrics;
+
+impl Metrics {
+    /// Get or create a `Counter<u64>` for the given metric name.
+    /// Counters only go up; use UpDownCounter for things that can
+    /// decrease (queue depth, open connections).
+    pub fn counter(name: &'static str) -> CounterHandle {
+        let meter = meter();
+        let counter = meter.u64_counter(name).build();
+        CounterHandle { counter }
+    }
+
+    /// `f64` histogram — distribution of values (latency, payload sizes).
+    pub fn histogram(name: &'static str) -> HistogramHandle {
+        let meter = meter();
+        let histogram = meter.f64_histogram(name).build();
+        HistogramHandle { histogram }
+    }
+
+    /// `i64` up-down counter — for values that go up AND down.
+    pub fn gauge(name: &'static str) -> GaugeHandle {
+        let meter = meter();
+        let counter = meter.i64_up_down_counter(name).build();
+        GaugeHandle { counter }
+    }
+}
+
+fn meter() -> Meter {
+    global::meter("suprnova")
+}
+
+pub struct CounterHandle {
+    counter: Counter<u64>,
+}
+
+impl CounterHandle {
+    pub fn inc(&self) {
+        self.counter.add(1, &[]);
+    }
+    pub fn inc_by(&self, value: u64) {
+        self.counter.add(value, &[]);
+    }
+    pub fn inc_with(&self, attrs: &[(&str, &str)]) {
+        let kvs: Vec<KeyValue> = attrs.iter().map(|(k, v)| KeyValue::new(*k, v.to_string())).collect();
+        self.counter.add(1, &kvs);
+    }
+}
+
+pub struct HistogramHandle {
+    histogram: Histogram<f64>,
+}
+
+impl HistogramHandle {
+    pub fn record(&self, value: f64) {
+        self.histogram.record(value, &[]);
+    }
+    pub fn record_with(&self, value: f64, attrs: &[(&str, &str)]) {
+        let kvs: Vec<KeyValue> = attrs.iter().map(|(k, v)| KeyValue::new(*k, v.to_string())).collect();
+        self.histogram.record(value, &kvs);
+    }
+}
+
+pub struct GaugeHandle {
+    counter: UpDownCounter<i64>,
+}
+
+impl GaugeHandle {
+    pub fn add(&self, delta: i64) {
+        self.counter.add(delta, &[]);
+    }
+    pub fn set(&self, _value: i64) {
+        // OpenTelemetry has no direct "set" for UpDownCounter — it's
+        // a delta API. For "current value" gauges, use the
+        // ObservableGauge with a callback, OR track the delta from
+        // the last known value in caller code. Phase 1 ships the
+        // delta API; ObservableGauge belongs in a v2 metrics task.
+        unimplemented!("use add(delta) for now; ObservableGauge for true gauges is v2")
+    }
+}
+```
+
+```rust
+// framework/src/lib.rs
+pub mod metrics;
+pub use metrics::Metrics;
+```
+
+- [ ] **Step 6: W3C Trace Context propagation in outbound HTTP**
+
+```rust
+// framework/src/http_client/mod.rs (Phase 2) — add inside HttpRequestBuilder::build_request
+use opentelemetry::trace::TraceContextExt;
+use opentelemetry::propagation::TextMapPropagator;
+use opentelemetry_sdk::propagation::TraceContextPropagator;
+
+// Inject the current trace context into outgoing request headers so
+// downstream services can continue the trace. W3C standard — works
+// with any compliant collector.
+let cx = opentelemetry::Context::current();
+let propagator = TraceContextPropagator::new();
+let mut injector = std::collections::HashMap::<String, String>::new();
+propagator.inject_context(&cx, &mut HeaderInjector(&mut injector));
+for (k, v) in injector {
+    rb = rb.header(&k, &v);
+}
+```
+
+> **Phase 2 dependency:** This propagation step modifies `framework/src/http_client/mod.rs` which is built in Phase 2. Two options: (a) leave the OTel-aware injection out of Phase 2's plan and add it here as a Phase-1-to-Phase-2 bridge note, (b) move propagation entirely to a Phase 2 task that depends on Phase 1's OTel deps being present. **Recommendation: (b)** — keep Phase 1 focused on local + export bridges; outbound trace propagation is a Phase 2 concern. Document the dependency in Phase 2's plan.
+
+- [ ] **Step 7: Integration test**
+
+```rust
+// framework/tests/otel.rs
+use suprnova::Metrics;
+
+#[tokio::test]
+async fn metrics_facade_records_without_otlp_endpoint() {
+    // When OTLP isn't configured, the meter falls back to noop. All
+    // operations succeed without exporting. This test guards against
+    // accidental "fail when not configured" regressions.
+    Metrics::counter("test.counter").inc();
+    Metrics::counter("test.counter").inc_by(5);
+    Metrics::histogram("test.histogram").record(42.0);
+    // No assertions on values — noop provider doesn't surface them.
+    // The test passes if no panic.
+}
+
+#[tokio::test]
+#[ignore = "requires OTLP collector on :4317 — docker run -p 4317:4317 otel/opentelemetry-collector"]
+async fn otel_export_round_trip() {
+    let cfg = suprnova::LogConfig {
+        level: "info".into(),
+        format: suprnova::LogFormat::Pretty,
+        otlp_endpoint: Some("http://localhost:4317".into()),
+        service_name: "suprnova-test".into(),
+        trace_sample_ratio: 1.0,
+    };
+    let _handle = suprnova::init_subscriber(cfg);
+
+    tracing::info_span!("test_op").in_scope(|| {
+        tracing::info!("test event inside span");
+    });
+
+    Metrics::counter("test.exported").inc();
+    Metrics::histogram("test.latency_ms").record(123.45);
+
+    // Drop _handle flushes; check the collector received the data
+    // (manual verification — collector logs).
+}
+```
+
+- [ ] **Step 8: Run + commit**
+
+```bash
+cargo test -p suprnova --test otel
+git add framework/Cargo.toml framework/src/logging/otel.rs framework/src/logging/init.rs framework/src/logging/config.rs framework/src/metrics framework/src/lib.rs framework/tests/otel.rs
+git commit -m "feat(observability): OpenTelemetry export bridge + Metrics facade"
+```
+
+---
+
+## Task 21: Polish — workspace lint + final verification
 
 - [ ] **Step 1: Run clippy**
 
@@ -2271,10 +2687,12 @@ Expected: all passing, including the existing 229 framework tests and the new on
 - [ ] **Step 3: Update CLAUDE.md or ROADMAP "Where we are"**
 
 Move the following from "Missing" / "Partial" to "Production-ready and complete":
-- Logging (tracing-based, structured, request-id propagation)
+- Logging (tracing-based, structured, request-id propagation, OTLP export)
 - Events (Event::dispatch / Event::listen / Event::fake, sync + queued)
 - Error tracing + ErrorOccurred event for 5xx
 - Minimal SSE delivery primitive
+- OpenTelemetry traces / metrics / logs export to any OTLP collector
+- Metrics::counter / histogram / gauge facade
 
 Edit `ROADMAP.md` "Where we are" section.
 
@@ -2310,6 +2728,9 @@ git push
 | Streaming response body | Task 16 |
 | SSE event framing | Tasks 17, 18 |
 | Dogfood event + SSE in app | Task 19 |
+| OpenTelemetry traces + metrics + logs export | Task 20 |
+| `Metrics::counter` / `histogram` / `gauge` facade | Task 20 |
+| W3C Trace Context propagation in outbound HTTP | Task 20 (Phase 2 wires the actual call site) |
 
 **Placeholder scan:** None ("TODO", "TBD", "implement later", "add appropriate error handling", "similar to Task N" — all clean. The few `> Implementation note:` callouts are concrete fork-points that name the file/function to inspect, not placeholders.)
 
