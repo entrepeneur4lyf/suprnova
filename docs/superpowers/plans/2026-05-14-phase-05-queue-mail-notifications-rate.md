@@ -6,7 +6,7 @@
 
 **Architecture:** Each subsystem is a trait + driver registry following the existing pattern (`UserProvider`, `CacheStore`, etc.). `Queue::push(job)` writes to whichever driver is currently bound; sea-streamer is the production driver, in-process is the dev/test default. `Mail::to(user).send(mailable)` builds a `lettre::Message` and dispatches through the bound transport. `Notify::send(user, notification).via(&channels)` fans out across channels. `RateLimiter::for_(name).limit(n).per_minute()` writes to the same Cache backend used for `Cache::*`.
 
-**Tech Stack:** `sea-streamer` 0.5 (with `kafka`, `redis`, `file`, `stdio`, `runtime-tokio` features), `lettre` 0.11 (with `tokio1-rustls`, `builder`, `pool` features), `web-push` 0.10, `reqwest` (already in Phase 2) for provider HTTP transports.
+**Tech Stack:** `sea-streamer` 0.5, `lettre` 0.11.22, `web-push` 0.11.0, `reqwest` (already in Phase 2) for provider HTTP transports. All three reference libraries are vendored under `reference/` and are wired by `path = "../reference/<name>"` so we pin to exact in-workspace sources until each crate hits a stable upstream release we trust to track.
 
 ---
 
@@ -54,8 +54,11 @@
 ```toml
 # framework/Cargo.toml
 sea-streamer = { path = "../reference/sea-streamer-0.5.2", features = ["redis", "kafka", "file", "stdio", "runtime-tokio"] }
-lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls", "pool"] }
-web-push = "0.10"
+lettre = { path = "../reference/lettre-0.11.22", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls", "pool"] }
+web-push = { path = "../reference/rust-web-push-master" }
+# After upstream stabilises, switch each to crates.io:
+# lettre = { version = "0.11", default-features = false, features = [...] }
+# web-push = "0.11"
 ```
 
 - [ ] **Step 2: Verify build**
@@ -1166,7 +1169,7 @@ impl NotificationChannel for WebPushChannel {
 }
 ```
 
-> **web-push API:** Verify version 0.10's exact `WebPushMessageBuilder` and client construction (the example uses `IsahcWebPushClient` — older versions use a different client). Adjust signatures.
+> **web-push API:** The vendored source at `reference/rust-web-push-master/` is version 0.11.0. Verify the exact `WebPushMessageBuilder` / `IsahcWebPushClient` / `SubscriptionInfo` shapes by reading the vendored source (`src/lib.rs`, `examples/`) before implementing. The 0.11 line has a `WebPushClient` trait with separate `IsahcWebPushClient` and `HyperWebPushClient` impls — pick the one that matches our `reqwest`/`hyper` stack.
 
 - [ ] **Step 3: Implement remaining channels** (`slack`, `discord`, `sms`, `database`, `webhook`, `broadcast`) — each `dispatch` posts via `Http::` (Phase 2 facade) or writes to DB / broadcasts via Track 7 broadcasting facade.
 
