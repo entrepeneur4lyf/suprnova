@@ -32,6 +32,19 @@ impl Middleware for CaptureRequestId {
     }
 }
 
+/// A capture middleware that records `Context::get("_request_id")` —
+/// confirms `RequestIdMiddleware` seeds the Context bag with the
+/// per-request id under the conventional key.
+struct CaptureContextRequestId(Arc<Mutex<Option<String>>>);
+
+#[async_trait]
+impl Middleware for CaptureContextRequestId {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        *self.0.lock().unwrap() = suprnova::Context::get::<String>("_request_id");
+        next(request).await
+    }
+}
+
 /// Spawn a one-shot server with `RequestIdMiddleware` installed
 /// outermost, followed by a `CaptureRequestId` that records the
 /// observed id, and an inner handler that returns 200 "ok".
@@ -147,4 +160,62 @@ async fn middleware_reuses_inbound_x_request_id_header() {
 
     let observed = captured.lock().unwrap().clone().unwrap();
     assert_eq!(observed, "test-inbound-id-12345-67890-abcdef-001122");
+}
+
+#[tokio::test]
+async fn middleware_seeds_request_id_into_context_bag() {
+    // Spawn a one-shot server with RequestIdMiddleware + a CaptureContextRequestId
+    // middleware that reads Context::get("_request_id") inside the chain.
+    let captured = Arc::new(Mutex::new(None::<String>));
+    let captured_for_handler = captured.clone();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            let io = TokioIo::new(stream);
+            let svc = service_fn(move |hyper_req: hyper::Request<hyper::body::Incoming>| {
+                let captured = captured_for_handler.clone();
+                async move {
+                    let req = Request::new(hyper_req);
+
+                    let mut chain = MiddlewareChain::new();
+                    chain.push(into_boxed(RequestIdMiddleware));
+                    chain.push(into_boxed(CaptureContextRequestId(captured)));
+
+                    let handler: Arc<suprnova::routing::BoxedHandler> = Arc::new(Box::new(
+                        move |_req: Request| -> suprnova::middleware::MiddlewareFuture {
+                            Box::pin(async move { Ok(HttpResponse::text("ok")) })
+                        },
+                    ));
+
+                    let resp = chain.execute(req, handler).await;
+                    let hyper_resp = match resp {
+                        Ok(r) => r.into_hyper(),
+                        Err(r) => r.into_hyper(),
+                    };
+                    Ok::<_, Infallible>(hyper_resp)
+                }
+            });
+            let _ = http1::Builder::new().serve_connection(io, svc).await;
+        }
+    });
+
+    let resp = get(addr, &[("X-Request-Id", "abc-context-seed-id-1234567890123456")]).await;
+    assert_eq!(resp.status(), 200);
+
+    let echoed = resp
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .expect("X-Request-Id header echoed on response");
+    assert_eq!(echoed, "abc-context-seed-id-1234567890123456");
+
+    let from_context = captured.lock().unwrap().clone();
+    assert_eq!(
+        from_context.as_deref(),
+        Some("abc-context-seed-id-1234567890123456"),
+        "Context::get(\"_request_id\") must return the middleware-seeded id"
+    );
 }

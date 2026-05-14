@@ -67,9 +67,18 @@ impl crate::middleware::Middleware for RequestIdMiddleware {
             .map(RequestId::from_string)
             .unwrap_or_else(RequestId::new);
         let id_str = id.as_str().to_string();
+        let id_for_context = id_str.clone();
 
-        let result = REQUEST_ID
-            .scope(id, async move { next(request).await })
+        // Scope both REQUEST_ID and CONTEXT for the rest of the
+        // request. The CONTEXT scope seeds `_request_id` so downstream
+        // log emitters / jobs / broadcasting can read the id by name.
+        let result = crate::context::CONTEXT
+            .scope(crate::context::ContextStore::default(), async move {
+                crate::context::Context::add("_request_id", id_for_context);
+                REQUEST_ID
+                    .scope(id, async move { next(request).await })
+                    .await
+            })
             .await;
 
         // Echo X-Request-Id on both success and error variants.

@@ -3,6 +3,7 @@ pub mod auth;
 pub mod cache;
 pub mod config;
 pub mod container;
+pub mod context;
 pub mod csrf;
 pub mod database;
 pub mod error;
@@ -28,6 +29,7 @@ pub use auth::{Auth, Authenticatable, AuthMiddleware, GuestMiddleware, UserProvi
 pub use cache::{Cache, CacheConfig, CacheStore, InMemoryCache, RedisCache};
 pub use config::{env, env_optional, env_required, AppConfig, Config, Environment, ServerConfig};
 pub use container::{App, Container};
+pub use context::{Context, ContextStore};
 pub use csrf::{csrf_field, csrf_meta_tag, csrf_token, CsrfMiddleware};
 pub use database::{
     AutoRouteBinding, Database, DatabaseConfig, DatabaseType, DbConnection, Model, ModelMut,
