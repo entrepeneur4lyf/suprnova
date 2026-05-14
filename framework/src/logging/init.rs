@@ -1,9 +1,23 @@
-//! Initializes the global tracing subscriber. Called once from
-//! `Server::serve()`. Safe to call multiple times; the second call
-//! returns silently.
+//! Initializes the global tracing subscriber. Historically called once
+//! from `Server::serve()` via [`init_subscriber`]. New code should use
+//! [`crate::telemetry::init_telemetry`] which also wires in OpenTelemetry
+//! when the `otel` feature is enabled and an OTLP endpoint is configured.
+//!
+//! [`init_subscriber`] is preserved as a thin wrapper that delegates to
+//! `init_telemetry` with telemetry disabled. Both entry points are
+//! idempotent: a second call is a silent no-op.
 
 use super::config::{LogConfig, LogFormat};
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::fmt;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::EnvFilter;
+
+/// Build an [`EnvFilter`] from a config string, falling back to `"info"`
+/// on parse failure so a malformed env var never crashes boot.
+pub(crate) fn build_env_filter(level: &str) -> EnvFilter {
+    EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("info"))
+}
 
 /// Install the global tracing subscriber from a `LogConfig`. Honors
 /// the `LOG_LEVEL` env-filter syntax (e.g. `"info,sqlx=warn"`).
@@ -11,14 +25,27 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 /// Idempotent. Calling more than once is a no-op (the second
 /// install fails inside tracing-subscriber and we ignore the error
 /// — convenient for tests).
+///
+/// Equivalent to calling
+/// [`crate::telemetry::init_telemetry`] with
+/// [`crate::telemetry::OtelConfig::disabled`].
 pub fn init_subscriber(config: LogConfig) {
-    let env_filter =
-        EnvFilter::try_new(&config.level).unwrap_or_else(|_| EnvFilter::new("info"));
+    let _guard = crate::telemetry::init_telemetry(config, crate::telemetry::OtelConfig::disabled());
+    // The guard's Drop emits a warning if shutdown() was not called, but
+    // for the legacy callers we explicitly mark it as shutdown-acknowledged
+    // by suppressing the drop warning. Disabled-mode guards have no
+    // providers to flush, so we just forget the in-process bookkeeping.
+    _guard.mark_shutdown_for_legacy();
+}
 
-    let registry = tracing_subscriber::registry().with(env_filter);
-
+/// Internal helper used by `init_telemetry` to install the (non-OTel) part
+/// of the subscriber. Returns whether install actually succeeded — a
+/// duplicate install (e.g. inside tests) is silently ignored.
+pub(crate) fn install_base_subscriber(config: &LogConfig) -> bool {
+    let env_filter = build_env_filter(&config.level);
     let result = match config.format {
-        LogFormat::Pretty => registry
+        LogFormat::Pretty => tracing_subscriber::registry()
+            .with(env_filter)
             .with(
                 fmt::layer()
                     .with_target(true)
@@ -26,7 +53,8 @@ pub fn init_subscriber(config: LogConfig) {
                     .pretty(),
             )
             .try_init(),
-        LogFormat::Json => registry
+        LogFormat::Json => tracing_subscriber::registry()
+            .with(env_filter)
             .with(
                 fmt::layer()
                     .json()
@@ -35,9 +63,7 @@ pub fn init_subscriber(config: LogConfig) {
             )
             .try_init(),
     };
-
-    // Ignore "a global default subscriber has already been set" — safe to re-init.
-    let _ = result;
+    result.is_ok()
 }
 
 #[cfg(test)]
