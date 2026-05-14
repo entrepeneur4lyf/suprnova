@@ -18,3 +18,7 @@ dotenvy = "0.15"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
+# Adapts tokio channels into futures::Stream values for the SSE
+# dogfood handler (broadcast → BroadcastStream → HttpResponse::sse).
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }

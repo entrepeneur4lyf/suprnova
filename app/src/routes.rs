@@ -33,4 +33,7 @@ routes! {
         get!("/", controllers::todo::list).name("todos.index"),
         post!("/random", controllers::todo::create_random).name("todos.create_random"),
     }),
+
+    // SSE dogfood — streams UserRegistered broadcast events
+    get!("/events/stream", controllers::sse_example::stream).name("events.stream"),
 }
