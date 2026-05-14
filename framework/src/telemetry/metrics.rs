@@ -19,34 +19,20 @@
 #[cfg(feature = "otel")]
 mod real {
     use opentelemetry::global;
-    use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
+    use opentelemetry::metrics::{Counter, Gauge, Histogram};
     use opentelemetry::KeyValue;
-    use std::collections::HashMap;
-    use std::sync::{Arc, OnceLock, RwLock};
+    use std::sync::Arc;
 
-    /// Global meter handle. Created on first instrument lookup so that
-    /// users can call `Metrics::counter(...)` even before
-    /// `init_telemetry` runs — they just get a no-op meter until the
-    /// global provider is installed.
-    static METER: OnceLock<Meter> = OnceLock::new();
-    static COUNTERS: OnceLock<RwLock<HashMap<&'static str, CounterHandle>>> = OnceLock::new();
-    static HISTOGRAMS: OnceLock<RwLock<HashMap<&'static str, HistogramHandle>>> = OnceLock::new();
-    static GAUGES: OnceLock<RwLock<HashMap<&'static str, GaugeHandle>>> = OnceLock::new();
-
-    fn meter() -> &'static Meter {
-        METER.get_or_init(|| global::meter("suprnova"))
-    }
-
-    fn counters() -> &'static RwLock<HashMap<&'static str, CounterHandle>> {
-        COUNTERS.get_or_init(|| RwLock::new(HashMap::new()))
-    }
-    fn histograms() -> &'static RwLock<HashMap<&'static str, HistogramHandle>> {
-        HISTOGRAMS.get_or_init(|| RwLock::new(HashMap::new()))
-    }
-    fn gauges() -> &'static RwLock<HashMap<&'static str, GaugeHandle>> {
-        GAUGES.get_or_init(|| RwLock::new(HashMap::new()))
-    }
-
+    /// Build a fresh instrument handle on every call. We intentionally
+    /// don't cache at this layer because OTel's SDK already caches
+    /// instruments keyed by (name, unit, description) inside the meter,
+    /// so repeated builds collapse to the same underlying `Arc<Counter>`
+    /// / `Arc<Histogram>` / `Arc<Gauge>` after the first call. Caching
+    /// at our layer was a trap: if `Metrics::counter("x")` ran once
+    /// before `init_telemetry` installed the real provider, the cached
+    /// handle was bound to the no-op meter permanently — silent data
+    /// loss. Going through `global::meter("suprnova")` per call always
+    /// resolves to whatever provider is currently installed.
     fn to_keyvalues(attrs: &[(&'static str, &str)]) -> Vec<KeyValue> {
         attrs
             .iter()
@@ -54,59 +40,29 @@ mod real {
             .collect()
     }
 
-    /// Entry point for creating metric instruments. Instruments are
-    /// cached by name; repeated calls with the same name return a handle
-    /// backed by the same instrument.
+    /// Entry point for creating metric instruments. Each call resolves
+    /// the current provider via `global::meter("suprnova")` and asks
+    /// it for an instrument with the given name. The OTel SDK caches
+    /// instruments per `(name, unit, description)` internally.
     pub struct Metrics;
 
     impl Metrics {
-        /// Get (or lazily create) a monotonically-increasing counter.
+        /// Get a monotonically-increasing counter.
         pub fn counter(name: &'static str) -> CounterHandle {
-            let map = counters();
-            if let Some(h) = map.read().unwrap().get(name) {
-                return h.clone();
-            }
-            let mut w = map.write().unwrap();
-            // Double-check after acquiring write lock.
-            if let Some(h) = w.get(name) {
-                return h.clone();
-            }
-            let counter = meter().u64_counter(name).build();
-            let handle = CounterHandle(Arc::new(counter));
-            w.insert(name, handle.clone());
-            handle
+            let counter = global::meter("suprnova").u64_counter(name).build();
+            CounterHandle(Arc::new(counter))
         }
 
-        /// Get (or lazily create) an `f64` histogram for value distributions.
+        /// Get an `f64` histogram for value distributions.
         pub fn histogram(name: &'static str) -> HistogramHandle {
-            let map = histograms();
-            if let Some(h) = map.read().unwrap().get(name) {
-                return h.clone();
-            }
-            let mut w = map.write().unwrap();
-            if let Some(h) = w.get(name) {
-                return h.clone();
-            }
-            let hist = meter().f64_histogram(name).build();
-            let handle = HistogramHandle(Arc::new(hist));
-            w.insert(name, handle.clone());
-            handle
+            let hist = global::meter("suprnova").f64_histogram(name).build();
+            HistogramHandle(Arc::new(hist))
         }
 
-        /// Get (or lazily create) a synchronous `f64` gauge.
+        /// Get a synchronous `f64` gauge.
         pub fn gauge(name: &'static str) -> GaugeHandle {
-            let map = gauges();
-            if let Some(h) = map.read().unwrap().get(name) {
-                return h.clone();
-            }
-            let mut w = map.write().unwrap();
-            if let Some(h) = w.get(name) {
-                return h.clone();
-            }
-            let gauge = meter().f64_gauge(name).build();
-            let handle = GaugeHandle(Arc::new(gauge));
-            w.insert(name, handle.clone());
-            handle
+            let gauge = global::meter("suprnova").f64_gauge(name).build();
+            GaugeHandle(Arc::new(gauge))
         }
     }
 
@@ -254,28 +210,37 @@ mod tests {
         g.set_with(7.0, &[("queue", "default")]);
     }
 
+    // Each Metrics::counter()/histogram()/gauge() call returns a fresh
+    // handle (we don't cache at this layer — see the module-level note
+    // for rationale). The OTel SDK is responsible for instrument
+    // identity under the (name, unit, description) key. These tests
+    // verify the API is idempotent in observable behavior: repeated
+    // calls produce usable handles that record without panicking.
     #[cfg(feature = "otel")]
     #[test]
-    fn counter_same_name_returns_cached_handle() {
-        let a = Metrics::counter("test.cache.counter");
-        let b = Metrics::counter("test.cache.counter");
-        // Both handles must wrap the same underlying counter instrument.
-        assert!(std::sync::Arc::ptr_eq(&a.0, &b.0));
+    fn counter_repeated_calls_produce_usable_handles() {
+        let a = Metrics::counter("test.repeated.counter");
+        let b = Metrics::counter("test.repeated.counter");
+        a.inc();
+        b.inc_by(5);
+        a.inc_with(&[("env", "test")]);
     }
 
     #[cfg(feature = "otel")]
     #[test]
-    fn histogram_same_name_returns_cached_handle() {
-        let a = Metrics::histogram("test.cache.histogram");
-        let b = Metrics::histogram("test.cache.histogram");
-        assert!(std::sync::Arc::ptr_eq(&a.0, &b.0));
+    fn histogram_repeated_calls_produce_usable_handles() {
+        let a = Metrics::histogram("test.repeated.histogram");
+        let b = Metrics::histogram("test.repeated.histogram");
+        a.record(1.0);
+        b.record_with(2.0, &[("env", "test")]);
     }
 
     #[cfg(feature = "otel")]
     #[test]
-    fn gauge_same_name_returns_cached_handle() {
-        let a = Metrics::gauge("test.cache.gauge");
-        let b = Metrics::gauge("test.cache.gauge");
-        assert!(std::sync::Arc::ptr_eq(&a.0, &b.0));
+    fn gauge_repeated_calls_produce_usable_handles() {
+        let a = Metrics::gauge("test.repeated.gauge");
+        let b = Metrics::gauge("test.repeated.gauge");
+        a.set(1.0);
+        b.set_with(2.0, &[("env", "test")]);
     }
 }

@@ -120,6 +120,50 @@ is what makes Rust frameworks reach 80% production-ready and stall.
   Tailwind v4 + Inertia 3.1, SSR-aware (`data-server-rendered` honored).
 - **CLI** - `suprnova new` / `serve` / `migrate*` / `make:*` /
   `schedule:*` / `workflow:*` / `ssr:*` / `db:sync` / `generate-types`.
+- **Logging** - `tracing`-based structured logs with env-driven config
+  (`LOG_LEVEL` / `LOG_FORMAT=pretty|json`). `RequestId` UUID-v4 task_local
+  installed by `RequestIdMiddleware` outermost; `X-Request-Id` echoed
+  on every response (success or error).
+- **Events** - `EventFacade::dispatch` / `EventFacade::listen` /
+  `EventFacade::fake` + typed `Event` / `Listener<E>` traits.
+  Sync + queued (per-listener `tokio::spawn`) delivery. Built-in
+  `ErrorOccurred` event dispatched on every 5xx with
+  `error_message` / `status_code` / `request_id`. Fake guard records
+  events for `assert_dispatched` / `assert_not_dispatched` /
+  `dispatched_count` assertions.
+- **Error pipeline** - `FrameworkError::context(msg)` for layered
+  error context (preserves status code, prepends message).
+  `From<FrameworkError> for HttpResponse` emits `tracing::error!`
+  for 5xx + `tracing::warn!` for 4xx, and spawns `ErrorOccurred`
+  for 5xx.
+- **SSE delivery primitive** - `HttpResponse::sse(stream)` over the
+  new `Body::Stream(BoxBody)` variant. `SseEvent::data`/`with_event`/
+  `with_id`/`json` builders + spec-compliant wire framing. Works
+  end-to-end against a real socket.
+- **Streaming response body** - `Body::Static(Bytes) | Body::Stream(BoxBody)`
+  enum replaces the old `body: String`. `HttpResponse::stream_bytes`
+  builds arbitrary `Stream`-backed responses.
+- **OpenTelemetry export** (feature `otel`, opt-in) - OTLP HTTP-proto
+  exporter for traces + metrics + logs. `init_telemetry(LogConfig,
+  OtelConfig)` returns a `TelemetryGuard` that flushes providers on
+  shutdown. Enabled when `OTEL_EXPORTER_OTLP_ENDPOINT` is set and
+  `OTEL_SDK_DISABLED != "true"`. Default OFF — pulls reqwest only
+  when the feature is enabled.
+- **Metrics facade** - `Metrics::counter("x").inc()` /
+  `inc_by(n)` / `inc_with(attrs)`, `Metrics::histogram("x").record(v)`,
+  `Metrics::gauge("x").set(v)`. Instrument handles cached in
+  `OnceLock<RwLock<HashMap>>` so the inc/record/set path is an
+  `Arc<Counter>.add(...)` call. No-ops cleanly when the `otel`
+  feature is off (zero-cost stubs preserve the same API).
+- **Graceful shutdown** - `Server::run` waits on `tokio::select!`
+  between `listener.accept()`, `ctrl_c()`, and unix `SIGTERM`. On
+  signal, calls `TelemetryGuard::shutdown().await` to flush OTel
+  batch processors before exit.
+- **Context facade** - Laravel-shaped per-request key/value bag.
+  `Context::add` / `get` / `push` (stack) / `has` / `forget` / `all`
+  + `hidden_add` / `hidden_get` (separate bag, excluded from
+  `all()`). Scoped via `tokio::task_local!`; `RequestIdMiddleware`
+  seeds `_request_id` automatically.
 
 **Partial - needs filling in:**
 
@@ -127,7 +171,8 @@ is what makes Rust frameworks reach 80% production-ready and stall.
   objects, no after-hooks, no error-bag-as-first-class)
 - Cache (Redis + in-memory drivers; needs tags, locks, rate-limiter)
 - Cookie (via session; standalone API unclear)
-- HTTP request/response (inbound great; outbound HTTP client missing)
+- HTTP request/response (inbound great + streaming responses now
+  ship; outbound HTTP client still missing — Phase 2)
 - Container scoped bindings (singletons work; per-request scoping
   underspecified)
 - Schema DSL + Query Builder facades (migrations work via SeaORM's

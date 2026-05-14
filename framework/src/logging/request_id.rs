@@ -59,13 +59,34 @@ use async_trait::async_trait;
 /// (both success and error variants).
 pub struct RequestIdMiddleware;
 
+/// Maximum length we accept for an inbound `X-Request-Id` header.
+/// 128 bytes is plenty for UUIDs (36), ULIDs (26), KSUIDs (27), and
+/// most distributed-tracing systems' trace ids. Anything longer is
+/// rejected and replaced with a fresh UUID so an attacker cannot use
+/// the header to inject control characters into log output, balloon
+/// the Context bag, or cause downstream pipelines to choke on
+/// pathologically long ids.
+const MAX_REQUEST_ID_LEN: usize = 128;
+
+/// Returns true if `s` is a safe id: ASCII printable, no control
+/// characters, no whitespace, within the length cap. Most production
+/// id formats (UUID, ULID, KSUID, hex trace ids) satisfy this.
+fn is_safe_request_id(s: &str) -> bool {
+    if s.is_empty() || s.len() > MAX_REQUEST_ID_LEN {
+        return false;
+    }
+    s.bytes()
+        .all(|b| b.is_ascii_graphic() && b != b' ')
+}
+
 #[async_trait]
 impl crate::middleware::Middleware for RequestIdMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
         let id = request
             .header("x-request-id")
+            .filter(|s| is_safe_request_id(s))
             .map(RequestId::from_string)
-            .unwrap_or_else(RequestId::new);
+            .unwrap_or_default();
         let id_str = id.as_str().to_string();
         let id_for_context = id_str.clone();
 

@@ -433,15 +433,22 @@ impl From<crate::error::FrameworkError> for HttpResponse {
                 "framework error"
             );
             // Dispatch ErrorOccurred. Spawn so we don't block response
-            // conversion on listener execution.
+            // conversion on listener execution. Guard with Handle::try_current()
+            // so this `From` impl is safe to call from sync contexts that
+            // happen to be outside a Tokio runtime (e.g. unit tests that
+            // exercise error paths without `#[tokio::test]`). Outside a
+            // runtime the dispatch is silently dropped — same effect as
+            // having no listeners.
             let evt = crate::events::ErrorOccurred {
                 error_message: message.clone(),
                 status_code: status,
                 request_id: request_id.clone(),
             };
-            tokio::spawn(async move {
-                let _ = crate::events::EventFacade::dispatch(evt).await;
-            });
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    let _ = crate::events::EventFacade::dispatch(evt).await;
+                });
+            }
         } else if status >= 400 {
             tracing::warn!(
                 status,

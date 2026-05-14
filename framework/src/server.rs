@@ -106,6 +106,11 @@ impl Server {
         let router = self.router;
         let middleware = Arc::new(self.middleware);
 
+        // Track in-flight connections so shutdown can drain them
+        // before flushing OTel buffers. Each accepted connection is
+        // spawned into this JoinSet rather than via bare tokio::spawn.
+        let mut connections: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+
         loop {
             tokio::select! {
                 accept = listener.accept() => {
@@ -114,7 +119,7 @@ impl Server {
                     let router = router.clone();
                     let middleware = middleware.clone();
 
-                    tokio::spawn(async move {
+                    connections.spawn(async move {
                         let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                             let router = router.clone();
                             let middleware = middleware.clone();
@@ -128,12 +133,43 @@ impl Server {
                         }
                     });
                 }
+                // Reap completed connections to keep the JoinSet small.
+                // join_next() returns None if the set is empty — we treat
+                // that as "stay parked" by branching only on Some.
+                Some(_) = connections.join_next() => {}
                 _ = tokio::signal::ctrl_c() => {
                     tracing::info!("shutdown signal received (Ctrl-C)");
                     break;
                 }
                 _ = wait_terminate() => {
                     tracing::info!("SIGTERM received");
+                    break;
+                }
+            }
+        }
+
+        // Drain in-flight connections before flushing telemetry. Spans
+        // and metrics emitted by these tasks need to land in the
+        // batch processors BEFORE we call shutdown(). Bound the drain
+        // window so a slow client can't block shutdown forever.
+        tracing::info!(
+            in_flight = connections.len(),
+            "draining in-flight connections (max 10s)"
+        );
+        let drain_deadline = tokio::time::sleep(std::time::Duration::from_secs(10));
+        tokio::pin!(drain_deadline);
+        loop {
+            tokio::select! {
+                next = connections.join_next() => {
+                    if next.is_none() {
+                        break; // JoinSet empty — all drained
+                    }
+                }
+                _ = &mut drain_deadline => {
+                    tracing::warn!(
+                        in_flight = connections.len(),
+                        "drain deadline exceeded; abandoning remaining connections"
+                    );
                     break;
                 }
             }
