@@ -39,6 +39,9 @@ pub use http::{
 pub use session::{
     session, session_mut, SessionConfig, SessionData, SessionMiddleware, SessionStore,
 };
+pub use logging::{
+    current_request_id, init_subscriber, LogConfig, LogFormat, RequestId, RequestIdMiddleware,
+};
 pub use inertia::{
     DeferConfig, DeferOptions, EncryptHistoryMiddleware, Frontend, Inertia303Middleware,
     InertiaConfig, InertiaRegistry, InertiaRequestExt, InertiaResponse, InertiaSharedData,
