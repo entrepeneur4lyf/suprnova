@@ -247,3 +247,31 @@ async fn fake_response_outside_scope_panics() {
     // loudly instead of touching uninitialized state.
     fake_response("GET", "/", 200, serde_json::json!({}));
 }
+
+#[tokio::test]
+async fn into_inner_returns_ok_for_real_response() {
+    // Real reqwest::Response should round-trip out via into_inner.
+    let (addr, _cap) = spawn_echo().await;
+    let url = format!("http://{}/", addr);
+    let resp = Http::get(&url).send().await.expect("send");
+    let inner = resp.into_inner().expect("real response should unwrap");
+    // Sanity: it really is a reqwest::Response with the same status.
+    assert_eq!(inner.status().as_u16(), 200);
+}
+
+#[tokio::test]
+async fn into_inner_returns_err_for_fake_response() {
+    Http::fake(|| async {
+        fake_response("GET", "/x", 200, serde_json::json!({"ok": true}));
+        let resp = Http::get("https://x.test/x").send().await.expect("send");
+        let err = resp
+            .into_inner()
+            .expect_err("fake response should not unwrap");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not available on fake responses"),
+            "unexpected error message: {msg}"
+        );
+    })
+    .await;
+}

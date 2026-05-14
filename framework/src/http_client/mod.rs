@@ -320,13 +320,22 @@ impl ClientResponse {
         }
     }
 
-    /// Unwrap to the underlying `reqwest::Response`. Panics if the
-    /// response was produced by the fake recorder.
-    pub fn into_inner(self) -> reqwest::Response {
+    /// Unwrap to the underlying `reqwest::Response`. This is an
+    /// escape hatch for callers that need to reach for a `reqwest`
+    /// API we don't expose (streaming bodies, redirect policy
+    /// inspection, etc.).
+    ///
+    /// Returns `Err(FrameworkError::internal(...))` if the response
+    /// was produced by [`Http::fake`] — there is no underlying
+    /// `reqwest::Response` in that case. Real responses are returned
+    /// via `Ok`.
+    pub fn into_inner(self) -> Result<reqwest::Response, FrameworkError> {
         match self.0 {
-            ClientResponseInner::Real(r) => r,
+            ClientResponseInner::Real(r) => Ok(r),
             ClientResponseInner::Fake { .. } => {
-                panic!("ClientResponse::into_inner() called on a fake response")
+                Err(FrameworkError::internal(
+                    "into_inner is not available on fake responses",
+                ))
             }
         }
     }

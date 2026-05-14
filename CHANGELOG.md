@@ -17,6 +17,11 @@ Until a 1.0 release, breaking changes are landed as hard cuts.
   `tokio::task_local!`, so tests no longer need an `HTTP_LOCK` and
   can run in parallel. The dropped type `HttpFakeGuard` is removed
   from public re-exports.
+- `ClientResponse::into_inner()` now returns
+  `Result<reqwest::Response, FrameworkError>` instead of panicking on
+  fake responses. Real responses return `Ok(resp)`; fake responses
+  return `Err(FrameworkError::internal("into_inner is not available
+  on fake responses"))`. Callers must add a `?` or `.expect(...)`.
 
 ### Added
 
