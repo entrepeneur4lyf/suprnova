@@ -19,6 +19,7 @@ pub mod schedule_list;
 pub mod schedule_run;
 pub mod schedule_work;
 pub mod serve;
+pub mod ssr_start;
 pub mod web_run;
 pub mod workflow_install;
 pub mod workflow_work;

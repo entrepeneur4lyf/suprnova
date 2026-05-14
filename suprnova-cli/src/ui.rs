@@ -199,6 +199,10 @@ pub fn print_help() {
     help_line("workflow:install", "Install workflow migrations");
     br();
 
+    println!("  {}", style("SSR").bold().underlined());
+    help_line("ssr:start", "Launch Inertia SSR worker (foreground)");
+    br();
+
     println!("  {}", style("DEPLOY").bold().underlined());
     help_line("docker:init", "Generate production Dockerfile");
     help_line("docker:compose", "Generate docker-compose.yml");

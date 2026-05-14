@@ -167,6 +167,18 @@ enum Commands {
     /// Install workflow migrations
     #[command(name = "workflow:install")]
     WorkflowInstall,
+    /// Launch the Inertia SSR worker in the foreground
+    #[command(name = "ssr:start")]
+    SsrStart {
+        /// Runtime to launch the worker under (node, bun, deno).
+        /// Falls back to SUPRNOVA_SSR_RUNTIME env, then "node".
+        #[arg(long)]
+        runtime: Option<String>,
+        /// Path to the built SSR bundle. Falls back to
+        /// SUPRNOVA_SSR_BUNDLE env, then frontend/bootstrap/ssr/ssr.js.
+        #[arg(long)]
+        bundle: Option<String>,
+    },
 }
 
 fn main() {
@@ -271,6 +283,9 @@ fn main() {
         }
         Commands::WorkflowInstall => {
             commands::workflow_install::run();
+        }
+        Commands::SsrStart { runtime, bundle } => {
+            commands::ssr_start::run(runtime, bundle);
         }
     }
 }
