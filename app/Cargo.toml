@@ -17,3 +17,4 @@ async-trait = "0.1"
 dotenvy = "0.15"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"

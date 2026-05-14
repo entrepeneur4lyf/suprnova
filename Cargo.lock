@@ -112,6 +112,7 @@ dependencies = [
  "serde",
  "suprnova",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
