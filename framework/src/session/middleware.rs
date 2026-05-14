@@ -144,7 +144,15 @@ impl SessionMiddleware {
     }
 
     fn create_session_cookie(&self, session_id: &str) -> Cookie {
-        let mut cookie = Cookie::new(&self.config.cookie_name, session_id)
+        // Pre-1.0 hard cut: session cookies are AES-256-GCM encrypted
+        // when Crypt is initialized. If APP_KEY isn't set the server
+        // already warned at boot — we fall back to plaintext rather
+        // than refuse to set a cookie.
+        let base = match Cookie::encrypted(&self.config.cookie_name, session_id) {
+            Ok(c) => c,
+            Err(_) => Cookie::new(&self.config.cookie_name, session_id),
+        };
+        let mut cookie = base
             .http_only(self.config.cookie_http_only)
             .secure(self.config.cookie_secure)
             .path(&self.config.cookie_path)
@@ -163,10 +171,18 @@ impl SessionMiddleware {
 #[async_trait]
 impl Middleware for SessionMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
-        // Get session ID from cookie or generate new one
-        let session_id = request
-            .cookie(&self.config.cookie_name)
-            .unwrap_or_else(generate_session_id);
+        // Get session ID from cookie or generate new one. Inbound
+        // values are AES-256-GCM ciphertext when Crypt is initialized;
+        // any decrypt failure (tamper, key rotation, plaintext leftover
+        // from a pre-cut deploy) silently produces a fresh session ID.
+        // No per-request log spam — this path is hit on every visitor
+        // whose cookie was set under a previous key.
+        let session_id = match request.cookie(&self.config.cookie_name) {
+            Some(raw) => Cookie::read_encrypted(&raw)
+                .ok()
+                .unwrap_or_else(generate_session_id),
+            None => generate_session_id(),
+        };
 
         // Load session from store
         let mut session = match self.store.read(&session_id).await {

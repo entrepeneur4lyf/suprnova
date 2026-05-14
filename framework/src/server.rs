@@ -46,6 +46,18 @@ impl Server {
         // Boot all auto-registered services from #[service(ConcreteType)]
         App::boot_services();
 
+        // Install the process-wide encryption key from APP_KEY. The
+        // server still boots without one, but encrypted cookies and
+        // `Crypt` calls will fail until it's set. A warn surfaces the
+        // misconfiguration on first boot.
+        match crate::crypto::EncryptionKey::from_env() {
+            Ok(key) => crate::crypto::Crypt::init(key),
+            Err(_) => tracing::warn!(
+                "APP_KEY not set — session cookies will fall back to plaintext, \
+                 Crypt::encrypt_* will error"
+            ),
+        }
+
         let config = Config::get::<ServerConfig>().unwrap_or_else(ServerConfig::from_env);
         Self {
             router: Arc::new(router.into()),

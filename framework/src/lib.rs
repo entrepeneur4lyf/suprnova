@@ -31,6 +31,7 @@ pub use cache::{Cache, CacheConfig, CacheStore, InMemoryCache, RedisCache};
 pub use config::{env, env_optional, env_required, AppConfig, Config, Environment, ServerConfig};
 pub use container::{App, Container};
 pub use context::{Context, ContextStore};
+pub use crypto::{Crypt, EncryptionKey};
 pub use csrf::{csrf_field, csrf_meta_tag, csrf_token, CsrfMiddleware};
 pub use database::{
     AutoRouteBinding, Database, DatabaseConfig, DatabaseType, DbConnection, Model, ModelMut,

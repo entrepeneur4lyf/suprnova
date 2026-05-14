@@ -187,6 +187,29 @@ impl Cookie {
     pub fn forever(name: impl Into<String>, value: impl Into<String>) -> Self {
         Self::new(name, value).max_age(Duration::from_secs(5 * 365 * 24 * 60 * 60))
     }
+
+    /// Build a cookie whose value is the AES-256-GCM ciphertext of
+    /// `plaintext`, base64-url-no-pad encoded. Requires
+    /// `Crypt::is_initialized()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `FrameworkError::Internal` if encryption fails (most
+    /// commonly because `Crypt` has not been initialized — `APP_KEY` not
+    /// set at server boot).
+    pub fn encrypted(
+        name: impl Into<String>,
+        plaintext: impl AsRef<str>,
+    ) -> Result<Self, crate::FrameworkError> {
+        let wire = crate::crypto::Crypt::encrypt_string(plaintext.as_ref())?;
+        Ok(Self::new(name, wire))
+    }
+
+    /// Decrypt a cookie value produced by [`Self::encrypted`]. Returns
+    /// the UTF-8 plaintext.
+    pub fn read_encrypted(wire: &str) -> Result<String, crate::FrameworkError> {
+        crate::crypto::Crypt::decrypt_string(wire)
+    }
 }
 
 /// Parse cookies from a Cookie header value
