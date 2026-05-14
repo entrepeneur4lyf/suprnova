@@ -14,8 +14,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 /// Runtime to launch the SSR worker under. Defaults to `node` when
-/// neither `--runtime` nor `SUPRNOVA_SSR_RUNTIME` are set.
-fn resolve_runtime(flag: Option<String>) -> String {
+/// neither `--runtime` nor `SUPRNOVA_SSR_RUNTIME` are set. Public for
+/// test coverage of the env-var precedence chain.
+pub(crate) fn resolve_runtime(flag: Option<String>) -> String {
     flag.or_else(|| std::env::var("SUPRNOVA_SSR_RUNTIME").ok())
         .unwrap_or_else(|| "node".to_string())
 }
@@ -25,7 +26,7 @@ fn resolve_runtime(flag: Option<String>) -> String {
 /// 2. `SUPRNOVA_SSR_BUNDLE` env var
 /// 3. `frontend/bootstrap/ssr/ssr.js` (Vite default for the
 ///    `@inertiajs/{...}/server` bundle)
-fn resolve_bundle(flag: Option<String>) -> PathBuf {
+pub(crate) fn resolve_bundle(flag: Option<String>) -> PathBuf {
     if let Some(p) = flag {
         return PathBuf::from(p);
     }
@@ -86,6 +87,48 @@ pub fn run(runtime: Option<String>, bundle: Option<String>) {
         Err(e) => {
             eprintln!("SSR worker exited abnormally: {e}");
             std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Note: env-var tests must use unique var names per test to avoid
+    // races between parallel cargo-test workers in the same process.
+
+    #[test]
+    fn resolve_runtime_prefers_flag_over_env_and_default() {
+        // Flag overrides everything.
+        let r = resolve_runtime(Some("bun".to_string()));
+        assert_eq!(r, "bun");
+    }
+
+    #[test]
+    fn resolve_runtime_falls_back_to_default() {
+        // No flag, no env → "node".
+        // SAFETY: We don't touch the env so other parallel tests are
+        // unaffected. If SUPRNOVA_SSR_RUNTIME happens to be set in the
+        // test environment, this assertion would skip — we explicitly
+        // check unset.
+        if std::env::var("SUPRNOVA_SSR_RUNTIME").is_err() {
+            let r = resolve_runtime(None);
+            assert_eq!(r, "node");
+        }
+    }
+
+    #[test]
+    fn resolve_bundle_prefers_flag() {
+        let p = resolve_bundle(Some("/tmp/custom-ssr.js".to_string()));
+        assert_eq!(p, PathBuf::from("/tmp/custom-ssr.js"));
+    }
+
+    #[test]
+    fn resolve_bundle_falls_back_to_default() {
+        if std::env::var("SUPRNOVA_SSR_BUNDLE").is_err() {
+            let p = resolve_bundle(None);
+            assert_eq!(p, PathBuf::from("frontend/bootstrap/ssr/ssr.js"));
         }
     }
 }

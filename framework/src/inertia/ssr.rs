@@ -10,20 +10,15 @@
 //! `ssr:start` for that, and operators are free to use their own
 //! supervisor.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::time::Duration;
 
 use crate::error::FrameworkError;
 use crate::inertia::config::SsrConfig;
 
-/// Request body posted to the SSR worker. The shape matches the page
-/// object we already produce — Inertia's SSR servers expect the same
-/// envelope the client would receive on an XHR response.
-#[derive(Serialize)]
-pub(crate) struct SsrRequest<'a> {
-    #[serde(flatten)]
-    pub page: &'a serde_json::Value,
-}
+// Note: we don't define a typed request struct — the `@inertiajs/*/server`
+// `createServer()` workers accept the raw page object JSON envelope.
+// We send `serde_json::Value` directly to avoid an extra serialize step.
 
 /// Response from the SSR worker. Heads is a list of `<head>` snippets
 /// (e.g. `<title>...</title>`, `<meta ...>`); body is the prerendered
@@ -101,14 +96,43 @@ pub(crate) async fn render(
                     "SSR render failed: {e}"
                 )))
             } else {
-                eprintln!(
-                    "[inertia] SSR worker unreachable at {} ({}); falling back to CSR",
+                let msg = format!(
+                    "SSR worker unreachable at {} ({}); falling back to CSR",
                     url, e
                 );
+                if let Some(cb) = &config.on_error {
+                    cb(&msg);
+                } else {
+                    eprintln!("[inertia] {}", msg);
+                }
                 Ok(None)
             }
         }
     }
+}
+
+/// Process-global hyper client shared across all SSR calls.
+///
+/// Constructing a `Client` is expensive — it sets up a connection pool
+/// and an HTTP/1.1 handshake state. A per-request `Client` resets the
+/// pool every time, so we keep one for the lifetime of the process.
+/// `hyper_util::client::legacy::Client` is `Clone`-cheap (`Arc` inside)
+/// and `Send + Sync`, so a `OnceLock` works.
+fn shared_client() -> &'static hyper_util::client::legacy::Client<
+    hyper_util::client::legacy::connect::HttpConnector,
+    http_body_util::Full<bytes::Bytes>,
+> {
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::TokioExecutor;
+    use std::sync::OnceLock;
+
+    static SSR_CLIENT: OnceLock<
+        Client<
+            hyper_util::client::legacy::connect::HttpConnector,
+            http_body_util::Full<bytes::Bytes>,
+        >,
+    > = OnceLock::new();
+    SSR_CLIENT.get_or_init(|| Client::builder(TokioExecutor::new()).build_http())
 }
 
 /// POST JSON to the SSR worker and deserialize the response. Uses
@@ -121,8 +145,6 @@ async fn post_json(
     use http_body_util::{BodyExt, Full};
     use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
     use hyper::Request;
-    use hyper_util::client::legacy::Client;
-    use hyper_util::rt::TokioExecutor;
 
     let parsed = hyper::Uri::try_from(url).map_err(|e| format!("invalid url: {e}"))?;
 
@@ -141,9 +163,7 @@ async fn post_json(
         .body(Full::new(bytes::Bytes::from(body)))
         .map_err(|e| format!("request build: {e}"))?;
 
-    let client: Client<_, Full<bytes::Bytes>> =
-        Client::builder(TokioExecutor::new()).build_http();
-
+    let client = shared_client();
     let fut = client.request(req);
     let resp = tokio::time::timeout(timeout, fut)
         .await

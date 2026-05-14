@@ -10,6 +10,10 @@ routes! {
         "/preserve-fragment-example",
         controllers::user::preserve_fragment_example
     ),
+    get!(
+        "/ssr-opt-out-example",
+        controllers::user::ssr_opt_out_example
+    ),
     get!("/config", controllers::config_example::show).name("config.show"),
 
     // User routes group

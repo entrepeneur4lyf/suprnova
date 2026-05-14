@@ -1753,6 +1753,42 @@ async fn scroll_props_field_omitted_when_no_scroll_props() {
 }
 
 #[tokio::test]
+async fn scroll_intent_wins_over_x_inertia_reset() {
+    // Documented behavior: if a client sends both X-Inertia-Reset for
+    // a scroll prop AND X-Inertia-Infinite-Scroll-Merge-Intent, the
+    // scroll intent wins — the prop emits with merge metadata and
+    // `reset: false`. X-Inertia-Reset is a regular-merge concept; for
+    // scroll props the merge direction comes from the intent header.
+    let req = MockReq::new("/users")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Users/Index")
+        .header("X-Inertia-Partial-Data", "users")
+        .header("X-Inertia-Reset", "users")
+        .header("X-Inertia-Infinite-Scroll-Merge-Intent", "append");
+    let resp = InertiaResponse::new("Users/Index")
+        .scroll(
+            "users",
+            ScrollMetadata::new("page").current(2).next(3),
+            serde_json::json!([{"id": 21}]),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    // Intent wins: reset is false; key shows up in mergeProps.
+    assert_eq!(page["scrollProps"]["users"]["reset"], false);
+    let merge: Vec<&str> = page["mergeProps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(merge.contains(&"users"));
+}
+
+#[tokio::test]
 async fn scroll_metadata_handles_string_cursor() {
     // Cursor pagination uses string identifiers, not numbers.
     let req = MockReq::new("/posts").inertia();
@@ -1828,6 +1864,35 @@ async fn errors_scoped_under_named_bag_when_header_set() {
     let errors = page["props"]["errors"].as_object().unwrap();
     assert!(errors.contains_key("registration"));
     assert!(errors["registration"].is_object());
+}
+
+#[tokio::test]
+async fn error_bag_wraps_handler_injected_errors() {
+    // Regression test: previously the bag scoping was done at the
+    // start of resolve_props with an empty object, then user props
+    // could overwrite it — silently losing the bag wrapping. The fix
+    // moves scoping to after all props resolve.
+    let req = MockReq::new("/")
+        .inertia()
+        .header("X-Inertia-Error-Bag", "checkout");
+    let resp = InertiaResponse::new("Home")
+        .with(
+            "errors",
+            serde_json::json!({"email": "must be valid", "card": "expired"}),
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let errors = page["props"]["errors"].as_object().unwrap();
+    assert!(
+        errors.contains_key("checkout"),
+        "handler-injected errors must be wrapped under bag, got: {:?}",
+        errors
+    );
+    assert_eq!(errors["checkout"]["email"], "must be valid");
+    assert_eq!(errors["checkout"]["card"], "expired");
 }
 
 #[tokio::test]

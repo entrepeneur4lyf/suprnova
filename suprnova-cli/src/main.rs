@@ -179,6 +179,17 @@ enum Commands {
         #[arg(long)]
         bundle: Option<String>,
     },
+    /// Verify the Inertia SSR worker is reachable
+    #[command(name = "ssr:check")]
+    SsrCheck {
+        /// SSR worker URL. Falls back to SUPRNOVA_SSR_URL env, then
+        /// http://127.0.0.1:13714.
+        #[arg(long)]
+        url: Option<String>,
+        /// Connect timeout in milliseconds.
+        #[arg(long, default_value = "2000")]
+        timeout_ms: u64,
+    },
 }
 
 fn main() {
@@ -286,6 +297,9 @@ fn main() {
         }
         Commands::SsrStart { runtime, bundle } => {
             commands::ssr_start::run(runtime, bundle);
+        }
+        Commands::SsrCheck { url, timeout_ms } => {
+            commands::ssr_check::run(url, timeout_ms);
         }
     }
 }

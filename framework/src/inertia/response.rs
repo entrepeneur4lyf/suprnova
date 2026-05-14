@@ -256,6 +256,17 @@ impl InertiaResponse {
     /// its accumulator. On subsequent fetches, the merge direction is
     /// driven by the header (`append` / `prepend`).
     ///
+    /// **Conflict semantics:**
+    /// - When the client sends both `X-Inertia-Reset` AND
+    ///   `X-Inertia-Infinite-Scroll-Merge-Intent` for this key, the
+    ///   scroll intent wins (intent → merge direction; reset=false).
+    ///   The two headers come from different client flows in practice
+    ///   and shouldn't both be set for the same prop.
+    /// - Calling both `.scroll(key, ...)` and `.merge(key, ...)` /
+    ///   `.with(key, ...)` for the same key is undefined; the
+    ///   builder's `IndexMap` keeps the last write, silently
+    ///   discarding the earlier prop. Don't.
+    ///
     /// Maps to Laravel's `Inertia::scroll(...)`.
     pub fn scroll<V: Serialize>(
         self,
@@ -689,19 +700,16 @@ async fn resolve_props(
     let mut materialized = serde_json::Map::new();
     let mut metadata = PageMetadata::default();
 
-    // `errors` is always present per the Inertia v3 contract. Populated
-    // from session flash + validation when those land; empty otherwise.
-    // When `X-Inertia-Error-Bag` is set, errors are scoped under the
-    // bag name: `errors: { bag_name: {...} }` instead of `errors: {...}`.
-    let errors_inner = Value::Object(serde_json::Map::new());
-    let errors_value = if let Some(bag) = error_bag {
-        let mut wrapper = serde_json::Map::new();
-        wrapper.insert(bag.to_string(), errors_inner);
-        Value::Object(wrapper)
-    } else {
-        errors_inner
-    };
-    materialized.insert("errors".to_string(), errors_value);
+    // `errors` is always present per the Inertia v3 contract. Seed
+    // with an empty object so the key exists even if no resolver
+    // writes errors. The `X-Inertia-Error-Bag` wrapping happens AFTER
+    // all props resolve — see the bottom of this function. Doing it
+    // post-resolution means a handler that injects errors via
+    // `.with("errors", {...})` still gets correctly scoped.
+    materialized.insert(
+        "errors".to_string(),
+        Value::Object(serde_json::Map::new()),
+    );
 
     let mut tasks: Vec<
         std::pin::Pin<
@@ -893,6 +901,19 @@ async fn resolve_props(
                     },
                 );
             }
+        }
+    }
+
+    // `X-Inertia-Error-Bag` scoping. Apply AFTER all props have
+    // resolved so a handler-provided `errors` prop (via
+    // `.with("errors", {...})`) gets correctly wrapped. Without this
+    // post-pass, the seeded empty object would be wrapped here but
+    // overwritten by the user prop, silently losing the bag.
+    if let Some(bag) = error_bag {
+        if let Some(errors_val) = materialized.remove("errors") {
+            let mut wrapper = serde_json::Map::new();
+            wrapper.insert(bag.to_string(), errors_val);
+            materialized.insert("errors".to_string(), Value::Object(wrapper));
         }
     }
 

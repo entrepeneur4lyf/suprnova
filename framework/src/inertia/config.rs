@@ -152,7 +152,7 @@ pub struct InertiaConfig {
 /// a JSON page object on `POST /render` and returns
 /// `{ head: string[], body: string }`. Configure the worker URL here;
 /// boot it separately (e.g. `suprnova ssr:start`).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SsrConfig {
     /// When `false`, SSR is fully off and the HTML shell renders empty
     /// `<div id="app">` for the client to hydrate. Default: `false`.
@@ -172,6 +172,24 @@ pub struct SsrConfig {
     /// render CSR-only even when `enabled` is `true`. Each pattern
     /// supports `*` (anything-not-slash) and `**` (anything).
     pub excluded_paths: Vec<String>,
+    /// Observability hook invoked when an SSR render fails and we
+    /// fall back to CSR. Defaults to `eprintln!` to stderr. Wire your
+    /// logger / Sentry / DataDog client here. When events parity
+    /// lands, `SsrRenderFailed` will fire from this callback too.
+    pub on_error: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
+}
+
+impl std::fmt::Debug for SsrConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SsrConfig")
+            .field("enabled", &self.enabled)
+            .field("url", &self.url)
+            .field("timeout", &self.timeout)
+            .field("throw_on_error", &self.throw_on_error)
+            .field("excluded_paths", &self.excluded_paths)
+            .field("on_error", &self.on_error.as_ref().map(|_| "<closure>"))
+            .finish()
+    }
 }
 
 impl Default for SsrConfig {
@@ -182,6 +200,7 @@ impl Default for SsrConfig {
             timeout: std::time::Duration::from_secs(5),
             throw_on_error: false,
             excluded_paths: Vec::new(),
+            on_error: None,
         }
     }
 }
@@ -292,6 +311,27 @@ impl InertiaConfig {
     /// Set a dynamic asset version resolver. The closure runs on every
     /// page-object emission and every version-mismatch check; cache
     /// inside the closure if invocation isn't cheap.
+    ///
+    /// The closure is synchronous and infallible by design — it mirrors
+    /// Laravel's `Inertia::version($closure)` contract. For
+    /// async / fallible computation (e.g. read a manifest from S3),
+    /// resolve once at boot and pass the cached `String` to
+    /// [`version`](Self::version):
+    ///
+    /// ```rust,ignore
+    /// // In bootstrap:
+    /// let manifest_hash = read_manifest_hash().await?;
+    /// let cfg = InertiaConfig::new().version(manifest_hash);
+    /// ```
+    ///
+    /// Or wrap an internal cache and panic-recovery in the closure:
+    ///
+    /// ```rust,ignore
+    /// use std::sync::Arc;
+    /// use std::sync::atomic::{AtomicPtr, Ordering};
+    /// let cached: Arc<...> = ...;  // your refresh strategy
+    /// InertiaConfig::new().version_with(move || cached.current_hash())
+    /// ```
     pub fn version_with<F>(mut self, f: F) -> Self
     where
         F: Fn() -> String + Send + Sync + 'static,
@@ -351,6 +391,16 @@ impl InertiaConfig {
     /// Add a path pattern excluded from SSR.
     pub fn ssr_exclude(mut self, pattern: impl Into<String>) -> Self {
         self.ssr.excluded_paths.push(pattern.into());
+        self
+    }
+
+    /// Register an observability callback for SSR render failures.
+    /// Replaces the default `eprintln!` to stderr.
+    pub fn on_ssr_error<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&str) + Send + Sync + 'static,
+    {
+        self.ssr.on_error = Some(std::sync::Arc::new(f));
         self
     }
 }
@@ -449,5 +499,66 @@ mod tests {
     fn config_version_with_creates_dynamic() {
         let cfg = InertiaConfig::new().version_with(|| "dyn-v1".to_string());
         assert_eq!(cfg.version.resolve(), "dyn-v1");
+    }
+
+    // ---- glob matcher ----
+    //
+    // Path-style glob: `*` matches one segment (no slash), `**` matches
+    // any characters including slashes. Standard rsync/gitignore-style
+    // semantics — `/admin/**` matches `/admin/x` but NOT bare `/admin`
+    // (use `/admin*` or two patterns for that).
+
+    #[test]
+    fn glob_literal_matches_exact() {
+        assert!(glob_match("/users", "/users"));
+        assert!(!glob_match("/users", "/users/1"));
+        assert!(!glob_match("/users", "/user"));
+    }
+
+    #[test]
+    fn glob_single_star_does_not_cross_slash() {
+        assert!(glob_match("/users/*", "/users/1"));
+        assert!(glob_match("/users/*", "/users/abc"));
+        assert!(!glob_match("/users/*", "/users/1/edit"));
+        // Standard glob semantics: `*` matches zero or more non-slash
+        // chars, so `/users/*` matches `/users/` (the `*` matches the
+        // empty segment).
+        assert!(glob_match("/users/*", "/users/"));
+    }
+
+    #[test]
+    fn glob_double_star_crosses_slashes() {
+        assert!(glob_match("/admin/**", "/admin/foo"));
+        assert!(glob_match("/admin/**", "/admin/foo/bar"));
+        assert!(glob_match("/admin/**", "/admin/"));
+    }
+
+    #[test]
+    fn glob_double_star_does_not_match_bare_prefix() {
+        // Standard glob semantics: `/admin/**` requires the slash. To
+        // match `/admin` itself, the operator should use `/admin*` or
+        // two separate patterns.
+        assert!(!glob_match("/admin/**", "/admin"));
+    }
+
+    #[test]
+    fn glob_admin_star_matches_admin_and_admin_suffix() {
+        assert!(glob_match("/admin*", "/admin"));
+        assert!(glob_match("/admin*", "/admin2"));
+        assert!(!glob_match("/admin*", "/admin/foo"));
+    }
+
+    #[test]
+    fn glob_leading_double_star_matches_anything() {
+        assert!(glob_match("**", "/anything/at/all"));
+        assert!(glob_match("**", ""));
+        assert!(glob_match("**/admin", "/foo/admin"));
+        assert!(glob_match("**/admin", "/admin"));
+    }
+
+    #[test]
+    fn glob_empty_pattern_matches_only_empty_path() {
+        assert!(glob_match("", ""));
+        assert!(!glob_match("", "/x"));
     }
 }

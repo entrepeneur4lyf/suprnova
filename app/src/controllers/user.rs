@@ -48,3 +48,17 @@ pub async fn redirect_example(_req: Request) -> Response {
 pub async fn preserve_fragment_example(_req: Request) -> Response {
     redirect!("users.index").preserve_fragment().into()
 }
+
+/// Example: opt out of SSR for this specific request. The destination
+/// renders client-side only even when `InertiaConfig::ssr.enabled` is
+/// `true`. Useful for routes that depend on per-request state SSR
+/// can't see (geolocation, session-only flash, etc.) or for debugging.
+///
+/// Maps to Laravel's `Inertia::disable_ssr()`.
+pub async fn ssr_opt_out_example(_req: Request) -> Response {
+    suprnova::App::disable_ssr_for_request();
+    json_response!({
+        "ssr_disabled_for_this_request": true,
+        "note": "If SSR is enabled globally, this route still renders CSR-only.",
+    })
+}

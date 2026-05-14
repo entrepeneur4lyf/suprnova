@@ -201,6 +201,7 @@ pub fn print_help() {
 
     println!("  {}", style("SSR").bold().underlined());
     help_line("ssr:start", "Launch Inertia SSR worker (foreground)");
+    help_line("ssr:check", "Verify SSR worker is reachable");
     br();
 
     println!("  {}", style("DEPLOY").bold().underlined());
