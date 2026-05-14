@@ -69,12 +69,19 @@ impl Http {
 
     /// Run an async test body inside a fake-HTTP scope.
     ///
-    /// Every `RequestBuilder::send` invoked from inside `f` (on the
-    /// same task or any child task spawned via `tokio::spawn` that
-    /// inherits this task-local) is intercepted: the request is
-    /// captured, and a canned response queued via [`fake_response`] is
-    /// returned. Tests in different tasks see different fake states,
-    /// so parallel test execution is safe.
+    /// Every `RequestBuilder::send` invoked from inside `f` is
+    /// intercepted: the request is captured, and a canned response
+    /// queued via [`fake_response`] is returned. Tests in different
+    /// tasks see different fake states, so parallel test execution is
+    /// safe.
+    ///
+    /// **Caveat:** the scope is `tokio::task_local!`, which is scoped
+    /// to the *current* task only. Work spawned via `tokio::spawn`
+    /// inside `f` runs on a different task and will NOT see the fake
+    /// — those requests will hit the real network. If you need a
+    /// spawned task to use the fake, capture the work into a closure
+    /// and `await` it directly, or pass the fake scope's data through
+    /// explicit channels.
     ///
     /// Returns whatever the closure returns.
     ///
@@ -335,11 +342,15 @@ async fn build_and_send(builder: &RequestBuilder) -> Result<ClientResponse, Fram
     Ok(ClientResponse::real(resp))
 }
 
-/// `base_backoff * 2^(attempt-1)`. Saturating math so 64-bit multiply
-/// can't overflow if the caller passes a wild `base_backoff`.
+/// `base_backoff * 2^(attempt-1)`. Saturating math so a pathologically
+/// large attempt count can't overflow the shift, and the resulting
+/// duration is clamped to ~136 years (`Duration::saturating_mul`).
 fn backoff_for(attempt: u32, base_backoff: Duration) -> Duration {
-    let factor: u64 = 1u64 << (attempt.saturating_sub(1).min(32));
-    base_backoff.saturating_mul(factor as u32)
+    // `Duration::saturating_mul` takes u32; cap the exponent at 31 so
+    // `1u32 << exp` is well-defined.
+    let exp = attempt.saturating_sub(1).min(31);
+    let factor: u32 = 1u32 << exp;
+    base_backoff.saturating_mul(factor)
 }
 
 /// Parse a `Retry-After: <seconds>` header. HTTP-date form is not

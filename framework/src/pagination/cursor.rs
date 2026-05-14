@@ -81,7 +81,13 @@ impl<T> CursorPaginator<T> {
     /// into the wire cursor. When `Crypt` is initialized, the cursor
     /// is AES-256-GCM authenticated; otherwise it falls back to plain
     /// base64 (and tracing emits a warn).
-    pub(crate) fn encode_value(
+    ///
+    /// Direct callers (controllers that build cursors outside
+    /// `Pagination::cursor`) use this to produce a typed cursor over
+    /// a non-string boundary — pass a `Value::BigInt(...)`,
+    /// `Value::Uuid(...)`, etc. and `Pagination::cursor` will
+    /// re-bind the same SQL type on decode.
+    pub fn encode_value(
         value: &sea_orm::Value,
         direction: CursorDirection,
     ) -> Result<String, FrameworkError> {
@@ -108,7 +114,11 @@ impl<T> CursorPaginator<T> {
 
     /// Decode the wire cursor into a typed `sea_orm::Value` plus the
     /// scan direction it was emitted with.
-    pub(crate) fn decode_value(
+    ///
+    /// Use when consuming a cursor in a controller that doesn't go
+    /// through `Pagination::cursor` — match on the returned variant to
+    /// extract the typed boundary (e.g. `Value::BigInt(Some(i))`).
+    pub fn decode_value(
         wire: &str,
     ) -> Result<(sea_orm::Value, CursorDirection), FrameworkError> {
         let json = if Crypt::is_initialized() {

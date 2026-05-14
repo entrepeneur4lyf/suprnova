@@ -4,6 +4,10 @@
 //! paginator)` — so the framework's `IntoInertiaScroll` wiring is
 //! exercised end-to-end.
 //!
+//! The cursor uses the typed `sea_orm::Value::BigInt` wire format
+//! (not the legacy `Value::String` path), so the dogfood matches what
+//! a real entity-backed `Pagination::cursor` would emit on the wire.
+//!
 //! Query params:
 //! - `per_page` (default `20`)
 //! - `cursor`   (opaque keyset cursor; first page omits it)
@@ -13,8 +17,8 @@
 
 use serde::Serialize;
 use suprnova::{
-    json_response, CursorPaginator, FrameworkError, HttpResponse, Inertia, IntoInertiaScroll,
-    Request, Response, ResponseExt,
+    json_response, CursorDirection, CursorPaginator, FrameworkError, HttpResponse, Inertia,
+    IntoInertiaScroll, Request, Response, ResponseExt,
 };
 
 #[derive(Clone, Serialize)]
@@ -43,6 +47,29 @@ fn query_param(qs: Option<&str>, key: &str) -> Option<String> {
     })
 }
 
+/// Decode the inbound cursor — typed `Value::BigInt` wire format —
+/// into a tuple of `(boundary id, direction)`. Returns `None` when
+/// the caller didn't pass a cursor (first page).
+fn decode_id_cursor(
+    raw: Option<&str>,
+) -> Result<Option<(i64, CursorDirection)>, FrameworkError> {
+    match raw {
+        None => Ok(None),
+        Some(c) => {
+            let (value, direction) = CursorPaginator::<User>::decode_value(c)?;
+            let id = match value {
+                sea_orm::Value::BigInt(Some(i)) => i,
+                other => {
+                    return Err(FrameworkError::internal(format!(
+                        "Expected BigInt cursor for /api/users, got {other:?}"
+                    )));
+                }
+            };
+            Ok(Some((id, direction)))
+        }
+    }
+}
+
 /// Build the paginator for the current request. Pure — no DB, no
 /// shared state, just slicing a 100-user fixture by the cursor.
 fn build_page(qs: Option<&str>) -> Result<CursorPaginator<User>, FrameworkError> {
@@ -50,42 +77,74 @@ fn build_page(qs: Option<&str>) -> Result<CursorPaginator<User>, FrameworkError>
         .and_then(|s| s.parse().ok())
         .unwrap_or(20);
 
-    let cursor_param: Option<String> = query_param(qs, "cursor");
-    let boundary: Option<i64> = match cursor_param.as_deref() {
-        Some(c) => Some(
-            CursorPaginator::<User>::decode_cursor(c)?
-                .parse::<i64>()
-                .map_err(|e| FrameworkError::internal(format!("bad cursor int: {e}")))?,
+    let cursor_input = query_param(qs, "cursor");
+    let decoded = decode_id_cursor(cursor_input.as_deref())?;
+
+    let all_users = make_users();
+    let (mut filtered, scan_dir): (Vec<User>, CursorDirection) = match decoded {
+        None => (all_users, CursorDirection::Next),
+        Some((boundary, CursorDirection::Next)) => (
+            all_users.into_iter().filter(|u| u.id > boundary).collect(),
+            CursorDirection::Next,
         ),
-        None => None,
+        Some((boundary, CursorDirection::Prev)) => {
+            // Back-scan: rows < boundary, DESC; then reverse to ASC.
+            let mut rows: Vec<User> = all_users
+                .into_iter()
+                .filter(|u| u.id < boundary)
+                .collect();
+            rows.reverse();
+            (rows, CursorDirection::Prev)
+        }
     };
 
-    let mut filtered: Vec<User> = make_users()
-        .into_iter()
-        .filter(|u| boundary.map(|b| u.id > b).unwrap_or(true))
-        .collect();
-
-    let has_more = filtered.len() as u64 > per_page;
-    if has_more {
-        filtered.truncate(per_page as usize);
+    let overflow = filtered.len() as u64 > per_page;
+    if overflow {
+        match scan_dir {
+            CursorDirection::Next => filtered.truncate(per_page as usize),
+            CursorDirection::Prev => {
+                // Back-scan: we DESC-fetched then reversed → rows
+                // are already ASC. The overflow row (if any) is now
+                // at index 0; drop it so the kept slice is still ASC.
+                let drop = filtered.len() - per_page as usize;
+                filtered.drain(0..drop);
+            }
+        }
     }
-    let next_cursor = if has_more {
-        filtered
-            .last()
-            .map(|u| CursorPaginator::<User>::encode_cursor(&u.id.to_string()))
-    } else {
-        None
+
+    let entered_via_next = matches!(decoded, Some((_, CursorDirection::Next)));
+    let entered_via_prev = matches!(decoded, Some((_, CursorDirection::Prev)));
+
+    let next_cursor = {
+        let has_next = match scan_dir {
+            CursorDirection::Next => overflow,
+            CursorDirection::Prev => true,
+        };
+        if has_next && !filtered.is_empty() {
+            let last = filtered.last().unwrap();
+            Some(CursorPaginator::<User>::encode_value(
+                &sea_orm::Value::BigInt(Some(last.id)),
+                CursorDirection::Next,
+            )?)
+        } else {
+            None
+        }
     };
-    // Provide a prev_cursor only when we entered via a forward cursor —
-    // i.e. there *is* a previous page. The dogfood path mirrors the
-    // bidirectional semantics of `Pagination::cursor` against a real
-    // entity, so consumers get to see the same shape on the wire.
-    let prev_cursor = if boundary.is_some() {
-        filtered
-            .first()
-            .map(|u| CursorPaginator::<User>::encode_cursor(&u.id.to_string()))
-    } else {
-        None
+
+    let prev_cursor = {
+        let has_prev = match scan_dir {
+            CursorDirection::Next => entered_via_next || entered_via_prev,
+            CursorDirection::Prev => overflow,
+        };
+        if has_prev && !filtered.is_empty() {
+            let first = filtered.first().unwrap();
+            Some(CursorPaginator::<User>::encode_value(
+                &sea_orm::Value::BigInt(Some(first.id)),
+                CursorDirection::Prev,
+            )?)
+        } else {
+            None
+        }
     };
 
     Ok(CursorPaginator {

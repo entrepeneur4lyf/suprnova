@@ -63,7 +63,7 @@ pub use inertia::{
     Prop, PropFuture, PropResolver, ScrollConfig, ScrollMetadata, VersionResolver,
 };
 pub use pagination::{
-    CursorPaginator, IntoInertiaScroll, LengthAwarePaginator, Pagination,
+    CursorDirection, CursorPaginator, IntoInertiaScroll, LengthAwarePaginator, Pagination,
 };
 pub use middleware::{
     register_global_middleware, Middleware, MiddlewareFuture, MiddlewareRegistry, Next,

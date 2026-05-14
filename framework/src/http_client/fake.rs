@@ -7,6 +7,11 @@
 //!
 //! Each task gets its own isolated fake state, so tests can run in
 //! parallel without serializing themselves on a process-wide mutex.
+//!
+//! Note: `tokio::task_local!` is task-scoped. Work spawned via
+//! `tokio::spawn` inside the scope runs on a fresh task and does NOT
+//! inherit the fake — those requests escape to the real network. See
+//! `Http::fake` for the caveat callers need to know.
 
 use std::future::Future;
 use std::sync::Mutex;

@@ -226,6 +226,133 @@ async fn pagination_cursor_last_page_no_next() {
     panic!("walked too many pages; last page: {last_page_rows:?}");
 }
 
+// --- Live-DB tests (gated by #[ignore]) ---
+//
+// These exercise `Pagination::cursor` against real Postgres / MySQL,
+// validating that the typed `sea_orm::Value` boundary binds correctly
+// for native int4 / bigint / uuid columns on each dialect.
+//
+// They're skipped by default. To run them, set the URL env var (or
+// rely on the localhost default) and pass `--ignored`:
+//
+//   PG_TEST_URL=postgres://postgres:postgres@localhost:5432/test \
+//     cargo test -p suprnova --test pagination -- --ignored postgres
+//
+//   MYSQL_TEST_URL=mysql://root:root@localhost:3306/test \
+//     cargo test -p suprnova --test pagination -- --ignored mysql
+//
+// The toy entity's `id` is `i32` (Int) on every dialect — so the
+// cursor wire format roundtrips `Value::Int(Some(42))` through
+// Postgres `int4`, MySQL `INT`, etc. without dialect-specific casts.
+
+async fn try_connect_live(url: &str) -> Option<sea_orm::DatabaseConnection> {
+    use sea_orm::ConnectOptions;
+    use std::time::Duration;
+    let mut opts = ConnectOptions::new(url.to_string());
+    opts.connect_timeout(Duration::from_secs(2))
+        .acquire_timeout(Duration::from_secs(2));
+    sea_orm::Database::connect(opts).await.ok()
+}
+
+async fn populate_n(conn: &sea_orm::DatabaseConnection, n: i32) {
+    // Drop the table if it lingers from a prior failed run; SeaORM's
+    // `create_table_from_entity` doesn't issue IF NOT EXISTS.
+    let _ = conn
+        .execute(Statement::from_string(
+            conn.get_database_backend(),
+            "DROP TABLE IF EXISTS items".to_string(),
+        ))
+        .await;
+    let schema = Schema::new(conn.get_database_backend());
+    let stmt = schema.create_table_from_entity(toy::Entity);
+    conn.execute(conn.get_database_backend().build(&stmt))
+        .await
+        .unwrap();
+    for i in 1..=n {
+        toy::ActiveModel {
+            id: Set(i),
+            name: Set(format!("item-{:02}", i)),
+        }
+        .insert(conn)
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires live Postgres; run with --ignored postgres"]
+async fn live_postgres_cursor_walks_with_typed_int_boundary() {
+    let url = std::env::var("PG_TEST_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/postgres".to_string());
+    let conn = try_connect_live(&url)
+        .await
+        .expect("Postgres test DB not reachable — set PG_TEST_URL");
+    populate_n(&conn, 25).await;
+
+    let _guard = TestContainer::fake();
+    install_db(conn);
+
+    let mut visited: Vec<i32> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..10 {
+        let p = Pagination::cursor::<toy::Entity, toy::Column>(
+            toy::Entity::find(),
+            cursor.as_deref(),
+            10,
+            toy::Column::Id,
+        )
+        .await
+        .unwrap();
+        for r in &p.data {
+            visited.push(r.id);
+        }
+        cursor = p.next_cursor.clone();
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(visited.len(), 25);
+    assert_eq!(visited.first(), Some(&1));
+    assert_eq!(visited.last(), Some(&25));
+}
+
+#[tokio::test]
+#[ignore = "requires live MySQL; run with --ignored mysql"]
+async fn live_mysql_cursor_walks_with_typed_int_boundary() {
+    let url = std::env::var("MYSQL_TEST_URL")
+        .unwrap_or_else(|_| "mysql://root:root@localhost:3306/test".to_string());
+    let conn = try_connect_live(&url)
+        .await
+        .expect("MySQL test DB not reachable — set MYSQL_TEST_URL");
+    populate_n(&conn, 25).await;
+
+    let _guard = TestContainer::fake();
+    install_db(conn);
+
+    let mut visited: Vec<i32> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..10 {
+        let p = Pagination::cursor::<toy::Entity, toy::Column>(
+            toy::Entity::find(),
+            cursor.as_deref(),
+            10,
+            toy::Column::Id,
+        )
+        .await
+        .unwrap();
+        for r in &p.data {
+            visited.push(r.id);
+        }
+        cursor = p.next_cursor.clone();
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(visited.len(), 25);
+    assert_eq!(visited.first(), Some(&1));
+    assert_eq!(visited.last(), Some(&25));
+}
+
 // --- IntoInertiaScroll wiring ---
 
 #[test]
