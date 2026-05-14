@@ -65,7 +65,14 @@ Until a 1.0 release, breaking changes are landed as hard cuts.
   and `InertiaResponse::paginate(key, paginator)` builder method that
   wire either paginator into an Inertia scroll prop.
 - `/api/users` dogfood route in `app/` — cursor-paginated 100-user
-  fixture.
+  fixture. Default path serves an Inertia response via
+  `Inertia::paginate("Users/Index", "users", paginator)`; pass
+  `?format=json` to receive the raw paginator JSON.
+- `suprnova::handle_request(router, middleware_registry, req)` —
+  public adapter that serves a single inbound `hyper::Request`
+  against a router + middleware chain. Same code path `Server::run`
+  uses internally; promoted to `pub` so embedders and tests can wire
+  the framework into their own hyper service loop.
 
 ### Internal
 

@@ -85,7 +85,7 @@ pub use workflow::{
     start_named, StepStatus, WorkflowConfig, WorkflowContext, WorkflowHandle, WorkflowStatus,
     WorkflowWorker,
 };
-pub use server::Server;
+pub use server::{handle_request, Server};
 
 // Re-export async_trait for middleware implementations
 pub use async_trait::async_trait;

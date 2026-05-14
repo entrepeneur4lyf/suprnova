@@ -22,3 +22,12 @@ tracing = "0.1"
 # dogfood handler (broadcast → BroadcastStream → HttpResponse::sse).
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+
+[dev-dependencies]
+# End-to-end tests against a one-shot server using the framework's
+# public `handle_request` adapter need hyper for the client + transport.
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+bytes = "1"
+serde_json = "1"
