@@ -1,3 +1,67 @@
+use std::sync::Arc;
+
+/// Asset-version source for Inertia responses.
+///
+/// Inertia uses a version string for cache-busting / version-mismatch
+/// detection. Most apps want a single static value (the asset manifest
+/// hash from build time). Some — long-running deploys, hot-reloaded
+/// dev environments — want to compute it per-request. The `Dynamic`
+/// variant covers that case; the resolver closure runs every time the
+/// version is needed.
+#[derive(Clone)]
+pub enum VersionResolver {
+    /// A baked-in static version string. Cheap; no closure invocation.
+    Static(String),
+    /// A closure that returns the current version. Runs on every read.
+    /// Wrap any caching the consumer wants inside the closure.
+    Dynamic(Arc<dyn Fn() -> String + Send + Sync>),
+}
+
+impl VersionResolver {
+    /// Build a static resolver from anything that can become a `String`.
+    pub fn new(version: impl Into<String>) -> Self {
+        Self::Static(version.into())
+    }
+
+    /// Build a dynamic resolver from a closure. The closure runs on
+    /// every call to [`resolve`]; cache inside the closure if needed.
+    pub fn with<F>(f: F) -> Self
+    where
+        F: Fn() -> String + Send + Sync + 'static,
+    {
+        Self::Dynamic(Arc::new(f))
+    }
+
+    /// Resolve to the current version string.
+    pub fn resolve(&self) -> String {
+        match self {
+            Self::Static(s) => s.clone(),
+            Self::Dynamic(f) => f(),
+        }
+    }
+}
+
+impl From<String> for VersionResolver {
+    fn from(s: String) -> Self {
+        Self::Static(s)
+    }
+}
+
+impl From<&str> for VersionResolver {
+    fn from(s: &str) -> Self {
+        Self::Static(s.to_string())
+    }
+}
+
+impl std::fmt::Debug for VersionResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Static(s) => write!(f, "Static({:?})", s),
+            Self::Dynamic(_) => write!(f, "Dynamic(<closure>)"),
+        }
+    }
+}
+
 /// Which frontend framework the host application uses.
 ///
 /// Detected at runtime from the `SUPRNOVA_FRONTEND` env var. The CLI
@@ -60,8 +124,9 @@ pub struct InertiaConfig {
     pub vite_dev_server: String,
     /// Vite entry point. Defaults to the frontend's standard entry.
     pub entry_point: String,
-    /// Asset version string for cache busting / version-mismatch detection.
-    pub version: String,
+    /// Asset version source for cache busting / version-mismatch
+    /// detection. See [`VersionResolver`] for static-vs-dynamic.
+    pub version: VersionResolver,
     /// `true` during local development (loads via the Vite dev server);
     /// `false` for production (loads built assets from `/assets/`).
     pub development: bool,
@@ -83,7 +148,7 @@ impl Default for InertiaConfig {
         Self {
             vite_dev_server: "http://localhost:5173".to_string(),
             entry_point: frontend.default_entry_point().to_string(),
-            version: "1.0".to_string(),
+            version: VersionResolver::Static("1.0".to_string()),
             development: true,
             frontend,
             default_title: "Suprnova".to_string(),
@@ -107,8 +172,21 @@ impl InertiaConfig {
         self
     }
 
+    /// Set a static asset version string. For dynamic versions
+    /// (e.g. read from a manifest at runtime) use [`version_with`].
     pub fn version(mut self, version: impl Into<String>) -> Self {
-        self.version = version.into();
+        self.version = VersionResolver::Static(version.into());
+        self
+    }
+
+    /// Set a dynamic asset version resolver. The closure runs on every
+    /// page-object emission and every version-mismatch check; cache
+    /// inside the closure if invocation isn't cheap.
+    pub fn version_with<F>(mut self, f: F) -> Self
+    where
+        F: Fn() -> String + Send + Sync + 'static,
+    {
+        self.version = VersionResolver::Dynamic(Arc::new(f));
         self
     }
 
@@ -190,5 +268,45 @@ mod tests {
     fn config_builder_overrides_default_title() {
         let cfg = InertiaConfig::new().default_title("My App");
         assert_eq!(cfg.default_title, "My App");
+    }
+
+    #[test]
+    fn version_resolver_static_resolves_to_string() {
+        let r = VersionResolver::new("abc123");
+        assert_eq!(r.resolve(), "abc123");
+        assert_eq!(r.resolve(), "abc123"); // idempotent
+    }
+
+    #[test]
+    fn version_resolver_dynamic_calls_closure_each_time() {
+        let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let c = counter.clone();
+        let r = VersionResolver::with(move || {
+            let n = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            format!("v{}", n)
+        });
+        assert_eq!(r.resolve(), "v0");
+        assert_eq!(r.resolve(), "v1");
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn version_resolver_from_string_makes_static() {
+        let r: VersionResolver = "x".to_string().into();
+        assert_eq!(r.resolve(), "x");
+        let r2: VersionResolver = "y".into();
+        assert_eq!(r2.resolve(), "y");
+    }
+
+    #[test]
+    fn config_version_builder_creates_static() {
+        let cfg = InertiaConfig::new().version("static-v1");
+        assert_eq!(cfg.version.resolve(), "static-v1");
+    }
+
+    #[test]
+    fn config_version_with_creates_dynamic() {
+        let cfg = InertiaConfig::new().version_with(|| "dyn-v1".to_string());
+        assert_eq!(cfg.version.resolve(), "dyn-v1");
     }
 }

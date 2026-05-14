@@ -20,6 +20,16 @@ pub trait InertiaRequestExt: Send + Sync {
             .map(|v| v == "true")
             .unwrap_or(false)
     }
+    /// Whether this is a prefetch visit. The Inertia client sets
+    /// `Purpose: prefetch` on hover/intent prefetches; handlers can
+    /// use this to skip expensive side effects (logging, analytics
+    /// counters, cache warmups) on a request that may never become a
+    /// real navigation.
+    fn is_prefetch(&self) -> bool {
+        self.header("Purpose")
+            .map(|v| v.eq_ignore_ascii_case("prefetch"))
+            .unwrap_or(false)
+    }
 }
 
 impl InertiaRequestExt for crate::http::Request {
@@ -45,6 +55,9 @@ impl<T: InertiaRequestExt + ?Sized> InertiaRequestExt for &T {
     }
     fn is_inertia(&self) -> bool {
         (**self).is_inertia()
+    }
+    fn is_prefetch(&self) -> bool {
+        (**self).is_prefetch()
     }
 }
 

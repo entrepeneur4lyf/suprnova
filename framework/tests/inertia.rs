@@ -460,6 +460,79 @@ async fn user_props_override_static_shared_data() {
 }
 
 #[tokio::test]
+async fn shared_props_field_lists_registry_keys() {
+    let _guard = suprnova::testing::TestContainer::fake();
+
+    suprnova::App::inertia_share("appName", "Suprnova");
+    suprnova::App::inertia_share("apiHost", "api.example.com");
+
+    let req = MockReq::new("/").inertia();
+    let resp = InertiaResponse::new("Home")
+        .with("page", "home")
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    let shared = page["sharedProps"]
+        .as_array()
+        .expect("sharedProps should be an array");
+    let names: Vec<&str> = shared.iter().filter_map(|v| v.as_str()).collect();
+    assert!(names.contains(&"appName"));
+    assert!(names.contains(&"apiHost"));
+    // User-only `page` key must NOT be advertised as shared.
+    assert!(!names.contains(&"page"));
+}
+
+#[tokio::test]
+async fn shared_props_field_omitted_when_registry_empty() {
+    let _guard = suprnova::testing::TestContainer::fake();
+
+    let req = MockReq::new("/").inertia();
+    let resp = InertiaResponse::new("Home")
+        .with("page", "home")
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        !page.as_object().unwrap().contains_key("sharedProps"),
+        "sharedProps must be omitted when no shared registry entries exist"
+    );
+}
+
+#[tokio::test]
+async fn shared_props_includes_key_even_when_user_overrides() {
+    // Per the Inertia v3 client contract, sharedProps is just a key
+    // list — the client reads values from `props`. Overriding a
+    // shared key with `.with()` doesn't remove the key from
+    // sharedProps; the override wins in `props` and that's what the
+    // client sees. Verifies the override-still-in-sharedProps contract.
+    let _guard = suprnova::testing::TestContainer::fake();
+
+    suprnova::App::inertia_share("title", "Shared Title");
+
+    let req = MockReq::new("/").inertia();
+    let resp = InertiaResponse::new("Home")
+        .with("title", "Page Title")
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    assert_eq!(page["props"]["title"], "Page Title");
+    let shared = page["sharedProps"].as_array().unwrap();
+    let names: Vec<&str> = shared.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        names.contains(&"title"),
+        "shared key should remain in sharedProps even when overridden"
+    );
+}
+
+#[tokio::test]
 async fn lazy_shared_resolves_only_when_partial_includes_key() {
     let _guard = suprnova::testing::TestContainer::fake();
 
@@ -1351,6 +1424,161 @@ async fn preserve_fragment_survives_partial_reload_filter() {
     assert!(page["props"].as_object().unwrap().get("body").is_none());
     // …but the top-level flag is unaffected.
     assert_eq!(page["preserveFragment"], true);
+}
+
+// ---- Purpose: prefetch header ----
+
+#[tokio::test]
+async fn is_prefetch_detects_purpose_header() {
+    let req = MockReq::new("/").inertia().header("Purpose", "prefetch");
+    assert!(req.is_prefetch());
+    assert!(req.is_inertia(), "prefetch is independent of is_inertia");
+}
+
+#[tokio::test]
+async fn is_prefetch_case_insensitive() {
+    let req = MockReq::new("/").header("Purpose", "Prefetch");
+    assert!(req.is_prefetch());
+    let req = MockReq::new("/").header("Purpose", "PREFETCH");
+    assert!(req.is_prefetch());
+}
+
+#[tokio::test]
+async fn is_prefetch_false_when_header_missing_or_other_value() {
+    let req = MockReq::new("/");
+    assert!(!req.is_prefetch());
+    let req = MockReq::new("/").header("Purpose", "navigation");
+    assert!(!req.is_prefetch());
+    let req = MockReq::new("/").header("Purpose", "");
+    assert!(!req.is_prefetch());
+}
+
+// ---- X-Inertia-Error-Bag header ----
+
+#[tokio::test]
+async fn errors_default_is_flat_empty_object() {
+    let req = MockReq::new("/").inertia();
+    let resp = InertiaResponse::new("Home").resolve(&req).await.unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    // No error bag → flat `errors: {}` shape.
+    assert!(page["props"]["errors"].is_object());
+    assert!(page["props"]["errors"].as_object().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn errors_scoped_under_named_bag_when_header_set() {
+    let req = MockReq::new("/")
+        .inertia()
+        .header("X-Inertia-Error-Bag", "registration");
+    let resp = InertiaResponse::new("Home").resolve(&req).await.unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    // Errors are now `errors: { registration: {} }`.
+    let errors = page["props"]["errors"].as_object().unwrap();
+    assert!(errors.contains_key("registration"));
+    assert!(errors["registration"].is_object());
+}
+
+#[tokio::test]
+async fn empty_error_bag_header_treated_as_unset() {
+    let req = MockReq::new("/")
+        .inertia()
+        .header("X-Inertia-Error-Bag", "  ");
+    let resp = InertiaResponse::new("Home").resolve(&req).await.unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    // Whitespace-only / empty bag should fall back to flat shape.
+    let errors = page["props"]["errors"].as_object().unwrap();
+    assert!(errors.is_empty(), "expected flat errors, got {:?}", errors);
+}
+
+// ---- X-Inertia-Reset header ----
+//
+// When the client sends X-Inertia-Reset with merge-prop key names, the
+// server resolves those props normally but suppresses the merge
+// metadata so the client treats the response as a fresh replacement
+// (not an append).
+
+#[tokio::test]
+async fn x_inertia_reset_strips_merge_metadata() {
+    let req = MockReq::new("/posts")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Posts/Index")
+        .header("X-Inertia-Partial-Data", "posts")
+        .header("X-Inertia-Reset", "posts");
+    let resp = InertiaResponse::new("Posts/Index")
+        .merge("posts", serde_json::json!([{"id": 1}]))
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    // Value is present
+    assert_eq!(page["props"]["posts"], serde_json::json!([{"id": 1}]));
+    // …but merge metadata is suppressed because client asked for reset.
+    let obj = page.as_object().unwrap();
+    let merge_props = obj
+        .get("mergeProps")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let names: Vec<&str> = merge_props.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        !names.contains(&"posts"),
+        "reset key must NOT appear in mergeProps"
+    );
+}
+
+#[tokio::test]
+async fn x_inertia_reset_does_not_affect_non_reset_merges() {
+    let req = MockReq::new("/posts")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Posts/Index")
+        .header("X-Inertia-Partial-Data", "posts,comments")
+        .header("X-Inertia-Reset", "comments");
+    let resp = InertiaResponse::new("Posts/Index")
+        .merge("posts", serde_json::json!([{"id": 1}]))
+        .merge("comments", serde_json::json!([{"id": 2}]))
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    let merge_props: Vec<&str> = page["mergeProps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(merge_props.contains(&"posts"));
+    assert!(!merge_props.contains(&"comments"));
+}
+
+#[tokio::test]
+async fn x_inertia_reset_empty_header_is_noop() {
+    let req = MockReq::new("/posts")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Posts/Index")
+        .header("X-Inertia-Partial-Data", "posts")
+        .header("X-Inertia-Reset", "");
+    let resp = InertiaResponse::new("Posts/Index")
+        .merge("posts", serde_json::json!([{"id": 1}]))
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    let merge_props: Vec<&str> = page["mergeProps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(merge_props.contains(&"posts"));
 }
 
 // ---- Cross-redirect carry: Redirect::preserve_fragment() round-trip ----

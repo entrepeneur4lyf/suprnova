@@ -30,22 +30,40 @@
 //! newer version.
 
 use crate::http::{HttpResponse, Request, Response};
+use crate::inertia::config::VersionResolver;
 use crate::middleware::{Middleware, Next};
 use async_trait::async_trait;
 
 /// Asset-version mismatch detector. Compares the request's
-/// `X-Inertia-Version` against a configured version string and returns
+/// `X-Inertia-Version` against the configured version and returns
 /// `409 + X-Inertia-Location: <url>` on mismatch.
+///
+/// Accepts either a static version string or a dynamic resolver via
+/// [`VersionResolver`]. The dynamic resolver runs on every request so
+/// the middleware stays in sync with build-time changes (hot reloads,
+/// rolling deploys).
 pub struct InertiaVersionMiddleware {
-    version: String,
+    version: VersionResolver,
 }
 
 impl InertiaVersionMiddleware {
-    /// Create a new middleware with the configured asset version. Typically
-    /// constructed from [`crate::inertia::InertiaConfig::version`].
+    /// Create a new middleware with a static asset version. Use
+    /// [`with_resolver`](Self::with_resolver) for dynamic versions.
     pub fn new(version: impl Into<String>) -> Self {
         Self {
-            version: version.into(),
+            version: VersionResolver::Static(version.into()),
+        }
+    }
+
+    /// Create a new middleware that resolves the asset version via the
+    /// given closure on every request. Wrap any caching inside the
+    /// closure.
+    pub fn with_resolver<F>(f: F) -> Self
+    where
+        F: Fn() -> String + Send + Sync + 'static,
+    {
+        Self {
+            version: VersionResolver::with(f),
         }
     }
 }
@@ -67,15 +85,16 @@ impl Middleware for InertiaVersionMiddleware {
             return next(request).await;
         }
 
+        let server_version = self.version.resolve();
         let client_version = request.inertia_version().unwrap_or("");
-        if client_version == self.version {
+        if client_version == server_version {
             return next(request).await;
         }
 
         // Mismatch — bounce the client to do a full-page visit at the
         // same URL so it picks up the new assets.
         let url = request.path().to_string();
-        Err(HttpResponse::text("")
+        Err(HttpResponse::new()
             .status(409)
             .header("X-Inertia-Location", url))
     }

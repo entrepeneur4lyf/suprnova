@@ -350,15 +350,24 @@ impl InertiaResponse {
         let url = req.path().to_string();
         let is_inertia_request = req.is_inertia();
         let filter = PartialFilter::build(req, &self.component);
-        let except_once: Vec<String> = req
-            .header("X-Inertia-Except-Once-Props")
-            .map(|raw| {
-                raw.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let except_once: Vec<String> = parse_csv_header(req, "X-Inertia-Except-Once-Props");
+        // `X-Inertia-Reset` lists merge-prop keys the client wants to
+        // start fresh from. We resolve their values normally (so the
+        // client gets the current data) but omit the merge metadata so
+        // the client treats the value as a replacement, not an append.
+        // See `inertia-3.1.1/packages/core/src/requestParams.ts`: the
+        // client puts reset keys into `only` AND `X-Inertia-Reset`, so
+        // the partial filter already guarantees inclusion.
+        let reset_keys: Vec<String> = parse_csv_header(req, "X-Inertia-Reset");
+        // `X-Inertia-Error-Bag` scopes the `errors` prop under a named
+        // bag, so multiple forms on a page can have isolated validation
+        // errors. `errors: {}` becomes `errors: { bag_name: {} }`. When
+        // validation parity wires real errors in, this is where they
+        // get scoped.
+        let error_bag: Option<String> = req
+            .header("X-Inertia-Error-Bag")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
         let Self {
             component,
@@ -393,22 +402,40 @@ impl InertiaResponse {
         //   1. Static shared registry  (App::inertia_share, App::inertia_share_lazy)
         //   2. Trait-registered shared data (InertiaSharedData::share)
         //   3. User-supplied props attached via the builder
+        //
+        // Track the union of (1) + (2) as `shared_keys` so the page
+        // object can advertise them under `sharedProps` (the client
+        // uses this for instant-swap during navigation — see
+        // `inertia-3.1.1/packages/core/src/router.ts` `performInstantSwap`).
         let registry = App::inertia_registry();
         let mut merged: IndexMap<String, Prop> = IndexMap::new();
+        let mut shared_keys: Vec<String> = Vec::new();
         for (k, v) in registry.snapshot_static() {
+            if !shared_keys.contains(&k) {
+                shared_keys.push(k.clone());
+            }
             merged.insert(k, v);
         }
         if let Some(provider) = registry.trait_provider() {
             let trait_shared = provider.share(req).await?;
             for (k, v) in trait_shared {
+                if !shared_keys.contains(&k) {
+                    shared_keys.push(k.clone());
+                }
                 merged.insert(k, v);
             }
         }
         for (k, v) in props {
+            // Note: when user props override a shared key, we keep the
+            // key in `shared_keys` per the Inertia v3 client contract —
+            // the client reads the value from `props` (user's override)
+            // and uses `sharedProps` only as a key list.
             merged.insert(k, v);
         }
 
-        let (materialized, metadata) = resolve_props(merged, &filter, &except_once).await?;
+        let (materialized, metadata) =
+            resolve_props(merged, &filter, &except_once, &reset_keys, error_bag.as_deref())
+                .await?;
 
         // Combine response-builder flash + task-local flash bag (App::flash).
         let mut flash = response_flash;
@@ -426,6 +453,7 @@ impl InertiaResponse {
             resolved_encrypt_history,
             clear_history,
             resolved_preserve_fragment,
+            shared_keys,
         );
 
         Ok(if is_inertia_request {
@@ -454,7 +482,7 @@ impl InertiaResponse {
             preserve_fragment,
         } = self;
         let (materialized, metadata) =
-            resolve_props(props, filter, &[])
+            resolve_props(props, filter, &[], &[], None)
                 .await
                 .expect("test resolver should not fail");
         let resolved_encrypt_history = encrypt_history
@@ -462,6 +490,8 @@ impl InertiaResponse {
         // Test helper doesn't run inside a session scope, so we never
         // pick up a flashed flag here — only the explicit override.
         let resolved_preserve_fragment = preserve_fragment.unwrap_or(false);
+        // The test helper does not exercise the shared-data registry.
+        let shared_keys: Vec<String> = Vec::new();
         build_page_object(
             &component,
             materialized,
@@ -472,6 +502,7 @@ impl InertiaResponse {
             resolved_encrypt_history,
             clear_history,
             resolved_preserve_fragment,
+            shared_keys,
         )
     }
 
@@ -533,20 +564,49 @@ enum TaskOutcome {
     },
 }
 
+/// Parse a CSV header into a deduped list of trimmed, non-empty values.
+fn parse_csv_header<R: InertiaRequestExt>(req: &R, name: &str) -> Vec<String> {
+    req.header(name)
+        .map(|raw| {
+            raw.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Walk the prop bag, apply per-variant filtering / metadata rules, await
 /// resolver closures concurrently, and return both the materialized prop
 /// map and the page-object metadata.
+///
+/// `reset_keys` is the `X-Inertia-Reset` list: merge-prop keys the
+/// client wants to start fresh from. For those keys we resolve the
+/// value normally but suppress the merge metadata, so the client
+/// treats the value as a replacement rather than an append.
 async fn resolve_props(
     props: IndexMap<String, Prop>,
     filter: &PartialFilter,
     except_once: &[String],
+    reset_keys: &[String],
+    error_bag: Option<&str>,
 ) -> Result<(serde_json::Map<String, Value>, PageMetadata), FrameworkError> {
     let mut materialized = serde_json::Map::new();
     let mut metadata = PageMetadata::default();
 
     // `errors` is always present per the Inertia v3 contract. Populated
     // from session flash + validation when those land; empty otherwise.
-    materialized.insert("errors".to_string(), Value::Object(serde_json::Map::new()));
+    // When `X-Inertia-Error-Bag` is set, errors are scoped under the
+    // bag name: `errors: { bag_name: {...} }` instead of `errors: {...}`.
+    let errors_inner = Value::Object(serde_json::Map::new());
+    let errors_value = if let Some(bag) = error_bag {
+        let mut wrapper = serde_json::Map::new();
+        wrapper.insert(bag.to_string(), errors_inner);
+        Value::Object(wrapper)
+    } else {
+        errors_inner
+    };
+    materialized.insert("errors".to_string(), errors_value);
 
     let mut tasks: Vec<
         std::pin::Pin<
@@ -613,13 +673,23 @@ async fn resolve_props(
                 if filter.should_include_eager(&key) {
                     let resolver = c.resolver;
                     let strategy = c.strategy;
+                    // X-Inertia-Reset: when the client asks to reset
+                    // this merge key, resolve the value normally but
+                    // emit it as a plain `Insert` so no merge metadata
+                    // attaches. The client then treats the value as a
+                    // replacement, not an append.
+                    let is_reset = reset_keys.iter().any(|k| k == &key);
                     tasks.push(Box::pin(async move {
                         let v = resolver().await?;
-                        Ok(TaskOutcome::Merge {
-                            key,
-                            value: v,
-                            strategy,
-                        })
+                        if is_reset {
+                            Ok(TaskOutcome::Insert { key, value: v })
+                        } else {
+                            Ok(TaskOutcome::Merge {
+                                key,
+                                value: v,
+                                strategy,
+                            })
+                        }
                     }));
                 }
             }
@@ -728,6 +798,7 @@ fn build_page_object(
     encrypt_history: bool,
     clear_history: bool,
     preserve_fragment: bool,
+    shared_keys: Vec<String>,
 ) -> Value {
     let mut page = serde_json::Map::new();
     page.insert(
@@ -736,7 +807,7 @@ fn build_page_object(
     );
     page.insert("props".to_string(), Value::Object(materialized_props));
     page.insert("url".to_string(), Value::String(url));
-    page.insert("version".to_string(), Value::String(config.version.clone()));
+    page.insert("version".to_string(), Value::String(config.version.resolve()));
 
     // Per spec, `encryptHistory` / `clearHistory` / `preserveFragment`
     // are only emitted when `true`. Falsy values are omitted to keep
@@ -840,6 +911,17 @@ fn build_page_object(
             })
             .collect::<serde_json::Map<_, _>>();
         page.insert("onceProps".to_string(), Value::Object(once));
+    }
+
+    // `sharedProps` lists the keys that came from the shared registry
+    // (static + trait). The client uses this during instant-swap visits
+    // to carry shared values across navigations. Omit when empty so
+    // small responses stay small.
+    if !shared_keys.is_empty() {
+        page.insert(
+            "sharedProps".to_string(),
+            Value::Array(shared_keys.into_iter().map(Value::String).collect()),
+        );
     }
 
     Value::Object(page)

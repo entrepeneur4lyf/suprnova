@@ -7,7 +7,7 @@ mod response;
 mod shared;
 mod version_middleware;
 
-pub use config::{Frontend, InertiaConfig};
+pub use config::{Frontend, InertiaConfig, VersionResolver};
 pub use conversion_middleware::Inertia303Middleware;
 pub use encrypt_middleware::EncryptHistoryMiddleware;
 pub use prop::{
