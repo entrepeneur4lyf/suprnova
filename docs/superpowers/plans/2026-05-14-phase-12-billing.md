@@ -1,12 +1,23 @@
-# Phase 12: Billing (Cashier-style) Implementation Plan
+# Phase 12: Billing (Cashier-style on PayRail) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Subscription billing facade matching Laravel Cashier: a single `Billable` trait on the user model exposing `subscribe(plan)`, `subscription("default").cancel()`, `invoiceFor(...)`, `redirectToBillingPortal()`. Two driver backends — Stripe and Paddle — behind a common `BillingProvider` trait. Webhook handlers for both with signature verification. Invoice PDF rendering. Trial periods, proration, dunning emails.
+**Goal:** Laravel-Cashier-shape subscription billing — `user.subscribe("pro", "price_xxx").await?`, `user.subscription("pro").cancel().await?`, `Invoice::for_subscription(...).render_pdf()`, customer-portal redirects, webhook → typed event fanout. Built on top of [`payrail`](https://github.com/boniface/payrail) (MIT/Apache-2.0) for the payment-rails layer, with Suprnova owning the subscription / invoice business-logic layer on top.
 
-**Architecture:** `framework/src/billing/` ships the trait surface; drivers live in `billing/providers/{stripe,paddle}.rs` behind feature flags. Each provider implements `BillingProvider`. The `Billable` trait is an extension on the user model — derive `#[derive(Billable)]` to get the subscription methods automatically. Subscriptions persist in a `subscriptions` table that the framework owns. Webhooks dispatch typed events (`SubscriptionCreated`, `InvoicePaid`, `SubscriptionCancelled`) through Phase 1's event system — app listeners react.
+**Architecture — two distinct layers:**
 
-**Tech Stack:** `stripe-rust` 0.39 (Stripe SDK), `paddle-rs` 0.2 (Paddle SDK; alternatively raw HTTP via `Http::` from Phase 2 if SDK quality varies), `genpdf` 0.2 or `printpdf` 0.7 for invoice PDFs. Reuses Phase 1 events, Phase 5 mail, Phase 2 HTTP client, Phase 2 encryption (for webhook signature verification).
+| Layer | Source | Responsibility |
+|---|---|---|
+| **Payment rails** | **PayRail** | One-time charges, refunds, captures, webhook signature verification + normalized `PaymentEvent`, provider routing across Stripe / PayPal / Lipila / MTN MoMo / M-Pesa / Airtel Money / Flutterwave / Paystack / Orange Money / Circle / Coinbase / Bridge / Binance |
+| **Subscription business logic** | **Ours** | `Subscription` model + lifecycle (trialing → active → past_due → cancelled), `Invoice` + PDF rendering, period-end charging job, `Billable` user trait, customer-portal redirects, typed event fanout (`SubscriptionCreated` / `InvoicePaid` / `SubscriptionCancelled` / `TrialEnding`) via Phase 1 `EventDispatcher` |
+
+The bridge: a single `WebhookHandler` per provider receives the raw payload, asks PayRail to verify the signature + normalize into `PaymentEvent`, then our subscription state machine reacts (mark invoice paid, transition subscription to past_due, etc.) and dispatches typed framework events. App listeners hook those via `Event::listen::<InvoicePaid>(...)`.
+
+**Why PayRail over Hyperswitch:** PayRail is a library; Hyperswitch is a deployment. PayRail's 13 builtin providers cover the markets Laravel Cashier doesn't reach — Mobile Money for African markets (Lipila, MTN MoMo, M-Pesa, Airtel, Orange) and crypto rails (Circle, Coinbase, Bridge, Binance) — without our consumers running a separate payments-router service.
+
+**Paddle note:** Paddle is not in PayRail's `BuiltinProvider` enum. v1 of Phase 12 ships without Paddle; if a consumer needs it, the path is (a) fork PayRail into workspace as `suprnova-payrail` and add a `Paddle` variant, or (b) contribute upstream. Documented under "Out of v1 scope" below.
+
+**Tech Stack:** `payrail` (`path = "../reference/payrail-0.1.5/crates/payrail"`, feature `all-providers`), `printpdf` 0.7 for invoice PDFs, reuses Phase 1 events, Phase 5 mail, Phase 5 queue (for period-end charging job), Phase 2 HTTP (for billing-portal URL retrieval where the provider needs it).
 
 ---
 
@@ -14,237 +25,294 @@
 
 **New files:**
 - `framework/src/billing/mod.rs` — `Billable` trait, `Subscription` model, facade
-- `framework/src/billing/provider.rs` — `BillingProvider` trait, registry
-- `framework/src/billing/providers/stripe.rs` — Stripe driver
-- `framework/src/billing/providers/paddle.rs` — Paddle driver
-- `framework/src/billing/webhook.rs` — `WebhookMiddleware`, signature verification per provider
-- `framework/src/billing/events.rs` — `SubscriptionCreated`, `InvoicePaid`, `SubscriptionCancelled`, `TrialEnding`
+- `framework/src/billing/subscription.rs` — lifecycle state machine
 - `framework/src/billing/invoice.rs` — `Invoice` struct + PDF rendering
+- `framework/src/billing/period_job.rs` — `ChargeSubscriptionJob` (period-end charging)
+- `framework/src/billing/webhook.rs` — per-provider webhook handlers, PayRail-bridge
+- `framework/src/billing/events.rs` — typed framework events
+- `framework/src/billing/portal.rs` — customer-portal URL builders (provider-specific)
 - `framework/src/billing/migrations/m_create_subscriptions_table.rs`
 - `framework/src/billing/migrations/m_create_invoices_table.rs`
 - `framework/src/billing/migrations/m_add_billing_columns_to_users.rs`
-- `framework/tests/billing.rs` — end-to-end with mock provider
+- `framework/tests/billing.rs` — end-to-end with PayRail mock provider
 - `app/src/listeners/billing_listener.rs` — dogfood
+
+**Modified files:**
+- `framework/Cargo.toml` — add `payrail = { path = "../reference/payrail-0.1.5/crates/payrail", features = ["all-providers"] }`, `printpdf`
+- `framework/src/lib.rs` — re-export `Billable`, `Subscription`, `Invoice`
 
 ---
 
-## Task 1: Migrations + dep flags
+## Task 1: Add deps + migrations
 
 **Files:** `framework/Cargo.toml`, migrations
 
-- [ ] **Step 1: Add feature-gated deps**
+- [ ] **Step 1: Add deps**
 
 ```toml
-# framework/Cargo.toml
-[features]
-billing = []
-billing-stripe = ["billing", "dep:stripe-rust"]
-billing-paddle = ["billing", "dep:paddle-rs"]
-
-[dependencies]
-stripe-rust = { version = "0.39", optional = true }
-paddle-rs = { version = "0.2", optional = true }
+# framework/Cargo.toml — [dependencies]
+payrail = { path = "../reference/payrail-0.1.5/crates/payrail", features = ["all-providers"] }
 printpdf = "0.7"
 ```
 
-- [ ] **Step 2: Schema** (sketch — implementer fills full SeaORM migration)
+- [ ] **Step 2: Verify build**
+
+```bash
+cargo check --workspace
+```
+
+- [ ] **Step 3: Migration schemas**
 
 ```rust
 // framework/src/billing/migrations/m_create_subscriptions_table.rs
-// Columns: id, user_id, provider, provider_subscription_id, plan, status,
-//          trial_ends_at, ends_at, quantity, created_at, updated_at
-//
-// Indexed by (user_id, status) for the common "find active sub" query.
+// CREATE TABLE subscriptions (
+//   id BIGINT PRIMARY KEY AUTO_INCREMENT,
+//   user_id BIGINT NOT NULL,
+//   name VARCHAR(64) NOT NULL,             -- "default" | "pro" | "addons" | ...
+//   provider VARCHAR(32) NOT NULL,          -- "Stripe" | "PayPal" | "Lipila" | ...
+//   provider_subscription_id VARCHAR(128),  -- PayRail ProviderReference for the subscription, when the rails offer one
+//   price_id VARCHAR(128) NOT NULL,
+//   status VARCHAR(32) NOT NULL,            -- "trialing" | "active" | "past_due" | "cancelled" | "incomplete"
+//   trial_ends_at DATETIME,
+//   current_period_start DATETIME NOT NULL,
+//   current_period_end DATETIME NOT NULL,
+//   cancel_at_period_end BOOLEAN NOT NULL DEFAULT FALSE,
+//   ends_at DATETIME,
+//   quantity INTEGER NOT NULL DEFAULT 1,
+//   metadata JSON,
+//   created_at DATETIME NOT NULL,
+//   updated_at DATETIME NOT NULL,
+//   INDEX (user_id, status),
+//   INDEX (current_period_end, status)
+// );
 ```
 
 ```rust
 // framework/src/billing/migrations/m_create_invoices_table.rs
-// Columns: id, subscription_id, provider_invoice_id, amount_cents,
-//          currency, status, period_start, period_end, paid_at, created_at
+// CREATE TABLE invoices (
+//   id BIGINT PRIMARY KEY AUTO_INCREMENT,
+//   subscription_id BIGINT,                 -- NULL for one-off invoices
+//   user_id BIGINT NOT NULL,
+//   number VARCHAR(64) NOT NULL UNIQUE,     -- "INV-2026-000123"
+//   provider VARCHAR(32) NOT NULL,
+//   provider_invoice_id VARCHAR(128),       -- PayRail PaymentId where applicable
+//   amount_cents BIGINT NOT NULL,
+//   currency VARCHAR(3) NOT NULL,
+//   status VARCHAR(32) NOT NULL,            -- "open" | "paid" | "void" | "uncollectible"
+//   period_start DATETIME,
+//   period_end DATETIME,
+//   paid_at DATETIME,
+//   line_items JSON NOT NULL,
+//   created_at DATETIME NOT NULL,
+//   INDEX (user_id, status),
+//   INDEX (subscription_id)
+// );
 ```
 
 ```rust
 // framework/src/billing/migrations/m_add_billing_columns_to_users.rs
-// Columns to add to users: stripe_customer_id (nullable),
-// paddle_customer_id (nullable), trial_ends_at (nullable).
+// ALTER TABLE users
+//   ADD COLUMN stripe_customer_id VARCHAR(128),
+//   ADD COLUMN paypal_customer_id VARCHAR(128),
+//   ADD COLUMN lipila_customer_id VARCHAR(128),
+//   ADD COLUMN preferred_payment_provider VARCHAR(32),
+//   ADD COLUMN trial_ends_at DATETIME;
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add framework/Cargo.toml framework/src/billing/migrations Cargo.lock
-git commit -m "feat(billing): migrations + feature-gated stripe / paddle deps"
+git add framework/Cargo.toml Cargo.lock framework/src/billing/migrations
+git commit -m "feat(billing): add payrail + printpdf deps + subscription/invoice migrations"
 ```
 
 ---
 
-## Task 2: BillingProvider trait + Billable trait
+## Task 2: PayRail client + Subscription / Billable foundations
 
-**Files:** `framework/src/billing/mod.rs`, `framework/src/billing/provider.rs`
+**Files:** `framework/src/billing/mod.rs`, `framework/src/billing/subscription.rs`
 
-- [ ] **Step 1: Implement**
+- [ ] **Step 1: Write failing test**
 
 ```rust
-// framework/src/billing/provider.rs
-use crate::FrameworkError;
-use async_trait::async_trait;
+// framework/tests/billing.rs
+use suprnova::{Billable, Subscription};
 
-#[async_trait]
-pub trait BillingProvider: Send + Sync {
-    /// Create or look up the customer on the provider for this user.
-    async fn create_or_find_customer(&self, user_id: i64, email: &str) -> Result<String, FrameworkError>;
-
-    /// Subscribe a customer to a plan/price.
-    async fn create_subscription(
-        &self,
-        customer_id: &str,
-        price_id: &str,
-        trial_days: Option<u32>,
-    ) -> Result<ProviderSubscription, FrameworkError>;
-
-    /// Cancel an existing subscription (graceful — ends at period end).
-    async fn cancel_subscription(&self, provider_subscription_id: &str) -> Result<(), FrameworkError>;
-
-    /// Cancel immediately (no remaining grace).
-    async fn cancel_now(&self, provider_subscription_id: &str) -> Result<(), FrameworkError>;
-
-    /// Resume a previously-cancelled subscription within its grace period.
-    async fn resume(&self, provider_subscription_id: &str) -> Result<(), FrameworkError>;
-
-    /// Swap to a different plan/price (proration handled by provider).
-    async fn swap(&self, provider_subscription_id: &str, new_price_id: &str) -> Result<(), FrameworkError>;
-
-    /// One-off charge for an invoice line item.
-    async fn invoice_for(
-        &self,
-        customer_id: &str,
-        amount_cents: i64,
-        currency: &str,
-        description: &str,
-    ) -> Result<String, FrameworkError>;
-
-    /// Construct a URL to the provider's customer billing portal.
-    async fn billing_portal_url(&self, customer_id: &str, return_url: &str) -> Result<String, FrameworkError>;
-
-    /// Verify a webhook payload + signature header.
-    fn verify_webhook(&self, body: &[u8], signature: &str) -> Result<serde_json::Value, FrameworkError>;
+#[derive(Debug, Clone)]
+struct User {
+    id: i64,
+    email: String,
+    stripe_customer_id: Option<String>,
 }
 
-pub struct ProviderSubscription {
-    pub provider_subscription_id: String,
-    pub status: String,           // "active", "trialing", "past_due", "cancelled"
-    pub current_period_end: chrono::DateTime<chrono::Utc>,
-    pub trial_ends_at: Option<chrono::DateTime<chrono::Utc>>,
+#[suprnova::async_trait]
+impl Billable for User {
+    fn user_id(&self) -> i64 { self.id }
+    fn email(&self) -> &str { &self.email }
+
+    async fn provider_customer_id(&self, provider: &payrail::PaymentProvider) -> Option<String> {
+        match provider {
+            payrail::PaymentProvider::Stripe => self.stripe_customer_id.clone(),
+            _ => None,
+        }
+    }
+
+    async fn set_provider_customer_id(
+        &mut self,
+        provider: &payrail::PaymentProvider,
+        id: String,
+    ) -> Result<(), suprnova::FrameworkError> {
+        if matches!(provider, payrail::PaymentProvider::Stripe) {
+            self.stripe_customer_id = Some(id);
+        }
+        Ok(())
+    }
 }
 
-use std::sync::{Arc, Mutex, OnceLock};
-
-static REGISTRY: Mutex<Option<std::collections::HashMap<String, Arc<dyn BillingProvider>>>> = Mutex::new(None);
-
-pub fn register(name: impl Into<String>, provider: Arc<dyn BillingProvider>) {
-    let mut g = REGISTRY.lock().unwrap();
-    let map = g.get_or_insert_with(std::collections::HashMap::new);
-    map.insert(name.into(), provider);
+#[tokio::test]
+async fn subscription_starts_in_trialing_when_trial_period_supplied() {
+    let user = User { id: 1, email: "alice@example.com".into(), stripe_customer_id: None };
+    let sub = Subscription::new_trialing(
+        user.id,
+        "pro",
+        payrail::PaymentProvider::Stripe,
+        "price_pro_monthly",
+        chrono::Duration::days(14),
+    );
+    assert_eq!(sub.status, "trialing");
+    assert!(sub.trial_ends_at.is_some());
+    assert!(sub.current_period_end > chrono::Utc::now());
 }
 
-pub fn get(name: &str) -> Result<Arc<dyn BillingProvider>, FrameworkError> {
-    let g = REGISTRY.lock().unwrap();
-    g.as_ref()
-        .and_then(|m| m.get(name).cloned())
-        .ok_or_else(|| FrameworkError::internal(format!("billing provider '{}' not registered", name)))
+#[tokio::test]
+async fn subscription_status_transitions_match_state_machine() {
+    let mut sub = make_active_sub();
+    sub.mark_past_due();
+    assert_eq!(sub.status, "past_due");
+    sub.mark_cancelled_at_period_end();
+    assert_eq!(sub.status, "active"); // still active until period end
+    assert!(sub.cancel_at_period_end);
+    sub.mark_ended();
+    assert_eq!(sub.status, "cancelled");
+}
+
+fn make_active_sub() -> Subscription {
+    Subscription {
+        id: 1,
+        user_id: 1,
+        name: "pro".into(),
+        provider: payrail::PaymentProvider::Stripe,
+        provider_subscription_id: Some("sub_xxx".into()),
+        price_id: "price_pro_monthly".into(),
+        status: "active".into(),
+        trial_ends_at: None,
+        current_period_start: chrono::Utc::now() - chrono::Duration::days(15),
+        current_period_end: chrono::Utc::now() + chrono::Duration::days(15),
+        cancel_at_period_end: false,
+        ends_at: None,
+        quantity: 1,
+        metadata: serde_json::json!({}),
+    }
 }
 ```
 
+- [ ] **Step 2: Implement**
+
 ```rust
 // framework/src/billing/mod.rs
-pub mod provider;
-pub mod providers;
-pub mod webhook;
+//! Subscription billing facade. Layered on top of `payrail` for the
+//! payment-rails (one-time charges, webhooks, multi-provider
+//! routing); we own the subscription lifecycle + invoices.
+
 pub mod events;
 pub mod invoice;
+pub mod migrations;
+pub mod period_job;
+pub mod portal;
+pub mod subscription;
+pub mod webhook;
+
+pub use events::{InvoicePaid, SubscriptionCancelled, SubscriptionCreated, TrialEnding};
+pub use invoice::{Invoice, LineItem};
+pub use subscription::Subscription;
 
 use crate::FrameworkError;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use payrail::PaymentProvider;
+use std::sync::OnceLock;
 
-pub use events::{InvoicePaid, SubscriptionCancelled, SubscriptionCreated, TrialEnding};
+/// The configured PayRail client. Initialized once in bootstrap.
+static PAYRAIL: OnceLock<payrail::PayRailClient> = OnceLock::new();
+
+pub fn set_payrail(client: payrail::PayRailClient) {
+    let _ = PAYRAIL.set(client);
+}
+
+pub(crate) fn payrail() -> Result<&'static payrail::PayRailClient, FrameworkError> {
+    PAYRAIL
+        .get()
+        .ok_or_else(|| FrameworkError::internal("payrail client not initialized — call billing::set_payrail in bootstrap"))
+}
 
 /// Trait implemented on user models for billing operations.
-///
-/// Once a user implements `Billable`, they can:
-/// ```ignore
-/// user.subscribe("default", "price_xxx").await?;
-/// user.subscription("default").cancel().await?;
-/// user.invoice_for(500, "usd", "one-time").await?;
-/// ```
 #[async_trait]
 pub trait Billable: Send + Sync {
     fn user_id(&self) -> i64;
     fn email(&self) -> &str;
 
-    /// Provider-specific customer id. Persist on the user row in
-    /// columns like `stripe_customer_id` / `paddle_customer_id`.
-    async fn provider_customer_id(&self, provider: &str) -> Result<Option<String>, FrameworkError>;
+    /// Provider-specific customer id from the user row.
+    async fn provider_customer_id(&self, provider: &PaymentProvider) -> Option<String>;
 
-    /// Persist the customer id after first creation.
-    async fn set_provider_customer_id(&mut self, provider: &str, id: &str) -> Result<(), FrameworkError>;
+    /// Persist a provider customer id back to the user row.
+    async fn set_provider_customer_id(
+        &mut self,
+        provider: &PaymentProvider,
+        id: String,
+    ) -> Result<(), FrameworkError>;
 
-    /// Start (or re-start) a subscription.
-    async fn subscribe(&mut self, name: &str, price_id: &str) -> Result<Subscription, FrameworkError> {
-        let provider = provider::get("default")?; // user can override via subscribe_with_provider
-        let customer_id = match self.provider_customer_id("default").await? {
-            Some(id) => id,
-            None => {
-                let id = provider.create_or_find_customer(self.user_id(), self.email()).await?;
-                self.set_provider_customer_id("default", &id).await?;
-                id
-            }
-        };
-        let prov_sub = provider.create_subscription(&customer_id, price_id, None).await?;
-        // Persist subscription row + dispatch SubscriptionCreated.
-        let sub = Subscription::persist(self.user_id(), name, &prov_sub).await?;
-        let _ = crate::Event::dispatch(SubscriptionCreated {
-            user_id: self.user_id(),
-            subscription_id: sub.id,
-            plan: price_id.to_string(),
-        })
-        .await;
-        Ok(sub)
+    /// Subscribe to a plan. Returns the new Subscription row.
+    async fn subscribe(
+        &mut self,
+        name: &str,
+        provider: PaymentProvider,
+        price_id: &str,
+    ) -> Result<Subscription, FrameworkError> {
+        subscription::create(self, name, provider, price_id, None).await
     }
 
+    async fn subscribe_with_trial(
+        &mut self,
+        name: &str,
+        provider: PaymentProvider,
+        price_id: &str,
+        trial_days: u32,
+    ) -> Result<Subscription, FrameworkError> {
+        subscription::create(self, name, provider, price_id, Some(trial_days)).await
+    }
+
+    /// Reference an existing subscription by name.
     fn subscription<'a>(&'a self, name: &'a str) -> SubscriptionRef<'a> {
         SubscriptionRef { user_id: self.user_id(), name }
     }
-}
 
-#[derive(Debug, Clone)]
-pub struct Subscription {
-    pub id: i64,
-    pub user_id: i64,
-    pub name: String,
-    pub provider_subscription_id: String,
-    pub status: String,
-    pub trial_ends_at: Option<DateTime<Utc>>,
-    pub ends_at: Option<DateTime<Utc>>,
-}
+    /// One-off charge through PayRail.
+    async fn invoice_for(
+        &self,
+        provider: PaymentProvider,
+        amount_cents: i64,
+        currency: &str,
+        description: &str,
+    ) -> Result<Invoice, FrameworkError> {
+        invoice::create_one_off(self, provider, amount_cents, currency, description).await
+    }
 
-impl Subscription {
-    pub async fn persist(
-        user_id: i64,
-        name: &str,
-        prov: &provider::ProviderSubscription,
-    ) -> Result<Self, FrameworkError> {
-        // Insert into `subscriptions` table via SeaORM. Sketch only —
-        // full impl is a straightforward ActiveModel insert.
-        Ok(Self {
-            id: 0, // populated by DB
-            user_id,
-            name: name.to_string(),
-            provider_subscription_id: prov.provider_subscription_id.clone(),
-            status: prov.status.clone(),
-            trial_ends_at: prov.trial_ends_at,
-            ends_at: None,
-        })
+    /// URL to the provider's customer billing portal.
+    async fn billing_portal_url(
+        &self,
+        provider: PaymentProvider,
+        return_url: &str,
+    ) -> Result<String, FrameworkError> {
+        portal::url_for(self, provider, return_url).await
     }
 }
 
@@ -255,388 +323,362 @@ pub struct SubscriptionRef<'a> {
 
 impl<'a> SubscriptionRef<'a> {
     pub async fn active(&self) -> Result<bool, FrameworkError> {
-        // SELECT status FROM subscriptions WHERE user_id = ? AND name = ?
-        Ok(true) // sketch
+        subscription::is_active(self.user_id, self.name).await
+    }
+
+    pub async fn on_trial(&self) -> Result<bool, FrameworkError> {
+        subscription::on_trial(self.user_id, self.name).await
     }
 
     pub async fn cancel(&self) -> Result<(), FrameworkError> {
-        let provider = provider::get("default")?;
-        let prov_id = self.lookup_provider_id().await?;
-        provider.cancel_subscription(&prov_id).await?;
-        let _ = crate::Event::dispatch(SubscriptionCancelled {
-            user_id: self.user_id,
-            subscription_name: self.name.to_string(),
-        })
-        .await;
-        Ok(())
+        subscription::cancel_at_period_end(self.user_id, self.name).await
+    }
+
+    pub async fn cancel_now(&self) -> Result<(), FrameworkError> {
+        subscription::cancel_immediately(self.user_id, self.name).await
+    }
+
+    pub async fn resume(&self) -> Result<(), FrameworkError> {
+        subscription::resume(self.user_id, self.name).await
     }
 
     pub async fn swap(&self, new_price_id: &str) -> Result<(), FrameworkError> {
-        let provider = provider::get("default")?;
-        let prov_id = self.lookup_provider_id().await?;
-        provider.swap(&prov_id, new_price_id).await
+        subscription::swap(self.user_id, self.name, new_price_id).await
+    }
+}
+```
+
+```rust
+// framework/src/billing/subscription.rs
+//! Subscription model + lifecycle state machine. The model persists
+//! to the `subscriptions` table; the state machine is just typed
+//! method calls that update `status` and related columns.
+
+use crate::{Billable, FrameworkError};
+use chrono::{DateTime, Duration, Utc};
+use payrail::PaymentProvider;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Subscription {
+    pub id: i64,
+    pub user_id: i64,
+    pub name: String,
+    pub provider: PaymentProvider,
+    pub provider_subscription_id: Option<String>,
+    pub price_id: String,
+    pub status: String,
+    pub trial_ends_at: Option<DateTime<Utc>>,
+    pub current_period_start: DateTime<Utc>,
+    pub current_period_end: DateTime<Utc>,
+    pub cancel_at_period_end: bool,
+    pub ends_at: Option<DateTime<Utc>>,
+    pub quantity: i32,
+    pub metadata: serde_json::Value,
+}
+
+impl Subscription {
+    pub fn new_trialing(
+        user_id: i64,
+        name: &str,
+        provider: PaymentProvider,
+        price_id: &str,
+        trial_length: Duration,
+    ) -> Self {
+        let now = Utc::now();
+        let trial_end = now + trial_length;
+        Self {
+            id: 0,
+            user_id,
+            name: name.to_string(),
+            provider,
+            provider_subscription_id: None,
+            price_id: price_id.to_string(),
+            status: "trialing".into(),
+            trial_ends_at: Some(trial_end),
+            current_period_start: now,
+            current_period_end: trial_end,
+            cancel_at_period_end: false,
+            ends_at: None,
+            quantity: 1,
+            metadata: serde_json::json!({}),
+        }
     }
 
-    async fn lookup_provider_id(&self) -> Result<String, FrameworkError> {
-        // Query subscriptions table by user_id + name; return provider_subscription_id.
-        Ok("sub_xxx".into()) // sketch
+    pub fn mark_past_due(&mut self) {
+        self.status = "past_due".into();
     }
+
+    pub fn mark_active(&mut self) {
+        self.status = "active".into();
+    }
+
+    pub fn mark_cancelled_at_period_end(&mut self) {
+        self.cancel_at_period_end = true;
+    }
+
+    pub fn mark_ended(&mut self) {
+        self.status = "cancelled".into();
+        self.ends_at = Some(Utc::now());
+    }
+
+    pub fn is_on_trial(&self) -> bool {
+        self.status == "trialing" && self.trial_ends_at.map_or(false, |t| t > Utc::now())
+    }
+
+    pub fn is_active(&self) -> bool {
+        matches!(self.status.as_str(), "trialing" | "active")
+    }
+}
+
+/// Create a new subscription via PayRail.
+pub(crate) async fn create<B: Billable + ?Sized>(
+    user: &mut B,
+    name: &str,
+    provider: PaymentProvider,
+    price_id: &str,
+    trial_days: Option<u32>,
+) -> Result<Subscription, FrameworkError> {
+    // 1. Get or create the customer on the provider via PayRail.
+    let customer_id = ensure_customer(user, &provider).await?;
+    let _ = customer_id; // used by the actual provider charge below
+
+    // 2. Construct + persist the subscription row.
+    let mut sub = match trial_days {
+        Some(days) => Subscription::new_trialing(
+            user.user_id(),
+            name,
+            provider.clone(),
+            price_id,
+            Duration::days(days as i64),
+        ),
+        None => {
+            // Active immediately; charge the first period via PayRail.
+            let now = Utc::now();
+            Subscription {
+                id: 0,
+                user_id: user.user_id(),
+                name: name.to_string(),
+                provider: provider.clone(),
+                provider_subscription_id: None,
+                price_id: price_id.to_string(),
+                status: "active".into(),
+                trial_ends_at: None,
+                current_period_start: now,
+                current_period_end: now + Duration::days(30), // default monthly; real impl reads plan
+                cancel_at_period_end: false,
+                ends_at: None,
+                quantity: 1,
+                metadata: serde_json::json!({}),
+            }
+        }
+    };
+
+    // INSERT INTO subscriptions ... RETURNING id;
+    // (Sketch — implementer wires SeaORM ActiveModel insert.)
+    sub.id = persist_new(&sub).await?;
+
+    // 3. If not on trial, charge the first period via PayRail.
+    if !sub.is_on_trial() {
+        // Use payrail::CreatePaymentRequest, including idempotency key
+        // derived from (user_id, subscription_id, period_start).
+        // Sketch — concrete CreatePaymentRequest construction depends
+        // on what `payrail` expects per provider; read
+        // reference/payrail-0.1.5/crates/payrail/src/core/payment.rs
+        // for the builder.
+    }
+
+    let _ = crate::Event::dispatch(crate::billing::events::SubscriptionCreated {
+        user_id: sub.user_id,
+        subscription_id: sub.id,
+        plan: sub.price_id.clone(),
+        provider: format!("{:?}", sub.provider),
+    })
+    .await;
+
+    Ok(sub)
+}
+
+pub(crate) async fn is_active(user_id: i64, name: &str) -> Result<bool, FrameworkError> {
+    let sub = find_by_user_name(user_id, name).await?;
+    Ok(sub.map_or(false, |s| s.is_active()))
+}
+
+pub(crate) async fn on_trial(user_id: i64, name: &str) -> Result<bool, FrameworkError> {
+    let sub = find_by_user_name(user_id, name).await?;
+    Ok(sub.map_or(false, |s| s.is_on_trial()))
+}
+
+pub(crate) async fn cancel_at_period_end(user_id: i64, name: &str) -> Result<(), FrameworkError> {
+    let mut sub = require(user_id, name).await?;
+    sub.mark_cancelled_at_period_end();
+    update(&sub).await?;
+    let _ = crate::Event::dispatch(crate::billing::events::SubscriptionCancelled {
+        user_id,
+        subscription_name: name.to_string(),
+        immediate: false,
+    })
+    .await;
+    Ok(())
+}
+
+pub(crate) async fn cancel_immediately(user_id: i64, name: &str) -> Result<(), FrameworkError> {
+    let mut sub = require(user_id, name).await?;
+    sub.mark_ended();
+    update(&sub).await?;
+    let _ = crate::Event::dispatch(crate::billing::events::SubscriptionCancelled {
+        user_id,
+        subscription_name: name.to_string(),
+        immediate: true,
+    })
+    .await;
+    Ok(())
+}
+
+pub(crate) async fn resume(user_id: i64, name: &str) -> Result<(), FrameworkError> {
+    let mut sub = require(user_id, name).await?;
+    sub.cancel_at_period_end = false;
+    update(&sub).await
+}
+
+pub(crate) async fn swap(user_id: i64, name: &str, new_price_id: &str) -> Result<(), FrameworkError> {
+    let mut sub = require(user_id, name).await?;
+    sub.price_id = new_price_id.to_string();
+    update(&sub).await
+}
+
+async fn ensure_customer<B: Billable + ?Sized>(
+    user: &mut B,
+    provider: &PaymentProvider,
+) -> Result<String, FrameworkError> {
+    if let Some(id) = user.provider_customer_id(provider).await {
+        return Ok(id);
+    }
+    // Create on the provider via PayRail. Sketch — PayRail's customer
+    // creation surface; verify against payrail's `Customer` type and
+    // the per-provider creation method on `PayRailClient`.
+    let id = format!("cust_{}_{}", user.user_id(), uuid::Uuid::new_v4());
+    user.set_provider_customer_id(provider, id.clone()).await?;
+    Ok(id)
+}
+
+// === Persistence stubs — implementer wires SeaORM ActiveModel ===
+async fn persist_new(_sub: &Subscription) -> Result<i64, FrameworkError> {
+    unimplemented!("INSERT INTO subscriptions RETURNING id via SeaORM ActiveModel")
+}
+async fn update(_sub: &Subscription) -> Result<(), FrameworkError> {
+    unimplemented!("UPDATE subscriptions ... via SeaORM ActiveModel")
+}
+async fn find_by_user_name(_user_id: i64, _name: &str) -> Result<Option<Subscription>, FrameworkError> {
+    unimplemented!("SELECT FROM subscriptions WHERE user_id = ? AND name = ?")
+}
+async fn require(user_id: i64, name: &str) -> Result<Subscription, FrameworkError> {
+    find_by_user_name(user_id, name)
+        .await?
+        .ok_or_else(|| FrameworkError::model_not_found("Subscription"))
 }
 ```
 
 ```rust
 // framework/src/lib.rs
 pub mod billing;
-pub use billing::{Billable, Subscription};
+pub use billing::{Billable, Invoice, Subscription};
 ```
 
-- [ ] **Step 2: Commit**
+> **PayRail builder + CreatePaymentRequest:** Verify the exact `PayRailBuilder` / `PayRailClient` / `CreatePaymentRequest` shapes via `reference/payrail-0.1.5/crates/payrail/src/{builder,client,core/payment}.rs`. The sketch above describes the architecture; field-by-field wiring is implementer work.
+
+- [ ] **Step 3: Run + commit**
 
 ```bash
-git add framework/src/billing framework/src/lib.rs
-git commit -m "feat(billing): BillingProvider trait + Billable + Subscription model"
+cargo test -p suprnova --test billing
+git add framework/src/billing framework/src/lib.rs framework/tests/billing.rs
+git commit -m "feat(billing): Billable trait + Subscription model + lifecycle state machine"
 ```
 
 ---
 
-## Task 3: Stripe driver
+## Task 3: Bootstrap PayRail client
 
-**Files:** `framework/src/billing/providers/stripe.rs`
+**Files:** `app/src/bootstrap.rs`, `framework/src/billing/mod.rs`
 
-- [ ] **Step 1: Implement**
+- [ ] **Step 1: Bootstrap helper**
 
 ```rust
-// framework/src/billing/providers/stripe.rs
-use crate::billing::provider::{BillingProvider, ProviderSubscription};
-use crate::FrameworkError;
-use async_trait::async_trait;
-use stripe::{Client, Customer, CustomerId, Subscription, SubscriptionId};
+// framework/src/billing/mod.rs — append
+use payrail::PayRailBuilder;
 
-pub struct StripeProvider {
-    client: Client,
-    webhook_secret: String,
-}
+/// Convenience builder for the standard "Stripe + PayPal + Lipila"
+/// configuration. Apps with more exotic provider needs build the
+/// PayRailClient directly and pass it to `set_payrail`.
+pub async fn use_standard() -> Result<(), FrameworkError> {
+    let mut builder = PayRailBuilder::default();
 
-impl StripeProvider {
-    pub fn new(secret_key: impl Into<String>, webhook_secret: impl Into<String>) -> Self {
-        Self {
-            client: Client::new(secret_key),
-            webhook_secret: webhook_secret.into(),
-        }
+    // Each provider check is feature-gated against payrail's feature
+    // flags + env vars present.
+    #[cfg(feature = "billing-stripe")]
+    if let Ok(key) = std::env::var("STRIPE_SECRET_KEY") {
+        let webhook_secret = std::env::var("STRIPE_WEBHOOK_SECRET").ok();
+        builder = builder.with_stripe(payrail::StripeConfig::new(
+            secrecy::SecretString::from(key),
+            webhook_secret.map(secrecy::SecretString::from),
+        ));
     }
-}
-
-#[async_trait]
-impl BillingProvider for StripeProvider {
-    async fn create_or_find_customer(&self, _user_id: i64, email: &str) -> Result<String, FrameworkError> {
-        // Search for existing customer by email first, then create.
-        let params = stripe::CreateCustomer {
-            email: Some(email),
-            ..Default::default()
-        };
-        let cust = Customer::create(&self.client, params)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("stripe: {}", e)))?;
-        Ok(cust.id.to_string())
+    #[cfg(feature = "billing-paypal")]
+    if let (Ok(client_id), Ok(secret)) = (
+        std::env::var("PAYPAL_CLIENT_ID"),
+        std::env::var("PAYPAL_SECRET"),
+    ) {
+        builder = builder.with_paypal(payrail::PayPalConfig::new(client_id, secrecy::SecretString::from(secret)));
+    }
+    #[cfg(feature = "billing-lipila")]
+    if let Ok(key) = std::env::var("LIPILA_API_KEY") {
+        builder = builder.with_lipila(payrail::LipilaConfig::new(secrecy::SecretString::from(key)));
     }
 
-    async fn create_subscription(
-        &self,
-        customer_id: &str,
-        price_id: &str,
-        trial_days: Option<u32>,
-    ) -> Result<ProviderSubscription, FrameworkError> {
-        let cust_id: CustomerId = customer_id
-            .parse()
-            .map_err(|e| FrameworkError::internal(format!("customer id: {}", e)))?;
-        let mut params = stripe::CreateSubscription::new(cust_id);
-        params.items = Some(vec![stripe::CreateSubscriptionItems {
-            price: Some(price_id.to_string()),
-            ..Default::default()
-        }]);
-        if let Some(days) = trial_days {
-            params.trial_period_days = Some(days);
-        }
-        let sub = Subscription::create(&self.client, params)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("stripe sub: {}", e)))?;
-        Ok(ProviderSubscription {
-            provider_subscription_id: sub.id.to_string(),
-            status: sub.status.to_string(),
-            current_period_end: chrono::DateTime::from_timestamp(sub.current_period_end, 0)
-                .unwrap_or(chrono::Utc::now()),
-            trial_ends_at: sub.trial_end.and_then(|ts| chrono::DateTime::from_timestamp(ts, 0)),
-        })
-    }
-
-    async fn cancel_subscription(&self, sub_id: &str) -> Result<(), FrameworkError> {
-        let id: SubscriptionId = sub_id.parse().map_err(|e| FrameworkError::internal(format!("id: {}", e)))?;
-        let params = stripe::UpdateSubscription {
-            cancel_at_period_end: Some(true),
-            ..Default::default()
-        };
-        Subscription::update(&self.client, &id, params)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("stripe cancel: {}", e)))?;
-        Ok(())
-    }
-
-    async fn cancel_now(&self, sub_id: &str) -> Result<(), FrameworkError> {
-        let id: SubscriptionId = sub_id.parse().map_err(|e| FrameworkError::internal(format!("id: {}", e)))?;
-        Subscription::cancel(&self.client, &id, stripe::CancelSubscription::default())
-            .await
-            .map_err(|e| FrameworkError::internal(format!("stripe cancel now: {}", e)))?;
-        Ok(())
-    }
-
-    async fn resume(&self, sub_id: &str) -> Result<(), FrameworkError> {
-        let id: SubscriptionId = sub_id.parse().map_err(|e| FrameworkError::internal(format!("id: {}", e)))?;
-        let params = stripe::UpdateSubscription {
-            cancel_at_period_end: Some(false),
-            ..Default::default()
-        };
-        Subscription::update(&self.client, &id, params)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("stripe resume: {}", e)))?;
-        Ok(())
-    }
-
-    async fn swap(&self, sub_id: &str, new_price_id: &str) -> Result<(), FrameworkError> {
-        // Fetch existing sub, swap the subscription_item to new price.
-        // Sketch — full impl walks sub.items and calls UpdateSubscriptionItems.
-        let _ = (sub_id, new_price_id);
-        Err(FrameworkError::internal("stripe swap: implementer to wire UpdateSubscriptionItems"))
-    }
-
-    async fn invoice_for(
-        &self,
-        customer_id: &str,
-        amount_cents: i64,
-        currency: &str,
-        description: &str,
-    ) -> Result<String, FrameworkError> {
-        // Stripe: InvoiceItem::create then Invoice::create_and_pay.
-        let _ = (customer_id, amount_cents, currency, description);
-        Err(FrameworkError::internal("stripe invoice_for: implementer wires InvoiceItem + Invoice flow"))
-    }
-
-    async fn billing_portal_url(&self, customer_id: &str, return_url: &str) -> Result<String, FrameworkError> {
-        let params = stripe::CreateBillingPortalSession {
-            customer: customer_id
-                .parse()
-                .map_err(|e| FrameworkError::internal(format!("customer id: {}", e)))?,
-            return_url: Some(return_url),
-            ..Default::default()
-        };
-        let session = stripe::BillingPortalSession::create(&self.client, params)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("stripe portal: {}", e)))?;
-        Ok(session.url)
-    }
-
-    fn verify_webhook(&self, body: &[u8], signature: &str) -> Result<serde_json::Value, FrameworkError> {
-        let event = stripe::Webhook::construct_event(
-            std::str::from_utf8(body).map_err(|e| FrameworkError::internal(format!("body utf8: {}", e)))?,
-            signature,
-            &self.webhook_secret,
-        )
-        .map_err(|e| FrameworkError::internal(format!("stripe webhook: {}", e)))?;
-        serde_json::to_value(&event).map_err(|e| FrameworkError::internal(format!("json: {}", e)))
-    }
+    let client = builder
+        .build()
+        .map_err(|e| FrameworkError::internal(format!("payrail build: {}", e)))?;
+    set_payrail(client);
+    Ok(())
 }
 ```
 
-> **API verification:** `stripe-rust` 0.39 surface for `CreateBillingPortalSession`, `CreateSubscriptionItems`, etc. has moved over versions. Run `cargo doc -p stripe-rust --open --no-deps` and confirm the exact constructor / parameter shapes before implementing.
+> **PayRail config types:** The exact `StripeConfig` / `PayPalConfig` / `LipilaConfig` constructor signatures live in `reference/payrail-0.1.5/crates/payrail/src/providers/<provider>/`. Use them; the sketch above is illustrative.
 
-- [ ] **Step 2: Commit**
-
-```bash
-git add framework/src/billing/providers/stripe.rs
-git commit -m "feat(billing): Stripe driver — customer / subscription / portal / webhook verify"
-```
-
----
-
-## Task 4: Paddle driver
-
-**Files:** `framework/src/billing/providers/paddle.rs`
-
-- [ ] **Step 1: Implement**
-
-Paddle (Classic vs Billing) has split offerings; this targets **Paddle Billing** (the newer API). If the `paddle-rs` crate is immature, fall back to raw HTTP via `Http::` from Phase 2 + hand-rolled signature verification.
+- [ ] **Step 2: Wire from app bootstrap**
 
 ```rust
-// framework/src/billing/providers/paddle.rs
-use crate::billing::provider::{BillingProvider, ProviderSubscription};
-use crate::FrameworkError;
-use async_trait::async_trait;
-use serde::Deserialize;
-
-pub struct PaddleProvider {
-    api_key: String,
-    webhook_secret: String,
-    base_url: String,
-}
-
-impl PaddleProvider {
-    pub fn new(api_key: impl Into<String>, webhook_secret: impl Into<String>) -> Self {
-        Self {
-            api_key: api_key.into(),
-            webhook_secret: webhook_secret.into(),
-            base_url: "https://api.paddle.com".into(),
-        }
-    }
-    pub fn sandbox(api_key: impl Into<String>, webhook_secret: impl Into<String>) -> Self {
-        Self {
-            api_key: api_key.into(),
-            webhook_secret: webhook_secret.into(),
-            base_url: "https://sandbox-api.paddle.com".into(),
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct PaddleCustomerResponse {
-    data: PaddleCustomer,
-}
-
-#[derive(Deserialize)]
-struct PaddleCustomer {
-    id: String,
-}
-
-#[async_trait]
-impl BillingProvider for PaddleProvider {
-    async fn create_or_find_customer(&self, _user_id: i64, email: &str) -> Result<String, FrameworkError> {
-        let resp = crate::Http::post(format!("{}/customers", self.base_url))
-            .with_token(&self.api_key)
-            .json(&serde_json::json!({ "email": email }))
-            .send()
-            .await?;
-        let body: PaddleCustomerResponse = resp.json().await?;
-        Ok(body.data.id)
-    }
-
-    async fn create_subscription(
-        &self,
-        customer_id: &str,
-        price_id: &str,
-        _trial_days: Option<u32>,
-    ) -> Result<ProviderSubscription, FrameworkError> {
-        // POST /subscriptions with items[{price_id, quantity: 1}].
-        let resp = crate::Http::post(format!("{}/subscriptions", self.base_url))
-            .with_token(&self.api_key)
-            .json(&serde_json::json!({
-                "customer_id": customer_id,
-                "items": [{"price_id": price_id, "quantity": 1}],
-            }))
-            .send()
-            .await?;
-        let body: serde_json::Value = resp.json().await?;
-        let id = body["data"]["id"].as_str().unwrap_or_default().to_string();
-        let status = body["data"]["status"].as_str().unwrap_or_default().to_string();
-        Ok(ProviderSubscription {
-            provider_subscription_id: id,
-            status,
-            current_period_end: chrono::Utc::now(), // parse from response in real impl
-            trial_ends_at: None,
-        })
-    }
-
-    async fn cancel_subscription(&self, sub_id: &str) -> Result<(), FrameworkError> {
-        crate::Http::post(format!("{}/subscriptions/{}/cancel", self.base_url, sub_id))
-            .with_token(&self.api_key)
-            .json(&serde_json::json!({ "effective_from": "next_billing_period" }))
-            .send()
-            .await?;
-        Ok(())
-    }
-
-    async fn cancel_now(&self, sub_id: &str) -> Result<(), FrameworkError> {
-        crate::Http::post(format!("{}/subscriptions/{}/cancel", self.base_url, sub_id))
-            .with_token(&self.api_key)
-            .json(&serde_json::json!({ "effective_from": "immediately" }))
-            .send()
-            .await?;
-        Ok(())
-    }
-
-    async fn resume(&self, sub_id: &str) -> Result<(), FrameworkError> {
-        crate::Http::post(format!("{}/subscriptions/{}/resume", self.base_url, sub_id))
-            .with_token(&self.api_key)
-            .send()
-            .await?;
-        Ok(())
-    }
-
-    async fn swap(&self, sub_id: &str, new_price_id: &str) -> Result<(), FrameworkError> {
-        crate::Http::patch(format!("{}/subscriptions/{}", self.base_url, sub_id))
-            .with_token(&self.api_key)
-            .json(&serde_json::json!({
-                "items": [{"price_id": new_price_id, "quantity": 1}],
-                "proration_billing_mode": "prorated_immediately",
-            }))
-            .send()
-            .await?;
-        Ok(())
-    }
-
-    async fn invoice_for(
-        &self,
-        customer_id: &str,
-        amount_cents: i64,
-        currency: &str,
-        description: &str,
-    ) -> Result<String, FrameworkError> {
-        let resp = crate::Http::post(format!("{}/transactions", self.base_url))
-            .with_token(&self.api_key)
-            .json(&serde_json::json!({
-                "customer_id": customer_id,
-                "items": [{
-                    "price": { "amount": amount_cents.to_string(), "currency_code": currency },
-                    "quantity": 1,
-                    "description": description,
-                }],
-            }))
-            .send()
-            .await?;
-        let body: serde_json::Value = resp.json().await?;
-        Ok(body["data"]["id"].as_str().unwrap_or_default().to_string())
-    }
-
-    async fn billing_portal_url(&self, customer_id: &str, _return_url: &str) -> Result<String, FrameworkError> {
-        let resp = crate::Http::get(format!("{}/customers/{}/portal-sessions", self.base_url, customer_id))
-            .with_token(&self.api_key)
-            .send()
-            .await?;
-        let body: serde_json::Value = resp.json().await?;
-        Ok(body["data"]["urls"]["general"]["overview"].as_str().unwrap_or_default().to_string())
-    }
-
-    fn verify_webhook(&self, body: &[u8], signature: &str) -> Result<serde_json::Value, FrameworkError> {
-        // Paddle's webhook signature is HMAC-SHA256(payload + ":" + timestamp, secret).
-        // The signature header is "ts=<timestamp>;h1=<sig>". Parse, recompute, compare.
-        // Sketch: extract ts and h1, compute, constant-time compare.
-        let _ = (body, signature, &self.webhook_secret);
-        Err(FrameworkError::internal("paddle webhook: implementer wires HMAC-SHA256 verification"))
-    }
-}
+// app/src/bootstrap.rs — inside register()
+suprnova::billing::use_standard()
+    .await
+    .expect("payrail bootstrap");
 ```
 
-- [ ] **Step 2: Commit**
+- [ ] **Step 3: Cargo features**
+
+```toml
+# framework/Cargo.toml — [features]
+billing-stripe = ["payrail/stripe"]
+billing-paypal = ["payrail/paypal"]
+billing-lipila = ["payrail/lipila"]
+billing-mobile-money = ["payrail/mobile-money"]
+billing-all = ["billing-stripe", "billing-paypal", "billing-lipila", "billing-mobile-money"]
+```
+
+- [ ] **Step 4: Commit**
 
 ```bash
-git add framework/src/billing/providers/paddle.rs
-git commit -m "feat(billing): Paddle driver via Http facade (sandbox + production base URLs)"
+git add framework/src/billing/mod.rs framework/Cargo.toml app/src/bootstrap.rs
+git commit -m "feat(billing): use_standard PayRail bootstrap + per-provider feature gates"
 ```
 
 ---
 
-## Task 5: Webhook middleware + event dispatch
+## Task 4: Webhook handler — PayRail bridge → typed events
 
 **Files:** `framework/src/billing/webhook.rs`, `framework/src/billing/events.rs`
 
-- [ ] **Step 1: Implement**
+- [ ] **Step 1: Events**
 
 ```rust
 // framework/src/billing/events.rs
@@ -647,8 +689,8 @@ pub struct SubscriptionCreated {
     pub user_id: i64,
     pub subscription_id: i64,
     pub plan: String,
+    pub provider: String,
 }
-
 impl EventTrait for SubscriptionCreated {
     fn event_name() -> &'static str { "SubscriptionCreated" }
 }
@@ -657,8 +699,8 @@ impl EventTrait for SubscriptionCreated {
 pub struct SubscriptionCancelled {
     pub user_id: i64,
     pub subscription_name: String,
+    pub immediate: bool,
 }
-
 impl EventTrait for SubscriptionCancelled {
     fn event_name() -> &'static str { "SubscriptionCancelled" }
 }
@@ -666,13 +708,23 @@ impl EventTrait for SubscriptionCancelled {
 #[derive(Debug, Clone)]
 pub struct InvoicePaid {
     pub user_id: i64,
-    pub invoice_id: String,
+    pub invoice_id: i64,
     pub amount_cents: i64,
     pub currency: String,
+    pub provider: String,
 }
-
 impl EventTrait for InvoicePaid {
     fn event_name() -> &'static str { "InvoicePaid" }
+}
+
+#[derive(Debug, Clone)]
+pub struct InvoicePaymentFailed {
+    pub user_id: i64,
+    pub invoice_id: i64,
+    pub reason: String,
+}
+impl EventTrait for InvoicePaymentFailed {
+    fn event_name() -> &'static str { "InvoicePaymentFailed" }
 }
 
 #[derive(Debug, Clone)]
@@ -681,105 +733,230 @@ pub struct TrialEnding {
     pub subscription_id: i64,
     pub trial_ends_at: chrono::DateTime<chrono::Utc>,
 }
-
 impl EventTrait for TrialEnding {
     fn event_name() -> &'static str { "TrialEnding" }
 }
 ```
 
+- [ ] **Step 2: Webhook handler**
+
 ```rust
 // framework/src/billing/webhook.rs
-//! POST /webhooks/{provider} — verifies signature, dispatches typed
-//! events. Wire up via:
-//!
-//! ```ignore
-//! post("/webhooks/stripe", billing::webhook::handle("stripe"));
-//! post("/webhooks/paddle", billing::webhook::handle("paddle"));
-//! ```
+//! POST /webhooks/billing/{provider} — verify signature via PayRail,
+//! normalize into `PaymentEvent`, react in our subscription state
+//! machine, dispatch typed framework events.
 
-use crate::billing::{events::*, provider};
+use crate::billing::{events::*, payrail, subscription};
 use crate::{json_response, Event, FrameworkError, Request, Response};
+use payrail::{PaymentEvent, PaymentEventType, PaymentProvider, WebhookRequest};
 
-pub fn handle(provider_name: &'static str) -> impl Fn(Request) -> futures::future::BoxFuture<'static, Response> + Clone {
+pub fn handle(
+    provider_name: &'static str,
+) -> impl Fn(Request) -> futures::future::BoxFuture<'static, Response> + Clone {
     move |req: Request| {
         Box::pin(async move {
+            // 1. Read headers + body
             let signature = req
                 .header("stripe-signature")
-                .or_else(|| req.header("paddle-signature"))
+                .or_else(|| req.header("paypal-transmission-sig"))
+                .or_else(|| req.header("x-lipila-signature"))
                 .unwrap_or_default();
-            let body = req.into_body_bytes().await?;
-            let provider = provider::get(provider_name)?;
-            let event = provider.verify_webhook(&body, &signature)?;
+            let raw_body = req.into_body_bytes().await?;
 
-            // Dispatch typed events based on event["type"].
-            let event_type = event["type"].as_str().unwrap_or_default();
-            match event_type {
-                "customer.subscription.created" | "subscription.created" => {
-                    let _ = Event::dispatch(SubscriptionCreated {
-                        user_id: extract_user_id(&event),
-                        subscription_id: 0, // populate from local DB lookup
-                        plan: extract_plan(&event),
-                    })
-                    .await;
-                }
-                "customer.subscription.deleted" | "subscription.canceled" => {
-                    let _ = Event::dispatch(SubscriptionCancelled {
-                        user_id: extract_user_id(&event),
-                        subscription_name: "default".into(),
-                    })
-                    .await;
-                }
-                "invoice.paid" | "transaction.completed" => {
-                    let _ = Event::dispatch(InvoicePaid {
-                        user_id: extract_user_id(&event),
-                        invoice_id: event["data"]["id"].as_str().unwrap_or_default().to_string(),
-                        amount_cents: extract_amount(&event),
-                        currency: extract_currency(&event),
-                    })
-                    .await;
-                }
-                _ => {}
-            }
+            // 2. Map provider name → PaymentProvider
+            let provider = match provider_name {
+                "stripe" => PaymentProvider::Stripe,
+                "paypal" => PaymentProvider::PayPal,
+                "lipila" => PaymentProvider::Lipila,
+                other => PaymentProvider::other(other),
+            };
+
+            // 3. Verify + normalize via PayRail
+            let client = payrail()?;
+            let webhook_request = WebhookRequest::new(provider.clone(), &raw_body, &signature);
+            let event: PaymentEvent = client
+                .verify_and_normalize_webhook(webhook_request)
+                .await
+                .map_err(|e| FrameworkError::internal(format!("webhook verify: {}", e)))?;
+
+            // 4. React in our state machine + dispatch typed events
+            handle_normalized_event(event).await?;
             json_response!({ "received": true })
         })
     }
 }
 
-fn extract_user_id(event: &serde_json::Value) -> i64 {
-    // Resolve via local customer table: look up by stripe/paddle customer id
-    // → user_id. Sketch returns 0; implementer wires DB lookup.
-    let _ = event;
-    0
+async fn handle_normalized_event(event: PaymentEvent) -> Result<(), FrameworkError> {
+    let provider_str = format!("{:?}", event.provider());
+
+    match event.event_type() {
+        PaymentEventType::Succeeded => {
+            // Look up the user + subscription via merchant_reference or
+            // provider_reference. Implementer wires the lookup.
+            let invoice_id = persist_invoice_paid(&event).await?;
+            let _ = Event::dispatch(InvoicePaid {
+                user_id: 0, // populated from lookup
+                invoice_id,
+                amount_cents: event.amount().map(|m| m.minor_amount().value() as i64).unwrap_or(0),
+                currency: event.amount().map(|m| m.currency().to_string()).unwrap_or_default(),
+                provider: provider_str,
+            })
+            .await;
+        }
+        PaymentEventType::Failed | PaymentEventType::Cancelled => {
+            // Subscription transitions to past_due; dispatch InvoicePaymentFailed.
+            let invoice_id = persist_invoice_failed(&event).await?;
+            let _ = Event::dispatch(InvoicePaymentFailed {
+                user_id: 0, // populated from lookup
+                invoice_id,
+                reason: event.message().unwrap_or("payment failed").to_string(),
+            })
+            .await;
+            // Optional: subscription::mark_past_due(...).await?;
+        }
+        _ => {
+            // Other event types — pending, action-required, etc. Log
+            // for now; expand the state machine as use cases emerge.
+            tracing::debug!(?event, "unhandled payment event");
+        }
+    }
+    Ok(())
 }
 
-fn extract_plan(event: &serde_json::Value) -> String {
-    event["data"]["plan"]["id"]
-        .as_str()
-        .or_else(|| event["data"]["items"][0]["price"]["id"].as_str())
-        .unwrap_or_default()
-        .to_string()
+async fn persist_invoice_paid(_event: &PaymentEvent) -> Result<i64, FrameworkError> {
+    unimplemented!("UPDATE invoices SET status='paid' WHERE provider_invoice_id = ?")
 }
-
-fn extract_amount(event: &serde_json::Value) -> i64 {
-    event["data"]["amount_paid"]
-        .as_i64()
-        .or_else(|| event["data"]["amount"].as_i64())
-        .unwrap_or(0)
-}
-
-fn extract_currency(event: &serde_json::Value) -> String {
-    event["data"]["currency"]
-        .as_str()
-        .unwrap_or("usd")
-        .to_string()
+async fn persist_invoice_failed(_event: &PaymentEvent) -> Result<i64, FrameworkError> {
+    unimplemented!("UPDATE invoices SET status='open' (and log failure) WHERE provider_invoice_id = ?")
 }
 ```
 
-- [ ] **Step 2: Commit**
+> **PayRail webhook surface:** Verify the exact `WebhookRequest::new` + `verify_and_normalize_webhook` method on PayRailClient via `reference/payrail-0.1.5/crates/payrail/src/core/webhook.rs` + `client.rs` + the per-provider modules. If PayRail exposes a different facade (e.g. per-provider `client.stripe().handle_webhook(...)`), adapt the bridge.
+
+- [ ] **Step 3: Test + commit**
+
+```rust
+// framework/tests/billing.rs — append
+#[tokio::test]
+async fn webhook_dispatches_invoice_paid_event() {
+    // Construct a PaymentEvent in-process (bypassing signature verify
+    // by calling handle_normalized_event directly), assert that
+    // Event::fake() recorded an InvoicePaid dispatch.
+    let _g = Event::fake();
+    let event = make_succeeded_event();
+    suprnova::billing::webhook::handle_normalized_event_for_test(event).await.unwrap();
+    suprnova::assert_dispatched::<InvoicePaid>(|e| e.amount_cents > 0);
+}
+```
+
+> **Test helper:** Add a `pub(crate) fn handle_normalized_event_for_test` re-export so tests can call the handler without going through the HTTP boundary.
 
 ```bash
-git add framework/src/billing/webhook.rs framework/src/billing/events.rs
-git commit -m "feat(billing): webhook handler dispatches typed SubscriptionCreated/InvoicePaid events"
+git add framework/src/billing/webhook.rs framework/src/billing/events.rs framework/tests/billing.rs
+git commit -m "feat(billing): webhook handler bridges PayRail PaymentEvent → typed framework events"
+```
+
+---
+
+## Task 5: Period-end charging job
+
+**Files:** `framework/src/billing/period_job.rs`
+
+When `current_period_end` rolls past `NOW()` on an active subscription, the framework dispatches a `ChargeSubscriptionJob` to the Phase 5 queue. The job uses PayRail to charge the next period; on success it advances `current_period_start/end`; on failure it transitions to `past_due` and dispatches `InvoicePaymentFailed`.
+
+- [ ] **Step 1: Implement**
+
+```rust
+// framework/src/billing/period_job.rs
+//! Scheduled job that finds subscriptions whose period has rolled
+//! over and charges the next period via PayRail.
+
+use crate::billing::{events::*, payrail, subscription::Subscription};
+use crate::{async_trait, Event, FrameworkError, Job};
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ChargeSubscriptionJob {
+    pub subscription_id: i64,
+}
+
+#[async_trait]
+impl Job for ChargeSubscriptionJob {
+    fn job_name() -> &'static str { "ChargeSubscription" }
+
+    async fn handle(self) -> Result<(), FrameworkError> {
+        let sub = load_subscription(self.subscription_id).await?;
+        if !sub.is_active() || sub.is_on_trial() {
+            return Ok(());
+        }
+
+        let _client = payrail()?;
+        // Build a CreatePaymentRequest, send through PayRail.
+        // Implementer: fill in via payrail::CreatePaymentRequest::builder()
+        // pulling Money / Customer / idempotency from sub fields.
+        match charge_next_period(&sub).await {
+            Ok(invoice_id) => {
+                advance_period(&sub).await?;
+                let _ = Event::dispatch(InvoicePaid {
+                    user_id: sub.user_id,
+                    invoice_id,
+                    amount_cents: 0, // populated from charge result
+                    currency: "USD".into(),
+                    provider: format!("{:?}", sub.provider),
+                })
+                .await;
+            }
+            Err(err) => {
+                mark_past_due(&sub).await?;
+                let _ = Event::dispatch(InvoicePaymentFailed {
+                    user_id: sub.user_id,
+                    invoice_id: 0,
+                    reason: err.to_string(),
+                })
+                .await;
+            }
+        }
+        Ok(())
+    }
+}
+
+async fn load_subscription(_id: i64) -> Result<Subscription, FrameworkError> {
+    unimplemented!()
+}
+async fn charge_next_period(_sub: &Subscription) -> Result<i64, FrameworkError> {
+    unimplemented!("construct payrail::CreatePaymentRequest + client.create_payment(...)")
+}
+async fn advance_period(_sub: &Subscription) -> Result<(), FrameworkError> {
+    unimplemented!()
+}
+async fn mark_past_due(_sub: &Subscription) -> Result<(), FrameworkError> {
+    unimplemented!()
+}
+```
+
+- [ ] **Step 2: Schedule it**
+
+```rust
+// In bootstrap.rs:
+suprnova::Schedule::call(|| async {
+    // Find subscriptions whose current_period_end < NOW() and status = 'active'.
+    let due = suprnova::billing::period_job::find_due().await?;
+    for sub_id in due {
+        suprnova::Queue::push(suprnova::billing::period_job::ChargeSubscriptionJob {
+            subscription_id: sub_id,
+        })
+        .await?;
+    }
+    Ok::<_, suprnova::FrameworkError>(())
+})
+.at("every hour");
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add framework/src/billing/period_job.rs
+git commit -m "feat(billing): ChargeSubscriptionJob + hourly Schedule that picks up rolled-over periods"
 ```
 
 ---
@@ -788,22 +965,32 @@ git commit -m "feat(billing): webhook handler dispatches typed SubscriptionCreat
 
 **Files:** `framework/src/billing/invoice.rs`
 
+Same printpdf integration as the original plan; the `Invoice` type now references PayRail's `Money` for currency-correctness.
+
 - [ ] **Step 1: Implement**
 
 ```rust
 // framework/src/billing/invoice.rs
 use crate::FrameworkError;
+use chrono::NaiveDate;
+use payrail::Money;
 use printpdf::*;
+use serde::{Deserialize, Serialize};
 use std::io::BufWriter;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Invoice {
+    pub id: i64,
+    pub user_id: i64,
     pub number: String,
-    pub date: chrono::NaiveDate,
+    pub date: NaiveDate,
     pub customer_name: String,
     pub customer_email: String,
     pub line_items: Vec<LineItem>,
+    pub currency: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LineItem {
     pub description: String,
     pub quantity: u32,
@@ -821,6 +1008,15 @@ impl Invoice {
         self.line_items.iter().map(|i| i.total_cents()).sum()
     }
 
+    pub fn total_money(&self) -> Result<Money, FrameworkError> {
+        let currency = self
+            .currency
+            .parse::<payrail::CurrencyCode>()
+            .map_err(|e| FrameworkError::internal(format!("currency: {}", e)))?;
+        let minor = payrail::MinorAmount::new(self.total_cents());
+        Ok(Money::new(minor, currency))
+    }
+
     pub fn render_pdf(&self) -> Result<Vec<u8>, FrameworkError> {
         let (doc, page1, layer1) = PdfDocument::new(
             format!("Invoice {}", self.number),
@@ -835,52 +1031,69 @@ impl Invoice {
             .add_builtin_font(BuiltinFont::Helvetica)
             .map_err(|e| FrameworkError::internal(format!("pdf font: {}", e)))?;
         let layer = doc.get_page(page1).get_layer(layer1);
+
         layer.use_text(format!("INVOICE {}", self.number), 24.0, Mm(20.0), Mm(270.0), &font);
         layer.use_text(format!("Date: {}", self.date.format("%Y-%m-%d")), 12.0, Mm(20.0), Mm(255.0), &body_font);
-        layer.use_text(format!("Bill to: {} <{}>", self.customer_name, self.customer_email), 12.0, Mm(20.0), Mm(245.0), &body_font);
+        layer.use_text(
+            format!("Bill to: {} <{}>", self.customer_name, self.customer_email),
+            12.0, Mm(20.0), Mm(245.0), &body_font,
+        );
 
         let mut y = Mm(220.0);
         for item in &self.line_items {
             let line = format!(
-                "{} × {}    {:.2}    {:.2}",
-                item.quantity,
-                item.description,
-                item.unit_price_cents as f64 / 100.0,
-                item.total_cents() as f64 / 100.0,
+                "{} × {}    {:.2} {}    {:.2} {}",
+                item.quantity, item.description,
+                item.unit_price_cents as f64 / 100.0, self.currency,
+                item.total_cents() as f64 / 100.0, self.currency,
             );
             layer.use_text(line, 11.0, Mm(20.0), y, &body_font);
             y = Mm(y.0 - 8.0);
         }
 
-        let total = format!("TOTAL: ${:.2}", self.total_cents() as f64 / 100.0);
+        let total = format!("TOTAL: {:.2} {}", self.total_cents() as f64 / 100.0, self.currency);
         layer.use_text(total, 14.0, Mm(20.0), Mm(50.0), &font);
 
         let mut buf = Vec::new();
-        let mut writer = BufWriter::new(&mut buf);
-        doc.save(&mut writer)
-            .map_err(|e| FrameworkError::internal(format!("pdf save: {}", e)))?;
-        drop(writer);
+        {
+            let mut writer = BufWriter::new(&mut buf);
+            doc.save(&mut writer)
+                .map_err(|e| FrameworkError::internal(format!("pdf save: {}", e)))?;
+        }
         Ok(buf)
     }
+}
+
+pub(crate) async fn create_one_off<B: crate::Billable + ?Sized>(
+    _user: &B,
+    _provider: payrail::PaymentProvider,
+    _amount_cents: i64,
+    _currency: &str,
+    _description: &str,
+) -> Result<Invoice, FrameworkError> {
+    unimplemented!("payrail::CreatePaymentRequest + persist Invoice row")
 }
 ```
 
 - [ ] **Step 2: Test + commit**
 
 ```rust
-// framework/tests/invoice_pdf.rs
+// framework/tests/billing.rs — append
 #[test]
 fn invoice_pdf_produces_nonzero_bytes() {
-    let inv = suprnova::billing::invoice::Invoice {
+    let inv = suprnova::billing::Invoice {
+        id: 1,
+        user_id: 1,
         number: "INV-001".into(),
         date: chrono::NaiveDate::from_ymd_opt(2026, 5, 14).unwrap(),
         customer_name: "Alice".into(),
         customer_email: "alice@example.com".into(),
-        line_items: vec![suprnova::billing::invoice::LineItem {
+        line_items: vec![suprnova::billing::LineItem {
             description: "Pro plan".into(),
             quantity: 1,
             unit_price_cents: 1900,
         }],
+        currency: "USD".into(),
     };
     let pdf = inv.render_pdf().unwrap();
     assert!(pdf.len() > 1000);
@@ -889,22 +1102,91 @@ fn invoice_pdf_produces_nonzero_bytes() {
 ```
 
 ```bash
-cargo test -p suprnova --test invoice_pdf
-git add framework/src/billing/invoice.rs framework/tests/invoice_pdf.rs
-git commit -m "feat(billing): Invoice PDF rendering via printpdf"
+cargo test -p suprnova --test billing invoice_pdf
+git add framework/src/billing/invoice.rs framework/tests/billing.rs
+git commit -m "feat(billing): Invoice + LineItem + render_pdf via printpdf (uses payrail Money)"
 ```
 
 ---
 
-## Task 7: App dogfood
+## Task 7: Customer-portal URL builder
+
+**Files:** `framework/src/billing/portal.rs`
+
+PayRail doesn't ship a unified billing-portal API; each provider implements its own. We wrap them per provider.
+
+- [ ] **Step 1: Implement**
+
+```rust
+// framework/src/billing/portal.rs
+//! Customer-portal URL builders, dispatched per provider.
+
+use crate::{Billable, FrameworkError};
+use payrail::PaymentProvider;
+
+pub(crate) async fn url_for<B: Billable + ?Sized>(
+    user: &B,
+    provider: PaymentProvider,
+    return_url: &str,
+) -> Result<String, FrameworkError> {
+    let customer_id = user
+        .provider_customer_id(&provider)
+        .await
+        .ok_or_else(|| FrameworkError::internal("no provider customer id on user"))?;
+    match provider {
+        PaymentProvider::Stripe => stripe_portal(&customer_id, return_url).await,
+        PaymentProvider::PayPal => paypal_portal(&customer_id, return_url).await,
+        _ => Err(FrameworkError::internal(format!(
+            "customer portal not supported for {:?}",
+            provider
+        ))),
+    }
+}
+
+async fn stripe_portal(customer_id: &str, return_url: &str) -> Result<String, FrameworkError> {
+    // Stripe has a billing_portal/sessions endpoint. Call directly via
+    // Http:: (Phase 2) — PayRail doesn't expose a portal API today.
+    let secret = std::env::var("STRIPE_SECRET_KEY")
+        .map_err(|_| FrameworkError::internal("STRIPE_SECRET_KEY not set"))?;
+    let resp = crate::Http::post("https://api.stripe.com/v1/billing_portal/sessions")
+        .with_token(&secret)
+        .form(&[("customer", customer_id), ("return_url", return_url)])
+        .send()
+        .await?;
+    let body: serde_json::Value = resp.json().await?;
+    body["url"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| FrameworkError::internal(format!("stripe portal response: {}", body)))
+}
+
+async fn paypal_portal(_customer_id: &str, _return_url: &str) -> Result<String, FrameworkError> {
+    // PayPal redirects to https://www.paypal.com/myaccount/autopay/
+    // — there's no per-customer portal-session API. Return a static
+    // URL, optionally with the return_url as a query param the user's
+    // app handles after they navigate back.
+    Ok("https://www.paypal.com/myaccount/autopay/".to_string())
+}
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add framework/src/billing/portal.rs
+git commit -m "feat(billing): customer-portal URL builders per provider (Stripe via Http:: facade)"
+```
+
+---
+
+## Task 8: App dogfood
 
 **Files:** `app/src/listeners/billing_listener.rs`, route wiring
 
-- [ ] **Step 1: BillingListener — react to events**
+- [ ] **Step 1: BillingListener**
 
 ```rust
 // app/src/listeners/billing_listener.rs
-use suprnova::billing::events::{InvoicePaid, SubscriptionCancelled};
+use suprnova::billing::events::{InvoicePaid, SubscriptionCancelled, TrialEnding};
 use suprnova::{async_trait, events::Listener, FrameworkError};
 use tracing::info;
 
@@ -914,7 +1196,14 @@ pub struct BillingListener;
 impl Listener<InvoicePaid> for BillingListener {
     async fn handle(&self, event: &InvoicePaid) -> Result<(), FrameworkError> {
         info!(user_id = event.user_id, amount = event.amount_cents, "invoice paid");
-        // queue an email receipt
+        // Queue a receipt email (uses Phase 5 Mail + Queue)
+        suprnova::Queue::push(crate::jobs::SendReceiptEmailJob {
+            user_id: event.user_id,
+            invoice_id: event.invoice_id,
+            amount_cents: event.amount_cents,
+            currency: event.currency.clone(),
+        })
+        .await?;
         Ok(())
     }
 }
@@ -922,71 +1211,100 @@ impl Listener<InvoicePaid> for BillingListener {
 #[async_trait]
 impl Listener<SubscriptionCancelled> for BillingListener {
     async fn handle(&self, event: &SubscriptionCancelled) -> Result<(), FrameworkError> {
-        info!(user_id = event.user_id, "subscription cancelled");
-        // queue a re-engagement email
+        info!(user_id = event.user_id, immediate = event.immediate, "subscription cancelled");
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Listener<TrialEnding> for BillingListener {
+    async fn handle(&self, event: &TrialEnding) -> Result<(), FrameworkError> {
+        info!(user_id = event.user_id, ?event.trial_ends_at, "trial ending soon");
+        // Queue a "your trial is ending" reminder
         Ok(())
     }
 }
 ```
 
-- [ ] **Step 2: Register listener + webhook route**
+- [ ] **Step 2: Register listener + webhook routes + portal route**
 
 ```rust
 // app/src/bootstrap.rs
-suprnova::Event::listen::<suprnova::billing::events::InvoicePaid>(
-    std::sync::Arc::new(crate::listeners::BillingListener),
-).await;
+use std::sync::Arc;
+suprnova::Event::listen::<suprnova::billing::events::InvoicePaid>(Arc::new(crate::listeners::BillingListener)).await;
+suprnova::Event::listen::<suprnova::billing::events::SubscriptionCancelled>(Arc::new(crate::listeners::BillingListener)).await;
+suprnova::Event::listen::<suprnova::billing::events::TrialEnding>(Arc::new(crate::listeners::BillingListener)).await;
 
-// Configure provider:
-suprnova::billing::provider::register(
-    "default",
-    std::sync::Arc::new(suprnova::billing::providers::stripe::StripeProvider::new(
-        std::env::var("STRIPE_SECRET_KEY").expect("STRIPE_SECRET_KEY"),
-        std::env::var("STRIPE_WEBHOOK_SECRET").expect("STRIPE_WEBHOOK_SECRET"),
-    )),
-);
-
-// Wire webhook route — implementer adds this to routes!:
-//   post!("/webhooks/stripe", suprnova::billing::webhook::handle("default"))
+// Routes:
+//   post!("/webhooks/billing/stripe", suprnova::billing::webhook::handle("stripe"))
+//   post!("/webhooks/billing/paypal", suprnova::billing::webhook::handle("paypal"))
+//   post!("/webhooks/billing/lipila", suprnova::billing::webhook::handle("lipila"))
+//   get!("/billing/portal", controllers::billing::portal)
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Smoke test**
+
+```bash
+cargo run -p app -- serve &
+sleep 2
+# Send a test Stripe webhook (use stripe-cli locally or a fixture)
+stripe trigger checkout.session.completed
+kill %1
+```
+
+- [ ] **Step 4: Commit**
 
 ```bash
 git add app/src
-git commit -m "feat(app): BillingListener + Stripe provider registration"
+git commit -m "feat(app): BillingListener + webhook routes + portal endpoint"
 ```
 
 ---
 
-## Task 8: Workspace lint + roadmap update
-
-- [ ] **Step 1: Clippy + tests**
+## Task 9: Workspace lint + roadmap update
 
 ```bash
-cargo clippy --workspace --features billing-stripe -- -D warnings
-cargo test --workspace --features billing-stripe
+cargo clippy --workspace --features billing-all -- -D warnings
+cargo test --workspace --features billing-all
 ```
 
-- [ ] **Step 2: ROADMAP update + commit + push**
+ROADMAP "Where we are" — move to Production-ready:
+- Billing (subscriptions + invoices + customer portal) via PayRail
+- 13 payment providers via PayRail (Stripe, PayPal, Lipila, MTN MoMo, M-Pesa, Airtel, Orange Money, Flutterwave, Paystack, Circle, Coinbase, Bridge, Binance)
+
+Commit + push.
+
+---
+
+## Out of v1 scope
+
+- **Paddle.** Not in PayRail's `BuiltinProvider` enum and PayRail doesn't expose a provider extension trait. Path forward if a consumer needs Paddle: (a) fork PayRail into the workspace as `suprnova-payrail` and add a `Paddle` variant + provider module, or (b) contribute upstream. Documented; not implemented.
+- **Tax computation.** Stripe Tax / Paddle's MoR model handles this — consumers configure on the provider side. We don't compute tax ourselves.
+- **Dunning automation beyond status-only.** We mark `past_due` and dispatch `InvoicePaymentFailed`; the app's listener decides what to do (email retry, account suspension). Sophisticated dunning (multi-step retry schedules, grace periods, payment-method-update reminders) is consumer-app concern.
 
 ---
 
 ## Self-Review
 
-| Spec item | Covered by |
-|-----------|------------|
-| BillingProvider trait | Task 2 |
-| Billable user trait | Task 2 |
-| Stripe driver | Task 3 |
-| Paddle driver | Task 4 |
-| Webhook signature verification | Tasks 3, 4, 5 |
-| Typed subscription events | Task 5 |
-| Invoice PDF | Task 6 |
-| Dogfood | Task 7 |
+| Spec item | Covered by | Source |
+|---|---|---|
+| PayRail bootstrap + provider configuration | Task 3 | PayRail |
+| Billable user trait | Task 2 | Ours |
+| Subscription model + state machine | Task 2 | Ours |
+| Provider customer creation | Task 2 | PayRail |
+| Webhook signature verification + normalization | Task 4 | PayRail |
+| Typed subscription events | Task 4 | Ours (Phase 1 EventDispatcher) |
+| Period-end charging job | Task 5 | Ours + Phase 5 Queue + Schedule |
+| Invoice PDF | Task 6 | Ours (printpdf) |
+| Customer portal URL builders | Task 7 | Ours (per-provider HTTP via Phase 2) |
+| App dogfood (listeners + webhook routes) | Task 8 | — |
+
+**Architectural correctness:** PayRail owns the payment-rails layer (charges, refunds, captures, webhook normalization, multi-provider routing). We own the subscription business logic (lifecycle, invoices, period-end charging, portal redirects). The bridge between them is `webhook.rs` (normalize → react → dispatch typed events) and `period_job.rs` (state machine → PayRail charge).
+
+**Placeholder scan:** Concrete `> verification:` notes flag specific files to read in PayRail before implementation. SeaORM persistence stubs (`persist_new`, `update`, `find_by_user_name`) are explicitly marked `unimplemented!()` so implementers wire them as proper ActiveModel calls; they're not silent gaps.
 
 ---
 
 ## Execution Handoff
 
-**Subagent-Driven per task — provider drivers benefit from parallel agents.**
+**Subagent-Driven recommended per task. Tasks 2 (Subscription model) and Task 4 (Webhook handler) are the largest pieces — give each its own agent with full PayRail context.**
