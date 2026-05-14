@@ -37,6 +37,12 @@ pub struct InertiaResponse {
     /// client rotates its history-encryption key. Maps to
     /// `Inertia::clearHistory()`.
     clear_history: bool,
+    /// When `true`, the page object carries `preserveFragment: true` so
+    /// the client carries its current URL fragment (`#anchor`) over to
+    /// the new URL when this page is rendered as the destination of a
+    /// redirect. Maps to `Inertia::preserveFragment()` / Laravel's
+    /// `redirect()->preserveFragment()` (set on the destination response).
+    preserve_fragment: bool,
 }
 
 impl InertiaResponse {
@@ -50,6 +56,7 @@ impl InertiaResponse {
             title: None,
             encrypt_history: None,
             clear_history: false,
+            preserve_fragment: false,
         }
     }
 
@@ -262,6 +269,17 @@ impl InertiaResponse {
         self
     }
 
+    /// Set the `preserveFragment` flag on the page object. When the
+    /// client receives a page with this flag set, it carries over the
+    /// fragment (`#anchor`) from the current URL to the new URL. Useful
+    /// for redirects where the destination should keep the original
+    /// fragment. Maps to Laravel's `redirect(...)->preserveFragment()`
+    /// — set on the destination response, not on the redirect itself.
+    pub fn preserve_fragment(mut self, on: bool) -> Self {
+        self.preserve_fragment = on;
+        self
+    }
+
     /// Build a `409 Conflict` external-redirect response. The client
     /// performs `window.location = url`, doing a full page navigation
     /// (not an Inertia SPA visit). Maps to `Inertia::location($url)`.
@@ -269,6 +287,20 @@ impl InertiaResponse {
         HttpResponse::text("")
             .status(409)
             .header("X-Inertia-Location", url.as_ref())
+    }
+
+    /// Build a `409 Conflict` Inertia-soft-redirect response. The client
+    /// performs an Inertia SPA visit (not a full page navigation) to the
+    /// target URL. The URL may include a `#fragment` which the client
+    /// will land at after the visit. Counterpart to
+    /// [`location`](Self::location) for the case where the redirect
+    /// target is still inside the Inertia app.
+    ///
+    /// Maps to the Inertia v3 `X-Inertia-Redirect` protocol header.
+    pub fn redirect(url: impl AsRef<str>) -> HttpResponse {
+        HttpResponse::text("")
+            .status(409)
+            .header("X-Inertia-Redirect", url.as_ref())
     }
 
     /// Internal helper used by the `inertia_response!` macro to unfold a
@@ -315,6 +347,7 @@ impl InertiaResponse {
             title,
             encrypt_history,
             clear_history,
+            preserve_fragment,
         } = self;
 
         // History-encryption precedence: per-response override (handler
@@ -359,6 +392,7 @@ impl InertiaResponse {
             flash,
             resolved_encrypt_history,
             clear_history,
+            preserve_fragment,
         );
 
         Ok(if is_inertia_request {
@@ -384,6 +418,7 @@ impl InertiaResponse {
             title: _,
             encrypt_history,
             clear_history,
+            preserve_fragment,
         } = self;
         let (materialized, metadata) =
             resolve_props(props, filter, &[])
@@ -400,6 +435,7 @@ impl InertiaResponse {
             flash,
             resolved_encrypt_history,
             clear_history,
+            preserve_fragment,
         )
     }
 
@@ -655,6 +691,7 @@ fn build_page_object(
     flash: serde_json::Map<String, Value>,
     encrypt_history: bool,
     clear_history: bool,
+    preserve_fragment: bool,
 ) -> Value {
     let mut page = serde_json::Map::new();
     page.insert(
@@ -665,14 +702,17 @@ fn build_page_object(
     page.insert("url".to_string(), Value::String(url));
     page.insert("version".to_string(), Value::String(config.version.clone()));
 
-    // Per spec, `encryptHistory` is only emitted when `true`, and
-    // `clearHistory` likewise. Falsy values are omitted to keep the
-    // page object lean.
+    // Per spec, `encryptHistory` / `clearHistory` / `preserveFragment`
+    // are only emitted when `true`. Falsy values are omitted to keep
+    // the page object lean.
     if encrypt_history {
         page.insert("encryptHistory".to_string(), Value::Bool(true));
     }
     if clear_history {
         page.insert("clearHistory".to_string(), Value::Bool(true));
+    }
+    if preserve_fragment {
+        page.insert("preserveFragment".to_string(), Value::Bool(true));
     }
 
     if !flash.is_empty() {
@@ -1079,5 +1119,46 @@ mod tests {
 
         let obj = page.as_object().unwrap();
         assert_eq!(obj["deepMergeProps"], json!(["chat"]));
+    }
+
+    #[tokio::test]
+    async fn preserve_fragment_true_emits_flag() {
+        let resp = InertiaResponse::new("Article").preserve_fragment(true);
+        let page = resp
+            .build_page_object_for_test("/article/new".into(), &PartialFilter::default())
+            .await;
+        let obj = page.as_object().unwrap();
+        assert_eq!(obj["preserveFragment"], Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn preserve_fragment_default_omits_flag() {
+        let resp = InertiaResponse::new("Article");
+        let page = resp
+            .build_page_object_for_test("/article".into(), &PartialFilter::default())
+            .await;
+        assert!(!page.as_object().unwrap().contains_key("preserveFragment"));
+    }
+
+    #[tokio::test]
+    async fn preserve_fragment_false_omits_flag() {
+        let resp = InertiaResponse::new("Article").preserve_fragment(false);
+        let page = resp
+            .build_page_object_for_test("/article".into(), &PartialFilter::default())
+            .await;
+        assert!(!page.as_object().unwrap().contains_key("preserveFragment"));
+    }
+
+    #[tokio::test]
+    async fn redirect_response_shape() {
+        let r = InertiaResponse::redirect("/articles/new#section");
+        let hyper_resp = r.into_hyper();
+        assert_eq!(hyper_resp.status(), 409);
+        assert_eq!(
+            hyper_resp.headers().get("X-Inertia-Redirect").unwrap(),
+            "/articles/new#section"
+        );
+        // Distinct from `location`: must NOT carry X-Inertia-Location.
+        assert!(hyper_resp.headers().get("X-Inertia-Location").is_none());
     }
 }

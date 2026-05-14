@@ -1232,6 +1232,79 @@ async fn inertia_location_returns_409_with_x_inertia_location() {
     );
 }
 
+// ---- Tier 3.1: fragment preservation ----
+//
+// `preserveFragment` is a page-object flag set on the *destination*
+// response of a redirect — the client (which knows its own URL hash)
+// carries the fragment over to the new URL when this flag is true.
+// `InertiaResponse::redirect(url)` is the X-Inertia-Redirect mechanism
+// for soft Inertia redirects whose target URL may carry a `#fragment`.
+
+#[tokio::test]
+async fn preserve_fragment_true_emits_flag_in_page_object() {
+    let req = MockReq::new("/article/new").inertia();
+    let resp = InertiaResponse::new("Article/Show")
+        .preserve_fragment(true)
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(page["preserveFragment"], true);
+}
+
+#[tokio::test]
+async fn preserve_fragment_default_does_not_emit_flag() {
+    let req = MockReq::new("/article").inertia();
+    let resp = InertiaResponse::new("Article/Show")
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(!page.as_object().unwrap().contains_key("preserveFragment"));
+}
+
+#[tokio::test]
+async fn preserve_fragment_false_does_not_emit_flag() {
+    let req = MockReq::new("/article").inertia();
+    let resp = InertiaResponse::new("Article/Show")
+        .preserve_fragment(false)
+        .resolve(&req)
+        .await
+        .unwrap();
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(!page.as_object().unwrap().contains_key("preserveFragment"));
+}
+
+#[tokio::test]
+async fn inertia_redirect_returns_409_with_x_inertia_redirect() {
+    let resp = InertiaResponse::redirect("/article/new#section");
+    let hyper_resp = resp.into_hyper();
+    assert_eq!(hyper_resp.status(), 409);
+    assert_eq!(
+        hyper_resp.headers().get("X-Inertia-Redirect").unwrap(),
+        "/article/new#section"
+    );
+    // X-Inertia-Redirect is distinct from X-Inertia-Location — only
+    // one of the two should be present, per the protocol.
+    assert!(hyper_resp.headers().get("X-Inertia-Location").is_none());
+}
+
+#[tokio::test]
+async fn inertia_redirect_distinct_from_location() {
+    // Sanity check: redirect() and location() produce different shapes.
+    let redirect = InertiaResponse::redirect("/foo").into_hyper();
+    let location = InertiaResponse::location("/foo").into_hyper();
+
+    assert!(redirect.headers().get("X-Inertia-Redirect").is_some());
+    assert!(redirect.headers().get("X-Inertia-Location").is_none());
+
+    assert!(location.headers().get("X-Inertia-Redirect").is_none());
+    assert!(location.headers().get("X-Inertia-Location").is_some());
+}
+
 // ---- version-mismatch middleware ----
 //
 // These tests drive the middleware directly via the Middleware trait
