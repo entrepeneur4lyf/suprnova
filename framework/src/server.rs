@@ -234,6 +234,14 @@ async fn handle_request_inner(
 
             // Unwrap the Result - both Ok and Err contain HttpResponse
             let http_response = response.unwrap_or_else(|e| e);
+            // Mark the active tracing span as errored on 5xx so the
+            // tracing-opentelemetry bridge translates it to OTel
+            // `Status::Error`. The field is a no-op when no span is
+            // active (e.g. before the Phase 2 request span lands).
+            #[cfg(feature = "otel")]
+            if http_response.status_code() >= 500 {
+                tracing::Span::current().record("error", true);
+            }
             http_response.into_hyper()
         }
         None => {
@@ -258,6 +266,14 @@ async fn handle_request_inner(
 
                 // Unwrap the Result - both Ok and Err contain HttpResponse
                 let http_response = response.unwrap_or_else(|e| e);
+                // Mark the active tracing span as errored on 5xx so the
+                // tracing-opentelemetry bridge translates it to OTel
+                // `Status::Error`. The field is a no-op when no span is
+                // active.
+                #[cfg(feature = "otel")]
+                if http_response.status_code() >= 500 {
+                    tracing::Span::current().record("error", true);
+                }
                 http_response.into_hyper()
             } else {
                 // No fallback defined, return default 404
