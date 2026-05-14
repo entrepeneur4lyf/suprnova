@@ -772,56 +772,55 @@ async cursors, not `LIMIT N OFFSET M` page joins.
 
 ## Recommended sequencing
 
-Each phase unblocks the next. Approximate effort in italics; not
-commitments. Every phase ships its fakes/assertions in the same
-commit (Philosophy rule 4).
+Each phase unblocks the next. Every phase ships its fakes /
+assertions in the same commit (Philosophy rule 4). Order is set
+by dependency; we ship a phase when it's done, not on a calendar.
 
-**Phase 1: Logging + Events + Error handling + minimal SSE** *(5 weeks)*
+**Phase 1: Logging + Events + Error handling + minimal SSE.**
 Foundation observability. Everything else uses them. The longer we
 wait, the more retrofitting we owe. Minimal SSE rides along so
 events have a delivery primitive from day one.
 
-**Phase 2: HTTP client + Pagination + Encryption** *(3 weeks)*
+**Phase 2: HTTP client + Pagination + Encryption.**
 Small, high-leverage, often-used. Encryption replaces the sign-only
 cookie path; HTTP client unblocks third-party API integrations every
 real app needs.
 
-**Phase 3: Authorization + API mode** *(4–5 weeks)*
+**Phase 3: Authorization + API mode.**
 Gates + Policies + token auth + JSON Resources + `--api` scaffolding.
 Day-one expectation for any Laravel dev, separate from the Auth track
 that already shipped. The bigger your app gets, the more this matters.
 
-**Phase 4: Filesystem + File uploads + Validation parity** *(5–7 weeks)*
+**Phase 4: Filesystem + File uploads + Validation parity.**
 Storage drivers and upload handling together because controllers
 touch both. Validation gets finished here because we already exercised
 the gaps in Precognition.
 
-**Phase 5: Queue + Mail + Notifications + Rate Limiting** *(5–6 weeks)*
+**Phase 5: Queue + Mail + Notifications + Rate Limiting.**
 Mail-via-queue is the canonical pattern; ship them together.
 Rate limiting middleware in the same wave because cache + redis are
 already set up. Notifications layer on top.
 
-**Phase 6: Factories + Seeders + Configuration + Console** *(2–3 weeks)*
+**Phase 6: Factories + Seeders + Configuration + Console.**
 The Laravel-dev day-one expectations not covered earlier. Small but
 high-impact for DX.
 
-**Phase 7: Full Broadcasting + supervised background workers** *(5–6 weeks)*
+**Phase 7: Full Broadcasting + supervised background workers.**
 WebSocket + presence + channel auth. The "Rust eats Laravel's lunch"
 moment at full strength — Phase 1 already shipped SSE for the simpler
 cases. This is the demo that gets a Laravel dev to say "wait, you can
 do that in one process?"
 
-**Phase 8: Admin Panel** *(4–5 weeks)*
+**Phase 8: Admin Panel.**
 TOML-driven CRUD + RBAC + audit trails over every entity. Depends
 on Authorization (Phase 3) and Filesystem (Phase 4) shipping first.
-The "you can ship a real product on month four" moment.
 
-**Phase 9: Differentiation** *(ongoing)*
+**Phase 9: Differentiation** *(ongoing as consumers demand it).*
 Vectors, graphs, search, time-series. Driven by real consumer needs
 (`nation-x.com` will exercise some). Ship one when the demand exists;
 the others queue up behind.
 
-**Phase 10: Polish** *(parallel with phases above)*
+**Phase 10: Polish** *(parallel with the phases above).*
 Translation, Support helpers, Process, scoped bindings, routing extras,
 `english-to-cron`, `suprnova doctor`. These fit between bigger pieces.
 
