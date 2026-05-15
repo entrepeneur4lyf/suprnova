@@ -391,6 +391,65 @@ impl Prop {
             Prop::Scroll(c) => (c.resolver)().await,
         }
     }
+
+    /// Construct a lazy `Prop` from a simple async closure that returns a
+    /// `serde_json::Value` directly (no `Result` wrapping required on the
+    /// caller's side). The closure is only invoked when the field is
+    /// requested via `?include=` and passes the DTO's allowlist check.
+    pub fn lazy<F, Fut>(f: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Value> + Send + 'static,
+    {
+        Prop::Lazy(Arc::new(move || {
+            let fut = f();
+            Box::pin(async move { Ok(fut.await) })
+        }))
+    }
+
+    /// Resolution path used by `#[derive(Data)]`-generated code. Consults
+    /// the request's [`crate::data::RequestIncludeSet`] AND the per-DTO
+    /// allowlist before invoking the lazy closure.
+    ///
+    /// - If `field` is NOT in the request's include set: returns
+    ///   `Ok(None)` (caller omits the field from the response).
+    /// - If `field` IS in the include set but NOT in the DTO's allowlist:
+    ///   returns `Err` with status 400 — the `IncludeError::UnknownInclude`
+    ///   message body lists the field and the allowed includes.
+    /// - If `field` IS in both: invokes the closure and returns
+    ///   `Ok(Some(value))`.
+    /// - Non-lazy variants (`Eager`, `Always`, etc.) resolve through the
+    ///   existing `resolve` path without include-set gating.
+    pub async fn resolve_with_owner(
+        self,
+        owner_struct_name: &str,
+        field: &str,
+    ) -> Result<Option<Value>, FrameworkError> {
+        use crate::data::{current_include_set, registry, IncludeError};
+
+        match self {
+            Prop::Lazy(closure) => {
+                let set = current_include_set();
+                if set.includes(field) {
+                    if !registry::is_allowed(owner_struct_name, field) {
+                        return Err(IncludeError::UnknownInclude {
+                            field: field.to_string(),
+                            allowed: registry::allowed_for(owner_struct_name)
+                                .iter()
+                                .map(|s| s.to_string())
+                                .collect(),
+                        }
+                        .into_framework_error());
+                    }
+                    let value = closure().await?;
+                    Ok(Some(value))
+                } else {
+                    Ok(None)
+                }
+            }
+            other => Ok(Some(other.resolve().await?)),
+        }
+    }
 }
 
 /// Decision engine for partial-reload filtering.
