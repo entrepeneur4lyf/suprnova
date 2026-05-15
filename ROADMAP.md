@@ -195,6 +195,54 @@ is what makes Rust frameworks reach 80% production-ready and stall.
   encrypted using the `APP_KEY` installed at server boot. Pre-1.0 hard
   cut: existing plaintext sessions silently become unreadable after
   deploy and clients get a fresh session ID.
+- **Data Objects** - `#[derive(Data)]` unifies request DTOs, response
+  DTOs, and TypeScript exports in one struct. `Field<T> = Absent | Null
+  | Value(T)` tri-state for PATCH endpoints. `?include=`/`?fields[type]=`
+  task-locals scoped by `IncludeMiddleware` with default-deny 400 on
+  unknown keys. Lazy flavors (`plain`/`inertia`/`deferred`/`closure`/
+  `when_loaded`) + auto-registration of `allow_include` allowlist via
+  `inventory`. Type-aware route-param coercion at macro time. Generic
+  structs (TS interface generics + suppressed FormRequest where bounds
+  can't verify). Paired `<Name>` / `<Name>Input` TS interfaces.
+- **Authorization** - `Gate::define::<U, R>(action, |u, r| ...)`,
+  `allows` / `denies` / `authorize` (`FrameworkError::Unauthorized` on
+  deny). Default-deny on missing gates. `#[policy(User, Resource)]`
+  proc macro emits Gate registrations per impl method via `inventory`
+  free-function shims (avoids the `'static` constraint on
+  `inventory::submit!`). `init_policies()` (guarded by `Once`) called
+  from `Server::serve`.
+- **Auth methods (torii integration)** - `Auth::password()` /
+  `Auth::oauth(provider)` / `Auth::passkey()` / `Auth::magic_link()`
+  facades over `torii` 0.5.x + `torii-storage-seaorm`. Process-global
+  `OnceLock<Torii<SeaORMRepositoryProvider>>` initialised by
+  `init_torii(ToriiConfig)`. Provider configs registered via
+  `Auth::oauth("github").configure(OAuthProviderConfig { ... })`.
+  Passkey WebAuthn challenge/verify with sensible defaults.
+- **Bearer-token API auth** - `BearerTokenMiddleware` resolves
+  `Authorization: Bearer <token>` to a torii session, binds
+  `user_id` to the request session scope without short-circuiting on
+  missing/invalid tokens (route-level `AuthMiddleware` produces the
+  canonical 401).
+- **JSON:API resources** - `#[derive(Data)] #[json_resource("<type>")]`
+  emits an `IntoJsonResource` impl alongside the existing
+  `IntoInertiaData`. `Resource::single` / `Resource::collection` /
+  `Resource::paginated` produce spec-compliant envelopes:
+  `data.type`/`id`/`attributes`/`relationships`, top-level
+  `included` compound documents (deduplicated by `(type, id)`),
+  `links`/`meta`. Sparse fieldsets via `?fields[users]=name,email`
+  + `RequestFieldsetSet` task-local. Multi-level dot-notation
+  `?include=author.posts.tags` parsed into `IncludeTree` and walked
+  recursively; unknown keys produce a JSON:API 400 errors envelope
+  (`FrameworkError::into_json_api_response`). Relationships type
+  `Option<T>` / `Vec<T>` / `T` where `T: IntoJsonResource`;
+  `Prop` remains Inertia-only.
+- **API mode scaffolder** - `suprnova new <name> --api` emits a pure
+  JSON-API starter: `Cargo.toml`, `main.rs`, `lib.rs`, `bootstrap.rs`
+  (registers `BearerTokenMiddleware` + `IncludeMiddleware` globally,
+  no Inertia), `routes.rs` (JSON-only routes including register/login
+  and an example `Resource::collection`), example `UserResource`
+  (`#[derive(Data)] #[json_resource("users")]`), Post-style models,
+  migrations, `.env` placeholders.
 
 **Partial - needs filling in:**
 
