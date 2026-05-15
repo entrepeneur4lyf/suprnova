@@ -6,6 +6,7 @@
 mod error;
 mod field;
 mod include_set;
+pub mod registry;
 
 pub use error::IncludeError;
 pub use field::Field;
