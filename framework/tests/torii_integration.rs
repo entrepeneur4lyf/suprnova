@@ -81,6 +81,27 @@ fn wrong_password_fails_authentication() {
     });
 }
 
+/// Passkey registration returns a non-empty challenge, the echoed email, and an rp_id.
+///
+/// This test does not complete a full WebAuthn round-trip (that requires a browser).
+/// It verifies that `begin_registration` wires correctly all the way from
+/// `Auth::passkey()` → `Webauthn` → `PasskeyRegistrationChallenge`.
+#[test]
+fn passkey_registration_challenge_returns_options() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let challenge = Auth::passkey()
+            .begin_registration("alice@example.com")
+            .await
+            .unwrap();
+
+        assert!(!challenge.challenge.is_empty());
+        assert_eq!(challenge.user_email, "alice@example.com");
+        assert!(!challenge.rp_id.is_empty());
+    });
+}
+
 /// OAuth kickoff returns a valid GitHub authorization URL and a non-empty state token.
 #[test]
 fn oauth_kickoff_returns_authorization_url() {

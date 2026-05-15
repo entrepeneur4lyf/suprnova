@@ -36,20 +36,33 @@ static TORII: OnceLock<Torii<SeaORMRepositoryProvider>> = OnceLock::new();
 ///
 /// Create one with [`ToriiConfig::from_sea_orm`] (typical) or
 /// [`ToriiConfig::sqlite_in_memory`] (tests/dev).
+///
+/// # Passkey configuration
+///
+/// Set `passkey_rp_id` and `passkey_rp_origin` to enable WebAuthn/passkey
+/// authentication. Both default to `"localhost"` / `"http://localhost"` so tests
+/// and local development work without extra configuration.
 pub struct ToriiConfig {
     conn: sea_orm::DatabaseConnection,
     apply_migrations: bool,
+    /// WebAuthn relying-party identifier, e.g. `"example.com"`.
+    /// Must be an effective domain of `passkey_rp_origin`.
+    pub passkey_rp_id: String,
+    /// WebAuthn relying-party origin URL, e.g. `"https://example.com"`.
+    pub passkey_rp_origin: String,
 }
 
 impl ToriiConfig {
     /// Create a Torii config from an existing SeaORM connection.
     ///
     /// This is the standard path — share the connection with the framework's
-    /// own database usage.
+    /// own database usage. Passkey defaults to `localhost`.
     pub fn from_sea_orm(conn: sea_orm::DatabaseConnection) -> Self {
         Self {
             conn,
             apply_migrations: true,
+            passkey_rp_id: "localhost".to_string(),
+            passkey_rp_origin: "http://localhost".to_string(),
         }
     }
 
@@ -59,6 +72,8 @@ impl ToriiConfig {
     /// database survives for as long as at least one connection holds it open.
     /// When stored in the global `TORII` static, the pool's lifetime extends
     /// across multiple async test runtimes.
+    ///
+    /// Passkey defaults to `localhost` / `http://localhost`.
     pub async fn sqlite_in_memory() -> Result<Self, FrameworkError> {
         let conn = sea_orm::Database::connect("sqlite:file::memory:?cache=shared")
             .await
@@ -66,6 +81,8 @@ impl ToriiConfig {
         Ok(Self {
             conn,
             apply_migrations: true,
+            passkey_rp_id: "localhost".to_string(),
+            passkey_rp_origin: "http://localhost".to_string(),
         })
     }
 
@@ -74,6 +91,23 @@ impl ToriiConfig {
     /// Defaults to `true`.
     pub fn apply_migrations(mut self, yes: bool) -> Self {
         self.apply_migrations = yes;
+        self
+    }
+
+    /// Set the WebAuthn relying-party identifier (e.g. `"example.com"`).
+    ///
+    /// The `rp_id` must be an effective domain of `rp_origin`. Defaults to
+    /// `"localhost"`.
+    pub fn passkey_rp_id(mut self, rp_id: impl Into<String>) -> Self {
+        self.passkey_rp_id = rp_id.into();
+        self
+    }
+
+    /// Set the WebAuthn relying-party origin URL (e.g. `"https://example.com"`).
+    ///
+    /// Defaults to `"http://localhost"`.
+    pub fn passkey_rp_origin(mut self, rp_origin: impl Into<String>) -> Self {
+        self.passkey_rp_origin = rp_origin.into();
         self
     }
 }
@@ -99,6 +133,10 @@ pub async fn init_torii(config: ToriiConfig) -> Result<(), FrameworkError> {
     if TORII.get().is_some() {
         return Ok(());
     }
+
+    // Initialise WebAuthn before the torii lock so the passkey facade is
+    // always ready after init_torii returns.
+    passkey::init_webauthn(&config.passkey_rp_id, &config.passkey_rp_origin)?;
 
     let storage = SeaORMStorage::new(config.conn);
 
