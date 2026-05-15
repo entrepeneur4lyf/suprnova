@@ -14,6 +14,7 @@
 //! - This is consistent with the examples in the published crate's own doc-tests.
 
 pub mod magic_link;
+pub mod middleware;
 pub mod oauth;
 pub mod passkey;
 pub mod password;

@@ -20,9 +20,10 @@
 //! runs, regardless of parallel execution order.
 
 use once_cell::sync::Lazy;
+use std::sync::Arc;
 use tokio::runtime::Runtime;
 
-use suprnova::torii_integration::{init_torii, ToriiConfig};
+use suprnova::torii_integration::{init_torii, middleware::BearerTokenMiddleware, ToriiConfig};
 use suprnova::Auth;
 
 /// One tokio runtime shared across every test in this file.
@@ -174,5 +175,159 @@ fn oauth_kickoff_returns_authorization_url() {
             kickoff.authorization_url,
         );
         assert!(!kickoff.state.is_empty());
+    });
+}
+
+// ── BearerTokenMiddleware tests ───────────────────────────────────────────────
+
+/// Creates a real `suprnova::Request` with an optional `Authorization` header
+/// by spinning up a minimal in-memory HTTP/1.1 connection.
+///
+/// `suprnova::Request` wraps `hyper::Request<hyper::body::Incoming>`, and
+/// `Incoming` can only be produced by hyper's connection machinery. We use a
+/// `tokio::io::duplex` pipe + `hyper::server::conn::http1` to parse a raw
+/// HTTP request, giving us a genuine `Incoming` body without a network socket.
+async fn build_request_async(auth_header: Option<&str>) -> suprnova::Request {
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use std::convert::Infallible;
+    use tokio::sync::oneshot;
+
+    let (req_tx, req_rx) = oneshot::channel::<suprnova::Request>();
+
+    // Build the raw HTTP bytes to send over the wire.
+    let auth_line = auth_header
+        .map(|h| format!("Authorization: {}\r\n", h))
+        .unwrap_or_default();
+    let http_bytes = format!(
+        "GET /api/test HTTP/1.1\r\nHost: localhost\r\n{}Content-Length: 0\r\n\r\n",
+        auth_line
+    );
+
+    let (client_io, server_io) = tokio::io::duplex(4096);
+
+    // Server side: accept one request, send it through the oneshot channel.
+    // `service_fn` requires `Fn`, so we use a `Mutex<Option<_>>` to move
+    // the sender out on the first (and only) call.
+    let req_tx = std::sync::Mutex::new(Some(req_tx));
+    tokio::spawn(async move {
+        let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+            let wrapped = suprnova::Request::new(req);
+            if let Ok(mut guard) = req_tx.lock() {
+                if let Some(tx) = guard.take() {
+                    let _ = tx.send(wrapped);
+                }
+            }
+            async {
+                Ok::<_, Infallible>(hyper::Response::new(
+                    http_body_util::Empty::<bytes::Bytes>::new(),
+                ))
+            }
+        });
+
+        let _ = http1::Builder::new()
+            .serve_connection(hyper_util::rt::TokioIo::new(server_io), svc)
+            .await;
+    });
+
+    // Client side: write the raw request bytes, then drop (signals EOF).
+    {
+        use tokio::io::AsyncWriteExt;
+        let mut client = client_io;
+        client.write_all(http_bytes.as_bytes()).await.unwrap();
+    }
+
+    req_rx.await.expect("server should have received the request")
+}
+
+/// `BearerTokenMiddleware` binds the session when a valid token is presented.
+///
+/// Registers a user, authenticates (obtaining a real session token), then
+/// drives the middleware with that token in the `Authorization` header.
+/// Asserts that `Auth::check()` returns `true` inside the session scope.
+#[test]
+fn bearer_token_middleware_binds_session_when_token_valid() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        // Register + authenticate to get a real session token.
+        Auth::password()
+            .register("bearer-valid@example.com", "Bearer1!")
+            .await
+            .unwrap();
+
+        let (_user, torii_session) = Auth::password()
+            .authenticate("bearer-valid@example.com", "Bearer1!", None, None)
+            .await
+            .unwrap();
+
+        let token_str = torii_session.token.to_string();
+        assert!(!token_str.is_empty());
+
+        // Build a fake request with the bearer token.
+        let request = build_request_async(Some(&format!("Bearer {}", token_str))).await;
+
+        // Set up a per-request session scope (as SessionMiddleware would do at runtime).
+        let slot = suprnova::session::new_session_slot_for_test();
+
+        let authenticated = suprnova::session::session_scope_for_test(slot, async {
+            // Stub `next` that just returns OK without touching the session.
+            let next: suprnova::Next = Arc::new(|_req| {
+                Box::pin(async { Ok(suprnova::HttpResponse::text("ok")) })
+            });
+
+            let mw = BearerTokenMiddleware;
+            use suprnova::Middleware;
+            let _response = mw.handle(request, next).await;
+
+            // After middleware runs, `Auth::check()` must return true because
+            // `set_auth_user` was called with the hashed user_id.
+            Auth::check()
+        })
+        .await;
+
+        assert!(
+            authenticated,
+            "BearerTokenMiddleware should bind the session for a valid token"
+        );
+    });
+}
+
+/// `BearerTokenMiddleware` passes through without binding when the token is invalid.
+///
+/// Drives the middleware with a garbage token; asserts that `Auth::check()`
+/// returns `false` (no session was bound) and the request reached the handler
+/// (response is `Ok`, not `401`).
+#[test]
+fn bearer_token_middleware_passes_through_when_token_invalid() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let request = build_request_async(Some("Bearer garbage_invalid_token_xyz")).await;
+
+        let slot = suprnova::session::new_session_slot_for_test();
+
+        let (authenticated, response_ok) =
+            suprnova::session::session_scope_for_test(slot, async {
+                let next: suprnova::Next = Arc::new(|_req| {
+                    Box::pin(async { Ok(suprnova::HttpResponse::text("ok")) })
+                });
+
+                let mw = BearerTokenMiddleware;
+                use suprnova::Middleware;
+                let response = mw.handle(request, next).await;
+
+                (Auth::check(), response.is_ok())
+            })
+            .await;
+
+        assert!(
+            !authenticated,
+            "BearerTokenMiddleware should NOT bind the session for an invalid token"
+        );
+        assert!(
+            response_ok,
+            "BearerTokenMiddleware should pass through (no 401) for an invalid token"
+        );
     });
 }
