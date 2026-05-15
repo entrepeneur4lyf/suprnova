@@ -112,9 +112,10 @@ async fn partial_data_filters_after_include_resolves() {
     assert_eq!(page["props"]["name"], "Beethoven");
 
     // "albums" is NOT in X-Inertia-Partial-Data → partial-data gate excludes it
-    // before the include-set resolver even runs.
+    // before the include-set resolver even runs. Use contains_key to distinguish
+    // "absent key" from "key present with null value".
     assert!(
-        page["props"]["albums"].is_null(),
+        !page["props"].as_object().unwrap().contains_key("albums"),
         "expected 'albums' prop to be absent (partial-data filtered), got: {:?}",
         page["props"]
     );
