@@ -98,7 +98,7 @@ fn deserialize_option_null_yields_none() {
 // ── #[data(allow_include)] inventory→registry pipeline ───────────────────
 
 #[allow(non_camel_case_types)]
-#[derive(suprnova::Data)]
+#[derive(suprnova::Data, Validate)]
 struct _test_AlbumDto_t8 {
     pub id: i64,
     pub title: String,

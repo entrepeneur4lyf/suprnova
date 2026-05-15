@@ -2,17 +2,46 @@
 //! - `Serialize` (skipping `#[data(input_only)]` fields)
 //! - `Deserialize` (rejecting payloads containing `#[data(output_only)]`
 //!   fields; using `T::default()` for output_only fields on deserialize)
-//! - `Validate` (via the existing `validator` crate forwarding)
-//! - `InertiaProps` (existing surface; serialization is the same as the
-//!   generated Serialize)
-//! - `FormRequest` (existing surface; gives the extractor path)
+//! - `FormRequest` (with `authorize: true` default; see below)
 //!
 //! Plus: a per-struct `inventory::submit!` block registering
 //! `#[data(allow_include)]` fields into the runtime allowlist.
 //!
-//! Task 7 (this task) emits the skeleton for non-generic structs; Task
-//! 15 extends the same builders to thread `impl_generics` /
-//! `ty_generics` / `where_clause` through every generated impl.
+//! Task 7 emits the skeleton for non-generic structs; Task 15 extends
+//! the same builders to thread `impl_generics` / `ty_generics` /
+//! `where_clause` through every generated impl.
+//!
+//! # Validation
+//!
+//! `#[derive(Data)]` generates the `FormRequest` impl (with
+//! `authorize: true` default) but does NOT generate `Validate`. Add
+//! `#[derive(Validate)]` separately so `#[validate(...)]` attributes
+//! stay visible at the field call site:
+//!
+//! ```ignore
+//! #[derive(Data, Validate)]
+//! struct CreateUser {
+//!     #[validate(email)]
+//!     email: String,
+//! }
+//! ```
+//!
+//! # Custom authorization
+//!
+//! By default, `FormRequest::authorize` returns `true`. To override,
+//! add `#[data(custom_authorize)]` at the struct level — the derive
+//! will skip emitting the `FormRequest` impl, letting you write your
+//! own:
+//!
+//! ```ignore
+//! #[derive(Data, Validate)]
+//! #[data(custom_authorize)]
+//! struct ProtectedDto { /* ... */ }
+//!
+//! impl FormRequest for ProtectedDto {
+//!     fn authorize(req: &Request) -> bool { /* your logic */ }
+//! }
+//! ```
 //!
 //! # Optional and tri-state fields
 //!
@@ -39,6 +68,47 @@ struct FieldOptions {
     input_only: bool,
     output_only: bool,
     allow_include: bool,
+}
+
+#[derive(Default)]
+struct StructOptions {
+    custom_authorize: bool,
+}
+
+fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::Error> {
+    let mut opts = StructOptions::default();
+    for attr in attrs {
+        if !attr.path().is_ident("data") {
+            continue;
+        }
+        let list = match &attr.meta {
+            Meta::List(list) => list,
+            _ => continue,
+        };
+        list.parse_nested_meta(|meta| {
+            if meta.path.is_ident("custom_authorize") {
+                opts.custom_authorize = true;
+            } else {
+                return Err(meta.error("unknown struct-level #[data(...)] flag"));
+            }
+            Ok(())
+        })?;
+    }
+    Ok(opts)
+}
+
+fn build_form_request(struct_name: &Ident, struct_opts: &StructOptions) -> TokenStream2 {
+    if struct_opts.custom_authorize {
+        // User opted to provide their own FormRequest impl — emit nothing.
+        return quote! {};
+    }
+    quote! {
+        impl ::suprnova::http::FormRequest for #struct_name {
+            fn authorize(_req: &::suprnova::Request) -> bool {
+                true
+            }
+        }
+    }
 }
 
 fn parse_field_options(field: &Field) -> Result<FieldOptions, syn::Error> {
@@ -112,14 +182,21 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
         }
     }
 
+    let struct_opts = match parse_struct_options(&input.attrs) {
+        Ok(o) => o,
+        Err(e) => return e.to_compile_error().into(),
+    };
+
     let serialize_impl = build_serialize(struct_name, &parsed);
     let deserialize_impl = build_deserialize(struct_name, &struct_name_str, &parsed);
     let allowlist_registration = build_allowlist_registration(&struct_name_str, &parsed);
+    let form_request_impl = build_form_request(struct_name, &struct_opts);
 
     let expanded = quote! {
         #serialize_impl
         #deserialize_impl
         #allowlist_registration
+        #form_request_impl
     };
 
     expanded.into()
