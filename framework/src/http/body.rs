@@ -17,13 +17,19 @@ pub async fn collect_body(body: Incoming) -> Result<Bytes, FrameworkError> {
 }
 
 /// Parse bytes as JSON into the target type
+///
+/// Deserialization errors map to 422 Unprocessable Entity — the client
+/// supplied invalid input (wrong shape, rejected fields, bad types).
 pub fn parse_json<T: DeserializeOwned>(bytes: &Bytes) -> Result<T, FrameworkError> {
     serde_json::from_slice(bytes)
-        .map_err(|e| FrameworkError::internal(format!("Failed to parse JSON body: {}", e)))
+        .map_err(|e| FrameworkError::domain(format!("Failed to parse JSON body: {}", e), 422))
 }
 
 /// Parse bytes as form-urlencoded into the target type
+///
+/// Deserialization errors map to 422 Unprocessable Entity — the client
+/// supplied invalid input.
 pub fn parse_form<T: DeserializeOwned>(bytes: &Bytes) -> Result<T, FrameworkError> {
     serde_urlencoded::from_bytes(bytes)
-        .map_err(|e| FrameworkError::internal(format!("Failed to parse form body: {}", e)))
+        .map_err(|e| FrameworkError::domain(format!("Failed to parse form body: {}", e), 422))
 }
