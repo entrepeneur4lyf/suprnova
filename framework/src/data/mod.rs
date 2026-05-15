@@ -6,8 +6,10 @@
 mod error;
 mod field;
 mod include_set;
+mod middleware;
 pub mod registry;
 
 pub use error::IncludeError;
 pub use field::Field;
 pub use include_set::{current_include_set, RequestIncludeSet, REQUEST_INCLUDE_SET};
+pub use middleware::IncludeMiddleware;

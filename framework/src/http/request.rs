@@ -35,6 +35,12 @@ impl Request {
         self.inner.uri().path()
     }
 
+    /// Returns the query string portion of the request URI (the part
+    /// after `?`), or `None` when no query is present.
+    pub fn query(&self) -> Option<&str> {
+        self.inner.uri().query()
+    }
+
     /// Get a route parameter by name (e.g., /users/{id})
     /// Returns Err(ParamError) if the parameter is missing, enabling use of `?` operator
     pub fn param(&self, name: &str) -> Result<&str, ParamError> {
