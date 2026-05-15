@@ -22,6 +22,7 @@
 - [core/responses](core/responses.md)
 - [core/error-handling](core/error-handling.md)
 - [core/middleware](core/middleware.md)
+- [core/data-objects](core/data-objects.md)
 - [core/authentication](core/authentication.md)
 - [core/sessions](core/sessions.md)
 - [core/csrf](core/csrf.md)
