@@ -94,3 +94,34 @@ fn deserialize_option_null_yields_none() {
     let u: PatchUserDto = serde_json::from_value(j).unwrap();
     assert!(u.name.is_none());
 }
+
+// ── #[data(allow_include)] inventory→registry pipeline ───────────────────
+
+#[allow(non_camel_case_types)]
+#[derive(suprnova::Data)]
+struct _test_AlbumDto_t8 {
+    pub id: i64,
+    pub title: String,
+
+    #[data(allow_include)]
+    pub songs: Option<Vec<String>>,
+
+    #[data(allow_include)]
+    pub artist: Option<String>,
+}
+
+#[test]
+fn allow_include_fields_register_via_inventory() {
+    // `inventory::submit!` registers the AllowedIncludes entries at
+    // link time; the first call to `is_allowed`/`allowed_for` drains
+    // them into the runtime registry via `ensure_initialized()`.
+    use suprnova::data::registry;
+
+    assert!(registry::is_allowed("_test_AlbumDto_t8", "songs"));
+    assert!(registry::is_allowed("_test_AlbumDto_t8", "artist"));
+    assert!(!registry::is_allowed("_test_AlbumDto_t8", "title"));
+    assert_eq!(
+        registry::allowed_for("_test_AlbumDto_t8"),
+        vec!["songs", "artist"]
+    );
+}
