@@ -14,9 +14,9 @@
 //! In-flight registration and authentication state is kept in process-local
 //! `DashMap`s keyed by email. This is intentional: WebAuthn challenges are
 //! ephemeral (typically expire in 60 s) and are not useful to persist across
-//! restarts. Production deployments that run multiple replicas should replace
-//! the in-memory maps with a shared cache (Redis, etc.) — a future Suprnova
-//! extension point.
+//! restarts. Production deployments that run multiple replicas must replace
+//! the in-memory maps with a shared external cache (Redis, etc.) before going
+//! multi-instance.
 //!
 //! # Re-exports
 //!
@@ -65,6 +65,19 @@ fn reg_state() -> &'static DashMap<String, PasskeyRegistration> {
 
 fn auth_state() -> &'static DashMap<String, PasskeyAuthentication> {
     AUTH_STATE.get_or_init(DashMap::new)
+}
+
+/// Look up a user by email, creating one if none exists.
+///
+/// torii 0.5.x has no public `get_user_by_email` API. Using `password().register`
+/// is safe here: torii returns the existing user when the email is already taken
+/// and does not overwrite the stored password.
+async fn get_or_create_user_by_email(email: &str) -> Result<User, FrameworkError> {
+    instance()?
+        .password()
+        .register(email, &Uuid::new_v4().to_string())
+        .await
+        .map_err(|e| FrameworkError::internal(format!("passkey: get/create user: {e}")))
 }
 
 /// Initialise the global `Webauthn` instance.
@@ -192,19 +205,10 @@ impl PasskeyAuth {
         &self,
         email: &str,
     ) -> Result<PasskeyRegistrationChallenge, FrameworkError> {
-        let torii = instance()?;
         let webauthn = webauthn_instance()?;
 
-        // Get-or-create the user. We use a random UUID as the "password" so
-        // the user is created in torii's user table without a usable password
-        // credential. torii's register() returns the existing user when the
-        // email is already taken, without touching the stored password — so
-        // this is safe to call repeatedly.
-        let user = torii
-            .password()
-            .register(email, &Uuid::new_v4().to_string())
-            .await
-            .map_err(|e| FrameworkError::internal(format!("passkey: create user: {e}")))?;
+        // Get-or-create the user account.
+        let user = get_or_create_user_by_email(email).await?;
 
         // Derive a stable UUID from the opaque torii UserId string.
         // torii's UserId is a prefixed ID (e.g. "usr_..."), not a UUID.
@@ -214,7 +218,7 @@ impl PasskeyAuth {
             Uuid::new_v5(&Uuid::NAMESPACE_URL, user.id.as_str().as_bytes());
 
         // Get existing credentials so webauthn can exclude them.
-        let existing: Vec<webauthn_rs::prelude::CredentialID> = torii
+        let existing: Vec<webauthn_rs::prelude::CredentialID> = instance()?
             .passkey()
             .get_user_credentials(&user.id)
             .await
@@ -267,7 +271,6 @@ impl PasskeyAuth {
         email: &str,
         response: RegisterPublicKeyCredential,
     ) -> Result<User, FrameworkError> {
-        let torii = instance()?;
         let webauthn = webauthn_instance()?;
 
         // Retrieve and remove in-flight state (one-time use).
@@ -281,11 +284,7 @@ impl PasskeyAuth {
             .map_err(|e| FrameworkError::internal(format!("webauthn finish_passkey_registration: {e:?}")))?;
 
         // Load the user (must exist — begin_registration created them).
-        let user = torii
-            .password()
-            .register(email, &Uuid::new_v4().to_string())
-            .await
-            .map_err(|e| FrameworkError::internal(format!("passkey: lookup user: {e}")))?;
+        let user = get_or_create_user_by_email(email).await?;
 
         // Serialise the webauthn Passkey struct into bytes for torii storage.
         // Torii's passkey store is a raw-byte key/value; we store the JSON
@@ -294,7 +293,7 @@ impl PasskeyAuth {
         let passkey_bytes = serde_json::to_vec(&passkey)
             .map_err(|e| FrameworkError::internal(format!("passkey: serialize passkey: {e}")))?;
 
-        torii
+        instance()?
             .passkey()
             .register_credential(&user.id, cred_id, passkey_bytes, None)
             .await
@@ -319,18 +318,13 @@ impl PasskeyAuth {
         &self,
         email: &str,
     ) -> Result<PasskeyAuthenticationChallenge, FrameworkError> {
-        let torii = instance()?;
         let webauthn = webauthn_instance()?;
 
         // Resolve user — we need the user_id to fetch credentials.
-        let user = torii
-            .password()
-            .register(email, &Uuid::new_v4().to_string())
-            .await
-            .map_err(|e| FrameworkError::internal(format!("passkey: resolve user: {e}")))?;
+        let user = get_or_create_user_by_email(email).await?;
 
         // Load stored passkeys.
-        let stored_creds = torii
+        let stored_creds = instance()?
             .passkey()
             .get_user_credentials(&user.id)
             .await
@@ -387,7 +381,6 @@ impl PasskeyAuth {
         email: &str,
         response: PublicKeyCredential,
     ) -> Result<(User, Session), FrameworkError> {
-        let torii = instance()?;
         let webauthn = webauthn_instance()?;
 
         // Retrieve and remove in-flight state (one-time use).
@@ -396,13 +389,9 @@ impl PasskeyAuth {
             .ok_or_else(|| FrameworkError::internal("passkey: no authentication in progress for this email"))?;
 
         // Load the user and their stored passkeys (needed for finish_passkey_authentication).
-        let user = torii
-            .password()
-            .register(email, &Uuid::new_v4().to_string())
-            .await
-            .map_err(|e| FrameworkError::internal(format!("passkey: resolve user: {e}")))?;
+        let user = get_or_create_user_by_email(email).await?;
 
-        let stored_creds = torii
+        let stored_creds = instance()?
             .passkey()
             .get_user_credentials(&user.id)
             .await
@@ -423,7 +412,10 @@ impl PasskeyAuth {
             .map_err(|e| FrameworkError::internal(format!("webauthn finish_passkey_authentication: {e:?}")))?;
 
         // Update the counter on the matching passkey and persist.
+        // We assert the matched credential is present — webauthn verifies it is in
+        // the allow-list we provided, so a mismatch here would be an internal bug.
         let used_cred_id = auth_result.cred_id();
+        let mut updated = false;
         for (stored, passkey) in stored_creds.iter().zip(passkeys.iter_mut()) {
             if &stored.credential_id == used_cred_id.as_ref() {
                 passkey.update_credential(&auth_result);
@@ -431,12 +423,12 @@ impl PasskeyAuth {
                     FrameworkError::internal(format!("passkey: serialize updated passkey: {e}"))
                 })?;
                 // Re-register to update bytes (torii has no update API; delete + add).
-                torii
+                instance()?
                     .passkey()
                     .delete_credential(&stored.credential_id)
                     .await
                     .map_err(|e| FrameworkError::internal(format!("passkey: delete old credential: {e}")))?;
-                torii
+                instance()?
                     .passkey()
                     .register_credential(
                         &user.id,
@@ -446,12 +438,21 @@ impl PasskeyAuth {
                     )
                     .await
                     .map_err(|e| FrameworkError::internal(format!("passkey: update credential: {e}")))?;
+                updated = true;
                 break;
             }
         }
 
+        // Defensive guard: webauthn verifies the credential is in the allow-list
+        // we provided; if we still didn't find it, something is inconsistent.
+        if !updated {
+            return Err(FrameworkError::internal(
+                "passkey: authenticated credential not found in stored set — internal consistency error",
+            ));
+        }
+
         // Create a new session.
-        let session = torii
+        let session = instance()?
             .create_session(&user.id, None, None)
             .await
             .map_err(|e| FrameworkError::internal(format!("passkey: create session: {e}")))?;
