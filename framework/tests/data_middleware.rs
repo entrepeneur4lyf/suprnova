@@ -113,3 +113,25 @@ async fn middleware_passes_through_empty_set() {
     let set = captured.lock().unwrap().take().expect("next was not called");
     assert!(set.is_empty(), "expected empty set for request with no query string, got {set:?}");
 }
+
+#[tokio::test]
+async fn middleware_parses_array_form_via_hyper() {
+    // Mirrors the integration path: hyper request → Request::query() →
+    // RequestIncludeSet::from_query — confirms `?include[]=a&include[]=b`
+    // accumulates correctly when the value flows through the actual
+    // server stack.
+    let captured: Arc<Mutex<Option<RequestIncludeSet>>> = Arc::new(Mutex::new(None));
+    let resp = drive(
+        "http://localhost/items?include[]=author&include[]=tags",
+        captured.clone(),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 200);
+
+    let set = captured.lock().unwrap().take().expect("next was not called");
+    assert_eq!(set.include, vec!["author", "tags"]);
+    assert!(set.exclude.is_empty());
+    assert!(set.only.is_none());
+    assert!(set.except.is_empty());
+}

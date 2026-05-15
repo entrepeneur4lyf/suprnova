@@ -13,6 +13,37 @@ use crate::Request;
 
 use super::include_set::{RequestIncludeSet, REQUEST_INCLUDE_SET};
 
+/// Per-request middleware that parses `?include=`/`?exclude=`/`?only=`/
+/// `?except=` from the request URI and binds the resulting
+/// [`RequestIncludeSet`] into the [`REQUEST_INCLUDE_SET`] task-local for
+/// the duration of the request.
+///
+/// # When to install
+///
+/// Install this middleware **globally** (or at the root of any router
+/// that serves Data-derived endpoints). It should sit BEFORE any
+/// middleware that resolves a `Prop::Lazy`-owned field, because the
+/// lazy resolver consults the task-local. A safe position in the
+/// standard stack is between session middleware and authorization
+/// middleware:
+///
+/// ```text
+/// SessionMiddleware → IncludeMiddleware → AuthMiddleware → handlers
+/// ```
+///
+/// # What it enables
+///
+/// Handlers and the `#[derive(Data)]`-generated `Inertia::data` path
+/// can call [`super::include_set::current_include_set`] to inspect the request's
+/// `?include=`/`?exclude=`/`?only=`/`?except=` parameters. The
+/// per-DTO allowlist (Task 8) enforces default-deny: only fields
+/// listed in `#[data(allow_include)]` are eligible.
+///
+/// # Performance
+///
+/// Cost per request: one [`RequestIncludeSet::from_query`] parse and one
+/// `Arc::new` allocation. The parse is linear in the query-string
+/// length with no regex or URL-decoding.
 pub struct IncludeMiddleware;
 
 #[async_trait]
