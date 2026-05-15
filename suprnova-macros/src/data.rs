@@ -68,6 +68,10 @@ struct FieldOptions {
     input_only: bool,
     output_only: bool,
     allow_include: bool,
+    /// `Some(None)` means bare `#[data(from_route_param)]` — use the field name.
+    /// `Some(Some(s))` means `#[data(from_route_param("s"))]` — use the explicit key.
+    /// `None` means the attribute was not present on this field.
+    from_route_param: Option<Option<String>>,
 }
 
 #[derive(Default)]
@@ -97,21 +101,202 @@ fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::
     Ok(opts)
 }
 
+/// Classification of a field's type for route-param coercion.
+#[derive(Clone, Copy)]
+enum RouteParamKind {
+    I64,
+    U64,
+    I32,
+    U32,
+    I128,
+    U128,
+    F64,
+    F32,
+    Bool,
+    /// Everything else (String, Uuid, &str, custom types) — pass as JSON string.
+    Str,
+}
+
+/// Classify the last path segment of a type into a `RouteParamKind`.
+/// Wraps the inner type when the field is `Option<T>` or `Field<T>`.
+fn classify_route_param_type(ty: &syn::Type) -> RouteParamKind {
+    // Unwrap Option<T> and Field<T> to their inner type for classification.
+    let inner = unwrap_single_generic(ty);
+    last_ident_kind(inner)
+}
+
+/// If `ty` is `Path<T>` where Path ends in `Option` or `Field`, return the
+/// first generic arg; otherwise return `ty` unchanged.
+fn unwrap_single_generic(ty: &syn::Type) -> &syn::Type {
+    if let syn::Type::Path(p) = ty {
+        if let Some(seg) = p.path.segments.last() {
+            if seg.ident == "Option" || seg.ident == "Field" {
+                if let syn::PathArguments::AngleBracketed(ab) = &seg.arguments {
+                    if let Some(syn::GenericArgument::Type(inner)) = ab.args.first() {
+                        return inner;
+                    }
+                }
+            }
+        }
+    }
+    ty
+}
+
+fn last_ident_kind(ty: &syn::Type) -> RouteParamKind {
+    if let syn::Type::Path(p) = ty {
+        if let Some(seg) = p.path.segments.last() {
+            return match seg.ident.to_string().as_str() {
+                "i64" => RouteParamKind::I64,
+                "u64" => RouteParamKind::U64,
+                "i32" => RouteParamKind::I32,
+                "u32" => RouteParamKind::U32,
+                "i128" => RouteParamKind::I128,
+                "u128" => RouteParamKind::U128,
+                "f64" => RouteParamKind::F64,
+                "f32" => RouteParamKind::F32,
+                "bool" => RouteParamKind::Bool,
+                _ => RouteParamKind::Str,
+            };
+        }
+    }
+    RouteParamKind::Str
+}
+
+/// Map a `RouteParamKind` to the fully-qualified coercer function path in the
+/// `suprnova::data::route_params` module.
+fn route_param_parser_path(kind: RouteParamKind) -> TokenStream2 {
+    match kind {
+        RouteParamKind::I64 => quote! { ::suprnova::data::route_params::parse_i64 },
+        RouteParamKind::U64 => quote! { ::suprnova::data::route_params::parse_u64 },
+        RouteParamKind::I32 => quote! { ::suprnova::data::route_params::parse_i32 },
+        RouteParamKind::U32 => quote! { ::suprnova::data::route_params::parse_u32 },
+        RouteParamKind::I128 => quote! { ::suprnova::data::route_params::parse_i128 },
+        RouteParamKind::U128 => quote! { ::suprnova::data::route_params::parse_u128 },
+        RouteParamKind::F64 => quote! { ::suprnova::data::route_params::parse_f64 },
+        RouteParamKind::F32 => quote! { ::suprnova::data::route_params::parse_f32 },
+        RouteParamKind::Bool => quote! { ::suprnova::data::route_params::parse_bool },
+        RouteParamKind::Str => quote! { ::suprnova::data::route_params::pass_string },
+    }
+}
+
+/// Returns `true` when the outermost type is `Option<_>` or `Field<_>`.
+fn is_option_type(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(p) = ty {
+        if let Some(seg) = p.path.segments.last() {
+            return seg.ident == "Option" || seg.ident == "Field";
+        }
+    }
+    false
+}
+
 fn build_form_request(
     struct_name: &Ident,
     struct_opts: &StructOptions,
     impl_generics: &syn::ImplGenerics,
     ty_generics: &syn::TypeGenerics,
     where_clause: Option<&syn::WhereClause>,
+    parsed: &[(&Field, FieldOptions)],
 ) -> TokenStream2 {
     if struct_opts.custom_authorize {
         // User opted to provide their own FormRequest impl — emit nothing.
         return quote! {};
     }
+
+    // Collect route-param injection snippets for any field with `from_route_param`.
+    let route_param_injections: Vec<TokenStream2> = parsed
+        .iter()
+        .filter_map(|(f, opts)| {
+            let param_spec = opts.from_route_param.as_ref()?;
+            let field_ident = f.ident.as_ref().unwrap();
+            let field_key = field_ident.to_string();
+            // Use explicit name if provided, otherwise use the field name.
+            let resolved_name = param_spec
+                .clone()
+                .unwrap_or_else(|| field_key.clone());
+
+            let parser = route_param_parser_path(classify_route_param_type(&f.ty));
+            let optional = is_option_type(&f.ty);
+
+            if optional {
+                Some(quote! {
+                    if let Some(raw) = route_snapshot.get(#resolved_name) {
+                        let coerced = #parser(#resolved_name, raw)?;
+                        map.insert(#field_key.to_string(), coerced);
+                    }
+                })
+            } else {
+                Some(quote! {
+                    {
+                        let raw = route_snapshot.get(#resolved_name)
+                            .ok_or_else(|| ::suprnova::FrameworkError::bad_request(
+                                format!("missing route param `{}`", #resolved_name)
+                            ))?;
+                        let coerced = #parser(#resolved_name, raw)?;
+                        map.insert(#field_key.to_string(), coerced);
+                    }
+                })
+            }
+        })
+        .collect();
+
+    // If no fields use from_route_param, emit the simple no-op FormRequest impl
+    // (delegates to the trait's default `extract` which reads the body normally).
+    if route_param_injections.is_empty() {
+        return quote! {
+            impl #impl_generics ::suprnova::http::FormRequest for #struct_name #ty_generics #where_clause {
+                fn authorize(_req: &::suprnova::Request) -> bool {
+                    true
+                }
+            }
+        };
+    }
+
+    // At least one field is injected from a route param: generate a custom
+    // `extract` that snapshots params, merges them (path WINS) into the body
+    // map, then deserializes + validates the merged map.
     quote! {
+        #[::suprnova::__async_trait::async_trait]
         impl #impl_generics ::suprnova::http::FormRequest for #struct_name #ty_generics #where_clause {
             fn authorize(_req: &::suprnova::Request) -> bool {
                 true
+            }
+
+            async fn extract(req: ::suprnova::Request) -> ::core::result::Result<Self, ::suprnova::FrameworkError> {
+                if !Self::authorize(&req) {
+                    return Err(::suprnova::FrameworkError::Unauthorized);
+                }
+
+                // Snapshot route params BEFORE consuming the request with body_bytes().
+                let route_snapshot: ::std::collections::HashMap<String, String> =
+                    req.all_route_params();
+
+                // Collect and parse body.
+                let (_, body_bytes) = req.body_bytes().await?;
+                let body: ::suprnova::serde_json::Value =
+                    if body_bytes.is_empty() {
+                        ::suprnova::serde_json::Value::Object(
+                            ::suprnova::serde_json::Map::new()
+                        )
+                    } else {
+                        ::suprnova::serde_json::from_slice(&body_bytes)
+                            .map_err(|e| ::suprnova::FrameworkError::bad_request(e.to_string()))?
+                    };
+                let mut map: ::suprnova::serde_json::Map<String, ::suprnova::serde_json::Value> =
+                    body.as_object().cloned().unwrap_or_default();
+
+                // Inject route params into the map (path params WIN — IDOR protection).
+                #(#route_param_injections)*
+
+                let dto: Self = ::suprnova::serde_json::from_value(
+                    ::suprnova::serde_json::Value::Object(map),
+                ).map_err(|e| ::suprnova::FrameworkError::bad_request(e.to_string()))?;
+
+                use ::validator::Validate;
+                dto.validate().map_err(|e| ::suprnova::FrameworkError::Validation(
+                    ::suprnova::ValidationErrors::from_validator(e)
+                ))?;
+
+                Ok(dto)
             }
         }
     }
@@ -139,9 +324,20 @@ fn parse_field_options(field: &Field) -> Result<FieldOptions, syn::Error> {
                 opts.output_only = true;
             } else if meta.path.is_ident("allow_include") {
                 opts.allow_include = true;
+            } else if meta.path.is_ident("from_route_param") {
+                // `#[data(from_route_param("key"))]` — explicit param name
+                // `#[data(from_route_param)]`        — use the field name
+                if meta.input.peek(syn::token::Paren) {
+                    let content;
+                    syn::parenthesized!(content in meta.input);
+                    let lit: syn::LitStr = content.parse()?;
+                    opts.from_route_param = Some(Some(lit.value()));
+                } else {
+                    opts.from_route_param = Some(None);
+                }
             } else {
                 return Err(meta.error(
-                    "unknown #[data(...)] flag — expected input_only, output_only, or allow_include",
+                    "unknown #[data(...)] flag — expected input_only, output_only, allow_include, or from_route_param",
                 ));
             }
             Ok(())
@@ -245,7 +441,7 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
     let form_request_impl = if is_generic || has_reference_fields {
         proc_macro2::TokenStream::new()
     } else {
-        build_form_request(struct_name, &struct_opts, &impl_generics, &ty_generics, where_clause)
+        build_form_request(struct_name, &struct_opts, &impl_generics, &ty_generics, where_clause, &parsed)
     };
 
     let expanded = quote! {

@@ -8,6 +8,7 @@ mod field;
 mod include_set;
 mod middleware;
 pub mod registry;
+pub mod route_params;
 
 pub use error::IncludeError;
 pub use field::Field;

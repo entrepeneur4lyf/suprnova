@@ -57,6 +57,14 @@ impl Request {
         &self.params
     }
 
+    /// Return a clone of all route parameters as an owned map.
+    ///
+    /// Used by the `#[data(from_route_param)]` generated code, which must
+    /// snapshot the params before consuming `self` via `body_bytes()`.
+    pub fn all_route_params(&self) -> HashMap<String, String> {
+        self.params.clone()
+    }
+
     /// Get the inner hyper request
     pub fn inner(&self) -> &hyper::Request<hyper::body::Incoming> {
         &self.inner
