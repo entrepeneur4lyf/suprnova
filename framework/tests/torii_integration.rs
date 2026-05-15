@@ -102,6 +102,58 @@ fn passkey_registration_challenge_returns_options() {
     });
 }
 
+/// Magic-link send returns a non-empty, substantial token string.
+///
+/// Verifies the full path: `Auth::magic_link()` → torii `MagicLinkService` →
+/// `get_or_create_user` → token creation → plaintext token returned.
+///
+/// No mailer is configured, so the call degrades to pure token generation.
+/// The callback URL is accepted but not emailed at this phase.
+#[test]
+fn magic_link_send_returns_token() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let token = Auth::magic_link()
+            .send("magic@example.com", "http://localhost:8000/auth/magic")
+            .await
+            .unwrap();
+
+        assert!(!token.is_empty());
+        assert!(token.len() >= 16, "token should be a substantial random string");
+    });
+}
+
+/// Magic-link consume returns the expected user and session.
+///
+/// Calls `send` to obtain a token then `consume` to exchange it for a
+/// `(User, Session)`. Asserts the user email matches and the session is
+/// linked to the same user. Then verifies the token is single-use: a
+/// second `consume` call must fail.
+#[test]
+fn magic_link_consume_returns_user_and_session() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let email = "magic-consume@example.com";
+        let token = Auth::magic_link()
+            .send(email, "http://localhost:8000/auth/magic")
+            .await
+            .unwrap();
+
+        assert!(!token.is_empty());
+
+        let (user, session) = Auth::magic_link().consume(&token).await.unwrap();
+
+        assert_eq!(user.email, email);
+        assert_eq!(session.user_id, user.id);
+
+        // Token must be single-use: second consume must fail.
+        let second = Auth::magic_link().consume(&token).await;
+        assert!(second.is_err(), "magic-link token should be single-use");
+    });
+}
+
 /// OAuth kickoff returns a valid GitHub authorization URL and a non-empty state token.
 #[test]
 fn oauth_kickoff_returns_authorization_url() {
