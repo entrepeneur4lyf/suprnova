@@ -64,12 +64,25 @@ use quote::quote;
 use syn::{parse_macro_input, Data, DataStruct, DeriveInput, Field, Fields, Ident, Meta};
 
 /// Flavors of lazy resolution for a `#[data(lazy)]` field.
-/// Only `Plain` exists in Task 18; additional flavors (e.g. `Deferred`)
-/// will be added in Task 19.
+///
+/// - `Plain` / `Inertia` — standard lazy prop, gated behind `?include=`.
+///   Both emit `PropEntry::LazyOwned`.
+/// - `Deferred` — Inertia deferred prop (follow-up XHR). Emits
+///   `PropEntry::DeferredOwned`.
+/// - `Closure` — closure-resolved prop (resolves eagerly on initial load
+///   in a future release; same runtime as LazyOwned for v1). Emits
+///   `PropEntry::ClosureOwned`.
+/// - `WhenLoaded(relation)` — delegates to the `when_loaded!` macro at
+///   runtime to produce `Prop::Lazy` or `Prop::EagerNone` based on whether
+///   the named relation is preloaded on the source entity.
 #[derive(Default, Clone, Debug)]
 enum LazyFlavor {
     #[default]
     Plain,
+    Inertia,
+    Deferred,
+    Closure,
+    WhenLoaded,
 }
 
 #[derive(Default)]
@@ -352,7 +365,26 @@ fn parse_field_options(field: &Field) -> Result<FieldOptions, syn::Error> {
             } else if meta.path.is_ident("allow_include") {
                 opts.allow_include = true;
             } else if meta.path.is_ident("lazy") {
-                opts.lazy = Some(LazyFlavor::Plain);
+                // Accept both bare `lazy` and `lazy(<flavor>)`.
+                if meta.input.peek(syn::token::Paren) {
+                    let content;
+                    syn::parenthesized!(content in meta.input);
+                    let flavor_ident: syn::Ident = content.parse()?;
+                    opts.lazy = Some(match flavor_ident.to_string().as_str() {
+                        "inertia" => LazyFlavor::Inertia,
+                        "deferred" => LazyFlavor::Deferred,
+                        "closure" => LazyFlavor::Closure,
+                        "when_loaded" => LazyFlavor::WhenLoaded,
+                        other => {
+                            return Err(syn::Error::new(
+                                flavor_ident.span(),
+                                format!("unknown lazy flavor `{other}` — expected inertia, deferred, closure, or when_loaded"),
+                            ));
+                        }
+                    });
+                } else {
+                    opts.lazy = Some(LazyFlavor::Plain);
+                }
             } else if meta.path.is_ident("from_route_param") {
                 // `#[data(from_route_param("key"))]` — explicit param name
                 // `#[data(from_route_param)]`        — use the field name
@@ -404,15 +436,36 @@ fn build_into_inertia_props(
             let ident = f.ident.as_ref().unwrap();
             let name = ident.to_string();
 
-            if opts.lazy.is_some() {
-                quote! {
-                    out.push((
-                        #name.to_string(),
+            if let Some(flavor) = &opts.lazy {
+                let entry_construction = match flavor {
+                    LazyFlavor::Plain
+                    | LazyFlavor::Inertia
+                    | LazyFlavor::WhenLoaded => quote! {
                         ::suprnova::inertia::PropEntry::LazyOwned {
                             owner: #struct_name_str,
                             field: #name,
                             prop: self.#ident,
-                        },
+                        }
+                    },
+                    LazyFlavor::Deferred => quote! {
+                        ::suprnova::inertia::PropEntry::DeferredOwned {
+                            owner: #struct_name_str,
+                            field: #name,
+                            prop: self.#ident,
+                        }
+                    },
+                    LazyFlavor::Closure => quote! {
+                        ::suprnova::inertia::PropEntry::ClosureOwned {
+                            owner: #struct_name_str,
+                            field: #name,
+                            prop: self.#ident,
+                        }
+                    },
+                };
+                quote! {
+                    out.push((
+                        #name.to_string(),
+                        #entry_construction,
                     ));
                 }
             } else {

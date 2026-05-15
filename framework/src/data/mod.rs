@@ -9,8 +9,10 @@ mod include_set;
 mod middleware;
 pub mod registry;
 pub mod route_params;
+mod when_loaded;
 
 pub use error::IncludeError;
 pub use field::Field;
 pub use include_set::{current_include_set, RequestIncludeSet, REQUEST_INCLUDE_SET};
 pub use middleware::IncludeMiddleware;
+pub use when_loaded::IsRelationLoaded;

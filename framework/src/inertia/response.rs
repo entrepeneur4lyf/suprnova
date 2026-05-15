@@ -18,12 +18,29 @@ use std::sync::Arc;
 ///
 /// - `Eager` — the field's value is already serialized; inserted directly
 ///   into the response prop bag.
-/// - `LazyOwned` — the field is a `Prop<T>` lazy closure that must pass
-///   the `?include=` + allowlist gate before resolution. `owner` and `field`
-///   are used by `from_data_props` to call `prop_lazy_with_owner`.
+/// - `LazyOwned` — standard lazy / `#[data(lazy)]` / `#[data(lazy(inertia))]`.
+///   Must pass the `?include=` + allowlist gate before resolution.
+/// - `DeferredOwned` — `#[data(lazy(deferred))]`. Same `?include=` gate as
+///   `LazyOwned`; the variant tag signals Inertia deferred-props protocol to
+///   the client (follow-up XHR). For v1, resolved via the same code path as
+///   `LazyOwned`.
+/// - `ClosureOwned` — `#[data(lazy(closure))]`. Same `?include=` gate for v1;
+///   future releases will resolve eagerly on the initial visit. The variant
+///   tag is preserved for downstream protocol differentiation.
+#[derive(Debug)]
 pub enum PropEntry {
     Eager(serde_json::Value),
     LazyOwned {
+        owner: &'static str,
+        field: &'static str,
+        prop: Prop,
+    },
+    DeferredOwned {
+        owner: &'static str,
+        field: &'static str,
+        prop: Prop,
+    },
+    ClosureOwned {
         owner: &'static str,
         field: &'static str,
         prop: Prop,
@@ -182,7 +199,9 @@ impl InertiaResponse {
                 PropEntry::Eager(v) => {
                     r.props.insert(k, Prop::Eager(v));
                 }
-                PropEntry::LazyOwned { owner, field, prop } => {
+                PropEntry::LazyOwned { owner, field, prop }
+                | PropEntry::DeferredOwned { owner, field, prop }
+                | PropEntry::ClosureOwned { owner, field, prop } => {
                     r.props.insert(k, prop);
                     r.lazy_owned.insert(field.to_string(), (owner, field));
                 }
@@ -832,6 +851,9 @@ async fn resolve_props(
                     materialized.insert(key, v);
                 }
             }
+            // Absent sentinel (from when_loaded! when relation not loaded) —
+            // silently skip; no null, no error.
+            Prop::EagerNone => {}
             Prop::Lazy(r) => {
                 if let Some(&(owner, field)) = lazy_owned.get(&key) {
                     // OWNER-TAGGED LAZY PATH

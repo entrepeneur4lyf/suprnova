@@ -36,7 +36,7 @@ pub use container::{App, Container};
 pub use context::{Context, ContextStore};
 pub use crypto::{Crypt, EncryptionKey};
 pub use csrf::{csrf_field, csrf_meta_tag, csrf_token, CsrfMiddleware};
-pub use data::{current_include_set, Field, IncludeError, IncludeMiddleware, RequestIncludeSet};
+pub use data::{current_include_set, Field, IncludeError, IncludeMiddleware, IsRelationLoaded, RequestIncludeSet};
 pub use database::{
     AutoRouteBinding, Database, DatabaseConfig, DatabaseType, DbConnection, Model, ModelMut,
     RouteBinding, DB,

@@ -271,6 +271,12 @@ pub enum Prop {
     /// respects partial-reload filtering on partial visits.
     Eager(Value),
 
+    /// Absent sentinel — produced by `when_loaded!` when the named relation
+    /// is not preloaded on the source entity. The field is silently omitted
+    /// from the response (no null, no error). Resolves to `Ok(None)` so
+    /// callers that use `resolve_with_owner` skip the field transparently.
+    EagerNone,
+
     /// Materialized at builder time. Always included, even on partial
     /// reloads that did not request the key. Maps to `Inertia::always(...)`.
     Always(Value),
@@ -319,6 +325,7 @@ impl std::fmt::Debug for Prop {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Prop::Eager(v) => f.debug_tuple("Eager").field(v).finish(),
+            Prop::EagerNone => f.debug_struct("EagerNone").finish(),
             Prop::Always(v) => f.debug_tuple("Always").field(v).finish(),
             Prop::Lazy(_) => f.debug_struct("Lazy").finish_non_exhaustive(),
             Prop::Optional(_) => f.debug_struct("Optional").finish_non_exhaustive(),
@@ -384,6 +391,11 @@ impl Prop {
     pub async fn resolve(self) -> Result<Value, FrameworkError> {
         match self {
             Prop::Eager(v) | Prop::Always(v) => Ok(v),
+            // EagerNone is an absent sentinel — it should never be resolved
+            // through the plain resolve path (callers should use
+            // resolve_with_owner, which returns Ok(None) for this variant).
+            // Return Null as a safe fallback so we don't panic.
+            Prop::EagerNone => Ok(Value::Null),
             Prop::Lazy(r) | Prop::Optional(r) => r().await,
             Prop::Defer(c) => (c.resolver)().await,
             Prop::Merge(c) => (c.resolver)().await,
@@ -447,6 +459,8 @@ impl Prop {
                     Ok(None)
                 }
             }
+            // Absent sentinel — relation was not preloaded; silently skip.
+            Prop::EagerNone => Ok(None),
             other => Ok(Some(other.resolve().await?)),
         }
     }
@@ -565,6 +579,8 @@ impl PartialFilter {
     pub fn should_include(&self, key: &str, prop: &Prop) -> bool {
         match prop {
             Prop::Always(_) => true,
+            // EagerNone is an absent sentinel — never include it.
+            Prop::EagerNone => false,
             Prop::Eager(_)
             | Prop::Lazy(_)
             | Prop::Merge(_)
