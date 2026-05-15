@@ -21,6 +21,23 @@ pub struct RequestIncludeSet {
 }
 
 impl RequestIncludeSet {
+    /// Parse `?include=`/`?exclude=`/`?only=`/`?except=` query parameters
+    /// from a raw query string.
+    ///
+    /// # Input contract
+    ///
+    /// - `raw` must NOT include the leading `?` — caller strips it.
+    /// - Values are expected to be percent-decoded already; this parser
+    ///   does not URL-decode (`include=foo%2Cbar` stays as one literal
+    ///   value `foo%2Cbar`).
+    /// - Repeated keys accumulate (`include=a&include=b` → `include: [a, b]`),
+    ///   matching Laravel's array semantics.
+    /// - The Laravel array form `include[]=a&include[]=b` is also accepted
+    ///   and accumulates the same way.
+    /// - Whitespace around values is trimmed; empty values are dropped
+    ///   (`include= a , , b` → `[a, b]`).
+    /// - Unknown keys are silently ignored — only the four canonical names
+    ///   are recognized.
     pub fn from_query(raw: &str) -> Self {
         let mut s = Self::default();
         for pair in raw.split('&') {
