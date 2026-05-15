@@ -45,6 +45,11 @@ pub struct InertiaResponse {
     /// session-flash mechanism mirroring Laravel's
     /// `redirect()->preserveFragment()` chainable.
     preserve_fragment: Option<bool>,
+    /// Sidecar map for props registered via `prop_lazy_with_owner`.
+    /// Maps the prop key to `(owner_struct_name, field_name)` so that
+    /// `resolve_props` can call `Prop::resolve_with_owner` instead of
+    /// the plain `Prop::Lazy` path. Keyed by the same string as `props`.
+    lazy_owned: IndexMap<String, (&'static str, &'static str)>,
 }
 
 impl InertiaResponse {
@@ -59,6 +64,7 @@ impl InertiaResponse {
             encrypt_history: None,
             clear_history: false,
             preserve_fragment: None,
+            lazy_owned: IndexMap::new(),
         }
     }
 
@@ -109,6 +115,29 @@ impl InertiaResponse {
     {
         let resolver = make_resolver(resolver);
         self.props.insert(key.into(), Prop::Lazy(resolver));
+        self
+    }
+
+    /// Attach a lazy prop owned by a `#[derive(Data)]` DTO.
+    ///
+    /// The prop key is `field` (they are always identical in the DTO pattern).
+    /// During resolution the `RequestIncludeSet` task-local is consulted via
+    /// `Prop::resolve_with_owner`: the closure runs only when `field` appears
+    /// in `?include=` AND is in the DTO's allowlist. Returns `400` to the
+    /// client if the include set asks for a field not in the allowlist.
+    ///
+    /// Composition with `X-Inertia-Partial-Data`: partial-data is applied as
+    /// a pre-resolution gate (the existing `should_include_eager` check), so
+    /// the include-set gate and the partial-data filter compose correctly —
+    /// a field must pass both to be resolved and returned.
+    pub fn prop_lazy_with_owner(
+        mut self,
+        owner_struct_name: &'static str,
+        field: &'static str,
+        prop: Prop,
+    ) -> Self {
+        self.props.insert(field.to_string(), prop);
+        self.lazy_owned.insert(field.to_string(), (owner_struct_name, field));
         self
     }
 
@@ -468,6 +497,7 @@ impl InertiaResponse {
             encrypt_history,
             clear_history,
             preserve_fragment,
+            lazy_owned,
         } = self;
 
         // History-encryption precedence: per-response override (handler
@@ -530,6 +560,7 @@ impl InertiaResponse {
             &reset_keys,
             error_bag.as_deref(),
             scroll_intent.as_deref(),
+            &lazy_owned,
         )
         .await?;
 
@@ -585,9 +616,10 @@ impl InertiaResponse {
             encrypt_history,
             clear_history,
             preserve_fragment,
+            lazy_owned,
         } = self;
         let (materialized, metadata) =
-            resolve_props(props, filter, &[], &[], None, None)
+            resolve_props(props, filter, &[], &[], None, None, &lazy_owned)
                 .await
                 .expect("test resolver should not fail");
         let resolved_encrypt_history = encrypt_history
@@ -663,6 +695,10 @@ enum TaskOutcome {
         key: String,
         value: Value,
     },
+    /// Produced by `prop_lazy_with_owner` resolution when the field is not
+    /// in the request's `?include=` set. The key is simply omitted from the
+    /// response — no error, no null sentinel.
+    Skip,
     Rescued {
         key: String,
     },
@@ -714,6 +750,7 @@ async fn resolve_props(
     reset_keys: &[String],
     error_bag: Option<&str>,
     scroll_intent: Option<&str>,
+    lazy_owned: &IndexMap<String, (&'static str, &'static str)>,
 ) -> Result<(serde_json::Map<String, Value>, PageMetadata), FrameworkError> {
     let mut materialized = serde_json::Map::new();
     let mut metadata = PageMetadata::default();
@@ -747,10 +784,24 @@ async fn resolve_props(
             }
             Prop::Lazy(r) => {
                 if filter.should_include_eager(&key) {
-                    tasks.push(Box::pin(async move {
-                        let v = r().await?;
-                        Ok(TaskOutcome::Insert { key, value: v })
-                    }));
+                    // Stage 1: check whether this Lazy prop is registered as
+                    // owned by a DTO. If so, use `resolve_with_owner` to
+                    // consult the `?include=` task-local + the per-DTO
+                    // allowlist (returns `Ok(None)` when not included).
+                    if let Some(&(owner, field)) = lazy_owned.get(&key) {
+                        tasks.push(Box::pin(async move {
+                            let prop = Prop::Lazy(r);
+                            match prop.resolve_with_owner(owner, field).await? {
+                                Some(v) => Ok(TaskOutcome::Insert { key, value: v }),
+                                None => Ok(TaskOutcome::Skip),
+                            }
+                        }));
+                    } else {
+                        tasks.push(Box::pin(async move {
+                            let v = r().await?;
+                            Ok(TaskOutcome::Insert { key, value: v })
+                        }));
+                    }
                 }
             }
             Prop::Optional(r) => {
@@ -870,6 +921,8 @@ async fn resolve_props(
             TaskOutcome::Insert { key, value } => {
                 materialized.insert(key, value);
             }
+            // Field was not in the request's `?include=` set — omit silently.
+            TaskOutcome::Skip => {}
             TaskOutcome::Rescued { key } => {
                 metadata.rescued.push(key);
             }
