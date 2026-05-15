@@ -7,6 +7,7 @@ struct User {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct Post {
     id: i64,
     author_id: i64,
