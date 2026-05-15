@@ -21,7 +21,7 @@ pub mod password;
 use std::sync::{Arc, OnceLock};
 
 use torii::seaorm::SeaORMRepositoryProvider;
-use torii::{Torii, ToriiError};
+use torii::Torii;
 use torii_storage_seaorm::SeaORMStorage;
 
 use crate::error::FrameworkError;
@@ -129,8 +129,3 @@ pub(crate) fn instance() -> Result<&'static Torii<SeaORMRepositoryProvider>, Fra
         .ok_or_else(|| FrameworkError::internal("Torii not initialised. Call init_torii() first."))
 }
 
-/// Convert a [`ToriiError`] to a [`FrameworkError`].
-#[allow(dead_code)]
-pub(crate) fn torii_err(e: ToriiError) -> FrameworkError {
-    FrameworkError::internal(format!("torii: {e}"))
-}
