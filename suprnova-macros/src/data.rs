@@ -13,6 +13,21 @@
 //! Task 7 (this task) emits the skeleton for non-generic structs; Task
 //! 15 extends the same builders to thread `impl_generics` /
 //! `ty_generics` / `where_clause` through every generated impl.
+//!
+//! # Optional and tri-state fields
+//!
+//! Fields typed `Option<T>` and `Field<T>` are treated as absent-defaulting:
+//! when the key is missing from the payload, they produce `None` /
+//! `Field::Absent` respectively (via `unwrap_or_default()`). This matches
+//! serde-derive's behaviour for `Option` and is the correct semantic for
+//! `Field<T>` PATCH use-cases.
+//!
+//! # Unknown fields
+//!
+//! Payload keys not matching any struct field are silently dropped (serde
+//! default permissive behavior). This mirrors `#[derive(Deserialize)]`.
+//! Strict-mode (deny-unknown-fields) is not yet supported — add a
+//! `#[data(deny_unknown_fields)]` opt-in if/when needed.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -110,6 +125,24 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
     expanded.into()
 }
 
+/// Returns `true` when the field type's last path segment is `Option` or
+/// `Field`. Both types impl `Default` meaningfully (`None` / `Field::Absent`),
+/// so an absent payload key should produce the default rather than a
+/// `missing_field` error.
+///
+/// Last-segment matching accepts fully-qualified paths
+/// (`std::option::Option<T>`, `suprnova::data::Field<T>`) as well as the
+/// short forms. False positives require a user type named exactly `Option` or
+/// `Field` — an acceptable and easily documented limitation.
+fn is_option_or_field(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(p) = ty {
+        if let Some(seg) = p.path.segments.last() {
+            return seg.ident == "Option" || seg.ident == "Field";
+        }
+    }
+    false
+}
+
 fn build_serialize(struct_name: &Ident, parsed: &[(&Field, FieldOptions)]) -> TokenStream2 {
     let output_fields: Vec<TokenStream2> = parsed
         .iter()
@@ -148,16 +181,51 @@ fn build_deserialize(
         .map(|(f, _)| f.ident.as_ref().unwrap().to_string())
         .collect();
 
-    let input_field_idents: Vec<&Ident> = parsed
+    // Split input fields into two groups based on whether an absent key
+    // should produce a missing_field error (required) or a Default value
+    // (Option<T> and Field<T> — both impl Default meaningfully).
+    let input_fields: Vec<(&Ident, &str, &syn::Type)> = parsed
         .iter()
         .filter(|(_, o)| !o.output_only)
-        .map(|(f, _)| f.ident.as_ref().unwrap())
+        .map(|(f, _)| {
+            let ident = f.ident.as_ref().unwrap();
+            let name: &str = Box::leak(ident.to_string().into_boxed_str());
+            (ident, name, &f.ty)
+        })
         .collect();
-    let input_field_names: Vec<String> = input_field_idents.iter().map(|i| i.to_string()).collect();
-    let input_field_types: Vec<&syn::Type> = parsed
+
+    // Required fields — missing key is an error.
+    let req_idents: Vec<&Ident> = input_fields
         .iter()
-        .filter(|(_, o)| !o.output_only)
-        .map(|(f, _)| &f.ty)
+        .filter(|(_, _, ty)| !is_option_or_field(ty))
+        .map(|(id, _, _)| *id)
+        .collect();
+    let req_names: Vec<&str> = input_fields
+        .iter()
+        .filter(|(_, _, ty)| !is_option_or_field(ty))
+        .map(|(_, name, _)| *name)
+        .collect();
+    let req_types: Vec<&syn::Type> = input_fields
+        .iter()
+        .filter(|(_, _, ty)| !is_option_or_field(ty))
+        .map(|(_, _, ty)| *ty)
+        .collect();
+
+    // Defaultable fields — missing key yields Default::default().
+    let def_idents: Vec<&Ident> = input_fields
+        .iter()
+        .filter(|(_, _, ty)| is_option_or_field(ty))
+        .map(|(id, _, _)| *id)
+        .collect();
+    let def_names: Vec<&str> = input_fields
+        .iter()
+        .filter(|(_, _, ty)| is_option_or_field(ty))
+        .map(|(_, name, _)| *name)
+        .collect();
+    let def_types: Vec<&syn::Type> = input_fields
+        .iter()
+        .filter(|(_, _, ty)| is_option_or_field(ty))
+        .map(|(_, _, ty)| *ty)
         .collect();
 
     let output_only_idents: Vec<&Ident> = parsed
@@ -181,7 +249,11 @@ fn build_deserialize(
                     }
 
                     fn visit_map<A: ::serde::de::MapAccess<'de>>(self, mut map: A) -> ::core::result::Result<#struct_name, A::Error> {
-                        #(let mut #input_field_idents: ::core::option::Option<#input_field_types> = None;)*
+                        // Required fields — slot is None until the key appears.
+                        #(let mut #req_idents: ::core::option::Option<#req_types> = None;)*
+                        // Defaultable fields (Option<T>, Field<T>) — slot is
+                        // None until the key appears; absent yields Default.
+                        #(let mut #def_idents: ::core::option::Option<#def_types> = None;)*
 
                         while let Some(key) = map.next_key::<String>()? {
                             match key.as_str() {
@@ -197,20 +269,33 @@ fn build_deserialize(
                                     }
                                 )*
                                 #(
-                                    #input_field_names => {
-                                        #input_field_idents = Some(map.next_value()?);
+                                    #req_names => {
+                                        #req_idents = Some(map.next_value()?);
+                                    }
+                                )*
+                                #(
+                                    #def_names => {
+                                        #def_idents = Some(map.next_value()?);
                                     }
                                 )*
                                 _ => {
+                                    // Unknown keys are silently dropped —
+                                    // permissive / serde-default behaviour.
                                     let _: ::serde::de::IgnoredAny = map.next_value()?;
                                 }
                             }
                         }
 
                         Ok(#struct_name {
+                            // Required fields: missing key is an error.
                             #(
-                                #input_field_idents: #input_field_idents
-                                    .ok_or_else(|| <A::Error as ::serde::de::Error>::missing_field(#input_field_names))?,
+                                #req_idents: #req_idents
+                                    .ok_or_else(|| <A::Error as ::serde::de::Error>::missing_field(#req_names))?,
+                            )*
+                            // Defaultable fields: missing key yields Default::default().
+                            #(
+                                #def_idents: #def_idents
+                                    .unwrap_or_default(),
                             )*
                             #(
                                 #output_only_idents: ::core::default::Default::default(),

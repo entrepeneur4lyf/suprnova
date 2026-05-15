@@ -38,10 +38,16 @@ fn ensure_initialized() {
 /// Register the allowed-include list for a DTO. Idempotent — re-registering
 /// the same struct overwrites the prior list.
 ///
-/// This is the test-injection path. It does NOT call `ensure_initialized` —
-/// it writes directly so tests can set up allowlists without side-effects
-/// from the inventory machinery.
+/// Calls `ensure_initialized()` first so that the inventory-collected entries
+/// (from `#[derive(Data)]` link-time submissions) are drained into the map
+/// before the manual write. This guarantees that a caller's explicit
+/// registration is the final, authoritative state — it is never silently
+/// overwritten by a later `ensure_initialized` call (the `Once` guard
+/// prevents that anyway, but the pre-drain makes the ordering explicit).
+///
+/// This is the primary test-injection path for ad-hoc allowlists.
 pub fn register(struct_name: &'static str, fields: &'static [&'static str]) {
+    ensure_initialized();
     let mut map = REGISTRY
         .write()
         .expect("data::registry REGISTRY write lock poisoned");

@@ -1,5 +1,6 @@
 //! Compile-time + runtime tests of `#[derive(Data)]` macro expansion.
 
+use suprnova::data::Field;
 use suprnova::Data;
 use validator::Validate;
 
@@ -55,4 +56,41 @@ fn deserialize_rejects_output_only_in_payload() {
     });
     let err = serde_json::from_value::<UserDto>(j).unwrap_err();
     assert!(err.to_string().contains("computed_handle"));
+}
+
+// ── Option<T> and Field<T> absent-default regression ─────────────────────
+
+#[derive(Debug, Data, Validate)]
+struct PatchUserDto {
+    pub id: i64,
+    pub name: Option<String>,
+    pub bio: Field<String>,
+}
+
+#[test]
+fn deserialize_treats_option_as_absent_default_none() {
+    // Neither `name` nor `bio` is present — both should default rather than
+    // trigger a missing_field error.
+    let j = serde_json::json!({"id": 1});
+    let u: PatchUserDto = serde_json::from_value(j).unwrap();
+    assert_eq!(u.id, 1);
+    assert!(u.name.is_none());
+    assert!(u.bio.is_absent());
+}
+
+#[test]
+fn deserialize_option_passes_through_value() {
+    let j = serde_json::json!({"id": 1, "name": "ada", "bio": "hi"});
+    let u: PatchUserDto = serde_json::from_value(j).unwrap();
+    assert_eq!(u.name.as_deref(), Some("ada"));
+    assert!(matches!(u.bio, Field::Value(_)));
+}
+
+#[test]
+fn deserialize_option_null_yields_none() {
+    // Explicit JSON null on an Option<T> field must deserialize to None,
+    // not error.
+    let j = serde_json::json!({"id": 1, "name": null});
+    let u: PatchUserDto = serde_json::from_value(j).unwrap();
+    assert!(u.name.is_none());
 }
