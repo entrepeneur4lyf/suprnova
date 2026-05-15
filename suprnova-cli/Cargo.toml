@@ -17,6 +17,7 @@ path = "src/main.rs"
 [lib]
 name = "suprnova_cli"
 path = "src/lib.rs"
+doctest = false
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
