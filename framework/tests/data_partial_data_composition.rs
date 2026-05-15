@@ -1,11 +1,10 @@
 //! Integration tests for the composition of `?include=` (DTO lazy resolution)
 //! and `X-Inertia-Partial-Data` (Inertia partial-reload filtering).
 //!
-//! Rule: `X-Inertia-Partial-Data` is a *pre-resolution* gate applied by
-//! `PartialFilter::should_include_eager` before the lazy closure is called.
-//! `?include=` / `resolve_with_owner` is a *second* gate applied inside the
-//! closure itself (via `REQUEST_INCLUDE_SET`). A prop must pass BOTH gates to
-//! appear in the response.
+//! Gate order (spec): include-set + allowlist enforcement runs FIRST (Stage 1);
+//! `X-Inertia-Partial-Data` is applied AFTER as the final "only" filter
+//! (Stage 2). A disallowed `?include=` field must return 400 even when
+//! `X-Inertia-Partial-Data` would have filtered the field out anyway.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -221,8 +220,61 @@ async fn partial_data_and_include_both_request_same_key() {
 
     // "name" is NOT in X-Inertia-Partial-Data → excluded.
     assert!(
-        page["props"]["name"].is_null(),
+        !page["props"].as_object().unwrap().contains_key("name"),
         "expected 'name' prop to be absent (partial-data restricts to 'albums'), got: {:?}",
         page["props"]
     );
+}
+
+// ---------------------------------------------------------------------------
+// Test D: disallowed ?include= returns 400 even when X-Inertia-Partial-Data
+//         would have filtered the field out anyway.
+//
+// Security contract: the include-set + allowlist gate (Stage 1) MUST fire
+// before the partial-data filter (Stage 2) can swallow the error.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn disallowed_include_returns_400_even_when_partial_data_narrower() {
+    // `lyrics` is NOT on the allowlist — only `albums` is allowed.
+    registry::register("_test_ArtistDto_t6d", &["albums"]);
+
+    let set = Arc::new(RequestIncludeSet {
+        include: vec!["lyrics".into()], // attacker requests a disallowed field
+        ..Default::default()
+    });
+
+    // Partial-data only asks for `name`. Without the correct gate order, the
+    // partial-data filter would silently skip `lyrics` before
+    // `resolve_with_owner` can raise the 400 — masking the security error.
+    let req = MockReq::new("/artist/1")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Artist/Show")
+        .header("X-Inertia-Partial-Data", "name");
+
+    let result = REQUEST_INCLUDE_SET
+        .scope(
+            set,
+            InertiaResponse::new("Artist/Show")
+                .with("name", "Beethoven")
+                .prop_lazy_with_owner(
+                    "_test_ArtistDto_t6d",
+                    "lyrics",
+                    Prop::lazy(|| async { serde_json::json!("la la") }),
+                )
+                .resolve(&req),
+        )
+        .await;
+
+    // Spec requires 400 on disallowed include — must fire even when
+    // partial-data would have filtered the field out before resolution.
+    match result {
+        Ok(_) => panic!("expected Err(400 disallowed include), got Ok response"),
+        Err(err) => assert_eq!(
+            err.status_code(),
+            400,
+            "expected HTTP 400 for disallowed include, got {}",
+            err.status_code()
+        ),
+    }
 }

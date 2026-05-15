@@ -783,25 +783,43 @@ async fn resolve_props(
                 }
             }
             Prop::Lazy(r) => {
-                if filter.should_include_eager(&key) {
-                    // Stage 1: check whether this Lazy prop is registered as
-                    // owned by a DTO. If so, use `resolve_with_owner` to
-                    // consult the `?include=` task-local + the per-DTO
-                    // allowlist (returns `Ok(None)` when not included).
-                    if let Some(&(owner, field)) = lazy_owned.get(&key) {
-                        tasks.push(Box::pin(async move {
-                            let prop = Prop::Lazy(r);
-                            match prop.resolve_with_owner(owner, field).await? {
-                                Some(v) => Ok(TaskOutcome::Insert { key, value: v }),
-                                None => Ok(TaskOutcome::Skip),
+                if let Some(&(owner, field)) = lazy_owned.get(&key) {
+                    // OWNER-TAGGED LAZY PATH
+                    //
+                    // Gate order (spec):
+                    //   Stage 1 — resolve_with_owner: include-set membership
+                    //     check + per-DTO allowlist enforcement. Returns
+                    //     Err(400) when the requested field is not on the
+                    //     allowlist. This error MUST propagate before
+                    //     partial-data can silently swallow it.
+                    //   Stage 2 — partial-data filter: applied to the resolved
+                    //     Some(v) result as the final "only" gate.
+                    //
+                    // The previous code had partial-data as the OUTER guard,
+                    // which silently dropped disallowed-include errors when
+                    // X-Inertia-Partial-Data was narrower than ?include=.
+                    let filter_clone = filter.clone();
+                    tasks.push(Box::pin(async move {
+                        let prop = Prop::Lazy(r);
+                        match prop.resolve_with_owner(owner, field).await? {
+                            None => Ok(TaskOutcome::Skip), // not in include set
+                            Some(v) => {
+                                // Stage 2: partial-data is the final "only" filter.
+                                if filter_clone.should_include_eager(&key) {
+                                    Ok(TaskOutcome::Insert { key, value: v })
+                                } else {
+                                    Ok(TaskOutcome::Skip)
+                                }
                             }
-                        }));
-                    } else {
-                        tasks.push(Box::pin(async move {
-                            let v = r().await?;
-                            Ok(TaskOutcome::Insert { key, value: v })
-                        }));
-                    }
+                        }
+                    }));
+                } else if filter.should_include_eager(&key) {
+                    // PLAIN LAZY PATH (no owner tag)
+                    // Partial-data is the only gate — existing behavior unchanged.
+                    tasks.push(Box::pin(async move {
+                        let v = r().await?;
+                        Ok(TaskOutcome::Insert { key, value: v })
+                    }));
                 }
             }
             Prop::Optional(r) => {
