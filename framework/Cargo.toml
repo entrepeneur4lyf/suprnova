@@ -44,6 +44,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry", "smallvec", "parking_lot"] }
 uuid = { version = "1", features = ["v4", "fast-rng", "serde"] }
 dashmap = "6"
+torii-core = { version = "0.5.2" }
+torii-storage-seaorm = { version = "0.5.2" }
+
 # Pinned to versions sea-orm 1.1.x exposes via `with-rust_decimal` / `with-bigdecimal`.
 # Used by the `pagination` module to round-trip `sea_orm::Value::Decimal` /
 # `Value::BigDecimal` boundaries in cursor payloads.
