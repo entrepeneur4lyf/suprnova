@@ -61,7 +61,7 @@ pub fn is_allowed(struct_name: &str, field: &str) -> bool {
         .read()
         .expect("data::registry REGISTRY read lock poisoned")
         .get(struct_name)
-        .map(|fields| fields.iter().any(|f| *f == field))
+        .map(|fields| fields.contains(&field))
         .unwrap_or(false)
 }
 

@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 //! `#[derive(Data)]` — composite derive that produces:
 //! - `Serialize` (skipping `#[data(input_only)]` fields)
 //! - `Deserialize` (rejecting payloads containing `#[data(output_only)]`
@@ -694,6 +695,7 @@ fn is_reference_type(ty: &syn::Type) -> bool {
     matches!(ty, syn::Type::Reference(_))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_deserialize(
     struct_name: &Ident,
     struct_name_str: &str,

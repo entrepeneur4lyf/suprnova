@@ -22,17 +22,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// "absent vs explicit null" semantics over an inner-nullable column,
 /// model the column as `T` and let `Field::Null` carry the "clear it"
 /// signal directly.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum Field<T> {
+    #[default]
     Absent,
     Null,
     Value(T),
-}
-
-impl<T> Default for Field<T> {
-    fn default() -> Self {
-        Field::Absent
-    }
 }
 
 impl<T> Field<T> {

@@ -658,7 +658,7 @@ impl InertiaResponse {
             // SSR runs only for HTML (non-XHR) visits. XHR is a JSON
             // page-object response and never needs prerender.
             let ssr_result =
-                super::ssr::render(&config.ssr, &req.path().to_string(), &page).await?;
+                super::ssr::render(&config.ssr, req.path(), &page).await?;
             Ok(build_html_response(
                 &page,
                 &config,
@@ -759,6 +759,7 @@ struct OnceMetadataEntry {
 /// Outcome of a single prop's async resolution. Returned by each task
 /// inside `try_join_all` so post-processing can apply the right
 /// metadata side-effect.
+#[allow(clippy::large_enum_variant)]
 enum TaskOutcome {
     Insert {
         key: String,
@@ -1070,12 +1071,12 @@ async fn resolve_props(
     // `.with("errors", {...})`) gets correctly wrapped. Without this
     // post-pass, the seeded empty object would be wrapped here but
     // overwritten by the user prop, silently losing the bag.
-    if let Some(bag) = error_bag {
-        if let Some(errors_val) = materialized.remove("errors") {
-            let mut wrapper = serde_json::Map::new();
-            wrapper.insert(bag.to_string(), errors_val);
-            materialized.insert("errors".to_string(), Value::Object(wrapper));
-        }
+    if let Some(bag) = error_bag
+        && let Some(errors_val) = materialized.remove("errors")
+    {
+        let mut wrapper = serde_json::Map::new();
+        wrapper.insert(bag.to_string(), errors_val);
+        materialized.insert("errors".to_string(), Value::Object(wrapper));
     }
 
     Ok((materialized, metadata))
@@ -1104,6 +1105,7 @@ fn apply_merge_strategy(metadata: &mut PageMetadata, key: String, strategy: Merg
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_page_object(
     component: &str,
     materialized_props: serde_json::Map<String, Value>,
