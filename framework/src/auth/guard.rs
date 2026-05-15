@@ -219,4 +219,45 @@ impl Auth {
         let user = Self::user().await?;
         Ok(user.and_then(|u| u.as_any().downcast_ref::<T>().cloned()))
     }
+
+    // ── Torii-backed authentication providers ──────────────────────────────────
+
+    /// Access password-based authentication operations.
+    ///
+    /// Requires that [`crate::torii_integration::init_torii`] has been called first.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use suprnova::Auth;
+    ///
+    /// let user = Auth::password().register("alice@example.com", "s3cret!").await?;
+    /// let (user, session) = Auth::password()
+    ///     .authenticate("alice@example.com", "s3cret!", None, None)
+    ///     .await?;
+    /// ```
+    pub fn password() -> crate::torii_integration::password::PasswordAuth {
+        crate::torii_integration::password::PasswordAuth
+    }
+
+    /// Access OAuth authentication operations.
+    ///
+    /// Full implementation coming in P3T6.
+    pub fn oauth() -> crate::torii_integration::oauth::OAuthAuth {
+        crate::torii_integration::oauth::OAuthAuth
+    }
+
+    /// Access passkey (WebAuthn/FIDO2) authentication operations.
+    ///
+    /// Full implementation coming in P3T7.
+    pub fn passkey() -> crate::torii_integration::passkey::PasskeyAuth {
+        crate::torii_integration::passkey::PasskeyAuth
+    }
+
+    /// Access magic-link authentication operations.
+    ///
+    /// Full implementation coming in P3T5.
+    pub fn magic_link() -> crate::torii_integration::magic_link::MagicLinkAuth {
+        crate::torii_integration::magic_link::MagicLinkAuth
+    }
 }

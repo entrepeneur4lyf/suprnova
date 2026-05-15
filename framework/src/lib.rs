@@ -1,5 +1,6 @@
 pub mod app;
 pub mod auth;
+pub mod torii_integration;
 pub mod authorization;
 pub mod cache;
 pub mod config;
@@ -31,6 +32,7 @@ extern crate self as suprnova;
 
 pub use app::Application;
 pub use auth::{Auth, Authenticatable, AuthMiddleware, GuestMiddleware, UserProvider};
+pub use torii_integration::{init_torii, Session, SessionToken, ToriiConfig, User, UserId};
 pub use authorization::{Gate, Policy};
 pub use cache::{Cache, CacheConfig, CacheStore, InMemoryCache, RedisCache};
 pub use config::{env, env_optional, env_required, AppConfig, Config, Environment, ServerConfig};

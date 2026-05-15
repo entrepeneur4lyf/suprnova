@@ -3630,6 +3630,7 @@ dependencies = [
  "suprnova-macros",
  "thiserror 1.0.69",
  "tokio",
+ "torii",
  "torii-core",
  "torii-storage-seaorm",
  "tracing",
@@ -4041,6 +4042,21 @@ dependencies = [
  "bytes",
  "prost",
  "tonic",
+]
+
+[[package]]
+name = "torii"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "977df4559aa26c3605e7a3b4e498b69932de182ed6a38bd5ea675307d81cdf3f"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "torii-core",
+ "torii-storage-seaorm",
+ "tracing",
 ]
 
 [[package]]
