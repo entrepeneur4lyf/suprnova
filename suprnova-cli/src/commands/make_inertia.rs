@@ -5,7 +5,84 @@ use std::path::Path;
 use crate::templates::{self, Frontend};
 use crate::ui;
 
-pub fn run(name: String) {
+const DATA_TEMPLATE: &str = r#"//! {name} — unified inbound + outbound DTO.
+
+use suprnova::Data;
+use validator::Validate;
+
+#[derive(Data, Validate)]
+pub struct {name} {{
+    pub id: i64,
+    // Add fields here.
+    //
+    // Available field attributes:
+    //   #[data(input_only)]     — accepted on Deserialize, omitted from Serialize
+    //   #[data(output_only)]    — rejected on Deserialize, included in Serialize
+    //   #[data(allow_include)]  — registers as ?include=-eligible (default-deny)
+    //
+    // For PATCH endpoints, use suprnova::data::Field<T> to distinguish
+    // absent from null. For lazy outbound fields, use suprnova::inertia::Prop<T>.
+}}
+"#;
+
+pub fn run(name: String, data: bool) {
+    if data {
+        run_data_struct(name);
+    } else {
+        run_inertia_page(name);
+    }
+}
+
+fn run_data_struct(name: String) {
+    let struct_name = to_pascal_case(&name);
+
+    if !is_valid_rust_identifier(&struct_name) {
+        ui::error(&format!("'{}' is not a valid struct name", name));
+        std::process::exit(1);
+    }
+
+    let file_name = to_snake_case(&struct_name);
+    let props_dir = Path::new("app/src/props");
+    let props_file = props_dir.join(format!("{}.rs", file_name));
+
+    // Create the props directory if it doesn't exist.
+    if !props_dir.exists() {
+        if let Err(e) = fs::create_dir_all(props_dir) {
+            ui::error(&format!("Failed to create directory app/src/props: {}", e));
+            std::process::exit(1);
+        }
+    }
+
+    if props_file.exists() {
+        ui::warning(&format!(
+            "Props struct '{}' already exists at {}",
+            struct_name,
+            props_file.display()
+        ));
+        std::process::exit(0);
+    }
+
+    let content = DATA_TEMPLATE.replace("{name}", &struct_name);
+
+    if let Err(e) = fs::write(&props_file, &content) {
+        ui::error(&format!("Failed to write props file: {}", e));
+        std::process::exit(1);
+    }
+    ui::success(&format!("Created {}", props_file.display()));
+
+    ui::br();
+    ui::info(&format!(
+        "Data struct {} created at {}",
+        style(&struct_name).cyan().bold(),
+        style(props_file.display().to_string().as_str()).dim(),
+    ));
+    ui::br();
+    ui::hint("Use in a controller with automatic serde + validation:");
+    ui::command(&format!("let dto: {} = req.validate_json().await?;", struct_name));
+    ui::br();
+}
+
+fn run_inertia_page(name: String) {
     let _ = dotenvy::from_path(".env");
 
     let frontend = Frontend::detect_from_env();
@@ -65,6 +142,33 @@ fn is_valid_component_name(name: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_alphanumeric())
+}
+
+fn is_valid_rust_identifier(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_alphanumeric() || c == '_')
+}
+
+fn to_snake_case(s: &str) -> String {
+    let mut result = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() {
+            if i > 0 {
+                result.push('_');
+            }
+            result.push(c.to_lowercase().next().unwrap());
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }
 
 fn to_pascal_case(s: &str) -> String {

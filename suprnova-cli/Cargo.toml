@@ -46,3 +46,5 @@ base64 = "0.22"
 [dev-dependencies]
 # Verify generated keys round-trip through the framework's loader.
 suprnova = { path = "../framework", version = "0.1" }
+# Integration tests that invoke the binary with a temp working directory.
+tempfile = "3"

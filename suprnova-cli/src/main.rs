@@ -96,11 +96,14 @@ enum Commands {
         /// Name of the error (e.g., UserNotFound, InvalidInput)
         name: String,
     },
-    /// Generate a new Inertia page
+    /// Generate a new Inertia page or Data struct
     #[command(name = "make:inertia")]
     MakeInertia {
-        /// Name of the page (e.g., About, UserProfile)
+        /// Name of the page or struct (e.g., About, UserProps)
         name: String,
+        /// Scaffold a #[derive(Data, Validate)] struct in app/src/props/ instead of a frontend page
+        #[arg(long)]
+        data: bool,
     },
     /// Generate a new database migration
     #[command(name = "make:migration")]
@@ -252,8 +255,8 @@ fn main() {
         Commands::MakeError { name } => {
             commands::make_error::run(name);
         }
-        Commands::MakeInertia { name } => {
-            commands::make_inertia::run(name);
+        Commands::MakeInertia { name, data } => {
+            commands::make_inertia::run(name, data);
         }
         Commands::MakeMigration { name } => {
             commands::make_migration::run(name);
