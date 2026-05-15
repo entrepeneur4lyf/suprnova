@@ -127,6 +127,7 @@ pub use suprnova_macros::injectable;
 pub use suprnova_macros::redirect;
 pub use suprnova_macros::request;
 pub use suprnova_macros::service;
+pub use suprnova_macros::policy;
 pub use suprnova_macros::workflow;
 pub use suprnova_macros::workflow_step;
 pub use suprnova_macros::Data;

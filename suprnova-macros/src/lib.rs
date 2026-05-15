@@ -22,6 +22,7 @@ mod request;
 mod service;
 mod test_macro;
 mod utils;
+mod policy;
 mod workflow;
 mod workflow_step;
 
@@ -466,4 +467,35 @@ pub fn describe(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn test(input: TokenStream) -> TokenStream {
     test_macro::test_impl(input)
+}
+
+/// Attribute macro for authorization policy classes.
+///
+/// Annotate an `impl` block with `#[policy(UserType, ResourceType)]` to
+/// automatically register each method as a named Gate action. The gate name
+/// is derived by combining the method name with the lowercased resource type:
+/// `fn view(...)` on `Comment` → `"view-comment"`.
+///
+/// Call `suprnova::authorization::init_policies()` once at startup (or in
+/// tests) to run all submitted registrations. `Server::serve` calls this
+/// automatically.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use suprnova::policy;
+///
+/// struct CommentPolicy;
+///
+/// #[policy(User, Comment)]
+/// impl CommentPolicy {
+///     fn view(_user: &User, _comment: &Comment) -> bool { true }
+///     fn update(user: &User, comment: &Comment) -> bool {
+///         comment.author_id == user.id
+///     }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn policy(attr: TokenStream, item: TokenStream) -> TokenStream {
+    policy::policy(attr, item)
 }

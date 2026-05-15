@@ -107,6 +107,9 @@ impl Server {
         // or SIGTERM. Idempotent across calls.
         let guard = init_telemetry(LogConfig::from_env(), OtelConfig::from_env());
 
+        // Register all #[policy] gates collected via inventory::submit!
+        crate::authorization::init_policies();
+
         // Bootstrap cache (Redis with in-memory fallback)
         Cache::bootstrap().await;
 

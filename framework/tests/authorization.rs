@@ -1,4 +1,4 @@
-use suprnova::{Gate, FrameworkError};
+use suprnova::{Gate, FrameworkError, policy};
 
 #[derive(Debug)]
 struct User {
@@ -61,4 +61,38 @@ async fn gate_authorize_returns_forbidden_when_denied() {
     };
     let result = Gate::authorize("edit-post", &alice, &foreign_post);
     assert!(matches!(result, Err(FrameworkError::Unauthorized)));
+}
+
+// ── Task 3: #[policy] proc-macro test ────────────────────────────────────────
+
+struct Comment {
+    pub author_id: i64,
+}
+
+struct CommentPolicy;
+
+#[policy(User, Comment)]
+impl CommentPolicy {
+    fn view(_user: &User, _comment: &Comment) -> bool {
+        true
+    }
+    fn update(user: &User, comment: &Comment) -> bool {
+        comment.author_id == user.id
+    }
+}
+
+#[test]
+fn policy_macro_registers_gates_via_inventory() {
+    // The #[policy] attribute should have wired up gates for
+    // "view-comment" and "update-comment" via inventory::submit!.
+    // Eagerly trigger inventory collection at startup:
+    suprnova::authorization::init_policies();
+
+    let alice = User { id: 1, is_admin: false };
+    let mine = Comment { author_id: 1 };
+    let theirs = Comment { author_id: 99 };
+
+    assert!(Gate::allows("view-comment", &alice, &mine));
+    assert!(Gate::allows("update-comment", &alice, &mine));
+    assert!(!Gate::allows("update-comment", &alice, &theirs));
 }
