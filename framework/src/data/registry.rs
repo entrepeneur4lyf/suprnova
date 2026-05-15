@@ -18,7 +18,9 @@ static REGISTRY: Lazy<RwLock<HashMap<&'static str, Vec<&'static str>>>> =
 /// Register the allowed-include list for a DTO. Idempotent — re-registering
 /// the same struct overwrites the prior list.
 pub fn register(struct_name: &'static str, fields: &'static [&'static str]) {
-    let mut map = REGISTRY.write().unwrap();
+    let mut map = REGISTRY
+        .write()
+        .expect("data::registry REGISTRY write lock poisoned");
     map.insert(struct_name, fields.to_vec());
 }
 
@@ -26,7 +28,7 @@ pub fn register(struct_name: &'static str, fields: &'static [&'static str]) {
 pub fn is_allowed(struct_name: &str, field: &str) -> bool {
     REGISTRY
         .read()
-        .unwrap()
+        .expect("data::registry REGISTRY read lock poisoned")
         .get(struct_name)
         .map(|fields| fields.iter().any(|f| *f == field))
         .unwrap_or(false)
@@ -37,7 +39,7 @@ pub fn is_allowed(struct_name: &str, field: &str) -> bool {
 pub fn allowed_for(struct_name: &str) -> Vec<&'static str> {
     REGISTRY
         .read()
-        .unwrap()
+        .expect("data::registry REGISTRY read lock poisoned")
         .get(struct_name)
         .cloned()
         .unwrap_or_default()
@@ -49,26 +51,41 @@ mod tests {
 
     #[test]
     fn registered_fields_are_allowed() {
-        register("MyDto", &["author", "tags"]);
-        assert!(is_allowed("MyDto", "author"));
-        assert!(is_allowed("MyDto", "tags"));
-        assert!(!is_allowed("MyDto", "secret"));
+        register("_test_MyDto", &["author", "tags"]);
+        assert!(is_allowed("_test_MyDto", "author"));
+        assert!(is_allowed("_test_MyDto", "tags"));
+        assert!(!is_allowed("_test_MyDto", "secret"));
     }
 
     #[test]
     fn unregistered_dto_allows_nothing() {
-        assert!(!is_allowed("Unregistered", "anything"));
+        assert!(!is_allowed("_test_Unregistered", "anything"));
     }
 
     #[test]
     fn allowed_list_returns_registered() {
-        register("ListDto", &["a", "b", "c"]);
-        let allowed = allowed_for("ListDto");
+        register("_test_ListDto", &["a", "b", "c"]);
+        let allowed = allowed_for("_test_ListDto");
         assert_eq!(allowed, vec!["a", "b", "c"]);
     }
 
     #[test]
     fn allowed_list_empty_when_unregistered() {
-        assert!(allowed_for("MissingDto").is_empty());
+        assert!(allowed_for("_test_MissingDto").is_empty());
+    }
+
+    #[test]
+    fn overwrite_replaces_prior_fields() {
+        register("_test_OverwriteDto", &["old"]);
+        register("_test_OverwriteDto", &["new"]);
+        assert!(is_allowed("_test_OverwriteDto", "new"));
+        assert!(!is_allowed("_test_OverwriteDto", "old"));
+    }
+
+    #[test]
+    fn empty_allowlist_allows_nothing() {
+        register("_test_EmptyDto", &[]);
+        assert!(!is_allowed("_test_EmptyDto", "anything"));
+        assert!(allowed_for("_test_EmptyDto").is_empty());
     }
 }
