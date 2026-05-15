@@ -125,3 +125,62 @@ fn allow_include_fields_register_via_inventory() {
         vec!["songs", "artist"]
     );
 }
+
+// ── Task 18: #[data(lazy)] + #[data(auto_lazy)] ──────────────────────────
+
+use suprnova::inertia::{Prop, PropEntry};
+
+#[allow(non_camel_case_types)]
+#[derive(suprnova::Data, validator::Validate)]
+pub struct _test_UserDto_t18 {
+    pub id: i64,
+
+    #[data(lazy)]
+    pub favorite_song: Prop,
+}
+
+#[test]
+fn lazy_field_registers_in_allowlist() {
+    use suprnova::data::registry;
+    assert!(registry::is_allowed("_test_UserDto_t18", "favorite_song"));
+    assert!(!registry::is_allowed("_test_UserDto_t18", "id"));
+}
+
+#[test]
+fn into_inertia_props_emits_owner_tagged_lazy() {
+    let dto = _test_UserDto_t18 {
+        id: 7,
+        favorite_song: Prop::lazy(|| async { serde_json::json!("Symphony 9") }),
+    };
+    let props = dto.__into_inertia_props();
+
+    let names: Vec<&str> = props.iter().map(|(k, _)| k.as_str()).collect();
+    assert!(names.contains(&"id"));
+    assert!(names.contains(&"favorite_song"));
+
+    let song_entry = props.into_iter().find(|(k, _)| k == "favorite_song").unwrap().1;
+    match song_entry {
+        PropEntry::LazyOwned { owner, field, .. } => {
+            assert_eq!(owner, "_test_UserDto_t18");
+            assert_eq!(field, "favorite_song");
+        }
+        _ => panic!("expected LazyOwned entry"),
+    }
+}
+
+#[allow(non_camel_case_types)]
+#[derive(suprnova::Data, validator::Validate)]
+#[data(auto_lazy)]
+pub struct _test_AutoLazyDto_t18 {
+    pub id: i64,
+    pub song: Prop,
+    pub album: Prop,
+}
+
+#[test]
+fn auto_lazy_marks_all_prop_typed_fields() {
+    use suprnova::data::registry;
+    assert!(registry::is_allowed("_test_AutoLazyDto_t18", "song"));
+    assert!(registry::is_allowed("_test_AutoLazyDto_t18", "album"));
+    assert!(!registry::is_allowed("_test_AutoLazyDto_t18", "id"));
+}

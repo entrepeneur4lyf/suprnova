@@ -14,6 +14,30 @@ use serde_json::Value;
 use std::future::Future;
 use std::sync::Arc;
 
+/// A single prop entry returned by `#[derive(Data)]`'s `__into_inertia_props`.
+///
+/// - `Eager` — the field's value is already serialized; inserted directly
+///   into the response prop bag.
+/// - `LazyOwned` — the field is a `Prop<T>` lazy closure that must pass
+///   the `?include=` + allowlist gate before resolution. `owner` and `field`
+///   are used by `from_data_props` to call `prop_lazy_with_owner`.
+pub enum PropEntry {
+    Eager(serde_json::Value),
+    LazyOwned {
+        owner: &'static str,
+        field: &'static str,
+        prop: Prop,
+    },
+}
+
+/// Marker trait implemented by `#[derive(Data)]`-derived types so
+/// `Inertia::data` can dispatch on them. Carries the macro-generated
+/// `__into_inertia_props` surface — users should not implement this
+/// manually.
+pub trait IntoInertiaData {
+    fn __into_inertia_props(self) -> Vec<(String, PropEntry)>;
+}
+
 /// Builder for Inertia.js page responses.
 ///
 /// Construct with a component name, attach props with [`with`](Self::with),
@@ -139,6 +163,32 @@ impl InertiaResponse {
         self.props.insert(field.to_string(), prop);
         self.lazy_owned.insert(field.to_string(), (owner_struct_name, field));
         self
+    }
+
+    /// Build an `InertiaResponse` from the `Vec<(String, PropEntry)>` produced
+    /// by a `#[derive(Data)]` DTO's `__into_inertia_props`.
+    ///
+    /// Dispatches on each entry variant:
+    /// - `Eager` → inserted directly via the internal prop map (equivalent to `.with(key, value)`).
+    /// - `LazyOwned` → routed through `prop_lazy_with_owner` so the
+    ///   `?include=` + allowlist gate applies at resolution time.
+    pub fn from_data_props(
+        component: &'static str,
+        props: Vec<(String, PropEntry)>,
+    ) -> Self {
+        let mut r = Self::new(component);
+        for (k, entry) in props {
+            match entry {
+                PropEntry::Eager(v) => {
+                    r.props.insert(k, Prop::Eager(v));
+                }
+                PropEntry::LazyOwned { owner, field, prop } => {
+                    r.props.insert(k, prop);
+                    r.lazy_owned.insert(field.to_string(), (owner, field));
+                }
+            }
+        }
+        r
     }
 
     /// Attach an optional prop. Never included on standard visits;

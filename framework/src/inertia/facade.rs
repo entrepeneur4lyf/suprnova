@@ -3,6 +3,7 @@
 
 use crate::pagination::IntoInertiaScroll;
 
+use super::response::IntoInertiaData;
 use super::InertiaResponse;
 
 /// Static facade. Today it exposes `Inertia::paginate`; future helpers
@@ -31,5 +32,17 @@ impl Inertia {
     {
         let (meta, data) = paginator.into_inertia_scroll();
         InertiaResponse::new(component).scroll(key, meta, data)
+    }
+
+    /// Build an Inertia response from a `#[derive(Data)]` DTO.
+    ///
+    /// Lazy fields registered via `#[data(lazy)]` / `#[data(auto_lazy)]`
+    /// resolve against the request's `?include=` set; the per-DTO allowlist
+    /// enforces default-deny — disallowed includes return 400.
+    pub fn data<T>(component: &'static str, dto: T) -> InertiaResponse
+    where
+        T: IntoInertiaData,
+    {
+        InertiaResponse::from_data_props(component, dto.__into_inertia_props())
     }
 }

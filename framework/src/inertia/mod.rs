@@ -18,7 +18,7 @@ pub use prop::{
     DeferConfig, DeferOptions, InertiaRequestExt, MergeConfig, MergeStrategy, OnceConfig,
     OnceOptions, PartialFilter, Prop, PropFuture, PropResolver, ScrollConfig, ScrollMetadata,
 };
-pub use response::InertiaResponse;
+pub use response::{InertiaResponse, IntoInertiaData, PropEntry};
 pub use shared::{InertiaRegistry, InertiaSharedData};
 pub use version_middleware::InertiaVersionMiddleware;
 

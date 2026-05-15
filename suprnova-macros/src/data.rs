@@ -63,6 +63,15 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{parse_macro_input, Data, DataStruct, DeriveInput, Field, Fields, Ident, Meta};
 
+/// Flavors of lazy resolution for a `#[data(lazy)]` field.
+/// Only `Plain` exists in Task 18; additional flavors (e.g. `Deferred`)
+/// will be added in Task 19.
+#[derive(Default, Clone, Debug)]
+enum LazyFlavor {
+    #[default]
+    Plain,
+}
+
 #[derive(Default)]
 struct FieldOptions {
     input_only: bool,
@@ -72,10 +81,14 @@ struct FieldOptions {
     /// `Some(Some(s))` means `#[data(from_route_param("s"))]` — use the explicit key.
     /// `None` means the attribute was not present on this field.
     from_route_param: Option<Option<String>>,
+    /// Set by `#[data(lazy)]` or derived from `#[data(auto_lazy)]` at the
+    /// struct level when the field's type is `Prop<T>`.
+    lazy: Option<LazyFlavor>,
 }
 
 #[derive(Default)]
 struct StructOptions {
+    auto_lazy: bool,
     custom_authorize: bool,
 }
 
@@ -90,7 +103,9 @@ fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::
             _ => continue,
         };
         list.parse_nested_meta(|meta| {
-            if meta.path.is_ident("custom_authorize") {
+            if meta.path.is_ident("auto_lazy") {
+                opts.auto_lazy = true;
+            } else if meta.path.is_ident("custom_authorize") {
                 opts.custom_authorize = true;
             } else {
                 return Err(meta.error("unknown struct-level #[data(...)] flag"));
@@ -184,6 +199,18 @@ fn is_option_type(ty: &syn::Type) -> bool {
     if let syn::Type::Path(p) = ty {
         if let Some(seg) = p.path.segments.last() {
             return seg.ident == "Option" || seg.ident == "Field";
+        }
+    }
+    false
+}
+
+/// Returns `true` when the outermost type is `Prop<_>`.
+/// Used by `auto_lazy` logic to infer which fields should be treated
+/// as lazy props without an explicit `#[data(lazy)]` annotation.
+fn is_prop_type(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(p) = ty {
+        if let Some(seg) = p.path.segments.last() {
+            return seg.ident == "Prop";
         }
     }
     false
@@ -324,6 +351,8 @@ fn parse_field_options(field: &Field) -> Result<FieldOptions, syn::Error> {
                 opts.output_only = true;
             } else if meta.path.is_ident("allow_include") {
                 opts.allow_include = true;
+            } else if meta.path.is_ident("lazy") {
+                opts.lazy = Some(LazyFlavor::Plain);
             } else if meta.path.is_ident("from_route_param") {
                 // `#[data(from_route_param("key"))]` — explicit param name
                 // `#[data(from_route_param)]`        — use the field name
@@ -337,7 +366,7 @@ fn parse_field_options(field: &Field) -> Result<FieldOptions, syn::Error> {
                 }
             } else {
                 return Err(meta.error(
-                    "unknown #[data(...)] flag — expected input_only, output_only, allow_include, or from_route_param",
+                    "unknown #[data(...)] flag — expected input_only, output_only, allow_include, lazy, or from_route_param",
                 ));
             }
             Ok(())
@@ -358,6 +387,64 @@ fn add_de_lifetime(g: &syn::Generics) -> syn::Generics {
     let mut g = g.clone();
     g.params.insert(0, syn::parse_quote!('__de));
     g
+}
+
+fn build_into_inertia_props(
+    struct_name: &Ident,
+    struct_name_str: &str,
+    impl_generics: &syn::ImplGenerics,
+    ty_generics: &syn::TypeGenerics,
+    where_clause: Option<&syn::WhereClause>,
+    parsed: &[(&Field, FieldOptions)],
+) -> TokenStream2 {
+    let entries: Vec<TokenStream2> = parsed
+        .iter()
+        .filter(|(_, o)| !o.input_only)
+        .map(|(f, opts)| {
+            let ident = f.ident.as_ref().unwrap();
+            let name = ident.to_string();
+
+            if opts.lazy.is_some() {
+                quote! {
+                    out.push((
+                        #name.to_string(),
+                        ::suprnova::inertia::PropEntry::LazyOwned {
+                            owner: #struct_name_str,
+                            field: #name,
+                            prop: self.#ident,
+                        },
+                    ));
+                }
+            } else {
+                quote! {
+                    out.push((
+                        #name.to_string(),
+                        ::suprnova::inertia::PropEntry::Eager(
+                            ::suprnova::serde_json::to_value(&self.#ident)
+                                .expect("__into_inertia_props: field failed to serialize"),
+                        ),
+                    ));
+                }
+            }
+        })
+        .collect();
+
+    quote! {
+        impl #impl_generics #struct_name #ty_generics #where_clause {
+            #[doc(hidden)]
+            pub fn __into_inertia_props(self) -> ::std::vec::Vec<(String, ::suprnova::inertia::PropEntry)> {
+                let mut out = ::std::vec::Vec::new();
+                #(#entries)*
+                out
+            }
+        }
+
+        impl #impl_generics ::suprnova::inertia::IntoInertiaData for #struct_name #ty_generics #where_clause {
+            fn __into_inertia_props(self) -> ::std::vec::Vec<(String, ::suprnova::inertia::PropEntry)> {
+                <Self>::__into_inertia_props(self)
+            }
+        }
+    }
 }
 
 pub fn derive_data_impl(input: TokenStream) -> TokenStream {
@@ -405,6 +492,24 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
         Err(e) => return e.to_compile_error().into(),
     };
 
+    // auto_lazy: when the struct-level flag is set, implicitly mark any
+    // `Prop<T>`-typed field as lazy (equivalent to `#[data(lazy)]`).
+    if struct_opts.auto_lazy {
+        for (field, opts) in parsed.iter_mut() {
+            if opts.lazy.is_none() && is_prop_type(&field.ty) {
+                opts.lazy = Some(LazyFlavor::Plain);
+            }
+        }
+    }
+
+    // Lazy fields are always allow_include-eligible so they register in
+    // the runtime allowlist.
+    for (_, opts) in parsed.iter_mut() {
+        if opts.lazy.is_some() {
+            opts.allow_include = true;
+        }
+    }
+
     // If any non-output-only field has a reference type (`&T` / `&'a T`),
     // we skip generating the Deserialize impl.  Reference types cannot be
     // produced by serde's deserialization machinery in the general case
@@ -412,12 +517,19 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
     // reference fields are typically only ever serialized, not deserialized.
     let has_reference_fields = parsed
         .iter()
-        .filter(|(_, o)| !o.output_only)
+        .filter(|(_, o)| !o.output_only && o.lazy.is_none())
         .any(|(f, _)| is_reference_type(&f.ty));
+
+    // Structs with lazy fields (`Prop` type) also skip Deserialize and
+    // FormRequest: `Prop` is a server-side type with no `Default` impl and
+    // is never deserialized from client input. The DTO's public surface for
+    // output is `__into_inertia_props`; for input, callers must write their
+    // own extractor or use a separate input DTO without lazy fields.
+    let has_lazy_fields = parsed.iter().any(|(_, o)| o.lazy.is_some());
 
     let serialize_impl =
         build_serialize(struct_name, &impl_generics, &ty_generics, where_clause, &parsed);
-    let deserialize_impl = if has_reference_fields {
+    let deserialize_impl = if has_reference_fields || has_lazy_fields {
         proc_macro2::TokenStream::new()
     } else {
         build_deserialize(
@@ -438,17 +550,27 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
     // Users who need FormRequest on a generic struct must write the impl manually
     // with the appropriate where bounds (e.g., `where T: Send + Validate + ...`).
     let is_generic = !input.generics.params.is_empty();
-    let form_request_impl = if is_generic || has_reference_fields {
+    let form_request_impl = if is_generic || has_reference_fields || has_lazy_fields {
         proc_macro2::TokenStream::new()
     } else {
         build_form_request(struct_name, &struct_opts, &impl_generics, &ty_generics, where_clause, &parsed)
     };
+
+    let into_inertia_props_impl = build_into_inertia_props(
+        struct_name,
+        &struct_name_str,
+        &impl_generics,
+        &ty_generics,
+        where_clause,
+        &parsed,
+    );
 
     let expanded = quote! {
         #serialize_impl
         #deserialize_impl
         #allowlist_registration
         #form_request_impl
+        #into_inertia_props_impl
     };
 
     expanded.into()
@@ -481,7 +603,11 @@ fn build_serialize(
 ) -> TokenStream2 {
     let output_fields: Vec<TokenStream2> = parsed
         .iter()
-        .filter(|(_, opts)| !opts.input_only)
+        // input_only and lazy fields are excluded from serde Serialize:
+        // - input_only: never sent to the client in the response
+        // - lazy: Prop<T> is not directly serializable; goes through
+        //   __into_inertia_props -> PropEntry -> InertiaResponse resolution
+        .filter(|(_, opts)| !opts.input_only && opts.lazy.is_none())
         .map(|(f, _)| {
             let ident = f.ident.as_ref().unwrap();
             let name = ident.to_string();
