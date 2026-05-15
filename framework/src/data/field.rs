@@ -13,6 +13,15 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// Pair with `#[serde(default, skip_serializing_if = "Field::is_absent")]`
 /// on the struct field to wire absent-detection on deserialize and
 /// absent-omission on serialize.
+///
+/// # Caveat: `Field<Option<T>>` is lossy
+///
+/// Stacking `Field` over `Option` collapses one state during a JSON
+/// round-trip. `Field::Value(None)` serializes to `null` and deserializes
+/// back to `Field::Null` — the `Value(None)` distinction is lost. For
+/// "absent vs explicit null" semantics over an inner-nullable column,
+/// model the column as `T` and let `Field::Null` carry the "clear it"
+/// signal directly.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Field<T> {
     Absent,
@@ -53,12 +62,16 @@ impl<T> Field<T> {
         }
     }
 
-    /// Collapse `Absent` into `Null`. Useful for endpoints that treat both
-    /// as "clear the field".
-    pub fn into_option_null(self) -> Option<T> {
+    /// Convert into `Option<Option<T>>` for endpoints that need to distinguish
+    /// "do not touch this field" (`None`) from "set this field to null"
+    /// (`Some(None)`) from "set this field to a value" (`Some(Some(v))`).
+    ///
+    /// This is the typical PATCH-against-a-DB-column pattern.
+    pub fn into_option_or_null(self) -> Option<Option<T>> {
         match self {
-            Field::Value(v) => Some(v),
-            _ => None,
+            Field::Absent => None,
+            Field::Null => Some(None),
+            Field::Value(v) => Some(Some(v)),
         }
     }
 }
@@ -69,6 +82,11 @@ impl<T> From<T> for Field<T> {
     }
 }
 
+/// `Some(v)` → `Field::Value(v)`. `None` → `Field::Null` (NOT `Absent`).
+///
+/// Rationale: the `Option` itself was present in the caller's data flow;
+/// it just happened to carry no value. That maps to "present and null."
+/// Use `Field::Absent` directly when you want to signal "not provided."
 impl<T> From<Option<T>> for Field<T> {
     fn from(o: Option<T>) -> Self {
         match o {
@@ -121,5 +139,76 @@ mod tests {
         assert!(!v.is_absent());
         assert!(!v.is_null());
         assert!(v.is_value());
+    }
+
+    // --- into_value ---
+
+    #[test]
+    fn into_value_returns_some_for_value() {
+        let f: Field<i32> = Field::Value(7);
+        assert_eq!(f.into_value(), Some(7));
+    }
+
+    #[test]
+    fn into_value_returns_none_for_absent_or_null() {
+        let f: Field<i32> = Field::Absent;
+        assert_eq!(f.into_value(), None);
+        let f: Field<i32> = Field::Null;
+        assert_eq!(f.into_value(), None);
+    }
+
+    // --- into_option_or_null ---
+
+    #[test]
+    fn into_option_or_null_three_way() {
+        let absent: Field<i32> = Field::Absent;
+        assert_eq!(absent.into_option_or_null(), None);
+
+        let null: Field<i32> = Field::Null;
+        assert_eq!(null.into_option_or_null(), Some(None));
+
+        let value: Field<i32> = Field::Value(7);
+        assert_eq!(value.into_option_or_null(), Some(Some(7)));
+    }
+
+    // --- From<Option<T>> ---
+
+    #[test]
+    fn from_some_option_yields_value() {
+        let f: Field<i32> = Some(7).into();
+        assert_eq!(f, Field::Value(7));
+    }
+
+    #[test]
+    fn from_none_option_yields_null_not_absent() {
+        let f: Field<i32> = None.into();
+        assert_eq!(f, Field::Null);
+        assert!(!f.is_absent());
+    }
+
+    #[test]
+    fn from_t_yields_value() {
+        let f: Field<i32> = 7.into();
+        assert_eq!(f, Field::Value(7));
+    }
+
+    // --- Field<Option<T>> lossy round-trip (known limitation) ---
+
+    #[test]
+    fn field_of_option_collapses_value_none_to_null_round_trip() {
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Deserialize, Serialize, PartialEq)]
+        struct Holder {
+            #[serde(default, skip_serializing_if = "Field::is_absent")]
+            x: Field<Option<String>>,
+        }
+
+        let with_value_none = Holder { x: Field::Value(None) };
+        let json = serde_json::to_string(&with_value_none).unwrap();
+        assert_eq!(json, r#"{"x":null}"#);
+
+        let back: Holder = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.x, Field::Null, "Value(None) round-trips through JSON as Null — known limitation");
     }
 }
