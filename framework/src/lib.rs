@@ -6,6 +6,7 @@ pub mod container;
 pub mod context;
 pub mod crypto;
 pub mod csrf;
+pub mod data;
 pub mod database;
 pub mod error;
 pub mod hashing;
@@ -35,6 +36,7 @@ pub use container::{App, Container};
 pub use context::{Context, ContextStore};
 pub use crypto::{Crypt, EncryptionKey};
 pub use csrf::{csrf_field, csrf_meta_tag, csrf_token, CsrfMiddleware};
+pub use data::Field;
 pub use database::{
     AutoRouteBinding, Database, DatabaseConfig, DatabaseType, DbConnection, Model, ModelMut,
     RouteBinding, DB,
