@@ -15,22 +15,18 @@
 //!   Inertia response. Useful for hitting the route from `curl` /
 //!   tests that don't speak Inertia.
 
-use serde::Serialize;
 use suprnova::{
     json_response, CursorDirection, CursorPaginator, FrameworkError, HttpResponse, Inertia,
     IntoInertiaScroll, Request, Response, ResponseExt,
 };
 
-#[derive(Clone, Serialize)]
-struct User {
-    id: i64,
-    name: String,
-}
+use crate::props::UserProps;
 
-fn make_users() -> Vec<User> {
+fn make_users() -> Vec<UserProps> {
     (1..=100i64)
-        .map(|id| User {
+        .map(|id| UserProps {
             id,
+            email: format!("user-{:03}@example.com", id),
             name: format!("user-{:03}", id),
         })
         .collect()
@@ -56,7 +52,7 @@ fn decode_id_cursor(
     match raw {
         None => Ok(None),
         Some(c) => {
-            let (value, direction) = CursorPaginator::<User>::decode_value(c)?;
+            let (value, direction) = CursorPaginator::<UserProps>::decode_value(c)?;
             let id = match value {
                 sea_orm::Value::BigInt(Some(i)) => i,
                 other => {
@@ -72,7 +68,7 @@ fn decode_id_cursor(
 
 /// Build the paginator for the current request. Pure — no DB, no
 /// shared state, just slicing a 100-user fixture by the cursor.
-fn build_page(qs: Option<&str>) -> Result<CursorPaginator<User>, FrameworkError> {
+fn build_page(qs: Option<&str>) -> Result<CursorPaginator<UserProps>, FrameworkError> {
     let per_page: u64 = query_param(qs, "per_page")
         .and_then(|s| s.parse().ok())
         .unwrap_or(20);
@@ -81,7 +77,7 @@ fn build_page(qs: Option<&str>) -> Result<CursorPaginator<User>, FrameworkError>
     let decoded = decode_id_cursor(cursor_input.as_deref())?;
 
     let all_users = make_users();
-    let (mut filtered, scan_dir): (Vec<User>, CursorDirection) = match decoded {
+    let (mut filtered, scan_dir): (Vec<UserProps>, CursorDirection) = match decoded {
         None => (all_users, CursorDirection::Next),
         Some((boundary, CursorDirection::Next)) => (
             all_users.into_iter().filter(|u| u.id > boundary).collect(),
@@ -89,7 +85,7 @@ fn build_page(qs: Option<&str>) -> Result<CursorPaginator<User>, FrameworkError>
         ),
         Some((boundary, CursorDirection::Prev)) => {
             // Back-scan: rows < boundary, DESC; then reverse to ASC.
-            let mut rows: Vec<User> = all_users
+            let mut rows: Vec<UserProps> = all_users
                 .into_iter()
                 .filter(|u| u.id < boundary)
                 .collect();
@@ -122,7 +118,7 @@ fn build_page(qs: Option<&str>) -> Result<CursorPaginator<User>, FrameworkError>
         };
         if has_next && !filtered.is_empty() {
             let last = filtered.last().unwrap();
-            Some(CursorPaginator::<User>::encode_value(
+            Some(CursorPaginator::<UserProps>::encode_value(
                 &sea_orm::Value::BigInt(Some(last.id)),
                 CursorDirection::Next,
             )?)
@@ -138,7 +134,7 @@ fn build_page(qs: Option<&str>) -> Result<CursorPaginator<User>, FrameworkError>
         };
         if has_prev && !filtered.is_empty() {
             let first = filtered.first().unwrap();
-            Some(CursorPaginator::<User>::encode_value(
+            Some(CursorPaginator::<UserProps>::encode_value(
                 &sea_orm::Value::BigInt(Some(first.id)),
                 CursorDirection::Prev,
             )?)
