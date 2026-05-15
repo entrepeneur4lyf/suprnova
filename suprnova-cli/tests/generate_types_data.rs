@@ -60,3 +60,45 @@ fn user_dto_emits_output_and_input_types() {
     assert!(!input.contains("computed_handle"));      // output_only excluded
     assert!(!input.contains("favorite_song"));        // lazy props are output-only
 }
+
+const GENERIC_SRC: &str = r#"
+use suprnova::data::Field;
+
+#[derive(suprnova::Data)]
+pub struct Paginated<T>
+where
+    T: serde::Serialize + for<'de> serde::Deserialize<'de>,
+{
+    pub items: Vec<T>,
+    pub total: usize,
+    pub cursor: Field<String>,
+}
+"#;
+
+#[test]
+fn generic_struct_emits_typescript_generic() {
+    let ts = generate_types_string(ScanInput::Source(GENERIC_SRC));
+    assert!(ts.contains("export interface Paginated<T>"));
+    assert!(ts.contains("items: Array<T>"));
+    assert!(ts.contains("total: number"));
+    assert!(ts.contains("cursor?: string | null"));
+}
+
+#[test]
+fn multi_param_generic() {
+    let src = r#"
+        #[derive(suprnova::Data)]
+        pub struct Pair<A, B>
+        where
+            A: serde::Serialize + for<'de> serde::Deserialize<'de>,
+            B: serde::Serialize + for<'de> serde::Deserialize<'de>,
+        {
+            pub left: A,
+            pub right: B,
+        }
+    "#;
+    let ts = generate_types_string(ScanInput::Source(src));
+    assert!(ts.contains("export interface Pair<A, B>"));
+    assert!(ts.contains("left: A"));
+    assert!(ts.contains("right: B"));
+}

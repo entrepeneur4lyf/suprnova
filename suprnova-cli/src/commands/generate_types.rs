@@ -11,6 +11,8 @@ use crate::ui;
 #[derive(Debug, Clone)]
 pub struct InertiaPropsStruct {
     pub name: String,
+    /// Generic type parameter names (e.g. `["T"]` for `struct Foo<T>`).
+    pub type_params: Vec<String>,
     pub fields: Vec<StructField>,
 }
 
@@ -224,6 +226,12 @@ impl<'ast> Visit<'ast> for InertiaPropsVisitor {
         if self.has_inertia_props_derive(&node.attrs) || self.has_data_derive(&node.attrs) {
             let name = node.ident.to_string();
 
+            let type_params: Vec<String> = node
+                .generics
+                .type_params()
+                .map(|tp| tp.ident.to_string())
+                .collect();
+
             let fields = match &node.fields {
                 Fields::Named(named) => named
                     .named
@@ -239,7 +247,7 @@ impl<'ast> Visit<'ast> for InertiaPropsVisitor {
                 _ => Vec::new(),
             };
 
-            self.structs.push(InertiaPropsStruct { name, fields });
+            self.structs.push(InertiaPropsStruct { name, type_params, fields });
         }
 
         // Continue visiting nested items
@@ -279,7 +287,7 @@ fn rust_type_to_ts(ty: &RustType) -> String {
         RustType::Number => "number".to_string(),
         RustType::Bool => "boolean".to_string(),
         RustType::Option(inner) => format!("{} | null", rust_type_to_ts(inner)),
-        RustType::Vec(inner) => format!("{}[]", rust_type_to_ts(inner)),
+        RustType::Vec(inner) => format!("Array<{}>", rust_type_to_ts(inner)),
         RustType::HashMap(key, val) => {
             format!("Record<{}, {}>", rust_type_to_ts(key), rust_type_to_ts(val))
         }
@@ -379,10 +387,17 @@ fn emit_ts_for_struct(s: &InertiaPropsStruct) -> String {
         f.data_flags.input_only || f.data_flags.output_only || f.data_flags.lazy
     });
 
+    // Build generic type parameter suffix, e.g. "<T>" or "<A, B>" or "".
+    let generics = if s.type_params.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", s.type_params.join(", "))
+    };
+
     let mut out = String::new();
 
     // Output interface — what the frontend RECEIVES
-    out.push_str(&format!("export interface {} {{\n", s.name));
+    out.push_str(&format!("export interface {}{} {{\n", s.name, generics));
     for f in s.fields.iter().filter(|f| !f.data_flags.input_only) {
         out.push_str(&format!(
             "  {}{}: {};\n",
@@ -395,7 +410,7 @@ fn emit_ts_for_struct(s: &InertiaPropsStruct) -> String {
 
     // Input interface — what the frontend SENDS (only when shapes differ)
     if has_flags {
-        out.push_str(&format!("export interface {}Input {{\n", s.name));
+        out.push_str(&format!("export interface {}Input{} {{\n", s.name, generics));
         // Exclude output_only AND lazy fields (lazy props are output-only in nature)
         for f in s
             .fields
