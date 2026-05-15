@@ -431,7 +431,7 @@ impl<T: Debug + PartialOrd> Expect<T> {
     /// expect!(10).to_be_greater_than(5);
     /// ```
     pub fn to_be_greater_than(&self, expected: T) {
-        if !(self.value > expected) {
+        if self.value <= expected {
             panic!(
                 "{}\n  expect!(value).to_be_greater_than(expected)\n\n  Expected: > {:?}\n  Received: {:?}\n",
                 format_header(self.location),
@@ -448,7 +448,7 @@ impl<T: Debug + PartialOrd> Expect<T> {
     /// expect!(5).to_be_less_than(10);
     /// ```
     pub fn to_be_less_than(&self, expected: T) {
-        if !(self.value < expected) {
+        if self.value >= expected {
             panic!(
                 "{}\n  expect!(value).to_be_less_than(expected)\n\n  Expected: < {:?}\n  Received: {:?}\n",
                 format_header(self.location),
@@ -465,7 +465,7 @@ impl<T: Debug + PartialOrd> Expect<T> {
     /// expect!(10).to_be_greater_than_or_equal(10);
     /// ```
     pub fn to_be_greater_than_or_equal(&self, expected: T) {
-        if !(self.value >= expected) {
+        if self.value < expected {
             panic!(
                 "{}\n  expect!(value).to_be_greater_than_or_equal(expected)\n\n  Expected: >= {:?}\n  Received: {:?}\n",
                 format_header(self.location),
@@ -482,7 +482,7 @@ impl<T: Debug + PartialOrd> Expect<T> {
     /// expect!(5).to_be_less_than_or_equal(5);
     /// ```
     pub fn to_be_less_than_or_equal(&self, expected: T) {
-        if !(self.value <= expected) {
+        if self.value > expected {
             panic!(
                 "{}\n  expect!(value).to_be_less_than_or_equal(expected)\n\n  Expected: <= {:?}\n  Received: {:?}\n",
                 format_header(self.location),

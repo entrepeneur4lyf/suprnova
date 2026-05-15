@@ -84,6 +84,12 @@ pub struct WorkflowWorker {
     worker_id: String,
 }
 
+impl Default for WorkflowWorker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WorkflowWorker {
     /// Create a worker with config from environment
     pub fn new() -> Self {

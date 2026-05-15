@@ -25,6 +25,8 @@ impl WorkflowStatus {
         }
     }
 
+    // Returns Option rather than Result, so implementing FromStr would change semantics.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
             "pending" => Some(Self::Pending),
@@ -53,6 +55,8 @@ impl StepStatus {
         }
     }
 
+    // Returns Option rather than Result, so implementing FromStr would change semantics.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
             "running" => Some(Self::Running),

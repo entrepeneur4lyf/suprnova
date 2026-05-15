@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use syn::{parse::Parse, parse::ParseStream, parse_macro_input, LitStr};
 
 use crate::utils::levenshtein_distance;
@@ -74,7 +74,7 @@ fn validate_route_exists(route_name: &str, span: Span) -> Result<(), syn::Error>
     Ok(())
 }
 
-fn extract_route_names(project_root: &PathBuf) -> Vec<String> {
+fn extract_route_names(project_root: &Path) -> Vec<String> {
     // Try routes.rs first, fall back to cmd/main.rs or legacy src/main.rs
     let routes_rs = project_root.join("src").join("routes.rs");
     let cmd_main_rs = project_root.join("cmd").join("main.rs");

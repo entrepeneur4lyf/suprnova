@@ -107,8 +107,6 @@ pub fn domain_error_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
             if c.is_uppercase() && i > 0 {
                 result.push(' ');
                 result.push(c.to_lowercase().next().unwrap());
-            } else if i == 0 {
-                result.push(c);
             } else {
                 result.push(c);
             }

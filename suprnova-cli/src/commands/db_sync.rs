@@ -395,8 +395,8 @@ fn to_pascal_case(s: &str) -> String {
 
 fn singularize(word: &str) -> String {
     // Basic singularization
-    if word.ends_with("ies") {
-        format!("{}y", &word[..word.len() - 3])
+    if let Some(stem) = word.strip_suffix("ies") {
+        format!("{}y", stem)
     } else if word.ends_with("es") && !word.ends_with("ses") && !word.ends_with("xes") {
         word[..word.len() - 2].to_string()
     } else if word.ends_with("s") && !word.ends_with("ss") && !word.ends_with("us") {

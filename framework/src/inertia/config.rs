@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+/// Shared error-observer callback for SSR render failures.
+pub(crate) type SsrErrorHook = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// Asset-version source for Inertia responses.
 ///
 /// Inertia uses a version string for cache-busting / version-mismatch
@@ -176,7 +179,7 @@ pub struct SsrConfig {
     /// fall back to CSR. Defaults to `eprintln!` to stderr. Wire your
     /// logger / Sentry / DataDog client here. When events parity
     /// lands, `SsrRenderFailed` will fire from this callback too.
-    pub on_error: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
+    pub on_error: Option<SsrErrorHook>,
 }
 
 impl std::fmt::Debug for SsrConfig {

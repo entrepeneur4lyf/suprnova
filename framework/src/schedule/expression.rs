@@ -94,8 +94,8 @@ impl CronField {
         }
 
         // Handle */N (every N)
-        if s.starts_with("*/") {
-            let step: u32 = s[2..]
+        if let Some(rest) = s.strip_prefix("*/") {
+            let step: u32 = rest
                 .parse()
                 .map_err(|_| format!("Invalid step value in '{}'", s))?;
             return Ok(CronField::Step(step));
@@ -144,18 +144,24 @@ impl CronField {
         Ok(CronField::Value(value))
     }
 
-    fn to_string(&self) -> String {
+}
+
+impl std::fmt::Display for CronField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CronField::Any => "*".to_string(),
-            CronField::Value(v) => v.to_string(),
-            CronField::Range(s, e) => format!("{}-{}", s, e),
-            CronField::Step(s) => format!("*/{}", s),
-            CronField::StepFrom(start, step) => format!("{}/{}", start, step),
-            CronField::List(l) => l
-                .iter()
-                .map(|v| v.to_string())
-                .collect::<Vec<_>>()
-                .join(","),
+            CronField::Any => write!(f, "*"),
+            CronField::Value(v) => write!(f, "{}", v),
+            CronField::Range(s, e) => write!(f, "{}-{}", s, e),
+            CronField::Step(s) => write!(f, "*/{}", s),
+            CronField::StepFrom(start, step) => write!(f, "{}/{}", start, step),
+            CronField::List(l) => write!(
+                f,
+                "{}",
+                l.iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
         }
     }
 }
@@ -219,9 +225,9 @@ impl CronExpression {
                     "{} {} {} {} {}",
                     minute,
                     hour,
-                    self.day_of_month.to_string(),
-                    self.month.to_string(),
-                    self.day_of_week.to_string(),
+                    self.day_of_month,
+                    self.month,
+                    self.day_of_week,
                 );
             }
         self

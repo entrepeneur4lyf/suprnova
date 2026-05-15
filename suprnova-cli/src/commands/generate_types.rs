@@ -441,6 +441,9 @@ pub fn generate_typescript(structs: &[InertiaPropsStruct]) -> String {
 }
 
 /// Input source for `generate_types_string`.
+// Used exclusively from integration tests (suprnova-cli/tests/), which are
+// separate compilation units invisible to the dead_code lint on the binary target.
+#[allow(dead_code)]
 pub enum ScanInput {
     /// Parse a single Rust source string (for testing without a filesystem walk).
     Source(&'static str),
@@ -453,6 +456,9 @@ pub enum ScanInput {
 ///
 /// Both the test harness and `generate_types_to_file` delegate here so that
 /// a single emission path is always exercised.
+// Used exclusively from integration tests (suprnova-cli/tests/), which are
+// separate compilation units invisible to the dead_code lint on the binary target.
+#[allow(dead_code)]
 pub fn generate_types_string(input: ScanInput) -> String {
     let structs: Vec<InertiaPropsStruct> = match input {
         ScanInput::Source(src) => {

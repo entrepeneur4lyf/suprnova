@@ -12,7 +12,11 @@ use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::Value;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+
+/// Pinned boxed task future used when resolving lazy Inertia props.
+type TaskFuture = Pin<Box<dyn Future<Output = Result<TaskOutcome, FrameworkError>> + Send>>;
 
 /// A single prop entry returned by `#[derive(Data)]`'s `__into_inertia_props`.
 ///
@@ -836,11 +840,7 @@ async fn resolve_props(
         Value::Object(serde_json::Map::new()),
     );
 
-    let mut tasks: Vec<
-        std::pin::Pin<
-            Box<dyn Future<Output = Result<TaskOutcome, FrameworkError>> + Send>,
-        >,
-    > = Vec::new();
+    let mut tasks: Vec<TaskFuture> = Vec::new();
 
     for (key, prop) in props {
         match prop {

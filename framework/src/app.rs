@@ -27,6 +27,9 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
+/// Boxed async bootstrap function (avoids repeating the complex trait-object type).
+type BootstrapFn = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
+
 /// CLI structure for suprnova applications
 #[derive(Parser)]
 #[command(name = "app")]
@@ -88,7 +91,7 @@ where
     M: MigratorTrait,
 {
     config_fn: Option<Box<dyn FnOnce()>>,
-    bootstrap_fn: Option<Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>>,
+    bootstrap_fn: Option<BootstrapFn>,
     routes_fn: Option<Box<dyn FnOnce() -> Router + Send>>,
     _migrator: std::marker::PhantomData<M>,
 }
@@ -271,7 +274,7 @@ where
     }
 
     async fn run_server_internal(
-        bootstrap_fn: Option<Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>>,
+        bootstrap_fn: Option<BootstrapFn>,
         routes_fn: Option<Box<dyn FnOnce() -> Router + Send>>,
     ) {
         // Run bootstrap
@@ -363,7 +366,7 @@ where
     }
 
     async fn run_scheduler_daemon_internal(
-        bootstrap_fn: Option<Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>>,
+        bootstrap_fn: Option<BootstrapFn>,
     ) {
         // Run bootstrap for scheduler context
         if let Some(bootstrap_fn) = bootstrap_fn {
@@ -385,7 +388,7 @@ where
     }
 
     async fn run_scheduled_tasks_internal(
-        bootstrap_fn: Option<Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>>,
+        bootstrap_fn: Option<BootstrapFn>,
     ) {
         // Run bootstrap for scheduler context
         if let Some(bootstrap_fn) = bootstrap_fn {
@@ -405,7 +408,7 @@ where
     }
 
     async fn run_workflow_worker_internal(
-        bootstrap_fn: Option<Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>>,
+        bootstrap_fn: Option<BootstrapFn>,
     ) {
         if let Some(bootstrap_fn) = bootstrap_fn {
             bootstrap_fn().await;
