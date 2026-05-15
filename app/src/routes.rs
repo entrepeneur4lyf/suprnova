@@ -1,4 +1,4 @@
-use suprnova::{get, group, post, routes};
+use suprnova::{delete, get, group, post, routes};
 
 use crate::controllers;
 use crate::middleware::AuthMiddleware;
@@ -39,4 +39,12 @@ routes! {
 
     // Phase 2 dogfood — cursor pagination over a 100-user fixture
     get!("/api/users", controllers::paginated_users::index).name("api.users.index"),
+
+    // Phase 3 dogfood — JSON:API resources + Gate-authorized deletion
+    // GET  /api/users/{id}  → JSON:API single resource (sparse fieldsets via ?fields[users]=...)
+    // GET  /api/v3/users    → JSON:API collection
+    // DELETE /api/posts/{id} → Gate::authorize("delete-post", ...) demo
+    get!("/api/users/{id}", controllers::admin::show_user).name("api.users.show"),
+    get!("/api/v3/users", controllers::admin::list_users).name("api.v3.users.index"),
+    delete!("/api/posts/{id}", controllers::admin::delete_post).name("api.posts.destroy"),
 }

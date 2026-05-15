@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod config_example;
 pub mod home;
 pub mod paginated_users;

@@ -7,6 +7,8 @@ pub mod listeners;
 pub mod middleware;
 pub mod migrations;
 pub mod models;
+pub mod policies;
 pub mod props;
 pub mod providers;
+pub mod resources;
 pub mod routes;

@@ -27,8 +27,8 @@ use std::sync::{Arc, OnceLock};
 
 #[allow(unused_imports)]
 use suprnova::{
-    bind, global_middleware, singleton, App, EventFacade, FrameworkError, InertiaRequestExt,
-    InertiaSharedData, InertiaVersionMiddleware, Prop, UserProvider, DB,
+    bind, global_middleware, singleton, App, EventFacade, FrameworkError, IncludeMiddleware,
+    InertiaRequestExt, InertiaSharedData, InertiaVersionMiddleware, Prop, UserProvider, DB,
 };
 use tokio::sync::broadcast;
 
@@ -70,6 +70,10 @@ pub async fn register() {
 
     // Global middleware (runs on every request in registration order)
     global_middleware!(middleware::LoggingMiddleware);
+
+    // Phase 3: scope `?include=` and `?fields[type]=` from the query string
+    // into task-local state so JSON:API resource handlers can read them.
+    global_middleware!(IncludeMiddleware);
 
     // Asset-version 409 middleware — sends clients with stale SPA bundles
     // through a full-page reload when the server's version has bumped.

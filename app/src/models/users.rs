@@ -128,12 +128,28 @@ impl UserBuilder {
 // Add your custom query and mutation methods below
 // ============================================================================
 
-// Example custom finder:
-// impl Model {
-//     pub async fn find_by_email(email: &str) -> Result<Option<Self>, suprnova::FrameworkError> {
-//         Self::query().filter(Column::Email.eq(email)).first().await
-//     }
-// }
+impl Model {
+    /// Look up a user by primary key.
+    ///
+    /// Thin wrapper around the query builder.
+    pub async fn find_by_id(id: i32) -> Result<Option<Self>, suprnova::FrameworkError> {
+        Self::query().filter(Column::Id.eq(id)).first().await
+    }
+
+    /// Return all users, ordered by id ascending.
+    pub async fn find_all() -> Result<Vec<Self>, suprnova::FrameworkError> {
+        Self::query().all().await
+    }
+
+    /// Whether this user holds admin privileges.
+    ///
+    /// The dogfood entity has no `is_admin` column — this always returns
+    /// `false`. A real app would persist this flag and include it in the
+    /// migration.
+    pub fn is_admin(&self) -> bool {
+        false
+    }
+}
 
 // ============================================================================
 // RELATIONS
