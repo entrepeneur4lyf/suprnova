@@ -7,17 +7,31 @@ use walkdir::WalkDir;
 
 use crate::ui;
 
-/// Represents a parsed InertiaProps struct
+/// Represents a parsed InertiaProps/Data struct
 #[derive(Debug, Clone)]
 pub struct InertiaPropsStruct {
     pub name: String,
     pub fields: Vec<StructField>,
 }
 
+/// Flags derived from `#[data(...)]` field attributes.
+#[derive(Debug, Clone, Default)]
+pub struct DataFieldFlags {
+    /// Field is only sent from client → server (excluded from output type)
+    pub input_only: bool,
+    /// Field is only sent from server → client (excluded from input type)
+    pub output_only: bool,
+    /// Runtime-only opt-in for sparse fieldsets; no TS effect
+    pub allow_include: bool,
+    /// Lazily-loaded prop; treated as output-only for TS purposes
+    pub lazy: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct StructField {
     pub name: String,
     pub ty: RustType,
+    pub data_flags: DataFieldFlags,
 }
 
 #[derive(Debug, Clone)]
@@ -28,10 +42,14 @@ pub enum RustType {
     Option(Box<RustType>),
     Vec(Box<RustType>),
     HashMap(Box<RustType>, Box<RustType>),
+    /// `Field<T>` — serialises as `T | null`; optional on the wire
+    Field(Box<RustType>),
+    /// `Prop<T>` — deferred/lazy prop; optional, never null
+    Prop(Box<RustType>),
     Custom(String),
 }
 
-/// Visitor that collects structs with #[derive(InertiaProps)]
+/// Visitor that collects structs with #[derive(InertiaProps)] or #[derive(Data)]
 struct InertiaPropsVisitor {
     structs: Vec<InertiaPropsStruct>,
 }
@@ -58,6 +76,31 @@ impl InertiaPropsVisitor {
                             let first = &path.segments[0].ident;
                             let second = &path.segments[1].ident;
                             if first == "suprnova" && second == "InertiaProps" {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn has_data_derive(&self, attrs: &[Attribute]) -> bool {
+        for attr in attrs {
+            if attr.path().is_ident("derive") {
+                if let Ok(nested) = attr.parse_args_with(
+                    syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+                ) {
+                    for path in nested {
+                        if path.is_ident("Data") {
+                            return true;
+                        }
+                        // Also check for suprnova::Data
+                        if path.segments.len() == 2 {
+                            let first = &path.segments[0].ident;
+                            let second = &path.segments[1].ident;
+                            if first == "suprnova" && second == "Data" {
                                 return true;
                             }
                         }
@@ -114,6 +157,22 @@ impl InertiaPropsVisitor {
                             Box::new(RustType::Custom("unknown".to_string())),
                         )
                     }
+                    "Field" => {
+                        if let PathArguments::AngleBracketed(args) = &segment.arguments {
+                            if let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
+                                return RustType::Field(Box::new(self.parse_type(inner_ty)));
+                            }
+                        }
+                        RustType::Field(Box::new(RustType::Custom("unknown".to_string())))
+                    }
+                    "Prop" => {
+                        if let PathArguments::AngleBracketed(args) = &segment.arguments {
+                            if let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
+                                return RustType::Prop(Box::new(self.parse_type(inner_ty)));
+                            }
+                        }
+                        RustType::Prop(Box::new(RustType::Custom("unknown".to_string())))
+                    }
                     other => RustType::Custom(other.to_string()),
                 }
             }
@@ -137,9 +196,32 @@ impl InertiaPropsVisitor {
     }
 }
 
+/// Parse `#[data(...)]` attributes on a field into `DataFieldFlags`.
+fn parse_data_flags(attrs: &[Attribute]) -> DataFieldFlags {
+    let mut flags = DataFieldFlags::default();
+    for attr in attrs {
+        if !attr.path().is_ident("data") {
+            continue;
+        }
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("input_only") {
+                flags.input_only = true;
+            } else if meta.path.is_ident("output_only") {
+                flags.output_only = true;
+            } else if meta.path.is_ident("allow_include") {
+                flags.allow_include = true;
+            } else if meta.path.is_ident("lazy") {
+                flags.lazy = true;
+            }
+            Ok(())
+        });
+    }
+    flags
+}
+
 impl<'ast> Visit<'ast> for InertiaPropsVisitor {
     fn visit_item_struct(&mut self, node: &'ast ItemStruct) {
-        if self.has_inertia_props_derive(&node.attrs) {
+        if self.has_inertia_props_derive(&node.attrs) || self.has_data_derive(&node.attrs) {
             let name = node.ident.to_string();
 
             let fields = match &node.fields {
@@ -150,6 +232,7 @@ impl<'ast> Visit<'ast> for InertiaPropsVisitor {
                         f.ident.as_ref().map(|ident| StructField {
                             name: ident.to_string(),
                             ty: self.parse_type(&f.ty),
+                            data_flags: parse_data_flags(&f.attrs),
                         })
                     })
                     .collect(),
@@ -164,12 +247,17 @@ impl<'ast> Visit<'ast> for InertiaPropsVisitor {
     }
 }
 
-/// Scan all Rust files in the src directory for InertiaProps structs
+/// Scan all Rust files in the src directory for InertiaProps/Data structs
 pub fn scan_inertia_props(project_path: &Path) -> Vec<InertiaPropsStruct> {
     let src_path = project_path.join("src");
     let mut all_structs = Vec::new();
+    visit_path_into(&src_path, &mut all_structs);
+    all_structs
+}
 
-    for entry in WalkDir::new(&src_path)
+/// Walk a directory tree and collect all InertiaProps/Data structs into `out`.
+fn visit_path_into(root: &Path, out: &mut Vec<InertiaPropsStruct>) {
+    for entry in WalkDir::new(root)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().map(|ext| ext == "rs").unwrap_or(false))
@@ -178,12 +266,10 @@ pub fn scan_inertia_props(project_path: &Path) -> Vec<InertiaPropsStruct> {
             if let Ok(syntax) = syn::parse_file(&content) {
                 let mut visitor = InertiaPropsVisitor::new();
                 visitor.visit_file(&syntax);
-                all_structs.extend(visitor.structs);
+                out.extend(visitor.structs);
             }
         }
     }
-
-    all_structs
 }
 
 /// Convert a RustType to TypeScript type string
@@ -197,7 +283,18 @@ fn rust_type_to_ts(ty: &RustType) -> String {
         RustType::HashMap(key, val) => {
             format!("Record<{}, {}>", rust_type_to_ts(key), rust_type_to_ts(val))
         }
+        RustType::Field(inner) => format!("{} | null", rust_type_to_ts(inner)),
+        RustType::Prop(inner) => rust_type_to_ts(inner),
         RustType::Custom(name) => name.clone(),
+    }
+}
+
+/// Return the optional marker for a field's TS declaration.
+/// `Field<T>` and `Prop<T>` are optional (may be absent on the wire).
+fn optional_marker(ty: &RustType) -> &'static str {
+    match ty {
+        RustType::Field(_) | RustType::Prop(_) => "?",
+        _ => "",
     }
 }
 
@@ -261,6 +358,9 @@ fn collect_type_deps(ty: &RustType, deps: &mut HashSet<String>, known: &HashSet<
         RustType::Option(inner) | RustType::Vec(inner) => {
             collect_type_deps(inner, deps, known);
         }
+        RustType::Field(inner) | RustType::Prop(inner) => {
+            collect_type_deps(inner, deps, known);
+        }
         RustType::HashMap(key, val) => {
             collect_type_deps(key, deps, known);
             collect_type_deps(val, deps, known);
@@ -269,7 +369,56 @@ fn collect_type_deps(ty: &RustType, deps: &mut HashSet<String>, known: &HashSet<
     }
 }
 
-/// Generate TypeScript interfaces from the structs
+/// Emit paired output + (optionally) input TypeScript interfaces for one struct.
+///
+/// A paired `<Name>Input` interface is emitted whenever any field carries an
+/// `input_only`, `output_only`, or `lazy` flag — i.e. whenever the input and
+/// output shapes differ.
+fn emit_ts_for_struct(s: &InertiaPropsStruct) -> String {
+    let has_flags = s.fields.iter().any(|f| {
+        f.data_flags.input_only || f.data_flags.output_only || f.data_flags.lazy
+    });
+
+    let mut out = String::new();
+
+    // Output interface — what the frontend RECEIVES
+    out.push_str(&format!("export interface {} {{\n", s.name));
+    for f in s.fields.iter().filter(|f| !f.data_flags.input_only) {
+        out.push_str(&format!(
+            "  {}{}: {};\n",
+            f.name,
+            optional_marker(&f.ty),
+            rust_type_to_ts(&f.ty)
+        ));
+    }
+    out.push_str("}\n\n");
+
+    // Input interface — what the frontend SENDS (only when shapes differ)
+    if has_flags {
+        out.push_str(&format!("export interface {}Input {{\n", s.name));
+        // Exclude output_only AND lazy fields (lazy props are output-only in nature)
+        for f in s
+            .fields
+            .iter()
+            .filter(|f| !f.data_flags.output_only && !f.data_flags.lazy)
+        {
+            out.push_str(&format!(
+                "  {}{}: {};\n",
+                f.name,
+                optional_marker(&f.ty),
+                rust_type_to_ts(&f.ty)
+            ));
+        }
+        out.push_str("}\n\n");
+    }
+
+    out
+}
+
+/// Generate TypeScript interfaces from the structs.
+///
+/// This is the canonical emission path; both the file-write entry point and
+/// the in-memory `generate_types_string` helper call through here.
 pub fn generate_typescript(structs: &[InertiaPropsStruct]) -> String {
     let sorted = topological_sort(structs);
 
@@ -278,14 +427,46 @@ pub fn generate_typescript(structs: &[InertiaPropsStruct]) -> String {
     output.push_str("// Run `suprnova generate-types` to regenerate.\n\n");
 
     for s in sorted {
-        output.push_str(&format!("export interface {} {{\n", s.name));
-        for field in &s.fields {
-            let ts_type = rust_type_to_ts(&field.ty);
-            output.push_str(&format!("  {}: {};\n", field.name, ts_type));
-        }
-        output.push_str("}\n\n");
+        output.push_str(&emit_ts_for_struct(s));
     }
 
+    output
+}
+
+/// Input source for `generate_types_string`.
+pub enum ScanInput {
+    /// Parse a single Rust source string (for testing without a filesystem walk).
+    Source(&'static str),
+    /// Walk a directory tree (production code path).
+    Walk(std::path::PathBuf),
+}
+
+/// Generate TypeScript type declarations from a given source, returning the
+/// result as a `String` without writing to disk.
+///
+/// Both the test harness and `generate_types_to_file` delegate here so that
+/// a single emission path is always exercised.
+pub fn generate_types_string(input: ScanInput) -> String {
+    let structs: Vec<InertiaPropsStruct> = match input {
+        ScanInput::Source(src) => {
+            let syntax = syn::parse_file(src).expect("ScanInput::Source: invalid Rust");
+            let mut visitor = InertiaPropsVisitor::new();
+            visitor.visit_file(&syntax);
+            visitor.structs
+        }
+        ScanInput::Walk(root) => {
+            let mut out = Vec::new();
+            visit_path_into(&root, &mut out);
+            out
+        }
+    };
+
+    // Emit without the file-level header comment so tests get clean output.
+    let sorted = topological_sort(&structs);
+    let mut output = String::new();
+    for s in sorted {
+        output.push_str(&emit_ts_for_struct(s));
+    }
     output
 }
 

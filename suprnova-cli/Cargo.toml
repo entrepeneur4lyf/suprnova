@@ -14,6 +14,10 @@ readme = "README.md"
     name = "suprnova"
 path = "src/main.rs"
 
+[lib]
+name = "suprnova_cli"
+path = "src/lib.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 dialoguer = "0.11"

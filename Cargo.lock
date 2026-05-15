@@ -3514,6 +3514,7 @@ dependencies = [
  "indexmap",
  "inventory",
  "matchit",
+ "once_cell",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-http",
@@ -3573,7 +3574,10 @@ dependencies = [
  "regex",
  "serde",
  "serde_derive_internals",
+ "serde_json",
+ "suprnova",
  "syn 2.0.117",
+ "validator",
 ]
 
 [[package]]
