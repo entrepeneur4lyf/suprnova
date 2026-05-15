@@ -457,6 +457,14 @@ impl FrameworkError {
         }
     }
 
+    /// Create a generic bad-request (400) error.
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self::Domain {
+            message: message.into(),
+            status_code: 400,
+        }
+    }
+
     /// Get the HTTP status code for this error
     pub fn status_code(&self) -> u16 {
         match self {

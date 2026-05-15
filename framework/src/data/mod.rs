@@ -3,6 +3,10 @@
 //! `RequestIncludeSet` task-local + middleware for `?include=` runtime
 //! lazy resolution, and a default-deny allowlist registry.
 
+mod error;
 mod field;
+mod include_set;
 
+pub use error::IncludeError;
 pub use field::Field;
+pub use include_set::{current_include_set, RequestIncludeSet, REQUEST_INCLUDE_SET};
