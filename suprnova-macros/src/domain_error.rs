@@ -38,20 +38,17 @@ fn parse_attrs(attr: TokenStream) -> DomainErrorAttrs {
 
             match key.as_deref() {
                 Some("status") => {
-                    if let Expr::Lit(expr_lit) = &nv.value {
-                        if let Lit::Int(lit_int) = &expr_lit.lit {
-                            if let Ok(val) = lit_int.base10_parse::<u16>() {
+                    if let Expr::Lit(expr_lit) = &nv.value
+                        && let Lit::Int(lit_int) = &expr_lit.lit
+                            && let Ok(val) = lit_int.base10_parse::<u16>() {
                                 result.status = val;
                             }
-                        }
-                    }
                 }
                 Some("message") => {
-                    if let Expr::Lit(expr_lit) = &nv.value {
-                        if let Lit::Str(lit_str) = &expr_lit.lit {
+                    if let Expr::Lit(expr_lit) = &nv.value
+                        && let Lit::Str(lit_str) = &expr_lit.lit {
                             result.message = Some(lit_str.value());
                         }
-                    }
                 }
                 _ => {}
             }

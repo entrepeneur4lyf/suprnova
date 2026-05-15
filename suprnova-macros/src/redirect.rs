@@ -112,11 +112,10 @@ fn find_similar_route(target: &str, available: &[String]) -> Option<String> {
     for route in available {
         let distance = levenshtein_distance(&target_lower, &route.to_lowercase());
         let threshold = std::cmp::max(2, target.len() / 3);
-        if distance <= threshold {
-            if best_match.is_none() || distance < best_match.as_ref().unwrap().1 {
+        if distance <= threshold
+            && (best_match.is_none() || distance < best_match.as_ref().unwrap().1) {
                 best_match = Some((route.clone(), distance));
             }
-        }
     }
 
     best_match.map(|(name, _)| name)

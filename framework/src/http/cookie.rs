@@ -7,17 +7,14 @@ use std::time::Duration;
 
 /// SameSite cookie attribute
 #[derive(Clone, Debug, PartialEq)]
+#[derive(Default)]
 pub enum SameSite {
     Strict,
+    #[default]
     Lax,
     None,
 }
 
-impl Default for SameSite {
-    fn default() -> Self {
-        Self::Lax
-    }
-}
 
 /// Cookie options with secure defaults
 #[derive(Clone, Debug)]
@@ -280,12 +277,11 @@ fn url_decode(s: &str) -> String {
     while let Some(c) = chars.next() {
         if c == '%' {
             let hex: String = chars.by_ref().take(2).collect();
-            if hex.len() == 2 {
-                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+            if hex.len() == 2
+                && let Ok(byte) = u8::from_str_radix(&hex, 16) {
                     result.push(byte as char);
                     continue;
                 }
-            }
             result.push('%');
             result.push_str(&hex);
         } else if c == '+' {

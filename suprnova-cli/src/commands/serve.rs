@@ -243,20 +243,18 @@ pub fn run(
     }
 
     // Ensure cargo-watch is installed (only if running backend)
-    if !frontend_only {
-        if let Err(e) = ensure_cargo_watch() {
+    if !frontend_only
+        && let Err(e) = ensure_cargo_watch() {
             ui::error(&e);
             std::process::exit(1);
         }
-    }
 
     // Ensure npm dependencies are installed (only if running frontend)
-    if !backend_only {
-        if let Err(e) = ensure_npm_dependencies() {
+    if !backend_only
+        && let Err(e) = ensure_npm_dependencies() {
             ui::error(&e);
             std::process::exit(1);
         }
-    }
 
     let mut manager = ProcessManager::new();
     let shutdown = manager.shutdown.clone();

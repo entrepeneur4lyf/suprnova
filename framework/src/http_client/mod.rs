@@ -287,8 +287,8 @@ impl RequestBuilder {
                 Ok(resp) => {
                     let status = resp.status();
                     let is_transient = (500..600).contains(&status);
-                    if is_transient && attempt < max_attempts {
-                        if let Some(p) = policy {
+                    if is_transient && attempt < max_attempts
+                        && let Some(p) = policy {
                             let backoff = backoff_for(attempt, p.base_backoff);
                             let wait = if status == 503 {
                                 std::cmp::max(backoff, retry_after_from(&resp))
@@ -298,7 +298,6 @@ impl RequestBuilder {
                             tokio::time::sleep(wait).await;
                             continue;
                         }
-                    }
                     return Ok(resp);
                 }
                 Err(e) => {

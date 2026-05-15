@@ -250,7 +250,9 @@ pub async fn handle_request(
     let flash_bag = crate::inertia::flash::new_bag();
     let ssr_disabled = crate::inertia::ssr::new_disable_ssr_flag();
 
-    let response = crate::inertia::flash::FLASH_BAG
+    
+
+    crate::inertia::flash::FLASH_BAG
         .scope(flash_bag, async move {
             crate::inertia::ssr::DISABLE_SSR
                 .scope(ssr_disabled, async move {
@@ -258,9 +260,7 @@ pub async fn handle_request(
                 })
                 .await
         })
-        .await;
-
-    response
+        .await
 }
 
 async fn handle_request_inner(
@@ -270,7 +270,9 @@ async fn handle_request_inner(
     method: hyper::Method,
     path: &str,
 ) -> hyper::Response<ServerBody> {
-    let response = match router.match_route(&method, path) {
+    
+
+    match router.match_route(&method, path) {
         Some((handler, params)) => {
             let request = Request::new(req).with_params(params);
 
@@ -339,9 +341,7 @@ async fn handle_request_inner(
                 HttpResponse::text("404 Not Found").status(404).into_hyper()
             }
         }
-    };
-
-    response
+    }
 }
 
 

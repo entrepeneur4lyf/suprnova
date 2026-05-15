@@ -46,12 +46,11 @@ fn run_data_struct(name: String) {
     let props_file = props_dir.join(format!("{}.rs", file_name));
 
     // Create the props directory if it doesn't exist.
-    if !props_dir.exists() {
-        if let Err(e) = fs::create_dir_all(props_dir) {
+    if !props_dir.exists()
+        && let Err(e) = fs::create_dir_all(props_dir) {
             ui::error(&format!("Failed to create directory app/src/props: {}", e));
             std::process::exit(1);
         }
-    }
 
     if props_file.exists() {
         ui::warning(&format!(

@@ -532,13 +532,11 @@ impl PartialFilter {
             Some(list) => list.iter().any(|k| k == key),
             None => true,
         };
-        if included {
-            if let Some(except) = &self.except {
-                if except.iter().any(|k| k == key) {
+        if included
+            && let Some(except) = &self.except
+                && except.iter().any(|k| k == key) {
                     included = false;
                 }
-            }
-        }
         included
     }
 
@@ -560,11 +558,10 @@ impl PartialFilter {
         if !in_only {
             return false;
         }
-        if let Some(except) = &self.except {
-            if except.iter().any(|k| k == key) {
+        if let Some(except) = &self.except
+            && except.iter().any(|k| k == key) {
                 return false;
             }
-        }
         true
     }
 

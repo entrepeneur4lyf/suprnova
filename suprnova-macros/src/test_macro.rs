@@ -26,11 +26,10 @@ fn to_snake_case(name: &str) -> String {
                 result.push(c);
                 prev_is_uppercase = false;
             }
-        } else if c.is_whitespace() || c == '-' || c == '_' {
-            if !result.ends_with('_') && !result.is_empty() {
+        } else if (c.is_whitespace() || c == '-' || c == '_')
+            && !result.ends_with('_') && !result.is_empty() {
                 result.push('_');
             }
-        }
     }
 
     // Remove trailing underscore
@@ -110,11 +109,10 @@ impl Parse for TestArgs {
 
 /// Check if a type path ends with "TestDatabase"
 fn is_test_database(ty: &Type) -> bool {
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.last() {
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.last() {
             return segment.ident == "TestDatabase";
         }
-    }
     false
 }
 

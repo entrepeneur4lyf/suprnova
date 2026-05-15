@@ -250,8 +250,8 @@ impl FormRequestVisitor {
                 return true;
             }
             // Check for #[derive(FormRequest)]
-            if attr.path().is_ident("derive") {
-                if let Ok(nested) = attr.parse_args_with(
+            if attr.path().is_ident("derive")
+                && let Ok(nested) = attr.parse_args_with(
                     syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
                 ) {
                     for path in nested {
@@ -260,7 +260,6 @@ impl FormRequestVisitor {
                         }
                     }
                 }
-            }
         }
         false
     }
@@ -277,27 +276,25 @@ impl FormRequestVisitor {
                     | "u64" | "u128" | "usize" | "f32" | "f64" => RustType::Number,
                     "bool" => RustType::Bool,
                     "Option" => {
-                        if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                            if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+                        if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                            && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
                                 return RustType::Option(Box::new(self.parse_type(inner_ty)));
                             }
-                        }
                         RustType::Option(Box::new(RustType::Custom("unknown".to_string())))
                     }
                     "Vec" => {
-                        if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                            if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+                        if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                            && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
                                 return RustType::Vec(Box::new(self.parse_type(inner_ty)));
                             }
-                        }
                         RustType::Vec(Box::new(RustType::Custom("unknown".to_string())))
                     }
                     other => RustType::Custom(other.to_string()),
                 }
             }
             Type::Reference(type_ref) => {
-                if let Type::Path(inner) = &*type_ref.elem {
-                    if inner
+                if let Type::Path(inner) = &*type_ref.elem
+                    && inner
                         .path
                         .segments
                         .last()
@@ -306,7 +303,6 @@ impl FormRequestVisitor {
                     {
                         return RustType::String;
                     }
-                }
                 self.parse_type(&type_ref.elem)
             }
             _ => RustType::Custom("unknown".to_string()),
@@ -360,15 +356,14 @@ fn scan_form_requests(project_path: &Path) -> HashMap<String, FormRequestStruct>
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().map(|ext| ext == "rs").unwrap_or(false))
     {
-        if let Ok(content) = fs::read_to_string(entry.path()) {
-            if let Ok(syntax) = syn::parse_file(&content) {
+        if let Ok(content) = fs::read_to_string(entry.path())
+            && let Ok(syntax) = syn::parse_file(&content) {
                 let mut visitor = FormRequestVisitor::new();
                 visitor.visit_file(&syntax);
                 for s in visitor.structs {
                     form_requests.insert(s.name.clone(), s);
                 }
             }
-        }
     }
 
     form_requests
@@ -550,7 +545,7 @@ pub fn generate_typescript(routes: &[GeneratedRoute]) -> String {
                 // Use route name or path segment to make unique
                 if let Some(name) = &route.definition.name {
                     // Use the last part of the route name: "home" from "home", "protected" from name
-                    name.split('.').last().unwrap_or(base_fn_name).to_string()
+                    name.split('.').next_back().unwrap_or(base_fn_name).to_string()
                 } else {
                     // Use path to create unique name
                     let path_name = route

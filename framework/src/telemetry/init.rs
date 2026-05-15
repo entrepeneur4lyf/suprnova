@@ -123,7 +123,6 @@ impl TelemetryGuard {
     /// subsequent calls are no-ops.
     pub async fn shutdown(self) {
         if self.shutdown_called.swap(true, Ordering::SeqCst) {
-            return;
         }
         #[cfg(feature = "otel")]
         {

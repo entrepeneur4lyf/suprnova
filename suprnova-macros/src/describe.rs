@@ -25,11 +25,10 @@ fn to_snake_case(name: &str) -> String {
                 result.push(c);
                 prev_is_uppercase = false;
             }
-        } else if c.is_whitespace() || c == '-' || c == '_' {
-            if !result.ends_with('_') && !result.is_empty() {
+        } else if (c.is_whitespace() || c == '-' || c == '_')
+            && !result.ends_with('_') && !result.is_empty() {
                 result.push('_');
             }
-        }
     }
 
     // Remove trailing underscore

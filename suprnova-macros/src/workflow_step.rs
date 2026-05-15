@@ -143,11 +143,10 @@ fn ensure_result_framework_error(output: &ReturnType) -> Result<(), syn::Error> 
 }
 
 fn is_framework_error(ty: &Type) -> bool {
-    if let Type::Path(path) = ty {
-        if let Some(last) = path.path.segments.last() {
+    if let Type::Path(path) = ty
+        && let Some(last) = path.path.segments.last() {
             return last.ident == "FrameworkError";
         }
-    }
     false
 }
 

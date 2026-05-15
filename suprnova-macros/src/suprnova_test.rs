@@ -34,24 +34,21 @@ impl syn::parse::Parse for SuprnovaTestArgs {
 
 /// Check if a type is `TestDatabase`
 fn is_test_database_type(ty: &Type) -> bool {
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.last() {
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.last() {
             return segment.ident == "TestDatabase";
         }
-    }
     false
 }
 
 /// Find the parameter name for TestDatabase if it exists
 fn find_db_param_name(func: &ItemFn) -> Option<syn::Ident> {
     for arg in &func.sig.inputs {
-        if let FnArg::Typed(pat_type) = arg {
-            if is_test_database_type(&pat_type.ty) {
-                if let Pat::Ident(pat_ident) = &*pat_type.pat {
+        if let FnArg::Typed(pat_type) = arg
+            && is_test_database_type(&pat_type.ty)
+                && let Pat::Ident(pat_ident) = &*pat_type.pat {
                     return Some(pat_ident.ident.clone());
                 }
-            }
-        }
     }
     None
 }

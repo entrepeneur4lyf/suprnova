@@ -13,14 +13,12 @@ pub fn run() {
         .status()
         .expect("Failed to execute cargo command");
 
-    if !status.success() {
-        if let Some(code) = status.code() {
-            if code != 130 {
+    if !status.success()
+        && let Some(code) = status.code()
+            && code != 130 {
                 ui::error("Web server exited with error");
                 std::process::exit(1);
             }
-        }
-    }
 
     ui::br();
     ui::info("Web server stopped.");

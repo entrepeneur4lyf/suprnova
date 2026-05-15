@@ -108,9 +108,7 @@ pub async fn register() {
     // `set` returns Err if already populated — register() should only run
     // once per process; treat a double-init as a bug.
     USER_REGISTERED_SENDER
-        .set(user_registered_tx.clone())
-        .ok()
-        .expect("bootstrap::register() called twice; USER_REGISTERED_SENDER already set");
+        .set(user_registered_tx.clone()).expect("bootstrap::register() called twice; USER_REGISTERED_SENDER already set");
 
     EventFacade::listen::<UserRegistered, _>(Arc::new(SendWelcomeEmailListener)).await;
     EventFacade::listen::<UserRegistered, _>(Arc::new(UserRegisteredBroadcaster::new(

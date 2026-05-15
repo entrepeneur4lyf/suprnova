@@ -41,11 +41,10 @@ impl DbConnection {
             // Don't apply to in-memory databases
             if path != ":memory:" && !path.starts_with(":memory:") {
                 // Create parent directories if needed
-                if let Some(parent) = std::path::Path::new(path).parent() {
-                    if !parent.as_os_str().is_empty() {
+                if let Some(parent) = std::path::Path::new(path).parent()
+                    && !parent.as_os_str().is_empty() {
                         std::fs::create_dir_all(parent).ok();
                     }
-                }
 
                 // Touch the file to create it if it doesn't exist
                 if !std::path::Path::new(path).exists() {

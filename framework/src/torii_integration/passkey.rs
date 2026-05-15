@@ -417,7 +417,7 @@ impl PasskeyAuth {
         let used_cred_id = auth_result.cred_id();
         let mut updated = false;
         for (stored, passkey) in stored_creds.iter().zip(passkeys.iter_mut()) {
-            if &stored.credential_id == used_cred_id.as_ref() {
+            if stored.credential_id == used_cred_id.as_ref() {
                 passkey.update_credential(&auth_result);
                 let updated_bytes = serde_json::to_vec(passkey).map_err(|e| {
                     FrameworkError::internal(format!("passkey: serialize updated passkey: {e}"))

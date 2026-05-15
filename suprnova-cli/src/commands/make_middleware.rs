@@ -16,7 +16,7 @@ pub fn run(name: String) {
     } else {
         format!("{}Middleware", name)
     };
-    let file_name = to_snake_case(&name.trim_end_matches("Middleware"));
+    let file_name = to_snake_case(name.trim_end_matches("Middleware"));
 
     let middleware_dir = Path::new("src/middleware");
     let middleware_file = middleware_dir.join(format!("{}.rs", file_name));

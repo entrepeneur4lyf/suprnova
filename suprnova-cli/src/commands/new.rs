@@ -73,7 +73,7 @@ pub fn run(
         no_git,
         frontend,
     ) {
-        ui::error(&format!("{}", e));
+        ui::error(&e.to_string());
         std::process::exit(1);
     }
 
@@ -193,8 +193,7 @@ fn to_snake_case(s: &str) -> String {
 }
 
 fn to_title_case(s: &str) -> String {
-    s.replace('-', " ")
-        .replace('_', " ")
+    s.replace(['-', '_'], " ")
         .split_whitespace()
         .map(|word| {
             let mut chars = word.chars();

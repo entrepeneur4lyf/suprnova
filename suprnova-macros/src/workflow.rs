@@ -166,11 +166,10 @@ fn extract_result_ok_type(output: &ReturnType) -> Result<Type, syn::Error> {
 }
 
 fn is_framework_error(ty: &Type) -> bool {
-    if let Type::Path(path) = ty {
-        if let Some(last) = path.path.segments.last() {
+    if let Type::Path(path) = ty
+        && let Some(last) = path.path.segments.last() {
             return last.ident == "FrameworkError";
         }
-    }
     false
 }
 

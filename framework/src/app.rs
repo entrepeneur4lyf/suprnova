@@ -301,11 +301,10 @@ where
             let path = database_url.trim_start_matches("sqlite://");
             let path = path.trim_start_matches("./");
 
-            if let Some(parent) = Path::new(path).parent() {
-                if !parent.as_os_str().is_empty() {
+            if let Some(parent) = Path::new(path).parent()
+                && !parent.as_os_str().is_empty() {
                     std::fs::create_dir_all(parent).ok();
                 }
-            }
 
             if !Path::new(path).exists() {
                 std::fs::File::create(path).ok();

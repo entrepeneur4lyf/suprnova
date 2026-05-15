@@ -75,8 +75,8 @@ impl Middleware for BearerTokenMiddleware {
         // Extract the Bearer token from the Authorization header.
         // hyper's HeaderMap uses case-insensitive keys, so this handles
         // both "Authorization" and "authorization".
-        if let Some(auth_header) = request.header("Authorization") {
-            if let Some(token_str) = auth_header.strip_prefix("Bearer ") {
+        if let Some(auth_header) = request.header("Authorization")
+            && let Some(token_str) = auth_header.strip_prefix("Bearer ") {
                 let token_str = token_str.trim();
                 if !token_str.is_empty() {
                     // Attempt to look up the session in the global Torii instance.
@@ -91,7 +91,6 @@ impl Middleware for BearerTokenMiddleware {
                     }
                 }
             }
-        }
 
         next(request).await
     }

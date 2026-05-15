@@ -70,8 +70,8 @@ impl WorkflowContext {
         let step_index = self.inner.step_index.fetch_add(1, Ordering::SeqCst);
 
         if let Some(existing) = store::load_step(workflow_id, step_index, step_name).await? {
-            if let Some(status) = StepStatus::from_str(&existing.status) {
-                if status == StepStatus::Succeeded {
+            if let Some(status) = StepStatus::from_str(&existing.status)
+                && status == StepStatus::Succeeded {
                     let output_json = existing.output.ok_or_else(|| {
                         FrameworkError::internal("Step output missing for succeeded step")
                     })?;
@@ -84,19 +84,17 @@ impl WorkflowContext {
                     store::refresh_lock(workflow_id, self.inner.lock_timeout).await?;
                     return Ok(value);
                 }
-            }
 
             store::update_step_running(existing, &input_json).await?;
         } else {
-            if let Some(other) = store::load_step_by_index(workflow_id, step_index).await? {
-                if other.step_name != step_name {
+            if let Some(other) = store::load_step_by_index(workflow_id, step_index).await?
+                && other.step_name != step_name {
                     return Err(FrameworkError::internal(format!(
                         "Workflow step mismatch at index {}: expected '{}', found '{}'. \
                          Workflow steps must be deterministic.",
                         step_index, step_name, other.step_name
                     )));
                 }
-            }
             store::insert_step_running(workflow_id, step_index, step_name, &input_json).await?;
         }
 

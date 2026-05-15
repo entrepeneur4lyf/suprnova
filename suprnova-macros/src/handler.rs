@@ -182,11 +182,10 @@ fn classify_param_type(ty: &Type) -> ParamKind {
             }
 
             // Check for Model type (path ends with ::Model)
-            if let Some(last_segment) = segments.last() {
-                if last_segment.ident == "Model" && segments.len() >= 2 {
+            if let Some(last_segment) = segments.last()
+                && last_segment.ident == "Model" && segments.len() >= 2 {
                     return ParamKind::Model;
                 }
-            }
 
             // Default to FormRequest for other types
             ParamKind::FormRequest

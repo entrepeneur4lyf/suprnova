@@ -169,7 +169,7 @@ impl TestDatabase {
 #[macro_export]
 macro_rules! test_database {
     () => {
-        $crate::testing::TestDatabase::fresh::<crate::migrations::Migrator>()
+        $crate::testing::TestDatabase::fresh::<$crate::migrations::Migrator>()
             .await
             .expect("Failed to set up test database")
     };

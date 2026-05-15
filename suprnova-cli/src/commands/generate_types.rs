@@ -65,8 +65,8 @@ impl InertiaPropsVisitor {
 
     fn has_inertia_props_derive(&self, attrs: &[Attribute]) -> bool {
         for attr in attrs {
-            if attr.path().is_ident("derive") {
-                if let Ok(nested) = attr.parse_args_with(
+            if attr.path().is_ident("derive")
+                && let Ok(nested) = attr.parse_args_with(
                     syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
                 ) {
                     for path in nested {
@@ -83,15 +83,14 @@ impl InertiaPropsVisitor {
                         }
                     }
                 }
-            }
         }
         false
     }
 
     fn has_data_derive(&self, attrs: &[Attribute]) -> bool {
         for attr in attrs {
-            if attr.path().is_ident("derive") {
-                if let Ok(nested) = attr.parse_args_with(
+            if attr.path().is_ident("derive")
+                && let Ok(nested) = attr.parse_args_with(
                     syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
                 ) {
                     for path in nested {
@@ -108,7 +107,6 @@ impl InertiaPropsVisitor {
                         }
                     }
                 }
-            }
         }
         false
     }
@@ -125,19 +123,17 @@ impl InertiaPropsVisitor {
                     | "u64" | "u128" | "usize" | "f32" | "f64" => RustType::Number,
                     "bool" => RustType::Bool,
                     "Option" => {
-                        if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                            if let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
+                        if let PathArguments::AngleBracketed(args) = &segment.arguments
+                            && let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
                                 return RustType::Option(Box::new(self.parse_type(inner_ty)));
                             }
-                        }
                         RustType::Option(Box::new(RustType::Custom("unknown".to_string())))
                     }
                     "Vec" => {
-                        if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                            if let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
+                        if let PathArguments::AngleBracketed(args) = &segment.arguments
+                            && let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
                                 return RustType::Vec(Box::new(self.parse_type(inner_ty)));
                             }
-                        }
                         RustType::Vec(Box::new(RustType::Custom("unknown".to_string())))
                     }
                     "HashMap" | "BTreeMap" => {
@@ -160,19 +156,17 @@ impl InertiaPropsVisitor {
                         )
                     }
                     "Field" => {
-                        if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                            if let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
+                        if let PathArguments::AngleBracketed(args) = &segment.arguments
+                            && let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
                                 return RustType::Field(Box::new(self.parse_type(inner_ty)));
                             }
-                        }
                         RustType::Field(Box::new(RustType::Custom("unknown".to_string())))
                     }
                     "Prop" => {
-                        if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                            if let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
+                        if let PathArguments::AngleBracketed(args) = &segment.arguments
+                            && let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
                                 return RustType::Prop(Box::new(self.parse_type(inner_ty)));
                             }
-                        }
                         RustType::Prop(Box::new(RustType::Custom("unknown".to_string())))
                     }
                     other => RustType::Custom(other.to_string()),
@@ -180,8 +174,8 @@ impl InertiaPropsVisitor {
             }
             Type::Reference(type_ref) => {
                 // Handle &str as String
-                if let Type::Path(inner) = &*type_ref.elem {
-                    if inner
+                if let Type::Path(inner) = &*type_ref.elem
+                    && inner
                         .path
                         .segments
                         .last()
@@ -190,7 +184,6 @@ impl InertiaPropsVisitor {
                     {
                         return RustType::String;
                     }
-                }
                 self.parse_type(&type_ref.elem)
             }
             _ => RustType::Custom("unknown".to_string()),
@@ -270,13 +263,12 @@ fn visit_path_into(root: &Path, out: &mut Vec<InertiaPropsStruct>) {
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().map(|ext| ext == "rs").unwrap_or(false))
     {
-        if let Ok(content) = fs::read_to_string(entry.path()) {
-            if let Ok(syntax) = syn::parse_file(&content) {
+        if let Ok(content) = fs::read_to_string(entry.path())
+            && let Ok(syntax) = syn::parse_file(&content) {
                 let mut visitor = InertiaPropsVisitor::new();
                 visitor.visit_file(&syntax);
                 out.extend(visitor.structs);
             }
-        }
     }
 }
 
@@ -518,7 +510,7 @@ pub fn run(output: Option<String>, watch: bool) {
     }
 
     let output_path = output
-        .map(|s| std::path::PathBuf::from(s))
+        .map(std::path::PathBuf::from)
         .unwrap_or_else(|| project_path.join("frontend/src/types/inertia-props.ts"));
 
     ui::info("Scanning for InertiaProps structs...");

@@ -82,8 +82,8 @@ impl CronField {
             CronField::Any => true,
             CronField::Value(v) => *v == value,
             CronField::Range(start, end) => value >= *start && value <= *end,
-            CronField::Step(step) => value % step == 0,
-            CronField::StepFrom(start, step) => value >= *start && (value - start) % step == 0,
+            CronField::Step(step) => value.is_multiple_of(*step),
+            CronField::StepFrom(start, step) => value >= *start && (value - start).is_multiple_of(*step),
             CronField::List(values) => values.contains(&value),
         }
     }
@@ -211,8 +211,8 @@ impl CronExpression {
     /// Set the time component (modifies hour and minute)
     pub fn at(mut self, time: &str) -> Self {
         let parts: Vec<&str> = time.split(':').collect();
-        if parts.len() == 2 {
-            if let (Ok(hour), Ok(minute)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+        if parts.len() == 2
+            && let (Ok(hour), Ok(minute)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
                 self.hour = CronField::Value(hour);
                 self.minute = CronField::Value(minute);
                 self.raw = format!(
@@ -224,7 +224,6 @@ impl CronExpression {
                     self.day_of_week.to_string(),
                 );
             }
-        }
         self
     }
 
