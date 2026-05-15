@@ -310,13 +310,11 @@ fn build_serialize(
 }
 
 /// Returns `true` when the field's type is a reference (`&T` or `&'a T`).
-/// Reference-typed fields cannot be deserialized in general (serde provides
-/// `Deserialize` for `&str` / `&[u8]` specifically, not for `&'a T` where T
-/// is an arbitrary generic type parameter).  The macro treats such fields as
-/// "reference-backed" and skips them from the deserialization key-match,
-/// constructing them via `Default::default()` to ensure the generated
-/// `Deserialize` impl always compiles even when the struct has a reference
-/// field that is inherently non-deserializable.
+/// Used in `derive_data_impl` to detect structs for which generating a
+/// `Deserialize` impl would be unsound: serde only provides `Deserialize` for
+/// `&str` / `&[u8]` via input borrowing, not for arbitrary `&'a T`.  When any
+/// non-output-only field is a reference, both the `Deserialize` and
+/// `FormRequest` impls are suppressed.
 fn is_reference_type(ty: &syn::Type) -> bool {
     matches!(ty, syn::Type::Reference(_))
 }
@@ -351,20 +349,22 @@ fn build_deserialize(
         })
         .collect();
 
-    // Required fields — missing key is an error (non-Option, non-Field, non-reference).
+    // Required fields — missing key is an error (non-Option, non-Field).
+    // Note: reference-typed fields never appear here because build_deserialize
+    // is only called when has_reference_fields is false (see derive_data_impl).
     let req_idents: Vec<&Ident> = input_fields
         .iter()
-        .filter(|(_, _, ty)| !is_option_or_field(ty) && !is_reference_type(ty))
+        .filter(|(_, _, ty)| !is_option_or_field(ty))
         .map(|(id, _, _)| *id)
         .collect();
     let req_names: Vec<&str> = input_fields
         .iter()
-        .filter(|(_, _, ty)| !is_option_or_field(ty) && !is_reference_type(ty))
+        .filter(|(_, _, ty)| !is_option_or_field(ty))
         .map(|(_, name, _)| *name)
         .collect();
     let req_types: Vec<&syn::Type> = input_fields
         .iter()
-        .filter(|(_, _, ty)| !is_option_or_field(ty) && !is_reference_type(ty))
+        .filter(|(_, _, ty)| !is_option_or_field(ty))
         .map(|(_, _, ty)| *ty)
         .collect();
 
@@ -383,13 +383,6 @@ fn build_deserialize(
         .iter()
         .filter(|(_, _, ty)| is_option_or_field(ty))
         .map(|(_, _, ty)| *ty)
-        .collect();
-
-    // Reference-backed fields — cannot deserialize; skip in key-match and use Default.
-    let ref_idents: Vec<&Ident> = input_fields
-        .iter()
-        .filter(|(_, _, ty)| is_reference_type(ty))
-        .map(|(id, _, _)| *id)
         .collect();
 
     let output_only_idents: Vec<&Ident> = parsed
@@ -471,12 +464,6 @@ fn build_deserialize(
                             #(
                                 #def_idents: #def_idents
                                     .unwrap_or_default(),
-                            )*
-                            // Reference-backed fields: cannot be populated from
-                            // deserialized data; use Default (callers must not
-                            // rely on deserialization for reference fields).
-                            #(
-                                #ref_idents: ::core::default::Default::default(),
                             )*
                             #(
                                 #output_only_idents: ::core::default::Default::default(),
