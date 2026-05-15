@@ -44,7 +44,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry", "smallvec", "parking_lot"] }
 uuid = { version = "1", features = ["v4", "fast-rng", "serde"] }
 dashmap = "6"
-torii = { version = "0.5.2", default-features = false, features = ["seaorm-sqlite", "seaorm-postgres", "seaorm-mysql", "password"] }
+torii = { version = "0.5.2", default-features = false, features = ["seaorm-sqlite", "seaorm-postgres", "seaorm-mysql", "password", "oauth"] }
 torii-core = { version = "0.5.2" }
 torii-storage-seaorm = { version = "0.5.2" }
 

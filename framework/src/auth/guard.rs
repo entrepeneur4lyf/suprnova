@@ -240,11 +240,32 @@ impl Auth {
         crate::torii_integration::password::PasswordAuth
     }
 
-    /// Access OAuth authentication operations.
+    /// Access OAuth authentication operations for a given provider.
     ///
-    /// Full implementation coming in P3T6.
-    pub fn oauth() -> crate::torii_integration::oauth::OAuthAuth {
-        crate::torii_integration::oauth::OAuthAuth
+    /// # Arguments
+    ///
+    /// * `provider` - The OAuth provider name (e.g., `"github"`, `"google"`).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use suprnova::Auth;
+    /// use suprnova::torii_integration::oauth::OAuthProviderConfig;
+    ///
+    /// Auth::oauth("github").configure(OAuthProviderConfig {
+    ///     client_id: "...".into(),
+    ///     client_secret: "...".into(),
+    ///     redirect_url: "http://localhost:8000/auth/oauth/github/callback".into(),
+    ///     scopes: vec!["user:email".into()],
+    /// });
+    ///
+    /// let kickoff = Auth::oauth("github").begin().await?;
+    /// // Redirect user to kickoff.authorization_url, store kickoff.state in session.
+    ///
+    /// let (user, session) = Auth::oauth("github").complete(&code, &state).await?;
+    /// ```
+    pub fn oauth(provider: impl Into<String>) -> crate::torii_integration::oauth::OAuthAuth {
+        crate::torii_integration::oauth::OAuthAuth::new(provider.into())
     }
 
     /// Access passkey (WebAuthn/FIDO2) authentication operations.

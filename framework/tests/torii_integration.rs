@@ -80,3 +80,26 @@ fn wrong_password_fails_authentication() {
         assert!(result.is_err());
     });
 }
+
+/// OAuth kickoff returns a valid GitHub authorization URL and a non-empty state token.
+#[test]
+fn oauth_kickoff_returns_authorization_url() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        Auth::oauth("github").configure(suprnova::torii_integration::oauth::OAuthProviderConfig {
+            client_id: "test-client".into(),
+            client_secret: "test-secret".into(),
+            redirect_url: "http://localhost:8000/auth/oauth/github/callback".into(),
+            scopes: vec!["user:email".into()],
+        });
+
+        let kickoff = Auth::oauth("github").begin().await.unwrap();
+        assert!(
+            kickoff.authorization_url.starts_with("https://github.com/login/oauth"),
+            "expected GitHub OAuth URL, got: {}",
+            kickoff.authorization_url,
+        );
+        assert!(!kickoff.state.is_empty());
+    });
+}
