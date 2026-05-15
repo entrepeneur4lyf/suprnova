@@ -547,6 +547,146 @@ pub fn scaffold_frontend(
     Ok(())
 }
 
+// ============================================================================
+// API-only starter templates
+// ============================================================================
+
+pub mod api {
+    pub fn cargo_toml(package_name: &str, project_name: &str) -> String {
+        include_str!("files/api/Cargo.toml.tpl")
+            .replace("{package_name}", package_name)
+            .replace("{project_name}", project_name)
+    }
+    pub fn main_rs(package_name: &str, project_name: &str) -> String {
+        include_str!("files/api/src/main.rs.tpl")
+            .replace("{package_name}", package_name)
+            .replace("{project_name}", project_name)
+    }
+    pub fn lib_rs() -> &'static str {
+        include_str!("files/api/src/lib.rs.tpl")
+    }
+    pub fn bootstrap_rs() -> &'static str {
+        include_str!("files/api/src/bootstrap.rs.tpl")
+    }
+    pub fn routes_rs() -> &'static str {
+        include_str!("files/api/src/routes.rs.tpl")
+    }
+    pub fn config_mod_rs() -> &'static str {
+        include_str!("files/api/src/config/mod.rs.tpl")
+    }
+    pub fn controllers_mod_rs() -> &'static str {
+        include_str!("files/api/src/controllers/mod.rs.tpl")
+    }
+    pub fn controllers_users_rs() -> &'static str {
+        include_str!("files/api/src/controllers/users.rs.tpl")
+    }
+    pub fn resources_mod_rs() -> &'static str {
+        include_str!("files/api/src/resources/mod.rs.tpl")
+    }
+    pub fn resources_user_resource_rs() -> &'static str {
+        include_str!("files/api/src/resources/user_resource.rs.tpl")
+    }
+    pub fn models_mod_rs() -> &'static str {
+        include_str!("files/api/src/models/mod.rs.tpl")
+    }
+    pub fn models_user_rs() -> &'static str {
+        include_str!("files/api/src/models/user.rs.tpl")
+    }
+    pub fn migrations_mod_rs() -> &'static str {
+        include_str!("files/api/src/migrations/mod.rs.tpl")
+    }
+    pub fn migrations_create_users_rs() -> &'static str {
+        include_str!("files/api/src/migrations/create_users_table.rs.tpl")
+    }
+    pub fn env(package_name: &str, project_name: &str) -> String {
+        include_str!("files/api/.env.tpl")
+            .replace("{package_name}", package_name)
+            .replace("{project_name}", project_name)
+    }
+    pub fn gitignore() -> &'static str {
+        include_str!("files/api/.gitignore.tpl")
+    }
+}
+
+/// Scaffold a JSON:API-only project under `project_path`.
+///
+/// No Inertia, no frontend. Registers `BearerTokenMiddleware` and
+/// `IncludeMiddleware` globally; includes example `UserResource` with
+/// `#[derive(Data)] #[json_resource("users")]`.
+pub fn scaffold_api(
+    project_path: &Path,
+    project_name: &str,
+    package_name: &str,
+) -> Result<(), String> {
+    let src = project_path.join("src");
+    let config = src.join("config");
+    let controllers = src.join("controllers");
+    let resources = src.join("resources");
+    let models = src.join("models");
+    let migrations = src.join("migrations");
+
+    for d in [&src, &config, &controllers, &resources, &models, &migrations] {
+        fs::create_dir_all(d)
+            .map_err(|e| format!("Failed to create {}: {}", d.display(), e))?;
+    }
+
+    let writes: &[(std::path::PathBuf, String)] = &[
+        (
+            project_path.join("Cargo.toml"),
+            api::cargo_toml(package_name, project_name),
+        ),
+        (
+            src.join("main.rs"),
+            api::main_rs(package_name, project_name),
+        ),
+        (src.join("lib.rs"), api::lib_rs().to_string()),
+        (src.join("bootstrap.rs"), api::bootstrap_rs().to_string()),
+        (src.join("routes.rs"), api::routes_rs().to_string()),
+        (config.join("mod.rs"), api::config_mod_rs().to_string()),
+        (
+            controllers.join("mod.rs"),
+            api::controllers_mod_rs().to_string(),
+        ),
+        (
+            controllers.join("users.rs"),
+            api::controllers_users_rs().to_string(),
+        ),
+        (
+            resources.join("mod.rs"),
+            api::resources_mod_rs().to_string(),
+        ),
+        (
+            resources.join("user_resource.rs"),
+            api::resources_user_resource_rs().to_string(),
+        ),
+        (models.join("mod.rs"), api::models_mod_rs().to_string()),
+        (models.join("user.rs"), api::models_user_rs().to_string()),
+        (
+            migrations.join("mod.rs"),
+            api::migrations_mod_rs().to_string(),
+        ),
+        (
+            migrations.join("m20240101_000001_create_users_table.rs"),
+            api::migrations_create_users_rs().to_string(),
+        ),
+        (
+            project_path.join(".env"),
+            api::env(package_name, project_name),
+        ),
+        (
+            project_path.join(".gitignore"),
+            api::gitignore().to_string(),
+        ),
+    ];
+
+    for (path, content) in writes {
+        fs::write(path, content)
+            .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+    }
+
+    Ok(())
+}
+
 // Auth backend templates
 
 pub fn auth_controller() -> &'static str {

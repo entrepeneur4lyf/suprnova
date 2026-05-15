@@ -34,8 +34,13 @@ enum Commands {
         no_git: bool,
 
         /// Frontend framework (svelte, react, vue). Prompts if omitted.
-        #[arg(long)]
+        /// Conflicts with --api.
+        #[arg(long, conflicts_with = "api")]
         frontend: Option<String>,
+
+        /// Scaffold a JSON:API-only project (no Inertia, no frontend).
+        #[arg(long)]
+        api: bool,
     },
     /// Start the development servers (backend + frontend)
     Serve {
@@ -225,8 +230,9 @@ fn main() {
             no_interaction,
             no_git,
             frontend,
+            api,
         } => {
-            commands::new::run(name, no_interaction, no_git, frontend);
+            commands::new::run(name, no_interaction, no_git, frontend, api);
         }
         Commands::Serve {
             port,

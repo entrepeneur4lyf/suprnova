@@ -13,15 +13,49 @@ pub fn run(
     no_interaction: bool,
     no_git: bool,
     frontend: Option<String>,
+    api: bool,
 ) {
     ui::banner();
 
     let project_name = get_project_name(name, no_interaction);
+    let package_name = to_snake_case(&project_name);
+
+    if api {
+        ui::br();
+        ui::info(&format!(
+            "Creating {} as a JSON:API-only project...",
+            style(&project_name).bold(),
+        ));
+        ui::br();
+
+        if let Err(e) = create_api_project(&project_name, &package_name, no_git) {
+            ui::error(&e);
+            std::process::exit(1);
+        }
+
+        ui::success("Generated API project structure");
+
+        if !no_git {
+            ui::success("Initialized git repository");
+        }
+
+        ui::success("Ready to go!");
+
+        ui::br();
+        ui::panel("Next Steps", &[
+            &format!("cd {}", project_name),
+            "suprnova migrate",
+            "suprnova serve",
+        ]);
+        ui::br();
+        ui::label_value("API", "http://localhost:8080/api");
+        ui::br();
+        return;
+    }
+
     let description = get_description(no_interaction);
     let author = get_author(no_interaction);
     let frontend = get_frontend(frontend, no_interaction);
-
-    let package_name = to_snake_case(&project_name);
 
     ui::br();
     ui::info(&format!(
@@ -57,8 +91,8 @@ pub fn run(
         "suprnova serve",
     ]);
     ui::br();
-    ui::label_value("Backend", &format!("http://localhost:8000"));
-    ui::label_value("Frontend", &format!("http://localhost:5173"));
+    ui::label_value("Backend", "http://localhost:8000");
+    ui::label_value("Frontend", "http://localhost:5173");
     ui::br();
 }
 
@@ -171,6 +205,33 @@ fn to_title_case(s: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn create_api_project(
+    project_name: &str,
+    package_name: &str,
+    no_git: bool,
+) -> Result<(), String> {
+    let project_path = Path::new(project_name);
+
+    if project_path.exists() {
+        return Err(format!("Directory '{}' already exists", project_name));
+    }
+
+    fs::create_dir_all(project_path)
+        .map_err(|e| format!("Failed to create project directory: {}", e))?;
+
+    templates::scaffold_api(project_path, project_name, package_name)?;
+
+    if !no_git {
+        Command::new("git")
+            .args(["init"])
+            .current_dir(project_path)
+            .output()
+            .map_err(|e| format!("Failed to initialize git repository: {}", e))?;
+    }
+
+    Ok(())
 }
 
 fn create_project(
