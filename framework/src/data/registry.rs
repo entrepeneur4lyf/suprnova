@@ -3,10 +3,9 @@
 //! Populated at link time by `#[derive(Data)]` via the `inventory`
 //! crate (one `inventory::submit!` per struct). The first call to
 //! `is_allowed`/`allowed_for` drains the inventory collection into
-//! the runtime map (see `ensure_initialized` in Task 8). The
-//! `register(name, fields)` helper below stays available for tests
-//! that need to inject ad-hoc allowlists. Default-deny: a DTO not
-//! registered allows nothing.
+//! the runtime map via `ensure_initialized`. The `register(name,
+//! fields)` helper below stays available for tests that need to inject
+//! ad-hoc allowlists. Default-deny: a DTO not registered allows nothing.
 
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
@@ -15,8 +14,33 @@ use std::sync::RwLock;
 static REGISTRY: Lazy<RwLock<HashMap<&'static str, Vec<&'static str>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
+/// Entry submitted by `#[derive(Data)]` via `inventory::submit!`. Each
+/// derived struct contributes one of these listing its `#[data(allow_include)]`
+/// fields. The collection is drained into the runtime `REGISTRY` map by
+/// `ensure_initialized` on first lookup.
+pub struct AllowedIncludes {
+    pub struct_name: &'static str,
+    pub fields: &'static [&'static str],
+}
+
+inventory::collect!(AllowedIncludes);
+
+fn ensure_initialized() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let mut map = REGISTRY.write().expect("data::registry REGISTRY write lock poisoned");
+        for entry in inventory::iter::<AllowedIncludes> {
+            map.insert(entry.struct_name, entry.fields.to_vec());
+        }
+    });
+}
+
 /// Register the allowed-include list for a DTO. Idempotent — re-registering
 /// the same struct overwrites the prior list.
+///
+/// This is the test-injection path. It does NOT call `ensure_initialized` —
+/// it writes directly so tests can set up allowlists without side-effects
+/// from the inventory machinery.
 pub fn register(struct_name: &'static str, fields: &'static [&'static str]) {
     let mut map = REGISTRY
         .write()
@@ -26,6 +50,7 @@ pub fn register(struct_name: &'static str, fields: &'static [&'static str]) {
 
 /// Check whether `field` is includable on `struct_name`.
 pub fn is_allowed(struct_name: &str, field: &str) -> bool {
+    ensure_initialized();
     REGISTRY
         .read()
         .expect("data::registry REGISTRY read lock poisoned")
@@ -37,6 +62,7 @@ pub fn is_allowed(struct_name: &str, field: &str) -> bool {
 /// Returns the full allowed-include list for a DTO. Empty when the DTO
 /// has not been registered.
 pub fn allowed_for(struct_name: &str) -> Vec<&'static str> {
+    ensure_initialized();
     REGISTRY
         .read()
         .expect("data::registry REGISTRY read lock poisoned")

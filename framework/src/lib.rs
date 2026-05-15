@@ -121,6 +121,7 @@ pub use suprnova_macros::request;
 pub use suprnova_macros::service;
 pub use suprnova_macros::workflow;
 pub use suprnova_macros::workflow_step;
+pub use suprnova_macros::Data;
 pub use suprnova_macros::FormRequest as FormRequestDerive;
 pub use suprnova_macros::InertiaProps;
 pub use suprnova_macros::suprnova_test;

@@ -10,6 +10,7 @@
 
 use proc_macro::TokenStream;
 
+mod data;
 mod describe;
 mod domain_error;
 mod handler;
@@ -23,6 +24,33 @@ mod test_macro;
 mod utils;
 mod workflow;
 mod workflow_step;
+
+/// Derive macro for `Data` — composite derive that produces `Serialize`
+/// (skipping `#[data(input_only)]` fields) and `Deserialize` (rejecting
+/// payloads that set `#[data(output_only)]` fields). Also registers
+/// `#[data(allow_include)]` fields into the runtime include allowlist
+/// via `inventory::submit!`.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[derive(Data, Validate)]
+/// struct UserDto {
+///     pub id: i64,
+///     pub name: String,
+///
+///     #[data(input_only)]
+///     #[validate(length(min = 8))]
+///     pub password: String,
+///
+///     #[data(output_only)]
+///     pub computed_handle: String,
+/// }
+/// ```
+#[proc_macro_derive(Data, attributes(data))]
+pub fn derive_data(input: TokenStream) -> TokenStream {
+    data::derive_data_impl(input)
+}
 
 /// Derive macro for generating `Serialize` implementation for Inertia props
 ///
