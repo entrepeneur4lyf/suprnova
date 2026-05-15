@@ -1,5 +1,6 @@
 pub mod app;
 pub mod auth;
+pub mod resources;
 pub mod torii_integration;
 pub mod authorization;
 pub mod cache;
@@ -42,7 +43,7 @@ pub use container::{App, Container};
 pub use context::{Context, ContextStore};
 pub use crypto::{Crypt, EncryptionKey};
 pub use csrf::{csrf_field, csrf_meta_tag, csrf_token, CsrfMiddleware};
-pub use data::{current_include_set, Field, IncludeError, IncludeMiddleware, IsRelationLoaded, RequestIncludeSet};
+pub use data::{current_include_set, scope_include_set, Field, IncludeError, IncludeMiddleware, IsRelationLoaded, RequestIncludeSet};
 pub use database::{
     AutoRouteBinding, Database, DatabaseConfig, DatabaseType, DbConnection, Model, ModelMut,
     RouteBinding, DB,
@@ -71,7 +72,22 @@ pub use inertia::{
     Prop, PropFuture, PropResolver, ScrollConfig, ScrollMetadata, VersionResolver,
 };
 pub use pagination::{
-    CursorDirection, CursorPaginator, IntoInertiaScroll, LengthAwarePaginator, Pagination,
+    CursorDirection, CursorPaginator, IntoInertiaScroll, LengthAwarePaginator, Paginated, Pagination,
+};
+pub use resources::{
+    AsRelationshipValue,
+    IncludeResolutionError,
+    IncludeTree,
+    IntoJsonResource,
+    JsonApiBuilder,
+    JsonApiResponse,
+    PushIncluded,
+    RelationshipValue,
+    RequestFieldsetSet,
+    Resource,
+    ResourceIdentifier,
+    current_fieldset,
+    scope_fieldset,
 };
 pub use middleware::{
     register_global_middleware, Middleware, MiddlewareFuture, MiddlewareRegistry, Next,

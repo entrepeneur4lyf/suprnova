@@ -48,7 +48,7 @@ mod workflow_step;
 ///     pub computed_handle: String,
 /// }
 /// ```
-#[proc_macro_derive(Data, attributes(data))]
+#[proc_macro_derive(Data, attributes(data, json_resource))]
 pub fn derive_data(input: TokenStream) -> TokenStream {
     data::derive_data_impl(input)
 }

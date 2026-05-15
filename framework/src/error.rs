@@ -503,6 +503,42 @@ impl FrameworkError {
         }
     }
 
+    /// Create a 404 Not Found error (convenience constructor).
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::ModelNotFound {
+            model_name: message.into(),
+        }
+    }
+
+    /// Return the primary human-readable error message. Used by
+    /// `into_json_api_response` to populate the `detail` field.
+    pub fn message(&self) -> &str {
+        match self {
+            Self::ServiceNotFound { type_name } => type_name,
+            Self::ParamError { param_name } => param_name,
+            Self::ValidationError { message, .. } => message,
+            Self::Database(msg) => msg,
+            Self::Internal { message } => message,
+            Self::Domain { message, .. } => message,
+            Self::Validation(_) => "Validation failed",
+            Self::Unauthorized => "This action is unauthorized.",
+            Self::ModelNotFound { model_name } => model_name,
+            Self::ParamParse { param, .. } => param,
+            Self::PrecognitionSuccess => "Precognition validation passed",
+            Self::PrecognitionFailure(_) => "Precognition validation failed",
+        }
+    }
+
+    /// Return the field associated with this error, if any. Used by
+    /// `into_json_api_response` to populate `source.pointer`.
+    /// Only `ValidationError` carries a field name.
+    pub fn field(&self) -> Option<&str> {
+        match self {
+            Self::ValidationError { field, .. } => Some(field),
+            _ => None,
+        }
+    }
+
     /// Wrap this error with a context string. The status code is
     /// preserved; the display becomes `"<ctx>: <original>"`.
     ///

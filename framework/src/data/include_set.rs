@@ -89,3 +89,17 @@ pub fn current_include_set() -> Arc<RequestIncludeSet> {
         .try_with(Arc::clone)
         .unwrap_or_else(|_| Arc::new(RequestIncludeSet::default()))
 }
+
+/// Scope a [`RequestIncludeSet`] around a future. Primarily used in tests
+/// to simulate what `IncludeMiddleware` does for a real HTTP request.
+///
+/// ```rust,ignore
+/// let set = RequestIncludeSet::from_query("include=author");
+/// let result = scope_include_set(set, async { /* handler code */ }).await;
+/// ```
+pub async fn scope_include_set<F, R>(set: RequestIncludeSet, f: F) -> R
+where
+    F: std::future::Future<Output = R>,
+{
+    REQUEST_INCLUDE_SET.scope(Arc::new(set), f).await
+}

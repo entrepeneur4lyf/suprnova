@@ -51,6 +51,13 @@ impl Middleware for IncludeMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
         let raw_query = request.query().unwrap_or("").to_string();
         let set = Arc::new(RequestIncludeSet::from_query(&raw_query));
-        REQUEST_INCLUDE_SET.scope(set, next(request)).await
+        let fieldset = crate::resources::RequestFieldsetSet::from_query(&raw_query);
+        REQUEST_INCLUDE_SET
+            .scope(set, async move {
+                crate::resources::REQUEST_FIELDSET
+                    .scope(fieldset, next(request))
+                    .await
+            })
+            .await
     }
 }

@@ -104,28 +104,131 @@ struct FieldOptions {
 struct StructOptions {
     auto_lazy: bool,
     custom_authorize: bool,
+    /// `Some(...)` when `#[json_resource("...")]` is present on the struct.
+    json_resource: Option<JsonResourceOptions>,
+}
+
+struct JsonResourceOptions {
+    /// JSON:API `type` member emitted in the resource envelope.
+    resource_type: String,
+    /// Field name to use as the `id` member (default: "id").
+    id_field: String,
 }
 
 fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::Error> {
     let mut opts = StructOptions::default();
     for attr in attrs {
-        if !attr.path().is_ident("data") {
-            continue;
+        if attr.path().is_ident("data") {
+            let list = match &attr.meta {
+                Meta::List(list) => list,
+                _ => continue,
+            };
+            list.parse_nested_meta(|meta| {
+                if meta.path.is_ident("auto_lazy") {
+                    opts.auto_lazy = true;
+                } else if meta.path.is_ident("custom_authorize") {
+                    opts.custom_authorize = true;
+                } else {
+                    return Err(meta.error("unknown struct-level #[data(...)] flag"));
+                }
+                Ok(())
+            })?;
+        } else if attr.path().is_ident("json_resource") {
+            // Positional first argument is the resource type string;
+            // optional keyword args follow (`id_field = "..."`).
+            let list = match &attr.meta {
+                Meta::List(list) => list,
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        attr,
+                        "#[json_resource(...)] requires arguments — at minimum a type string, e.g. #[json_resource(\"users\")]",
+                    ));
+                }
+            };
+
+            let mut resource_type: Option<String> = None;
+            let mut id_field = "id".to_string();
+            let mut first = true;
+
+            list.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated,
+            )?
+            .into_iter()
+            .try_for_each(|expr| -> Result<(), syn::Error> {
+                if first {
+                    first = false;
+                    if let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(s),
+                        ..
+                    }) = expr
+                    {
+                        resource_type = Some(s.value());
+                        return Ok(());
+                    } else {
+                        return Err(syn::Error::new_spanned(
+                            expr,
+                            "first argument to #[json_resource(...)] must be a string literal: the resource type",
+                        ));
+                    }
+                }
+                // Subsequent args: keyword = value
+                if let syn::Expr::Assign(assign) = expr {
+                    let key = match assign.left.as_ref() {
+                        syn::Expr::Path(p) => p
+                            .path
+                            .get_ident()
+                            .ok_or_else(|| {
+                                syn::Error::new_spanned(
+                                    &assign.left,
+                                    "expected a bare identifier on the LHS of #[json_resource(...)] keyword arg",
+                                )
+                            })?
+                            .to_string(),
+                        _ => {
+                            return Err(syn::Error::new_spanned(
+                                &assign.left,
+                                "expected a bare identifier on the LHS of #[json_resource(...)] keyword arg",
+                            ));
+                        }
+                    };
+                    let value = match assign.right.as_ref() {
+                        syn::Expr::Lit(syn::ExprLit {
+                            lit: syn::Lit::Str(s),
+                            ..
+                        }) => s.value(),
+                        _ => {
+                            return Err(syn::Error::new_spanned(
+                                &assign.right,
+                                "#[json_resource(...)] keyword args must be string literals",
+                            ));
+                        }
+                    };
+                    match key.as_str() {
+                        "id_field" => id_field = value,
+                        other => {
+                            return Err(syn::Error::new_spanned(
+                                &assign.left,
+                                format!("unknown #[json_resource(...)] keyword '{}'; expected 'id_field'", other),
+                            ));
+                        }
+                    }
+                    Ok(())
+                } else {
+                    Err(syn::Error::new_spanned(
+                        expr,
+                        "expected `keyword = \"value\"` after the resource type in #[json_resource(...)]",
+                    ))
+                }
+            })?;
+
+            let resource_type = resource_type.ok_or_else(|| {
+                syn::Error::new_spanned(
+                    attr,
+                    "#[json_resource(...)] requires a resource type as the first argument, e.g. #[json_resource(\"users\")]",
+                )
+            })?;
+            opts.json_resource = Some(JsonResourceOptions { resource_type, id_field });
         }
-        let list = match &attr.meta {
-            Meta::List(list) => list,
-            _ => continue,
-        };
-        list.parse_nested_meta(|meta| {
-            if meta.path.is_ident("auto_lazy") {
-                opts.auto_lazy = true;
-            } else if meta.path.is_ident("custom_authorize") {
-                opts.custom_authorize = true;
-            } else {
-                return Err(meta.error("unknown struct-level #[data(...)] flag"));
-            }
-            Ok(())
-        })?;
     }
     Ok(opts)
 }
@@ -619,12 +722,26 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
         &parsed,
     );
 
+    let into_json_resource_impl = if let Some(jr_opts) = &struct_opts.json_resource {
+        build_into_json_resource(
+            struct_name,
+            &impl_generics,
+            &ty_generics,
+            where_clause,
+            &parsed,
+            jr_opts,
+        )
+    } else {
+        proc_macro2::TokenStream::new()
+    };
+
     let expanded = quote! {
         #serialize_impl
         #deserialize_impl
         #allowlist_registration
         #form_request_impl
         #into_inertia_props_impl
+        #into_json_resource_impl
     };
 
     expanded.into()
@@ -850,6 +967,144 @@ fn build_deserialize(
                 }
 
                 __d.deserialize_map(#visitor_construction)
+            }
+        }
+    }
+}
+
+/// Emit the `IntoJsonResource` impl for a struct annotated with
+/// `#[json_resource("type")]`.
+///
+/// - Attribute fields: non-input_only, non-id, non-allow_include, non-lazy fields.
+/// - Relationship fields: `#[data(allow_include)]` fields that are NOT lazy
+///   (lazy = Inertia/Prop fields; they can't satisfy `IntoJsonResource`).
+/// - id field: the field named by `opts.id_field` (default "id").
+/// - Default-deny: `resource_included` rejects unknown keys in the include tree.
+fn build_into_json_resource(
+    struct_name: &Ident,
+    impl_generics: &syn::ImplGenerics,
+    ty_generics: &syn::TypeGenerics,
+    where_clause: Option<&syn::WhereClause>,
+    parsed: &[(&Field, FieldOptions)],
+    opts: &JsonResourceOptions,
+) -> TokenStream2 {
+    let resource_type = &opts.resource_type;
+    let id_field = syn::Ident::new(&opts.id_field, proc_macro2::Span::call_site());
+
+    // Attribute fields: non-input_only, not the id field, not allow_include, not lazy.
+    let attr_fields: Vec<(&Ident, String)> = parsed
+        .iter()
+        .filter(|(f, fo)| {
+            let ident = f.ident.as_ref().unwrap();
+            !fo.input_only
+                && ident != &id_field
+                && !fo.allow_include
+                && fo.lazy.is_none()
+        })
+        .map(|(f, _)| {
+            let ident = f.ident.as_ref().unwrap();
+            let name = ident.to_string();
+            (ident, name)
+        })
+        .collect();
+
+    // Relationship fields: allow_include=true AND not lazy (Prop fields excluded).
+    let rel_fields: Vec<(&Ident, String)> = parsed
+        .iter()
+        .filter(|(_, fo)| fo.allow_include && fo.lazy.is_none())
+        .map(|(f, _)| {
+            let ident = f.ident.as_ref().unwrap();
+            let name = ident.to_string();
+            (ident, name)
+        })
+        .collect();
+
+    let attrs_entries = attr_fields.iter().map(|(ident, name)| {
+        quote! {
+            if fieldset_includes(#name) {
+                map.insert(
+                    #name.to_string(),
+                    ::suprnova::serde_json::to_value(&self.#ident)
+                        .expect("attribute serialization should succeed"),
+                );
+            }
+        }
+    });
+
+    let rel_entries = rel_fields.iter().map(|(ident, name)| {
+        quote! {
+            if let Some(rel) = ::suprnova::resources::AsRelationshipValue::as_relationship_value(&self.#ident) {
+                rels.push((#name.to_string(), rel));
+            }
+        }
+    });
+
+    let allowed_include_names: Vec<String> =
+        rel_fields.iter().map(|(_, name)| name.clone()).collect();
+    let resource_type_lit = resource_type.clone();
+
+    let included_entries = rel_fields.iter().map(|(ident, name)| {
+        quote! {
+            if let ::std::option::Option::Some(subtree) = include_tree.subtree(#name) {
+                ::suprnova::resources::PushIncluded::push_included(
+                    &self.#ident,
+                    subtree,
+                    out,
+                )?;
+            }
+        }
+    });
+
+    quote! {
+        impl #impl_generics ::suprnova::resources::IntoJsonResource for #struct_name #ty_generics #where_clause {
+            fn resource_type() -> &'static str {
+                #resource_type
+            }
+
+            fn resource_id(&self) -> ::std::string::String {
+                ::std::string::ToString::to_string(&self.#id_field)
+            }
+
+            fn resource_attributes(
+                &self,
+                fieldset: ::std::option::Option<&[&str]>,
+            ) -> ::suprnova::serde_json::Value {
+                let fieldset_includes = |name: &str| match fieldset {
+                    ::std::option::Option::Some(allowed) => allowed.iter().any(|a| *a == name),
+                    ::std::option::Option::None => true,
+                };
+                let mut map = ::suprnova::serde_json::Map::new();
+                #(#attrs_entries)*
+                ::suprnova::serde_json::Value::Object(map)
+            }
+
+            fn resource_relationships(
+                &self,
+            ) -> ::std::vec::Vec<(::std::string::String, ::suprnova::resources::RelationshipValue)> {
+                let mut rels = ::std::vec::Vec::new();
+                #(#rel_entries)*
+                rels
+            }
+
+            fn resource_included(
+                &self,
+                include_tree: &::suprnova::resources::IncludeTree,
+                out: &mut ::std::vec::Vec<::suprnova::serde_json::Value>,
+            ) -> ::std::result::Result<(), ::suprnova::resources::IncludeResolutionError> {
+                // Default-deny: reject any include key not in our allowlist.
+                const ALLOWED: &[&str] = &[#(#allowed_include_names),*];
+                for (key, _) in include_tree.iter() {
+                    if !ALLOWED.contains(&key) {
+                        return ::std::result::Result::Err(
+                            ::suprnova::resources::IncludeResolutionError {
+                                path: key.to_string(),
+                                on_type: #resource_type_lit,
+                            },
+                        );
+                    }
+                }
+                #(#included_entries)*
+                ::std::result::Result::Ok(())
             }
         }
     }

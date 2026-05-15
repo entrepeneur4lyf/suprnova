@@ -185,3 +185,70 @@ impl Pagination {
         })
     }
 }
+
+// ── Paginated<T> trait ────────────────────────────────────────────────────
+
+/// Common surface consumed by `Resource::paginated` for building
+/// JSON:API pagination links and meta. Implemented by
+/// `LengthAwarePaginator<T>` and `CursorPaginator<T>`.
+pub trait Paginated<T> {
+    /// The items on the current page.
+    fn items(&self) -> &[T];
+
+    /// `meta.pagination` payload — conventionally placed under
+    /// `meta.pagination` in JSON:API responses.
+    fn meta_value(&self) -> serde_json::Value;
+
+    /// Yield `(rel, href)` pairs for pagination links
+    /// (`first`, `last`, `prev`, `next`, `self`).
+    fn links_iter(&self) -> Box<dyn Iterator<Item = (&'static str, String)> + '_>;
+}
+
+impl<T> Paginated<T> for LengthAwarePaginator<T> {
+    fn items(&self) -> &[T] {
+        &self.data
+    }
+
+    fn meta_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "total": self.total,
+            "per_page": self.per_page,
+            "current_page": self.current_page,
+            "last_page": self.last_page,
+        })
+    }
+
+    fn links_iter(&self) -> Box<dyn Iterator<Item = (&'static str, String)> + '_> {
+        let mut links: Vec<(&'static str, String)> = Vec::new();
+        links.push(("self", self.url_for_page(self.current_page)));
+        links.push(("first", self.url_for_page(1)));
+        if self.last_page > 0 {
+            links.push(("last", self.url_for_page(self.last_page)));
+        }
+        if self.current_page > 1 {
+            links.push(("prev", self.url_for_page(self.current_page - 1)));
+        }
+        if self.current_page < self.last_page {
+            links.push(("next", self.url_for_page(self.current_page + 1)));
+        }
+        Box::new(links.into_iter())
+    }
+}
+
+impl<T> Paginated<T> for CursorPaginator<T> {
+    fn items(&self) -> &[T] {
+        &self.data
+    }
+
+    fn meta_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "next_cursor": self.next_cursor,
+            "prev_cursor": self.prev_cursor,
+        })
+    }
+
+    fn links_iter(&self) -> Box<dyn Iterator<Item = (&'static str, String)> + '_> {
+        // Cursor paginators don't carry a base URL; return empty links.
+        Box::new(std::iter::empty())
+    }
+}

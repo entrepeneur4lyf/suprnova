@@ -19,6 +19,11 @@ pub struct LengthAwarePaginator<T> {
     pub current_page: u64,
     /// 1-based last page index. `0` when `total == 0`.
     pub last_page: u64,
+    /// Base URL for generating page links (e.g. `/api/users`).
+    /// When set, `url_for_page` appends `?page=N` to this value.
+    /// `None` when constructed without a base URL (Inertia scroll usage).
+    #[serde(skip)]
+    pub base_url: Option<String>,
 }
 
 impl<T> LengthAwarePaginator<T> {
@@ -37,6 +42,24 @@ impl<T> LengthAwarePaginator<T> {
             per_page,
             current_page,
             last_page,
+            base_url: None,
+        }
+    }
+
+    /// Set the base URL used by `url_for_page` to generate pagination links.
+    /// Returns `self` for builder-style chaining.
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = Some(base_url.into());
+        self
+    }
+
+    /// Generate the URL for a specific page number by appending `?page=N`
+    /// to the configured `base_url`. Falls back to `?page=N` when no
+    /// `base_url` is set.
+    pub fn url_for_page(&self, page: u64) -> String {
+        match &self.base_url {
+            Some(base) => format!("{}?page={}", base, page),
+            None => format!("?page={}", page),
         }
     }
 
@@ -69,5 +92,19 @@ mod tests {
         assert_eq!(p.last_page, 0);
         assert!(!p.has_more_pages());
         assert!(p.data.is_empty());
+    }
+
+    #[test]
+    fn url_for_page_with_base_url() {
+        let p = LengthAwarePaginator::new(vec![1, 2], 20, 10, 1)
+            .with_base_url("/api/users");
+        assert_eq!(p.url_for_page(1), "/api/users?page=1");
+        assert_eq!(p.url_for_page(2), "/api/users?page=2");
+    }
+
+    #[test]
+    fn url_for_page_without_base_url_fallback() {
+        let p = LengthAwarePaginator::new(vec![1], 10, 10, 1);
+        assert_eq!(p.url_for_page(1), "?page=1");
     }
 }

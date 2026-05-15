@@ -153,6 +153,27 @@ impl HttpResponse {
         self.status
     }
 
+    /// Create a response from raw bytes with an explicit `Content-Type`.
+    ///
+    /// Used by JSON:API resource serialization and any other surface that
+    /// needs a non-JSON content type with a raw byte body.
+    pub fn bytes_body(body: impl Into<Bytes>, content_type: impl Into<String>) -> Self {
+        Self {
+            status: 200,
+            body: Body::Static(body.into()),
+            headers: vec![("Content-Type".to_string(), content_type.into())],
+        }
+    }
+
+    /// Access the static body bytes. Returns `None` for streaming responses.
+    /// Use this in tests and JSON:API serialization where a buffered body is expected.
+    pub fn body(&self) -> &[u8] {
+        match &self.body {
+            Body::Static(b) => b,
+            Body::Stream(_) => &[],
+        }
+    }
+
     /// Add a header to the response
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
