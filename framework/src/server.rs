@@ -131,8 +131,27 @@ impl Server {
         self
     }
 
-    fn get_addr(&self) -> SocketAddr {
-        SocketAddr::new(self.host.parse().unwrap(), self.port)
+    /// Parse `self.host` as an `IpAddr` and combine with `self.port` into a
+    /// [`SocketAddr`] suitable for `TcpListener::bind`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::Internal`] if `self.host` is not a valid IP
+    /// address literal. The message identifies the bad value and shows the
+    /// expected format so misconfiguration surfaces during boot with an
+    /// actionable diagnostic instead of an opaque process panic.
+    ///
+    /// IPv4 and IPv6 literals are both accepted (e.g. `127.0.0.1`, `::1`).
+    /// Hostnames must be resolved by the caller before reaching this path;
+    /// `Server::host()` accepts strings verbatim.
+    fn get_addr(&self) -> Result<SocketAddr, crate::FrameworkError> {
+        let ip: std::net::IpAddr = self.host.parse().map_err(|e| {
+            crate::FrameworkError::internal(format!(
+                "invalid server host '{}': {e}. Expected an IP literal such as '127.0.0.1' or '::1'.",
+                self.host,
+            ))
+        })?;
+        Ok(SocketAddr::new(ip, self.port))
     }
 
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -148,7 +167,7 @@ impl Server {
         // Bootstrap cache (Redis with in-memory fallback)
         Cache::bootstrap().await;
 
-        let addr: SocketAddr = self.get_addr();
+        let addr: SocketAddr = self.get_addr()?;
         let listener = TcpListener::bind(addr).await?;
 
         tracing::info!(%addr, "suprnova server listening");
@@ -440,4 +459,60 @@ async fn check_database_health() -> Result<(), String> {
         .map_err(|e| format!("Database query failed: {}", e))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Codex review finding #16: invalid `Server::host()` strings used to
+    //! panic at boot via `host.parse().unwrap()`. These tests pin the
+    //! current behaviour — a typed `FrameworkError` with a message that
+    //! names the offending value and the expected format — so a future
+    //! regression to `.unwrap()` fails loudly.
+    use super::*;
+    use crate::routing::Router;
+
+    #[test]
+    fn invalid_host_returns_typed_error_not_panic() {
+        let server = Server::new(Router::new()).host("not-a-valid-host");
+        let result = server.get_addr();
+        let err = result.expect_err("invalid host must surface as Err, not panic or Ok");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid server host"),
+            "error message must identify the failure mode; got: {msg}"
+        );
+        assert!(
+            msg.contains("not-a-valid-host"),
+            "error message must echo the bad host value; got: {msg}"
+        );
+        // 500-class — internal misconfiguration, not a client error.
+        assert_eq!(err.status_code(), 500);
+    }
+
+    #[test]
+    fn empty_host_returns_typed_error_not_panic() {
+        let server = Server::new(Router::new()).host("");
+        let result = server.get_addr();
+        let err = result.expect_err("empty host must surface as Err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid server host"),
+            "error message must identify the failure mode; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn valid_ipv4_host_parses_correctly() {
+        let server = Server::new(Router::new()).host("127.0.0.1").port(8000);
+        let addr = server.get_addr().expect("valid IPv4 should parse");
+        assert_eq!(addr.to_string(), "127.0.0.1:8000");
+    }
+
+    #[test]
+    fn valid_ipv6_host_parses_correctly() {
+        let server = Server::new(Router::new()).host("::1").port(8000);
+        let addr = server.get_addr().expect("valid IPv6 should parse");
+        // SocketAddr renders IPv6 with bracket notation.
+        assert_eq!(addr.to_string(), "[::1]:8000");
+    }
 }
