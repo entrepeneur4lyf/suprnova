@@ -25,6 +25,7 @@ pub mod routing;
 pub mod schedule;
 pub mod sse;
 pub mod telemetry;
+pub mod validation;
 pub mod workflow;
 pub mod server;
 pub mod session;
