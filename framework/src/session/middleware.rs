@@ -143,15 +143,21 @@ impl SessionMiddleware {
         Self { config, store }
     }
 
-    fn create_session_cookie(&self, session_id: &str) -> Cookie {
-        // Pre-1.0 hard cut: session cookies are AES-256-GCM encrypted
-        // when Crypt is initialized. If APP_KEY isn't set the server
-        // already warned at boot — we fall back to plaintext rather
-        // than refuse to set a cookie.
-        let base = match Cookie::encrypted(&self.config.cookie_name, session_id) {
-            Ok(c) => c,
-            Err(_) => Cookie::new(&self.config.cookie_name, session_id),
-        };
+    /// Build the outbound session cookie. Returns `Err` if `Crypt`
+    /// failed to encrypt the session id — which by design only happens
+    /// when `Crypt` is not initialized.
+    ///
+    /// `Server::from_config` guarantees `Crypt` is installed before
+    /// any middleware runs (it fails boot otherwise outside dev
+    /// environments, and generates a transient dev key otherwise), so
+    /// the error path is purely defensive. If it ever does fire, the
+    /// middleware fails the request closed rather than emit a
+    /// plaintext session id — codex review finding #1.
+    fn create_session_cookie(
+        &self,
+        session_id: &str,
+    ) -> Result<Cookie, crate::FrameworkError> {
+        let base = Cookie::encrypted(&self.config.cookie_name, session_id)?;
         let mut cookie = base
             .http_only(self.config.cookie_http_only)
             .secure(self.config.cookie_secure)
@@ -164,32 +170,36 @@ impl SessionMiddleware {
             _ => cookie.same_site(SameSite::Lax),
         };
 
-        cookie
+        Ok(cookie)
     }
 }
 
 #[async_trait]
 impl Middleware for SessionMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
-        // Read the session ID from the inbound cookie. Two modes:
-        // - Crypt initialized (APP_KEY set): cookie value is AES-256-GCM
-        //   ciphertext; decrypt-failure (tamper, key rotation, pre-cut
-        //   plaintext) silently mints a fresh session ID. No per-request
-        //   log spam.
-        // - Crypt NOT initialized (no APP_KEY): outbound cookies are
-        //   plaintext, so inbound reads must accept the raw value as
-        //   the session ID. Without this, every request would mint a
-        //   new session and sessions would be silently non-functional.
+        // Defensive: refuse to run at all when `Crypt` isn't installed.
+        // `Server::from_config` guarantees a key is in place before
+        // middleware boots (failing closed in production, generating a
+        // transient key in dev). If we somehow got here without one
+        // — e.g. an embedder built a service loop without going through
+        // `Server::from_config` — bail out closed rather than emit or
+        // accept plaintext session ids. Codex review finding #1.
+        if !crate::crypto::Crypt::is_initialized() {
+            return Err(crate::http::HttpResponse::text(
+                "Internal Server Error: encryption key not installed",
+            )
+            .status(500));
+        }
+
+        // Read the session ID from the inbound cookie. The cookie
+        // value is AES-256-GCM ciphertext; decrypt failure (tamper,
+        // key rotation) silently mints a fresh session id rather than
+        // logging per-request — same fail-quietly semantics as Laravel
+        // when the SESSION cookie is unreadable.
         let session_id = match request.cookie(&self.config.cookie_name) {
-            Some(raw) => {
-                if crate::crypto::Crypt::is_initialized() {
-                    Cookie::read_encrypted(&raw)
-                        .ok()
-                        .unwrap_or_else(generate_session_id)
-                } else {
-                    raw
-                }
-            }
+            Some(raw) => Cookie::read_encrypted(&raw)
+                .ok()
+                .unwrap_or_else(generate_session_id),
             None => generate_session_id(),
         };
 
@@ -227,8 +237,18 @@ impl Middleware for SessionMiddleware {
                 eprintln!("Session write error: {}", e);
             }
 
-            // Add session cookie to response
-            let cookie = self.create_session_cookie(&session.id);
+            // Add session cookie to response. Encryption must succeed
+            // here — we already verified Crypt is initialized at the
+            // top of `handle`. If it doesn't, fail the request closed.
+            let cookie = match self.create_session_cookie(&session.id) {
+                Ok(c) => c,
+                Err(_) => {
+                    return Err(crate::http::HttpResponse::text(
+                        "Internal Server Error: session cookie encryption failed",
+                    )
+                    .status(500));
+                }
+            };
 
             match response {
                 Ok(res) => Ok(res.cookie(cookie)),

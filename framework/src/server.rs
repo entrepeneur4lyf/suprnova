@@ -39,33 +39,68 @@ impl Server {
         }
     }
 
-    pub fn from_config(router: impl Into<Router>) -> Self {
+    /// Build a [`Server`] from process configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`FrameworkError`] if the encryption key cannot be
+    /// installed. Specifically:
+    ///
+    /// - `APP_ENV` resolves to a non-development environment (anything
+    ///   other than local/development/testing) AND `APP_KEY` is unset
+    ///   or empty. Production fails closed per codex review finding #1.
+    /// - `APP_KEY` is set but malformed (wrong length, not base64).
+    ///
+    /// Local, development, and testing environments generate a
+    /// transient dev key when `APP_KEY` is unset, so `cargo run` stays
+    /// zero-config. A loud `tracing::warn!` is emitted in that case so
+    /// the operator notices sessions won't persist across restarts.
+    pub fn from_config(router: impl Into<Router>) -> Result<Self, crate::FrameworkError> {
         // Initialize the App container
         App::init();
 
         // Boot all auto-registered services from #[service(ConcreteType)]
         App::boot_services();
 
-        // Install the process-wide encryption key from APP_KEY. The
-        // server still boots without one, but encrypted cookies and
-        // `Crypt` calls will fail until it's set. A warn surfaces the
-        // misconfiguration on first boot.
-        match crate::crypto::EncryptionKey::from_env() {
-            Ok(key) => crate::crypto::Crypt::init(key),
-            Err(_) => tracing::warn!(
-                "APP_KEY not set — session cookies will fall back to plaintext, \
-                 Crypt::encrypt_* will error"
-            ),
+        // Install the process-wide encryption key.
+        //
+        // Production / staging / custom envs fail closed when APP_KEY
+        // is missing — `resolve_boot_key` returns Err with an
+        // actionable message that we propagate as the boot error.
+        //
+        // Local / development / testing fall through to a generated
+        // transient key. We log a loud warn so the operator notices.
+        //
+        // The `is_initialized()` guard makes this idempotent in tests
+        // (and embedders that call `from_config` more than once). On
+        // re-entry, we keep whatever key is already installed.
+        if !crate::crypto::Crypt::is_initialized() {
+            let environment = Config::get::<crate::config::AppConfig>()
+                .map(|c| c.environment)
+                .unwrap_or_else(crate::config::Environment::detect);
+            let app_key = std::env::var("APP_KEY").ok();
+            let boot_key = crate::crypto::resolve_boot_key(&environment, app_key.as_deref())?;
+
+            if boot_key.is_generated() {
+                tracing::warn!(
+                    environment = %environment,
+                    "APP_KEY is not set — generated a transient development key. \
+                     Sessions and cursors will reset on every restart. Set APP_KEY \
+                     in your environment to persist them. This path is gated to \
+                     local/development/testing; production fails closed."
+                );
+            }
+            crate::crypto::Crypt::init(boot_key.into_key());
         }
 
         let config = Config::get::<ServerConfig>().unwrap_or_else(ServerConfig::from_env);
-        Self {
+        Ok(Self {
             router: Arc::new(router.into()),
             // Pull global middleware registered via global_middleware! in bootstrap.rs
             middleware: MiddlewareRegistry::from_global(),
             host: config.host,
             port: config.port,
-        }
+        })
     }
 
     /// Add global middleware (runs on every request)
@@ -75,7 +110,7 @@ impl Server {
     /// # Example
     ///
     /// ```rust,ignore
-    /// Server::from_config(router)
+    /// Server::from_config(router)?
     ///     .middleware(LoggingMiddleware)  // Global
     ///     .middleware(CorsMiddleware)     // Global
     ///     .run()

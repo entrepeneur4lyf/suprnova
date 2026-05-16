@@ -18,13 +18,33 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 
-use suprnova::{handle_request, MiddlewareRegistry};
+use suprnova::{handle_request, EncryptionKey, MiddlewareRegistry};
+
+/// Process-wide guard so the `Crypt::init` call below is a single,
+/// idempotent install across every test in this binary.
+static CRYPT_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+/// Install a test-only encryption key into the framework's process-
+/// wide `Crypt` facade. Cursor pagination refuses to emit a payload
+/// without an authenticated cipher (codex review finding #1 / no
+/// plaintext-base64 fallback), so any test that exercises
+/// `Pagination::cursor` end-to-end needs `Crypt` initialised. We
+/// generate a fresh test-only key here rather than rely on
+/// `Server::from_config` because these tests assemble the router by
+/// hand and never go through the server boot path.
+fn ensure_crypt_initialised() {
+    CRYPT_INIT.get_or_init(|| {
+        suprnova::Crypt::init(EncryptionKey::generate());
+    });
+}
 
 /// Spawn a one-shot hyper server that serves the app's router for a
 /// configurable number of inbound connections. Returns the bound
 /// address. The accept loop terminates once the per-test budget is
 /// drained.
 async fn spawn_app_server(max_connections: usize) -> SocketAddr {
+    ensure_crypt_initialised();
+
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let router = Arc::new(app::routes::register());

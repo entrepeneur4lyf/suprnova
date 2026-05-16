@@ -295,11 +295,17 @@ where
             Router::new()
         };
 
-        // Create server with configuration from environment
-        Server::from_config(router)
-            .run()
-            .await
-            .expect("Failed to start server");
+        // Create server with configuration from environment.
+        //
+        // `from_config` returns Err when APP_KEY is required (any
+        // non-development environment) but unset or malformed. We
+        // expect-out the boot error with the message verbatim — the
+        // message itself is the user-facing remediation (it points at
+        // `suprnova key:generate`). This is the boot-time fail-closed
+        // path described in codex review finding #1.
+        let server = Server::from_config(router)
+            .unwrap_or_else(|e| panic!("Failed to start server: {e}"));
+        server.run().await.expect("Failed to start server");
     }
 
     async fn get_database_connection() -> sea_orm::DatabaseConnection {

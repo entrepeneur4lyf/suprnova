@@ -78,15 +78,22 @@ pub(crate) struct CursorPayload {
 
 impl<T> CursorPaginator<T> {
     /// Encode a typed boundary `sea_orm::Value` plus scan direction
-    /// into the wire cursor. When `Crypt` is initialized, the cursor
-    /// is AES-256-GCM authenticated; otherwise it falls back to plain
-    /// base64 (and tracing emits a warn).
+    /// into the wire cursor. The cursor is AES-256-GCM authenticated
+    /// — `Crypt` must be initialized (the framework guarantees this
+    /// via `Server::from_config` at boot).
     ///
     /// Direct callers (controllers that build cursors outside
     /// `Pagination::cursor`) use this to produce a typed cursor over
     /// a non-string boundary — pass a `Value::BigInt(...)`,
     /// `Value::Uuid(...)`, etc. and `Pagination::cursor` will
     /// re-bind the same SQL type on decode.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the SeaORM variant isn't a supported cursor
+    /// boundary or if `Crypt` is not initialized (defensive — should
+    /// be impossible after `Server::from_config`). Codex review
+    /// finding #1: never emit an unsigned/forgeable cursor payload.
     pub fn encode_value(
         value: &sea_orm::Value,
         direction: CursorDirection,
@@ -100,37 +107,23 @@ impl<T> CursorPaginator<T> {
         let json = serde_json::to_string(&payload).map_err(|e| {
             FrameworkError::internal(format!("Cursor payload JSON encode failed: {e}"))
         })?;
-        match Crypt::encrypt_string(&json) {
-            Ok(wire) => Ok(wire),
-            Err(_) => {
-                tracing::warn!(
-                    "Crypt not initialized — cursors will be plain base64. \
-                     Set APP_KEY before deploying."
-                );
-                Ok(URL_SAFE_NO_PAD.encode(json.as_bytes()))
-            }
-        }
+        // `Crypt::encrypt_string` returns Err when Crypt isn't
+        // initialized — propagate verbatim. No plaintext base64
+        // fallback (that branch was the codex-flagged fail-open path).
+        Crypt::encrypt_string(&json)
     }
 
     /// Decode the wire cursor into a typed `sea_orm::Value` plus the
     /// scan direction it was emitted with.
     ///
-    /// Use when consuming a cursor in a controller that doesn't go
-    /// through `Pagination::cursor` — match on the returned variant to
-    /// extract the typed boundary (e.g. `Value::BigInt(Some(i))`).
+    /// Cursors must be authenticated — there is no plaintext fallback
+    /// even if `Crypt` is not initialized (which would itself be a
+    /// boot bug). Any attempt to decode an unsigned base64 payload
+    /// errors. Codex review finding #1.
     pub fn decode_value(
         wire: &str,
     ) -> Result<(sea_orm::Value, CursorDirection), FrameworkError> {
-        let json = if Crypt::is_initialized() {
-            // With a key installed, only the authenticated path is valid.
-            Crypt::decrypt_string(wire)?
-        } else {
-            let bytes = URL_SAFE_NO_PAD
-                .decode(wire.trim())
-                .map_err(|e| FrameworkError::internal(format!("Cursor decode failed: {e}")))?;
-            String::from_utf8(bytes)
-                .map_err(|e| FrameworkError::internal(format!("Cursor not UTF-8: {e}")))?
-        };
+        let json = Crypt::decrypt_string(wire)?;
         let payload: CursorPayload = serde_json::from_str(&json).map_err(|e| {
             FrameworkError::internal(format!("Cursor payload JSON decode failed: {e}"))
         })?;
@@ -147,12 +140,24 @@ impl<T> CursorPaginator<T> {
     ///
     /// Internally this calls [`Self::encode_value`] with a
     /// `Value::String` variant and `CursorDirection::Next`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `Crypt` is not initialized. The framework guarantees
+    /// initialization in `Server::from_config`; if it isn't, the
+    /// process never reached steady-state and emitting an unsigned
+    /// cursor would be a security bug. The previous plaintext
+    /// `URL_SAFE_NO_PAD.encode` fallback was removed for codex review
+    /// finding #1.
     pub fn encode_cursor(value: &str) -> String {
         Self::encode_value(
             &sea_orm::Value::String(Some(Box::new(value.to_string()))),
             CursorDirection::Next,
         )
-        .unwrap_or_else(|_| URL_SAFE_NO_PAD.encode(value.as_bytes()))
+        .expect(
+            "Crypt invariant: cursors must be encrypted. \
+             Initialize via Server::from_config (sets APP_KEY-derived key).",
+        )
     }
 
     /// Decode a cursor produced by [`Self::encode_cursor`] back to its

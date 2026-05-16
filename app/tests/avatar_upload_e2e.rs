@@ -4,9 +4,10 @@
 //! sqlite::memory database, a tempdir-rooted `public` storage disk, and
 //! the framework's real `SessionMiddleware` + `AuthMiddleware` stack.
 //! Sessions are seeded directly through `DatabaseSessionDriver` and
-//! handed to the client as a plaintext cookie (Crypt is left
-//! uninitialised in the test, matching the middleware's no-APP_KEY
-//! branch).
+//! handed to the client as an AES-256-GCM encrypted cookie produced
+//! with the same key that the running middleware uses (the test
+//! installs the process-wide `Crypt` key at setup; the middleware
+//! refuses to run without one per codex review finding #1).
 //!
 //! The tests cover three branches:
 //! - happy path: PNG bytes + caption → 200, file persisted on disk.
@@ -32,11 +33,12 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 
 use sea_orm_migration::MigratorTrait;
+use suprnova::http::cookie::Cookie;
 use suprnova::session::driver::database::DatabaseSessionDriver;
 use suprnova::session::{generate_csrf_token, generate_session_id, SessionData, SessionStore};
 use suprnova::{
-    bind, group, handle_request, post, AuthMiddleware, MiddlewareRegistry, Router, SessionConfig,
-    SessionMiddleware, Storage, UserProvider,
+    bind, group, handle_request, post, AuthMiddleware, EncryptionKey, MiddlewareRegistry, Router,
+    SessionConfig, SessionMiddleware, Storage, UserProvider,
 };
 use tokio::sync::Mutex;
 
@@ -99,6 +101,14 @@ fn build_router() -> Router {
 /// The caller drops the `TestApp` to release the global lock.
 async fn setup_app() -> TestApp {
     let lock = TEST_LOCK.lock().await;
+
+    // Install the process-wide encryption key once. `Crypt::init` uses
+    // `OnceLock` so this is idempotent across tests — the first test
+    // in this binary supplies a fresh key; later tests in this binary
+    // share it. The `SessionMiddleware` requires `Crypt` to be
+    // initialised (codex review finding #1 / fail-closed boot path);
+    // without this seed, every test would 500.
+    suprnova::Crypt::init(EncryptionKey::generate());
 
     // Storage: install the test guard (resets the registry + serialises
     // against other `Storage::fake()` callers), then re-register `public`
@@ -183,10 +193,11 @@ async fn setup_app() -> TestApp {
 }
 
 /// Create a real user row, then seed a session row pointing at it.
-/// Returns the session id, which the caller drops into a plaintext
-/// `suprnova_session=<id>` cookie. Crypt is left uninitialised in
-/// these tests, so the inbound-cookie branch of `SessionMiddleware`
-/// reads the value verbatim.
+/// Returns the AES-256-GCM encrypted cookie value that the caller
+/// drops into a `suprnova_session=<encrypted-value>` cookie. The
+/// `SessionMiddleware` decrypts inbound cookies via `Crypt` (which
+/// the test seeded in `setup_app`); the plaintext fallback was
+/// removed in codex review finding #1.
 async fn seed_session_for_new_user(app: &TestApp) -> (User, String) {
     let user = User::create()
         .insert()
@@ -200,7 +211,15 @@ async fn seed_session_for_new_user(app: &TestApp) -> (User, String) {
         .write(&session)
         .await
         .expect("write seed session");
-    (user, session_id)
+    // Encrypt the session id so the middleware's inbound-cookie
+    // decryption path accepts it. We bypass the `Cookie` builder and
+    // grab just the encrypted wire value (which is what would land in
+    // an HTTP `Cookie` header from a real browser).
+    let encrypted = Cookie::encrypted("suprnova_session", &session_id)
+        .expect("Crypt installed at setup_app")
+        .value()
+        .to_string();
+    (user, encrypted)
 }
 
 /// Build a multipart body from `(name, filename?, bytes)` parts.

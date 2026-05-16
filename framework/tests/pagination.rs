@@ -12,8 +12,21 @@ use serde::Serialize;
 use serde_json::json;
 use suprnova::testing::TestContainer;
 use suprnova::{
-    CursorPaginator, DbConnection, IntoInertiaScroll, LengthAwarePaginator, Pagination,
+    CursorPaginator, DbConnection, EncryptionKey, IntoInertiaScroll, LengthAwarePaginator,
+    Pagination,
 };
+
+/// Cursor pagination encrypts every emitted payload via the framework's
+/// `Crypt` facade (codex review finding #1 — no plaintext base64
+/// fallback). Tests that exercise `Pagination::cursor` need a key
+/// installed, but `Crypt` is a process-global `OnceLock`, so we install
+/// it exactly once for the binary.
+fn ensure_crypt() {
+    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INIT.get_or_init(|| {
+        suprnova::Crypt::init(EncryptionKey::generate());
+    });
+}
 
 // Toy in-memory SQLite entity used by the integration tests.
 mod toy {
@@ -109,6 +122,7 @@ async fn seaorm_length_aware_page_2_returns_10_rows() {
 
 #[tokio::test]
 async fn pagination_cursor_walks_forward_until_exhausted() {
+    ensure_crypt();
     let _guard = TestContainer::fake();
     let conn = make_db_with_n_rows(25).await;
     install_db(conn);
@@ -143,6 +157,7 @@ async fn pagination_cursor_walks_forward_until_exhausted() {
 
 #[tokio::test]
 async fn pagination_cursor_emits_prev_cursor_on_page_2() {
+    ensure_crypt();
     let _guard = TestContainer::fake();
     let conn = make_db_with_n_rows(25).await;
     install_db(conn);
@@ -200,6 +215,7 @@ async fn pagination_cursor_emits_prev_cursor_on_page_2() {
 
 #[tokio::test]
 async fn pagination_cursor_last_page_no_next() {
+    ensure_crypt();
     let _guard = TestContainer::fake();
     let conn = make_db_with_n_rows(25).await;
     install_db(conn);
