@@ -5,8 +5,9 @@
 //! resets the global disk registry on drop. This lets the tests safely run
 //! under the default parallel `cargo test` runner without registry collisions.
 
+use opendal::layers::RetryLayer;
 use suprnova::filesystem::streaming::copy_between_disks;
-use suprnova::Storage;
+use suprnova::{S3Config, Storage};
 
 #[tokio::test]
 async fn memory_disk_round_trip() {
@@ -132,5 +133,118 @@ async fn streaming_copy_errors_on_missing_source_disk() {
     assert!(
         msg.contains("nope") || msg.contains("not registered"),
         "error should identify the missing disk, got: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `register_<driver>_with` — opendal layer composition.
+// ---------------------------------------------------------------------------
+//
+// These tests prove that the closure passed to `register_<driver>_with`
+// actually runs and that the layered `Operator` is what lands in the
+// registry. We use `Arc<AtomicBool>` (NOT a `static`) so cross-test leakage
+// is impossible under the default parallel test runner.
+
+#[tokio::test]
+async fn register_fs_with_layer_applies_to_operator() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let _guard = Storage::fake();
+    let tmp = tempfile::tempdir().expect("create tempdir");
+
+    let closure_ran = Arc::new(AtomicBool::new(false));
+    let flag = closure_ran.clone();
+    Storage::register_fs_with("layered_fs", tmp.path(), move |op| {
+        flag.store(true, Ordering::SeqCst);
+        op.layer(RetryLayer::new().with_max_times(3))
+    })
+    .expect("fs disk with layer registers");
+
+    assert!(
+        closure_ran.load(Ordering::SeqCst),
+        "layer closure must run during registration"
+    );
+
+    // And the disk must still work end-to-end through the layered operator.
+    let disk = Storage::disk("layered_fs").expect("registered layered fs disk");
+    disk.write("hello.txt", "world").await.expect("write");
+    assert_eq!(disk.read("hello.txt").await.expect("read").to_vec(), b"world");
+}
+
+#[tokio::test]
+async fn register_memory_with_layer_composes() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let _guard = Storage::fake();
+
+    let closure_ran = Arc::new(AtomicBool::new(false));
+    let flag = closure_ran.clone();
+    Storage::register_memory_with("layered_mem", move |op| {
+        flag.store(true, Ordering::SeqCst);
+        op.layer(RetryLayer::new().with_max_times(2))
+    });
+
+    assert!(
+        closure_ran.load(Ordering::SeqCst),
+        "memory layer closure must run"
+    );
+
+    let disk = Storage::disk("layered_mem").expect("registered layered memory disk");
+    disk.write("k", "v").await.expect("write");
+    assert_eq!(disk.read("k").await.expect("read").to_vec(), b"v");
+}
+
+#[tokio::test]
+async fn register_s3_with_layer_compiles_and_registers() {
+    let _guard = Storage::fake();
+
+    // Build construction never touches the network — opendal validates the
+    // config and produces an `Operator` lazily, so this must succeed even
+    // without live credentials. We don't drive a real read/write here.
+    let result = Storage::register_s3_with(
+        "fake_s3",
+        S3Config {
+            bucket: "test-bucket".into(),
+            region: Some("us-east-1".into()),
+            endpoint: None,
+            access_key_id: Some("AKIATEST".into()),
+            secret_access_key: Some("secret".into()),
+            root: None,
+        },
+        |op| op.layer(RetryLayer::new().with_max_times(3)),
+    );
+    assert!(
+        result.is_ok(),
+        "S3 registration with layer must succeed even without live credentials: {result:?}"
+    );
+    assert!(
+        Storage::disk("fake_s3").is_ok(),
+        "disk lookup must succeed after register_s3_with"
+    );
+}
+
+#[tokio::test]
+async fn register_s3_unchanged_still_works() {
+    // Backwards-compat: the existing `register_s3` (no `_with`) is now a
+    // thin wrapper around `register_s3_with` with an identity closure.
+    // Existing call sites must not need to change.
+    let _guard = Storage::fake();
+    let result = Storage::register_s3(
+        "plain_s3",
+        S3Config {
+            bucket: "test-bucket".into(),
+            region: Some("us-east-1".into()),
+            endpoint: None,
+            access_key_id: Some("AKIATEST".into()),
+            secret_access_key: Some("secret".into()),
+            root: None,
+        },
+    );
+    assert!(result.is_ok(), "register_s3 must still work: {result:?}");
+    assert!(
+        Storage::disk("plain_s3").is_ok(),
+        "disk lookup must succeed after register_s3"
     );
 }

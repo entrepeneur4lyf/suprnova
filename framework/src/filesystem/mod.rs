@@ -110,32 +110,117 @@ impl Storage {
     /// The root directory is created if it does not already exist. Paths
     /// passed to subsequent `disk.write(...)`, `disk.read(...)`, etc. are
     /// resolved relative to this root.
+    ///
+    /// Equivalent to [`Storage::register_fs_with`] with an identity closure.
     pub fn register_fs(
         name: impl Into<String>,
         root: impl AsRef<Path>,
     ) -> Result<(), FrameworkError> {
+        Self::register_fs_with(name, root, |op| op)
+    }
+
+    /// Register a local filesystem disk with a custom layer stack applied to
+    /// the underlying [`Operator`] before it lands in the registry.
+    ///
+    /// Use this to compose opendal layers (retry, logging, timeout, metrics,
+    /// throttle, …) on top of the raw FS operator. See
+    /// [`opendal::layers`](https://docs.rs/opendal/0.56/opendal/layers/) for
+    /// the full list.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use opendal::layers::RetryLayer;
+    /// use suprnova::Storage;
+    ///
+    /// Storage::register_fs_with("local", "./storage", |op| {
+    ///     op.layer(RetryLayer::new().with_max_times(3))
+    /// })?;
+    /// ```
+    pub fn register_fs_with(
+        name: impl Into<String>,
+        root: impl AsRef<Path>,
+        layer_fn: impl FnOnce(Operator) -> Operator,
+    ) -> Result<(), FrameworkError> {
         let root_str = root.as_ref().to_string_lossy();
         let builder = services::Fs::default().root(&root_str);
-        let op = Operator::new(builder)
+        let raw = Operator::new(builder)
             .map_err(|e| FrameworkError::internal(format!("opendal fs init: {e}")))?
             .finish();
-        registry::register(name, op);
+        let layered = layer_fn(raw);
+        registry::register(name, layered);
         Ok(())
     }
 
     /// Register an in-memory disk. Useful for tests, ephemeral buffers, and
     /// any case where persistence is explicitly not required.
+    ///
+    /// Equivalent to [`Storage::register_memory_with`] with an identity closure.
     pub fn register_memory(name: impl Into<String>) {
-        let op = Operator::new(services::Memory::default())
+        Self::register_memory_with(name, |op| op)
+    }
+
+    /// Register an in-memory disk with a custom layer stack.
+    ///
+    /// Memory backend construction is infallible, so the closure always runs.
+    /// Useful for testing layer behaviour without external services.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use opendal::layers::RetryLayer;
+    /// use suprnova::Storage;
+    ///
+    /// Storage::register_memory_with("scratch", |op| {
+    ///     op.layer(RetryLayer::new().with_max_times(2))
+    /// });
+    /// ```
+    pub fn register_memory_with(
+        name: impl Into<String>,
+        layer_fn: impl FnOnce(Operator) -> Operator,
+    ) {
+        let raw = Operator::new(services::Memory::default())
             .expect("opendal memory service is infallible")
             .finish();
-        registry::register(name, op);
+        let layered = layer_fn(raw);
+        registry::register(name, layered);
     }
 
     /// Register an S3 (or S3-compatible) disk.
+    ///
+    /// Equivalent to [`Storage::register_s3_with`] with an identity closure.
     pub fn register_s3(
         name: impl Into<String>,
         config: S3Config,
+    ) -> Result<(), FrameworkError> {
+        Self::register_s3_with(name, config, |op| op)
+    }
+
+    /// Register an S3 disk with a custom layer stack applied to the
+    /// [`Operator`] before it lands in the registry.
+    ///
+    /// Production S3 deployments need retries (for throttling and transient
+    /// 5xx), timeouts, and observability. Use this entry point to compose
+    /// any opendal layer stack. See
+    /// [`opendal::layers`](https://docs.rs/opendal/0.56/opendal/layers/) for
+    /// the full list.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use opendal::layers::RetryLayer;
+    /// use suprnova::{Storage, S3Config};
+    ///
+    /// Storage::register_s3_with(
+    ///     "uploads",
+    ///     S3Config { bucket: "my-bucket".into(), ..Default::default() },
+    ///     |op| op.layer(RetryLayer::new().with_max_times(3)),
+    /// )?;
+    /// ```
+    pub fn register_s3_with(
+        name: impl Into<String>,
+        config: S3Config,
+        layer_fn: impl FnOnce(Operator) -> Operator,
     ) -> Result<(), FrameworkError> {
         let mut builder = services::S3::default().bucket(&config.bucket);
         if let Some(region) = config.region.as_deref() {
@@ -153,17 +238,30 @@ impl Storage {
         if let Some(root) = config.root.as_deref() {
             builder = builder.root(root);
         }
-        let op = Operator::new(builder)
+        let raw = Operator::new(builder)
             .map_err(|e| FrameworkError::internal(format!("opendal s3 init: {e}")))?
             .finish();
-        registry::register(name, op);
+        let layered = layer_fn(raw);
+        registry::register(name, layered);
         Ok(())
     }
 
     /// Register an Azure Blob Storage disk.
+    ///
+    /// Equivalent to [`Storage::register_azblob_with`] with an identity closure.
     pub fn register_azblob(
         name: impl Into<String>,
         config: AzBlobConfig,
+    ) -> Result<(), FrameworkError> {
+        Self::register_azblob_with(name, config, |op| op)
+    }
+
+    /// Register an Azure Blob Storage disk with a custom layer stack applied
+    /// to the [`Operator`] before it lands in the registry.
+    pub fn register_azblob_with(
+        name: impl Into<String>,
+        config: AzBlobConfig,
+        layer_fn: impl FnOnce(Operator) -> Operator,
     ) -> Result<(), FrameworkError> {
         let mut builder = services::Azblob::default()
             .container(&config.container)
@@ -175,17 +273,30 @@ impl Storage {
         if let Some(root) = config.root.as_deref() {
             builder = builder.root(root);
         }
-        let op = Operator::new(builder)
+        let raw = Operator::new(builder)
             .map_err(|e| FrameworkError::internal(format!("opendal azblob init: {e}")))?
             .finish();
-        registry::register(name, op);
+        let layered = layer_fn(raw);
+        registry::register(name, layered);
         Ok(())
     }
 
     /// Register a Google Cloud Storage disk.
+    ///
+    /// Equivalent to [`Storage::register_gcs_with`] with an identity closure.
     pub fn register_gcs(
         name: impl Into<String>,
         config: GcsConfig,
+    ) -> Result<(), FrameworkError> {
+        Self::register_gcs_with(name, config, |op| op)
+    }
+
+    /// Register a Google Cloud Storage disk with a custom layer stack applied
+    /// to the [`Operator`] before it lands in the registry.
+    pub fn register_gcs_with(
+        name: impl Into<String>,
+        config: GcsConfig,
+        layer_fn: impl FnOnce(Operator) -> Operator,
     ) -> Result<(), FrameworkError> {
         let mut builder = services::Gcs::default().bucket(&config.bucket);
         if let Some(credential) = config.credential.as_deref() {
@@ -200,10 +311,11 @@ impl Storage {
         if let Some(root) = config.root.as_deref() {
             builder = builder.root(root);
         }
-        let op = Operator::new(builder)
+        let raw = Operator::new(builder)
             .map_err(|e| FrameworkError::internal(format!("opendal gcs init: {e}")))?
             .finish();
-        registry::register(name, op);
+        let layered = layer_fn(raw);
+        registry::register(name, layered);
         Ok(())
     }
 
