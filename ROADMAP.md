@@ -243,11 +243,27 @@ is what makes Rust frameworks reach 80% production-ready and stall.
   and an example `Resource::collection`), example `UserResource`
   (`#[derive(Data)] #[json_resource("users")]`), Post-style models,
   migrations, `.env` placeholders.
+- **Filesystem** — `Storage::disk("name")` facade backed by `opendal`
+  0.56, with FS / memory / S3 / Azure Blob / GCS drivers all
+  first-class. `copy_between_disks` streams 64 KiB chunks across any
+  backend pair. `Storage::fake()` provides registry isolation for tests.
+- **File uploads** — `#[derive(MultipartRequest)]` strongly-typed
+  extractor with streaming `multer` parser. `UploadedFile<V>` supports
+  composable validators (`Image` magic-byte detection, `MaxSize<N>`
+  byte-boundary rejection, `MimeType<L>` allowlists, plus tuple
+  composition). Array uploads (`Vec<UploadedFile<V>>`) preserve
+  duplicate-name parts for `photos[]`-style forms.
+  `MultipartRequestHooks` mirrors `FormRequest`'s `authorize` /
+  `after_validation` lifecycle.
+- **Validation parity** — `Rule` trait (`Required`, `Email` via
+  `validator::ValidateEmail`, `Min`, `Max`), `ContextualRule` for
+  conditional rules (`RequiredIf`, `RequiredWith`, `RequiredUnless`),
+  `AsyncRule` with `Unique` issuing real parameterized DB queries
+  (no in-memory fakes). `FormRequest::after_validation` cross-field
+  hook. `ValidationErrors::add_to_bag` for named-scope errors.
 
 **Partial - needs filling in:**
 
-- Validation (basic; FormRequest + Precognition work but no rule
-  objects, no after-hooks, no error-bag-as-first-class)
 - Cache (Redis + in-memory drivers; needs tags, locks, rate-limiter)
 - Cookie (via session; standalone API unclear)
 - HTTP request/response (inbound great + streaming responses ship;
