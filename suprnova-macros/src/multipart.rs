@@ -76,15 +76,55 @@ pub fn expand(input: TokenStream) -> TokenStream {
         let ident = field.ident.clone().unwrap();
         let ty = &field.ty;
 
-        // Parse `#[field("name")]`.
+        // Parse `#[field("name")]` or `#[field("name", max_count = N)]`.
+        //
+        // `max_count = N` is a count cap on Vec fields. The Phase 4 body
+        // cap blocks total bytes but a `Vec<UploadedFile<()>>` field could
+        // accept unlimited part count within that budget (a request with
+        // 100k 1-byte parts in a 25 MiB body would allocate a
+        // `MultipartValue::File` per part). `max_count` enforces a
+        // per-Vec ceiling: once the in-progress Vec reaches `max_count`
+        // parts, the next push short-circuits with 422 before allocating.
+        //
+        // Currently honoured for `Vec<UploadedFile<V>>` (FileVec) and
+        // `Vec<T: FromStr>` (TextVec). On scalar/option fields the
+        // attribute is accepted but does nothing (the parser keeps
+        // first-write-wins semantics already).
         let mut field_name: Option<LitStr> = None;
+        let mut max_count: Option<usize> = None;
         for attr in &field.attrs {
             if attr.path().is_ident("field") {
-                let s: LitStr = match attr.parse_args() {
-                    Ok(s) => s,
+                let parsed = attr.parse_args_with(
+                    |input: syn::parse::ParseStream| -> syn::Result<(LitStr, Option<usize>)> {
+                        let name: LitStr = input.parse()?;
+                        let mut max: Option<usize> = None;
+                        while input.peek(syn::Token![,]) {
+                            let _comma: syn::Token![,] = input.parse()?;
+                            let key: syn::Ident = input.parse()?;
+                            let _eq: syn::Token![=] = input.parse()?;
+                            if key == "max_count" {
+                                let lit: syn::LitInt = input.parse()?;
+                                max = Some(lit.base10_parse()?);
+                            } else {
+                                return Err(syn::Error::new(
+                                    key.span(),
+                                    format!(
+                                        "unknown #[field(...)] option `{key}`; \
+                                         supported keys: max_count"
+                                    ),
+                                ));
+                            }
+                        }
+                        Ok((name, max))
+                    },
+                );
+                match parsed {
+                    Ok((name, max)) => {
+                        field_name = Some(name);
+                        max_count = max;
+                    }
                     Err(e) => return e.to_compile_error().into(),
-                };
-                field_name = Some(s);
+                }
             }
         }
         let Some(field_name) = field_name else {
@@ -98,6 +138,25 @@ pub fn expand(input: TokenStream) -> TokenStream {
         let field_name_str = field_name.value();
 
         let shape = classify(ty);
+
+        // `max_count` is only meaningful on Vec shapes; reject it on
+        // scalar / option fields so a typo doesn't silently disable
+        // the cap a caller intended.
+        if max_count.is_some()
+            && !matches!(
+                shape,
+                FieldShape::FileVec { .. } | FieldShape::TextVec { .. }
+            )
+        {
+            return syn::Error::new_spanned(
+                &ident,
+                "#[field(..., max_count = N)] is only valid on `Vec<...>` fields; \
+                 scalar and `Option<...>` fields already keep first-write-wins semantics",
+            )
+            .to_compile_error()
+            .into();
+        }
+
         match shape {
             FieldShape::FileScalar { validator } => {
                 let v_ident = quote::format_ident!("__v_{}", ident);
@@ -195,12 +254,33 @@ pub fn expand(input: TokenStream) -> TokenStream {
                         <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_chunk(&#v_ident, sniff, size)?;
                     }
                 });
+                // `max_count` short-circuit: when the attribute is set,
+                // emit a length check BEFORE pushing the file into the
+                // Vec. We test against the cap (not cap-1) and return
+                // 422 the moment a request would push the (cap+1)-th
+                // file. The check is omitted when no cap is configured
+                // so existing callers see no behavioural change.
+                let cap_guard = match max_count {
+                    Some(cap) => quote! {
+                        if #ident.len() >= #cap {
+                            return ::core::result::Result::Err(::suprnova::FrameworkError::Domain {
+                                message: format!(
+                                    "field '{}' exceeds max_count {}",
+                                    #field_name_str, #cap
+                                ),
+                                status_code: 422,
+                            });
+                        }
+                    },
+                    None => quote! {},
+                };
                 field_arms.push(quote! {
                     #field_name_str => {
                         if let ::suprnova::http::upload::MultipartValue::File { backing, size, file_name, content_type, inferred_extension, sniff } = value {
                             <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_final(
                                 &#v_ident, &sniff, size, content_type.as_deref()
                             )?;
+                            #cap_guard
                             #ident.push(
                                 match backing {
                                     ::suprnova::http::upload::UploadedFileBacking::Memory(b) =>
@@ -280,6 +360,24 @@ pub fn expand(input: TokenStream) -> TokenStream {
                 struct_init.push(quote! { #ident, });
             }
             FieldShape::TextVec { inner_ty } => {
+                // `max_count` on text Vec fields covers the same DoS as
+                // file Vec fields: 100k text parts in a 25 MiB body would
+                // still allocate a parsed scalar per part. Emit the same
+                // length-check short-circuit when the attribute is set.
+                let cap_guard = match max_count {
+                    Some(cap) => quote! {
+                        if #ident.len() >= #cap {
+                            return ::core::result::Result::Err(::suprnova::FrameworkError::Domain {
+                                message: format!(
+                                    "field '{}' exceeds max_count {}",
+                                    #field_name_str, #cap
+                                ),
+                                status_code: 422,
+                            });
+                        }
+                    },
+                    None => quote! {},
+                };
                 field_arms.push(quote! {
                     #field_name_str => {
                         if let ::suprnova::http::upload::MultipartValue::Text(s) = value {
@@ -292,6 +390,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
                                     ),
                                     status_code: 400,
                                 })?;
+                            #cap_guard
                             #ident.push(parsed);
                         }
                     }

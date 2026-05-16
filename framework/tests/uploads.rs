@@ -118,6 +118,93 @@ async fn derive_collects_array_uploads() {
     assert_eq!(form.photos[2].bytes().await.unwrap().as_ref(), b"third");
 }
 
+// ── max_count on Vec fields ──
+//
+// Closes self-audit item B: the Phase 4 body cap blocks total bytes,
+// but `Vec<UploadedFile<()>>` would accept unlimited part count within
+// budget. A client could send 100k 1-byte parts in a 25 MiB body. The
+// `#[field(name, max_count = N)]` attribute caps Vec growth during
+// parsing; the (N+1)-th part returns 422 immediately, before
+// allocating the extra `UploadedFile`.
+
+#[derive(MultipartRequest)]
+struct CappedGallery {
+    #[field("photos", max_count = 3)]
+    photos: Vec<UploadedFile>,
+}
+
+#[tokio::test]
+async fn vec_count_cap_rejects_when_over_max() {
+    let parts: Vec<(&str, Option<&str>, &[u8])> =
+        (0..5).map(|_| ("photos", Some("a.bin"), &b"data"[..])).collect();
+    let body = build_multipart_body("test", &parts);
+    let req = request_from_multipart("test", body).await;
+    let err = CappedGallery::from_request(req)
+        .await
+        .err()
+        .expect("five parts must blow the max_count = 3 cap");
+    assert_eq!(err.status_code(), 422, "got error: {err:?}");
+    assert!(
+        err.to_string().contains("max_count"),
+        "error message should mention max_count: {err}"
+    );
+}
+
+#[tokio::test]
+async fn vec_count_cap_accepts_at_max() {
+    let parts: Vec<(&str, Option<&str>, &[u8])> =
+        (0..3).map(|_| ("photos", Some("a.bin"), &b"data"[..])).collect();
+    let body = build_multipart_body("test", &parts);
+    let req = request_from_multipart("test", body).await;
+    let form = CappedGallery::from_request(req).await.unwrap();
+    assert_eq!(form.photos.len(), 3);
+}
+
+#[tokio::test]
+async fn vec_count_cap_accepts_below_max() {
+    let parts: Vec<(&str, Option<&str>, &[u8])> =
+        (0..2).map(|_| ("photos", Some("a.bin"), &b"data"[..])).collect();
+    let body = build_multipart_body("test", &parts);
+    let req = request_from_multipart("test", body).await;
+    let form = CappedGallery::from_request(req).await.unwrap();
+    assert_eq!(form.photos.len(), 2);
+}
+
+#[derive(MultipartRequest)]
+struct CappedTags {
+    #[field("tags", max_count = 4)]
+    tags: Vec<String>,
+}
+
+#[tokio::test]
+async fn text_vec_count_cap_rejects_when_over_max() {
+    let parts: Vec<(&str, Option<&str>, &[u8])> = (0..6)
+        .map(|_| ("tags", None, &b"hello"[..]))
+        .collect();
+    let body = build_multipart_body("test", &parts);
+    let req = request_from_multipart("test", body).await;
+    let err = CappedTags::from_request(req)
+        .await
+        .err()
+        .expect("six text parts must blow the max_count = 4 cap");
+    assert_eq!(err.status_code(), 422, "got error: {err:?}");
+    assert!(
+        err.to_string().contains("max_count"),
+        "error message should mention max_count: {err}"
+    );
+}
+
+#[tokio::test]
+async fn text_vec_count_cap_accepts_at_max() {
+    let parts: Vec<(&str, Option<&str>, &[u8])> = (0..4)
+        .map(|_| ("tags", None, &b"x"[..]))
+        .collect();
+    let body = build_multipart_body("test", &parts);
+    let req = request_from_multipart("test", body).await;
+    let form = CappedTags::from_request(req).await.unwrap();
+    assert_eq!(form.tags.len(), 4);
+}
+
 // ── FromStr text parsing ──
 
 #[derive(MultipartRequest)]
