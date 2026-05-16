@@ -11,12 +11,11 @@
 //! `webauthn_rs::Webauthn`, which Suprnova builds from `ToriiConfig::passkey_rp_id`
 //! and `ToriiConfig::passkey_rp_origin` at init time.
 //!
-//! In-flight registration and authentication state is kept in process-local
-//! `DashMap`s keyed by email. This is intentional: WebAuthn challenges are
-//! ephemeral (typically expire in 60 s) and are not useful to persist across
-//! restarts. Production deployments that run multiple replicas must replace
-//! the in-memory maps with a shared external cache (Redis, etc.) before going
-//! multi-instance.
+//! In-flight registration and authentication state is stored in the user's
+//! **session** (via `session_mut` / `session`) under provider-scoped keys.
+//! This is session-safe: it survives process restarts (session is
+//! database-backed), works across multi-replica deployments, and is scoped to
+//! the initiating browser session — no cross-session leakage.
 //!
 //! # Re-exports
 //!
@@ -28,13 +27,12 @@ use std::sync::OnceLock;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use dashmap::DashMap;
 use uuid::Uuid;
 use webauthn_rs::prelude::{Passkey, Url, Webauthn, WebauthnBuilder};
 
-use super::instance;
-use super::{Session, User};
+use super::{Session, User, find_or_create_user_by_email, instance};
 use crate::error::FrameworkError;
+use crate::session::{session, session_mut};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public re-exports — consumers never need to import webauthn_rs directly
@@ -53,31 +51,44 @@ pub use webauthn_rs::prelude::{
 /// The global `Webauthn` instance, built once from `ToriiConfig` at init time.
 static WEBAUTHN: OnceLock<Webauthn> = OnceLock::new();
 
-/// In-flight registration state, keyed by email.
-static REG_STATE: OnceLock<DashMap<String, PasskeyRegistration>> = OnceLock::new();
+// Session keys for in-flight passkey state.
+const SESSION_KEY_REG: &str = "passkey_reg";
+const SESSION_KEY_AUTH: &str = "passkey_auth";
 
-/// In-flight authentication state, keyed by email.
-static AUTH_STATE: OnceLock<DashMap<String, PasskeyAuthentication>> = OnceLock::new();
-
-fn reg_state() -> &'static DashMap<String, PasskeyRegistration> {
-    REG_STATE.get_or_init(DashMap::new)
+/// Store the in-flight `PasskeyRegistration` in the current request session.
+fn store_reg_state(reg: &PasskeyRegistration) -> Result<(), FrameworkError> {
+    let json = serde_json::to_string(reg)
+        .map_err(|e| FrameworkError::internal(format!("passkey: serialize reg state: {e}")))?;
+    session_mut(|s| s.put(SESSION_KEY_REG, json));
+    Ok(())
 }
 
-fn auth_state() -> &'static DashMap<String, PasskeyAuthentication> {
-    AUTH_STATE.get_or_init(DashMap::new)
+/// Retrieve and consume the in-flight `PasskeyRegistration` from the session.
+fn take_reg_state() -> Result<PasskeyRegistration, FrameworkError> {
+    let json: String = session()
+        .and_then(|s| s.get::<String>(SESSION_KEY_REG))
+        .ok_or_else(|| FrameworkError::internal("passkey: no registration in progress (session key missing)"))?;
+    session_mut(|s| { s.forget(SESSION_KEY_REG); });
+    serde_json::from_str(&json)
+        .map_err(|e| FrameworkError::internal(format!("passkey: deserialize reg state: {e}")))
 }
 
-/// Look up a user by email, creating one if none exists.
-///
-/// torii 0.5.x has no public `get_user_by_email` API. Using `password().register`
-/// is safe here: torii returns the existing user when the email is already taken
-/// and does not overwrite the stored password.
-async fn get_or_create_user_by_email(email: &str) -> Result<User, FrameworkError> {
-    instance()?
-        .password()
-        .register(email, &Uuid::new_v4().to_string())
-        .await
-        .map_err(|e| FrameworkError::internal(format!("passkey: get/create user: {e}")))
+/// Store the in-flight `PasskeyAuthentication` in the current request session.
+fn store_auth_state(auth: &PasskeyAuthentication) -> Result<(), FrameworkError> {
+    let json = serde_json::to_string(auth)
+        .map_err(|e| FrameworkError::internal(format!("passkey: serialize auth state: {e}")))?;
+    session_mut(|s| s.put(SESSION_KEY_AUTH, json));
+    Ok(())
+}
+
+/// Retrieve and consume the in-flight `PasskeyAuthentication` from the session.
+fn take_auth_state() -> Result<PasskeyAuthentication, FrameworkError> {
+    let json: String = session()
+        .and_then(|s| s.get::<String>(SESSION_KEY_AUTH))
+        .ok_or_else(|| FrameworkError::internal("passkey: no authentication in progress (session key missing)"))?;
+    session_mut(|s| { s.forget(SESSION_KEY_AUTH); });
+    serde_json::from_str(&json)
+        .map_err(|e| FrameworkError::internal(format!("passkey: deserialize auth state: {e}")))
 }
 
 /// Initialise the global `Webauthn` instance.
@@ -207,8 +218,9 @@ impl PasskeyAuth {
     ) -> Result<PasskeyRegistrationChallenge, FrameworkError> {
         let webauthn = webauthn_instance()?;
 
-        // Get-or-create the user account.
-        let user = get_or_create_user_by_email(email).await?;
+        // Get-or-create the user account via the repository layer (no dummy
+        // password row created).
+        let user = find_or_create_user_by_email(email).await?;
 
         // Derive a stable UUID from the opaque torii UserId string.
         // torii's UserId is a prefixed ID (e.g. "usr_..."), not a UUID.
@@ -241,8 +253,8 @@ impl PasskeyAuth {
         let challenge_str = URL_SAFE_NO_PAD.encode(&*ccr.public_key.challenge);
         let rp_id = ccr.public_key.rp.id.clone();
 
-        // Persist in-flight state.
-        reg_state().insert(email.to_string(), pending_reg);
+        // Persist in-flight state in the user's session (not a process-local map).
+        store_reg_state(&pending_reg)?;
 
         Ok(PasskeyRegistrationChallenge {
             challenge: challenge_str,
@@ -273,10 +285,8 @@ impl PasskeyAuth {
     ) -> Result<User, FrameworkError> {
         let webauthn = webauthn_instance()?;
 
-        // Retrieve and remove in-flight state (one-time use).
-        let (_email_key, reg_state) = reg_state()
-            .remove(email)
-            .ok_or_else(|| FrameworkError::internal("passkey: no registration in progress for this email"))?;
+        // Retrieve and consume in-flight state from the session (one-time use).
+        let reg_state = take_reg_state()?;
 
         // Verify the browser response and extract the Passkey.
         let passkey = webauthn
@@ -284,7 +294,7 @@ impl PasskeyAuth {
             .map_err(|e| FrameworkError::internal(format!("webauthn finish_passkey_registration: {e:?}")))?;
 
         // Load the user (must exist — begin_registration created them).
-        let user = get_or_create_user_by_email(email).await?;
+        let user = find_or_create_user_by_email(email).await?;
 
         // Serialise the webauthn Passkey struct into bytes for torii storage.
         // Torii's passkey store is a raw-byte key/value; we store the JSON
@@ -321,7 +331,7 @@ impl PasskeyAuth {
         let webauthn = webauthn_instance()?;
 
         // Resolve user — we need the user_id to fetch credentials.
-        let user = get_or_create_user_by_email(email).await?;
+        let user = find_or_create_user_by_email(email).await?;
 
         // Load stored passkeys.
         let stored_creds = instance()?
@@ -352,7 +362,8 @@ impl PasskeyAuth {
 
         let challenge_str = URL_SAFE_NO_PAD.encode(&*rcr.public_key.challenge);
 
-        auth_state().insert(email.to_string(), pending_auth);
+        // Persist in-flight state in the user's session.
+        store_auth_state(&pending_auth)?;
 
         Ok(PasskeyAuthenticationChallenge {
             challenge: challenge_str,
@@ -383,13 +394,11 @@ impl PasskeyAuth {
     ) -> Result<(User, Session), FrameworkError> {
         let webauthn = webauthn_instance()?;
 
-        // Retrieve and remove in-flight state (one-time use).
-        let (_email_key, auth_state_val) = auth_state()
-            .remove(email)
-            .ok_or_else(|| FrameworkError::internal("passkey: no authentication in progress for this email"))?;
+        // Retrieve and consume in-flight state from the session (one-time use).
+        let auth_state_val = take_auth_state()?;
 
         // Load the user and their stored passkeys (needed for finish_passkey_authentication).
-        let user = get_or_create_user_by_email(email).await?;
+        let user = find_or_create_user_by_email(email).await?;
 
         let stored_creds = instance()?
             .passkey()

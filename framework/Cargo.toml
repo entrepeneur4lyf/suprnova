@@ -45,7 +45,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json",
 uuid = { version = "1", features = ["v4", "v5", "fast-rng", "serde"] }
 dashmap = "6"
 torii = { version = "0.5.2", default-features = false, features = ["seaorm-sqlite", "seaorm-postgres", "seaorm-mysql", "password", "oauth", "passkey", "magic-link"] }
-webauthn-rs = { version = "0.5", features = ["resident-key-support"] }
+webauthn-rs = { version = "0.5", features = ["resident-key-support", "danger-allow-state-serialisation"] }
 torii-core = { version = "0.5.2" }
 torii-storage-seaorm = { version = "0.5.2" }
 

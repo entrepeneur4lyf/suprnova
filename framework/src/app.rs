@@ -220,6 +220,12 @@ where
         // Initialize framework configuration (loads .env files)
         Config::init(Path::new("."));
 
+        // Register all #[policy] gates collected via inventory::submit!.
+        // Called here (before the subcommand match) so background workers,
+        // CLI commands, and scheduled tasks all see registered gates — not
+        // only the web server path. The inner `Once` makes this idempotent.
+        crate::authorization::init_policies();
+
         // Destructure self to avoid partial move issues
         let Application {
             config_fn,

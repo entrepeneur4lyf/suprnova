@@ -15,6 +15,20 @@ use syn::{
     parse_macro_input, punctuated::Punctuated, ImplItem, ItemImpl, Meta, Token, Type,
 };
 
+/// Convert a PascalCase identifier to kebab-case.
+///
+/// `"Post"` → `"post"`, `"UserProfile"` → `"user-profile"`.
+fn pascal_to_kebab(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            out.push('-');
+        }
+        out.push(c.to_ascii_lowercase());
+    }
+    out
+}
+
 pub fn policy(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr with Punctuated::<Meta, Token![,]>::parse_terminated);
     let item = parse_macro_input!(item as ItemImpl);
@@ -51,7 +65,7 @@ pub fn policy(attr: TokenStream, item: TokenStream) -> TokenStream {
         .expect("#[policy] resource type must be a simple path")
         .ident
         .to_string();
-    let resource_lower = resource_ident.to_lowercase();
+    let resource_lower = pascal_to_kebab(&resource_ident);
 
     // Extract the self-type identifier for mangling shim names.
     let self_ty_ident = match item.self_ty.as_ref() {

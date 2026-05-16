@@ -23,6 +23,7 @@ use std::sync::{Arc, OnceLock};
 
 use torii::seaorm::SeaORMRepositoryProvider;
 use torii::Torii;
+use torii_core::repositories::{RepositoryProvider, UserRepository};
 use torii_storage_seaorm::SeaORMStorage;
 
 use crate::error::FrameworkError;
@@ -32,6 +33,27 @@ pub use torii::{Session, SessionToken, User, UserId};
 
 /// The single global Torii instance, pinned to the SeaORM repository provider.
 static TORII: OnceLock<Torii<SeaORMRepositoryProvider>> = OnceLock::new();
+
+/// The raw repository provider — stored separately so internal code can call
+/// `find_or_create_by_email` without going through `password().register()`.
+/// `Torii<R>` does not expose a public `repositories()` accessor, so we keep
+/// our own `Arc` from the moment we build the provider in `init_torii`.
+static PROVIDER: OnceLock<Arc<SeaORMRepositoryProvider>> = OnceLock::new();
+
+/// Find or create a user by email using the repository layer directly.
+///
+/// This is the correct way to get-or-create a user without creating a dummy
+/// password row. Called from the passkey module.
+pub(crate) async fn find_or_create_user_by_email(email: &str) -> Result<User, FrameworkError> {
+    let provider = PROVIDER
+        .get()
+        .ok_or_else(|| FrameworkError::internal("Torii not initialised. Call init_torii() first."))?;
+    provider
+        .user()
+        .find_or_create_by_email(email)
+        .await
+        .map_err(|e| FrameworkError::internal(format!("find_or_create_user_by_email: {e}")))
+}
 
 /// Configuration for initialising Torii authentication.
 ///
@@ -149,7 +171,11 @@ pub async fn init_torii(config: ToriiConfig) -> Result<(), FrameworkError> {
     }
 
     let provider = Arc::new(storage.into_repository_provider());
-    let torii = Torii::new(provider);
+    let torii = Torii::new(provider.clone());
+
+    // Store the raw provider so internal code (e.g. passkey) can call
+    // find_or_create_by_email without creating a dummy password row.
+    let _ = PROVIDER.set(provider);
 
     // Ignore set() error — another caller may have raced us. Either winner
     // produces an equivalent, fully-initialised instance.

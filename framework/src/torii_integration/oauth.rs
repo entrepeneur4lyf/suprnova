@@ -27,12 +27,12 @@ use std::{
     sync::{OnceLock, RwLock},
 };
 
-use chrono::Duration;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     error::FrameworkError,
+    session::{session, session_mut},
     torii_integration::{Session, User, instance},
 };
 
@@ -150,13 +150,16 @@ impl OAuthAuth {
 
     /// Begin the OAuth flow.
     ///
-    /// Generates a CSRF state token, stores it in torii's PKCE verifier store
-    /// (10-minute TTL), and returns the provider authorization URL with all
-    /// required query parameters appended.
+    /// Generates a CSRF state token and stores it in the **current user's
+    /// session** under a provider-scoped key (`oauth_state_<provider>`).
+    /// Returns the provider authorization URL with all required query parameters.
+    ///
+    /// Storing state per-session (rather than in a global store) means an
+    /// attacker cannot complete an OAuth flow initiated by a different user —
+    /// each session only accepts the state it generated.
     ///
     /// # Errors
     ///
-    /// - `FrameworkError` if torii is not initialised.
     /// - `FrameworkError` if the provider is unknown or not configured.
     pub async fn begin(&self) -> Result<OAuthKickoff, FrameworkError> {
         let config = self.config()?;
@@ -165,15 +168,10 @@ impl OAuthAuth {
         // Generate a cryptographically random CSRF state token.
         let state = uuid::Uuid::new_v4().to_string();
 
-        // Persist the state so we can validate it on callback.
-        // We repurpose torii's PKCE verifier store: the "verifier" value is the
-        // state itself (we use a simple CSRF token, not full PKCE here).
-        let torii = instance()?;
-        torii
-            .oauth()
-            .store_pkce_verifier(&state, &state, Duration::minutes(10))
-            .await
-            .map_err(|e| FrameworkError::internal(format!("oauth store_pkce_verifier: {e}")))?;
+        // Store the state in THIS session, scoped to the provider.
+        // No global store — binding to the session prevents cross-session CSRF.
+        let session_key = format!("oauth_state_{}", self.provider);
+        session_mut(|s| s.put(&session_key, state.clone()));
 
         // Build the authorization URL.
         let scope = config.scopes.join(" ");
@@ -194,19 +192,20 @@ impl OAuthAuth {
 
     /// Complete the OAuth callback flow.
     ///
-    /// Validates the CSRF state, exchanges the authorization code for an access
-    /// token, fetches the user's profile from the provider, and returns the
-    /// (User, Session) pair.
+    /// Validates the CSRF state against THIS session's stored value (one-time
+    /// use: the session key is deleted after reading). Exchanges the
+    /// authorization code for an access token, fetches the user's profile
+    /// from the provider, and returns the (User, Session) pair.
     ///
     /// # Arguments
     ///
     /// * `code`  - The authorization code from the provider callback.
-    /// * `state` - The CSRF state from the provider callback (must match stored).
+    /// * `state` - The CSRF state from the provider callback (must match session).
     ///
     /// # Errors
     ///
     /// - `FrameworkError` if torii is not initialised.
-    /// - `FrameworkError` if the state is invalid or expired.
+    /// - `FrameworkError` if the state does not match what this session stored.
     /// - `FrameworkError` if the token exchange or userinfo fetch fails.
     pub async fn complete(
         &self,
@@ -217,17 +216,24 @@ impl OAuthAuth {
         let endpoints = self.endpoints()?;
         let torii = instance()?;
 
-        // Validate CSRF state (one-time use: get consumes it).
-        let stored = torii
-            .oauth()
-            .get_pkce_verifier(state)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("oauth get_pkce_verifier: {e}")))?;
+        // Read and consume the expected state from THIS session (one-time use).
+        let session_key = format!("oauth_state_{}", self.provider);
+        let expected_state: Option<String> = session().and_then(|s| s.get(&session_key));
+        // Delete from session immediately — one-time use.
+        session_mut(|s| { s.forget(&session_key); });
 
-        if stored.is_none() {
-            return Err(FrameworkError::internal(
-                "OAuth state is invalid or expired".to_string(),
-            ));
+        match expected_state {
+            None => {
+                return Err(FrameworkError::internal(
+                    "OAuth state missing from session — flow not initiated or session expired".to_string(),
+                ));
+            }
+            Some(ref expected) if expected != state => {
+                return Err(FrameworkError::internal(
+                    "OAuth state mismatch — possible CSRF attack or expired flow".to_string(),
+                ));
+            }
+            Some(_) => {} // state matches, proceed
         }
 
         let client = Client::builder()
