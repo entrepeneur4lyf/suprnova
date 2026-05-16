@@ -1,15 +1,13 @@
 //! Rule objects — composable validators that work alongside (and
 //! independently of) `#[derive(Validate)]`.
 //!
-//! The base trait [`Rule`] covers pure synchronous checks on a single
-//! string value. Built-in rules in [`rules`]:
+//! Two traits cover the synchronous and asynchronous design space:
 //!
-//! - [`rules::Required`] — value must be present and non-whitespace.
-//! - [`rules::Email`] — value must be a valid email per the
-//!   [`validator`] crate's [`ValidateEmail`](validator::ValidateEmail)
-//!   semantics.
-//! - [`rules::Min`] / [`rules::Max`] — value length (in `char`s) must
-//!   be within bounds.
+//! - [`Rule`] — pure sync check on a single value. Built-ins:
+//!   [`rules::Required`], [`rules::Email`], [`rules::Min`],
+//!   [`rules::Max`].
+//! - [`AsyncRule`] — async check (DB queries — [`async_rules::Unique`]
+//!   lives here).
 
 /// A synchronous validator over a single string value.
 ///
@@ -81,3 +79,90 @@ pub mod rules {
         }
     }
 }
+
+/// An asynchronous validator over a single string value.
+///
+/// Rules that need to hit a database, an HTTP service, or any other
+/// `.await` point go here. [`async_rules::Unique`] is the canonical
+/// built-in.
+#[async_trait::async_trait]
+pub trait AsyncRule: Send + Sync {
+    /// Check `value`. Return `Ok(())` if it passes, `Err(message)` if
+    /// it fails.
+    async fn passes(&self, value: &str) -> Result<(), String>;
+}
+
+/// Built-in asynchronous rules.
+pub mod async_rules {
+    use super::AsyncRule;
+    use crate::DB;
+    use sea_orm::{ConnectionTrait, Statement, Value};
+
+    /// Laravel `unique:table,column[,except_id]` — issues a single
+    /// parameterized `COUNT(*)` against the configured DB connection.
+    ///
+    /// Returns `Err` when at least one row matches and its `id`
+    /// (when [`Self::except_id`] is set) differs.
+    ///
+    /// # Safety on identifiers
+    ///
+    /// `table` and `column` are `&'static str` slices under crate
+    /// control (i.e. caller-provided literals in source). The
+    /// implementation interpolates them directly into the SQL string,
+    /// which is safe because they are not user-controlled. The actual
+    /// value being checked and the `except_id`, on the other hand, are
+    /// passed as bound parameters.
+    pub struct Unique {
+        pub table: &'static str,
+        pub column: &'static str,
+        pub except_id: Option<i64>,
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncRule for Unique {
+        async fn passes(&self, value: &str) -> Result<(), String> {
+            let conn = DB::connection().map_err(|e| format!("db: {e}"))?;
+            let backend = conn.inner().get_database_backend();
+
+            let (sql, values) = match self.except_id {
+                None => (
+                    format!(
+                        "SELECT COUNT(*) AS c FROM {} WHERE {} = ?",
+                        self.table, self.column
+                    ),
+                    vec![Value::from(value.to_string())],
+                ),
+                Some(id) => (
+                    format!(
+                        "SELECT COUNT(*) AS c FROM {} WHERE {} = ? AND id <> ?",
+                        self.table, self.column
+                    ),
+                    vec![Value::from(value.to_string()), Value::from(id)],
+                ),
+            };
+
+            let stmt = Statement::from_sql_and_values(backend, &sql, values);
+            let row = conn
+                .inner()
+                .query_one(stmt)
+                .await
+                .map_err(|e| format!("unique query: {e}"))?
+                .ok_or_else(|| "unique query returned no rows".to_string())?;
+
+            let count: i64 = row
+                .try_get::<i64>("", "c")
+                .map_err(|e| format!("unique decode: {e}"))?;
+
+            if count == 0 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{} already exists for {}",
+                    self.column, self.table
+                ))
+            }
+        }
+    }
+}
+
+pub use async_rules::Unique;
