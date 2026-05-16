@@ -2,11 +2,16 @@
 //!
 //! Emits two impls per struct:
 //! 1. `impl FromRequest` — calls hooks, parses the body once via
-//!    `parse_multipart_streaming`, dispatches each `(name, value)` to
-//!    the right field, then constructs `Self`.
+//!    `parse_multipart_streaming_with_cap`, dispatches each `(name, value)`
+//!    to the right field, then constructs `Self`.
 //! 2. `impl MultipartRequestHooks` — empty default unless the struct
 //!    carries `#[multipart(custom_hooks)]`, in which case the user
 //!    provides their own impl.
+//!
+//! Validators receive a bounded sniff buffer + the running size in
+//! bytes; the parser captures both during streaming so neither
+//! `validate_chunk` nor `validate_final` requires the full part in
+//! memory.
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -101,20 +106,27 @@ pub fn expand(input: TokenStream) -> TokenStream {
                 });
                 validator_arms.push(quote! {
                     #field_name_str => {
-                        <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_chunk(&#v_ident, accumulated)?;
+                        <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_chunk(&#v_ident, sniff, size)?;
                     }
                 });
                 field_arms.push(quote! {
                     #field_name_str => {
-                        if let ::suprnova::http::upload::MultipartValue::File { bytes, file_name, content_type } = value {
+                        if let ::suprnova::http::upload::MultipartValue::File { backing, size, file_name, content_type, inferred_extension, sniff } = value {
                             <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_final(
-                                &#v_ident, &bytes, content_type.as_deref()
+                                &#v_ident, &sniff, size, content_type.as_deref()
                             )?;
                             if #ident.is_none() {
                                 #ident = ::core::option::Option::Some(
-                                    ::suprnova::http::upload::UploadedFile::<#validator>::new(
-                                        bytes, file_name, content_type,
-                                    )
+                                    match backing {
+                                        ::suprnova::http::upload::UploadedFileBacking::Memory(b) =>
+                                            ::suprnova::http::upload::UploadedFile::<#validator>::from_memory(
+                                                b, file_name, content_type, inferred_extension,
+                                            ),
+                                        ::suprnova::http::upload::UploadedFileBacking::Disk(t) =>
+                                            ::suprnova::http::upload::UploadedFile::<#validator>::from_disk(
+                                                t, size, file_name, content_type, inferred_extension,
+                                            ),
+                                    }
                                 );
                             }
                         } else {
@@ -142,20 +154,27 @@ pub fn expand(input: TokenStream) -> TokenStream {
                 });
                 validator_arms.push(quote! {
                     #field_name_str => {
-                        <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_chunk(&#v_ident, accumulated)?;
+                        <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_chunk(&#v_ident, sniff, size)?;
                     }
                 });
                 field_arms.push(quote! {
                     #field_name_str => {
-                        if let ::suprnova::http::upload::MultipartValue::File { bytes, file_name, content_type } = value {
+                        if let ::suprnova::http::upload::MultipartValue::File { backing, size, file_name, content_type, inferred_extension, sniff } = value {
                             <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_final(
-                                &#v_ident, &bytes, content_type.as_deref()
+                                &#v_ident, &sniff, size, content_type.as_deref()
                             )?;
                             if #ident.is_none() {
                                 #ident = ::core::option::Option::Some(
-                                    ::suprnova::http::upload::UploadedFile::<#validator>::new(
-                                        bytes, file_name, content_type,
-                                    )
+                                    match backing {
+                                        ::suprnova::http::upload::UploadedFileBacking::Memory(b) =>
+                                            ::suprnova::http::upload::UploadedFile::<#validator>::from_memory(
+                                                b, file_name, content_type, inferred_extension,
+                                            ),
+                                        ::suprnova::http::upload::UploadedFileBacking::Disk(t) =>
+                                            ::suprnova::http::upload::UploadedFile::<#validator>::from_disk(
+                                                t, size, file_name, content_type, inferred_extension,
+                                            ),
+                                    }
                                 );
                             }
                         }
@@ -173,19 +192,26 @@ pub fn expand(input: TokenStream) -> TokenStream {
                 });
                 validator_arms.push(quote! {
                     #field_name_str => {
-                        <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_chunk(&#v_ident, accumulated)?;
+                        <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_chunk(&#v_ident, sniff, size)?;
                     }
                 });
                 field_arms.push(quote! {
                     #field_name_str => {
-                        if let ::suprnova::http::upload::MultipartValue::File { bytes, file_name, content_type } = value {
+                        if let ::suprnova::http::upload::MultipartValue::File { backing, size, file_name, content_type, inferred_extension, sniff } = value {
                             <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_final(
-                                &#v_ident, &bytes, content_type.as_deref()
+                                &#v_ident, &sniff, size, content_type.as_deref()
                             )?;
                             #ident.push(
-                                ::suprnova::http::upload::UploadedFile::<#validator>::new(
-                                    bytes, file_name, content_type,
-                                )
+                                match backing {
+                                    ::suprnova::http::upload::UploadedFileBacking::Memory(b) =>
+                                        ::suprnova::http::upload::UploadedFile::<#validator>::from_memory(
+                                            b, file_name, content_type, inferred_extension,
+                                        ),
+                                    ::suprnova::http::upload::UploadedFileBacking::Disk(t) =>
+                                        ::suprnova::http::upload::UploadedFile::<#validator>::from_disk(
+                                            t, size, file_name, content_type, inferred_extension,
+                                        ),
+                                }
                             );
                         }
                     }
@@ -308,10 +334,12 @@ pub fn expand(input: TokenStream) -> TokenStream {
                 #(#validator_decls)*
 
                 let __max_body_bytes: usize = #max_body_bytes_expr;
+                let __spill_threshold: usize = ::suprnova::http::upload::global_upload_spill_threshold();
                 let payload = ::suprnova::http::upload::parse_multipart_streaming_with_cap(
                     req,
                     __max_body_bytes,
-                    |name: &str, accumulated: &[u8]| -> ::core::result::Result<(), ::suprnova::FrameworkError> {
+                    __spill_threshold,
+                    |name: &str, sniff: &[u8], size: u64| -> ::core::result::Result<(), ::suprnova::FrameworkError> {
                         match name {
                             #(#validator_arms)*
                             _ => {}

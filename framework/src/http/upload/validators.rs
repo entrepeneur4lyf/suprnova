@@ -2,6 +2,15 @@
 //! runs both. Implementations are `Default`-constructed inside the
 //! derive macro; unit structs auto-impl `Default`, parameterized
 //! built-ins use phantom types so a `Default` ctor is meaningful.
+//!
+//! # Streaming-aware signature
+//!
+//! Because parts above the configured spill threshold no longer keep their
+//! full contents in memory, validators receive a bounded **sniff buffer**
+//! (the first ~16 KiB of the part, sufficient for magic-byte detection)
+//! plus the **total accumulated size** in bytes. Validators that care
+//! about content (e.g. [`Image`], [`MimeType`]) consult `sniff`; validators
+//! that care about size (e.g. [`MaxSize`]) consult `size`.
 
 use crate::FrameworkError;
 
@@ -31,22 +40,37 @@ use crate::FrameworkError;
 /// then `MaxSize::validate_chunk` (per chunk); `validate_final` runs in
 /// the same order. Short-circuits on first `Err`.
 pub trait UploadValidator: Send + Sync + Default {
-    /// Called after each chunk is appended to the accumulator.
-    /// Return `Err` to short-circuit oversized uploads at the byte
-    /// boundary without buffering further.
-    fn validate_chunk(&self, accumulated: &[u8]) -> Result<(), FrameworkError> {
-        let _ = accumulated;
+    /// Called after each chunk lands.
+    ///
+    /// - `sniff` is the first up to 16 KiB of the part (truncated when
+    ///   the part is smaller), sufficient for magic-byte detection via
+    ///   `infer::get`. The buffer never grows past 16 KiB regardless of
+    ///   part size.
+    /// - `size` is the running total of bytes received for this part.
+    ///
+    /// Return `Err` to short-circuit oversized uploads at the chunk
+    /// boundary without buffering further. Size-based validators
+    /// (`MaxSize<N>`) check `size`; content-based validators don't
+    /// usually need to act per-chunk.
+    fn validate_chunk(&self, sniff: &[u8], size: u64) -> Result<(), FrameworkError> {
+        let _ = (sniff, size);
         Ok(())
     }
 
-    /// Called once when the part is fully received. Use for
-    /// magic-byte content sniffing.
+    /// Called once when the part is fully received.
+    ///
+    /// - `sniff` is the bounded 16 KiB prefix captured during parsing
+    ///   (same buffer threaded through `validate_chunk`).
+    /// - `size` is the final byte count.
+    /// - `content_type` is the client-declared `Content-Type` header.
+    ///   Untrusted — content sniffers should rely on `sniff`.
     fn validate_final(
         &self,
-        full: &[u8],
+        sniff: &[u8],
+        size: u64,
         content_type: Option<&str>,
     ) -> Result<(), FrameworkError> {
-        let _ = (full, content_type);
+        let _ = (sniff, size, content_type);
         Ok(())
     }
 }
@@ -59,8 +83,8 @@ impl UploadValidator for () {}
 pub struct MaxSize<const N: usize>;
 
 impl<const N: usize> UploadValidator for MaxSize<N> {
-    fn validate_chunk(&self, accumulated: &[u8]) -> Result<(), FrameworkError> {
-        if accumulated.len() > N {
+    fn validate_chunk(&self, _sniff: &[u8], size: u64) -> Result<(), FrameworkError> {
+        if size > N as u64 {
             return Err(FrameworkError::Domain {
                 message: format!("file exceeds {N} bytes"),
                 status_code: 413,
@@ -68,8 +92,13 @@ impl<const N: usize> UploadValidator for MaxSize<N> {
         }
         Ok(())
     }
-    fn validate_final(&self, full: &[u8], _ct: Option<&str>) -> Result<(), FrameworkError> {
-        self.validate_chunk(full)
+    fn validate_final(
+        &self,
+        _sniff: &[u8],
+        size: u64,
+        _ct: Option<&str>,
+    ) -> Result<(), FrameworkError> {
+        self.validate_chunk(&[], size)
     }
 }
 
@@ -78,8 +107,15 @@ impl<const N: usize> UploadValidator for MaxSize<N> {
 pub struct Image;
 
 impl UploadValidator for Image {
-    fn validate_final(&self, full: &[u8], _ct: Option<&str>) -> Result<(), FrameworkError> {
-        let kind = infer::get(full).ok_or_else(|| FrameworkError::Domain {
+    fn validate_final(
+        &self,
+        sniff: &[u8],
+        _size: u64,
+        _ct: Option<&str>,
+    ) -> Result<(), FrameworkError> {
+        // `infer::get` only needs the first ~32 bytes for every format it
+        // recognises; the bounded sniff buffer (≤ 16 KiB) is generous.
+        let kind = infer::get(sniff).ok_or_else(|| FrameworkError::Domain {
             message: "could not identify file type".into(),
             status_code: 422,
         })?;
@@ -102,8 +138,13 @@ pub trait MimeAllowlist: Send + Sync + Default {
 pub struct MimeType<L: MimeAllowlist>(std::marker::PhantomData<L>);
 
 impl<L: MimeAllowlist + 'static> UploadValidator for MimeType<L> {
-    fn validate_final(&self, full: &[u8], _ct: Option<&str>) -> Result<(), FrameworkError> {
-        let kind = infer::get(full).ok_or_else(|| FrameworkError::Domain {
+    fn validate_final(
+        &self,
+        sniff: &[u8],
+        _size: u64,
+        _ct: Option<&str>,
+    ) -> Result<(), FrameworkError> {
+        let kind = infer::get(sniff).ok_or_else(|| FrameworkError::Domain {
             message: "could not identify file type".into(),
             status_code: 422,
         })?;
@@ -123,13 +164,18 @@ where
     A: UploadValidator,
     B: UploadValidator,
 {
-    fn validate_chunk(&self, accumulated: &[u8]) -> Result<(), FrameworkError> {
-        self.0.validate_chunk(accumulated)?;
-        self.1.validate_chunk(accumulated)
+    fn validate_chunk(&self, sniff: &[u8], size: u64) -> Result<(), FrameworkError> {
+        self.0.validate_chunk(sniff, size)?;
+        self.1.validate_chunk(sniff, size)
     }
-    fn validate_final(&self, full: &[u8], ct: Option<&str>) -> Result<(), FrameworkError> {
-        self.0.validate_final(full, ct)?;
-        self.1.validate_final(full, ct)
+    fn validate_final(
+        &self,
+        sniff: &[u8],
+        size: u64,
+        ct: Option<&str>,
+    ) -> Result<(), FrameworkError> {
+        self.0.validate_final(sniff, size, ct)?;
+        self.1.validate_final(sniff, size, ct)
     }
 }
 
@@ -139,14 +185,19 @@ where
     B: UploadValidator,
     C: UploadValidator,
 {
-    fn validate_chunk(&self, accumulated: &[u8]) -> Result<(), FrameworkError> {
-        self.0.validate_chunk(accumulated)?;
-        self.1.validate_chunk(accumulated)?;
-        self.2.validate_chunk(accumulated)
+    fn validate_chunk(&self, sniff: &[u8], size: u64) -> Result<(), FrameworkError> {
+        self.0.validate_chunk(sniff, size)?;
+        self.1.validate_chunk(sniff, size)?;
+        self.2.validate_chunk(sniff, size)
     }
-    fn validate_final(&self, full: &[u8], ct: Option<&str>) -> Result<(), FrameworkError> {
-        self.0.validate_final(full, ct)?;
-        self.1.validate_final(full, ct)?;
-        self.2.validate_final(full, ct)
+    fn validate_final(
+        &self,
+        sniff: &[u8],
+        size: u64,
+        ct: Option<&str>,
+    ) -> Result<(), FrameworkError> {
+        self.0.validate_final(sniff, size, ct)?;
+        self.1.validate_final(sniff, size, ct)?;
+        self.2.validate_final(sniff, size, ct)
     }
 }

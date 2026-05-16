@@ -62,9 +62,11 @@ pub use http::body::{
 };
 pub use http::upload::validators::{Image, MaxSize, MimeAllowlist, MimeType};
 pub use http::upload::{
-    global_max_multipart_body_bytes, parse_multipart_streaming,
-    parse_multipart_streaming_with_cap, set_global_max_multipart_body_bytes, MultipartPayload,
-    MultipartRequestHooks, MultipartValue, UploadedFile, DEFAULT_MAX_MULTIPART_BODY_BYTES,
+    global_max_multipart_body_bytes, global_upload_spill_threshold, parse_multipart_streaming,
+    parse_multipart_streaming_with_cap, set_global_max_multipart_body_bytes,
+    set_global_upload_spill_threshold, MultipartPayload, MultipartRequestHooks, MultipartValue,
+    UploadedFile, UploadedFileBacking, DEFAULT_MAX_MULTIPART_BODY_BYTES,
+    DEFAULT_UPLOAD_SPILL_THRESHOLD,
 };
 pub use http_client::{
     assert_not_sent, assert_sent, fake_response, ClientResponse, Http, RecordedRequest,

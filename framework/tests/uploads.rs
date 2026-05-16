@@ -43,7 +43,7 @@ async fn multipart_parses_two_fields_via_helper() {
         ],
     );
     let req = request_from_multipart("test", body).await;
-    let payload = parse_multipart_streaming(req, |_, _| Ok(())).await.unwrap();
+    let payload = parse_multipart_streaming(req, |_, _, _| Ok(())).await.unwrap();
     let names: Vec<&str> = payload.fields.iter().map(|(n, _)| n.as_str()).collect();
     assert!(names.contains(&"avatar"));
     assert!(names.contains(&"caption"));
@@ -63,7 +63,8 @@ async fn derive_extracts_avatar_and_caption() {
     );
     let req = request_from_multipart("test", body).await;
     let form = AvatarUpload::from_request(req).await.unwrap();
-    assert!(form.avatar.bytes.starts_with(&png[..8]));
+    let avatar_bytes = form.avatar.bytes().await.unwrap();
+    assert!(avatar_bytes.starts_with(&png[..8]));
     assert_eq!(form.caption.as_deref(), Some("hello world"));
 }
 
@@ -112,9 +113,9 @@ async fn derive_collects_array_uploads() {
     let req = request_from_multipart("test", body).await;
     let form = Gallery::from_request(req).await.unwrap();
     assert_eq!(form.photos.len(), 3);
-    assert_eq!(form.photos[0].bytes.as_ref(), b"first");
-    assert_eq!(form.photos[1].bytes.as_ref(), b"second");
-    assert_eq!(form.photos[2].bytes.as_ref(), b"third");
+    assert_eq!(form.photos[0].bytes().await.unwrap().as_ref(), b"first");
+    assert_eq!(form.photos[1].bytes().await.unwrap().as_ref(), b"second");
+    assert_eq!(form.photos[2].bytes().await.unwrap().as_ref(), b"third");
 }
 
 // ── FromStr text parsing ──
@@ -185,7 +186,10 @@ struct ChecksumForm {
 
 impl MultipartRequestHooks for ChecksumForm {
     fn after_validation(&self) -> Result<(), ValidationErrors> {
-        if self.file.bytes.len() != self.expected_size {
+        // `after_validation` is sync — no `.await`. Use the pre-computed
+        // `size` field, which works for both memory- and disk-backed
+        // uploads without re-reading bytes.
+        if self.file.size as usize != self.expected_size {
             let mut errs = ValidationErrors::new();
             errs.add("file", "size mismatch");
             return Err(errs);
@@ -259,11 +263,16 @@ struct ChunkCounter {
 }
 
 impl suprnova::http::upload::validators::UploadValidator for ChunkCounter {
-    fn validate_chunk(&self, _: &[u8]) -> Result<(), suprnova::FrameworkError> {
+    fn validate_chunk(&self, _sniff: &[u8], _size: u64) -> Result<(), suprnova::FrameworkError> {
         self.count.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    fn validate_final(&self, _: &[u8], _: Option<&str>) -> Result<(), suprnova::FrameworkError> {
+    fn validate_final(
+        &self,
+        _sniff: &[u8],
+        _size: u64,
+        _ct: Option<&str>,
+    ) -> Result<(), suprnova::FrameworkError> {
         let chunks = self.count.load(Ordering::SeqCst);
         if chunks == 0 {
             return Err(suprnova::FrameworkError::Domain {
@@ -300,40 +309,46 @@ async fn validator_instance_is_threaded_across_chunk_and_final() {
     );
 }
 
-// ── Multipart body cap: default / global override / per-struct override ──
+// ── Multipart body cap & spill threshold: default / global override / per-struct override ──
 //
-// These tests mutate a process-global atomic. Cargo runs tests within a
-// single integration binary in parallel by default, so they would race
-// each other without serialization. The `BodyCapGuard` below combines a
-// poison-tolerant Mutex with RAII reset-to-default-on-drop so that even
-// if a body-cap test panics mid-assertion, the next one starts clean.
+// These tests mutate two independent process-global atomics (body cap
+// and spill threshold). Cargo runs tests within a single integration
+// binary in parallel by default, so concurrent mutations would race.
+// The `UploadGlobalsGuard` below combines a poison-tolerant Mutex with
+// RAII reset-to-default-on-drop covering BOTH atomics so even if a test
+// panics mid-assertion the next one starts clean. We share one mutex
+// across body-cap and spill-threshold tests — both atomics are global,
+// so simultaneous mutation from sibling tests would still race even if
+// each used a separate lock.
 
 use std::sync::Mutex;
 
-static BODY_CAP_LOCK: Mutex<()> = Mutex::new(());
+static UPLOAD_GLOBALS_LOCK: Mutex<()> = Mutex::new(());
 
-struct BodyCapGuard {
+struct UploadGlobalsGuard {
     _guard: std::sync::MutexGuard<'static, ()>,
 }
 
-impl BodyCapGuard {
+impl UploadGlobalsGuard {
     fn acquire() -> Self {
-        let guard = BODY_CAP_LOCK
+        let guard = UPLOAD_GLOBALS_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // Always start from the compile-time default.
+        // Always start from the compile-time defaults for both atomics.
         suprnova::http::upload::set_global_max_multipart_body_bytes(0);
+        suprnova::http::upload::set_global_upload_spill_threshold(0);
         Self { _guard: guard }
     }
 }
 
-impl Drop for BodyCapGuard {
+impl Drop for UploadGlobalsGuard {
     fn drop(&mut self) {
-        // Restore the default for any test that doesn't take the lock
-        // (the non-body-cap tests don't touch the global, but a stale
-        // override could still leak across test invocations if we
+        // Restore the defaults for any test that doesn't take the lock
+        // (the non-cap/threshold tests don't touch the globals, but a
+        // stale override could still leak across test invocations if we
         // skipped this).
         suprnova::http::upload::set_global_max_multipart_body_bytes(0);
+        suprnova::http::upload::set_global_upload_spill_threshold(0);
     }
 }
 
@@ -346,7 +361,7 @@ struct UncappedBlob {
 
 #[tokio::test]
 async fn body_cap_uses_default_when_no_override() {
-    let _g = BodyCapGuard::acquire();
+    let _g = UploadGlobalsGuard::acquire();
 
     // 26 MiB body — exceeds the 25 MiB compile-time default.
     let big = vec![0u8; 26 * 1024 * 1024];
@@ -361,7 +376,7 @@ async fn body_cap_uses_default_when_no_override() {
 
 #[tokio::test]
 async fn body_cap_respects_global_override() {
-    let _g = BodyCapGuard::acquire();
+    let _g = UploadGlobalsGuard::acquire();
 
     // Set a 1 MiB process-global cap.
     suprnova::http::upload::set_global_max_multipart_body_bytes(1024 * 1024);
@@ -385,7 +400,7 @@ struct TinyBlob {
 
 #[tokio::test]
 async fn body_cap_per_struct_override_wins() {
-    let _g = BodyCapGuard::acquire();
+    let _g = UploadGlobalsGuard::acquire();
 
     // Bump the global way up — per-struct should still apply.
     suprnova::http::upload::set_global_max_multipart_body_bytes(100 * 1024 * 1024);
@@ -403,12 +418,98 @@ async fn body_cap_per_struct_override_wins() {
 
 #[tokio::test]
 async fn body_cap_per_struct_under_cap_succeeds() {
-    let _g = BodyCapGuard::acquire();
+    let _g = UploadGlobalsGuard::acquire();
 
     // 256-byte body, under the per-struct 512-byte cap — should succeed.
     let small = vec![0u8; 256];
     let body = build_multipart_body("test", &[("file", Some("a.bin"), &small)]);
     let req = request_from_multipart("test", body).await;
     let form = TinyBlob::from_request(req).await.unwrap();
-    assert_eq!(form.file.bytes.len(), 256);
+    assert_eq!(form.file.size, 256);
+}
+
+// ── Spill-to-disk: true streaming for large parts ──
+
+#[derive(suprnova::MultipartRequest)]
+struct AnyFile {
+    #[field("file")]
+    file: suprnova::UploadedFile,
+}
+
+#[tokio::test]
+async fn upload_spills_to_disk_above_threshold() {
+    let _g = UploadGlobalsGuard::acquire();
+
+    // Drop the spill threshold so a small body forces the disk path.
+    // Bump the body cap so the cap doesn't reject first.
+    suprnova::http::upload::set_global_upload_spill_threshold(1024); // 1 KiB
+    suprnova::http::upload::set_global_max_multipart_body_bytes(10 * 1024 * 1024);
+
+    let big = vec![7u8; 4 * 1024]; // 4 KiB — comfortably above the 1 KiB threshold
+    let body = build_multipart_body("test", &[("file", Some("big.bin"), &big)]);
+    let req = request_from_multipart("test", body).await;
+
+    let form = AnyFile::from_request(req).await.unwrap();
+    assert_eq!(form.file.size, 4 * 1024);
+    // The async `bytes()` accessor must round-trip the spilled file
+    // identical to what was uploaded.
+    let bytes = form.file.bytes().await.unwrap();
+    assert_eq!(bytes.len(), 4 * 1024);
+    assert!(bytes.iter().all(|b| *b == 7u8));
+}
+
+#[tokio::test]
+async fn upload_stays_in_memory_below_threshold() {
+    let _g = UploadGlobalsGuard::acquire();
+
+    // Default 2 MiB spill threshold (set via `0` sentinel above). A 1 KiB
+    // body must NOT trigger the disk path — assertion is content-equality
+    // round-tripped through the in-memory accessor.
+    let small = vec![3u8; 1024];
+    let body = build_multipart_body("test", &[("file", Some("small.bin"), &small)]);
+    let req = request_from_multipart("test", body).await;
+
+    let form = AnyFile::from_request(req).await.unwrap();
+    assert_eq!(form.file.size, 1024);
+    let bytes = form.file.bytes().await.unwrap();
+    assert_eq!(bytes.len(), 1024);
+    assert!(bytes.iter().all(|b| *b == 3u8));
+}
+
+#[tokio::test]
+async fn store_as_streams_disk_backed_part_to_storage() {
+    use suprnova::Storage;
+    let _g = UploadGlobalsGuard::acquire();
+    // `Storage::fake()` serialises against other Storage tests via its
+    // own internal mutex; our `UploadGlobalsGuard` mutex is independent
+    // (covers the spill/cap atomics). Acquiring both is fine — they
+    // don't share any state.
+    let _storage_guard = Storage::fake();
+    Storage::register_memory("spill_dest");
+
+    // Force the spill path with a small threshold.
+    suprnova::http::upload::set_global_upload_spill_threshold(1024);
+    suprnova::http::upload::set_global_max_multipart_body_bytes(10 * 1024 * 1024);
+
+    // 4 KiB body — must spill. Non-uniform content so we can detect
+    // truncation or corruption in the round-trip assertion.
+    let mut big = Vec::with_capacity(4 * 1024);
+    for i in 0..(4 * 1024) {
+        big.push((i % 251) as u8); // 251 keeps a clear pattern without trivial repeats.
+    }
+    let body = build_multipart_body("test", &[("file", Some("big.bin"), &big)]);
+    let req = request_from_multipart("test", body).await;
+
+    let form = AnyFile::from_request(req).await.unwrap();
+    let disk = Storage::disk("spill_dest").unwrap();
+    form.file
+        .store_as(&disk, "stored/big.bin")
+        .await
+        .expect("store_as must stream disk-backed parts");
+
+    // Read the stored object back and assert byte-for-byte equality with
+    // the original upload — this proves the streaming copy preserved
+    // every byte (no early termination, no truncation, no double-write).
+    let stored = disk.read("stored/big.bin").await.unwrap();
+    assert_eq!(stored.to_vec(), big);
 }

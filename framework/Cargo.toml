@@ -75,8 +75,9 @@ infer = "0.19"
 multer = "3"
 opendal = { version = "0.56", default-features = false, features = ["services-fs", "services-s3", "services-azblob", "services-gcs", "services-memory", "layers-retry"] }
 url = "2"
-
-[dev-dependencies]
+# Spill-to-disk backing for large multipart parts. Used at runtime when a
+# single upload exceeds the in-memory spill threshold so the framework never
+# materialises an arbitrarily large body in RAM.
 tempfile = "3"
 
 [features]
