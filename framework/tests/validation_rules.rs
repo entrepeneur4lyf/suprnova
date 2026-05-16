@@ -2,13 +2,9 @@
 //! `suprnova::validation::rule`.
 
 use sea_orm::{ConnectionTrait, Database, DbBackend, Statement, Value};
+use suprnova::rules::{Email, Max, Min, Required, RequiredIf, RequiredUnless, RequiredWith};
 use suprnova::testing::TestContainer;
-use suprnova::validation::rule::{
-    async_rules::Unique,
-    rules::{Email, Max, Min, Required, RequiredIf, RequiredUnless, RequiredWith},
-    AsyncRule, ContextualRule, FormContext, Rule,
-};
-use suprnova::DbConnection;
+use suprnova::{AsyncRule, ContextualRule, DbConnection, FormContext, Rule, Unique};
 
 #[test]
 fn required_passes_on_present() {

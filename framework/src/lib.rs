@@ -113,6 +113,9 @@ pub use telemetry::{
     init_telemetry, CounterHandle, GaugeHandle, HistogramHandle, Metrics, OtelConfig,
     TelemetryGuard,
 };
+pub use validation::rule::{
+    async_rules, rules, AsyncRule, ContextualRule, FormContext, Rule, Unique,
+};
 pub use workflow::{
     start_named, StepStatus, WorkflowConfig, WorkflowContext, WorkflowHandle, WorkflowStatus,
     WorkflowWorker,
