@@ -73,6 +73,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 infer = "0.19"
 multer = "3"
 opendal = { version = "0.56", default-features = false, features = ["services-fs", "services-s3", "services-azblob", "services-gcs", "services-memory", "layers-retry"] }
+url = "2"
 
 [dev-dependencies]
 tempfile = "3"

@@ -5,11 +5,15 @@
 //!
 //! - [`Rule`] — pure sync check on a single value. Built-ins:
 //!   [`rules::Required`], [`rules::Email`], [`rules::Min`],
-//!   [`rules::Max`].
+//!   [`rules::Max`], [`rules::Between`], [`rules::In`],
+//!   [`rules::NotIn`], [`rules::Integer`], [`rules::Numeric`],
+//!   [`rules::Boolean`], [`rules::Alpha`], [`rules::AlphaNum`],
+//!   [`rules::Url`], [`rules::Uuid`].
 //! - [`ContextualRule`] — sync check that can read sibling fields
 //!   (think Laravel `required_if:other,value`). Built-ins:
 //!   [`rules::RequiredIf`], [`rules::RequiredWith`],
-//!   [`rules::RequiredUnless`].
+//!   [`rules::RequiredUnless`], [`rules::Same`],
+//!   [`rules::Different`], [`rules::Confirmed`].
 //! - [`AsyncRule`] — async check (DB queries — [`async_rules::Unique`]
 //!   lives here).
 //!
@@ -120,6 +124,147 @@ pub mod rules {
         }
     }
 
+    /// Laravel `between:min,max` — value length is `min..=max` inclusive
+    /// (counted in Unicode scalar values, not bytes).
+    pub struct Between(pub usize, pub usize);
+    impl Rule for Between {
+        fn passes(&self, value: &str) -> Result<(), String> {
+            let len = value.chars().count();
+            if len < self.0 || len > self.1 {
+                Err(format!(
+                    "must be between {} and {} characters",
+                    self.0, self.1
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Laravel `in:foo,bar,baz` — value must be one of the allowed
+    /// strings (exact match, case-sensitive).
+    pub struct In(pub &'static [&'static str]);
+    impl Rule for In {
+        fn passes(&self, value: &str) -> Result<(), String> {
+            if self.0.iter().any(|v| *v == value) {
+                Ok(())
+            } else {
+                Err(format!("must be one of {:?}", self.0))
+            }
+        }
+    }
+
+    /// Laravel `not_in:foo,bar,baz` — value must NOT be in the
+    /// forbidden list (exact match, case-sensitive).
+    pub struct NotIn(pub &'static [&'static str]);
+    impl Rule for NotIn {
+        fn passes(&self, value: &str) -> Result<(), String> {
+            if self.0.iter().any(|v| *v == value) {
+                Err(format!("must not be one of {:?}", self.0))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Laravel `integer` — value parses cleanly as an `i64`.
+    pub struct Integer;
+    impl Rule for Integer {
+        fn passes(&self, value: &str) -> Result<(), String> {
+            value
+                .parse::<i64>()
+                .map(|_| ())
+                .map_err(|_| "must be an integer".into())
+        }
+    }
+
+    /// Laravel `numeric` — value parses cleanly as an `f64` (covers
+    /// integers, floats, and scientific notation).
+    pub struct Numeric;
+    impl Rule for Numeric {
+        fn passes(&self, value: &str) -> Result<(), String> {
+            value
+                .parse::<f64>()
+                .map(|_| ())
+                .map_err(|_| "must be numeric".into())
+        }
+    }
+
+    /// Laravel `boolean` — accepts `"true"`, `"false"`, `"0"`, `"1"`,
+    /// `"yes"`, `"no"`, `"on"`, `"off"` (case-insensitive).
+    pub struct Boolean;
+    impl Rule for Boolean {
+        fn passes(&self, value: &str) -> Result<(), String> {
+            match value.to_ascii_lowercase().as_str() {
+                "true" | "false" | "0" | "1" | "yes" | "no" | "on" | "off" => Ok(()),
+                _ => Err("must be a boolean".into()),
+            }
+        }
+    }
+
+    /// Laravel `alpha` — value must contain only alphabetic
+    /// characters and be non-empty.
+    ///
+    /// **Unicode semantics:** uses [`char::is_alphabetic`] which
+    /// accepts non-ASCII letters (`é`, `ñ`, `中`, etc.). This differs
+    /// from Laravel 13's default `alpha`, which is ASCII-only — Laravel
+    /// only matches Unicode if the `:ascii` suffix is omitted in newer
+    /// versions. Suprnova picks the international default; if you need
+    /// ASCII-only behaviour, gate with a custom rule.
+    pub struct Alpha;
+    impl Rule for Alpha {
+        fn passes(&self, value: &str) -> Result<(), String> {
+            if !value.is_empty() && value.chars().all(|c| c.is_alphabetic()) {
+                Ok(())
+            } else {
+                Err("must contain only letters".into())
+            }
+        }
+    }
+
+    /// Laravel `alpha_dash` — value is letters, digits, underscores,
+    /// or hyphens; must be non-empty. Uses Unicode-aware
+    /// [`char::is_alphanumeric`].
+    pub struct AlphaNum;
+    impl Rule for AlphaNum {
+        fn passes(&self, value: &str) -> Result<(), String> {
+            if !value.is_empty()
+                && value
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            {
+                Ok(())
+            } else {
+                Err("must be alphanumeric (letters, digits, _, -)".into())
+            }
+        }
+    }
+
+    /// Laravel `url` — value parses as a well-formed URL via the
+    /// [`url`] crate. Note that `Url::parse` is liberal about schemes
+    /// (`file:`, custom URIs all pass); tighten with an extra rule if
+    /// you specifically want `http`/`https`.
+    pub struct Url;
+    impl Rule for Url {
+        fn passes(&self, value: &str) -> Result<(), String> {
+            url::Url::parse(value)
+                .map(|_| ())
+                .map_err(|_| "must be a valid URL".into())
+        }
+    }
+
+    /// Laravel `uuid` — value parses as a UUID in any of the formats
+    /// the [`uuid`] crate's `parse_str` accepts (hyphenated, simple,
+    /// braced, urn).
+    pub struct Uuid;
+    impl Rule for Uuid {
+        fn passes(&self, value: &str) -> Result<(), String> {
+            uuid::Uuid::parse_str(value)
+                .map(|_| ())
+                .map_err(|_| "must be a valid UUID".into())
+        }
+    }
+
     /// Laravel `required_if:other,value` — the field is required only
     /// when sibling field `other` is exactly equal to `value`.
     ///
@@ -181,6 +326,60 @@ pub mod rules {
                 Err(format!("required unless {} is {}", self.other, self.value))
             } else {
                 Ok(())
+            }
+        }
+    }
+
+    /// Laravel `same:other_field` — value must equal `ctx[other]`. Used
+    /// for password-confirmation style flows where the two fields don't
+    /// share the `<field>_confirmation` suffix convention.
+    ///
+    /// Missing `other` field is treated as a failure.
+    pub struct Same {
+        pub other: &'static str,
+    }
+    impl ContextualRule for Same {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String> {
+            match ctx.get(self.other) {
+                Some(v) if v == value => Ok(()),
+                _ => Err(format!("must match {}", self.other)),
+            }
+        }
+    }
+
+    /// Laravel `different:other_field` — value must differ from
+    /// `ctx[other]`. If `other` is missing, the rule passes (there is
+    /// nothing to be the same as).
+    pub struct Different {
+        pub other: &'static str,
+    }
+    impl ContextualRule for Different {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String> {
+            match ctx.get(self.other) {
+                Some(v) if v == value => Err(format!("must differ from {}", self.other)),
+                _ => Ok(()),
+            }
+        }
+    }
+
+    /// Laravel `confirmed` — value must equal `ctx["<field>_confirmation"]`.
+    ///
+    /// Because [`ContextualRule::passes`] does not receive the name of
+    /// the field being validated, the lookup target is explicit on the
+    /// rule itself. Construct as `Confirmed { field: "password" }` when
+    /// validating a `password` field; the rule will look up
+    /// `password_confirmation` in the form context.
+    ///
+    /// Missing confirmation field is treated as a failure.
+    pub struct Confirmed {
+        pub field: &'static str,
+    }
+    impl ContextualRule for Confirmed {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String> {
+            let key = format!("{}_confirmation", self.field);
+            match ctx.get(&key) {
+                Some(v) if v == value => Ok(()),
+                _ => Err("confirmation does not match".into()),
             }
         }
     }

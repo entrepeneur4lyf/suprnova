@@ -2,7 +2,10 @@
 //! `suprnova::validation::rule`.
 
 use sea_orm::{ConnectionTrait, Database, DbBackend, Statement, Value};
-use suprnova::rules::{Email, Max, Min, Required, RequiredIf, RequiredUnless, RequiredWith};
+use suprnova::rules::{
+    Alpha, AlphaNum, Between, Boolean, Confirmed, Different, Email, In, Integer, Max, Min, NotIn,
+    Numeric, Required, RequiredIf, RequiredUnless, RequiredWith, Same, Url, Uuid,
+};
 use suprnova::testing::TestContainer;
 use suprnova::{AsyncRule, ContextualRule, DbConnection, FormContext, Rule, Unique};
 
@@ -172,6 +175,116 @@ async fn unique_ignores_except_id() {
         except_id: Some(id),
     };
     assert!(rule.passes("self@example.com").await.is_ok());
+}
+
+// --- expanded sync rule set ---
+
+#[test]
+fn between_checks_inclusive_length_range() {
+    let r = Between(3, 5);
+    assert!(r.passes("abc").is_ok());
+    assert!(r.passes("abcde").is_ok());
+    assert!(r.passes("ab").is_err());
+    assert!(r.passes("abcdef").is_err());
+}
+
+#[test]
+fn in_and_not_in_check_membership() {
+    let allowed = In(&["red", "green", "blue"]);
+    assert!(allowed.passes("red").is_ok());
+    assert!(allowed.passes("yellow").is_err());
+
+    let banned = NotIn(&["admin", "root"]);
+    assert!(banned.passes("user").is_ok());
+    assert!(banned.passes("admin").is_err());
+}
+
+#[test]
+fn integer_and_numeric_parse_correctly() {
+    assert!(Integer.passes("42").is_ok());
+    assert!(Integer.passes("-17").is_ok());
+    assert!(Integer.passes("3.14").is_err());
+    assert!(Integer.passes("abc").is_err());
+
+    assert!(Numeric.passes("3.14").is_ok());
+    assert!(Numeric.passes("42").is_ok());
+    assert!(Numeric.passes("-1.5e10").is_ok());
+    assert!(Numeric.passes("abc").is_err());
+}
+
+#[test]
+fn boolean_accepts_common_truthy_falsy() {
+    for v in &[
+        "true", "false", "TRUE", "False", "0", "1", "yes", "no", "ON", "off",
+    ] {
+        assert!(Boolean.passes(v).is_ok(), "should accept: {v}");
+    }
+    assert!(Boolean.passes("maybe").is_err());
+    assert!(Boolean.passes("2").is_err());
+}
+
+#[test]
+fn alpha_and_alphanum_check_character_classes() {
+    assert!(Alpha.passes("hello").is_ok());
+    assert!(
+        Alpha.passes("héllo").is_ok(),
+        "unicode alphabetic accepted"
+    );
+    assert!(Alpha.passes("hello42").is_err());
+    assert!(Alpha.passes("").is_err());
+
+    assert!(AlphaNum.passes("hello42").is_ok());
+    assert!(AlphaNum.passes("user_name-42").is_ok());
+    assert!(AlphaNum.passes("user@name").is_err());
+    assert!(AlphaNum.passes("").is_err());
+}
+
+#[test]
+fn url_and_uuid_validate_format() {
+    assert!(Url.passes("https://example.com").is_ok());
+    assert!(Url.passes("http://x.test/p?q=1").is_ok());
+    assert!(Url.passes("not a url").is_err());
+
+    assert!(Uuid.passes("550e8400-e29b-41d4-a716-446655440000").is_ok());
+    assert!(Uuid.passes("not-a-uuid").is_err());
+}
+
+// --- expanded contextual rule set ---
+
+#[test]
+fn same_checks_field_equality() {
+    let rule = Same { other: "password" };
+    let c = ctx(&[("password", "secret")]);
+    assert!(rule.passes("secret", &c).is_ok());
+    assert!(rule.passes("different", &c).is_err());
+    let c2 = ctx(&[]);
+    assert!(
+        rule.passes("anything", &c2).is_err(),
+        "missing other field → fail"
+    );
+}
+
+#[test]
+fn different_rejects_equality() {
+    let rule = Different {
+        other: "old_password",
+    };
+    let c = ctx(&[("old_password", "secret")]);
+    assert!(rule.passes("new_secret", &c).is_ok());
+    assert!(rule.passes("secret", &c).is_err());
+}
+
+#[test]
+fn confirmed_matches_field_confirmation_suffix() {
+    let rule = Confirmed { field: "password" };
+    let c = ctx(&[("password_confirmation", "secret")]);
+    assert!(rule.passes("secret", &c).is_ok());
+    assert!(rule.passes("different", &c).is_err());
+    let c2 = ctx(&[]);
+    assert!(
+        rule.passes("anything", &c2).is_err(),
+        "missing confirmation → fail"
+    );
 }
 
 #[test]

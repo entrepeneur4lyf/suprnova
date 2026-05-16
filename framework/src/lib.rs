@@ -115,7 +115,17 @@ pub use telemetry::{
     TelemetryGuard,
 };
 pub use validation::rule::{
-    async_rules, rules, AsyncRule, ContextualRule, FormContext, Rule, Unique,
+    async_rules,
+    rules,
+    rules::{
+        Alpha, AlphaNum, Between, Boolean, Confirmed, Different, Email, In, Integer, Max, Min,
+        NotIn, Numeric, Required, RequiredIf, RequiredUnless, RequiredWith, Same, Url, Uuid,
+    },
+    AsyncRule,
+    ContextualRule,
+    FormContext,
+    Rule,
+    Unique,
 };
 pub use workflow::{
     start_named, StepStatus, WorkflowConfig, WorkflowContext, WorkflowHandle, WorkflowStatus,
