@@ -61,20 +61,30 @@
 //!
 //! # Unknown fields
 //!
-//! By default, payload keys not matching any struct field are silently
-//! dropped (serde default permissive behaviour). Response DTOs and DTOs
-//! shared with external callers that may carry forward-compatible extra
-//! keys typically want this.
+//! By default, payload keys that don't match any struct field are
+//! REJECTED with `serde::de::Error::unknown_field(..)`. Client typos
+//! and schema drift surface immediately at the boundary instead of
+//! silently disappearing into a deserialized value.
 //!
-//! Request-bound DTOs that must reject client typos can opt into strict
-//! mode with `#[data(deny_unknown_fields)]` at the struct level:
+//! Response DTOs that read forward-compatible payloads from external
+//! services (paginated API envelopes, third-party webhooks, etc.) can
+//! opt into permissive behaviour with `#[data(allow_unknown_fields)]`
+//! at the struct level:
 //!
 //! ```ignore
+//! // Strict by default — `{"email": "a@b", "typo": "x"}` fails fast.
 //! #[derive(Data, Validate)]
-//! #[data(deny_unknown_fields)]
 //! struct CreateUser {
 //!     #[validate(email)]
 //!     email: String,
+//! }
+//!
+//! // Permissive opt-in — for response DTOs that may carry extra keys.
+//! #[derive(Data)]
+//! #[data(allow_unknown_fields)]
+//! struct WebhookEvent {
+//!     id: String,
+//!     kind: String,
 //! }
 //! ```
 //!
@@ -134,12 +144,15 @@ struct StructOptions {
     /// impl (body parsing, validation, Precognition, route-param
     /// injection, `after_validation`) is always emitted.
     authorize_fn: Option<syn::ExprPath>,
-    /// `#[data(deny_unknown_fields)]` — when set, the generated
-    /// `Deserialize` visitor rejects payload keys not matching any
-    /// struct field with `serde::de::Error::unknown_field(..)`. The
-    /// default stays permissive (silently ignore unknown keys) so
-    /// response DTOs and forward-compatible inputs aren't broken.
-    deny_unknown_fields: bool,
+    /// `#[data(allow_unknown_fields)]` — when set, the generated
+    /// `Deserialize` visitor silently drops payload keys that don't
+    /// match any struct field (the serde-default permissive behaviour).
+    /// The DEFAULT is strict: unknown keys produce
+    /// `serde::de::Error::unknown_field(..)` so client typos and
+    /// schema drift surface immediately at the boundary. Opt out only
+    /// for response DTOs read back from external services that may
+    /// carry forward-compatible extra keys.
+    allow_unknown_fields: bool,
     /// `Some(...)` when `#[json_resource("...")]` is present on the struct.
     json_resource: Option<JsonResourceOptions>,
 }
@@ -172,8 +185,14 @@ fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::
                     let lit: syn::LitStr = meta.value()?.parse()?;
                     let path: syn::ExprPath = lit.parse()?;
                     opts.authorize_fn = Some(path);
+                } else if meta.path.is_ident("allow_unknown_fields") {
+                    opts.allow_unknown_fields = true;
                 } else if meta.path.is_ident("deny_unknown_fields") {
-                    opts.deny_unknown_fields = true;
+                    // `deny_unknown_fields` was the opt-in flag when
+                    // permissive was the default. Strict is now the
+                    // default (codex review finding #10), so this flag
+                    // is a no-op kept only to keep older call sites
+                    // compiling. Prefer removing the attribute entirely.
                 } else if meta.path.is_ident("custom_authorize") {
                     // Hard-cut diagnostic: the old "skip the whole
                     // FormRequest impl" flag is gone (codex review
@@ -185,7 +204,7 @@ fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::
                     ));
                 } else {
                     return Err(meta.error(
-                        "unknown struct-level #[data(...)] flag — expected auto_lazy, authorize, or deny_unknown_fields",
+                        "unknown struct-level #[data(...)] flag — expected auto_lazy, authorize, or allow_unknown_fields",
                     ));
                 }
                 Ok(())
@@ -761,7 +780,7 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
             where_clause,
             &parsed,
             has_type_params,
-            struct_opts.deny_unknown_fields,
+            struct_opts.allow_unknown_fields,
         )
     };
     let allowlist_registration = build_allowlist_registration(&struct_name_str, &parsed);
@@ -886,7 +905,7 @@ fn build_deserialize(
     where_clause: Option<&syn::WhereClause>,
     parsed: &[(&Field, FieldOptions)],
     has_type_params: bool,
-    deny_unknown_fields: bool,
+    allow_unknown_fields: bool,
 ) -> TokenStream2 {
     let output_only_names: Vec<String> = parsed
         .iter()
@@ -952,21 +971,32 @@ fn build_deserialize(
 
     let visitor_name = quote::format_ident!("__{}DataVisitor", struct_name);
 
-    // Tokens for the `_ =>` arm of the visitor's key match. When
-    // `#[data(deny_unknown_fields)]` is set, we surface
-    // `serde::de::Error::unknown_field` instead of silently dropping
-    // the value. The expected-fields slice is the union of required,
-    // defaultable, and output_only names — output_only keys are rejected
-    // with a more specific message earlier in the match, so listing them
-    // here only affects the diagnostic output for keys that match
-    // nothing at all.
+    // Tokens for the `_ =>` arm of the visitor's key match. The default
+    // is STRICT: unknown payload keys surface as
+    // `serde::de::Error::unknown_field` so client typos and schema drift
+    // fail at the boundary. `#[data(allow_unknown_fields)]` opts back
+    // into the serde-default permissive behaviour for response DTOs
+    // that read forward-compatible payloads from external services.
+    //
+    // The expected-fields slice is the union of required, defaultable,
+    // and output_only names — output_only keys are rejected with a more
+    // specific message earlier in the match, so listing them here only
+    // affects the diagnostic output for keys that match nothing at all.
     let all_known_names: Vec<String> = req_names
         .iter()
         .map(|s| (*s).to_string())
         .chain(def_names.iter().map(|s| (*s).to_string()))
         .chain(output_only_names.iter().cloned())
         .collect();
-    let unknown_field_arm = if deny_unknown_fields {
+    let unknown_field_arm = if allow_unknown_fields {
+        quote! {
+            _ => {
+                // Unknown keys silently dropped — opt-in permissive
+                // behaviour via `#[data(allow_unknown_fields)]`.
+                let _: ::serde::de::IgnoredAny = map.next_value()?;
+            }
+        }
+    } else {
         quote! {
             _ => {
                 // Drop the value to keep the deserializer state machine
@@ -977,14 +1007,6 @@ fn build_deserialize(
                     key.as_str(),
                     &[#(#all_known_names),*],
                 ));
-            }
-        }
-    } else {
-        quote! {
-            _ => {
-                // Unknown keys are silently dropped —
-                // permissive / serde-default behaviour.
-                let _: ::serde::de::IgnoredAny = map.next_value()?;
             }
         }
     };

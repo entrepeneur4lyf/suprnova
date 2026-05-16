@@ -312,20 +312,22 @@ async fn inbound_rejects_output_only_in_payload() {
 }
 
 // ---------------------------------------------------------------------------
-// Codex review finding #10: `#[data(deny_unknown_fields)]`
+// Codex review finding #10: unknown-field handling
 // ---------------------------------------------------------------------------
 //
-// Default mode silently drops unknown payload keys (matches serde-derive's
-// default `Deserialize` behaviour). Request DTOs that need to reject client
-// typos can opt into strict mode with `#[data(deny_unknown_fields)]`.
+// Default mode REJECTS unknown payload keys with HTTP 422 — client typos
+// and schema drift surface at the boundary instead of silently disappearing.
+// Response DTOs that read forward-compatible payloads from external services
+// can opt into the serde-default permissive behaviour with
+// `#[data(allow_unknown_fields)]`.
 
 #[derive(Debug, suprnova::Data, validator::Validate)]
-#[data(deny_unknown_fields)]
 pub struct StrictDtoT10 {
     pub name: String,
 }
 
 #[derive(Debug, suprnova::Data, validator::Validate)]
+#[data(allow_unknown_fields)]
 pub struct PermissiveDtoT10 {
     pub name: String,
 }
@@ -365,7 +367,7 @@ where
 }
 
 #[tokio::test]
-async fn deny_unknown_fields_rejects_unknown_key_with_422() {
+async fn default_mode_rejects_unknown_key_with_422() {
     let (addr, captured) = spawn_and_capture_for::<StrictDtoT10>().await;
     post_json(
         addr,
@@ -379,7 +381,10 @@ async fn deny_unknown_fields_rejects_unknown_key_with_422() {
         .unwrap()
         .take()
         .expect("server did not process request");
-    let err = result.expect_err("unknown field on a deny_unknown_fields DTO must be rejected");
+    let err = result.expect_err(
+        "unknown field on a default-strict DTO must be rejected — \
+         strict is the default per codex review finding #10",
+    );
     assert_eq!(
         err.status_code(),
         422,
@@ -394,7 +399,7 @@ async fn deny_unknown_fields_rejects_unknown_key_with_422() {
 }
 
 #[tokio::test]
-async fn deny_unknown_fields_accepts_known_only_payload() {
+async fn default_mode_accepts_known_only_payload() {
     let (addr, captured) = spawn_and_capture_for::<StrictDtoT10>().await;
     post_json(addr, serde_json::json!({ "name": "shawn" })).await;
     tokio::task::yield_now().await;
@@ -404,12 +409,12 @@ async fn deny_unknown_fields_accepts_known_only_payload() {
         .unwrap()
         .take()
         .expect("server did not process request");
-    let dto = result.expect("known-only payload should succeed on a strict DTO");
+    let dto = result.expect("known-only payload should succeed on a default-strict DTO");
     assert_eq!(dto.name, "shawn");
 }
 
 #[tokio::test]
-async fn default_mode_silently_drops_unknown_fields() {
+async fn allow_unknown_fields_silently_drops_extras() {
     let (addr, captured) = spawn_and_capture_for::<PermissiveDtoT10>().await;
     post_json(
         addr,
@@ -424,8 +429,8 @@ async fn default_mode_silently_drops_unknown_fields() {
         .take()
         .expect("server did not process request");
     let dto = result.expect(
-        "default (permissive) mode must accept extra payload keys — \
-         response DTOs and forward-compatible inputs rely on this",
+        "#[data(allow_unknown_fields)] must accept extra payload keys — \
+         response DTOs reading forward-compatible payloads rely on this",
     );
     assert_eq!(dto.name, "shawn");
 }
