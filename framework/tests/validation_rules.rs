@@ -379,7 +379,7 @@ fn validation_errors_into_result_returns_err_when_populated() {
 // --- validate! macro ---
 
 mod validate_macro {
-    use suprnova::rules::{Email, Min, Required, RequiredIf};
+    use suprnova::rules::{Email, Max, Min, Required, RequiredIf};
     use suprnova::{validate, ValidationErrors};
 
     struct UserForm {
@@ -461,6 +461,102 @@ mod validate_macro {
             name => Required;
         };
         assert!(result.is_ok());
+    }
+
+    // --- `?:` Optional-field marker ---
+    //
+    // `validate! { self => bio?: Min(10); }` runs `Min(10)` only when
+    // `self.bio` is `Some`. The macro expands to
+    // `if let Some(ref __val) = self.bio { ... }` so `None` is a no-op
+    // and a populated `Some` runs every rule on the row.
+
+    struct OptionalForm {
+        email: Option<String>,
+        bio: Option<String>,
+    }
+
+    #[test]
+    fn validate_macro_skips_optional_field_when_none() {
+        let form = OptionalForm {
+            email: None,
+            bio: None,
+        };
+        let result: Result<(), ValidationErrors> = validate! { form =>
+            email?: Required, Email;
+            bio?: Min(10);
+        };
+        assert!(
+            result.is_ok(),
+            "None values must skip validation entirely, got: {:?}",
+            result.err().map(|e| e.errors)
+        );
+    }
+
+    #[test]
+    fn validate_macro_runs_rules_on_some_optional_field() {
+        let form = OptionalForm {
+            email: Some("not-an-email".into()),
+            bio: None,
+        };
+        let result: Result<(), ValidationErrors> = validate! { form =>
+            email?: Email;
+            bio?: Min(10);
+        };
+        let errs = result.unwrap_err();
+        assert!(
+            errs.errors.contains_key("email"),
+            "email should fail Email validation; got bag: {:?}",
+            errs.errors
+        );
+        assert!(
+            !errs.errors.contains_key("bio"),
+            "bio is None, no rule should run"
+        );
+    }
+
+    #[test]
+    fn validate_macro_mixes_required_and_optional_rows() {
+        struct MixedForm {
+            email: String,
+            bio: Option<String>,
+        }
+        let form = MixedForm {
+            email: "shawn@example.com".into(),
+            bio: Some("hi".into()), // too short for Min(5)
+        };
+        let result: Result<(), ValidationErrors> = validate! { form =>
+            email => Required, Email;
+            bio?: Min(5);
+        };
+        let errs = result.unwrap_err();
+        assert!(
+            errs.errors.contains_key("bio"),
+            "bio = Some(\"hi\") should fail Min(5)"
+        );
+        assert!(
+            !errs.errors.contains_key("email"),
+            "email is valid; should not appear"
+        );
+    }
+
+    #[test]
+    fn validate_macro_optional_row_with_multiple_rules() {
+        // Both rules on the row should run for a populated Option.
+        let form = OptionalForm {
+            email: None,
+            bio: Some("x".into()), // fails Min(10), passes Max(500)
+        };
+        let result: Result<(), ValidationErrors> = validate! { form =>
+            bio?: Min(10), Max(500);
+        };
+        let errs = result.unwrap_err();
+        assert!(errs.errors.contains_key("bio"));
+        assert_eq!(
+            errs.errors["bio"].len(),
+            1,
+            "only Min should fail; got {:?}",
+            errs.errors["bio"]
+        );
     }
 }
 

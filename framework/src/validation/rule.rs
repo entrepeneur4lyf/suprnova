@@ -67,17 +67,48 @@ pub type FormContext = HashMap<String, String>;
 pub trait ContextualRule {
     /// Check `value` against `ctx`. Return `Ok(())` if it passes,
     /// `Err(message)` if it fails.
+    ///
+    /// Rules whose semantics depend on the name of the field being
+    /// validated (for example, [`rules::Confirmed`], which looks up
+    /// `<field>_confirmation` in `ctx`) cannot implement a meaningful
+    /// `passes` because the name isn't available here. Such rules
+    /// override [`Self::check_named`] instead and use `passes` only
+    /// as a stub explaining the limitation.
     fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String>;
 
     /// Run the rule and push any failure message onto `errs` under
     /// the given field key. The error-accumulating analogue of
-    /// [`Self::passes`]; used by the [`validate!`] macro.
+    /// [`Self::passes`].
+    ///
+    /// Most rules don't need the field name — [`Self::check_named`]'s
+    /// default impl calls into this method, ignoring `field`. Override
+    /// `check_named` directly when the rule needs the name (see
+    /// [`rules::Confirmed`]).
     ///
     /// [`validate!`]: crate::validate
     fn check(&self, value: &str, errs: &mut ValidationErrors, field: &str, ctx: &FormContext) {
         if let Err(msg) = self.passes(value, ctx) {
             errs.add(field.to_string(), msg);
         }
+    }
+
+    /// Like [`Self::check`], but the rule may use `field` (e.g.
+    /// [`rules::Confirmed`] derives `<field>_confirmation` to look up
+    /// in `ctx`). The [`validate!`] macro always dispatches through
+    /// this method, threading the field ident via
+    /// `stringify!($field)`. The default impl ignores `field` and
+    /// forwards to [`Self::check`], so rules that don't care about the
+    /// field name need not override it.
+    ///
+    /// [`validate!`]: crate::validate
+    fn check_named(
+        &self,
+        value: &str,
+        errs: &mut ValidationErrors,
+        field: &str,
+        ctx: &FormContext,
+    ) {
+        self.check(value, errs, field, ctx);
     }
 }
 
@@ -535,6 +566,7 @@ pub use async_rules::Unique;
 ///     validate! { self =>
 ///         email       => Required, Email;
 ///         password    => Min(8), Max(72);
+///         bio?:          Min(10), Max(500);
 ///         card_number => RequiredIf {
 ///             other: "billing_type",
 ///             value: "card",
@@ -543,25 +575,40 @@ pub use async_rules::Unique;
 /// }
 /// ```
 ///
-/// Each row is `field_ident => Rule1, Rule2, ... ;`. Each rule is
-/// either a plain [`Rule`] (no suffix) or a [`ContextualRule`]
-/// followed by `=> with $ctx_ident`. The contextual separator is
-/// `=> with` (not parenthesised) because `macro_rules!` matches
-/// `$rule:expr` greedily — placing the suffix in parentheses runs
-/// into Rust's `FOLLOW` set rules for `expr` fragments.
+/// Each row is one of two shapes:
+///
+/// - `field_ident => Rule1, Rule2, ... ;` — the field is treated as
+///   required-shaped: the rule is invoked on `&self.field` directly.
+///   This is the shape for `String`, `i64`, or any other concrete
+///   type that derefs to `&str` (or implements [`Rule`] / [`ContextualRule`]
+///   over the contained scalar).
+/// - `field_ident ?: Rule1, Rule2, ... ;` — the field is `Option<T>`.
+///   When `Some`, the rules run on the unwrapped inner value; when
+///   `None`, every rule on the row is skipped. This matches Laravel's
+///   "if present, validate" semantics for optional form fields and is
+///   the right choice for every `Option<String>` (or `Option<i64>`, …)
+///   field on a form.
+///
+/// Each rule is either a plain [`Rule`] (no suffix) or a
+/// [`ContextualRule`] followed by `=> with $ctx_ident`. The contextual
+/// separator is `=> with` (not parenthesised) because `macro_rules!`
+/// matches `$rule:expr` greedily — placing the suffix in parentheses
+/// runs into Rust's `FOLLOW` set rules for `expr` fragments.
 ///
 /// The macro expands to a fresh [`ValidationErrors`](crate::ValidationErrors),
-/// calls [`Rule::check`] / [`ContextualRule::check`] for each declared
-/// rule, then returns
+/// calls [`Rule::check`] / [`ContextualRule::check_named`] for each
+/// declared rule, then returns
 /// [`ValidationErrors::into_result`](crate::ValidationErrors::into_result).
 ///
-/// # `Option<String>` fields
+/// # `Option<T>` fields
 ///
-/// The macro accesses `&$self.$field` and passes it where the trait
-/// methods expect `&str`. `&String` auto-derefs; `&Option<String>`
-/// does not. For `Option<String>` fields, run the rule manually with
-/// `.as_deref().unwrap_or("")` (or build a small helper rule that
-/// understands `Option`).
+/// Use the `?:` row separator (`bio?: Min(10), Max(500);`). The
+/// macro expands to `if let Some(ref __val) = self.bio { ... }`, so
+/// rules only run when the field is `Some`. Rules see the inner value
+/// borrowed as the type they expect (typically `&str` via
+/// `String: Deref<Target=str>` auto-deref). For non-string optional
+/// types, the inner type must implement the rule's expected borrow
+/// itself.
 ///
 /// # Async rules
 ///
@@ -571,29 +618,57 @@ pub use async_rules::Unique;
 /// [`ValidationErrors`](crate::ValidationErrors).
 #[macro_export]
 macro_rules! validate {
-    ($self:ident => $($field:ident => $($rule:expr $(=> with $ctx:ident)?),+);+ $(;)?) => {{
+    ($self:ident => $($tt:tt)*) => {{
         let mut __errs = $crate::ValidationErrors::new();
-        $(
-            $(
-                $crate::__validate_one!(__errs, $self, $field, $rule $(=> with $ctx)?);
-            )+
-        )+
+        $crate::__validate_rows!(__errs, $self, $($tt)*);
         __errs.into_result()
     }};
 }
 
-/// Internal dispatch macro used by [`validate!`]. Not part of the
-/// public API even though `#[macro_export]` makes it reachable at
-/// the crate root — `#[doc(hidden)]` keeps it out of rustdoc.
+/// Internal row walker used by [`validate!`]. Not part of the public
+/// API even though `#[macro_export]` makes it reachable at the crate
+/// root — `#[doc(hidden)]` keeps it out of rustdoc.
+///
+/// The walker consumes one row per recursive invocation. A row is
+/// either `field => rule1, rule2;` (required-shape) or
+/// `field?: rule1, rule2;` (optional-shape — runs rules only when the
+/// field is `Some`). Recursion terminates when the input is empty (or
+/// only a stray `;` remains, supporting the optional trailing
+/// semicolon style).
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __validate_rows {
+    // Optional-shape row: `field?: Rule1, Rule2 => with ctx, ... ;`
+    ($errs:ident, $self:ident, $field:ident ?: $($rule:expr $(=> with $ctx:ident)?),+ ; $($rest:tt)*) => {
+        if let ::core::option::Option::Some(ref __val) = $self.$field {
+            $(
+                $crate::__validate_one_optional!($errs, $field, __val, $rule $(=> with $ctx)?);
+            )+
+        }
+        $crate::__validate_rows!($errs, $self, $($rest)*);
+    };
+    // Required-shape row: `field => Rule1, Rule2 => with ctx, ... ;`
+    ($errs:ident, $self:ident, $field:ident => $($rule:expr $(=> with $ctx:ident)?),+ ; $($rest:tt)*) => {
+        $(
+            $crate::__validate_one!($errs, $self, $field, $rule $(=> with $ctx)?);
+        )+
+        $crate::__validate_rows!($errs, $self, $($rest)*);
+    };
+    // Terminal: input exhausted (with or without a trailing `;`).
+    ($errs:ident, $self:ident, $(;)?) => {};
+}
+
+/// Internal dispatch macro used by [`validate!`] for required-shape
+/// rows. Not part of the public API.
 #[macro_export]
 #[doc(hidden)]
 macro_rules! __validate_one {
     ($errs:ident, $self:ident, $field:ident, $rule:expr => with $ctx:ident) => {
-        $crate::validation::rule::ContextualRule::check(
+        $crate::validation::rule::ContextualRule::check_named(
             &$rule,
             &$self.$field,
             &mut $errs,
-            stringify!($field),
+            ::core::stringify!($field),
             &$ctx,
         );
     };
@@ -602,7 +677,32 @@ macro_rules! __validate_one {
             &$rule,
             &$self.$field,
             &mut $errs,
-            stringify!($field),
+            ::core::stringify!($field),
+        );
+    };
+}
+
+/// Internal dispatch macro used by [`validate!`] for optional-shape
+/// rows. Runs against the borrowed inner value of an `Option`. Not
+/// part of the public API.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __validate_one_optional {
+    ($errs:ident, $field:ident, $val:ident, $rule:expr => with $ctx:ident) => {
+        $crate::validation::rule::ContextualRule::check_named(
+            &$rule,
+            $val,
+            &mut $errs,
+            ::core::stringify!($field),
+            &$ctx,
+        );
+    };
+    ($errs:ident, $field:ident, $val:ident, $rule:expr) => {
+        $crate::validation::rule::Rule::check(
+            &$rule,
+            $val,
+            &mut $errs,
+            ::core::stringify!($field),
         );
     };
 }
