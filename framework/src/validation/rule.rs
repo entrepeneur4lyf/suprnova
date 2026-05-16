@@ -1,13 +1,28 @@
 //! Rule objects — composable validators that work alongside (and
 //! independently of) `#[derive(Validate)]`.
 //!
-//! Two traits cover the synchronous and asynchronous design space:
+//! Three traits cover the design space:
 //!
 //! - [`Rule`] — pure sync check on a single value. Built-ins:
 //!   [`rules::Required`], [`rules::Email`], [`rules::Min`],
 //!   [`rules::Max`].
+//! - [`ContextualRule`] — sync check that can read sibling fields
+//!   (think Laravel `required_if:other,value`). Built-ins:
+//!   [`rules::RequiredIf`], [`rules::RequiredWith`],
+//!   [`rules::RequiredUnless`].
 //! - [`AsyncRule`] — async check (DB queries — [`async_rules::Unique`]
 //!   lives here).
+//!
+//! # Coherence
+//!
+//! No blanket `impl<R: Rule> ContextualRule for R` is provided. Each
+//! built-in rule implements exactly **one** of `Rule` or
+//! `ContextualRule` (and `Unique` implements `AsyncRule` only). Adding
+//! a blanket would conflict with the explicit `ContextualRule` impls
+//! on the conditional rules. Consumers writing their own rules should
+//! pick a trait and stick to it.
+
+use std::collections::HashMap;
 
 /// A synchronous validator over a single string value.
 ///
@@ -20,16 +35,42 @@ pub trait Rule {
     fn passes(&self, value: &str) -> Result<(), String>;
 }
 
-/// Built-in synchronous rules.
+/// Map of "field name → its current string value", supplied to rules
+/// that need to read sibling fields during validation.
+pub type FormContext = HashMap<String, String>;
+
+/// A synchronous validator that needs visibility into other form
+/// fields.
+///
+/// This is the trait Laravel's `required_if` / `required_with` /
+/// `required_unless` style rules implement. The runner is expected to
+/// build a [`FormContext`] keyed by field name and pass it in alongside
+/// the value under test.
+pub trait ContextualRule {
+    /// Check `value` against `ctx`. Return `Ok(())` if it passes,
+    /// `Err(message)` if it fails.
+    fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String>;
+}
+
+/// Built-in synchronous rules — both pure ([`Rule`]) and contextual
+/// ([`ContextualRule`]).
 pub mod rules {
-    use super::Rule;
+    use super::{ContextualRule, FormContext, Rule};
     use validator::ValidateEmail;
+
+    /// Treat a value as "blank" when it is empty or whitespace-only.
+    ///
+    /// Matches Laravel's [`Validator::isImplicit`] heuristic: a string
+    /// of only spaces is not considered present.
+    fn is_blank(value: &str) -> bool {
+        value.trim().is_empty()
+    }
 
     /// Laravel `required` — value must be present and non-whitespace.
     pub struct Required;
     impl Rule for Required {
         fn passes(&self, value: &str) -> Result<(), String> {
-            if value.trim().is_empty() {
+            if is_blank(value) {
                 Err("required".into())
             } else {
                 Ok(())
@@ -75,6 +116,71 @@ pub mod rules {
                 Ok(())
             } else {
                 Err(format!("must be at most {} characters", self.0))
+            }
+        }
+    }
+
+    /// Laravel `required_if:other,value` — the field is required only
+    /// when sibling field `other` is exactly equal to `value`.
+    ///
+    /// When `other` matches: empty/whitespace value fails.
+    /// When `other` does not match (or is missing): always passes.
+    pub struct RequiredIf {
+        pub other: &'static str,
+        pub value: &'static str,
+    }
+    impl ContextualRule for RequiredIf {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String> {
+            let other_matches = ctx
+                .get(self.other)
+                .map(|v| v == self.value)
+                .unwrap_or(false);
+            if other_matches && is_blank(value) {
+                Err(format!("required when {} is {}", self.other, self.value))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Laravel `required_with:other` — the field is required only
+    /// when sibling field `other` is present and non-blank.
+    pub struct RequiredWith {
+        pub other: &'static str,
+    }
+    impl ContextualRule for RequiredWith {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String> {
+            let other_present = ctx
+                .get(self.other)
+                .map(|v| !is_blank(v))
+                .unwrap_or(false);
+            if other_present && is_blank(value) {
+                Err(format!("required when {} is present", self.other))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Laravel `required_unless:other,value` — the field is required
+    /// unless sibling field `other` is exactly equal to `value`.
+    ///
+    /// When `other` matches `value`: always passes.
+    /// Otherwise: empty/whitespace value fails.
+    pub struct RequiredUnless {
+        pub other: &'static str,
+        pub value: &'static str,
+    }
+    impl ContextualRule for RequiredUnless {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String> {
+            let other_matches = ctx
+                .get(self.other)
+                .map(|v| v == self.value)
+                .unwrap_or(false);
+            if !other_matches && is_blank(value) {
+                Err(format!("required unless {} is {}", self.other, self.value))
+            } else {
+                Ok(())
             }
         }
     }

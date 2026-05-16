@@ -5,8 +5,8 @@ use sea_orm::{ConnectionTrait, Database, DbBackend, Statement, Value};
 use suprnova::testing::TestContainer;
 use suprnova::validation::rule::{
     async_rules::Unique,
-    rules::{Email, Max, Min, Required},
-    AsyncRule, Rule,
+    rules::{Email, Max, Min, Required, RequiredIf, RequiredUnless, RequiredWith},
+    AsyncRule, ContextualRule, FormContext, Rule,
 };
 use suprnova::DbConnection;
 
@@ -47,6 +47,56 @@ fn min_max_check_length() {
     let r = Max(5);
     assert!(r.passes("hi").is_ok());
     assert!(r.passes("toolong").is_err());
+}
+
+// --- contextual rules ---
+
+fn ctx(pairs: &[(&str, &str)]) -> FormContext {
+    pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect()
+}
+
+#[test]
+fn required_if_triggers_when_other_field_matches() {
+    let rule = RequiredIf {
+        other: "billing_type",
+        value: "card",
+    };
+    let c = ctx(&[("billing_type", "card")]);
+    assert!(rule.passes("4111111111111111", &c).is_ok());
+    assert!(rule.passes("", &c).is_err());
+
+    let c2 = ctx(&[("billing_type", "invoice")]);
+    assert!(rule.passes("", &c2).is_ok());
+}
+
+#[test]
+fn required_with_triggers_when_other_field_present() {
+    let rule = RequiredWith {
+        other: "address_line_1",
+    };
+    let c = ctx(&[("address_line_1", "1 Main St")]);
+    assert!(rule.passes("12345", &c).is_ok());
+    assert!(rule.passes("", &c).is_err());
+
+    let c2 = ctx(&[]);
+    assert!(rule.passes("", &c2).is_ok());
+}
+
+#[test]
+fn required_unless_triggers_when_other_field_does_not_match() {
+    let rule = RequiredUnless {
+        other: "subscription",
+        value: "free",
+    };
+    let c_free = ctx(&[("subscription", "free")]);
+    assert!(rule.passes("", &c_free).is_ok());
+
+    let c_paid = ctx(&[("subscription", "pro")]);
+    assert!(rule.passes("billing_token", &c_paid).is_ok());
+    assert!(rule.passes("", &c_paid).is_err());
 }
 
 // --- async rules (Unique) ---
