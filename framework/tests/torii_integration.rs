@@ -246,6 +246,7 @@ fn oauth_kickoff_returns_authorization_url() {
             client_secret: "test-secret".into(),
             redirect_url: "http://localhost:8000/auth/oauth/github/callback".into(),
             scopes: vec!["user:email".into()],
+            endpoints_override: None,
         });
 
         let slot = suprnova::session::new_session_slot_for_test();
@@ -279,6 +280,7 @@ fn oauth_complete_rejects_when_session_has_no_stored_state() {
         client_secret: "test-secret".into(),
         redirect_url: "http://localhost:8000/auth/oauth/github/callback".into(),
         scopes: vec!["user:email".into()],
+        endpoints_override: None,
     });
 
     RT.block_on(async {
@@ -300,8 +302,17 @@ fn oauth_complete_rejects_when_session_has_no_stored_state() {
         })
         .await;
 
-        assert!(result.is_err(), "complete() in a session with no stored state must fail");
-        let err_msg = result.unwrap_err().to_string();
+        let err = result.expect_err("complete() in a session with no stored state must fail");
+        // Codex finding #7: protocol/CSRF failures are caller errors, not
+        // server faults. Status must be 400, not 500.
+        assert_eq!(
+            err.status_code(),
+            400,
+            "missing state must surface as 400 Bad Request, got: status={} msg={}",
+            err.status_code(),
+            err,
+        );
+        let err_msg = err.to_string();
         assert!(
             err_msg.contains("missing"),
             "expected 'missing' error (no oauth_state_github in session), got: {err_msg}",
@@ -324,6 +335,7 @@ fn oauth_complete_rejects_when_state_doesnt_match_session_stored() {
         client_secret: "test-secret".into(),
         redirect_url: "http://localhost:8000/auth/oauth/github/callback".into(),
         scopes: vec!["user:email".into()],
+        endpoints_override: None,
     });
 
     RT.block_on(async {
@@ -341,11 +353,312 @@ fn oauth_complete_rejects_when_state_doesnt_match_session_stored() {
         })
         .await;
 
-        assert!(result.is_err(), "complete() must reject state that doesn't match the stored value");
-        let err_msg = result.unwrap_err().to_string();
+        let err = result
+            .expect_err("complete() must reject state that doesn't match the stored value");
+        // Codex finding #7: CSRF mismatch is a caller error, must be 400.
+        assert_eq!(
+            err.status_code(),
+            400,
+            "state mismatch must surface as 400 Bad Request, got: status={} msg={}",
+            err.status_code(),
+            err,
+        );
+        let err_msg = err.to_string();
         assert!(
             err_msg.contains("mismatch"),
             "expected 'mismatch' error (state doesn't match session-stored value), got: {err_msg}",
+        );
+    });
+}
+
+// ── PKCE tests (codex review finding #7) ──────────────────────────────────────
+
+/// Codex finding #7a: `begin()` must add `code_challenge` and
+/// `code_challenge_method=S256` to the authorize URL. The verifier
+/// must also land in the session under `oauth_pkce_verifier_<provider>`.
+#[test]
+fn oauth_begin_emits_pkce_challenge_and_stores_verifier_in_session() {
+    Lazy::force(&SETUP);
+
+    Auth::oauth("github").configure(suprnova::torii_integration::oauth::OAuthProviderConfig {
+        client_id: "test-client".into(),
+        client_secret: "test-secret".into(),
+        redirect_url: "http://localhost:8000/auth/oauth/github/callback".into(),
+        scopes: vec!["user:email".into()],
+        endpoints_override: None,
+    });
+
+    RT.block_on(async {
+        let slot = suprnova::session::new_session_slot_for_test();
+        let (url, stored_verifier, stored_state) =
+            suprnova::session::session_scope_for_test(slot, async {
+                let kickoff = Auth::oauth("github").begin().await.unwrap();
+                let verifier: Option<String> = suprnova::session::session()
+                    .and_then(|s| s.get("oauth_pkce_verifier_github"));
+                let state: Option<String> = suprnova::session::session()
+                    .and_then(|s| s.get("oauth_state_github"));
+                (kickoff.authorization_url, verifier, state)
+            })
+            .await;
+
+        assert!(
+            url.contains("code_challenge="),
+            "authorize URL missing code_challenge param: {url}"
+        );
+        assert!(
+            url.contains("code_challenge_method=S256"),
+            "authorize URL missing code_challenge_method=S256: {url}"
+        );
+
+        let verifier = stored_verifier
+            .expect("begin() must store the PKCE verifier under oauth_pkce_verifier_github");
+        // RFC 7636 §4.1: 43..=128 chars from [A-Za-z0-9-._~]. We use
+        // base64url-no-pad, a strict subset that's all in [A-Za-z0-9_-].
+        assert!(
+            (43..=128).contains(&verifier.len()),
+            "verifier length {} not in 43..=128",
+            verifier.len()
+        );
+        assert!(
+            verifier
+                .chars()
+                .all(|c| matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_')),
+            "verifier has chars outside [A-Za-z0-9_-]: {verifier}"
+        );
+        assert!(
+            stored_state.is_some(),
+            "begin() must still store the CSRF state alongside the verifier"
+        );
+    });
+}
+
+/// Codex finding #7b: `complete()` reads the verifier from the session
+/// and sends it to the token endpoint as `code_verifier=...`. The
+/// verifier is one-time use — after `complete()` runs, the session key
+/// must be cleared.
+///
+/// We assert the wire-level behaviour by pointing `endpoints_override`
+/// at a one-shot hyper server that captures the form-encoded body and
+/// returns the fixture access token. This is the same pattern used in
+/// `tests/http_client.rs::spawn_echo`.
+#[test]
+fn oauth_complete_sends_code_verifier_to_token_endpoint() {
+    use http_body_util::{BodyExt, Full};
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use std::convert::Infallible;
+    use std::sync::Mutex;
+
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        // Captured form bodies from the two upstream calls the OAuth
+        // flow makes: (1) POST token, (2) GET userinfo.
+        let token_body_captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let userinfo_auth_captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{addr}");
+
+        // Spawn a multi-request hyper server that handles BOTH token and
+        // userinfo calls. We pin the body and headers we care about into
+        // the shared mutexes, then return canned responses.
+        let token_capture = token_body_captured.clone();
+        let userinfo_capture = userinfo_auth_captured.clone();
+        tokio::spawn(async move {
+            // Accept both connections (reqwest may or may not reuse). To
+            // be safe we accept in a loop until the test is done; tokio
+            // drops this future when the runtime tears down.
+            loop {
+                let (stream, _) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                let token_capture = token_capture.clone();
+                let userinfo_capture = userinfo_capture.clone();
+                tokio::spawn(async move {
+                    let io = TokioIo::new(stream);
+                    let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                        let token_capture = token_capture.clone();
+                        let userinfo_capture = userinfo_capture.clone();
+                        async move {
+                            let path = req.uri().path().to_string();
+                            let method = req.method().to_string();
+                            if path == "/token" && method == "POST" {
+                                let body_bytes =
+                                    req.into_body().collect().await.unwrap().to_bytes();
+                                let body_str = String::from_utf8_lossy(&body_bytes).to_string();
+                                *token_capture.lock().unwrap() = Some(body_str);
+                                let payload = serde_json::json!({
+                                    "access_token": "fake-access-token",
+                                    "token_type": "bearer"
+                                });
+                                let bytes = serde_json::to_vec(&payload).unwrap();
+                                return Ok::<_, Infallible>(
+                                    hyper::Response::builder()
+                                        .status(200)
+                                        .header("content-type", "application/json")
+                                        .body(Full::new(bytes::Bytes::from(bytes)))
+                                        .unwrap(),
+                                );
+                            }
+                            if path == "/userinfo" {
+                                let auth = req
+                                    .headers()
+                                    .get("authorization")
+                                    .and_then(|h| h.to_str().ok())
+                                    .map(|s| s.to_string());
+                                *userinfo_capture.lock().unwrap() = auth;
+                                let payload = serde_json::json!({
+                                    "id": 4242,
+                                    "login": "pkce-test-user",
+                                    "email": "pkce@example.com",
+                                    "name": "PKCE Test"
+                                });
+                                let bytes = serde_json::to_vec(&payload).unwrap();
+                                return Ok::<_, Infallible>(
+                                    hyper::Response::builder()
+                                        .status(200)
+                                        .header("content-type", "application/json")
+                                        .body(Full::new(bytes::Bytes::from(bytes)))
+                                        .unwrap(),
+                                );
+                            }
+                            Ok::<_, Infallible>(
+                                hyper::Response::builder()
+                                    .status(404)
+                                    .body(Full::new(bytes::Bytes::new()))
+                                    .unwrap(),
+                            )
+                        }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, svc)
+                        .await;
+                });
+            }
+        });
+
+        // Use a unique provider name so this test's config doesn't
+        // collide with the `github` registrations the other tests
+        // perform. The provider name only matters for the well-known
+        // endpoint table, and we're overriding that anyway.
+        let provider_name = "github_pkce_test";
+        Auth::oauth(provider_name).configure(
+            suprnova::torii_integration::oauth::OAuthProviderConfig {
+                client_id: "pkce-client".into(),
+                client_secret: "pkce-secret".into(),
+                redirect_url: "http://localhost:8000/auth/oauth/cb".into(),
+                scopes: vec!["user:email".into()],
+                endpoints_override: Some(
+                    suprnova::torii_integration::oauth::EndpointOverrides {
+                        authorize: format!("{base}/authorize"),
+                        token: format!("{base}/token"),
+                        userinfo: format!("{base}/userinfo"),
+                    },
+                ),
+            },
+        );
+
+        let slot = suprnova::session::new_session_slot_for_test();
+        let (result, verifier_after) = suprnova::session::session_scope_for_test(slot, async {
+            let kickoff = Auth::oauth(provider_name).begin().await.unwrap();
+            // Read the stored verifier BEFORE complete() consumes it.
+            let stored_verifier: Option<String> = suprnova::session::session()
+                .and_then(|s| s.get(format!("oauth_pkce_verifier_{provider_name}").as_str()));
+
+            let res = Auth::oauth(provider_name).complete("real-auth-code", &kickoff.state).await;
+
+            // After complete() the session key must be cleared (one-time use).
+            let after: Option<String> = suprnova::session::session()
+                .and_then(|s| s.get(format!("oauth_pkce_verifier_{provider_name}").as_str()));
+            (res.map(|_| stored_verifier.expect("verifier present before complete()")), after)
+        })
+        .await;
+
+        let stored_verifier = result.expect("complete() should succeed against the mock provider");
+        assert!(
+            verifier_after.is_none(),
+            "complete() must clear the PKCE verifier from session — found: {verifier_after:?}"
+        );
+
+        let token_body = token_body_captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("token endpoint must have been hit");
+        let expected_verifier_param = format!("code_verifier={stored_verifier}");
+        assert!(
+            token_body.contains(&expected_verifier_param),
+            "token POST body missing the exact code_verifier from session.\
+             \nexpected: {expected_verifier_param}\nbody:     {token_body}"
+        );
+        assert!(
+            token_body.contains("grant_type=authorization_code"),
+            "token POST body missing grant_type=authorization_code: {token_body}"
+        );
+        assert!(
+            token_body.contains("code=real-auth-code"),
+            "token POST body missing the original auth code: {token_body}"
+        );
+
+        assert_eq!(
+            userinfo_auth_captured.lock().unwrap().as_deref(),
+            Some("Bearer fake-access-token"),
+            "userinfo call must use the bearer token returned by the token endpoint"
+        );
+    });
+}
+
+/// Codex finding #7c: if the PKCE verifier is missing from the session
+/// (e.g. session expired between `begin()` and `complete()`),
+/// `complete()` must return 400 Bad Request — same class as missing
+/// state. The error message must call out the missing verifier so
+/// operators can distinguish it from a missing-state failure.
+#[test]
+fn oauth_complete_returns_400_when_pkce_verifier_missing_from_session() {
+    Lazy::force(&SETUP);
+
+    Auth::oauth("github").configure(suprnova::torii_integration::oauth::OAuthProviderConfig {
+        client_id: "test-client".into(),
+        client_secret: "test-secret".into(),
+        redirect_url: "http://localhost:8000/auth/oauth/github/callback".into(),
+        scopes: vec!["user:email".into()],
+        endpoints_override: None,
+    });
+
+    RT.block_on(async {
+        let slot = suprnova::session::new_session_slot_for_test();
+        let result = suprnova::session::session_scope_for_test(slot, async {
+            // Begin populates BOTH state and the verifier.
+            let state = Auth::oauth("github").begin().await.unwrap().state;
+            // Simulate the verifier being lost (session pruned, dropped
+            // by a middleware, partial restore, etc.) while the state
+            // remains. complete() must reject this cleanly.
+            suprnova::session::session_mut(|s| {
+                s.forget("oauth_pkce_verifier_github");
+            });
+            Auth::oauth("github").complete("any-code", &state).await
+        })
+        .await;
+
+        let err = result.expect_err("complete() must fail when PKCE verifier is missing");
+        assert_eq!(
+            err.status_code(),
+            400,
+            "missing PKCE verifier must surface as 400 Bad Request, got: status={} msg={}",
+            err.status_code(),
+            err,
+        );
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.to_ascii_lowercase().contains("pkce"),
+            "expected 'pkce' in error message so operators can tell this apart from missing-state, got: {err_msg}"
+        );
+        assert!(
+            err_msg.to_ascii_lowercase().contains("verifier"),
+            "expected 'verifier' in error message, got: {err_msg}"
         );
     });
 }

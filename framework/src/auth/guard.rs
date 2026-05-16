@@ -258,6 +258,7 @@ impl Auth {
     ///     client_secret: "...".into(),
     ///     redirect_url: "http://localhost:8000/auth/oauth/github/callback".into(),
     ///     scopes: vec!["user:email".into()],
+    ///     endpoints_override: None, // use the well-known GitHub endpoints
     /// });
     ///
     /// let kickoff = Auth::oauth("github").begin().await?;
