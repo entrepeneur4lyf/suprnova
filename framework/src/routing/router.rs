@@ -1,5 +1,6 @@
 use crate::http::{Request, Response};
 use crate::middleware::{into_boxed, BoxedMiddleware, Middleware};
+use hyper::Method;
 use matchit::Router as MatchitRouter;
 use std::collections::HashMap;
 use std::future::Future;
@@ -57,15 +58,6 @@ pub fn route_with_params(name: &str, params: &HashMap<String, String>) -> Option
     Some(url)
 }
 
-/// HTTP method for tracking the last registered route
-#[derive(Clone, Copy)]
-enum Method {
-    Get,
-    Post,
-    Put,
-    Delete,
-}
-
 /// Type alias for route handlers
 pub type BoxedHandler =
     Box<dyn Fn(Request) -> Pin<Box<dyn Future<Output = Response> + Send>> + Send + Sync>;
@@ -76,8 +68,16 @@ pub struct Router {
     post_routes: MatchitRouter<Arc<BoxedHandler>>,
     put_routes: MatchitRouter<Arc<BoxedHandler>>,
     delete_routes: MatchitRouter<Arc<BoxedHandler>>,
-    /// Middleware assignments: path -> boxed middleware instances
-    route_middleware: HashMap<String, Vec<BoxedMiddleware>>,
+    /// Middleware assignments: (method, path) -> boxed middleware instances.
+    ///
+    /// Keying by `(Method, String)` rather than path alone prevents
+    /// middleware registered for one method on a path (e.g.
+    /// `POST /api/posts` under an auth group) from silently bleeding
+    /// onto a different method registered separately for the same
+    /// path (e.g. a public `GET /api/posts`). This is a
+    /// security-shaped invariant — the codex review tracked it as
+    /// "route_middleware keyed by path leaks across methods".
+    route_middleware: HashMap<(Method, String), Vec<BoxedMiddleware>>,
     /// Fallback handler for when no routes match (overrides default 404)
     fallback_handler: Option<Arc<BoxedHandler>>,
     /// Middleware for the fallback route
@@ -97,15 +97,32 @@ impl Router {
         }
     }
 
-    /// Get middleware for a specific route path
-    pub fn get_route_middleware(&self, path: &str) -> Vec<BoxedMiddleware> {
-        self.route_middleware.get(path).cloned().unwrap_or_default()
+    /// Get middleware registered for a specific `(method, path)` pair.
+    ///
+    /// The key is the HTTP method plus the exact path that was passed
+    /// to `add_middleware`. The current `server.rs` dispatcher passes
+    /// the literal request path here; that means middleware on
+    /// static routes works correctly and middleware on parameterised
+    /// patterns (e.g. `/api/posts/{id}`) is *not* matched on each
+    /// request. That second behaviour is a separate, pre-existing
+    /// limitation of the dispatcher — this method does an exact-string
+    /// lookup, not a pattern match.
+    pub fn get_route_middleware(&self, method: &Method, path: &str) -> Vec<BoxedMiddleware> {
+        self.route_middleware
+            .get(&(method.clone(), path.to_string()))
+            .cloned()
+            .unwrap_or_default()
     }
 
-    /// Register middleware for a path (internal use)
-    pub(crate) fn add_middleware(&mut self, path: &str, middleware: BoxedMiddleware) {
+    /// Register middleware for a `(method, path)` pair (internal use).
+    pub(crate) fn add_middleware(
+        &mut self,
+        method: Method,
+        path: &str,
+        middleware: BoxedMiddleware,
+    ) {
         self.route_middleware
-            .entry(path.to_string())
+            .entry((method, path.to_string()))
             .or_default()
             .push(middleware);
     }
@@ -158,7 +175,7 @@ impl Router {
         RouteBuilder {
             router: self,
             last_path: path.to_string(),
-            _last_method: Method::Get,
+            last_method: Method::GET,
         }
     }
 
@@ -173,7 +190,7 @@ impl Router {
         RouteBuilder {
             router: self,
             last_path: path.to_string(),
-            _last_method: Method::Post,
+            last_method: Method::POST,
         }
     }
 
@@ -188,7 +205,7 @@ impl Router {
         RouteBuilder {
             router: self,
             last_path: path.to_string(),
-            _last_method: Method::Put,
+            last_method: Method::PUT,
         }
     }
 
@@ -203,7 +220,7 @@ impl Router {
         RouteBuilder {
             router: self,
             last_path: path.to_string(),
-            _last_method: Method::Delete,
+            last_method: Method::DELETE,
         }
     }
 
@@ -242,8 +259,7 @@ impl Default for Router {
 pub struct RouteBuilder {
     pub(crate) router: Router,
     last_path: String,
-    #[allow(dead_code)]
-    _last_method: Method,
+    last_method: Method,
 }
 
 impl RouteBuilder {
@@ -263,19 +279,19 @@ impl RouteBuilder {
     ///     .get("/api/users", users_handler).middleware(CorsMiddleware)
     /// ```
     pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> RouteBuilder {
+        let method = self.last_method.clone();
+        let path = self.last_path.clone();
         self.router
-            .add_middleware(&self.last_path, into_boxed(middleware));
+            .add_middleware(method, &path, into_boxed(middleware));
         self
     }
 
     /// Apply pre-boxed middleware to the most recently registered route
     /// (Used internally by route macros)
     pub fn middleware_boxed(mut self, middleware: BoxedMiddleware) -> RouteBuilder {
-        self.router
-            .route_middleware
-            .entry(self.last_path.clone())
-            .or_default()
-            .push(middleware);
+        let method = self.last_method.clone();
+        let path = self.last_path.clone();
+        self.router.add_middleware(method, &path, middleware);
         self
     }
 

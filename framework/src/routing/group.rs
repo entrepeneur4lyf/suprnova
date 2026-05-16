@@ -3,6 +3,7 @@
 use super::{BoxedHandler, RouteBuilder, Router};
 use crate::http::{Request, Response};
 use crate::middleware::{into_boxed, BoxedMiddleware, Middleware};
+use hyper::Method;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -64,25 +65,33 @@ impl GroupBuilder {
         for route in self.group_routes {
             let full_path = format!("{}{}", self.prefix, route.path);
 
-            // Insert into the appropriate method router using public(crate) methods
-            match route.method {
+            // Insert into the appropriate method router using public(crate) methods,
+            // and capture the canonical `hyper::Method` so middleware is keyed by
+            // (method, path) — sibling routes on the same path under different
+            // methods MUST NOT share middleware.
+            let http_method = match route.method {
                 GroupMethod::Get => {
                     self.outer_router.insert_get(&full_path, route.handler);
+                    Method::GET
                 }
                 GroupMethod::Post => {
                     self.outer_router.insert_post(&full_path, route.handler);
+                    Method::POST
                 }
                 GroupMethod::Put => {
                     self.outer_router.insert_put(&full_path, route.handler);
+                    Method::PUT
                 }
                 GroupMethod::Delete => {
                     self.outer_router.insert_delete(&full_path, route.handler);
+                    Method::DELETE
                 }
-            }
+            };
 
-            // Apply group middleware to each route
+            // Apply group middleware to each route under its own (method, path) key.
             for mw in &self.middleware {
-                self.outer_router.add_middleware(&full_path, mw.clone());
+                self.outer_router
+                    .add_middleware(http_method.clone(), &full_path, mw.clone());
             }
         }
 

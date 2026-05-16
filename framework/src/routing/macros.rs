@@ -38,6 +38,7 @@ pub const fn validate_route_path(path: &'static str) -> &'static str {
 }
 use crate::middleware::{into_boxed, BoxedMiddleware, Middleware};
 use crate::routing::router::{register_route_name, BoxedHandler, Router};
+use hyper::Method;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -81,6 +82,22 @@ pub enum HttpMethod {
     Post,
     Put,
     Delete,
+}
+
+impl HttpMethod {
+    /// Canonical `hyper::Method` for use as a `route_middleware` key.
+    ///
+    /// The middleware map is keyed by `(hyper::Method, String)` so that
+    /// middleware on one method never bleeds onto a sibling route on
+    /// the same path but a different method.
+    fn as_hyper(self) -> Method {
+        match self {
+            HttpMethod::Get => Method::GET,
+            HttpMethod::Post => Method::POST,
+            HttpMethod::Put => Method::PUT,
+            HttpMethod::Delete => Method::DELETE,
+        }
+    }
 }
 
 /// Builder for route definitions that supports `.name()` and `.middleware()` chaining
@@ -527,12 +544,16 @@ impl GroupDef {
                         register_route_name(name, full_path);
                     }
 
-                    // Apply combined middleware (inherited + group), then route-specific
+                    // Apply combined middleware (inherited + group), then route-specific.
+                    // The middleware map is keyed by `(method, path)` — middleware
+                    // belongs to *this* route's method, never to siblings on the
+                    // same path under a different method.
+                    let http_method = route.method.as_hyper();
                     for mw in &combined_middleware {
-                        router.add_middleware(full_path, mw.clone());
+                        router.add_middleware(http_method.clone(), full_path, mw.clone());
                     }
                     for mw in route.middlewares {
-                        router.add_middleware(full_path, mw);
+                        router.add_middleware(http_method.clone(), full_path, mw);
                     }
                 }
                 GroupItem::NestedGroup(nested) => {

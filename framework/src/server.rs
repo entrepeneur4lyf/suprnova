@@ -340,8 +340,12 @@ async fn handle_request_inner(
             // 1. Add global middleware
             chain.extend(middleware_registry.global_middleware().iter().cloned());
 
-            // 2. Add route-level middleware (already boxed)
-            let route_middleware = router.get_route_middleware(path);
+            // 2. Add route-level middleware (already boxed).
+            //    Lookup is keyed by `(method, path)` so middleware
+            //    registered for one HTTP method on a given path never
+            //    bleeds onto a sibling route on the same path under a
+            //    different method.
+            let route_middleware = router.get_route_middleware(&method, path);
             chain.extend(route_middleware);
 
             // 3. Execute chain with handler
