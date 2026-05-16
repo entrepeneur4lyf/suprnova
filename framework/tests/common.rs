@@ -50,7 +50,15 @@ pub async fn request_from_multipart(boundary: &str, body: Bytes) -> Request {
             {
                 let _ = tx.send(wrapped);
             }
+            // Never resolve. Hyper drives body bytes into `Incoming` only
+            // while the service future is pending; if we return Ok here,
+            // the connection task stops pumping and subsequent body reads
+            // (e.g. via `BodyDataStream` + `multer`) fail with
+            // "failed to read stream". The tokio test runtime drops this
+            // task at end-of-test, so the unreachable Ok branch just gives
+            // the closure its `Result<_, Infallible>` return type.
             async {
+                std::future::pending::<()>().await;
                 Ok::<_, Infallible>(hyper::Response::new(
                     http_body_util::Empty::<Bytes>::new(),
                 ))

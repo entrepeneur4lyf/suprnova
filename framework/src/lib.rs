@@ -55,7 +55,11 @@ pub use http::{
     json, text, Cookie, CookieOptions, FormRequest, FromParam, FromRequest, HttpResponse, Redirect,
     Request, Response, ResponseExt, SameSite,
 };
-pub use http::upload::{parse_multipart_streaming, MultipartPayload, MultipartValue};
+pub use http::upload::validators::{Image, MaxSize, MimeAllowlist, MimeType};
+pub use http::upload::{
+    parse_multipart_streaming, MultipartPayload, MultipartRequestHooks, MultipartValue,
+    UploadedFile,
+};
 pub use http_client::{
     assert_not_sent, assert_sent, fake_response, ClientResponse, Http, RecordedRequest,
     RequestBuilder,
@@ -156,6 +160,7 @@ pub use suprnova_macros::workflow_step;
 pub use suprnova_macros::Data;
 pub use suprnova_macros::FormRequest as FormRequestDerive;
 pub use suprnova_macros::InertiaProps;
+pub use suprnova_macros::MultipartRequest;
 pub use suprnova_macros::suprnova_test;
 
 // Re-export Jest-like testing macros

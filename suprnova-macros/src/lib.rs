@@ -16,6 +16,7 @@ mod domain_error;
 mod handler;
 mod inertia;
 mod injectable;
+mod multipart;
 mod suprnova_test;
 mod redirect;
 mod request;
@@ -498,4 +499,44 @@ pub fn test(input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn policy(attr: TokenStream, item: TokenStream) -> TokenStream {
     policy::policy(attr, item)
+}
+
+/// Derive macro for `MultipartRequest` — strongly-typed multipart extractor.
+///
+/// Annotate each field with `#[field("form_name")]` to bind it to the
+/// matching multipart part. Supported field shapes:
+///
+/// - `UploadedFile<V>` — required file; 422 if absent
+/// - `Option<UploadedFile<V>>` — optional file
+/// - `Vec<UploadedFile<V>>` — collect every matching file part
+/// - `T: FromStr` (e.g. `String`, `u32`) — required text field
+/// - `Option<T>` — optional text field
+/// - `Vec<T>` — collect every matching text part
+///
+/// The validator `V` defaults to `()` (accept anything). Built-in
+/// validators live in `suprnova::http::upload::validators` and can be
+/// composed via tuples: `UploadedFile<(Image, MaxSize<5_000_000>)>`.
+///
+/// `#[multipart(custom_hooks)]` on the struct suppresses the
+/// auto-generated `impl MultipartRequestHooks for Self {}`, letting
+/// users override `authorize` and `after_validation`.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use suprnova::http::upload::{Image, MaxSize, UploadedFile};
+/// use suprnova::MultipartRequest;
+///
+/// #[derive(MultipartRequest)]
+/// pub struct AvatarUpload {
+///     #[field("avatar")]
+///     pub avatar: UploadedFile<(Image, MaxSize<5_242_880>)>,
+///
+///     #[field("caption")]
+///     pub caption: Option<String>,
+/// }
+/// ```
+#[proc_macro_derive(MultipartRequest, attributes(field, multipart))]
+pub fn multipart_request(input: TokenStream) -> TokenStream {
+    multipart::expand(input)
 }
