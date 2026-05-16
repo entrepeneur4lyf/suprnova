@@ -73,7 +73,42 @@ tracing-opentelemetry = { version = "0.32.1", optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 infer = "0.19"
 multer = "3"
-opendal = { version = "0.56", default-features = false, features = ["services-fs", "services-s3", "services-azblob", "services-gcs", "services-memory", "layers-retry"] }
+opendal = { version = "0.56", default-features = false, features = [
+    "services-fs",
+    "services-s3",
+    "services-azblob",
+    "services-gcs",
+    "services-memory",
+    # Production-grade middleware stack. Each `layers-*` feature pulls a
+    # separate `opendal-layer-*` crate, which is why they're feature-gated
+    # at all — without these flags the layer types aren't even reachable.
+    # `layers-retry` (in 0.56 → `RetryLayer`): exponential-backoff retries
+    #   on transient 5xx and throttling.
+    # `layers-timeout` (`TimeoutLayer`): per-operation timeout.
+    # `layers-logging` (`LoggingLayer`): debug-level structured logs for
+    #   every operation.
+    # `layers-tracing` (`TracingLayer`): `tracing` spans per operation;
+    #   integrates with the framework's existing `tracing-subscriber` setup
+    #   and (when the `otel` feature is on) the OTLP exporter.
+    # `layers-prometheus-client` (`PrometheusClientLayer`): histograms +
+    #   counters for the `prometheus-client` registry. We pick this over
+    #   `layers-prometheus` because `prometheus-client` is the actively-
+    #   maintained crate; the older `prometheus` crate is in maintenance
+    #   mode.
+    # OTel-specific layers (`layers-otel-trace` / `layers-otel-metrics`)
+    # are intentionally NOT enabled here because they depend on the
+    # `opentelemetry` crate and could drag in a version different from
+    # the framework's pinned 0.31.x line, fracturing the `Tracer` trait
+    # identity. If a consumer needs OpenTelemetry, the framework's `otel`
+    # feature already wires the SDK and reqwest exporter; opendal's spans
+    # surface through `TracingLayer` because `tracing-opentelemetry`
+    # bridges them.
+    "layers-retry",
+    "layers-timeout",
+    "layers-logging",
+    "layers-tracing",
+    "layers-prometheus-client",
+] }
 url = "2"
 # Spill-to-disk backing for large multipart parts. Used at runtime when a
 # single upload exceeds the in-memory spill threshold so the framework never
@@ -94,3 +129,10 @@ otel = [
     "dep:opentelemetry-semantic-conventions",
     "dep:tracing-opentelemetry",
 ]
+
+[dev-dependencies]
+# Smoke test for the `opendal::layers::PrometheusClientLayer` feature.
+# Pinned to the same line opendal-layer-prometheus-client 0.56 builds
+# against — different majors of `prometheus-client` would fracture the
+# `Registry` type identity.
+prometheus-client = "0.24"

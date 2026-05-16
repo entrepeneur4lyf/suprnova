@@ -248,3 +248,110 @@ async fn register_s3_unchanged_still_works() {
         "disk lookup must succeed after register_s3"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Newly-enabled opendal layers: logging, tracing, timeout, prometheus-client.
+// ---------------------------------------------------------------------------
+//
+// These tests prove the layer features in `framework/Cargo.toml` resolve and
+// that the layer types are reachable to consumers through the `register_*_with`
+// entry points. We compose each layer onto a memory disk and round-trip a
+// write/read — the assertions are that registration succeeds AND that the
+// layered operator is functionally indistinguishable from an unlayered one for
+// happy-path operations.
+
+#[tokio::test]
+async fn register_with_logging_layer_composes_and_round_trips() {
+    use opendal::layers::LoggingLayer;
+
+    let _guard = Storage::fake();
+    Storage::register_memory_with("logged", |op| op.layer(LoggingLayer::default()));
+
+    let disk = Storage::disk("logged").expect("logged disk available");
+    disk.write("file.txt", "logged-write")
+        .await
+        .expect("write through LoggingLayer succeeds");
+    let bytes = disk.read("file.txt").await.expect("read through LoggingLayer");
+    assert_eq!(&bytes.to_vec(), b"logged-write");
+}
+
+#[tokio::test]
+async fn register_with_tracing_layer_composes_and_round_trips() {
+    use opendal::layers::TracingLayer;
+
+    let _guard = Storage::fake();
+    Storage::register_memory_with("traced", |op| op.layer(TracingLayer::new()));
+
+    let disk = Storage::disk("traced").expect("traced disk available");
+    disk.write("file.txt", "traced-write")
+        .await
+        .expect("write through TracingLayer succeeds");
+    let bytes = disk.read("file.txt").await.expect("read through TracingLayer");
+    assert_eq!(&bytes.to_vec(), b"traced-write");
+}
+
+#[tokio::test]
+async fn register_with_timeout_layer_composes_and_round_trips() {
+    use opendal::layers::TimeoutLayer;
+    use std::time::Duration;
+
+    let _guard = Storage::fake();
+    Storage::register_memory_with("timed", |op| {
+        op.layer(TimeoutLayer::new().with_timeout(Duration::from_secs(30)))
+    });
+
+    let disk = Storage::disk("timed").expect("timed disk available");
+    disk.write("file.txt", "timed-write")
+        .await
+        .expect("write through TimeoutLayer succeeds within 30s");
+    let bytes = disk.read("file.txt").await.expect("read through TimeoutLayer");
+    assert_eq!(&bytes.to_vec(), b"timed-write");
+}
+
+#[tokio::test]
+async fn register_with_prometheus_client_layer_composes_and_round_trips() {
+    use opendal::layers::PrometheusClientLayer;
+    use prometheus_client::registry::Registry;
+
+    let _guard = Storage::fake();
+    let mut registry = Registry::default();
+    // `PrometheusClientLayer::builder` registers histograms + counters into
+    // the registry; constructing it proves the feature flag works and the
+    // crate's API is reachable. Different opendal 0.56 patch releases shape
+    // this slightly differently — the builder pattern is the stable surface.
+    let layer = PrometheusClientLayer::builder()
+        .register(&mut registry);
+    Storage::register_memory_with("metered", move |op| op.layer(layer));
+
+    let disk = Storage::disk("metered").expect("metered disk available");
+    disk.write("file.txt", "metered-write")
+        .await
+        .expect("write through PrometheusClientLayer succeeds");
+    let bytes = disk.read("file.txt").await.expect("read through PrometheusClientLayer");
+    assert_eq!(&bytes.to_vec(), b"metered-write");
+}
+
+#[tokio::test]
+async fn register_with_full_production_layer_stack_round_trips() {
+    // Compose the recommended production stack — retry, timeout, logging,
+    // tracing — in the documented order. The test proves the full
+    // composition produces a working operator and doesn't conflict between
+    // layers.
+    use opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer, TracingLayer};
+    use std::time::Duration;
+
+    let _guard = Storage::fake();
+    Storage::register_memory_with("full_stack", |op| {
+        op.layer(RetryLayer::new().with_max_times(3))
+            .layer(TimeoutLayer::new().with_timeout(Duration::from_secs(30)))
+            .layer(LoggingLayer::default())
+            .layer(TracingLayer::new())
+    });
+
+    let disk = Storage::disk("full_stack").expect("full-stack disk available");
+    disk.write("file.txt", "stacked-write")
+        .await
+        .expect("write through full layer stack succeeds");
+    let bytes = disk.read("file.txt").await.expect("read through full layer stack");
+    assert_eq!(&bytes.to_vec(), b"stacked-write");
+}

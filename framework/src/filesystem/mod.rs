@@ -122,19 +122,39 @@ impl Storage {
     /// Register a local filesystem disk with a custom layer stack applied to
     /// the underlying [`Operator`] before it lands in the registry.
     ///
-    /// Use this to compose opendal layers (retry, logging, timeout, metrics,
-    /// throttle, …) on top of the raw FS operator. See
-    /// [`opendal::layers`](https://docs.rs/opendal/0.56/opendal/layers/) for
-    /// the full list.
+    /// # Available layers
+    ///
+    /// Suprnova enables these `opendal::layers::*` types out of the box (each
+    /// gated behind one `opendal` feature in `framework/Cargo.toml`):
+    ///
+    /// - [`RetryLayer`](https://docs.rs/opendal/0.56/opendal/layers/struct.RetryLayer.html) —
+    ///   exponential-backoff retries on transient 5xx / throttling.
+    /// - [`TimeoutLayer`](https://docs.rs/opendal/0.56/opendal/layers/struct.TimeoutLayer.html) —
+    ///   per-operation timeout.
+    /// - [`LoggingLayer`](https://docs.rs/opendal/0.56/opendal/layers/struct.LoggingLayer.html) —
+    ///   debug-level structured logs for every operation.
+    /// - [`TracingLayer`](https://docs.rs/opendal/0.56/opendal/layers/struct.TracingLayer.html) —
+    ///   `tracing` spans per operation; bridges to OTel through
+    ///   `tracing-opentelemetry` when the framework's `otel` feature is on.
+    /// - [`PrometheusClientLayer`](https://docs.rs/opendal/0.56/opendal/layers/struct.PrometheusClientLayer.html) —
+    ///   histograms + counters for the `prometheus-client` registry.
+    ///
+    /// Layer order matters: outermost layer wraps everything inside it. The
+    /// idiomatic stack is `RetryLayer → TimeoutLayer → LoggingLayer`, so a
+    /// timed-out attempt still logs and a retry covers transport failures.
     ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// use opendal::layers::RetryLayer;
+    /// use opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer, TracingLayer};
+    /// use std::time::Duration;
     /// use suprnova::Storage;
     ///
     /// Storage::register_fs_with("local", "./storage", |op| {
     ///     op.layer(RetryLayer::new().with_max_times(3))
+    ///       .layer(TimeoutLayer::new().with_timeout(Duration::from_secs(30)))
+    ///       .layer(LoggingLayer::default())
+    ///       .layer(TracingLayer::new())
     /// })?;
     /// ```
     pub fn register_fs_with(
@@ -165,14 +185,18 @@ impl Storage {
     /// Memory backend construction is infallible, so the closure always runs.
     /// Useful for testing layer behaviour without external services.
     ///
+    /// See [`Storage::register_fs_with`] for the full list of available
+    /// layers (retry, timeout, logging, tracing, prometheus-client).
+    ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// use opendal::layers::RetryLayer;
+    /// use opendal::layers::{LoggingLayer, RetryLayer};
     /// use suprnova::Storage;
     ///
     /// Storage::register_memory_with("scratch", |op| {
     ///     op.layer(RetryLayer::new().with_max_times(2))
+    ///       .layer(LoggingLayer::default())
     /// });
     /// ```
     pub fn register_memory_with(
@@ -200,21 +224,31 @@ impl Storage {
     /// [`Operator`] before it lands in the registry.
     ///
     /// Production S3 deployments need retries (for throttling and transient
-    /// 5xx), timeouts, and observability. Use this entry point to compose
-    /// any opendal layer stack. See
-    /// [`opendal::layers`](https://docs.rs/opendal/0.56/opendal/layers/) for
-    /// the full list.
+    /// 5xx), timeouts, and observability. See [`Storage::register_fs_with`]
+    /// for the full list of available layers (retry, timeout, logging,
+    /// tracing, prometheus-client).
     ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// use opendal::layers::RetryLayer;
-    /// use suprnova::{Storage, S3Config};
+    /// use opendal::layers::{LoggingLayer, PrometheusClientLayer, RetryLayer, TimeoutLayer, TracingLayer};
+    /// use prometheus_client::registry::Registry;
+    /// use std::time::Duration;
+    /// use suprnova::{S3Config, Storage};
+    ///
+    /// let mut registry = Registry::default();
+    /// let metrics_layer = PrometheusClientLayer::new(&mut registry);
     ///
     /// Storage::register_s3_with(
     ///     "uploads",
-    ///     S3Config { bucket: "my-bucket".into(), ..Default::default() },
-    ///     |op| op.layer(RetryLayer::new().with_max_times(3)),
+    ///     S3Config { bucket: "my-bucket".into(), region: Some("us-east-1".into()), ..Default::default() },
+    ///     |op| {
+    ///         op.layer(RetryLayer::new().with_max_times(3))
+    ///           .layer(TimeoutLayer::new().with_timeout(Duration::from_secs(30)))
+    ///           .layer(LoggingLayer::default())
+    ///           .layer(TracingLayer::new())
+    ///           .layer(metrics_layer)
+    ///     },
     /// )?;
     /// ```
     pub fn register_s3_with(
@@ -258,6 +292,10 @@ impl Storage {
 
     /// Register an Azure Blob Storage disk with a custom layer stack applied
     /// to the [`Operator`] before it lands in the registry.
+    ///
+    /// See [`Storage::register_fs_with`] for the full list of available
+    /// layers (retry, timeout, logging, tracing, prometheus-client) and a
+    /// canonical ordering example.
     pub fn register_azblob_with(
         name: impl Into<String>,
         config: AzBlobConfig,
@@ -293,6 +331,10 @@ impl Storage {
 
     /// Register a Google Cloud Storage disk with a custom layer stack applied
     /// to the [`Operator`] before it lands in the registry.
+    ///
+    /// See [`Storage::register_fs_with`] for the full list of available
+    /// layers (retry, timeout, logging, tracing, prometheus-client) and a
+    /// canonical ordering example.
     pub fn register_gcs_with(
         name: impl Into<String>,
         config: GcsConfig,
