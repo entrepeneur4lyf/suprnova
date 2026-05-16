@@ -5,6 +5,31 @@
 
 use crate::FrameworkError;
 
+/// Streaming upload validator.
+///
+/// # Lifecycle
+///
+/// For each declared `UploadedFile<V>` field on a `#[derive(MultipartRequest)]`
+/// struct, the derive macro constructs a single `V` instance via
+/// `Default::default()` at the start of request handling and reuses it
+/// across **both** [`validate_chunk`](Self::validate_chunk) and
+/// [`validate_final`](Self::validate_final) calls for that field.
+///
+/// # State
+///
+/// Both methods take `&self`. If your validator needs to accumulate
+/// state across chunks (e.g. a rolling hash, a running CRC), use
+/// **interior mutability** (`std::cell::Cell`, `std::sync::Mutex`,
+/// `std::sync::atomic::*`). Because the same `&V` is threaded through
+/// every chunk and the final check, your interior-mutability state
+/// is coherent across the entire upload.
+///
+/// # Composition
+///
+/// Tuple impls run validators in declaration order:
+/// `(Image, MaxSize<5_242_880>)` runs `Image::validate_chunk` first,
+/// then `MaxSize::validate_chunk` (per chunk); `validate_final` runs in
+/// the same order. Short-circuits on first `Err`.
 pub trait UploadValidator: Send + Sync + Default {
     /// Called after each chunk is appended to the accumulator.
     /// Return `Err` to short-circuit oversized uploads at the byte

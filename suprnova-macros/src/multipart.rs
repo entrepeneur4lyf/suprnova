@@ -43,6 +43,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
     let mut field_decls = Vec::new();
     let mut field_arms = Vec::new();
     let mut validator_arms = Vec::new();
+    let mut validator_decls = Vec::new();
     let mut struct_init = Vec::new();
 
     for field in &fields.named {
@@ -73,18 +74,20 @@ pub fn expand(input: TokenStream) -> TokenStream {
         let shape = classify(ty);
         match shape {
             FieldShape::FileScalar { validator } => {
+                let v_ident = quote::format_ident!("__v_{}", ident);
+                validator_decls.push(quote! {
+                    let #v_ident: #validator = <#validator as ::core::default::Default>::default();
+                });
                 validator_arms.push(quote! {
                     #field_name_str => {
-                        let v = <#validator as ::core::default::Default>::default();
-                        <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_chunk(&v, accumulated)?;
+                        <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_chunk(&#v_ident, accumulated)?;
                     }
                 });
                 field_arms.push(quote! {
                     #field_name_str => {
                         if let ::suprnova::http::upload::MultipartValue::File { bytes, file_name, content_type } = value {
-                            let v = <#validator as ::core::default::Default>::default();
                             <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_final(
-                                &v, &bytes, content_type.as_deref()
+                                &#v_ident, &bytes, content_type.as_deref()
                             )?;
                             if #ident.is_none() {
                                 #ident = ::core::option::Option::Some(
@@ -112,18 +115,20 @@ pub fn expand(input: TokenStream) -> TokenStream {
                 });
             }
             FieldShape::FileOption { validator } => {
+                let v_ident = quote::format_ident!("__v_{}", ident);
+                validator_decls.push(quote! {
+                    let #v_ident: #validator = <#validator as ::core::default::Default>::default();
+                });
                 validator_arms.push(quote! {
                     #field_name_str => {
-                        let v = <#validator as ::core::default::Default>::default();
-                        <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_chunk(&v, accumulated)?;
+                        <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_chunk(&#v_ident, accumulated)?;
                     }
                 });
                 field_arms.push(quote! {
                     #field_name_str => {
                         if let ::suprnova::http::upload::MultipartValue::File { bytes, file_name, content_type } = value {
-                            let v = <#validator as ::core::default::Default>::default();
                             <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_final(
-                                &v, &bytes, content_type.as_deref()
+                                &#v_ident, &bytes, content_type.as_deref()
                             )?;
                             if #ident.is_none() {
                                 #ident = ::core::option::Option::Some(
@@ -141,18 +146,20 @@ pub fn expand(input: TokenStream) -> TokenStream {
                 struct_init.push(quote! { #ident, });
             }
             FieldShape::FileVec { validator } => {
+                let v_ident = quote::format_ident!("__v_{}", ident);
+                validator_decls.push(quote! {
+                    let #v_ident: #validator = <#validator as ::core::default::Default>::default();
+                });
                 validator_arms.push(quote! {
                     #field_name_str => {
-                        let v = <#validator as ::core::default::Default>::default();
-                        <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_chunk(&v, accumulated)?;
+                        <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_chunk(&#v_ident, accumulated)?;
                     }
                 });
                 field_arms.push(quote! {
                     #field_name_str => {
                         if let ::suprnova::http::upload::MultipartValue::File { bytes, file_name, content_type } = value {
-                            let v = <#validator as ::core::default::Default>::default();
                             <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_final(
-                                &v, &bytes, content_type.as_deref()
+                                &#v_ident, &bytes, content_type.as_deref()
                             )?;
                             #ident.push(
                                 ::suprnova::http::upload::UploadedFile::<#validator>::new(
@@ -268,6 +275,16 @@ pub fn expand(input: TokenStream) -> TokenStream {
                 if !<Self as ::suprnova::http::upload::MultipartRequestHooks>::authorize(&req) {
                     return ::core::result::Result::Err(::suprnova::FrameworkError::Unauthorized);
                 }
+
+                // Construct one validator instance per file field, ONCE.
+                // The non-`move` closure below and the post-parse field
+                // loop both borrow these via `&#v_<ident>`, so stateful
+                // validators (interior mutability — `Mutex`, `AtomicUsize`,
+                // etc.) see coherent state across every chunk + the final
+                // call. Without this hoist a fresh instance would be
+                // constructed inside each match arm and any accumulated
+                // state would be discarded.
+                #(#validator_decls)*
 
                 let payload = ::suprnova::http::upload::parse_multipart_streaming(
                     req,

@@ -241,3 +241,61 @@ async fn extension_from_magic_falls_back_to_bin_for_unknown_content() {
     let form = Blob::from_request(req).await.unwrap();
     assert_eq!(form.file.extension_from_magic(), "bin");
 }
+
+// ── Stateful validator: one instance threaded across chunk + final phases ──
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Stateful validator using `AtomicUsize` interior mutability. Counts
+/// `validate_chunk` calls; `validate_final` returns `Err` if the count
+/// is zero, which would mean the macro constructed a SEPARATE instance
+/// for the final phase (the chunk-phase counter would have been
+/// discarded with that other instance). Under the corrected macro the
+/// same `&self` is used in both phases, so the counter survives and
+/// `from_request` succeeds.
+#[derive(Default)]
+struct ChunkCounter {
+    count: AtomicUsize,
+}
+
+impl suprnova::http::upload::validators::UploadValidator for ChunkCounter {
+    fn validate_chunk(&self, _: &[u8]) -> Result<(), suprnova::FrameworkError> {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    fn validate_final(&self, _: &[u8], _: Option<&str>) -> Result<(), suprnova::FrameworkError> {
+        let chunks = self.count.load(Ordering::SeqCst);
+        if chunks == 0 {
+            return Err(suprnova::FrameworkError::Domain {
+                message: "validate_final saw zero chunks — instances not threaded".into(),
+                status_code: 500,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(MultipartRequest)]
+struct ProbedUpload {
+    #[field("data")]
+    #[allow(dead_code)] // we just need the macro to invoke the validator
+    data: UploadedFile<ChunkCounter>,
+}
+
+#[tokio::test]
+async fn validator_instance_is_threaded_across_chunk_and_final() {
+    // 256 KiB body, well above multer's internal chunk size, so the
+    // streaming path produces at least one `validate_chunk` call before
+    // `validate_final` runs.
+    let body = build_multipart_body("test", &[("data", Some("a.bin"), &[0u8; 256_000])]);
+    let req = request_from_multipart("test", body).await;
+    // If the macro constructed separate instances per phase, the final
+    // phase would see count=0 and return Err. The same-instance hoist
+    // means count > 0 and the request succeeds.
+    let result = ProbedUpload::from_request(req).await;
+    assert!(
+        result.is_ok(),
+        "validator instance must persist from chunk to final phase: {:?}",
+        result.err().map(|e| e.to_string()),
+    );
+}
