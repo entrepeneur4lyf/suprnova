@@ -88,11 +88,13 @@ pub fn dispatched_count<E: Event>(pred: impl Fn(&E) -> bool) -> usize {
 mod tests {
     use super::*;
     use crate::events::EventFacade;
-    use std::sync::Mutex;
+    use tokio::sync::Mutex;
 
     // Tests in this module share the global `FAKE` store, so they
-    // need to run serially to avoid cross-test contamination.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    // need to run serially to avoid cross-test contamination. Use
+    // `tokio::sync::Mutex` so the guard can be safely held across
+    // `.await` points.
+    static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
     #[derive(Debug, Clone)]
     struct Noted {
@@ -106,7 +108,7 @@ mod tests {
 
     #[tokio::test]
     async fn fake_records_dispatched_events_and_does_not_call_listeners() {
-        let _serial = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = TEST_LOCK.lock().await;
         let _guard = EventFacade::fake();
         EventFacade::dispatch(Noted { note: "hi".into() })
             .await
@@ -121,7 +123,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatched_count_works() {
-        let _serial = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = TEST_LOCK.lock().await;
         let _guard = EventFacade::fake();
         EventFacade::dispatch(Noted { note: "a".into() })
             .await

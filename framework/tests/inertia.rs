@@ -2246,23 +2246,22 @@ mod version_mw {
         (flag, next)
     }
 
-    /// Test note: full Request construction requires `hyper::body::Incoming`
-    /// which can't be built outside hyper. The middleware tests therefore
-    /// live in this submodule with a dedicated runner that exercises the
-    /// middleware's logic against the actual `Request` type through a
-    /// minimal hyper service setup. We use `hyper::Request::builder()`
-    /// + `http_body_util::Empty` as the body, then convert via
-    /// `Request::new` after collecting a wrapped Incoming.
-    ///
-    /// Since hyper doesn't expose a way to construct Incoming, we
-    /// instead test the middleware behavior end-to-end by binding a
-    /// tokio TCP listener on `127.0.0.1:0` and sending real HTTP
-    /// requests through a hyper client.
-    ///
-    /// That setup is heavier than the direct invocation pattern used for
-    /// the rest of these integration tests, so we use a separate test
-    /// fixture below.
-
+    // Test note: full Request construction requires `hyper::body::Incoming`
+    // which can't be built outside hyper. The middleware tests therefore
+    // live in this submodule with a dedicated runner that exercises the
+    // middleware's logic against the actual `Request` type through a
+    // minimal hyper service setup. We use `hyper::Request::builder()`
+    //   + `http_body_util::Empty` as the body, then convert via
+    // `Request::new` after collecting a wrapped Incoming.
+    //
+    // Since hyper doesn't expose a way to construct Incoming, we
+    // instead test the middleware behavior end-to-end by binding a
+    // tokio TCP listener on `127.0.0.1:0` and sending real HTTP
+    // requests through a hyper client.
+    //
+    // That setup is heavier than the direct invocation pattern used for
+    // the rest of these integration tests, so we use a separate test
+    // fixture below.
     use http_body_util::{BodyExt, Empty};
     use hyper::body::Bytes;
     use hyper::server::conn::http1;

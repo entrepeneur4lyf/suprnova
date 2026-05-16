@@ -10,12 +10,11 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use validator::Validate;
 
 use suprnova::error::FrameworkError;
 use suprnova::{FormRequest, HttpResponse, Request};

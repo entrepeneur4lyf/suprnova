@@ -97,9 +97,8 @@ fn deserialize_option_null_yields_none() {
 
 // ── #[data(allow_include)] inventory→registry pipeline ───────────────────
 
-#[allow(non_camel_case_types)]
 #[derive(suprnova::Data, Validate)]
-struct _test_AlbumDto_t8 {
+struct TestAlbumDtoT8 {
     pub id: i64,
     pub title: String,
 
@@ -117,11 +116,21 @@ fn allow_include_fields_register_via_inventory() {
     // them into the runtime registry via `ensure_initialized()`.
     use suprnova::data::registry;
 
-    assert!(registry::is_allowed("_test_AlbumDto_t8", "songs"));
-    assert!(registry::is_allowed("_test_AlbumDto_t8", "artist"));
-    assert!(!registry::is_allowed("_test_AlbumDto_t8", "title"));
+    // Force construction so the struct + its fields aren't treated as
+    // dead code; the registry assertions below verify the link-time
+    // `inventory::submit!` registration regardless.
+    let _album = TestAlbumDtoT8 {
+        id: 1,
+        title: "x".into(),
+        songs: None,
+        artist: None,
+    };
+
+    assert!(registry::is_allowed("TestAlbumDtoT8", "songs"));
+    assert!(registry::is_allowed("TestAlbumDtoT8", "artist"));
+    assert!(!registry::is_allowed("TestAlbumDtoT8", "title"));
     assert_eq!(
-        registry::allowed_for("_test_AlbumDto_t8"),
+        registry::allowed_for("TestAlbumDtoT8"),
         vec!["songs", "artist"]
     );
 }

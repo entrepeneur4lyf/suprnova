@@ -18,7 +18,7 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 
-use suprnova::{handle_request, MiddlewareRegistry, Router};
+use suprnova::{handle_request, MiddlewareRegistry};
 
 /// Spawn a one-shot hyper server that serves the app's router for a
 /// configurable number of inbound connections. Returns the bound

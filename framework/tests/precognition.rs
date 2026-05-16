@@ -120,7 +120,7 @@ async fn precognition_failure_returns_422_with_filtered_errors() {
     assert_eq!(resp.status(), 422);
     assert_eq!(resp.headers().get("Precognition").unwrap(), "true");
     assert_eq!(resp.headers().get("Vary").unwrap(), "Precognition");
-    let body: serde_json::Value = serde_json::from_slice(&resp.body()).unwrap();
+    let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
     let errors = body["errors"].as_object().unwrap();
     assert!(errors.contains_key("email"));
     assert!(
@@ -158,7 +158,7 @@ async fn non_precognition_request_runs_handler_on_valid_input() {
     )
     .await;
     assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = serde_json::from_slice(&resp.body()).unwrap();
+    let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
     assert_eq!(body["ok"], true);
 }
 

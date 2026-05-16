@@ -132,10 +132,10 @@ mod tests {
 
     #[test]
     fn f64_happy() {
-        let v = parse_f64("ratio", "3.14").unwrap();
+        let v = parse_f64("ratio", "2.5").unwrap();
         if let Value::Number(n) = v {
             let f = n.as_f64().unwrap();
-            assert!((f - 3.14f64).abs() < 1e-9);
+            assert!((f - 2.5f64).abs() < 1e-9);
         } else {
             panic!("expected number");
         }

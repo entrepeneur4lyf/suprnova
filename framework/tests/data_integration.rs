@@ -26,9 +26,8 @@ use suprnova::{FormRequest, HttpResponse, InertiaRequestExt, InertiaResponse, Re
 // Shared DTO under test
 // ---------------------------------------------------------------------------
 
-#[allow(non_camel_case_types)]
 #[derive(Debug, suprnova::Data, validator::Validate)]
-pub struct _test_ArticleDto_t12 {
+pub struct TestArticleDtoT12 {
     pub id: i64,
 
     #[validate(length(min = 1, max = 255))]
@@ -50,9 +49,9 @@ pub struct _test_ArticleDto_t12 {
 async fn spawn_and_capture()
 -> (
     SocketAddr,
-    Arc<Mutex<Option<Result<_test_ArticleDto_t12, FrameworkError>>>>,
+    Arc<Mutex<Option<Result<TestArticleDtoT12, FrameworkError>>>>,
 ) {
-    let captured: Arc<Mutex<Option<Result<_test_ArticleDto_t12, FrameworkError>>>> =
+    let captured: Arc<Mutex<Option<Result<TestArticleDtoT12, FrameworkError>>>> =
         Arc::new(Mutex::new(None));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -67,7 +66,7 @@ async fn spawn_and_capture()
                     let captured_inner = captured_svc.clone();
                     async move {
                         let req = Request::new(hyper_req);
-                        let result = _test_ArticleDto_t12::extract(req).await;
+                        let result = TestArticleDtoT12::extract(req).await;
                         *captured_inner.lock().unwrap() = Some(result);
                         Ok::<_, Infallible>(HttpResponse::text("ok").into_hyper())
                     }
@@ -196,7 +195,7 @@ async fn inbound_path_validates_and_constructs() {
 
 #[test]
 fn outbound_path_strips_input_only_and_includes_output_only() {
-    let article = _test_ArticleDto_t12 {
+    let article = TestArticleDtoT12 {
         id: 1,
         title: "Hello".into(),
         draft_body: "# Hello".into(),
@@ -238,7 +237,7 @@ fn outbound_path_strips_input_only_and_includes_output_only() {
 
 #[tokio::test]
 async fn outbound_via_inertia_response() {
-    let article = _test_ArticleDto_t12 {
+    let article = TestArticleDtoT12 {
         id: 1,
         title: "Hello".into(),
         draft_body: "# Hello".into(),

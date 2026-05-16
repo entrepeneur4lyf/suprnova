@@ -385,10 +385,10 @@ async fn build_request_async(auth_header: Option<&str>) -> suprnova::Request {
     tokio::spawn(async move {
         let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
             let wrapped = suprnova::Request::new(req);
-            if let Ok(mut guard) = req_tx.lock() {
-                if let Some(tx) = guard.take() {
-                    let _ = tx.send(wrapped);
-                }
+            if let Ok(mut guard) = req_tx.lock()
+                && let Some(tx) = guard.take()
+            {
+                let _ = tx.send(wrapped);
             }
             async {
                 Ok::<_, Infallible>(hyper::Response::new(

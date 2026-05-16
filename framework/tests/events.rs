@@ -1,15 +1,16 @@
 //! Integration tests for the events subsystem and error→event bridge.
 
-use std::sync::Mutex;
 use suprnova::{ErrorOccurred, EventFacade, FrameworkError, HttpResponse};
+use tokio::sync::Mutex;
 
 // Tests in this file share the global event fake store, so they must
-// run serially.
-static TEST_LOCK: Mutex<()> = Mutex::new(());
+// run serially. Use `tokio::sync::Mutex` so the guard can be safely
+// held across `.await` points.
+static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
 #[tokio::test]
 async fn server_error_dispatches_error_occurred() {
-    let _serial = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = TEST_LOCK.lock().await;
     let _guard = EventFacade::fake();
 
     let err = FrameworkError::internal("boom");
@@ -26,7 +27,7 @@ async fn server_error_dispatches_error_occurred() {
 
 #[tokio::test]
 async fn client_error_does_not_dispatch_error_occurred() {
-    let _serial = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = TEST_LOCK.lock().await;
     let _guard = EventFacade::fake();
 
     let err = FrameworkError::param("name");

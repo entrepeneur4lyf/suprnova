@@ -205,9 +205,11 @@ mod tests {
 
     #[tokio::test]
     async fn render_returns_none_when_path_excluded() {
-        let mut cfg = SsrConfig::default();
-        cfg.enabled = true;
-        cfg.excluded_paths.push("/admin/**".to_string());
+        let cfg = SsrConfig {
+            enabled: true,
+            excluded_paths: vec!["/admin/**".to_string()],
+            ..SsrConfig::default()
+        };
         let page = serde_json::json!({"component": "Admin"});
         let result = render(&cfg, "/admin/users", &page).await.unwrap();
         assert!(result.is_none());
