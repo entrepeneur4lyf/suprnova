@@ -1,4 +1,4 @@
-use suprnova::{delete, get, group, post, routes};
+use suprnova::{delete, get, group, post, routes, AuthMiddleware as SessionAuthMiddleware};
 
 use crate::controllers;
 use crate::middleware::AuthMiddleware;
@@ -22,6 +22,13 @@ routes! {
         get!("/{id}", controllers::user::show).name("users.show"),
         post!("/", controllers::user::store).name("users.store"),
     }),
+
+    // Authenticated user routes — session-gated via the framework's
+    // `AuthMiddleware`. The avatar upload exercises the full multipart
+    // + storage + Auth stack end-to-end.
+    group!("/users", {
+        post!("/avatar", controllers::avatar_upload::upload).name("users.avatar.store"),
+    }).middleware(SessionAuthMiddleware::new()),
 
     // Protected routes - requires Authorization header
     group!("/protected", {

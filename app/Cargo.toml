@@ -32,3 +32,6 @@ hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
 bytes = "1"
 serde_json = "1"
+# Per-test tempdir for the `public` Storage disk so parallel avatar-upload
+# e2e tests do not collide on the same on-disk path.
+tempfile = "3"

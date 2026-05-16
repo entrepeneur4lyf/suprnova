@@ -28,7 +28,8 @@ use std::sync::{Arc, OnceLock};
 #[allow(unused_imports)]
 use suprnova::{
     bind, global_middleware, singleton, App, EventFacade, FrameworkError, IncludeMiddleware,
-    InertiaRequestExt, InertiaSharedData, InertiaVersionMiddleware, Prop, UserProvider, DB,
+    InertiaRequestExt, InertiaSharedData, InertiaVersionMiddleware, Prop, S3Config, SessionConfig,
+    SessionMiddleware, Storage, UserProvider, DB,
 };
 use tokio::sync::broadcast;
 
@@ -115,6 +116,50 @@ pub async fn register() {
         user_registered_tx,
     )))
     .await;
+
+    // Storage disks. Local `public` is always available; the S3 `uploads`
+    // disk is env-gated so dev boots without AWS credentials.
+    register_storage_disks();
+
+    // Session middleware — installed globally so every route shares the
+    // same session lifecycle. The framework's `AuthMiddleware` and the
+    // `Auth::user_as` facade both read state set up by this middleware,
+    // so wiring it here is what makes auth-aware controllers (e.g. the
+    // avatar upload endpoint) functional in dev/prod.
+    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
+}
+
+/// Register the application's storage disks.
+///
+/// `public` is a local-filesystem disk rooted at `./storage/public`, suitable
+/// for development. `uploads` is an S3-backed disk that is only registered
+/// when `S3_BUCKET` is set in the environment — production deployments wire
+/// it via env vars, while local dev and tests skip it.
+///
+/// Split out of `register()` so test harnesses can re-target the `public`
+/// disk to a tempdir without re-running the rest of bootstrap.
+pub fn register_storage_disks() {
+    Storage::register_fs("public", "./storage/public").expect("register public disk");
+
+    // Pre-create the `avatars/` subdirectory so the first upload to a
+    // freshly-cloned checkout doesn't 500 on a missing parent. opendal's
+    // fs service creates files but not intermediate dirs.
+    std::fs::create_dir_all("./storage/public/avatars").ok();
+
+    if let Ok(bucket) = std::env::var("S3_BUCKET") {
+        Storage::register_s3(
+            "uploads",
+            S3Config {
+                bucket,
+                region: std::env::var("AWS_REGION").ok(),
+                endpoint: std::env::var("S3_ENDPOINT").ok(),
+                access_key_id: std::env::var("AWS_ACCESS_KEY_ID").ok(),
+                secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").ok(),
+                root: std::env::var("S3_ROOT").ok(),
+            },
+        )
+        .expect("register S3 uploads disk");
+    }
 }
 
 /// Per-request Inertia shared data. Demonstrates the request-aware
