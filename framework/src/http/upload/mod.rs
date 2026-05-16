@@ -14,9 +14,46 @@ use crate::error::FrameworkError;
 use bytes::Bytes;
 use http_body_util::BodyDataStream;
 use multer::Multipart;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub mod validators;
 use validators::UploadValidator;
+
+/// Default per-request multipart body cap when none is configured.
+/// 25 MiB matches what most production apps want as their default
+/// upper bound — large enough for typical document/image uploads,
+/// small enough that an unauthenticated client can't trivially DoS.
+pub const DEFAULT_MAX_MULTIPART_BODY_BYTES: usize = 25 * 1024 * 1024;
+
+static GLOBAL_MAX_BODY: AtomicUsize = AtomicUsize::new(0);
+
+/// Set the process-global cap on multipart request body size, in bytes.
+///
+/// Called at boot — typically from `bootstrap.rs` — to override the
+/// compile-time [`DEFAULT_MAX_MULTIPART_BODY_BYTES`]. Setting `0` is
+/// special: it means "use the default". Setting `usize::MAX` disables
+/// the cap entirely.
+///
+/// Per-struct overrides via `#[multipart(max_body_bytes = N)]` still
+/// take precedence.
+///
+/// Thread-safe; can be called multiple times. The most recent value
+/// wins for any subsequent request.
+pub fn set_global_max_multipart_body_bytes(bytes: usize) {
+    GLOBAL_MAX_BODY.store(bytes, Ordering::SeqCst);
+}
+
+/// Read the currently-configured global cap. Returns the default if
+/// [`set_global_max_multipart_body_bytes`] has never been called or was
+/// called with `0`.
+pub fn global_max_multipart_body_bytes() -> usize {
+    let stored = GLOBAL_MAX_BODY.load(Ordering::SeqCst);
+    if stored == 0 {
+        DEFAULT_MAX_MULTIPART_BODY_BYTES
+    } else {
+        stored
+    }
+}
 
 /// A single uploaded file with associated validator `V`.
 pub struct UploadedFile<V: UploadValidator = ()> {
@@ -91,11 +128,24 @@ pub enum MultipartValue {
     Text(String),
 }
 
-/// Stream the body of `req` into a `MultipartPayload`, invoking
-/// `per_field_validator(name, accumulated)` after each chunk so the
-/// caller can short-circuit oversized parts at byte boundaries.
-pub async fn parse_multipart_streaming<F>(
+/// Stream the body of `req` into a `MultipartPayload`, capped at
+/// `max_body_bytes` total accumulated bytes across all parts. The
+/// `per_field_validator` callback fires after each chunk and may
+/// short-circuit oversized individual fields independently.
+///
+/// The total-body cap is enforced BEFORE `per_field_validator` runs,
+/// so it fires even when no validator has been configured for the
+/// field (e.g. `UploadedFile<()>` or plain `Option<String>` fields).
+///
+/// # Errors
+///
+/// - 400 if the request is malformed (missing content-type, bad boundary)
+/// - 413 if the total body exceeds `max_body_bytes`
+/// - Whatever `per_field_validator` returns (typically 413 for individual
+///   field size caps via `MaxSize<N>`, or 422 for content checks)
+pub async fn parse_multipart_streaming_with_cap<F>(
     req: crate::http::Request,
+    max_body_bytes: usize,
     mut per_field_validator: F,
 ) -> Result<MultipartPayload, FrameworkError>
 where
@@ -123,6 +173,7 @@ where
     let mut multipart = Multipart::new(stream, boundary);
 
     let mut payload = MultipartPayload::default();
+    let mut total_bytes: usize = 0;
 
     while let Some(mut field) =
         multipart
@@ -142,6 +193,20 @@ where
             message: format!("multipart chunk: {e}"),
             status_code: 400,
         })? {
+            // Global body cap — short-circuits BEFORE the per-field validator
+            // runs, so it fires even when no validator has been configured for
+            // the field. `saturating_add` guards against `usize` wraparound on
+            // pathologically large streams.
+            total_bytes = total_bytes.saturating_add(chunk.len());
+            if total_bytes > max_body_bytes {
+                return Err(FrameworkError::Domain {
+                    message: format!(
+                        "multipart body exceeds {max_body_bytes} bytes (cap)"
+                    ),
+                    status_code: 413,
+                });
+            }
+
             buf.extend_from_slice(&chunk);
             per_field_validator(&name, &buf)?;
         }
@@ -167,6 +232,30 @@ where
     }
 
     Ok(payload)
+}
+
+/// Stream the body of `req` into a `MultipartPayload`, invoking
+/// `per_field_validator(name, accumulated)` after each chunk so the
+/// caller can short-circuit oversized parts at byte boundaries.
+///
+/// Thin wrapper around [`parse_multipart_streaming_with_cap`] using the
+/// process-global cap from [`global_max_multipart_body_bytes`]. New
+/// callers that want to pin the cap to a known value should prefer
+/// [`parse_multipart_streaming_with_cap`] directly; this exists for
+/// backwards compatibility with the pre-cap signature.
+pub async fn parse_multipart_streaming<F>(
+    req: crate::http::Request,
+    per_field_validator: F,
+) -> Result<MultipartPayload, FrameworkError>
+where
+    F: FnMut(&str, &[u8]) -> Result<(), FrameworkError>,
+{
+    parse_multipart_streaming_with_cap(
+        req,
+        global_max_multipart_body_bytes(),
+        per_field_validator,
+    )
+    .await
 }
 
 /// Lifecycle hooks for multipart request structs. Mirrors

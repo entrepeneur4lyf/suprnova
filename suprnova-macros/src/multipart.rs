@@ -16,18 +16,39 @@ pub fn expand(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let struct_name = &input.ident;
 
-    // Parse struct-level `#[multipart(custom_hooks)]`.
+    // Parse struct-level `#[multipart(...)]` options.
+    //
+    // `custom_hooks`         — caller provides the `MultipartRequestHooks` impl.
+    // `max_body_bytes = N`   — per-struct cap on total request body size, in bytes.
+    //                          When absent, the macro falls through to the
+    //                          process-global cap at runtime.
     let mut emit_default_hooks = true;
+    let mut max_body_bytes: Option<proc_macro2::TokenStream> = None;
     for attr in &input.attrs {
         if attr.path().is_ident("multipart") {
             let _ = attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("custom_hooks") {
                     emit_default_hooks = false;
+                    return Ok(());
                 }
-                Ok(())
+                if meta.path.is_ident("max_body_bytes") {
+                    let value: syn::Expr = meta.value()?.parse()?;
+                    max_body_bytes = Some(quote::quote! { #value });
+                    return Ok(());
+                }
+                Err(meta.error("unknown #[multipart(...)] option"))
             });
         }
     }
+
+    // Compute the cap expression once: per-struct override (if set), else
+    // the process-global accessor evaluated at runtime.
+    let max_body_bytes_expr: proc_macro2::TokenStream = if let Some(override_expr) = max_body_bytes
+    {
+        quote::quote! { (#override_expr) as usize }
+    } else {
+        quote::quote! { ::suprnova::http::upload::global_max_multipart_body_bytes() }
+    };
 
     let Data::Struct(data) = &input.data else {
         return syn::Error::new_spanned(&input, "MultipartRequest requires a struct")
@@ -286,8 +307,10 @@ pub fn expand(input: TokenStream) -> TokenStream {
                 // state would be discarded.
                 #(#validator_decls)*
 
-                let payload = ::suprnova::http::upload::parse_multipart_streaming(
+                let __max_body_bytes: usize = #max_body_bytes_expr;
+                let payload = ::suprnova::http::upload::parse_multipart_streaming_with_cap(
                     req,
+                    __max_body_bytes,
                     |name: &str, accumulated: &[u8]| -> ::core::result::Result<(), ::suprnova::FrameworkError> {
                         match name {
                             #(#validator_arms)*

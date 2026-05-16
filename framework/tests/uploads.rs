@@ -299,3 +299,116 @@ async fn validator_instance_is_threaded_across_chunk_and_final() {
         result.err().map(|e| e.to_string()),
     );
 }
+
+// ── Multipart body cap: default / global override / per-struct override ──
+//
+// These tests mutate a process-global atomic. Cargo runs tests within a
+// single integration binary in parallel by default, so they would race
+// each other without serialization. The `BodyCapGuard` below combines a
+// poison-tolerant Mutex with RAII reset-to-default-on-drop so that even
+// if a body-cap test panics mid-assertion, the next one starts clean.
+
+use std::sync::Mutex;
+
+static BODY_CAP_LOCK: Mutex<()> = Mutex::new(());
+
+struct BodyCapGuard {
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl BodyCapGuard {
+    fn acquire() -> Self {
+        let guard = BODY_CAP_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Always start from the compile-time default.
+        suprnova::http::upload::set_global_max_multipart_body_bytes(0);
+        Self { _guard: guard }
+    }
+}
+
+impl Drop for BodyCapGuard {
+    fn drop(&mut self) {
+        // Restore the default for any test that doesn't take the lock
+        // (the non-body-cap tests don't touch the global, but a stale
+        // override could still leak across test invocations if we
+        // skipped this).
+        suprnova::http::upload::set_global_max_multipart_body_bytes(0);
+    }
+}
+
+#[derive(suprnova::MultipartRequest)]
+struct UncappedBlob {
+    #[field("file")]
+    #[allow(dead_code)] // the assertion is on status code, not the constructed value
+    file: suprnova::UploadedFile,
+}
+
+#[tokio::test]
+async fn body_cap_uses_default_when_no_override() {
+    let _g = BodyCapGuard::acquire();
+
+    // 26 MiB body — exceeds the 25 MiB compile-time default.
+    let big = vec![0u8; 26 * 1024 * 1024];
+    let body = build_multipart_body("test", &[("file", Some("a.bin"), &big)]);
+    let req = request_from_multipart("test", body).await;
+    let err = UncappedBlob::from_request(req)
+        .await
+        .err()
+        .expect("default 25 MiB cap should reject 26 MiB body");
+    assert_eq!(err.status_code(), 413);
+}
+
+#[tokio::test]
+async fn body_cap_respects_global_override() {
+    let _g = BodyCapGuard::acquire();
+
+    // Set a 1 MiB process-global cap.
+    suprnova::http::upload::set_global_max_multipart_body_bytes(1024 * 1024);
+
+    let two_mb = vec![0u8; 2 * 1024 * 1024];
+    let body = build_multipart_body("test", &[("file", Some("a.bin"), &two_mb)]);
+    let req = request_from_multipart("test", body).await;
+    let err = UncappedBlob::from_request(req)
+        .await
+        .err()
+        .expect("global 1 MiB cap should reject 2 MiB body");
+    assert_eq!(err.status_code(), 413);
+}
+
+#[derive(suprnova::MultipartRequest)]
+#[multipart(max_body_bytes = 512)]
+struct TinyBlob {
+    #[field("file")]
+    file: suprnova::UploadedFile,
+}
+
+#[tokio::test]
+async fn body_cap_per_struct_override_wins() {
+    let _g = BodyCapGuard::acquire();
+
+    // Bump the global way up — per-struct should still apply.
+    suprnova::http::upload::set_global_max_multipart_body_bytes(100 * 1024 * 1024);
+
+    // 1 KiB body — under global, over the per-struct 512-byte cap.
+    let kb = vec![0u8; 1024];
+    let body = build_multipart_body("test", &[("file", Some("a.bin"), &kb)]);
+    let req = request_from_multipart("test", body).await;
+    let err = TinyBlob::from_request(req)
+        .await
+        .err()
+        .expect("per-struct 512-byte cap should reject 1 KiB body");
+    assert_eq!(err.status_code(), 413);
+}
+
+#[tokio::test]
+async fn body_cap_per_struct_under_cap_succeeds() {
+    let _g = BodyCapGuard::acquire();
+
+    // 256-byte body, under the per-struct 512-byte cap — should succeed.
+    let small = vec![0u8; 256];
+    let body = build_multipart_body("test", &[("file", Some("a.bin"), &small)]);
+    let req = request_from_multipart("test", body).await;
+    let form = TinyBlob::from_request(req).await.unwrap();
+    assert_eq!(form.file.bytes.len(), 256);
+}
