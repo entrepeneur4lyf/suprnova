@@ -23,7 +23,7 @@ use std::sync::{Arc, OnceLock};
 
 use torii::seaorm::SeaORMRepositoryProvider;
 use torii::Torii;
-use torii_core::repositories::{RepositoryProvider, UserRepository};
+use torii_core::repositories::{PasswordRepository, RepositoryProvider, UserRepository};
 use torii_storage_seaorm::SeaORMStorage;
 
 use crate::error::FrameworkError;
@@ -53,6 +53,47 @@ pub(crate) async fn find_or_create_user_by_email(email: &str) -> Result<User, Fr
         .find_or_create_by_email(email)
         .await
         .map_err(|e| FrameworkError::internal(format!("find_or_create_user_by_email: {e}")))
+}
+
+/// Return the stored password hash for a user identified by email, or `None`
+/// if the user has no password row.
+///
+/// # Purpose
+///
+/// This function exists **only for integration tests** that need to verify
+/// that passkey registration does not create a password row.  Production code
+/// should never need to inspect raw password hashes; use the `Auth::password()`
+/// facade instead.
+///
+/// The function is `pub` (not `pub(crate)`) so integration tests in
+/// `framework/tests/` — which compile as separate crates — can access it.
+/// It is hidden from documentation to discourage accidental use.
+#[doc(hidden)]
+pub async fn password_hash_for_email_test_only(
+    email: &str,
+) -> Result<Option<String>, FrameworkError> {
+    let provider = PROVIDER
+        .get()
+        .ok_or_else(|| FrameworkError::internal("Torii not initialised. Call init_torii() first."))?;
+    // First find the user; if the user doesn't exist return None (no row means no hash).
+    let user = match provider.user().find_by_email(email).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return Ok(None),
+        Err(e) => {
+            return Err(FrameworkError::internal(format!(
+                "password_hash_for_email_test_only find_by_email: {e}"
+            )))
+        }
+    };
+    provider
+        .password()
+        .get_password_hash(&user.id)
+        .await
+        .map_err(|e| {
+            FrameworkError::internal(format!(
+                "password_hash_for_email_test_only get_password_hash: {e}"
+            ))
+        })
 }
 
 /// Configuration for initialising Torii authentication.

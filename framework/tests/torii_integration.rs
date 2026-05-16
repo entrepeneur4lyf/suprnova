@@ -192,9 +192,17 @@ fn passkey_registration_state_stored_in_session() {
 /// FIX 3: `begin_registration` does not create a password row for the user.
 ///
 /// Before the fix, `get_or_create_user_by_email` called `password().register(email, random_uuid)`,
-/// creating a password row. Now it uses `find_or_create_by_email` via the repository layer.
-/// After `begin_registration`, authenticating with ANY password must FAIL — proving no
-/// password row was created for the user.
+/// which set `password_hash` to a bcrypt-hashed random UUID in the users table.
+/// After the fix, user creation goes through `find_or_create_by_email` (the repository
+/// layer directly), which creates the users row but leaves `password_hash = NULL`.
+///
+/// # Discriminator
+///
+/// We read the raw `password_hash` column after `begin_registration` and assert it is
+/// `None`.  Pre-fix code sets a non-null hash (random UUID, bcrypt-hashed); post-fix
+/// code leaves the hash null.  Using `password().authenticate()` does NOT discriminate
+/// between the two paths (both return `Err` — for different reasons), but a direct hash
+/// read does.
 #[test]
 fn passkey_registration_does_not_create_password_row() {
     Lazy::force(&SETUP);
@@ -204,7 +212,7 @@ fn passkey_registration_does_not_create_password_row() {
 
         let slot = suprnova::session::new_session_slot_for_test();
         suprnova::session::session_scope_for_test(slot, async {
-            // This should create the user via find_or_create_by_email (no password row).
+            // Creates the user via find_or_create_by_email — no password hash set.
             Auth::passkey()
                 .begin_registration(email)
                 .await
@@ -212,21 +220,17 @@ fn passkey_registration_does_not_create_password_row() {
         })
         .await;
 
-        // Now try to authenticate with any password — must fail.
-        // Before the fix, password().register() would set a random UUID password,
-        // and while that specific UUID wouldn't work, the user would exist in
-        // the password table. More importantly, the user creation is "wrong" —
-        // it locks the email in the password table making subsequent password
-        // signup with that email fail or behave unexpectedly.
-        //
-        // We verify: password auth with a known-wrong password fails.
-        let auth_result = Auth::password()
-            .authenticate(email, "any-password-at-all", None, None)
-            .await;
+        // Read the raw password hash from the database.
+        // Post-fix: hash is None (password_hash column is NULL).
+        // Pre-fix: hash is Some(<bcrypt of random uuid>) — password().register() was called.
+        let hash = suprnova::torii_integration::password_hash_for_email_test_only(email)
+            .await
+            .expect("password_hash_for_email_test_only should not error");
 
         assert!(
-            auth_result.is_err(),
-            "password authentication must fail for a passkey-only user (no password row should exist)"
+            hash.is_none(),
+            "passkey registration must not create a password hash; \
+             found hash={hash:?} — indicates the old password().register() path is still running"
         );
     });
 }
