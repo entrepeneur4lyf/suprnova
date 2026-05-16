@@ -310,3 +310,122 @@ async fn inbound_rejects_output_only_in_payload() {
         err.status_code()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Codex review finding #10: `#[data(deny_unknown_fields)]`
+// ---------------------------------------------------------------------------
+//
+// Default mode silently drops unknown payload keys (matches serde-derive's
+// default `Deserialize` behaviour). Request DTOs that need to reject client
+// typos can opt into strict mode with `#[data(deny_unknown_fields)]`.
+
+#[derive(Debug, suprnova::Data, validator::Validate)]
+#[data(deny_unknown_fields)]
+pub struct StrictDtoT10 {
+    pub name: String,
+}
+
+#[derive(Debug, suprnova::Data, validator::Validate)]
+pub struct PermissiveDtoT10 {
+    pub name: String,
+}
+
+/// Same spawn-and-capture pattern as `spawn_and_capture` but generic over
+/// the DTO so both the strict and permissive cases share one server harness.
+async fn spawn_and_capture_for<T>() -> (
+    SocketAddr,
+    Arc<Mutex<Option<Result<T, FrameworkError>>>>,
+)
+where
+    T: suprnova::FormRequest + Send + 'static,
+{
+    let captured: Arc<Mutex<Option<Result<T, FrameworkError>>>> = Arc::new(Mutex::new(None));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let captured_server = captured.clone();
+    tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            let io = TokioIo::new(stream);
+            let captured_svc = captured_server.clone();
+            let svc = service_fn(
+                move |hyper_req: hyper::Request<hyper::body::Incoming>| {
+                    let captured_inner = captured_svc.clone();
+                    async move {
+                        let req = Request::new(hyper_req);
+                        let result = T::extract(req).await;
+                        *captured_inner.lock().unwrap() = Some(result);
+                        Ok::<_, Infallible>(HttpResponse::text("ok").into_hyper())
+                    }
+                },
+            );
+            let _ = http1::Builder::new().serve_connection(io, svc).await;
+        }
+    });
+    (addr, captured)
+}
+
+#[tokio::test]
+async fn deny_unknown_fields_rejects_unknown_key_with_422() {
+    let (addr, captured) = spawn_and_capture_for::<StrictDtoT10>().await;
+    post_json(
+        addr,
+        serde_json::json!({ "name": "shawn", "typo": "oops" }),
+    )
+    .await;
+    tokio::task::yield_now().await;
+
+    let result = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("server did not process request");
+    let err = result.expect_err("unknown field on a deny_unknown_fields DTO must be rejected");
+    assert_eq!(
+        err.status_code(),
+        422,
+        "expected 422 for unknown-field rejection (parse error path), got {}",
+        err.status_code()
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("typo"),
+        "error must identify the offending field name; got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn deny_unknown_fields_accepts_known_only_payload() {
+    let (addr, captured) = spawn_and_capture_for::<StrictDtoT10>().await;
+    post_json(addr, serde_json::json!({ "name": "shawn" })).await;
+    tokio::task::yield_now().await;
+
+    let result = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("server did not process request");
+    let dto = result.expect("known-only payload should succeed on a strict DTO");
+    assert_eq!(dto.name, "shawn");
+}
+
+#[tokio::test]
+async fn default_mode_silently_drops_unknown_fields() {
+    let (addr, captured) = spawn_and_capture_for::<PermissiveDtoT10>().await;
+    post_json(
+        addr,
+        serde_json::json!({ "name": "shawn", "extra": "ignored" }),
+    )
+    .await;
+    tokio::task::yield_now().await;
+
+    let result = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("server did not process request");
+    let dto = result.expect(
+        "default (permissive) mode must accept extra payload keys — \
+         response DTOs and forward-compatible inputs rely on this",
+    );
+    assert_eq!(dto.name, "shawn");
+}

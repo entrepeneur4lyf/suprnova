@@ -54,10 +54,28 @@
 //!
 //! # Unknown fields
 //!
-//! Payload keys not matching any struct field are silently dropped (serde
-//! default permissive behavior). This mirrors `#[derive(Deserialize)]`.
-//! Strict-mode (deny-unknown-fields) is not yet supported — add a
-//! `#[data(deny_unknown_fields)]` opt-in if/when needed.
+//! By default, payload keys not matching any struct field are silently
+//! dropped (serde default permissive behaviour). Response DTOs and DTOs
+//! shared with external callers that may carry forward-compatible extra
+//! keys typically want this.
+//!
+//! Request-bound DTOs that must reject client typos can opt into strict
+//! mode with `#[data(deny_unknown_fields)]` at the struct level:
+//!
+//! ```ignore
+//! #[derive(Data, Validate)]
+//! #[data(deny_unknown_fields)]
+//! struct CreateUser {
+//!     #[validate(email)]
+//!     email: String,
+//! }
+//! ```
+//!
+//! Strict mode emits a `serde::de::Error::unknown_field` from the generated
+//! visitor when an unrecognised key is encountered. The error includes the
+//! offending key and the list of known fields, and surfaces through the
+//! `FormRequest` path as `FrameworkError::Domain { status_code: 422 }`
+//! (parse errors map to 422 in `framework/src/http/body.rs::parse_json`).
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -104,6 +122,12 @@ struct FieldOptions {
 struct StructOptions {
     auto_lazy: bool,
     custom_authorize: bool,
+    /// `#[data(deny_unknown_fields)]` — when set, the generated
+    /// `Deserialize` visitor rejects payload keys not matching any
+    /// struct field with `serde::de::Error::unknown_field(..)`. The
+    /// default stays permissive (silently ignore unknown keys) so
+    /// response DTOs and forward-compatible inputs aren't broken.
+    deny_unknown_fields: bool,
     /// `Some(...)` when `#[json_resource("...")]` is present on the struct.
     json_resource: Option<JsonResourceOptions>,
 }
@@ -128,8 +152,12 @@ fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::
                     opts.auto_lazy = true;
                 } else if meta.path.is_ident("custom_authorize") {
                     opts.custom_authorize = true;
+                } else if meta.path.is_ident("deny_unknown_fields") {
+                    opts.deny_unknown_fields = true;
                 } else {
-                    return Err(meta.error("unknown struct-level #[data(...)] flag"));
+                    return Err(meta.error(
+                        "unknown struct-level #[data(...)] flag — expected auto_lazy, custom_authorize, or deny_unknown_fields",
+                    ));
                 }
                 Ok(())
             })?;
@@ -698,6 +726,7 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
             where_clause,
             &parsed,
             has_type_params,
+            struct_opts.deny_unknown_fields,
         )
     };
     let allowlist_registration = build_allowlist_registration(&struct_name_str, &parsed);
@@ -822,6 +851,7 @@ fn build_deserialize(
     where_clause: Option<&syn::WhereClause>,
     parsed: &[(&Field, FieldOptions)],
     has_type_params: bool,
+    deny_unknown_fields: bool,
 ) -> TokenStream2 {
     let output_only_names: Vec<String> = parsed
         .iter()
@@ -887,6 +917,43 @@ fn build_deserialize(
 
     let visitor_name = quote::format_ident!("__{}DataVisitor", struct_name);
 
+    // Tokens for the `_ =>` arm of the visitor's key match. When
+    // `#[data(deny_unknown_fields)]` is set, we surface
+    // `serde::de::Error::unknown_field` instead of silently dropping
+    // the value. The expected-fields slice is the union of required,
+    // defaultable, and output_only names — output_only keys are rejected
+    // with a more specific message earlier in the match, so listing them
+    // here only affects the diagnostic output for keys that match
+    // nothing at all.
+    let all_known_names: Vec<String> = req_names
+        .iter()
+        .map(|s| (*s).to_string())
+        .chain(def_names.iter().map(|s| (*s).to_string()))
+        .chain(output_only_names.iter().cloned())
+        .collect();
+    let unknown_field_arm = if deny_unknown_fields {
+        quote! {
+            _ => {
+                // Drop the value to keep the deserializer state machine
+                // sane (some formats require consuming the value before
+                // erroring), then emit the field-aware error.
+                let _: ::serde::de::IgnoredAny = map.next_value()?;
+                return Err(<__A::Error as ::serde::de::Error>::unknown_field(
+                    key.as_str(),
+                    &[#(#all_known_names),*],
+                ));
+            }
+        }
+    } else {
+        quote! {
+            _ => {
+                // Unknown keys are silently dropped —
+                // permissive / serde-default behaviour.
+                let _: ::serde::de::IgnoredAny = map.next_value()?;
+            }
+        }
+    };
+
     // Visitor construction: when there are type params, we need the turbofish to
     // disambiguate; for non-generic structs (or lifetime-only generics with no
     // type params), just construct without turbofish.
@@ -940,11 +1007,7 @@ fn build_deserialize(
                                         #def_idents = Some(map.next_value()?);
                                     }
                                 )*
-                                _ => {
-                                    // Unknown keys are silently dropped —
-                                    // permissive / serde-default behaviour.
-                                    let _: ::serde::de::IgnoredAny = map.next_value()?;
-                                }
+                                #unknown_field_arm
                             }
                         }
 
