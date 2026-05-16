@@ -193,3 +193,52 @@ fn error_bag_scopes_default_and_named() {
     assert_eq!(errs.errors["profile.bio"][0], "too long");
     assert_eq!(errs.errors["profile.avatar"][0], "missing");
 }
+
+// --- FormRequest::after_validation cross-field hook ---
+
+mod after_validation_hook {
+    use serde::Deserialize;
+    use suprnova::{FormRequest, ValidationErrors};
+    use validator::Validate;
+
+    #[derive(Deserialize, Validate)]
+    struct UpdatePassword {
+        #[validate(length(min = 8))]
+        #[allow(dead_code)]
+        new_password: String,
+        #[allow(dead_code)]
+        confirmation: String,
+    }
+
+    impl FormRequest for UpdatePassword {
+        fn after_validation(&self) -> Result<(), ValidationErrors> {
+            if self.new_password != self.confirmation {
+                let mut errs = ValidationErrors::new();
+                errs.add("confirmation", "passwords do not match");
+                return Err(errs);
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn after_validation_runs_for_cross_field_checks() {
+        let req = UpdatePassword {
+            new_password: "longenough".into(),
+            confirmation: "different".into(),
+        };
+        let result = req.after_validation();
+        assert!(result.is_err());
+        let errs = result.unwrap_err();
+        assert!(errs.errors.contains_key("confirmation"));
+    }
+
+    #[test]
+    fn after_validation_passes_when_fields_agree() {
+        let req = UpdatePassword {
+            new_password: "matching_password".into(),
+            confirmation: "matching_password".into(),
+        };
+        assert!(req.after_validation().is_ok());
+    }
+}

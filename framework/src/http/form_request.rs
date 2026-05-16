@@ -66,6 +66,38 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send {
         true
     }
 
+    /// Cross-field validation hook. Called AFTER the derived
+    /// `Validate` rules pass. Return `Err(ValidationErrors)` to
+    /// surface additional errors (e.g. "passwords must match",
+    /// "end_date must be after start_date").
+    ///
+    /// The default implementation returns `Ok(())`.
+    ///
+    /// This hook runs in both normal and Precognition flows. In
+    /// Precognition mode the errors are filtered by the
+    /// `Precognition-Validate-Only` header just like single-field
+    /// validator errors, and surface as `FrameworkError::PrecognitionFailure`.
+    /// In the standard flow they surface as `FrameworkError::Validation`
+    /// (HTTP 422).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// impl FormRequest for UpdatePasswordRequest {
+    ///     fn after_validation(&self) -> Result<(), ValidationErrors> {
+    ///         if self.new_password != self.confirmation {
+    ///             let mut errs = ValidationErrors::new();
+    ///             errs.add("confirmation", "passwords do not match");
+    ///             return Err(errs);
+    ///         }
+    ///         Ok(())
+    ///     }
+    /// }
+    /// ```
+    fn after_validation(&self) -> Result<(), ValidationErrors> {
+        Ok(())
+    }
+
     /// Extract and validate data from the request
     ///
     /// This method:
@@ -116,7 +148,26 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send {
 
         if is_precognition {
             return match validation_result {
-                Ok(()) => Err(FrameworkError::PrecognitionSuccess),
+                Ok(()) => {
+                    // Per-field rules passed. Cross-field hook still
+                    // has to run — a "passwords must match" failure
+                    // should reach the Precognition client too.
+                    match data.after_validation() {
+                        Ok(()) => Err(FrameworkError::PrecognitionSuccess),
+                        Err(errs) => {
+                            let filtered = if validate_only.is_empty() {
+                                errs
+                            } else {
+                                errs.retain_fields(&validate_only)
+                            };
+                            if filtered.is_empty() {
+                                Err(FrameworkError::PrecognitionSuccess)
+                            } else {
+                                Err(FrameworkError::PrecognitionFailure(filtered))
+                            }
+                        }
+                    }
+                }
                 Err(errors) => {
                     let errs = ValidationErrors::from_validator(errors);
                     let filtered = if validate_only.is_empty() {
@@ -141,6 +192,11 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send {
             return Err(FrameworkError::Validation(
                 ValidationErrors::from_validator(errors),
             ));
+        }
+
+        // Per-field rules passed — run the cross-field hook.
+        if let Err(errs) = data.after_validation() {
+            return Err(FrameworkError::Validation(errs));
         }
 
         Ok(data)
