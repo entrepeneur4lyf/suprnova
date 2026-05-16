@@ -1,4 +1,4 @@
-mod body;
+pub mod body;
 pub mod cookie;
 mod extract;
 mod form_request;

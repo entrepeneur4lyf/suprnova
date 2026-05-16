@@ -294,7 +294,7 @@ pub fn handler(attr: TokenStream, input: TokenStream) -> TokenStream {
 ///     pub password: String,
 /// }
 /// ```
-#[proc_macro_derive(FormRequest)]
+#[proc_macro_derive(FormRequest, attributes(form_request))]
 pub fn derive_form_request(input: TokenStream) -> TokenStream {
     request::derive_request_impl(input)
 }

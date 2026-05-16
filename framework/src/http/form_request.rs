@@ -98,6 +98,30 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send {
         Ok(())
     }
 
+    /// Maximum request body size (in bytes) accepted by this FormRequest.
+    ///
+    /// Defaults to the process-global cap
+    /// ([`crate::http::body::global_max_request_body_bytes`]), which is
+    /// itself derived from
+    /// [`crate::http::body::DEFAULT_MAX_REQUEST_BODY_BYTES`] (8 MiB) unless
+    /// the application has called
+    /// [`crate::http::body::set_global_max_request_body_bytes`] at boot.
+    ///
+    /// Override this for endpoints that accept legitimately large JSON
+    /// payloads (analytics ingest, bulk import, etc.):
+    ///
+    /// ```rust,ignore
+    /// impl FormRequest for ImportPayload {
+    ///     fn max_body_bytes() -> usize { 64 * 1024 * 1024 } // 64 MiB
+    /// }
+    /// ```
+    ///
+    /// Lower it for endpoints that should never receive large bodies
+    /// (login, search query strings, etc.) to fail fast on abuse.
+    fn max_body_bytes() -> usize {
+        crate::http::body::global_max_request_body_bytes()
+    }
+
     /// Extract and validate data from the request
     ///
     /// This method:
@@ -134,8 +158,10 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send {
         // Get content type before consuming body
         let content_type = req.content_type().map(|s| s.to_string());
 
-        // Collect and parse body
-        let (_, bytes) = req.body_bytes().await?;
+        // Collect and parse body. Honor the per-struct cap; `body_bytes_with_cap`
+        // reads `Content-Length` from headers and pre-rejects oversized
+        // requests with 413 before consuming any body bytes.
+        let (_, bytes) = req.body_bytes_with_cap(Self::max_body_bytes()).await?;
 
         let data: Self = match content_type.as_deref() {
             Some(ct) if ct.starts_with("application/x-www-form-urlencoded") => parse_form(&bytes)?,

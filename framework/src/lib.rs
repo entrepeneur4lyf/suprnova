@@ -56,6 +56,10 @@ pub use http::{
     json, text, Cookie, CookieOptions, FormRequest, FromParam, FromRequest, HttpResponse, Redirect,
     Request, Response, ResponseExt, SameSite,
 };
+pub use http::body::{
+    collect_body_with_cap, global_max_request_body_bytes, set_global_max_request_body_bytes,
+    DEFAULT_MAX_REQUEST_BODY_BYTES,
+};
 pub use http::upload::validators::{Image, MaxSize, MimeAllowlist, MimeType};
 pub use http::upload::{
     global_max_multipart_body_bytes, parse_multipart_streaming,

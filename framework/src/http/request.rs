@@ -1,4 +1,4 @@
-use super::body::{collect_body, parse_form, parse_json};
+use super::body::{collect_body_with_cap, global_max_request_body_bytes, parse_form, parse_json};
 use super::cookie::parse_cookies;
 use super::ParamError;
 use crate::error::FrameworkError;
@@ -134,17 +134,49 @@ impl Request {
             .map(|v| v.split(',').collect())
     }
 
-    /// Consume the request and collect the body as bytes
+    /// Consume the request and collect the body as bytes, capped at the
+    /// process-global request-body limit.
+    ///
+    /// See [`crate::http::body::global_max_request_body_bytes`] and
+    /// [`crate::http::body::set_global_max_request_body_bytes`] for tuning
+    /// the cap. For per-extractor overrides (FormRequest types), prefer
+    /// [`Request::body_bytes_with_cap`].
+    ///
+    /// `Content-Length` is parsed from headers and used for pre-rejection
+    /// when present; otherwise the cap is enforced progressively while
+    /// reading.
     pub async fn body_bytes(self) -> Result<(RequestParts, Bytes), FrameworkError> {
-        let content_type = self
-            .inner
-            .headers()
+        self.body_bytes_with_cap(global_max_request_body_bytes())
+            .await
+    }
+
+    /// Consume the request and collect the body as bytes, capped at
+    /// `max_bytes`.
+    ///
+    /// Use this from `FormRequest::extract` to honor per-struct overrides
+    /// (`FormRequest::max_body_bytes`). For the default global cap, prefer
+    /// the simpler [`Request::body_bytes`].
+    ///
+    /// `Content-Length` is parsed from headers and used for pre-rejection
+    /// when present (HTTP 413 with no body bytes read); otherwise the cap
+    /// is enforced progressively while reading.
+    pub async fn body_bytes_with_cap(
+        self,
+        max_bytes: usize,
+    ) -> Result<(RequestParts, Bytes), FrameworkError> {
+        let headers = self.inner.headers();
+        let content_type = headers
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
+        let content_length = headers
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok());
 
         let params = self.params;
-        let bytes = collect_body(self.inner.into_body()).await?;
+        let bytes = collect_body_with_cap(self.inner.into_body(), content_length, max_bytes)
+            .await?;
 
         Ok((
             RequestParts {
