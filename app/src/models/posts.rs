@@ -58,9 +58,8 @@ impl Model {
 
     /// Return every public post, ordered by id ascending. Mirrors the
     /// `view-post` policy rule (`post.is_public`) at the query level
-    /// so an unauthenticated `GET /api/posts/public` endpoint can
-    /// stream the visible subset without re-running the gate on each
-    /// row.
+    /// so the unauthenticated `GET /api/posts` listing can stream
+    /// the visible subset without re-running the gate on each row.
     pub async fn all_public() -> Result<Vec<Self>, suprnova::FrameworkError> {
         Self::query()
             .filter(Column::IsPublic.eq(true))

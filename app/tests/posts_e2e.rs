@@ -53,11 +53,18 @@ struct TestApp {
 /// Stand up the router that production wires in `app/src/routes.rs`.
 /// `routes! { ... }` only works at module scope, so we mirror the
 /// inline `group!` / `get!` / `post!` shape here.
+///
+/// `GET /api/posts` is the unauthenticated public listing; the
+/// auth-gated group reuses the same path string for `POST /` and
+/// `GET /{id}`. The middleware map is keyed by `(method, path)`, so
+/// the public GET does not inherit the auth middleware bound to the
+/// POST on the same path.
 fn build_router() -> Router {
     let router = Router::new();
-    let router = get!("/api/posts/public", controllers::posts::index).register(router);
-    // Auth-gated POST + GET-by-id + DELETE all share the same path
-    // prefix; group them so the SessionAuthMiddleware applies once.
+    let router = get!("/api/posts", controllers::posts::index).register(router);
+    // Auth-gated POST + GET-by-id + DELETE share the `/api/posts`
+    // prefix; the group binds SessionAuthMiddleware to each route
+    // under its own `(method, path)` key.
     group!("/api/posts", {
         get!("/{id}", controllers::posts::show),
         post!("/", controllers::posts::store),
@@ -296,8 +303,11 @@ async fn list_public_posts_returns_only_public_rows() {
     .await;
     assert_eq!(s2.as_u16(), 201);
 
-    // GET /api/posts/public is unauthenticated.
-    let (status, body) = send_request(app.addr, "GET", "/api/posts/public", None, None).await;
+    // GET /api/posts is unauthenticated. Sibling POST /api/posts is
+    // auth-gated by SessionAuthMiddleware on the same path string;
+    // because the middleware map is keyed by `(method, path)`, the
+    // public GET does not inherit the POST's middleware.
+    let (status, body) = send_request(app.addr, "GET", "/api/posts", None, None).await;
     assert_eq!(status.as_u16(), 200);
     let json: serde_json::Value =
         serde_json::from_slice(&body).expect("response is JSON");
