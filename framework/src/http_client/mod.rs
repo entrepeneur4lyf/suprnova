@@ -10,10 +10,28 @@
 //! scope is captured into an in-memory recorder and answered with the
 //! canned responses you've queued via `fake_response(...)`. Because the
 //! state is task-local, tests can run in parallel without coordinating.
+//!
+//! Two additional helpers cover the corner where task-local isolation
+//! is the wrong default:
+//!
+//! - [`Http::fail_on_real_calls`] flips a process-global guard so any
+//!   outbound request that doesn't match an active fake errors out
+//!   (with a `FrameworkError::internal` instead of hitting the
+//!   network). This catches accidental escape from a fake scope —
+//!   e.g. a `tokio::spawn` that doesn't inherit task-local state.
+//!   Use [`FailOnRealCallsGuard`] for the RAII pattern that resets on
+//!   drop, so a test forgetting to call `allow_real_calls` doesn't
+//!   poison other tests.
+//!
+//! - [`Http::spawn_with_fake_inheritance`] is the explicit opt-in for
+//!   spawning a task that inherits the parent's fake state. Recorded
+//!   requests and consumed canned responses are shared with the
+//!   parent — `assert_sent` on the parent sees what the child sent.
 
 pub(crate) mod fake;
 
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -23,6 +41,18 @@ use serde::Serialize;
 use crate::FrameworkError;
 
 pub use fake::{assert_not_sent, assert_sent, fake_response, RecordedRequest};
+
+/// Process-global flag flipped by [`Http::fail_on_real_calls`]. When
+/// `true`, [`RequestBuilder::send`] refuses to hit the real network
+/// — every outbound call that isn't intercepted by an active fake
+/// returns an error.
+///
+/// The flag is process-global by design: the goal is to fail closed on
+/// accidental network escape from spawned tasks that don't inherit the
+/// caller's task-local fake. Tests that flip this should use
+/// [`FailOnRealCallsGuard`] (or call [`Http::allow_real_calls`] in
+/// teardown) so the flag doesn't leak between tests.
+static FAIL_ON_REAL_CALLS: AtomicBool = AtomicBool::new(false);
 
 static REQWEST_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
@@ -108,6 +138,121 @@ impl Http {
         Fut: Future<Output = T>,
     {
         fake::install_fake_scope(f).await
+    }
+
+    /// Enable test-guard mode: any outbound HTTP call that doesn't
+    /// match an active fake returns
+    /// `Err(FrameworkError::internal(...))` instead of hitting the
+    /// real network.
+    ///
+    /// This is intentionally process-global so it catches the case it
+    /// was built for — `tokio::spawn`-ed work escaping the caller's
+    /// task-local [`Http::fake`] scope and silently calling real
+    /// services. Pair with [`Self::allow_real_calls`] in teardown, or
+    /// prefer [`FailOnRealCallsGuard`] which resets on drop:
+    ///
+    /// ```rust,ignore
+    /// let _guard = suprnova::FailOnRealCallsGuard::install();
+    /// // Inside this scope, any unfaked outbound call fails closed.
+    /// ```
+    pub fn fail_on_real_calls() {
+        FAIL_ON_REAL_CALLS.store(true, Ordering::SeqCst);
+    }
+
+    /// Disable the test-guard mode. After this returns, unfaked
+    /// outbound calls proceed to the real network as usual. Default
+    /// state at process start is "real calls allowed".
+    pub fn allow_real_calls() {
+        FAIL_ON_REAL_CALLS.store(false, Ordering::SeqCst);
+    }
+
+    /// `true` when [`Self::fail_on_real_calls`] is active.
+    pub fn is_guarded() -> bool {
+        FAIL_ON_REAL_CALLS.load(Ordering::SeqCst)
+    }
+
+    /// Spawn a task that inherits the calling task's fake state.
+    ///
+    /// `tokio::spawn` does NOT carry `tokio::task_local!` values into
+    /// the spawned future, so a fake registered in the outer scope
+    /// doesn't apply to the spawned task. This helper captures the
+    /// current task's fake state (an `Arc<Mutex<FakeState>>`) and
+    /// re-installs it in the child's task-local scope. Recorded
+    /// requests from the child are visible to the parent through the
+    /// same Arc — `assert_sent` after the child completes sees what
+    /// the child sent.
+    ///
+    /// Most production code shouldn't need this — it's a test-time
+    /// helper for code-under-test that itself spawns tasks (e.g. a
+    /// queue worker that makes outbound HTTP from a spawned future).
+    ///
+    /// If no fake scope is active on the calling task, this is
+    /// equivalent to `tokio::spawn(future)` — the child runs without
+    /// any fake context and outbound calls take the normal real
+    /// network path (or fail closed when
+    /// [`Self::fail_on_real_calls`] is on).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// Http::fake(|| async {
+    ///     fake_response("GET", "/child", 204, serde_json::json!({}));
+    ///     let handle = Http::spawn_with_fake_inheritance(async {
+    ///         Http::get("https://child.test").send().await
+    ///     });
+    ///     let response = handle.await.unwrap().unwrap();
+    ///     assert_eq!(response.status(), 204);
+    /// })
+    /// .await;
+    /// ```
+    pub fn spawn_with_fake_inheritance<F, T>(future: F) -> tokio::task::JoinHandle<T>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        match fake::snapshot_current_fake_state() {
+            Some(state) => {
+                tokio::spawn(async move { fake::install_inherited_scope(state, future).await })
+            }
+            None => tokio::spawn(future),
+        }
+    }
+}
+
+/// RAII guard for [`Http::fail_on_real_calls`]. `install()` flips the
+/// flag on; the guard's `Drop` impl flips it back off, even if the
+/// test panics. Use this in test setup to avoid poisoning sibling
+/// tests when the body exits early:
+///
+/// ```rust,ignore
+/// #[tokio::test]
+/// async fn my_test() {
+///     let _guard = suprnova::FailOnRealCallsGuard::install();
+///     // Any unfaked outbound HTTP call in this scope errors out.
+/// }
+/// ```
+///
+/// The guard does NOT track previous state — `Drop` always returns
+/// the flag to the default of "real calls allowed". If a test needs
+/// to layer guards, it must coordinate explicitly via
+/// [`Http::fail_on_real_calls`] / [`Http::allow_real_calls`].
+#[must_use = "FailOnRealCallsGuard releases the guard on drop — bind it to a name"]
+pub struct FailOnRealCallsGuard {
+    _private: (),
+}
+
+impl FailOnRealCallsGuard {
+    /// Flip [`Http::fail_on_real_calls`] on and return a guard whose
+    /// `Drop` impl restores the default "real calls allowed" state.
+    pub fn install() -> Self {
+        Http::fail_on_real_calls();
+        Self { _private: () }
+    }
+}
+
+impl Drop for FailOnRealCallsGuard {
+    fn drop(&mut self) {
+        Http::allow_real_calls();
     }
 }
 
@@ -279,6 +424,22 @@ impl RequestBuilder {
         for attempt in 1..=max_attempts {
             let outcome = if fake::is_fake_active() {
                 Ok::<ClientResponse, FrameworkError>(fake::intercept(&self))
+            } else if Http::is_guarded() {
+                // Process-global fail-closed mode: outbound calls
+                // that don't match an active fake error out instead
+                // of hitting the real network. Mirrors Laravel's
+                // `Http::preventStrayRequests()`. The error is
+                // `FrameworkError::internal` — the request URL is
+                // included so the user can identify where the
+                // unmatched call originated, but no headers/body
+                // detail leaks.
+                Err::<ClientResponse, FrameworkError>(FrameworkError::internal(format!(
+                    "Http::fail_on_real_calls is active and no fake matched outbound \
+                     request to {}. Register a matching fake via fake_response(...), \
+                     or release the guard via FailOnRealCallsGuard / \
+                     Http::allow_real_calls() to allow real network access.",
+                    self.url,
+                )))
             } else {
                 build_and_send(&self).await
             };

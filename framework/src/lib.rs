@@ -69,8 +69,8 @@ pub use http::upload::{
     DEFAULT_UPLOAD_SPILL_THRESHOLD,
 };
 pub use http_client::{
-    assert_not_sent, assert_sent, fake_response, ClientResponse, Http, RecordedRequest,
-    RequestBuilder,
+    assert_not_sent, assert_sent, fake_response, ClientResponse, FailOnRealCallsGuard, Http,
+    RecordedRequest, RequestBuilder,
 };
 pub use session::{
     session, session_mut, SessionConfig, SessionData, SessionMiddleware, SessionStore,

@@ -5,27 +5,42 @@
 //! is intercepted, captured into a recorded-requests vec, and matched
 //! against canned responses queued via [`fake_response`].
 //!
-//! Each task gets its own isolated fake state, so tests can run in
-//! parallel without serializing themselves on a process-wide mutex.
+//! Each task gets its own isolated fake state (`Arc<Mutex<FakeState>>`),
+//! so tests can run in parallel without serializing themselves on a
+//! process-wide mutex.
 //!
 //! Note: `tokio::task_local!` is task-scoped. Work spawned via
 //! `tokio::spawn` inside the scope runs on a fresh task and does NOT
-//! inherit the fake — those requests escape to the real network. See
-//! `Http::fake` for the caveat callers need to know.
+//! inherit the fake by default — those requests escape to the real
+//! network (or fail-closed when `Http::fail_on_real_calls()` is on).
+//!
+//! For the cases that actually want spawned tasks to share the parent's
+//! fake (e.g. a queue worker that calls outbound HTTP from within a
+//! spawned future), [`Http::spawn_with_fake_inheritance`] captures the
+//! current fake state via the shared `Arc` and re-installs it in the
+//! child's `tokio::task_local!` scope. Recorded requests and consumed
+//! canned responses are shared with the parent through the same Arc —
+//! `assert_sent` on the parent sees what the child sent.
 
 use std::future::Future;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 
 use super::{Body, ClientResponse, RequestBuilder};
 
 tokio::task_local! {
-    /// Per-task fake state. Set by [`Http::fake`] / [`Http::fake_with`].
-    /// Inside the scope, `is_fake_active()` returns `true` and
-    /// `intercept` reads / mutates the state. Outside, all of them
-    /// return `false` / panic with a friendly error.
-    static FAKE_STATE: Mutex<FakeState>;
+    /// Per-task fake state. Set by [`Http::fake`]. Inside the scope,
+    /// `is_fake_active()` returns `true` and `intercept` reads / mutates
+    /// the state. Outside, all of them return `false` / panic with a
+    /// friendly error.
+    ///
+    /// `Arc<Mutex<...>>` (rather than `Mutex<...>` directly) so the
+    /// state can be cloned cheaply and re-installed in spawned tasks
+    /// via [`Http::spawn_with_fake_inheritance`]; recorded requests
+    /// from the child remain visible to the parent through the same
+    /// Arc.
+    static FAKE_STATE: Arc<Mutex<FakeState>>;
 }
 
 #[derive(Default)]
@@ -140,7 +155,28 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = T>,
 {
-    FAKE_STATE.scope(Mutex::new(FakeState::default()), f()).await
+    FAKE_STATE
+        .scope(Arc::new(Mutex::new(FakeState::default())), f())
+        .await
+}
+
+/// Install a previously-captured `Arc<Mutex<FakeState>>` for the
+/// duration of `fut`, so a spawned task can share the parent's
+/// recorded-requests / canned-responses store. Used by
+/// [`Http::spawn_with_fake_inheritance`].
+pub(crate) async fn install_inherited_scope<F, T>(state: Arc<Mutex<FakeState>>, fut: F) -> T
+where
+    F: Future<Output = T>,
+{
+    FAKE_STATE.scope(state, fut).await
+}
+
+/// Capture the current task's fake state for re-installation in a
+/// spawned task. Returns `None` when no fake scope is active on the
+/// current task — in which case the caller should fall through to a
+/// regular `tokio::spawn` rather than asserting inheritance.
+pub(crate) fn snapshot_current_fake_state() -> Option<Arc<Mutex<FakeState>>> {
+    FAKE_STATE.try_with(|state| state.clone()).ok()
 }
 
 /// `true` if a fake scope is active on the current task. Used by
@@ -197,10 +233,8 @@ pub(crate) fn intercept(req: &RequestBuilder) -> ClientResponse {
 /// Access the per-task `FakeState`. Panics if no scope is active.
 fn with_state<R>(f: impl FnOnce(&mut FakeState) -> R) -> R {
     FAKE_STATE
-        .try_with(|m| {
-            let mut guard = m
-                .lock()
-                .expect("FakeState mutex poisoned");
+        .try_with(|state| {
+            let mut guard = state.lock().expect("FakeState mutex poisoned");
             f(&mut guard)
         })
         .unwrap_or_else(|_| {
@@ -210,4 +244,3 @@ fn with_state<R>(f: impl FnOnce(&mut FakeState) -> R) -> R {
             )
         })
 }
-

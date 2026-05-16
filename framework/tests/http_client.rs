@@ -1,7 +1,16 @@
 //! Integration tests for `Http` and `Http::fake`.
 //!
 //! `Http::fake` uses `tokio::task_local!` for fake-state isolation, so
-//! tests in this file run in parallel without any explicit locking.
+//! `fake`-only tests run in parallel without explicit locking.
+//!
+//! Tests that touch the real network (`spawn_echo` / `spawn_canned`) or
+//! the process-global `fail_on_real_calls` flag — added in codex review
+//! finding #14 — serialize through `NETWORK_LOCK`. The flag is process-
+//! global by design (it's how Laravel's `Http::preventStrayRequests()`
+//! works), so two parallel tests with conflicting expectations about
+//! the flag's value would race. Holding the lock for the duration of
+//! any real-network or guard-touching test makes the order deterministic
+//! at zero cost beyond test serialization.
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -14,6 +23,11 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use suprnova::{assert_not_sent, assert_sent, fake_response, Http};
+
+/// Serializes every test that touches real-network IO or the
+/// `FAIL_ON_REAL_CALLS` flag. Pure-fake tests don't need to hold
+/// this lock — they're isolated via `tokio::task_local!`.
+static NETWORK_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// One-shot echo server. Accepts a single connection, captures the
 /// inbound request, replies with a JSON body that includes the
@@ -104,6 +118,7 @@ struct EchoCapture {
 
 #[tokio::test]
 async fn get_returns_200() {
+    let _net = NETWORK_LOCK.lock().await;
     let (addr, _cap) = spawn_echo().await;
     let url = format!("http://{}/ping", addr);
     let resp = Http::get(&url).send().await.expect("send");
@@ -115,6 +130,7 @@ async fn get_returns_200() {
 
 #[tokio::test]
 async fn post_json_echoes() {
+    let _net = NETWORK_LOCK.lock().await;
     let (addr, cap) = spawn_echo().await;
     let url = format!("http://{}/echo", addr);
     let payload = serde_json::json!({"hello": "world"});
@@ -135,6 +151,7 @@ async fn post_json_echoes() {
 
 #[tokio::test]
 async fn bearer_token_sets_auth_header() {
+    let _net = NETWORK_LOCK.lock().await;
     let (addr, cap) = spawn_echo().await;
     let url = format!("http://{}/secure", addr);
     let resp = Http::get(&url)
@@ -154,6 +171,7 @@ async fn bearer_token_sets_auth_header() {
 
 #[tokio::test]
 async fn basic_auth_sets_auth_header() {
+    let _net = NETWORK_LOCK.lock().await;
     let (addr, cap) = spawn_echo().await;
     let url = format!("http://{}/secure", addr);
     let resp = Http::get(&url)
@@ -264,6 +282,7 @@ async fn fake_response_outside_scope_panics() {
 
 #[tokio::test]
 async fn into_inner_returns_ok_for_real_response() {
+    let _net = NETWORK_LOCK.lock().await;
     // Real reqwest::Response should round-trip out via into_inner.
     let (addr, _cap) = spawn_echo().await;
     let url = format!("http://{}/", addr);
@@ -325,6 +344,7 @@ async fn spawn_canned(
 
 #[tokio::test]
 async fn retry_5xx_then_succeeds() {
+    let _net = NETWORK_LOCK.lock().await;
     // Populate queue so the FIRST pop is the first response served.
     // pop() reads from the END, so reverse the intended order.
     let mut canned: Vec<(u16, Option<u64>, &'static str)> = vec![
@@ -348,6 +368,7 @@ async fn retry_5xx_then_succeeds() {
 
 #[tokio::test]
 async fn retry_exhausted_returns_last_5xx() {
+    let _net = NETWORK_LOCK.lock().await;
     // Three 500s; max_attempts=3 → all three consumed.
     let mut canned: Vec<(u16, Option<u64>, &'static str)> = vec![
         (500, None, "{\"err\":1}"),
@@ -368,6 +389,7 @@ async fn retry_exhausted_returns_last_5xx() {
 
 #[tokio::test]
 async fn retry_not_attempted_on_4xx() {
+    let _net = NETWORK_LOCK.lock().await;
     let (addr, count) = spawn_canned(vec![(404, None, "{\"err\":\"nf\"}")]).await;
     let url = format!("http://{}/x", addr);
     let resp = Http::get(&url)
@@ -381,6 +403,7 @@ async fn retry_not_attempted_on_4xx() {
 
 #[tokio::test]
 async fn retry_honors_retry_after_header_on_503() {
+    let _net = NETWORK_LOCK.lock().await;
     // First response: 503 with Retry-After: 1 (1 second).
     // Second response: 200.
     // Base backoff is 1ms — far below the 1s Retry-After. We assert
@@ -435,6 +458,7 @@ async fn into_inner_returns_err_for_fake_response() {
 #[cfg(feature = "otel")]
 #[tokio::test]
 async fn outbound_request_includes_traceparent_when_otel_context_active() {
+    let _net = NETWORK_LOCK.lock().await;
     use opentelemetry::trace::{
         FutureExt as _, SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
     };
@@ -495,6 +519,7 @@ async fn outbound_request_includes_traceparent_when_otel_context_active() {
 #[cfg(feature = "otel")]
 #[tokio::test]
 async fn outbound_request_omits_traceparent_without_active_context() {
+    let _net = NETWORK_LOCK.lock().await;
     // No `with_context` wrapper here — `Context::current()` is empty,
     // so the propagator should inject nothing and the echo server
     // sees no `traceparent` header.
@@ -510,5 +535,174 @@ async fn outbound_request_omits_traceparent_without_active_context() {
         captured.traceparent.is_none(),
         "empty OTel context must NOT inject traceparent, got {:?}",
         captured.traceparent
+    );
+}
+
+// ── Codex review finding 14 — fail-closed guard + inherited fakes ────────
+//
+// `Http::fake` stores its state in a `tokio::task_local!`, which is
+// scoped to the current task. Two known divergences from Laravel-style
+// fakes get explicit support here:
+//
+// 1. Spawned tasks don't inherit task-local state, so an outbound call
+//    from a `tokio::spawn` inside `Http::fake` silently escapes to the
+//    real network. `Http::fail_on_real_calls()` flips a process-global
+//    guard that fails closed on any unfaked outbound call, surfacing
+//    the leak instead of silently letting it happen.
+//
+// 2. Some tests legitimately want spawned tasks to share the fake
+//    state with the parent. `Http::spawn_with_fake_inheritance(...)`
+//    captures the parent's `Arc<Mutex<FakeState>>` and re-installs it
+//    in the child's task-local scope.
+//
+// The `FAIL_ON_REAL_CALLS` flag is process-global, so tests that flip
+// it serialize through the same `NETWORK_LOCK` used by every real-IO
+// test in this file and use `FailOnRealCallsGuard` for the RAII Drop
+// pattern. Without that, sibling tests on parallel runners would race
+// on the flag.
+
+#[tokio::test]
+async fn fail_on_real_calls_blocks_unfaked_outbound() {
+    let _net = NETWORK_LOCK.lock().await;
+    let _guard = suprnova::FailOnRealCallsGuard::install();
+
+    // 127.0.0.1:9 is the Discard protocol port — nothing listens. We
+    // never want to actually try to connect to it, because the test
+    // must prove the guard short-circuits BEFORE any network IO. If
+    // the guard were broken, the request would fail with a connection
+    // error; with the guard active, it fails with the specific guard
+    // message.
+    let result = Http::get("http://127.0.0.1:9/unmatched").send().await;
+    let err = match result {
+        Ok(_) => panic!("guard must block unfaked outbound request"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("fail_on_real_calls"),
+        "expected guard message in error, got {msg:?}"
+    );
+    assert!(
+        msg.contains("http://127.0.0.1:9/unmatched"),
+        "expected request URL in error, got {msg:?}"
+    );
+}
+
+#[tokio::test]
+async fn fail_on_real_calls_lets_fakes_through() {
+    let _net = NETWORK_LOCK.lock().await;
+    let _guard = suprnova::FailOnRealCallsGuard::install();
+
+    // The guard MUST defer to fakes — if a fake matches, the request
+    // is intercepted and the fail-closed branch never runs.
+    Http::fake(|| async {
+        fake_response("GET", "/api", 204, serde_json::json!({}));
+        let resp = Http::get("https://example.com/api")
+            .send()
+            .await
+            .expect("send through fake while guard is active");
+        assert_eq!(resp.status(), 204);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn fail_on_real_calls_guard_resets_on_drop() {
+    let _net = NETWORK_LOCK.lock().await;
+
+    // Start clean — default is real calls allowed.
+    assert!(!Http::is_guarded(), "default must be unguarded");
+
+    {
+        let _guard = suprnova::FailOnRealCallsGuard::install();
+        assert!(Http::is_guarded(), "install() flips guard on");
+    }
+
+    // After the guard drops, the flag is back to default. A test
+    // that forgets to call `allow_real_calls()` does not poison
+    // siblings under this lock.
+    assert!(!Http::is_guarded(), "drop() flips guard back off");
+}
+
+#[tokio::test]
+async fn spawn_with_fake_inheritance_carries_fakes_to_child_task() {
+    Http::fake(|| async {
+        fake_response(
+            "GET",
+            "/child",
+            204,
+            serde_json::json!({"who": "inherited"}),
+        );
+        let handle = Http::spawn_with_fake_inheritance(async {
+            // This send happens inside the SPAWNED task. Without
+            // inheritance, the fake registered in the parent's
+            // task-local scope wouldn't apply here.
+            Http::get("https://child.test/child").send().await
+        });
+        let resp = handle
+            .await
+            .expect("spawned task did not panic")
+            .expect("send succeeded inside spawned task");
+        assert_eq!(resp.status(), 204);
+
+        // Recorded requests from the child are visible to the parent
+        // because the Arc<Mutex<FakeState>> is shared. `assert_sent`
+        // reads the parent's task-local — which the helper inherited
+        // by Arc-cloning, not by snapshotting.
+        assert_sent(|r| r.url.contains("/child"));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn spawn_with_fake_inheritance_falls_back_to_regular_spawn_outside_scope() {
+    let _net = NETWORK_LOCK.lock().await;
+    let _guard = suprnova::FailOnRealCallsGuard::install();
+
+    // No active Http::fake — the helper must degrade to a regular
+    // tokio::spawn rather than panicking on the missing task-local.
+    // We layer the guard so the spawned task fails closed if it
+    // tries to hit the real network, proving the spawned future
+    // ran in a context with NO fake state installed.
+    let handle =
+        Http::spawn_with_fake_inheritance(async { Http::get("http://127.0.0.1:9/x").send().await });
+    let inner = handle.await.expect("spawned task did not panic");
+    let err = match inner {
+        Ok(_) => panic!("guard must block unfaked outbound from spawned task"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string().contains("fail_on_real_calls"),
+        "expected guard message, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn regular_spawn_does_not_inherit_fakes() {
+    let _net = NETWORK_LOCK.lock().await;
+    let _guard = suprnova::FailOnRealCallsGuard::install();
+
+    // Plain `tokio::spawn` (not `spawn_with_fake_inheritance`) must
+    // NOT carry the parent's fake. With fail-closed mode on, an
+    // outbound call from the child fails closed instead of escaping
+    // to the real network.
+    let result = Http::fake(|| async {
+        fake_response("GET", "/parent", 200, serde_json::json!({}));
+        let handle = tokio::spawn(async {
+            // Inside the spawned task — no fake context is visible.
+            // The guard catches the escape.
+            Http::get("https://parent.test/parent").send().await
+        });
+        handle.await.expect("spawned task did not panic")
+    })
+    .await;
+
+    let err = match result {
+        Ok(_) => panic!("regular spawn must NOT inherit fake; guard must trip"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string().contains("fail_on_real_calls"),
+        "expected guard message, got {err:?}"
     );
 }
