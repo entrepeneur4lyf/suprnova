@@ -43,7 +43,12 @@ static PROVIDER: OnceLock<Arc<SeaORMRepositoryProvider>> = OnceLock::new();
 /// Find or create a user by email using the repository layer directly.
 ///
 /// This is the correct way to get-or-create a user without creating a dummy
-/// password row. Called from the passkey module.
+/// password row. Called from passkey **registration** (which legitimately
+/// provisions a new user the first time the email registers a passkey).
+///
+/// **Do not call this from authentication / login paths.** Login flows must
+/// use [`find_user_by_email_lookup_only`] so failed attempts cannot silently
+/// create accounts. (Codex review finding #3.)
 pub(crate) async fn find_or_create_user_by_email(email: &str) -> Result<User, FrameworkError> {
     let provider = PROVIDER
         .get()
@@ -53,6 +58,42 @@ pub(crate) async fn find_or_create_user_by_email(email: &str) -> Result<User, Fr
         .find_or_create_by_email(email)
         .await
         .map_err(|e| FrameworkError::internal(format!("find_or_create_user_by_email: {e}")))
+}
+
+/// Look up a user by email. Returns `Ok(None)` if the user doesn't exist —
+/// the caller decides what to do with the absence.
+///
+/// Use this for authentication / login flows. **Never** use
+/// [`find_or_create_user_by_email`] in login paths: it would silently create
+/// accounts from failed login attempts (account-enumeration / probing
+/// footgun, codex review finding #3).
+pub(crate) async fn find_user_by_email_lookup_only(
+    email: &str,
+) -> Result<Option<User>, FrameworkError> {
+    let provider = PROVIDER
+        .get()
+        .ok_or_else(|| FrameworkError::internal("Torii not initialised. Call init_torii() first."))?;
+    provider
+        .user()
+        .find_by_email(email)
+        .await
+        .map_err(|e| FrameworkError::internal(format!("find_user_by_email_lookup_only: {e}")))
+}
+
+/// Test-only helper: returns `true` if a user row exists for this email.
+///
+/// # Purpose
+///
+/// Integration tests need to assert that authentication paths do **not**
+/// create user rows on failed login attempts (codex review finding #3).
+/// `password_hash_for_email_test_only` can't discriminate "no user" from
+/// "user with NULL password hash" — both return `Ok(None)`. This helper
+/// answers the existence question directly.
+///
+/// Hidden from documentation to discourage accidental production use.
+#[doc(hidden)]
+pub async fn user_exists_by_email_test_only(email: &str) -> Result<bool, FrameworkError> {
+    Ok(find_user_by_email_lookup_only(email).await?.is_some())
 }
 
 /// Return the stored password hash for a user identified by email, or `None`

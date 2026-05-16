@@ -155,36 +155,309 @@ fn magic_link_consume_returns_user_and_session() {
     });
 }
 
-/// FIX 2: Passkey in-flight state is stored in the session, not a process-local DashMap.
+/// FIX 2 + Codex finding #3: Passkey in-flight state is stored in the session
+/// as a `{state, email, user_id}` ceremony, not a process-local DashMap and
+/// not just the bare WebAuthn state.
 ///
-/// Calls `begin_registration` inside a session scope and asserts the session
-/// contains the `passkey_reg` key with non-trivial JSON bytes. This proves
-/// state is written to the session and would survive a process restart or
-/// work across multiple replicas (each using the same session store).
+/// Calls `begin_registration` inside a session scope, then decodes the JSON
+/// stored under `passkey_reg` and asserts:
+///
+/// - The blob contains an `email` field equal to the begin-time email.
+/// - The blob contains a `user_id` field (proves the ceremony is bound to a
+///   specific user, not just a WebAuthn challenge).
+/// - The blob contains a `state` field (the WebAuthn challenge that
+///   `finish_passkey_registration` consumes).
+///
+/// This pins the contract that makes the cross-email finish attack
+/// (codex finding #3) impossible: even if the caller passes a different
+/// email to `finish_registration`, the ceremony in the session names the
+/// begin-time identity and the finisher rejects the mismatch.
 #[test]
-fn passkey_registration_state_stored_in_session() {
+fn passkey_registration_ceremony_stored_in_session() {
     Lazy::force(&SETUP);
 
     RT.block_on(async {
         let slot = suprnova::session::new_session_slot_for_test();
+        let begin_email = "ceremony-stored@example.com";
 
-        let session_has_reg_key = suprnova::session::session_scope_for_test(slot, async {
+        let ceremony_json = suprnova::session::session_scope_for_test(slot, async {
             let _challenge = Auth::passkey()
-                .begin_registration("session-state@example.com")
+                .begin_registration(begin_email)
                 .await
                 .expect("begin_registration should succeed");
 
-            // The session must now contain the passkey_reg key.
             suprnova::session::session()
                 .and_then(|s| s.get::<String>("passkey_reg"))
-                .map(|v| !v.is_empty())
-                .unwrap_or(false)
         })
         .await;
 
+        let json = ceremony_json
+            .expect("begin_registration must store a ceremony under 'passkey_reg'");
+        assert!(!json.is_empty(), "stored ceremony must not be empty");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("session blob must be valid JSON");
+
+        assert_eq!(
+            parsed
+                .get("email")
+                .and_then(|v| v.as_str())
+                .expect("ceremony JSON must have an 'email' field"),
+            begin_email,
+            "stored ceremony email must equal the begin-time email"
+        );
         assert!(
-            session_has_reg_key,
-            "begin_registration must store in-flight state in the session under 'passkey_reg'"
+            parsed.get("user_id").is_some(),
+            "ceremony JSON must have a 'user_id' field — proves binding to a specific user"
+        );
+        assert!(
+            parsed.get("state").is_some(),
+            "ceremony JSON must have a 'state' field — the WebAuthn challenge"
+        );
+    });
+}
+
+/// Codex finding #3 — primary regression test for the cross-email finish bug.
+///
+/// `begin_registration` for `alice@example.com` then `finish_registration`
+/// called with `bob@example.com` must reject with a 400 mismatch error.
+/// The session ceremony must be consumed even on rejection (a second
+/// `finish_registration` call returns "not started or expired").
+#[test]
+fn passkey_finish_rejects_email_mismatch_with_session_state() {
+    use webauthn_rs::prelude::RegisterPublicKeyCredential;
+
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let alice = "alice-mismatch@example.com";
+        let bob = "bob-mismatch@example.com";
+
+        let slot = suprnova::session::new_session_slot_for_test();
+        let (mismatch_err, second_call_err) = suprnova::session::session_scope_for_test(slot, async {
+            // Begin a registration ceremony bound to Alice's email.
+            Auth::passkey()
+                .begin_registration(alice)
+                .await
+                .expect("begin_registration should succeed");
+
+            // Craft a syntactically-valid (but cryptographically fake)
+            // `RegisterPublicKeyCredential`. WebAuthn verification would
+            // reject it on signature grounds, but the email-mismatch check
+            // happens BEFORE webauthn touches the response — that's the
+            // entire point: the mismatch is caught without trusting the
+            // ceremony state at all.
+            let fake_response: RegisterPublicKeyCredential = serde_json::from_value(serde_json::json!({
+                "id": "AAAAAAA",
+                "rawId": "AAAAAAA",
+                "type": "public-key",
+                "response": {
+                    "attestationObject": "AAAAAAA",
+                    "clientDataJSON": "AAAAAAA"
+                },
+                "extensions": {}
+            }))
+            .expect("fake RegisterPublicKeyCredential JSON must deserialise");
+
+            let first = Auth::passkey()
+                .finish_registration(bob, fake_response.clone())
+                .await
+                .expect_err("finish_registration with mismatched email must fail");
+
+            // Second call: ceremony must be consumed → expect "not started or expired".
+            let second = Auth::passkey()
+                .finish_registration(alice, fake_response)
+                .await
+                .expect_err("second finish_registration must fail — ceremony already consumed");
+
+            (first, second)
+        })
+        .await;
+
+        assert_eq!(
+            mismatch_err.status_code(),
+            400,
+            "email mismatch must surface as 400 Bad Request, got: status={} msg={}",
+            mismatch_err.status_code(),
+            mismatch_err,
+        );
+        let mismatch_msg = mismatch_err.to_string().to_ascii_lowercase();
+        assert!(
+            mismatch_msg.contains("mismatch"),
+            "expected 'mismatch' in error message, got: {mismatch_err}"
+        );
+
+        assert_eq!(
+            second_call_err.status_code(),
+            400,
+            "consumed ceremony must surface as 400, got: status={} msg={}",
+            second_call_err.status_code(),
+            second_call_err,
+        );
+        let second_msg = second_call_err.to_string().to_ascii_lowercase();
+        assert!(
+            second_msg.contains("not started") || second_msg.contains("expired"),
+            "expected 'not started' or 'expired' (ceremony consumed), got: {second_call_err}"
+        );
+    });
+}
+
+/// Codex finding #3 — email comparison is case-insensitive.
+///
+/// `begin_registration("Alice@Example.COM")` followed by
+/// `finish_registration("alice@example.com", ...)` must accept the email
+/// match (and then fail at the webauthn-verification step, not at the
+/// mismatch gate). RFC 5321 §2.4 technically permits case-sensitive
+/// local-parts, but production email systems uniformly normalise to
+/// lowercase, and we follow that convention.
+#[test]
+fn passkey_finish_email_comparison_is_case_insensitive() {
+    use webauthn_rs::prelude::RegisterPublicKeyCredential;
+
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let begin_email = "Casey-Case@Example.COM";
+        let finish_email = "casey-case@example.com";
+
+        let slot = suprnova::session::new_session_slot_for_test();
+        let err = suprnova::session::session_scope_for_test(slot, async {
+            Auth::passkey()
+                .begin_registration(begin_email)
+                .await
+                .expect("begin_registration should succeed");
+
+            let fake_response: RegisterPublicKeyCredential = serde_json::from_value(serde_json::json!({
+                "id": "AAAAAAA",
+                "rawId": "AAAAAAA",
+                "type": "public-key",
+                "response": {
+                    "attestationObject": "AAAAAAA",
+                    "clientDataJSON": "AAAAAAA"
+                },
+                "extensions": {}
+            }))
+            .expect("fake RegisterPublicKeyCredential JSON must deserialise");
+
+            Auth::passkey()
+                .finish_registration(finish_email, fake_response)
+                .await
+                .expect_err("finish must still fail — but on webauthn verification, not email mismatch")
+        })
+        .await;
+
+        // The mismatch gate must NOT be the failure source — the failure
+        // must come from later in the pipeline (webauthn rejecting the
+        // cryptographically invalid fake response).
+        let msg = err.to_string().to_ascii_lowercase();
+        assert!(
+            !msg.contains("email mismatch"),
+            "case-only-differing emails must pass the mismatch gate, got: {err}"
+        );
+    });
+}
+
+/// Codex finding #3 — calling `finish_registration` with no prior `begin`
+/// returns 400, not 500. The session has no ceremony, so the take_*
+/// helper rejects cleanly.
+#[test]
+fn passkey_finish_missing_session_state_returns_400() {
+    use webauthn_rs::prelude::RegisterPublicKeyCredential;
+
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let slot = suprnova::session::new_session_slot_for_test();
+        let err = suprnova::session::session_scope_for_test(slot, async {
+            let fake_response: RegisterPublicKeyCredential = serde_json::from_value(serde_json::json!({
+                "id": "AAAAAAA",
+                "rawId": "AAAAAAA",
+                "type": "public-key",
+                "response": {
+                    "attestationObject": "AAAAAAA",
+                    "clientDataJSON": "AAAAAAA"
+                },
+                "extensions": {}
+            }))
+            .expect("fake RegisterPublicKeyCredential JSON must deserialise");
+
+            Auth::passkey()
+                .finish_registration("never-began@example.com", fake_response)
+                .await
+                .expect_err("finish_registration without prior begin must fail")
+        })
+        .await;
+
+        assert_eq!(
+            err.status_code(),
+            400,
+            "missing ceremony must surface as 400 Bad Request, got: status={} msg={}",
+            err.status_code(),
+            err,
+        );
+        let msg = err.to_string().to_ascii_lowercase();
+        assert!(
+            msg.contains("not started") || msg.contains("expired"),
+            "expected 'not started' or 'expired' in message, got: {err}"
+        );
+    });
+}
+
+/// Codex finding #3 — passkey **authentication** must not provision users.
+///
+/// `Auth::passkey().begin_authentication(...)` against an email that has
+/// never been registered must return an error AND must not create a user
+/// row. Pre-fix, `find_or_create_user_by_email` was called on every
+/// authentication attempt, so probing the API with random emails would
+/// silently fill the users table.
+#[test]
+fn passkey_authentication_does_not_create_user() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let probed = "probe-never-registered@example.com";
+
+        // Sanity: the user must not exist before the test (we use a
+        // distinct email so this is robust against shared-fixture noise).
+        let exists_before =
+            suprnova::torii_integration::user_exists_by_email_test_only(probed)
+                .await
+                .expect("user_exists_by_email_test_only should not error");
+        assert!(
+            !exists_before,
+            "test fixture invariant: '{probed}' must not exist before the auth attempt"
+        );
+
+        let slot = suprnova::session::new_session_slot_for_test();
+        let auth_err = suprnova::session::session_scope_for_test(slot, async {
+            Auth::passkey()
+                .begin_authentication(probed)
+                .await
+                .expect_err("authentication against an unregistered email must fail")
+        })
+        .await;
+
+        // Lookup-only auth must surface as 401 (no account), not 500.
+        assert_eq!(
+            auth_err.status_code(),
+            401,
+            "passkey authentication against unknown email must surface as 401, got: status={} msg={}",
+            auth_err.status_code(),
+            auth_err,
+        );
+
+        // Critical assertion: the user row must STILL not exist. Pre-fix,
+        // `find_or_create_user_by_email` would have inserted a row before
+        // failing on "no passkeys". Post-fix uses `find_by_email`, which
+        // does not insert.
+        let exists_after =
+            suprnova::torii_integration::user_exists_by_email_test_only(probed)
+                .await
+                .expect("user_exists_by_email_test_only should not error");
+        assert!(
+            !exists_after,
+            "passkey authentication must NOT create a user row for '{probed}' — \
+             indicates the old find_or_create_user_by_email path is still running on the auth flow"
         );
     });
 }

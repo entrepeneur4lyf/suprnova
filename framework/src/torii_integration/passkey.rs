@@ -48,7 +48,9 @@ use base64::Engine as _;
 use uuid::Uuid;
 use webauthn_rs::prelude::{Passkey, Url, Webauthn, WebauthnBuilder};
 
-use super::{Session, User, find_or_create_user_by_email, instance};
+use super::{
+    Session, User, UserId, find_or_create_user_by_email, find_user_by_email_lookup_only, instance,
+};
 use crate::error::FrameworkError;
 use crate::session::{session, session_mut};
 
@@ -69,44 +71,111 @@ pub use webauthn_rs::prelude::{
 /// The global `Webauthn` instance, built once from `ToriiConfig` at init time.
 static WEBAUTHN: OnceLock<Webauthn> = OnceLock::new();
 
-// Session keys for in-flight passkey state.
+// Session keys for in-flight passkey ceremonies.
 const SESSION_KEY_REG: &str = "passkey_reg";
 const SESSION_KEY_AUTH: &str = "passkey_auth";
 
-/// Store the in-flight `PasskeyRegistration` in the current request session.
-fn store_reg_state(reg: &PasskeyRegistration) -> Result<(), FrameworkError> {
-    let json = serde_json::to_string(reg)
-        .map_err(|e| FrameworkError::internal(format!("passkey: serialize reg state: {e}")))?;
+/// In-flight passkey **registration** ceremony, persisted in the session
+/// between `begin_registration` and `finish_registration`.
+///
+/// # Security
+///
+/// Codex review finding #3: storing only the WebAuthn `PasskeyRegistration`
+/// state in session let a caller finish registration for a different email
+/// than they started with — the finisher could attach the credential to any
+/// account by passing a different email to `finish_registration`.
+///
+/// This struct binds the WebAuthn state to the begin-time **email + user_id**
+/// so `finish_registration` can reject calls that target a different account.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PasskeyRegistrationCeremony {
+    /// The WebAuthn `PasskeyRegistration` challenge state produced by
+    /// `webauthn-rs` during `start_passkey_registration`. Single-use:
+    /// consumed in `finish_passkey_registration`.
+    state: PasskeyRegistration,
+    /// The email passed to `begin_registration`. `finish_registration`
+    /// must be called with an email that matches this value
+    /// (case-insensitive comparison).
+    email: String,
+    /// The torii `UserId` of the account this ceremony was begun for.
+    /// Belt-and-braces: even if email comparison is bypassed, the user
+    /// the credential attaches to is the one identified here.
+    user_id: UserId,
+}
+
+/// In-flight passkey **authentication** ceremony, persisted in the session
+/// between `begin_authentication` and `finish_authentication`.
+///
+/// Binds the WebAuthn authentication challenge to the email + user_id that
+/// the flow was begun for, so the finisher cannot pass a different email
+/// and end up authenticated as another account.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PasskeyAuthenticationCeremony {
+    /// The WebAuthn `PasskeyAuthentication` challenge state.
+    state: PasskeyAuthentication,
+    /// The email passed to `begin_authentication`.
+    email: String,
+    /// The torii `UserId` of the account this ceremony was begun for.
+    user_id: UserId,
+}
+
+/// Store the in-flight registration ceremony in the current request session.
+fn store_registration_ceremony(
+    ceremony: &PasskeyRegistrationCeremony,
+) -> Result<(), FrameworkError> {
+    let json = serde_json::to_string(ceremony)
+        .map_err(|e| FrameworkError::internal(format!("passkey: serialize reg ceremony: {e}")))?;
     session_mut(|s| s.put(SESSION_KEY_REG, json));
     Ok(())
 }
 
-/// Retrieve and consume the in-flight `PasskeyRegistration` from the session.
-fn take_reg_state() -> Result<PasskeyRegistration, FrameworkError> {
+/// Retrieve and consume the in-flight registration ceremony from the session.
+///
+/// Missing ceremony is a **caller** problem (400), not a server fault — the
+/// caller either never started a ceremony or let their session expire. We
+/// map it to a `Domain` error so the response converter emits 400 with a
+/// public-safe message, rather than the 500-leaking `internal` variant.
+fn take_registration_ceremony() -> Result<PasskeyRegistrationCeremony, FrameworkError> {
     let json: String = session()
         .and_then(|s| s.get::<String>(SESSION_KEY_REG))
-        .ok_or_else(|| FrameworkError::internal("passkey: no registration in progress (session key missing)"))?;
-    session_mut(|s| { s.forget(SESSION_KEY_REG); });
-    serde_json::from_str(&json)
-        .map_err(|e| FrameworkError::internal(format!("passkey: deserialize reg state: {e}")))
+        .ok_or_else(|| FrameworkError::Domain {
+            message: "passkey registration not started or expired".to_string(),
+            status_code: 400,
+        })?;
+    session_mut(|s| {
+        s.forget(SESSION_KEY_REG);
+    });
+    serde_json::from_str(&json).map_err(|e| {
+        FrameworkError::internal(format!("passkey: deserialize reg ceremony: {e}"))
+    })
 }
 
-/// Store the in-flight `PasskeyAuthentication` in the current request session.
-fn store_auth_state(auth: &PasskeyAuthentication) -> Result<(), FrameworkError> {
-    let json = serde_json::to_string(auth)
-        .map_err(|e| FrameworkError::internal(format!("passkey: serialize auth state: {e}")))?;
+/// Store the in-flight authentication ceremony in the current request session.
+fn store_authentication_ceremony(
+    ceremony: &PasskeyAuthenticationCeremony,
+) -> Result<(), FrameworkError> {
+    let json = serde_json::to_string(ceremony)
+        .map_err(|e| FrameworkError::internal(format!("passkey: serialize auth ceremony: {e}")))?;
     session_mut(|s| s.put(SESSION_KEY_AUTH, json));
     Ok(())
 }
 
-/// Retrieve and consume the in-flight `PasskeyAuthentication` from the session.
-fn take_auth_state() -> Result<PasskeyAuthentication, FrameworkError> {
+/// Retrieve and consume the in-flight authentication ceremony from the session.
+///
+/// Missing ceremony is a caller problem (400) — see `take_registration_ceremony`.
+fn take_authentication_ceremony() -> Result<PasskeyAuthenticationCeremony, FrameworkError> {
     let json: String = session()
         .and_then(|s| s.get::<String>(SESSION_KEY_AUTH))
-        .ok_or_else(|| FrameworkError::internal("passkey: no authentication in progress (session key missing)"))?;
-    session_mut(|s| { s.forget(SESSION_KEY_AUTH); });
-    serde_json::from_str(&json)
-        .map_err(|e| FrameworkError::internal(format!("passkey: deserialize auth state: {e}")))
+        .ok_or_else(|| FrameworkError::Domain {
+            message: "passkey authentication not started or expired".to_string(),
+            status_code: 400,
+        })?;
+    session_mut(|s| {
+        s.forget(SESSION_KEY_AUTH);
+    });
+    serde_json::from_str(&json).map_err(|e| {
+        FrameworkError::internal(format!("passkey: deserialize auth ceremony: {e}"))
+    })
 }
 
 /// Initialise the global `Webauthn` instance.
@@ -237,7 +306,9 @@ impl PasskeyAuth {
         let webauthn = webauthn_instance()?;
 
         // Get-or-create the user account via the repository layer (no dummy
-        // password row created).
+        // password row created). Registration is the one path where
+        // find-or-create is appropriate: a brand-new email registering a
+        // passkey *is* a sign-up.
         let user = find_or_create_user_by_email(email).await?;
 
         // Derive a stable UUID from the opaque torii UserId string.
@@ -271,8 +342,14 @@ impl PasskeyAuth {
         let challenge_str = URL_SAFE_NO_PAD.encode(&*ccr.public_key.challenge);
         let rp_id = ccr.public_key.rp.id.clone();
 
-        // Persist in-flight state in the user's session (not a process-local map).
-        store_reg_state(&pending_reg)?;
+        // Bind the WebAuthn state to the begin-time email + user_id so
+        // `finish_registration` can reject calls that target a different
+        // account. (Codex review finding #3.)
+        store_registration_ceremony(&PasskeyRegistrationCeremony {
+            state: pending_reg,
+            email: email.to_string(),
+            user_id: user.id.clone(),
+        })?;
 
         Ok(PasskeyRegistrationChallenge {
             challenge: challenge_str,
@@ -303,16 +380,52 @@ impl PasskeyAuth {
     ) -> Result<User, FrameworkError> {
         let webauthn = webauthn_instance()?;
 
-        // Retrieve and consume in-flight state from the session (one-time use).
-        let reg_state = take_reg_state()?;
+        // Retrieve and consume the in-flight ceremony from the session
+        // (one-time use). Missing or expired ceremony → 400.
+        let ceremony = take_registration_ceremony()?;
 
-        // Verify the browser response and extract the Passkey.
+        // **Codex review finding #3**: reject if the caller-supplied email
+        // doesn't match the email the ceremony was begun for. Without this
+        // check, a session that started registration for alice@example.com
+        // could attach a credential to bob@example.com by calling
+        // `finish_registration("bob@example.com", ...)`.
+        //
+        // Comparison is case-insensitive on the ASCII range (RFC 5321 §2.4
+        // says the local-part is technically case-sensitive, but production
+        // email systems uniformly normalise to lowercase, and webauthn-rs
+        // does not normalise on its own).
+        if !email.eq_ignore_ascii_case(&ceremony.email) {
+            return Err(FrameworkError::Domain {
+                message: "passkey registration email mismatch — session was started for a different account".to_string(),
+                status_code: 400,
+            });
+        }
+
+        // Verify the browser response against the **session-bound** state.
         let passkey = webauthn
-            .finish_passkey_registration(&response, &reg_state)
+            .finish_passkey_registration(&response, &ceremony.state)
             .map_err(|e| FrameworkError::internal(format!("webauthn finish_passkey_registration: {e:?}")))?;
 
-        // Load the user (must exist — begin_registration created them).
-        let user = find_or_create_user_by_email(email).await?;
+        // Load the user via the **session-bound** email (belt-and-braces:
+        // even if the email comparison were bypassed, the lookup goes
+        // through the identity that was bound at begin-time). Lookup-only:
+        // `find_or_create` here would re-create the user if it had been
+        // deleted, which we'd rather surface as an internal-state error.
+        let user = find_user_by_email_lookup_only(&ceremony.email)
+            .await?
+            .ok_or_else(|| FrameworkError::internal(
+                "passkey: user disappeared between begin and finish — internal state inconsistency",
+            ))?;
+
+        // Defensive guard: the user we re-fetched must be the same user
+        // the ceremony was bound to. A mismatch here would indicate a
+        // race between two sessions racing to claim the same email, or
+        // a bug in `find_or_create_by_email`'s idempotence.
+        if user.id != ceremony.user_id {
+            return Err(FrameworkError::internal(
+                "passkey: user_id changed between begin and finish — internal state inconsistency",
+            ));
+        }
 
         // Serialise the webauthn Passkey struct into bytes for torii storage.
         // Torii's passkey store is a raw-byte key/value; we store the JSON
@@ -348,8 +461,18 @@ impl PasskeyAuth {
     ) -> Result<PasskeyAuthenticationChallenge, FrameworkError> {
         let webauthn = webauthn_instance()?;
 
-        // Resolve user — we need the user_id to fetch credentials.
-        let user = find_or_create_user_by_email(email).await?;
+        // Resolve user — **lookup-only**. Authentication is the wrong
+        // place to create accounts on miss (codex review finding #3): a
+        // probing attacker who guesses email addresses could otherwise
+        // silently provision accounts they don't own.
+        let user = find_user_by_email_lookup_only(email).await?.ok_or_else(|| {
+            FrameworkError::Domain {
+                // Generic message — do not confirm/deny user existence
+                // beyond what the protocol unavoidably reveals.
+                message: "passkey authentication failed".to_string(),
+                status_code: 401,
+            }
+        })?;
 
         // Load stored passkeys.
         let stored_creds = instance()?
@@ -359,9 +482,10 @@ impl PasskeyAuth {
             .map_err(|e| FrameworkError::internal(format!("passkey: fetch credentials: {e}")))?;
 
         if stored_creds.is_empty() {
-            return Err(FrameworkError::internal(
-                "passkey: user has no registered passkeys",
-            ));
+            return Err(FrameworkError::Domain {
+                message: "passkey authentication failed".to_string(),
+                status_code: 401,
+            });
         }
 
         // Deserialise the stored passkey blobs back into webauthn Passkey structs.
@@ -380,8 +504,14 @@ impl PasskeyAuth {
 
         let challenge_str = URL_SAFE_NO_PAD.encode(&*rcr.public_key.challenge);
 
-        // Persist in-flight state in the user's session.
-        store_auth_state(&pending_auth)?;
+        // Bind the WebAuthn state to the begin-time email + user_id so
+        // `finish_authentication` can reject calls that target a
+        // different account.
+        store_authentication_ceremony(&PasskeyAuthenticationCeremony {
+            state: pending_auth,
+            email: email.to_string(),
+            user_id: user.id.clone(),
+        })?;
 
         Ok(PasskeyAuthenticationChallenge {
             challenge: challenge_str,
@@ -412,11 +542,33 @@ impl PasskeyAuth {
     ) -> Result<(User, Session), FrameworkError> {
         let webauthn = webauthn_instance()?;
 
-        // Retrieve and consume in-flight state from the session (one-time use).
-        let auth_state_val = take_auth_state()?;
+        // Retrieve and consume the in-flight ceremony from the session
+        // (one-time use). Missing or expired → 400.
+        let ceremony = take_authentication_ceremony()?;
 
-        // Load the user and their stored passkeys (needed for finish_passkey_authentication).
-        let user = find_or_create_user_by_email(email).await?;
+        // **Codex review finding #3**: reject if the caller-supplied email
+        // doesn't match the email the ceremony was begun for.
+        if !email.eq_ignore_ascii_case(&ceremony.email) {
+            return Err(FrameworkError::Domain {
+                message: "passkey authentication email mismatch — session was started for a different account".to_string(),
+                status_code: 400,
+            });
+        }
+
+        // Load the user via the **session-bound** email (lookup-only —
+        // authentication never provisions accounts).
+        let user = find_user_by_email_lookup_only(&ceremony.email)
+            .await?
+            .ok_or_else(|| FrameworkError::Domain {
+                message: "passkey authentication failed".to_string(),
+                status_code: 401,
+            })?;
+
+        if user.id != ceremony.user_id {
+            return Err(FrameworkError::internal(
+                "passkey: user_id changed between begin and finish — internal state inconsistency",
+            ));
+        }
 
         let stored_creds = instance()?
             .passkey()
@@ -433,9 +585,9 @@ impl PasskeyAuth {
             })
             .collect::<Result<_, _>>()?;
 
-        // Verify the browser response.
+        // Verify the browser response against the **session-bound** state.
         let auth_result: PasskeyAuthenticationResult = webauthn
-            .finish_passkey_authentication(&response, &auth_state_val)
+            .finish_passkey_authentication(&response, &ceremony.state)
             .map_err(|e| FrameworkError::internal(format!("webauthn finish_passkey_authentication: {e:?}")))?;
 
         // Update the counter on the matching passkey and persist.
