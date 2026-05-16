@@ -4,7 +4,6 @@
 //! form, or generated for development.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use rand::{rngs::OsRng, TryRngCore};
 
 use crate::FrameworkError;
 
@@ -33,9 +32,7 @@ impl EncryptionKey {
     /// Generate a new random 32-byte key using the OS RNG.
     pub fn generate() -> Self {
         let mut bytes = [0u8; 32];
-        OsRng
-            .try_fill_bytes(&mut bytes)
-            .expect("OS RNG must be available to mint an AES-256 key");
+        getrandom::fill(&mut bytes).expect("OS RNG must be available to mint an AES-256 key");
         Self(bytes)
     }
 

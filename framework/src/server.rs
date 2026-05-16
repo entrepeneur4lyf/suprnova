@@ -327,7 +327,7 @@ async fn handle_request_inner(
     
 
     match router.match_route(&method, path) {
-        Some((handler, params)) => {
+        Some((pattern, handler, params)) => {
             let request = Request::new(req).with_params(params);
 
             // Build middleware chain
@@ -341,11 +341,16 @@ async fn handle_request_inner(
             chain.extend(middleware_registry.global_middleware().iter().cloned());
 
             // 2. Add route-level middleware (already boxed).
-            //    Lookup is keyed by `(method, path)` so middleware
-            //    registered for one HTTP method on a given path never
-            //    bleeds onto a sibling route on the same path under a
-            //    different method.
-            let route_middleware = router.get_route_middleware(&method, path);
+            //    Lookup is keyed by `(method, pattern)` — the matched
+            //    route pattern (e.g. `/api/posts/{id}`), NOT the raw
+            //    request path. That keeps two invariants:
+            //    (a) middleware registered for one HTTP method on a
+            //        path never bleeds onto a sibling route on the
+            //        same path under a different method; and
+            //    (b) group-applied middleware on parameterised routes
+            //        actually runs, instead of silently missing the
+            //        lookup because `/api/posts/42 != /api/posts/{id}`.
+            let route_middleware = router.get_route_middleware(&method, &pattern);
             chain.extend(route_middleware);
 
             // 3. Execute chain with handler

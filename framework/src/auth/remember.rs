@@ -74,12 +74,14 @@ pub const COOKIE_NAME: &str = "remember_me";
 #[doc(hidden)]
 pub fn generate_token() -> Result<(String, String), FrameworkError> {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-    use rand::{rngs::OsRng, TryRngCore};
 
+    // High-entropy OS randomness for token material. `getrandom::fill`
+    // is the direct binding to the OS RNG (e.g. `getrandom(2)` on Linux,
+    // `BCryptGenRandom` on Windows). rand 0.10 removed `OsRng` from its
+    // public surface, so call getrandom directly.
     let mut bytes = [0u8; TOKEN_BYTES];
-    OsRng
-        .try_fill_bytes(&mut bytes)
-        .expect("OS RNG must be available to mint remember-me tokens");
+    getrandom::fill(&mut bytes)
+        .map_err(|e| FrameworkError::internal(format!("OS RNG failure: {e}")))?;
     let plaintext = URL_SAFE_NO_PAD.encode(bytes);
     let hash = hashing::hash(&plaintext)?;
     Ok((plaintext, hash))

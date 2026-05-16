@@ -3,20 +3,17 @@
 //! `suprnova::EncryptionKey::to_base64()` so the framework's loader
 //! accepts it directly via the `APP_KEY` env var.
 //!
-//! The six lines that mint the key are duplicated here intentionally
-//! (`OsRng.fill_bytes([0u8; 32])` + base64 encode) instead of pulling
+//! The four lines that mint the key are duplicated here intentionally
+//! (`getrandom::fill([0u8; 32])` + base64 encode) instead of pulling
 //! `suprnova` into the CLI binary, which would drag tokio-full,
 //! reqwest, and SeaORM into the scaffolder.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use rand::{rngs::OsRng, TryRngCore};
 
 /// Generate a random 32-byte key, encoded URL-safe base64 (no padding).
 pub fn generate_app_key() -> String {
     let mut bytes = [0u8; 32];
-    OsRng
-        .try_fill_bytes(&mut bytes)
-        .expect("OS RNG must be available to mint an AES-256 key");
+    getrandom::fill(&mut bytes).expect("OS RNG must be available to mint an AES-256 key");
     URL_SAFE_NO_PAD.encode(bytes)
 }
 

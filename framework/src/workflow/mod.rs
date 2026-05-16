@@ -50,7 +50,7 @@ use crate::config::Config;
 use crate::error::FrameworkError;
 use crate::workflow::types::ClaimedWorkflow;
 use chrono::{Duration as ChronoDuration, Utc};
-use rand::Rng;
+use rand::RngExt;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;

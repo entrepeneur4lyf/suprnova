@@ -280,3 +280,37 @@ async fn middleware_on_one_path_does_not_apply_to_another_path() {
     assert_eq!(a_status.as_u16(), 200);
     assert_eq!(*calls.lock().unwrap(), vec!["a-mw"]);
 }
+
+/// 5. Group middleware applied to a parameterised route pattern
+///    (e.g. `/api/posts/{id}`) MUST run when the incoming request's
+///    resolved path matches the pattern. Earlier, middleware was keyed
+///    by the matched pattern but the dispatcher looked it up by the
+///    raw request path, so `DELETE /api/posts/42` would silently miss
+///    the registered key `/api/posts/{id}` — and the route's group
+///    middleware (e.g. an auth gate) never ran.
+#[tokio::test]
+async fn group_middleware_applies_to_parameterised_routes() {
+    use suprnova::{delete, group};
+
+    let calls = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+    let tracker = calls.clone();
+
+    let router = group!("/api", {
+        delete!("/posts/{id}", |_req: Request| async { text("deleted") }),
+    })
+    .middleware(TaggingMiddleware {
+        tag: "auth",
+        tracker,
+    })
+    .register(Router::new());
+
+    let addr = spawn_server(router, 4).await;
+
+    let (status, _) = send_request(addr, "DELETE", "/api/posts/42").await;
+    assert_eq!(status.as_u16(), 200);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec!["auth"],
+        "group middleware must run for parameterised routes — lookup by matched pattern, not raw path"
+    );
+}

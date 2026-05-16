@@ -63,11 +63,19 @@ pub type BoxedHandler =
     Box<dyn Fn(Request) -> Pin<Box<dyn Future<Output = Response> + Send>> + Send + Sync>;
 
 /// HTTP Router with Laravel-like route registration
+///
+/// Each matchit per-method router stores `(pattern, handler)` so a
+/// successful match returns both the resolved pattern (e.g.
+/// `/api/posts/{id}`) and the handler. The pattern is what the
+/// middleware registry is keyed by, so dispatch must look up
+/// middleware under the matched pattern — not the raw request path
+/// (e.g. `/api/posts/42`) — for group-applied middleware on
+/// parameterised routes to run.
 pub struct Router {
-    get_routes: MatchitRouter<Arc<BoxedHandler>>,
-    post_routes: MatchitRouter<Arc<BoxedHandler>>,
-    put_routes: MatchitRouter<Arc<BoxedHandler>>,
-    delete_routes: MatchitRouter<Arc<BoxedHandler>>,
+    get_routes: MatchitRouter<(String, Arc<BoxedHandler>)>,
+    post_routes: MatchitRouter<(String, Arc<BoxedHandler>)>,
+    put_routes: MatchitRouter<(String, Arc<BoxedHandler>)>,
+    delete_routes: MatchitRouter<(String, Arc<BoxedHandler>)>,
     /// Middleware assignments: (method, path) -> boxed middleware instances.
     ///
     /// Keying by `(Method, String)` rather than path alone prevents
@@ -97,19 +105,17 @@ impl Router {
         }
     }
 
-    /// Get middleware registered for a specific `(method, path)` pair.
+    /// Get middleware registered for a specific `(method, pattern)` pair.
     ///
-    /// The key is the HTTP method plus the exact path that was passed
-    /// to `add_middleware`. The current `server.rs` dispatcher passes
-    /// the literal request path here; that means middleware on
-    /// static routes works correctly and middleware on parameterised
-    /// patterns (e.g. `/api/posts/{id}`) is *not* matched on each
-    /// request. That second behaviour is a separate, pre-existing
-    /// limitation of the dispatcher — this method does an exact-string
-    /// lookup, not a pattern match.
-    pub fn get_route_middleware(&self, method: &Method, path: &str) -> Vec<BoxedMiddleware> {
+    /// The key is the HTTP method plus the route **pattern** that
+    /// `add_middleware` was called with — e.g. `/api/posts/{id}`,
+    /// not the resolved request path `/api/posts/42`. The dispatcher
+    /// in `server.rs` calls `match_route` first to recover the matched
+    /// pattern and then passes that pattern here, so parameterised
+    /// routes inherit group middleware correctly.
+    pub fn get_route_middleware(&self, method: &Method, pattern: &str) -> Vec<BoxedMiddleware> {
         self.route_middleware
-            .get(&(method.clone(), path.to_string()))
+            .get(&(method.clone(), pattern.to_string()))
             .cloned()
             .unwrap_or_default()
     }
@@ -146,22 +152,30 @@ impl Router {
 
     /// Insert a GET route with a pre-boxed handler (internal use for groups)
     pub(crate) fn insert_get(&mut self, path: &str, handler: Arc<BoxedHandler>) {
-        self.get_routes.insert(path, handler).ok();
+        self.get_routes
+            .insert(path, (path.to_string(), handler))
+            .ok();
     }
 
     /// Insert a POST route with a pre-boxed handler (internal use for groups)
     pub(crate) fn insert_post(&mut self, path: &str, handler: Arc<BoxedHandler>) {
-        self.post_routes.insert(path, handler).ok();
+        self.post_routes
+            .insert(path, (path.to_string(), handler))
+            .ok();
     }
 
     /// Insert a PUT route with a pre-boxed handler (internal use for groups)
     pub(crate) fn insert_put(&mut self, path: &str, handler: Arc<BoxedHandler>) {
-        self.put_routes.insert(path, handler).ok();
+        self.put_routes
+            .insert(path, (path.to_string(), handler))
+            .ok();
     }
 
     /// Insert a DELETE route with a pre-boxed handler (internal use for groups)
     pub(crate) fn insert_delete(&mut self, path: &str, handler: Arc<BoxedHandler>) {
-        self.delete_routes.insert(path, handler).ok();
+        self.delete_routes
+            .insert(path, (path.to_string(), handler))
+            .ok();
     }
 
     /// Register a GET route
@@ -171,7 +185,9 @@ impl Router {
         Fut: Future<Output = Response> + Send + 'static,
     {
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
-        self.get_routes.insert(path, Arc::new(handler)).ok();
+        self.get_routes
+            .insert(path, (path.to_string(), Arc::new(handler)))
+            .ok();
         RouteBuilder {
             router: self,
             last_path: path.to_string(),
@@ -186,7 +202,9 @@ impl Router {
         Fut: Future<Output = Response> + Send + 'static,
     {
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
-        self.post_routes.insert(path, Arc::new(handler)).ok();
+        self.post_routes
+            .insert(path, (path.to_string(), Arc::new(handler)))
+            .ok();
         RouteBuilder {
             router: self,
             last_path: path.to_string(),
@@ -201,7 +219,9 @@ impl Router {
         Fut: Future<Output = Response> + Send + 'static,
     {
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
-        self.put_routes.insert(path, Arc::new(handler)).ok();
+        self.put_routes
+            .insert(path, (path.to_string(), Arc::new(handler)))
+            .ok();
         RouteBuilder {
             router: self,
             last_path: path.to_string(),
@@ -216,7 +236,9 @@ impl Router {
         Fut: Future<Output = Response> + Send + 'static,
     {
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
-        self.delete_routes.insert(path, Arc::new(handler)).ok();
+        self.delete_routes
+            .insert(path, (path.to_string(), Arc::new(handler)))
+            .ok();
         RouteBuilder {
             router: self,
             last_path: path.to_string(),
@@ -224,12 +246,18 @@ impl Router {
         }
     }
 
-    /// Match a request and return the handler with extracted params
+    /// Match a request and return the matched route's **pattern**, its
+    /// handler, and the extracted path parameters.
+    ///
+    /// The pattern (e.g. `/api/posts/{id}`) is what the middleware
+    /// registry is keyed by — pass it to
+    /// [`Router::get_route_middleware`] so group-applied middleware on
+    /// parameterised routes runs.
     pub fn match_route(
         &self,
         method: &hyper::Method,
         path: &str,
-    ) -> Option<(Arc<BoxedHandler>, HashMap<String, String>)> {
+    ) -> Option<(String, Arc<BoxedHandler>, HashMap<String, String>)> {
         let router = match *method {
             hyper::Method::GET => &self.get_routes,
             hyper::Method::POST => &self.post_routes,
@@ -244,7 +272,8 @@ impl Router {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect();
-            (matched.value.clone(), params)
+            let (pattern, handler) = matched.value;
+            (pattern.clone(), handler.clone(), params)
         })
     }
 }

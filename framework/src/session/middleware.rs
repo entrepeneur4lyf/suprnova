@@ -5,7 +5,7 @@ use crate::http::Response;
 use crate::middleware::{Middleware, Next};
 use crate::Request;
 use async_trait::async_trait;
-use rand::Rng;
+use rand::RngExt;
 use std::sync::{Arc, Mutex};
 
 use super::config::SessionConfig;

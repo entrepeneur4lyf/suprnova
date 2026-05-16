@@ -1021,10 +1021,13 @@ fn bearer_token_middleware_binds_session_when_token_valid() {
 
         // Freshly authenticated sessions always carry the plaintext token —
         // `None` is reserved for sessions loaded from storage (hash only).
+        // The fork's `SessionToken::Display` is redacted to "[REDACTED]";
+        // `expose_secret()` is the explicit accessor for the underlying value.
         let token_str = torii_session
             .token
             .as_ref()
             .expect("freshly authenticated session must carry plaintext token")
+            .expose_secret()
             .to_string();
         assert!(!token_str.is_empty());
 
@@ -1079,10 +1082,13 @@ fn bearer_middleware_stores_raw_user_id_not_hash() {
 
         // Freshly authenticated sessions always carry the plaintext token —
         // `None` is reserved for sessions loaded from storage (hash only).
+        // The fork's `SessionToken::Display` is redacted to "[REDACTED]";
+        // `expose_secret()` is the explicit accessor for the underlying value.
         let token_str = torii_session
             .token
             .as_ref()
             .expect("freshly authenticated session must carry plaintext token")
+            .expose_secret()
             .to_string();
 
         let request = build_request_async(Some(&format!("Bearer {}", token_str))).await;

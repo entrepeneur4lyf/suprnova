@@ -42,6 +42,7 @@ regex = "1"
 # along (`tokio`-full + `reqwest` + SeaORM, etc).
 rand = "0.9"
 base64 = "0.22"
+getrandom = "0.4.2"
 
 [dev-dependencies]
 # Verify generated keys round-trip through the framework's loader.
