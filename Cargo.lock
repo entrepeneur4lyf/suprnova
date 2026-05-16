@@ -4545,6 +4545,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
+ "sha2",
  "suprnova-macros",
  "tempfile",
  "thiserror 1.0.69",
