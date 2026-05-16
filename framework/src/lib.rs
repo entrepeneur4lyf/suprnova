@@ -66,7 +66,7 @@ pub use logging::{
     current_request_id, init_subscriber, LogConfig, LogFormat, RequestId, RequestIdMiddleware,
 };
 pub use events::{ErrorOccurred, Event, EventDispatcher, EventFacade, Listener};
-pub use filesystem::{AzBlobConfig, GcsConfig, S3Config, Storage};
+pub use filesystem::{copy_between_disks, AzBlobConfig, GcsConfig, S3Config, Storage};
 pub use inertia::{
     DeferConfig, DeferOptions, EncryptHistoryMiddleware, Frontend, Inertia, Inertia303Middleware,
     InertiaConfig, InertiaRegistry, InertiaRequestExt, InertiaResponse, InertiaSharedData,

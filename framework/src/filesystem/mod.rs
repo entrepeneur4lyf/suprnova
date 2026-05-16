@@ -27,9 +27,12 @@
 //! ```
 
 mod registry;
+pub mod streaming;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
+
+pub use streaming::copy_between_disks;
 
 use crate::FrameworkError;
 use opendal::{services, Operator};

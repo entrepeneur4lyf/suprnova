@@ -5,6 +5,7 @@
 //! resets the global disk registry on drop. This lets the tests safely run
 //! under the default parallel `cargo test` runner without registry collisions.
 
+use suprnova::filesystem::streaming::copy_between_disks;
 use suprnova::Storage;
 
 #[tokio::test]
@@ -79,5 +80,57 @@ async fn fake_guard_resets_registry_on_drop() {
     assert!(
         Storage::disk("ephemeral").is_err(),
         "guard drop must reset the registry"
+    );
+}
+
+#[tokio::test]
+async fn streaming_copy_moves_bytes_between_disks() {
+    let _guard = Storage::fake();
+    Storage::register_memory("src");
+    Storage::register_memory("dest");
+    let src = Storage::disk("src").unwrap();
+    src.write("biggie.bin", vec![0u8; 1_000_000]).await.unwrap();
+
+    let copied = copy_between_disks("src", "biggie.bin", "dest", "moved.bin")
+        .await
+        .unwrap();
+    assert_eq!(copied, 1_000_000, "must report total bytes copied");
+
+    let dest = Storage::disk("dest").unwrap();
+    let bytes = dest.read("moved.bin").await.unwrap();
+    assert_eq!(bytes.len(), 1_000_000);
+}
+
+#[tokio::test]
+async fn streaming_copy_preserves_bytes_exactly() {
+    let _guard = Storage::fake();
+    Storage::register_memory("src");
+    Storage::register_memory("dest");
+    let src = Storage::disk("src").unwrap();
+
+    // Mixed pattern so a partial copy or chunk-boundary bug is detectable.
+    let pattern: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+    src.write("mixed.bin", pattern.clone()).await.unwrap();
+
+    copy_between_disks("src", "mixed.bin", "dest", "mixed.bin")
+        .await
+        .unwrap();
+
+    let dest = Storage::disk("dest").unwrap();
+    let copied = dest.read("mixed.bin").await.unwrap();
+    assert_eq!(copied.to_vec(), pattern, "every byte must match");
+}
+
+#[tokio::test]
+async fn streaming_copy_errors_on_missing_source_disk() {
+    let _guard = Storage::fake();
+    Storage::register_memory("dest");
+    let err = copy_between_disks("nope", "a", "dest", "b")
+        .await
+        .unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("nope") || msg.contains("not registered"),
+        "error should identify the missing disk, got: {msg}"
     );
 }
