@@ -275,15 +275,50 @@ fn different_rejects_equality() {
 }
 
 #[test]
-fn confirmed_matches_field_confirmation_suffix() {
-    let rule = Confirmed { field: "password" };
+fn confirmed_check_named_matches_field_confirmation_suffix() {
+    use suprnova::ValidationErrors;
+
+    // Production path: `Confirmed` is a unit struct and gets the field
+    // name via `check_named`. The `validate!` macro threads
+    // `stringify!($field)` automatically; for direct use, callers pass
+    // the field name themselves.
+    let rule = Confirmed;
     let c = ctx(&[("password_confirmation", "secret")]);
-    assert!(rule.passes("secret", &c).is_ok());
-    assert!(rule.passes("different", &c).is_err());
-    let c2 = ctx(&[]);
+
+    // Matching confirmation → no error added.
+    let mut errs = ValidationErrors::new();
+    rule.check_named("secret", &mut errs, "password", &c);
+    assert!(errs.is_empty(), "matching confirmation must not error");
+
+    // Mismatching value → error added.
+    let mut errs = ValidationErrors::new();
+    rule.check_named("different", &mut errs, "password", &c);
     assert!(
-        rule.passes("anything", &c2).is_err(),
-        "missing confirmation → fail"
+        errs.errors.contains_key("password"),
+        "mismatching confirmation must error on the field key"
+    );
+
+    // Missing confirmation field → error added.
+    let mut errs = ValidationErrors::new();
+    rule.check_named("anything", &mut errs, "password", &ctx(&[]));
+    assert!(
+        errs.errors.contains_key("password"),
+        "missing confirmation field must error"
+    );
+}
+
+#[test]
+fn confirmed_passes_returns_helpful_error_without_field_name() {
+    // `passes` doesn't get the field name, so it can't look up
+    // `<field>_confirmation`. Calling it directly must return an
+    // explanatory `Err` rather than silently passing or matching the
+    // wrong value.
+    let rule = Confirmed;
+    let c = ctx(&[("password_confirmation", "secret")]);
+    let err = rule.passes("secret", &c).unwrap_err();
+    assert!(
+        err.contains("check_named") || err.contains("validate!") || err.contains("field name"),
+        "passes should explain how to use Confirmed correctly, got: {err}"
     );
 }
 
@@ -556,6 +591,59 @@ mod validate_macro {
             1,
             "only Min should fail; got {:?}",
             errs.errors["bio"]
+        );
+    }
+
+    // --- Confirmed as a unit struct via `validate!` ---
+    //
+    // The `validate!` macro now dispatches `ContextualRule::check_named`
+    // and threads `stringify!($field)` into the rule. `Confirmed`
+    // overrides `check_named` to derive `<field>_confirmation` from the
+    // ident, so callers write `password => Confirmed => with ctx;` —
+    // the field name appears once, not twice.
+
+    use suprnova::Confirmed;
+
+    struct PasswordForm {
+        password: String,
+    }
+
+    #[test]
+    fn validate_macro_confirmed_unit_struct_passes_when_confirmation_matches() {
+        use std::collections::HashMap;
+        let form = PasswordForm {
+            password: "secret".into(),
+        };
+        let mut ctx: HashMap<String, String> = HashMap::new();
+        ctx.insert("password_confirmation".to_string(), "secret".to_string());
+
+        let result: Result<(), ValidationErrors> = validate! { form =>
+            password => Confirmed => with ctx;
+        };
+        assert!(
+            result.is_ok(),
+            "matching confirmation must pass; got: {:?}",
+            result.err().map(|e| e.errors)
+        );
+    }
+
+    #[test]
+    fn validate_macro_confirmed_unit_struct_fails_when_confirmation_mismatches() {
+        use std::collections::HashMap;
+        let form = PasswordForm {
+            password: "secret".into(),
+        };
+        let mut ctx: HashMap<String, String> = HashMap::new();
+        ctx.insert("password_confirmation".to_string(), "different".to_string());
+
+        let result: Result<(), ValidationErrors> = validate! { form =>
+            password => Confirmed => with ctx;
+        };
+        let errs = result.unwrap_err();
+        assert!(
+            errs.errors.contains_key("password"),
+            "mismatching confirmation must produce a `password` error; got: {:?}",
+            errs.errors
         );
     }
 }

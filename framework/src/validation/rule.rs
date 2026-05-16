@@ -420,22 +420,66 @@ pub mod rules {
 
     /// Laravel `confirmed` — value must equal `ctx["<field>_confirmation"]`.
     ///
-    /// Because [`ContextualRule::passes`] does not receive the name of
-    /// the field being validated, the lookup target is explicit on the
-    /// rule itself. Construct as `Confirmed { field: "password" }` when
-    /// validating a `password` field; the rule will look up
-    /// `password_confirmation` in the form context.
+    /// Usage is through the [`crate::validate!`] macro, which threads
+    /// the field ident into the rule via `stringify!($field)`:
     ///
-    /// Missing confirmation field is treated as a failure.
-    pub struct Confirmed {
-        pub field: &'static str,
-    }
+    /// ```rust,ignore
+    /// use suprnova::{validate, Confirmed};
+    /// use std::collections::HashMap;
+    /// # struct Form { password: String }
+    /// # fn run(form: Form, ctx: HashMap<String, String>) {
+    /// let _ = validate! { form =>
+    ///     password => Confirmed => with ctx;
+    /// };
+    /// # }
+    /// ```
+    ///
+    /// When `password` is being validated, `Confirmed` looks up
+    /// `password_confirmation` in `ctx` and compares it to the field
+    /// value. Missing confirmation field is treated as a failure.
+    ///
+    /// # Why a unit struct
+    ///
+    /// `Confirmed` is a unit struct because the field name it needs
+    /// for the `<field>_confirmation` lookup is supplied automatically
+    /// by the [`crate::validate!`] macro through
+    /// [`ContextualRule::check_named`]. Earlier versions exposed the
+    /// field as a struct member (`Confirmed { field: "password" }`),
+    /// which made the field name appear twice in `validate!` rows. The
+    /// unit-struct form is the canonical API.
+    ///
+    /// # Direct use (without the macro)
+    ///
+    /// If you call `Confirmed` outside the `validate!` macro, use
+    /// [`ContextualRule::check_named`] directly, passing the field
+    /// name. Calling [`ContextualRule::passes`] returns an error: the
+    /// trait signature does not give the rule access to the field
+    /// name, so there is no `<field>_confirmation` key to look up.
+    pub struct Confirmed;
     impl ContextualRule for Confirmed {
-        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String> {
-            let key = format!("{}_confirmation", self.field);
+        /// `Confirmed` needs the name of the field being validated in
+        /// order to look up `<field>_confirmation` in `ctx`. The
+        /// [`ContextualRule::passes`] signature does not carry that
+        /// name, so this method always returns an error explaining
+        /// how to invoke the rule correctly.
+        fn passes(&self, _value: &str, _ctx: &FormContext) -> Result<(), String> {
+            Err(
+                "Confirmed requires the field name; use the `validate!` macro or call `check_named` directly"
+                    .into(),
+            )
+        }
+
+        fn check_named(
+            &self,
+            value: &str,
+            errs: &mut crate::error::ValidationErrors,
+            field: &str,
+            ctx: &FormContext,
+        ) {
+            let key = format!("{field}_confirmation");
             match ctx.get(&key) {
-                Some(v) if v == value => Ok(()),
-                _ => Err("confirmation does not match".into()),
+                Some(v) if v == value => {}
+                _ => errs.add(field.to_string(), "confirmation does not match".to_string()),
             }
         }
     }
