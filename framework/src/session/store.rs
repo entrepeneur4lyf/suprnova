@@ -16,7 +16,7 @@ pub struct SessionData {
     /// Key-value data stored in the session
     pub data: HashMap<String, serde_json::Value>,
     /// Authenticated user ID (if any)
-    pub user_id: Option<i64>,
+    pub user_id: Option<String>,
     /// CSRF token for this session
     pub csrf_token: String,
     /// Whether the session has been modified

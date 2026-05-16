@@ -22,11 +22,11 @@ use super::provider::UserProvider;
 ///
 /// // Check if authenticated
 /// if Auth::check() {
-///     let user_id = Auth::id().unwrap();
+///     let user_id: String = Auth::id().unwrap();
 /// }
 ///
-/// // Log in
-/// Auth::login(user_id);
+/// // Log in (numeric apps: convert to string at the boundary)
+/// Auth::login(user_id.to_string());
 ///
 /// // Log out
 /// Auth::logout();
@@ -37,7 +37,7 @@ impl Auth {
     /// Get the authenticated user's ID
     ///
     /// Returns None if not authenticated.
-    pub fn id() -> Option<i64> {
+    pub fn id() -> Option<String> {
         auth_user_id()
     }
 
@@ -58,7 +58,7 @@ impl Auth {
     /// # Security
     ///
     /// This method regenerates the session ID to prevent session fixation attacks.
-    pub fn login(user_id: i64) {
+    pub fn login(user_id: impl Into<String>) {
         // Regenerate session ID to prevent session fixation
         regenerate_session_id();
 
@@ -79,7 +79,7 @@ impl Auth {
     ///
     /// * `user_id` - The user's ID
     /// * `remember_token` - A secure token for remember me cookie
-    pub fn login_remember(user_id: i64, _remember_token: &str) {
+    pub fn login_remember(user_id: impl Into<String>, _remember_token: &str) {
         // For now, just do a regular login
         // Remember me cookie handling is done in the controller
         Self::login(user_id);
@@ -114,7 +114,8 @@ impl Auth {
 
     /// Attempt to authenticate with a validator function
     ///
-    /// The validator function should return the user ID if credentials are valid.
+    /// The validator function should return the user ID (as a `String`) if credentials are valid.
+    /// Numeric-id apps can use `.to_string()` on the id before returning it.
     ///
     /// # Example
     ///
@@ -123,7 +124,7 @@ impl Auth {
     ///     // Validate credentials
     ///     let user = User::find_by_email(&email).await?;
     ///     if user.verify_password(&password)? {
-    ///         Ok(Some(user.id))
+    ///         Ok(Some(user.id.to_string()))
     ///     } else {
     ///         Ok(None)
     ///     }
@@ -133,14 +134,14 @@ impl Auth {
     ///     // Authentication successful
     /// }
     /// ```
-    pub async fn attempt<F, Fut>(validator: F) -> Result<Option<i64>, crate::error::FrameworkError>
+    pub async fn attempt<F, Fut>(validator: F) -> Result<Option<String>, crate::error::FrameworkError>
     where
         F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<Option<i64>, crate::error::FrameworkError>>,
+        Fut: std::future::Future<Output = Result<Option<String>, crate::error::FrameworkError>>,
     {
         let result = validator().await?;
-        if let Some(user_id) = result {
-            Self::login(user_id);
+        if let Some(ref user_id) = result {
+            Self::login(user_id.clone());
         }
         Ok(result)
     }
@@ -192,7 +193,7 @@ impl Auth {
             )
         })?;
 
-        provider.retrieve_by_id(user_id).await
+        provider.retrieve_by_id(&user_id).await
     }
 
     /// Get the authenticated user, cast to a concrete type

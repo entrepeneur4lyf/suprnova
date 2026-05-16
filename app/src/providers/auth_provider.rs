@@ -29,10 +29,14 @@ pub struct DatabaseUserProvider;
 impl UserProvider for DatabaseUserProvider {
     async fn retrieve_by_id(
         &self,
-        id: i64,
+        id: &str,
     ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        let numeric_id: i64 = id
+            .parse()
+            .map_err(|_| FrameworkError::bad_request("user id must be numeric"))?;
+
         let user = User::query()
-            .filter(Column::Id.eq(id as i32))
+            .filter(Column::Id.eq(numeric_id as i32))
             .first()
             .await?;
 

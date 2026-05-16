@@ -8,23 +8,19 @@
 //! # Behaviour
 //!
 //! - Header present **and** token valid **and** session exists → call
-//!   [`crate::session::set_auth_user`] with a stable `i64` derived from the
-//!   torii `UserId` string, then pass the request through.
+//!   [`crate::session::set_auth_user`] with the raw torii `UserId` string
+//!   (e.g. `"usr_<base58>"`), then pass the request through.
 //! - Header missing **or** token invalid **or** session not found → pass the
 //!   request through unchanged. The middleware never returns `401`; that is
 //!   [`crate::auth::AuthMiddleware`]'s responsibility.
 //!
-//! # Deriving an `i64` from torii's `UserId`
+//! # User ID storage
 //!
-//! Torii's `UserId` is a prefixed opaque string (`"usr_<base58>"`), not a
-//! numeric value. Suprnova's session layer stores the authenticated user as an
-//! `i64`. The middleware converts the string to a **stable, deterministic**
-//! `i64` using FNV-1a 64-bit hashing cast to `i64`. This value is used only as
-//! a session marker — `Auth::id()` returns it and `Auth::user_as::<T>()` passes
-//! it to the application's `UserProvider::retrieve_by_id`. Applications that
-//! use torii-backed users (not a custom `UserProvider`) should use
-//! `session.user_id` (the raw torii `UserId` string) from the torii session
-//! object directly; the `i64` is purely a session-layer token.
+//! The raw torii `UserId` string is stored directly in the session's `user_id`
+//! field. `Auth::id()` returns it as `Option<String>`, and
+//! `Auth::user_as::<T>()` passes it to `UserProvider::retrieve_by_id(&str)`.
+//! Applications that implement `UserProvider` receive the raw torii `UserId`
+//! and can look up the user in their own store by that string.
 //!
 //! # Registration
 //!
@@ -45,24 +41,6 @@ use crate::session::set_auth_user;
 use crate::Request;
 
 use super::instance;
-
-/// Converts a torii `UserId` string to a stable `i64` using FNV-1a 64-bit hashing.
-///
-/// FNV-1a is chosen because it is fast, dependency-free, and deterministic
-/// across platforms and restarts. The cast to `i64` is safe — the bit pattern
-/// is preserved and the sign bit is treated as data.
-pub(crate) fn user_id_to_i64(user_id_str: &str) -> i64 {
-    // FNV-1a 64-bit constants
-    const FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
-    const FNV_PRIME: u64 = 1_099_511_628_211;
-
-    let mut hash = FNV_OFFSET;
-    for byte in user_id_str.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash as i64
-}
 
 /// Middleware that authenticates API requests via `Authorization: Bearer <token>`.
 ///
@@ -85,8 +63,7 @@ impl Middleware for BearerTokenMiddleware {
                     if let Ok(torii) = instance() {
                         let session_token = SessionToken::from(token_str);
                         if let Ok(session) = torii.get_session(&session_token).await {
-                            let user_id = user_id_to_i64(session.user_id.as_str());
-                            set_auth_user(user_id);
+                            set_auth_user(session.user_id.as_str());
                         }
                     }
                 }

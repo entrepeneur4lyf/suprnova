@@ -10,15 +10,12 @@
 //!   `Resource::collection`.  Same sparse-fieldset support.
 //!
 //! * `DELETE /api/posts/{id}` — demonstrates `Gate::authorize` with the
-//!   `PostPolicy`. The "current user" is loaded from a stub (user id=1)
-//!   because `Auth::user_as::<User>()` doesn't work cleanly against the
-//!   torii-backed session layer for this dogfood entity (see P3T8 known
-//!   limitation). In a real app with a proper session-user mapping this
-//!   would be `Auth::user_as::<User>().await?.ok_or(FrameworkError::Unauthorized)?`.
+//!   `PostPolicy`. The current user is loaded via `Auth::user_as::<User>()`,
+//!   which resolves the session's string `user_id` through `DatabaseUserProvider`.
 
 use crate::models::{posts::Post, users::User};
 use crate::resources::user_resource::UserResource;
-use suprnova::{FrameworkError, Gate, HttpResponse, Request, Resource, Response};
+use suprnova::{Auth, FrameworkError, Gate, HttpResponse, Request, Resource, Response};
 
 // ---------------------------------------------------------------------------
 // GET /api/users/{id}
@@ -73,10 +70,6 @@ async fn list_users_inner() -> Result<HttpResponse, FrameworkError> {
 /// `#[policy(User, Post)]` impl on `PostPolicy` (inventory-based
 /// registration). If the current user doesn't own the post the gate
 /// returns `Err(FrameworkError::Unauthorized)` which is mapped to 403.
-///
-/// **Dogfood stub:** the "current user" is always user id=1 because the
-/// torii session layer stores a string UserId that can't be cleanly mapped
-/// back to the SeaORM `User` entity in this demo (P3T8 known limitation).
 pub async fn delete_post(req: Request) -> Response {
     delete_post_inner(req).await.map_err(HttpResponse::from)
 }
@@ -87,9 +80,7 @@ async fn delete_post_inner(req: Request) -> Result<HttpResponse, FrameworkError>
         .parse()
         .map_err(|_| FrameworkError::param_parse("id", "i32"))?;
 
-    // Dogfood: load user id=1 as the "current user".
-    // A real app would call `Auth::user_as::<User>().await?`.
-    let current_user = User::find_by_id(1)
+    let current_user = Auth::user_as::<User>()
         .await?
         .ok_or(FrameworkError::Unauthorized)?;
 

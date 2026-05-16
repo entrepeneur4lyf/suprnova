@@ -19,7 +19,7 @@
 //!
 //! // In a controller
 //! if Auth::check() {
-//!     let user_id = Auth::id().unwrap();
+//!     let user_id: String = Auth::id().unwrap();
 //! }
 //!
 //! // Get the currently authenticated user
@@ -32,8 +32,8 @@
 //!     println!("Welcome, user #{}!", user.id);
 //! }
 //!
-//! // Login
-//! Auth::login(user.id);
+//! // Login (numeric apps: convert to string at the boundary)
+//! Auth::login(user.id.to_string());
 //!
 //! // Logout
 //! Auth::logout();

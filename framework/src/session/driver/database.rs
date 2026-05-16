@@ -14,7 +14,7 @@ use crate::session::store::{SessionData, SessionStore};
 ///
 /// Stores sessions in a `sessions` table with the following schema:
 /// - id: VARCHAR (primary key) - session ID
-/// - user_id: BIGINT (nullable) - authenticated user ID
+/// - user_id: VARCHAR (nullable) - authenticated user ID (string, supports both numeric and opaque IDs)
 /// - payload: TEXT - JSON serialized session data
 /// - csrf_token: VARCHAR - CSRF protection token
 /// - last_activity: TIMESTAMP - last access time
@@ -85,7 +85,7 @@ impl SessionStore for DatabaseSessionDriver {
             // Update existing session
             let update = sessions::ActiveModel {
                 id: Set(session.id.clone()),
-                user_id: Set(session.user_id),
+                user_id: Set(session.user_id.clone()),
                 payload: Set(payload),
                 csrf_token: Set(session.csrf_token.clone()),
                 last_activity: Set(now),
@@ -99,7 +99,7 @@ impl SessionStore for DatabaseSessionDriver {
             // Insert new session
             let model = sessions::ActiveModel {
                 id: Set(session.id.clone()),
-                user_id: Set(session.user_id),
+                user_id: Set(session.user_id.clone()),
                 payload: Set(payload),
                 csrf_token: Set(session.csrf_token.clone()),
                 last_activity: Set(now),
@@ -150,7 +150,7 @@ pub mod sessions {
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: String,
-        pub user_id: Option<i64>,
+        pub user_id: Option<String>,
         #[sea_orm(column_type = "Text")]
         pub payload: String,
         pub csrf_token: String,

@@ -281,7 +281,7 @@ fn bearer_token_middleware_binds_session_when_token_valid() {
             let _response = mw.handle(request, next).await;
 
             // After middleware runs, `Auth::check()` must return true because
-            // `set_auth_user` was called with the hashed user_id.
+            // `set_auth_user` was called with the raw torii UserId string.
             Auth::check()
         })
         .await;
@@ -289,6 +289,52 @@ fn bearer_token_middleware_binds_session_when_token_valid() {
         assert!(
             authenticated,
             "BearerTokenMiddleware should bind the session for a valid token"
+        );
+    });
+}
+
+/// `BearerTokenMiddleware` stores the raw torii `UserId` string, not a hash.
+///
+/// Registers a user, authenticates, drives the middleware, then asserts that
+/// `Auth::id()` returns the raw `"usr_…"` prefixed string — proving that the
+/// old FNV-1a hashing punt has been removed.
+#[test]
+fn bearer_middleware_stores_raw_user_id_not_hash() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        Auth::password()
+            .register("raw-uid@example.com", "RawUid1!")
+            .await
+            .unwrap();
+
+        let (_user, torii_session) = Auth::password()
+            .authenticate("raw-uid@example.com", "RawUid1!", None, None)
+            .await
+            .unwrap();
+
+        let token_str = torii_session.token.to_string();
+
+        let request = build_request_async(Some(&format!("Bearer {}", token_str))).await;
+        let slot = suprnova::session::new_session_slot_for_test();
+
+        let session_uid = suprnova::session::session_scope_for_test(slot, async {
+            let next: suprnova::Next = Arc::new(|_req| {
+                Box::pin(async { Ok(suprnova::HttpResponse::text("ok")) })
+            });
+
+            let mw = BearerTokenMiddleware;
+            use suprnova::Middleware;
+            let _response = mw.handle(request, next).await;
+
+            Auth::id()
+        })
+        .await;
+
+        let session_uid = session_uid.expect("Auth::id() should be Some after bearer middleware");
+        assert!(
+            session_uid.starts_with("usr_"),
+            "expected raw torii UserId (starts with 'usr_'), got: {session_uid}"
         );
     });
 }

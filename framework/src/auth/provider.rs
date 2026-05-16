@@ -26,7 +26,8 @@ use crate::error::FrameworkError;
 ///
 /// #[async_trait]
 /// impl UserProvider for DatabaseUserProvider {
-///     async fn retrieve_by_id(&self, id: i64) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+///     async fn retrieve_by_id(&self, id: &str) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+///         let id: i64 = id.parse().map_err(|_| FrameworkError::bad_request("user id must be numeric"))?;
 ///         let user = User::query()
 ///             .filter(Column::Id.eq(id as i32))
 ///             .first()
@@ -38,9 +39,13 @@ use crate::error::FrameworkError;
 #[async_trait]
 pub trait UserProvider: Send + Sync + 'static {
     /// Retrieve a user by their unique identifier
+    ///
+    /// The `id` is the string stored in the session's `user_id` field.
+    /// For apps with numeric primary keys, parse the string: `id.parse::<i64>()`.
+    /// For torii-backed apps, this is the raw torii `UserId` string (e.g. `"usr_<base58>"`).
     async fn retrieve_by_id(
         &self,
-        id: i64,
+        id: &str,
     ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError>;
 
     /// Retrieve a user by credentials (for custom authentication flows)

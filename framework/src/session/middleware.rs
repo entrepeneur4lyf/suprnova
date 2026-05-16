@@ -270,12 +270,13 @@ pub fn is_authenticated() -> bool {
 }
 
 /// Helper to get the authenticated user ID
-pub fn auth_user_id() -> Option<i64> {
+pub fn auth_user_id() -> Option<String> {
     session().and_then(|s| s.user_id)
 }
 
 /// Helper to set the authenticated user
-pub fn set_auth_user(user_id: i64) {
+pub fn set_auth_user(user_id: impl Into<String>) {
+    let user_id = user_id.into();
     session_mut(|session| {
         session.user_id = Some(user_id);
         session.dirty = true;

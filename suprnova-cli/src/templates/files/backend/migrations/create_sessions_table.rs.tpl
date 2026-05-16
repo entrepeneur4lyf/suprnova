@@ -17,7 +17,7 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(Sessions::UserId).big_integer().null())
+                    .col(ColumnDef::new(Sessions::UserId).string().null())
                     .col(ColumnDef::new(Sessions::Payload).text().not_null())
                     .col(ColumnDef::new(Sessions::CsrfToken).string().not_null())
                     .col(ColumnDef::new(Sessions::LastActivity).timestamp().not_null())
