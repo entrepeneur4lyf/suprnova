@@ -334,12 +334,44 @@ async fn build_and_send(builder: &RequestBuilder) -> Result<ClientResponse, Fram
         None => {}
     }
 
-    let resp = req
-        .send()
+    // Build the request so we can mutate its header map to inject
+    // W3C trace context (otel feature only — no-op otherwise).
+    let mut request = req
+        .build()
+        .map_err(|e| FrameworkError::internal(format!("Http::send failed: {e}")))?;
+
+    inject_w3c_trace_context(&mut request);
+
+    let resp = client()
+        .execute(request)
         .await
         .map_err(|e| FrameworkError::internal(format!("Http::send failed: {e}")))?;
     Ok(ClientResponse::real(resp))
 }
+
+/// Inject the current OpenTelemetry context into outbound request
+/// headers using the globally-registered text-map propagator
+/// (`TraceContextPropagator` is installed by `init_telemetry` when the
+/// `otel` feature is enabled). Produces `traceparent` / `tracestate`
+/// headers that downstream services parse to continue the trace.
+///
+/// If no OTel context is active (i.e. `Context::current()` is empty),
+/// the propagator emits nothing and headers are left untouched. This
+/// keeps the code path safe to run unconditionally on every request.
+#[cfg(feature = "otel")]
+fn inject_w3c_trace_context(request: &mut reqwest::Request) {
+    use opentelemetry::global;
+    use crate::telemetry::propagation::HeaderInjector;
+
+    let cx = opentelemetry::Context::current();
+    let mut injector = HeaderInjector(request.headers_mut());
+    global::get_text_map_propagator(|propagator| propagator.inject_context(&cx, &mut injector));
+}
+
+/// No-op stub when the `otel` feature is disabled — header injection
+/// has nothing to do because no propagator is installed.
+#[cfg(not(feature = "otel"))]
+fn inject_w3c_trace_context(_request: &mut reqwest::Request) {}
 
 /// `base_backoff * 2^(attempt-1)`. Saturating math so a pathologically
 /// large attempt count can't overflow the shift, and the resulting

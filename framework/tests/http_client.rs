@@ -42,6 +42,16 @@ async fn spawn_echo() -> (SocketAddr, Arc<Mutex<Option<EchoCapture>>>) {
                         .get("content-type")
                         .and_then(|h| h.to_str().ok())
                         .map(|s| s.to_string());
+                    let traceparent = req
+                        .headers()
+                        .get("traceparent")
+                        .and_then(|h| h.to_str().ok())
+                        .map(|s| s.to_string());
+                    let tracestate = req
+                        .headers()
+                        .get("tracestate")
+                        .and_then(|h| h.to_str().ok())
+                        .map(|s| s.to_string());
                     let body_bytes = req.into_body().collect().await.unwrap().to_bytes();
                     let body_str = String::from_utf8_lossy(&body_bytes).to_string();
 
@@ -51,6 +61,8 @@ async fn spawn_echo() -> (SocketAddr, Arc<Mutex<Option<EchoCapture>>>) {
                         authorization: auth.clone(),
                         content_type: ct.clone(),
                         body: body_str.clone(),
+                        traceparent,
+                        tracestate,
                     });
 
                     let payload = serde_json::json!({
@@ -86,6 +98,8 @@ struct EchoCapture {
     authorization: Option<String>,
     content_type: Option<String>,
     body: String,
+    traceparent: Option<String>,
+    tracestate: Option<String>,
 }
 
 #[tokio::test]
@@ -409,4 +423,92 @@ async fn into_inner_returns_err_for_fake_response() {
         );
     })
     .await;
+}
+
+// ── Codex review finding 8 — W3C trace context injection ─────────────────
+//
+// `Http::send` must inject `traceparent` (and `tracestate` when
+// non-empty) into outbound requests when an OTel context is active.
+// This is gated behind the `otel` feature because the propagator and
+// context types only exist there.
+
+#[cfg(feature = "otel")]
+#[tokio::test]
+async fn outbound_request_includes_traceparent_when_otel_context_active() {
+    use opentelemetry::trace::{
+        FutureExt as _, SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
+    };
+    use opentelemetry::Context;
+
+    // Install the W3C TraceContext propagator. Idempotent — safe even
+    // if other tests in this run also called it.
+    suprnova::telemetry::propagation::install_trace_context_propagator();
+
+    // Build a fully-specified OTel span context. We use deterministic
+    // IDs so the test can assert that the wire `traceparent` carries
+    // exactly the trace id we attached.
+    let trace_id = TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736")
+        .expect("hex trace id parses");
+    let span_id = SpanId::from_hex("00f067aa0ba902b7").expect("hex span id parses");
+    let span_ctx = SpanContext::new(
+        trace_id,
+        span_id,
+        TraceFlags::SAMPLED,
+        /* is_remote: */ true,
+        TraceState::default(),
+    );
+    let cx = Context::current().with_remote_span_context(span_ctx);
+
+    let (addr, cap) = spawn_echo().await;
+    let url = format!("http://{}/traced", addr);
+
+    // Wrap the send in `with_context(cx)` so the OTel context is the
+    // current one across the await boundary, which is what the
+    // propagator reads from inside `inject_w3c_trace_context`.
+    async {
+        let resp = Http::get(&url).send().await.expect("send");
+        assert_eq!(resp.status(), 200);
+    }
+    .with_context(cx)
+    .await;
+
+    let captured = cap.lock().unwrap().clone().expect("server saw no request");
+    let traceparent = captured
+        .traceparent
+        .expect("traceparent header must be injected when an OTel context is active");
+
+    // W3C format: `version-trace_id-parent_id-flags`, all hex.
+    let parts: Vec<&str> = traceparent.split('-').collect();
+    assert_eq!(parts.len(), 4, "traceparent has 4 dash-separated parts, got {traceparent:?}");
+    assert_eq!(parts[0], "00", "version must be 00, got {traceparent:?}");
+    assert_eq!(parts[1].len(), 32, "trace_id is 32 hex chars, got {traceparent:?}");
+    assert_eq!(parts[2].len(), 16, "span_id is 16 hex chars, got {traceparent:?}");
+    assert_eq!(parts[3].len(), 2, "flags is 2 hex chars, got {traceparent:?}");
+
+    // The trace id we attached must show up on the wire.
+    assert_eq!(
+        parts[1], "4bf92f3577b34da6a3ce929d0e0e4736",
+        "trace id on wire does not match attached context, got {traceparent:?}"
+    );
+}
+
+#[cfg(feature = "otel")]
+#[tokio::test]
+async fn outbound_request_omits_traceparent_without_active_context() {
+    // No `with_context` wrapper here — `Context::current()` is empty,
+    // so the propagator should inject nothing and the echo server
+    // sees no `traceparent` header.
+    suprnova::telemetry::propagation::install_trace_context_propagator();
+
+    let (addr, cap) = spawn_echo().await;
+    let url = format!("http://{}/untraced", addr);
+    let resp = Http::get(&url).send().await.expect("send");
+    assert_eq!(resp.status(), 200);
+
+    let captured = cap.lock().unwrap().clone().expect("server saw no request");
+    assert!(
+        captured.traceparent.is_none(),
+        "empty OTel context must NOT inject traceparent, got {:?}",
+        captured.traceparent
+    );
 }
