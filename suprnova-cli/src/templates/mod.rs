@@ -596,10 +596,11 @@ pub mod api {
     pub fn migrations_create_users_rs() -> &'static str {
         include_str!("files/api/src/migrations/create_users_table.rs.tpl")
     }
-    pub fn env(package_name: &str, project_name: &str) -> String {
+    pub fn env(package_name: &str, project_name: &str, app_key: &str) -> String {
         include_str!("files/api/.env.tpl")
             .replace("{package_name}", package_name)
             .replace("{project_name}", project_name)
+            .replace("{app_key}", app_key)
     }
     pub fn gitignore() -> &'static str {
         include_str!("files/api/.gitignore.tpl")
@@ -669,7 +670,11 @@ pub fn scaffold_api(
         ),
         (
             project_path.join(".env"),
-            api::env(package_name, project_name),
+            api::env(
+                package_name,
+                project_name,
+                &crate::commands::key_generate::generate_app_key(),
+            ),
         ),
         (
             project_path.join(".gitignore"),
@@ -719,8 +724,10 @@ pub fn gitignore() -> &'static str {
     include_str!("files/root/gitignore.tpl")
 }
 
-pub fn env(project_name: &str) -> String {
-    include_str!("files/root/env.tpl").replace("{project_name}", project_name)
+pub fn env(project_name: &str, app_key: &str) -> String {
+    include_str!("files/root/env.tpl")
+        .replace("{project_name}", project_name)
+        .replace("{app_key}", app_key)
 }
 
 pub fn env_example() -> &'static str {

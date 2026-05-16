@@ -281,9 +281,14 @@ fn create_project(
     fs::write(project_path.join(".gitignore"), templates::gitignore())
         .map_err(|e| format!("Failed to write .gitignore: {}", e))?;
 
-    // Write .env
-    fs::write(project_path.join(".env"), templates::env(project_name))
-        .map_err(|e| format!("Failed to write .env: {}", e))?;
+    // Write .env (with a freshly-generated APP_KEY so the scaffolded
+    // project boots out-of-the-box without operator intervention).
+    let app_key = crate::commands::key_generate::generate_app_key();
+    fs::write(
+        project_path.join(".env"),
+        templates::env(project_name, &app_key),
+    )
+    .map_err(|e| format!("Failed to write .env: {}", e))?;
 
     // Write .env.example
     fs::write(project_path.join(".env.example"), templates::env_example())

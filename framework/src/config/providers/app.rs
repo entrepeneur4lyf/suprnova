@@ -14,12 +14,25 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
-    /// Build config from environment variables
+    /// Build config from environment variables.
+    ///
+    /// `APP_DEBUG` is environment-aware: if the variable is set, its
+    /// explicit value wins; if unset, the default is derived from
+    /// `APP_ENV` — `true` in local/development/testing, `false`
+    /// otherwise (including production and any unrecognized
+    /// environment). This keeps local zero-config DX while making
+    /// production fail-safe per codex review finding #12.
     pub fn from_env() -> Self {
+        let environment = Environment::detect();
+        let debug = std::env::var("APP_DEBUG")
+            .ok()
+            .and_then(|s| s.parse::<bool>().ok())
+            .unwrap_or_else(|| default_debug_for_env(&environment));
+
         Self {
-            name: env("APP_NAME", "suprnova Application".to_string()),
-            environment: Environment::detect(),
-            debug: env("APP_DEBUG", true),
+            name: env("APP_NAME", "Suprnova Application".to_string()),
+            environment,
+            debug,
             url: env("APP_URL", "http://localhost:8080".to_string()),
         }
     }
@@ -49,6 +62,18 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self::from_env()
     }
+}
+
+/// Pick the default value for `APP_DEBUG` when the env var is unset.
+///
+/// `true` in environments where developers want loud, helpful errors
+/// (local, development, testing). `false` everywhere else — production,
+/// staging, and any unrecognized custom environment fall closed.
+fn default_debug_for_env(env: &Environment) -> bool {
+    matches!(
+        env,
+        Environment::Local | Environment::Development | Environment::Testing
+    )
 }
 
 /// Builder for AppConfig
@@ -94,5 +119,24 @@ impl AppConfigBuilder {
             debug: self.debug.unwrap_or(default.debug),
             url: self.url.unwrap_or(default.url),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_debug_is_true_in_local_dev_test() {
+        assert!(default_debug_for_env(&Environment::Local));
+        assert!(default_debug_for_env(&Environment::Development));
+        assert!(default_debug_for_env(&Environment::Testing));
+    }
+
+    #[test]
+    fn default_debug_is_false_in_production_staging_custom() {
+        assert!(!default_debug_for_env(&Environment::Production));
+        assert!(!default_debug_for_env(&Environment::Staging));
+        assert!(!default_debug_for_env(&Environment::Custom("k8s-prod".into())));
     }
 }

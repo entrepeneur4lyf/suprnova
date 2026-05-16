@@ -60,37 +60,72 @@ impl std::fmt::Display for Environment {
     }
 }
 
-/// Load environment variables from .env files with proper precedence
+/// Load environment variables from `.env` files with proper precedence.
 ///
-/// Precedence (later files override earlier):
-/// 1. .env (base defaults)
-/// 2. .env.local (local overrides, not committed)
-/// 3. .env.{environment} (environment-specific)
-/// 4. .env.{environment}.local (environment-specific local overrides)
-/// 5. Actual system environment variables (highest priority)
+/// Precedence (highest wins):
+/// 1. Actual system environment variables (highest)
+/// 2. `.env.{environment}.local` (environment-specific local overrides)
+/// 3. `.env.{environment}` (environment-specific)
+/// 4. `.env.local` (local overrides, not committed)
+/// 5. `.env` (base defaults — lowest)
+///
+/// The loader works in two phases so that `APP_ENV` defined in the base
+/// `.env` correctly selects environment-specific files for the same
+/// invocation (codex review finding #12):
+///
+/// 1. Snapshot every key that was already present in the system
+///    environment when the function was called. These wins over every
+///    file value, full stop.
+/// 2. Load base `.env` (non-overriding — file values fill in gaps in
+///    the system env).
+/// 3. Re-detect `APP_ENV` now that base `.env` has been merged.
+/// 4. Load `.env.local`, `.env.{env}`, `.env.{env}.local` in
+///    least-to-most-specific order using `from_path_override` so each
+///    later file wins over earlier files.
+/// 5. Re-apply the system-env snapshot last so real system values
+///    survive any file that tried to override them.
 pub fn load_dotenv(project_root: &Path) -> Environment {
+    // Phase 1: snapshot real system env so we can restore precedence at
+    // the end. Captures only keys present BEFORE any file load.
+    let system_env: Vec<(String, String)> = std::env::vars().collect();
+
+    // Phase 2: load base `.env` non-overriding. Anything already in
+    // system env (i.e. the snapshot) stays untouched.
+    let _ = dotenvy::from_path(project_root.join(".env"));
+
+    // Phase 3: re-detect APP_ENV now that base `.env` has merged in.
+    // This is the fix for finding #12 — previously APP_ENV was
+    // detected before `.env` loaded, so `APP_ENV=production` set only
+    // in `.env` never selected `.env.production`.
     let env = Environment::detect();
 
-    // Load in REVERSE order of precedence because dotenvy doesn't overwrite existing vars
-    // So we load most specific first, then less specific files won't override
+    // Phase 4: load environment-specific files in least-to-most-
+    // specific order, using `from_path_override` so each later file
+    // beats the earlier file. We do NOT want these to override real
+    // system env — we restore that in phase 5.
+    let _ = dotenvy::from_path_override(project_root.join(".env.local"));
 
-    // 4. Environment-specific local (e.g., .env.production.local) - highest file priority
-    if let Some(suffix) = env.env_file_suffix() {
-        let path = project_root.join(format!(".env.{}.local", suffix));
-        let _ = dotenvy::from_path(&path);
-    }
-
-    // 3. Environment-specific (e.g., .env.production)
     if let Some(suffix) = env.env_file_suffix() {
         let path = project_root.join(format!(".env.{}", suffix));
-        let _ = dotenvy::from_path(&path);
+        let _ = dotenvy::from_path_override(&path);
+
+        let path = project_root.join(format!(".env.{}.local", suffix));
+        let _ = dotenvy::from_path_override(&path);
     }
 
-    // 2. .env.local
-    let _ = dotenvy::from_path(project_root.join(".env.local"));
-
-    // 1. .env (base) - lowest file priority
-    let _ = dotenvy::from_path(project_root.join(".env"));
+    // Phase 5: restore real system env. Any key that existed in the
+    // process environment BEFORE this function ran is rewritten back to
+    // its original value, defeating anything a file tried to override.
+    //
+    // SAFETY: `std::env::set_var` is process-global; documented unsafe
+    // because it races with concurrent getenv on some platforms. We're
+    // in the boot path before workers start, and callers serialize
+    // `load_dotenv` (it is meant to be called once at startup).
+    for (k, v) in system_env {
+        unsafe {
+            std::env::set_var(&k, &v);
+        }
+    }
 
     env
 }

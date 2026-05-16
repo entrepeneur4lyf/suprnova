@@ -3,6 +3,12 @@ APP_ENV=local
 APP_DEBUG=true
 APP_URL=http://localhost:8080
 
+# 32-byte AES-256 key (URL-safe base64, no padding). Generate one with
+# `suprnova key:generate` and copy it into your `.env`. Required in
+# production — Suprnova fails closed on boot when APP_ENV is not
+# local/dev/test and APP_KEY is unset.
+APP_KEY=
+
 SERVER_HOST=127.0.0.1
 SERVER_PORT=8080
 
