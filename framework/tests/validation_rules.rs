@@ -173,3 +173,23 @@ async fn unique_ignores_except_id() {
     };
     assert!(rule.passes("self@example.com").await.is_ok());
 }
+
+#[test]
+fn error_bag_scopes_default_and_named() {
+    use suprnova::ValidationErrors;
+
+    let mut errs = ValidationErrors::new();
+    errs.add("email", "invalid");
+    errs.add_to_bag("profile", "bio", "too long");
+    errs.add_to_bag("profile", "avatar", "missing");
+
+    // Bag-scoped errors are prefixed with bag name and a dot.
+    // The default bag (added via `add`) stays unprefixed.
+    assert!(errs.errors.contains_key("email"));
+    assert!(errs.errors.contains_key("profile.bio"));
+    assert!(errs.errors.contains_key("profile.avatar"));
+
+    assert_eq!(errs.errors["email"][0], "invalid");
+    assert_eq!(errs.errors["profile.bio"][0], "too long");
+    assert_eq!(errs.errors["profile.avatar"][0], "missing");
+}

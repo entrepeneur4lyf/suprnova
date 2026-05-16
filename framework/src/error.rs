@@ -179,6 +179,23 @@ impl ValidationErrors {
             .push(message.into());
     }
 
+    /// Add an error scoped under a named bag (Laravel's
+    /// `withErrors($errors, 'profile')`). The scope name is prepended
+    /// to the field key with a `.` separator, producing keys like
+    /// `profile.bio` in the unified `errors` map.
+    ///
+    /// Use this when a single response carries errors from multiple
+    /// forms or sub-forms that can't share a flat field namespace.
+    pub fn add_to_bag(
+        &mut self,
+        bag: impl AsRef<str>,
+        field: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        let scoped = format!("{}.{}", bag.as_ref(), field.into());
+        self.add(scoped, message);
+    }
+
     /// Check if there are any errors
     pub fn is_empty(&self) -> bool {
         self.errors.is_empty()
