@@ -78,7 +78,10 @@ opendal = { version = "0.56", default-features = false, features = ["services-fs
 tempfile = "3"
 
 [features]
-default = []
+default = ["testing"]
+# Exposes Storage::fake() and related test helpers. Enabled by default so the
+# integration test suite (and consumers' tests) can use them without opting in.
+testing = []
 otel = [
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",

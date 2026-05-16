@@ -16,6 +16,7 @@ pub mod hashing;
 pub mod http;
 pub mod http_client;
 pub mod events;
+pub mod filesystem;
 pub mod inertia;
 pub mod logging;
 pub mod middleware;
@@ -65,6 +66,7 @@ pub use logging::{
     current_request_id, init_subscriber, LogConfig, LogFormat, RequestId, RequestIdMiddleware,
 };
 pub use events::{ErrorOccurred, Event, EventDispatcher, EventFacade, Listener};
+pub use filesystem::{AzBlobConfig, GcsConfig, S3Config, Storage};
 pub use inertia::{
     DeferConfig, DeferOptions, EncryptHistoryMiddleware, Frontend, Inertia, Inertia303Middleware,
     InertiaConfig, InertiaRegistry, InertiaRequestExt, InertiaResponse, InertiaSharedData,
