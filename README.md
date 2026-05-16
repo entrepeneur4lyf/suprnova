@@ -1,4 +1,4 @@
-# suprnova
+# Suprnova
 
 **A Laravel-inspired web framework for Rust**
 
