@@ -28,8 +28,8 @@ use super::provider::UserProvider;
 /// // Log in (numeric apps: convert to string at the boundary)
 /// Auth::login(user_id.to_string());
 ///
-/// // Log out
-/// Auth::logout();
+/// // Log out (async — also revokes remember-me tokens for the user)
+/// Auth::logout().await?;
 /// ```
 pub struct Auth;
 
@@ -71,28 +71,105 @@ impl Auth {
         });
     }
 
-    /// Log in a user with "remember me" functionality
+    /// Log in a user AND issue a remember-me token.
     ///
-    /// This extends the session lifetime for persistent login.
+    /// This does a normal session login (regenerating session id + CSRF
+    /// token) and additionally:
+    ///
+    /// 1. Inserts a fresh hashed token into `remember_tokens`.
+    /// 2. Queues an encrypted, HttpOnly, SameSite=Lax cookie (Secure
+    ///    when `SESSION_SECURE=true`) for the outgoing response.
+    /// 3. Sets the cookie's `Max-Age` to match the token's TTL.
+    ///
+    /// On a future request where the session is missing or expired,
+    /// `SessionMiddleware` will verify the cookie's plaintext against
+    /// the hashed row, rotate the token (delete + reissue), and
+    /// hydrate the session — the user is logged back in transparently.
+    ///
+    /// # Closes
+    ///
+    /// Codex review finding #13 — the pre-fix implementation ignored
+    /// its `remember_token` parameter and performed only a session
+    /// login. There was no DB row, no cookie, no rotation, and
+    /// `logout()` did not clear any persistent state.
     ///
     /// # Arguments
     ///
-    /// * `user_id` - The user's ID
-    /// * `remember_token` - A secure token for remember me cookie
-    pub fn login_remember(user_id: impl Into<String>, _remember_token: &str) {
-        // For now, just do a regular login
-        // Remember me cookie handling is done in the controller
-        Self::login(user_id);
+    /// * `user_id` — the user's ID (string).
+    /// * `ttl_minutes` — token + cookie lifetime in minutes. Pass
+    ///   `SessionConfig::remember_lifetime` (as minutes) for the
+    ///   configured default; pass a smaller value for short-lived
+    ///   "stay signed in for an hour" UX.
+    pub async fn login_remember(
+        user_id: impl Into<String>,
+        ttl_minutes: i64,
+    ) -> Result<(), crate::error::FrameworkError> {
+        let user_id = user_id.into();
+        // Regular session login (regen session id + CSRF, set user).
+        Self::login(user_id.clone());
+
+        // Issue the row. Returns the plaintext destined for the cookie.
+        let plaintext = super::remember::issue(&user_id, ttl_minutes).await?;
+
+        // Build + queue the cookie. The cookie's `Max-Age` matches the
+        // row's TTL (`ttl_minutes` converted to seconds) so the browser
+        // stops sending the cookie the moment the row expires — the
+        // attribute does not "lie" about validity. Codex finding #13
+        // required "expires-at matches token expiration."
+        let config = crate::session::SessionConfig::from_env();
+        let max_age = std::time::Duration::from_secs(
+            (ttl_minutes.max(0) as u64).saturating_mul(60),
+        );
+        let cookie = crate::session::middleware::create_remember_cookie(
+            &config, &plaintext, max_age,
+        )?;
+        crate::session::middleware::push_pending_cookie(cookie);
+
+        Ok(())
+    }
+
+    /// Revoke every remember-me token for the currently-authenticated
+    /// user AND queue a "clear" cookie on the outgoing response.
+    ///
+    /// Chained automatically from `Auth::logout`. Also the right hook
+    /// for a "log me out everywhere" account-security button — call
+    /// it without a preceding `logout` to invalidate every device
+    /// while keeping the current session active.
+    ///
+    /// Returns the number of rows deleted (0 if the user had no
+    /// remember-me tokens).
+    pub async fn revoke_remember_tokens() -> Result<u64, crate::error::FrameworkError> {
+        let removed = match Self::id() {
+            Some(id) => super::remember::revoke_all_for_user(&id).await?,
+            None => 0,
+        };
+
+        // Always queue the clear cookie — even when the user has no
+        // remember-me row, the browser might still hold a stale one
+        // from a previous account, and clearing is the polite default.
+        let config = crate::session::SessionConfig::from_env();
+        let clear = crate::session::middleware::create_forget_remember_cookie(&config);
+        crate::session::middleware::push_pending_cookie(clear);
+
+        Ok(removed)
     }
 
     /// Log out the current user
     ///
-    /// Clears the authenticated user from the session.
+    /// Clears the authenticated user from the session AND revokes
+    /// every remember-me token for that user (so closing the browser
+    /// and reopening it does not silently log them back in).
     ///
     /// # Security
     ///
-    /// This regenerates the CSRF token to prevent any cached tokens from being reused.
-    pub fn logout() {
+    /// This regenerates the CSRF token to prevent any cached tokens
+    /// from being reused.
+    pub async fn logout() -> Result<(), crate::error::FrameworkError> {
+        // Revoke remember-me first, while we still have access to the
+        // authenticated user id. `revoke_remember_tokens` no-ops cleanly
+        // when there is no logged-in user.
+        Self::revoke_remember_tokens().await?;
+
         // Clear the authenticated user
         clear_auth_user();
 
@@ -100,16 +177,21 @@ impl Auth {
         session_mut(|session| {
             session.csrf_token = generate_csrf_token();
         });
+
+        Ok(())
     }
 
     /// Log out and invalidate the entire session
     ///
     /// Use this for complete session destruction (e.g., "logout everywhere").
-    pub fn logout_and_invalidate() {
+    /// Also revokes every remember-me token for the user.
+    pub async fn logout_and_invalidate() -> Result<(), crate::error::FrameworkError> {
+        Self::revoke_remember_tokens().await?;
         session_mut(|session| {
             session.flush();
             session.csrf_token = generate_csrf_token();
         });
+        Ok(())
     }
 
     /// Attempt to authenticate with a validator function

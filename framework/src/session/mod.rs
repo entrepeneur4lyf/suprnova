@@ -74,3 +74,20 @@ pub async fn session_scope_for_test<F: std::future::Future>(
 ) -> F::Output {
     middleware::SESSION_CONTEXT.scope(slot, fut).await
 }
+
+/// Test-only: a fresh pending-cookies slot. Use with
+/// [`pending_cookies_scope_for_test`] to drive `Auth::login_remember`
+/// and friends without booting `SessionMiddleware`.
+#[doc(hidden)]
+pub fn new_pending_cookies_slot_for_test()
+-> std::sync::Arc<std::sync::Mutex<Vec<crate::http::cookie::Cookie>>> {
+    std::sync::Arc::new(std::sync::Mutex::new(Vec::new()))
+}
+
+#[doc(hidden)]
+pub async fn pending_cookies_scope_for_test<F: std::future::Future>(
+    slot: std::sync::Arc<std::sync::Mutex<Vec<crate::http::cookie::Cookie>>>,
+    fut: F,
+) -> F::Output {
+    middleware::PENDING_COOKIES.scope(slot, fut).await
+}

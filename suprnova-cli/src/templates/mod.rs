@@ -771,6 +771,10 @@ pub fn create_sessions_migration() -> &'static str {
     include_str!("files/backend/migrations/create_sessions_table.rs.tpl")
 }
 
+pub fn create_remember_tokens_migration() -> &'static str {
+    include_str!("files/backend/migrations/create_remember_tokens_table.rs.tpl")
+}
+
 // Root templates
 
 pub fn gitignore() -> &'static str {

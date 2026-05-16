@@ -24,6 +24,35 @@ use super::store::{SessionData, SessionStore};
 // synchronous `std::sync::Mutex` is sound — guards drop before `.await`.
 tokio::task_local! {
     pub(crate) static SESSION_CONTEXT: Arc<Mutex<Option<SessionData>>>;
+    /// Per-request slot for cookies that handlers want to attach to the
+    /// outgoing response. `Auth::login_remember` and
+    /// `Auth::revoke_remember_tokens` push into here; `SessionMiddleware`
+    /// drains the slot when assembling the response, applying each cookie
+    /// next to the session cookie.
+    ///
+    /// We can't have handlers mutate the `Response` directly — they
+    /// return one synchronously, and the cookie machinery is in the
+    /// middleware layer that already owns the response. A task-local
+    /// slot is the same shape we use for the session itself.
+    pub(crate) static PENDING_COOKIES: Arc<Mutex<Vec<Cookie>>>;
+}
+
+/// Push a cookie into the per-request pending-cookies slot.
+///
+/// Internal helper used by `Auth::login_remember` /
+/// `Auth::revoke_remember_tokens`. The session middleware drains the
+/// slot after the handler returns and attaches every cookie to the
+/// response.
+///
+/// If called outside a request scope (no `PENDING_COOKIES` task-local
+/// installed — e.g. unit tests without the middleware) the cookie is
+/// silently dropped. Production code always runs through
+/// `SessionMiddleware::handle`, which installs the slot.
+#[allow(dead_code)]
+pub(crate) fn push_pending_cookie(cookie: Cookie) {
+    let _ = PENDING_COOKIES.try_with(|slot| {
+        slot.lock().unwrap().push(cookie);
+    });
 }
 
 /// Get the current session (read-only)
@@ -174,6 +203,59 @@ impl SessionMiddleware {
     }
 }
 
+/// Build an outbound remember-me cookie carrying the encrypted plaintext.
+///
+/// Framework-internal helper. `Auth::login_remember` and the
+/// middleware rotation path both call it so cookie attribute defaults
+/// live in one place. Mirrors the security profile of the session
+/// cookie (HttpOnly, optional Secure, SameSite=Lax).
+///
+/// `max_age` is set explicitly to match the TTL of the underlying
+/// `remember_tokens` row — codex review demanded "expires-at matches
+/// token expiration." Callers (login_remember + middleware rotation)
+/// pass the same `ttl_minutes` they used to issue the row.
+///
+/// Exposed as `pub` (rather than `pub(crate)`) because integration
+/// tests in `framework/tests/remember_me.rs` need to verify the cookie
+/// attributes a real handler would emit. `#[doc(hidden)]` keeps it out
+/// of the public rustdoc surface.
+#[doc(hidden)]
+pub fn create_remember_cookie(
+    config: &SessionConfig,
+    plaintext: &str,
+    max_age: std::time::Duration,
+) -> Result<Cookie, crate::FrameworkError> {
+    let base = Cookie::encrypted(super::super::auth::remember::COOKIE_NAME, plaintext)?;
+    let mut cookie = base
+        .http_only(true)
+        .secure(config.cookie_secure)
+        .path(&config.cookie_path)
+        .max_age(max_age);
+
+    cookie = match config.cookie_same_site.to_lowercase().as_str() {
+        "strict" => cookie.same_site(SameSite::Strict),
+        "none" => cookie.same_site(SameSite::None),
+        _ => cookie.same_site(SameSite::Lax),
+    };
+
+    Ok(cookie)
+}
+
+/// Build a Max-Age=0 cookie that tells the client to drop the
+/// `remember_me` cookie. Used by `Auth::revoke_remember_tokens` and by
+/// the middleware when a remember cookie fails verification.
+///
+/// `pub` + `#[doc(hidden)]` for the same reason as
+/// `create_remember_cookie`: integration tests need to verify the
+/// "clear cookie" shape, but consumers should not depend on it.
+#[doc(hidden)]
+pub fn create_forget_remember_cookie(config: &SessionConfig) -> Cookie {
+    Cookie::forget(super::super::auth::remember::COOKIE_NAME)
+        .path(&config.cookie_path)
+        .secure(config.cookie_secure)
+        .same_site(SameSite::Lax)
+}
+
 #[async_trait]
 impl Middleware for SessionMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
@@ -219,16 +301,105 @@ impl Middleware for SessionMiddleware {
         // Age flash data from previous request
         session.age_flash_data();
 
-        // Bind the session to a `tokio::task_local!` so it survives
-        // `.await` points that resume on a different worker thread.
-        // Handlers read/write through `session()` / `session_mut()`.
+        // Per-request bag of cookies handlers want attached. Populated
+        // by `push_pending_cookie` (called from `Auth::login_remember`
+        // and `Auth::revoke_remember_tokens`) and drained below right
+        // next to where the session cookie is attached.
+        let pending: Arc<Mutex<Vec<Cookie>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // Remember-me hydration: when the inbound request has no
+        // active session (no user_id loaded) but does carry a valid
+        // `remember_me` cookie, verify the token, rotate it, hydrate
+        // the session, and queue the fresh cookie. This is the
+        // "browser was closed, session expired, but the user ticked
+        // remember-me a month ago" path. Bad/expired/forged cookies
+        // are cleared so the client stops shipping garbage.
+        if session.user_id.is_none()
+            && let Some(raw_cookie) = request.cookie(crate::auth::remember::COOKIE_NAME)
+        {
+            match Cookie::read_encrypted(&raw_cookie) {
+                Ok(plaintext) => {
+                    let ttl_minutes =
+                        (self.config.remember_lifetime.as_secs() / 60) as i64;
+                    match crate::auth::remember::verify_and_rotate(&plaintext, ttl_minutes).await {
+                        Ok(Some((user_id, new_plaintext))) => {
+                            // Hydrate session. Mirrors `Auth::login`:
+                            // regenerate session id + CSRF token to
+                            // prevent session fixation off a stale id
+                            // and to invalidate any pre-login form
+                            // tokens.
+                            session.id = generate_session_id();
+                            session.user_id = Some(user_id);
+                            session.csrf_token = generate_csrf_token();
+                            session.dirty = true;
+
+                            // Queue the rotated cookie. Its Max-Age
+                            // mirrors the new row's TTL so the
+                            // browser stops sending it the moment
+                            // the server-side row expires. If we
+                            // can't encrypt (Crypt deinitialized
+                            // between boot and now — impossible in
+                            // practice but defensive), drop quietly
+                            // rather than fail the request: the user
+                            // is already authenticated this turn,
+                            // they just won't get a refreshed cookie.
+                            if let Ok(c) = create_remember_cookie(
+                                &self.config,
+                                &new_plaintext,
+                                self.config.remember_lifetime,
+                            ) {
+                                pending.lock().unwrap().push(c);
+                            }
+                        }
+                        Ok(None) => {
+                            // Cookie decrypted to a token nothing
+                            // matched — tell the client to drop it.
+                            pending
+                                .lock()
+                                .unwrap()
+                                .push(create_forget_remember_cookie(&self.config));
+                        }
+                        Err(e) => {
+                            // DB error — log and continue without
+                            // remember-me. Don't clear the cookie:
+                            // this might be a transient outage, not
+                            // a forged token.
+                            eprintln!("Remember-me verify error: {}", e);
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Cookie present but can't be decrypted (tamper,
+                    // old key). Clear it so the client stops sending
+                    // garbage.
+                    pending
+                        .lock()
+                        .unwrap()
+                        .push(create_forget_remember_cookie(&self.config));
+                }
+            }
+        }
+
+        // Bind both the session and the pending-cookies slot to
+        // `tokio::task_local!` so they survive `.await` points that
+        // resume on a different worker thread. Handlers read/write
+        // through `session()` / `session_mut()` / `push_pending_cookie`.
         let slot: Arc<Mutex<Option<SessionData>>> = Arc::new(Mutex::new(Some(session)));
         let response = SESSION_CONTEXT
-            .scope(slot.clone(), next(request))
+            .scope(
+                slot.clone(),
+                PENDING_COOKIES.scope(pending.clone(), next(request)),
+            )
             .await;
 
         // Take the potentially-modified session back out of the slot.
         let session = slot.lock().unwrap().take();
+
+        // Drain pending cookies — both the ones queued from the
+        // middleware (remember-me rotation / clear) and any queued by
+        // handlers via `Auth::login_remember` etc.
+        let mut response = response;
+        let pending_cookies = std::mem::take(&mut *pending.lock().unwrap());
 
         // Save session and add cookie to response
         if let Some(session) = session {
@@ -250,13 +421,23 @@ impl Middleware for SessionMiddleware {
                 }
             };
 
-            match response {
+            response = match response {
                 Ok(res) => Ok(res.cookie(cookie)),
                 Err(res) => Err(res.cookie(cookie)),
-            }
-        } else {
-            response
+            };
         }
+
+        // Attach every pending cookie. Done after the session cookie
+        // so the relative ordering in the `Set-Cookie` header list is
+        // stable (session first, then remember-me / clears).
+        for cookie in pending_cookies {
+            response = match response {
+                Ok(res) => Ok(res.cookie(cookie)),
+                Err(res) => Err(res.cookie(cookie)),
+            };
+        }
+
+        response
     }
 }
 

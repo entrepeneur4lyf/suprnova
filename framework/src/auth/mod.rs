@@ -35,8 +35,8 @@
 //! // Login (numeric apps: convert to string at the boundary)
 //! Auth::login(user.id.to_string());
 //!
-//! // Logout
-//! Auth::logout();
+//! // Logout (async — also revokes remember-me tokens for the user)
+//! Auth::logout().await?;
 //!
 //! // In routes
 //! group!("/dashboard")
@@ -54,6 +54,7 @@ pub mod authenticatable;
 pub mod guard;
 pub mod middleware;
 pub mod provider;
+pub mod remember;
 
 pub use authenticatable::Authenticatable;
 pub use guard::Auth;

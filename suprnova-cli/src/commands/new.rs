@@ -434,6 +434,12 @@ fn create_project(
     )
     .map_err(|e| format!("Failed to write create_sessions_table migration: {}", e))?;
 
+    fs::write(
+        project_path.join("src/migrations/m20240101_000003_create_remember_tokens_table.rs"),
+        templates::create_remember_tokens_migration(),
+    )
+    .map_err(|e| format!("Failed to write create_remember_tokens_table migration: {}", e))?;
+
     // Note: migrations are now integrated into the main binary
     // Run with: ./app migrate
 

@@ -2,6 +2,7 @@ pub use sea_orm_migration::prelude::*;
 
 mod m20240101_000001_create_users_table;
 mod m20240101_000002_create_sessions_table;
+mod m20240101_000003_create_remember_tokens_table;
 
 pub struct Migrator;
 
@@ -11,6 +12,7 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(m20240101_000001_create_users_table::Migration),
             Box::new(m20240101_000002_create_sessions_table::Migration),
+            Box::new(m20240101_000003_create_remember_tokens_table::Migration),
         ]
     }
 }

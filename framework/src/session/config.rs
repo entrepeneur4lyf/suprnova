@@ -19,6 +19,12 @@ pub struct SessionConfig {
     pub cookie_same_site: String,
     /// Database table name for sessions
     pub table_name: String,
+    /// Lifetime of a remember-me token (and its cookie). Default 30 days.
+    ///
+    /// Configured separately from `lifetime` because remember-me is the
+    /// "I closed my browser and want to come back next month" path —
+    /// the session cookie itself is short-lived (default 2 hours).
+    pub remember_lifetime: Duration,
 }
 
 impl Default for SessionConfig {
@@ -31,6 +37,7 @@ impl Default for SessionConfig {
             cookie_http_only: true,
             cookie_same_site: "Lax".to_string(),
             table_name: "sessions".to_string(),
+            remember_lifetime: Duration::from_secs(30 * 24 * 60 * 60), // 30 days
         }
     }
 }
@@ -49,6 +56,7 @@ impl SessionConfig {
     /// - `SESSION_SECURE`: Set Secure flag (default: true)
     /// - `SESSION_PATH`: Cookie path (default: /)
     /// - `SESSION_SAME_SITE`: SameSite attribute (default: Lax)
+    /// - `REMEMBER_LIFETIME`: Remember-me token/cookie lifetime in minutes (default: 43200 = 30 days)
     pub fn from_env() -> Self {
         let lifetime_minutes: u64 = crate::env_optional("SESSION_LIFETIME")
             .and_then(|s: String| s.parse().ok())
@@ -57,6 +65,10 @@ impl SessionConfig {
         let cookie_secure = crate::env_optional("SESSION_SECURE")
             .map(|s: String| s.to_lowercase() == "true" || s == "1")
             .unwrap_or(true);
+
+        let remember_lifetime_minutes: u64 = crate::env_optional("REMEMBER_LIFETIME")
+            .and_then(|s: String| s.parse().ok())
+            .unwrap_or(30 * 24 * 60); // 30 days
 
         Self {
             lifetime: Duration::from_secs(lifetime_minutes * 60),
@@ -69,6 +81,7 @@ impl SessionConfig {
             cookie_same_site: crate::env_optional("SESSION_SAME_SITE")
                 .unwrap_or_else(|| "Lax".to_string()),
             table_name: "sessions".to_string(),
+            remember_lifetime: Duration::from_secs(remember_lifetime_minutes * 60),
         }
     }
 
@@ -87,6 +100,12 @@ impl SessionConfig {
     /// Set whether the cookie should be secure (HTTPS only)
     pub fn secure(mut self, secure: bool) -> Self {
         self.cookie_secure = secure;
+        self
+    }
+
+    /// Set the remember-me token/cookie lifetime.
+    pub fn remember_lifetime(mut self, duration: Duration) -> Self {
+        self.remember_lifetime = duration;
         self
     }
 }
