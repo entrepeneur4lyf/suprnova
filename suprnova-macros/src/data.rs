@@ -30,19 +30,26 @@
 //! # Custom authorization
 //!
 //! By default, `FormRequest::authorize` returns `true`. To override,
-//! add `#[data(custom_authorize)]` at the struct level — the derive
-//! will skip emitting the `FormRequest` impl, letting you write your
-//! own:
+//! point the derive at a free function via `#[data(authorize = "path")]`:
 //!
 //! ```ignore
-//! #[derive(Data, Validate)]
-//! #[data(custom_authorize)]
-//! struct ProtectedDto { /* ... */ }
-//!
-//! impl FormRequest for ProtectedDto {
-//!     fn authorize(req: &Request) -> bool { /* your logic */ }
+//! fn admins_only(req: &Request) -> bool {
+//!     req.user().is_some_and(|u| u.is_admin())
 //! }
+//!
+//! #[derive(Data, Validate)]
+//! #[data(authorize = "admins_only")]
+//! struct ProtectedDto { /* ... */ }
 //! ```
+//!
+//! The derive keeps emitting the full `FormRequest` impl (body parsing,
+//! validation, Precognition, route-param injection, `after_validation`
+//! hook) and only routes `authorize` to the named function. The function
+//! must have the signature `fn(req: &::suprnova::Request) -> bool`.
+//!
+//! The earlier `#[data(custom_authorize)]` flag — which suppressed the
+//! whole `FormRequest` impl and forced callers to reimplement extraction,
+//! parsing, validation, and Precognition by hand — is removed.
 //!
 //! # Optional and tri-state fields
 //!
@@ -121,7 +128,12 @@ struct FieldOptions {
 #[derive(Default)]
 struct StructOptions {
     auto_lazy: bool,
-    custom_authorize: bool,
+    /// `Some(path)` when `#[data(authorize = "path::to::fn")]` is present.
+    /// The path is the user-supplied function the derive routes
+    /// `FormRequest::authorize` through. The rest of the `FormRequest`
+    /// impl (body parsing, validation, Precognition, route-param
+    /// injection, `after_validation`) is always emitted.
+    authorize_fn: Option<syn::ExprPath>,
     /// `#[data(deny_unknown_fields)]` — when set, the generated
     /// `Deserialize` visitor rejects payload keys not matching any
     /// struct field with `serde::de::Error::unknown_field(..)`. The
@@ -150,13 +162,30 @@ fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::
             list.parse_nested_meta(|meta| {
                 if meta.path.is_ident("auto_lazy") {
                     opts.auto_lazy = true;
-                } else if meta.path.is_ident("custom_authorize") {
-                    opts.custom_authorize = true;
+                } else if meta.path.is_ident("authorize") {
+                    // #[data(authorize = "path::to::fn")] — route the
+                    // generated `FormRequest::authorize` to a user
+                    // function. Quoted string + `LitStr::parse::<ExprPath>`
+                    // mirrors serde's `#[serde(with = "...")]` convention
+                    // and keeps paths with `::` separators unambiguous in
+                    // attribute syntax.
+                    let lit: syn::LitStr = meta.value()?.parse()?;
+                    let path: syn::ExprPath = lit.parse()?;
+                    opts.authorize_fn = Some(path);
                 } else if meta.path.is_ident("deny_unknown_fields") {
                     opts.deny_unknown_fields = true;
+                } else if meta.path.is_ident("custom_authorize") {
+                    // Hard-cut diagnostic: the old "skip the whole
+                    // FormRequest impl" flag is gone (codex review
+                    // finding #11). Migrate to `authorize = "fn"` so
+                    // body parsing, validation, and Precognition still
+                    // get generated for you.
+                    return Err(meta.error(
+                        "#[data(custom_authorize)] was removed (codex review finding #11) — use #[data(authorize = \"path::to::fn\")] instead; the derive keeps emitting the FormRequest impl and only routes authorize to your function",
+                    ));
                 } else {
                     return Err(meta.error(
-                        "unknown struct-level #[data(...)] flag — expected auto_lazy, custom_authorize, or deny_unknown_fields",
+                        "unknown struct-level #[data(...)] flag — expected auto_lazy, authorize, or deny_unknown_fields",
                     ));
                 }
                 Ok(())
@@ -369,10 +398,16 @@ fn build_form_request(
     where_clause: Option<&syn::WhereClause>,
     parsed: &[(&Field, FieldOptions)],
 ) -> TokenStream2 {
-    if struct_opts.custom_authorize {
-        // User opted to provide their own FormRequest impl — emit nothing.
-        return quote! {};
-    }
+    // Build the `fn authorize` body. With `#[data(authorize = "path::fn")]`
+    // we route to the user's function; without it, we keep Laravel's
+    // permissive default (true). Either way the rest of the `FormRequest`
+    // impl is emitted intact (body parsing, validation, Precognition,
+    // route-param injection, after_validation hook) — the prior
+    // `custom_authorize`-skips-everything trap is gone.
+    let authorize_body = match &struct_opts.authorize_fn {
+        Some(path) => quote! { #path(req) },
+        None => quote! { true },
+    };
 
     // Collect route-param injection snippets for any field with `from_route_param`.
     let route_param_injections: Vec<TokenStream2> = parsed
@@ -416,8 +451,8 @@ fn build_form_request(
     if route_param_injections.is_empty() {
         return quote! {
             impl #impl_generics ::suprnova::http::FormRequest for #struct_name #ty_generics #where_clause {
-                fn authorize(_req: &::suprnova::Request) -> bool {
-                    true
+                fn authorize(req: &::suprnova::Request) -> bool {
+                    #authorize_body
                 }
             }
         };
@@ -429,8 +464,8 @@ fn build_form_request(
     quote! {
         #[::suprnova::__async_trait::async_trait]
         impl #impl_generics ::suprnova::http::FormRequest for #struct_name #ty_generics #where_clause {
-            fn authorize(_req: &::suprnova::Request) -> bool {
-                true
+            fn authorize(req: &::suprnova::Request) -> bool {
+                #authorize_body
             }
 
             async fn extract(req: ::suprnova::Request) -> ::core::result::Result<Self, ::suprnova::FrameworkError> {

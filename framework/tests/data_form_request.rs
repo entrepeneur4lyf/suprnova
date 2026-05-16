@@ -125,3 +125,149 @@ async fn data_struct_form_request_rejects_invalid_payload() {
         err.status_code()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Codex review finding #11: `#[data(authorize = "path::to::fn")]`
+// ---------------------------------------------------------------------------
+//
+// The old `#[data(custom_authorize)]` flag suppressed the WHOLE FormRequest
+// impl, forcing callers to reimplement body parsing, validation, and
+// Precognition by hand. The replacement routes ONLY `authorize` to a
+// user-provided free function — the rest of the lifecycle stays generated.
+//
+// These tests prove three things:
+//   1. Authorize gates the request — a `false` return surfaces 403.
+//   2. When authorize returns `true`, body parsing + validation still run
+//      (so a bad payload still hits 422 — proves the impl wasn't skipped).
+//   3. Happy path returns the validated DTO.
+
+/// Header-based role gate driven by a test header. Realistic apps would
+/// consult a session/JWT/middleware-populated context; the header keeps
+/// the test self-contained.
+fn allow_only_admins(req: &suprnova::Request) -> bool {
+    req.header("X-Test-Role")
+        .map(|v| v == "admin")
+        .unwrap_or(false)
+}
+
+#[derive(Debug, suprnova::Data, validator::Validate)]
+#[data(authorize = "allow_only_admins")]
+struct AdminDtoT11 {
+    #[validate(length(min = 1))]
+    pub action: String,
+}
+
+/// Like `spawn_and_capture` but typed for `AdminDtoT11`. Kept local rather
+/// than generic so the rest of the file's helpers stay simple.
+async fn spawn_and_capture_admin() -> (
+    SocketAddr,
+    Arc<Mutex<Option<Result<AdminDtoT11, FrameworkError>>>>,
+) {
+    let captured: Arc<Mutex<Option<Result<AdminDtoT11, FrameworkError>>>> =
+        Arc::new(Mutex::new(None));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let captured_server = captured.clone();
+    tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            let io = TokioIo::new(stream);
+            let captured_svc = captured_server.clone();
+            let svc = service_fn(
+                move |hyper_req: hyper::Request<hyper::body::Incoming>| {
+                    let captured_inner = captured_svc.clone();
+                    async move {
+                        let req = Request::new(hyper_req);
+                        let result = AdminDtoT11::extract(req).await;
+                        *captured_inner.lock().unwrap() = Some(result);
+                        Ok::<_, Infallible>(HttpResponse::text("ok").into_hyper())
+                    }
+                },
+            );
+            let _ = http1::Builder::new().serve_connection(io, svc).await;
+        }
+    });
+    (addr, captured)
+}
+
+async fn post_json_with_role(addr: SocketAddr, role: &str, body: serde_json::Value) {
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let io = TokioIo::new(stream);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+
+    let body_bytes = serde_json::to_vec(&body).unwrap();
+    let req = hyper::Request::builder()
+        .method("POST")
+        .uri("http://localhost/admin")
+        .header("content-type", "application/json")
+        .header("content-length", body_bytes.len())
+        .header("X-Test-Role", role)
+        .body(Full::new(Bytes::from(body_bytes)))
+        .unwrap();
+    let _ = sender.send_request(req).await;
+}
+
+#[tokio::test]
+async fn custom_authorize_blocks_unauthorized() {
+    let (addr, captured) = spawn_and_capture_admin().await;
+    post_json_with_role(addr, "guest", serde_json::json!({ "action": "delete" })).await;
+    tokio::task::yield_now().await;
+
+    let result = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("server did not process request");
+    let err = result.expect_err("guest role must be rejected by the authorize gate");
+    assert_eq!(
+        err.status_code(),
+        403,
+        "Unauthorized maps to 403 in FrameworkError::status_code; got {}",
+        err.status_code(),
+    );
+}
+
+#[tokio::test]
+async fn custom_authorize_allows_authorized_and_runs_validation() {
+    // Authorize PASSES (role = admin) but the payload fails validation —
+    // `action` violates `length(min = 1)` because it is empty. If the
+    // FormRequest impl had been skipped the way `custom_authorize` used to
+    // skip it, we'd see an Ok or a parse error, not 422. 422 proves that
+    // body parsing, deserialisation, AND the `Validate` step all still
+    // run for `authorize = "..."` DTOs.
+    let (addr, captured) = spawn_and_capture_admin().await;
+    post_json_with_role(addr, "admin", serde_json::json!({ "action": "" })).await;
+    tokio::task::yield_now().await;
+
+    let result = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("server did not process request");
+    let err = result.expect_err("empty action must fail validation");
+    assert_eq!(
+        err.status_code(),
+        422,
+        "validation must still run for authorize-attributed DTOs; got {}",
+        err.status_code(),
+    );
+}
+
+#[tokio::test]
+async fn custom_authorize_full_happy_path() {
+    let (addr, captured) = spawn_and_capture_admin().await;
+    post_json_with_role(addr, "admin", serde_json::json!({ "action": "delete" })).await;
+    tokio::task::yield_now().await;
+
+    let result = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("server did not process request");
+    let dto = result.expect("admin role + valid payload must succeed end-to-end");
+    assert_eq!(dto.action, "delete");
+}
