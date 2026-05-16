@@ -90,3 +90,55 @@ async fn current_include_set_bound_returns_scoped_value() {
     assert_eq!(observed.include, vec!["author"]);
     assert!(Arc::ptr_eq(&observed, &bound), "should hand back the same Arc");
 }
+
+// Codex review finding 9 — URL decoding ------------------------------
+
+#[test]
+fn url_decoded_comma_splits_into_separate_values() {
+    // `%2C` is `,` — must be decoded before the `,` split.
+    let s = RequestIncludeSet::from_query("include=author%2Ccomments");
+    assert_eq!(s.include, vec!["author", "comments"]);
+}
+
+#[test]
+fn url_decoded_brackets_recognized_as_array_form() {
+    // `%5B%5D` is `[]` — array form must work after decoding.
+    let s = RequestIncludeSet::from_query("include%5B%5D=foo&include%5B%5D=bar");
+    assert_eq!(s.include, vec!["foo", "bar"]);
+}
+
+#[test]
+fn url_decoded_plus_becomes_space_then_trimmed() {
+    // `+` decodes to space; the value-trim step then drops the
+    // leading/trailing whitespace. A bare-space value collapses to
+    // an empty token which gets filtered out.
+    let s = RequestIncludeSet::from_query("include=foo+&include=bar");
+    assert_eq!(s.include, vec!["foo", "bar"]);
+}
+
+#[test]
+fn url_decoded_repeated_keys_merge_across_encoding() {
+    // Mix encoded and plain — both forms must merge into one list.
+    let s = RequestIncludeSet::from_query("include=a%2Cb&include=c");
+    assert_eq!(s.include, vec!["a", "b", "c"]);
+}
+
+#[test]
+fn url_decoded_value_with_encoded_only_field() {
+    let s = RequestIncludeSet::from_query("only=id%2Cname");
+    assert_eq!(s.only, Some(vec!["id".into(), "name".into()]));
+}
+
+#[test]
+fn url_decoded_malformed_percent_is_lossy_not_panic() {
+    // `%ZZ` is not a valid percent escape. `form_urlencoded::parse`
+    // tolerates it lossily; we just need to confirm the call
+    // returns without panicking and still parses the surrounding
+    // valid pairs.
+    let s = RequestIncludeSet::from_query("include=foo%ZZbar&exclude=baz");
+    // The decoded include value contains the raw `%ZZ` bytes (lossy
+    // decode keeps them); the exclude value should still come through
+    // cleanly.
+    assert_eq!(s.exclude, vec!["baz"]);
+    assert!(!s.include.is_empty(), "malformed percent must not drop the pair");
+}

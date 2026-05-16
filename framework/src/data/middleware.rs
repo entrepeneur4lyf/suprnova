@@ -41,9 +41,11 @@ use super::include_set::{RequestIncludeSet, REQUEST_INCLUDE_SET};
 ///
 /// # Performance
 ///
-/// Cost per request: one [`RequestIncludeSet::from_query`] parse and one
-/// `Arc::new` allocation. The parse is linear in the query-string
-/// length with no regex or URL-decoding.
+/// Cost per request: one [`RequestIncludeSet::from_query`] parse, one
+/// [`crate::resources::RequestFieldsetSet::from_query`] parse, and one
+/// `Arc::new` allocation. Both parsers run `url::form_urlencoded::parse`
+/// over the raw query string so percent-encoded commas, brackets, and
+/// reserved characters decode correctly before the value-split step.
 pub struct IncludeMiddleware;
 
 #[async_trait]

@@ -12,17 +12,21 @@ pub struct RequestFieldsetSet {
 impl RequestFieldsetSet {
     /// Build from a raw query string. Parses `fields[type]=f1,f2`
     /// pairs; ignores keys outside the `fields[type]` shape.
+    ///
+    /// The parser URL-decodes pairs via `url::form_urlencoded::parse`,
+    /// so encoded bracket forms (`fields%5Bposts%5D=...`), encoded
+    /// commas inside values (`title%2Cbody`), and encoded type names
+    /// all decode correctly before the `fields[<type>]` shape is
+    /// matched. Repeated keys accumulate their field lists.
     pub fn from_query(query: &str) -> Self {
         let mut by_type: HashMap<String, Vec<String>> = HashMap::new();
-        for pair in query.split('&') {
-            let mut iter = pair.splitn(2, '=');
-            let key = iter.next().unwrap_or("").trim();
-            let val = iter.next().unwrap_or("");
-            // key must look like `fields[some_type]`
+        for (key_cow, val_cow) in url::form_urlencoded::parse(query.as_bytes()) {
+            let key = key_cow.trim();
+            // key must look like `fields[some_type]` after decoding.
             let Some(rest) = key.strip_prefix("fields[") else { continue };
             let Some(rtype) = rest.strip_suffix(']') else { continue };
             if rtype.is_empty() { continue; }
-            let fields: Vec<String> = val
+            let fields: Vec<String> = val_cow
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())

@@ -27,9 +27,10 @@ impl RequestIncludeSet {
     /// # Input contract
     ///
     /// - `raw` must NOT include the leading `?` — caller strips it.
-    /// - Values are expected to be percent-decoded already; this parser
-    ///   does not URL-decode (`include=foo%2Cbar` stays as one literal
-    ///   value `foo%2Cbar`).
+    /// - The parser URL-decodes pairs via `url::form_urlencoded::parse`
+    ///   before splitting, so `include=foo%2Cbar` decodes to two
+    ///   entries `[foo, bar]`, and array-form keys may also be encoded
+    ///   (`include%5B%5D=foo`).
     /// - Repeated keys accumulate (`include=a&include=b` → `include: [a, b]`),
     ///   matching Laravel's array semantics.
     /// - The Laravel array form `include[]=a&include[]=b` is also accepted
@@ -38,14 +39,15 @@ impl RequestIncludeSet {
     ///   (`include= a , , b` → `[a, b]`).
     /// - Unknown keys are silently ignored — only the four canonical names
     ///   are recognized.
+    /// - Malformed percent-encoding sequences are tolerated lossily by
+    ///   `form_urlencoded::parse`; bad bytes are decoded with replacement
+    ///   rather than rejected, matching browser behavior.
     pub fn from_query(raw: &str) -> Self {
         let mut s = Self::default();
-        for pair in raw.split('&') {
-            let mut iter = pair.splitn(2, '=');
-            let key = iter.next().unwrap_or("").trim();
-            let val = iter.next().unwrap_or("");
+        for (key_cow, val_cow) in url::form_urlencoded::parse(raw.as_bytes()) {
+            let key = key_cow.trim();
             let stripped_key = key.strip_suffix("[]").unwrap_or(key);
-            let values: Vec<String> = val
+            let values: Vec<String> = val_cow
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())

@@ -148,6 +148,64 @@ async fn no_fieldset_param_returns_all_attributes() {
     assert_eq!(body["data"]["attributes"]["email"], "alice@example.com");
 }
 
+// ── Codex review finding 9 — fieldset URL decoding ────────────────────────
+
+#[tokio::test]
+async fn sparse_fieldsets_decode_encoded_bracket_keys() {
+    // `%5B`/`%5D` are `[`/`]` — the type-key must be recognized after
+    // the percent-decode pass.
+    use suprnova::resources::{RequestFieldsetSet, scope_fieldset};
+
+    let user = UserResource {
+        id: 1,
+        email: "alice@example.com".into(),
+        password: "x".into(),
+    };
+    let fieldset = RequestFieldsetSet::from_query("fields%5Busers%5D=email");
+    let envelope = scope_fieldset(fieldset, async move {
+        let resp = Resource::single(user).render().await.unwrap();
+        let body: Value = serde_json::from_slice(resp.body()).unwrap();
+        body
+    })
+    .await;
+
+    assert_eq!(envelope["data"]["attributes"]["email"], "alice@example.com");
+}
+
+#[tokio::test]
+async fn sparse_fieldsets_decode_encoded_comma_in_value() {
+    // Value `email%2Cfoo` decodes to `email,foo`; once split on `,`,
+    // the unknown field `foo` is ignored by the renderer but `email`
+    // must still come through.
+    use suprnova::resources::{RequestFieldsetSet, scope_fieldset};
+
+    let user = UserResource {
+        id: 1,
+        email: "alice@example.com".into(),
+        password: "x".into(),
+    };
+    let fieldset = RequestFieldsetSet::from_query("fields[users]=email%2Cfoo");
+    let envelope = scope_fieldset(fieldset, async move {
+        let resp = Resource::single(user).render().await.unwrap();
+        let body: Value = serde_json::from_slice(resp.body()).unwrap();
+        body
+    })
+    .await;
+
+    assert_eq!(envelope["data"]["attributes"]["email"], "alice@example.com");
+}
+
+#[test]
+fn fieldset_repeated_keys_merge_across_encoding() {
+    use suprnova::resources::RequestFieldsetSet;
+
+    let fs = RequestFieldsetSet::from_query("fields[users]=email&fields%5Busers%5D=id");
+    let merged = fs.fields_for("users").expect("users present");
+    // Order is preserved; we just need both to be present.
+    assert!(merged.contains(&"email"));
+    assert!(merged.contains(&"id"));
+}
+
 // ── Step 17/18: relationships + included + multi-level ────────────────────
 
 #[tokio::test]
