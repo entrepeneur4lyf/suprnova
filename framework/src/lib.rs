@@ -55,6 +55,7 @@ pub use http::{
     json, text, Cookie, CookieOptions, FormRequest, FromParam, FromRequest, HttpResponse, Redirect,
     Request, Response, ResponseExt, SameSite,
 };
+pub use http::upload::{parse_multipart_streaming, MultipartPayload, MultipartValue};
 pub use http_client::{
     assert_not_sent, assert_sent, fake_response, ClientResponse, Http, RecordedRequest,
     RequestBuilder,

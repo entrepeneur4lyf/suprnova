@@ -4,6 +4,7 @@ mod extract;
 mod form_request;
 mod request;
 mod response;
+pub mod upload;
 
 pub use body::{collect_body, parse_form, parse_json};
 pub use cookie::{parse_cookies, Cookie, CookieOptions, SameSite};
