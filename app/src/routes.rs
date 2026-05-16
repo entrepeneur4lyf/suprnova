@@ -54,4 +54,18 @@ routes! {
     get!("/api/users/{id}", controllers::admin::show_user).name("api.users.show"),
     get!("/api/v3/users", controllers::admin::list_users).name("api.v3.users.index"),
     delete!("/api/posts/{id}", controllers::admin::delete_post).name("api.posts.destroy"),
+
+    // Codex finding #17 — real Post model. Public GET listing remains
+    // open; create/show require a session (the controllers also enforce
+    // Gate::authorize through PostPolicy for show). The public listing
+    // lives at `/api/posts/public` so it doesn't share its
+    // route_middleware key with `POST /api/posts`, which is auth-gated.
+    // The framework's middleware map is keyed only on path (not method),
+    // so a public + auth route on the same path string would inherit
+    // the auth middleware on both.
+    get!("/api/posts/public", controllers::posts::index).name("api.posts.public"),
+    group!("/api/posts", {
+        get!("/{id}", controllers::posts::show).name("api.posts.show"),
+        post!("/", controllers::posts::store).name("api.posts.store"),
+    }).middleware(SessionAuthMiddleware::new()),
 }
