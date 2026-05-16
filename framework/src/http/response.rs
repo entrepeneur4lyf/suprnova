@@ -482,7 +482,16 @@ impl From<crate::error::FrameworkError> for HttpResponse {
         //   { "message": "<human readable>", "errors": { field: [msg, ...] } }
         // The `errors` key is only present for validation-style errors
         // (per-field detail). Everything else gets just `message`.
-        let body = match &err {
+        //
+        // 5xx sanitisation (codex review finding #2): for status >= 500
+        // we replace the raw err.to_string() with a generic
+        // "Internal Server Error". The original detail still flows into
+        // logs + ErrorOccurred above. When APP_DEBUG=true (false by
+        // default outside local/dev/test) we additionally include a
+        // `debug_message` field for development visibility — frontends
+        // MUST NOT key on this field, which is why `message` stays
+        // generic in both modes.
+        let mut body = match &err {
             crate::error::FrameworkError::ParamError { param_name } => {
                 serde_json::json!({
                     "message": format!("Missing required parameter: {}", param_name),
@@ -507,12 +516,42 @@ impl From<crate::error::FrameworkError> for HttpResponse {
                     "message": "This action is unauthorized.",
                 })
             }
+            _ if status >= 500 => {
+                // Generic body — never the raw err.to_string().
+                serde_json::json!({
+                    "message": "Internal Server Error",
+                })
+            }
             _ => {
+                // 4xx domain errors: caller-facing detail is fine and useful.
                 serde_json::json!({
                     "message": message.clone(),
                 })
             }
         };
+        // Inject the request_id into every error body so frontends and
+        // operators can correlate a client error to the structured log.
+        // Absent during early boot / tests with no request scope —
+        // serializes as `null` in JSON, still a stable shape.
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert(
+                "request_id".to_string(),
+                match &request_id {
+                    Some(id) => serde_json::Value::String(id.clone()),
+                    None => serde_json::Value::Null,
+                },
+            );
+            // Dev-only detail. Gated behind APP_DEBUG=true.
+            // The `message` field stays generic in both modes; this is
+            // strictly additive for developers, never to be parsed by
+            // production clients.
+            if status >= 500 && crate::config::AppConfig::from_env().is_debug() {
+                obj.insert(
+                    "debug_message".to_string(),
+                    serde_json::Value::String(message.clone()),
+                );
+            }
+        }
         HttpResponse::json(body).status(status)
     }
 }
