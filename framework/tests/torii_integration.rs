@@ -263,14 +263,15 @@ fn oauth_kickoff_returns_authorization_url() {
     });
 }
 
-/// FIX 1: OAuth CSRF — complete() in session A must reject state from session B.
+/// FIX 1a: OAuth CSRF — complete() rejects when the calling session never
+/// stored any state (attacker tricks a victim with no in-progress OAuth flow).
 ///
 /// Pre-fix: state was stored in torii's global pkce_verifier store, so any
-/// valid state token (from ANY session) would pass validation. Post-fix: state
-/// is bound to the session that called begin(), so session A's complete()
-/// rejects state_b (initiated in session B).
+/// valid state from ANY session in the world would pass validation. Post-fix:
+/// state is bound to the session that called begin(); a session with no
+/// `oauth_state_<provider>` key rejects any presented state.
 #[test]
-fn oauth_complete_rejects_state_from_different_session() {
+fn oauth_complete_rejects_when_session_has_no_stored_state() {
     Lazy::force(&SETUP);
 
     Auth::oauth("github").configure(suprnova::torii_integration::oauth::OAuthProviderConfig {
@@ -281,49 +282,70 @@ fn oauth_complete_rejects_state_from_different_session() {
     });
 
     RT.block_on(async {
-        // Session A: initiate a flow, capturing state_a.
-        let slot_a = suprnova::session::new_session_slot_for_test();
-        let _state_a = suprnova::session::session_scope_for_test(slot_a, async {
-            Auth::oauth("github").begin().await.unwrap().state
-        })
-        .await;
-
-        // Session B: initiate a separate flow, capturing state_b.
+        // Session B: initiate a flow so a state token exists in B's session.
+        // (Pre-fix this also wrote to torii's global store, which is what the
+        // attacker would have replayed.)
         let slot_b = suprnova::session::new_session_slot_for_test();
         let state_b = suprnova::session::session_scope_for_test(slot_b, async {
             Auth::oauth("github").begin().await.unwrap().state
         })
         .await;
 
-        // Session A: attempt to complete using state_b (from session B).
-        // With the fix: must fail because session A has oauth_state_github = state_a,
-        //              not state_b.
-        // Without the fix: would pass the state check because state_b is in
-        //                  the global pkce_verifier store, then fail on the
-        //                  real code exchange (which is fine, but the CSRF check
-        //                  itself would have wrongly passed).
-        let slot_a2 = suprnova::session::new_session_slot_for_test();
-        // Restore session A's data — re-use slot_a is not possible after drop,
-        // so we simulate session A's state by using a fresh slot with no
-        // oauth_state_github key (session A's state_a was a different UUID).
-        // The point is: session A's slot does NOT contain oauth_state_github = state_b.
-        let result = suprnova::session::session_scope_for_test(slot_a2, async {
-            // slot_a2 is a fresh session with no stored state — simulates session A
-            // after the begin() state has been consumed or was never state_b.
+        // Victim's session: never called begin(). Attempting complete() with
+        // any state (including state_b stolen from session B) must fail —
+        // there's no `oauth_state_github` key in this session.
+        let victim_slot = suprnova::session::new_session_slot_for_test();
+        let result = suprnova::session::session_scope_for_test(victim_slot, async {
+            Auth::oauth("github").complete("fake-code", &state_b).await
+        })
+        .await;
+
+        assert!(result.is_err(), "complete() in a session with no stored state must fail");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("missing"),
+            "expected 'missing' error (no oauth_state_github in session), got: {err_msg}",
+        );
+    });
+}
+
+/// FIX 1b: OAuth CSRF — complete() rejects when the session DOES have a stored
+/// state but the presented state value doesn't match it.
+///
+/// This exercises the `Some(expected) if expected != state` branch — the
+/// classic state-mismatch CSRF defence. Combined with the "no stored state"
+/// test above, both arms of the session check are covered.
+#[test]
+fn oauth_complete_rejects_when_state_doesnt_match_session_stored() {
+    Lazy::force(&SETUP);
+
+    Auth::oauth("github").configure(suprnova::torii_integration::oauth::OAuthProviderConfig {
+        client_id: "test-client".into(),
+        client_secret: "test-secret".into(),
+        redirect_url: "http://localhost:8000/auth/oauth/github/callback".into(),
+        scopes: vec!["user:email".into()],
+    });
+
+    RT.block_on(async {
+        // Both begin() and complete() in the SAME session — but complete()
+        // receives a state value that does NOT match what begin() stored.
+        let slot = suprnova::session::new_session_slot_for_test();
+        let result = suprnova::session::session_scope_for_test(slot, async {
+            let state_a = Auth::oauth("github").begin().await.unwrap().state;
+            assert!(!state_a.is_empty(), "begin() must produce a non-empty state");
+
+            // Forge a different state — must not match the stored state_a.
             Auth::oauth("github")
-                .complete("fake-code", &state_b)
+                .complete("fake-code", "attacker-controlled-state-value")
                 .await
         })
         .await;
 
-        assert!(
-            result.is_err(),
-            "complete() with state from a different session must fail (CSRF protection)"
-        );
+        assert!(result.is_err(), "complete() must reject state that doesn't match the stored value");
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("missing") || err_msg.contains("mismatch") || err_msg.contains("OAuth state"),
-            "error must mention OAuth state problem, got: {err_msg}"
+            err_msg.contains("mismatch"),
+            "expected 'mismatch' error (state doesn't match session-stored value), got: {err_msg}",
         );
     });
 }

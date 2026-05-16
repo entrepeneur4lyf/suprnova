@@ -73,8 +73,12 @@ impl GateRegistry {
             .insert(key, GateEntry::Async(erased));
     }
 
-    /// Invoke a sync gate. Returns `None` if not registered, `None` if the gate
-    /// is async (caller must use `invoke_async`).
+    /// Invoke a sync gate. Returns `None` if not registered, `Some(false)` if
+    /// the gate is registered as async (caller must use `invoke_async`).
+    ///
+    /// Hitting the async-registered branch via the sync path is almost always
+    /// a caller bug — silently denying would hide it, so we emit a
+    /// `tracing::warn!` and the caller can spot it in logs.
     pub(crate) fn invoke<U: 'static, R: 'static>(
         &self,
         action: &str,
@@ -85,8 +89,16 @@ impl GateRegistry {
         let gates = self.gates.read().unwrap();
         match gates.get(&key) {
             Some(GateEntry::Sync(f)) => Some(f(user as &dyn Any, resource as &dyn Any)),
-            // Async gate called via sync path → default deny (documented behaviour).
-            Some(GateEntry::Async(_)) => Some(false),
+            Some(GateEntry::Async(_)) => {
+                tracing::warn!(
+                    action = %action,
+                    user_type = std::any::type_name::<U>(),
+                    resource_type = std::any::type_name::<R>(),
+                    "Gate::allows/denies/authorize called on an async-registered gate — \
+                     defaulting to deny. Use Gate::allows_async/denies_async/authorize_async instead.",
+                );
+                Some(false)
+            }
             None => None,
         }
     }

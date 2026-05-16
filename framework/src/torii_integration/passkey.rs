@@ -17,6 +17,24 @@
 //! database-backed), works across multi-replica deployments, and is scoped to
 //! the initiating browser session — no cross-session leakage.
 //!
+//! # `danger-allow-state-serialisation` feature
+//!
+//! `webauthn-rs` namespaces serde support for `PasskeyRegistration` /
+//! `PasskeyAuthentication` behind a feature called `danger-allow-state-serialisation`.
+//! The `danger-` prefix is upstream's warning that serialised challenge state
+//! can be replayed or tampered with if the storage is unauthenticated or not
+//! single-use. We meet both conditions:
+//!
+//! 1. **Authenticated storage.** Session payloads ride in AES-256-GCM-encrypted
+//!    session cookies (keyed by `APP_KEY`). An attacker cannot tamper with the
+//!    serialised `PasskeyRegistration` without invalidating the MAC.
+//! 2. **Single-use semantics.** Both `finish_registration` and `finish_authentication`
+//!    call `session_mut(|s| s.forget(KEY))` immediately after deserialising the
+//!    state, so a captured serialised blob cannot be replayed against the same
+//!    session.
+//!
+//! Enabling this feature without those two guarantees would be unsafe.
+//!
 //! # Re-exports
 //!
 //! Consumers should `use suprnova::torii_integration::passkey::*` rather than
