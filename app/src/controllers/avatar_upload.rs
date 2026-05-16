@@ -57,22 +57,14 @@ pub async fn upload(form: AvatarUpload) -> Response {
 
     // Path is derived ONLY from server-controlled state:
     // - `user.id` is a numeric primary key.
-    // - The extension is sanitized to ASCII-alphanumeric with a length
-    //   cap so a hostile filename like `../../etc/passwd` survives only
-    //   as the fallback `"bin"`.
+    // - The extension comes from the file's MAGIC BYTES (via
+    //   `UploadedFile::extension_from_magic`), not from the client-supplied
+    //   filename. A request like `avatar=@evil.exe` where the body is real
+    //   PNG bytes is stored as `avatars/<id>.png`, never `.exe`. Unknown
+    //   content falls back to `"bin"`.
     //
-    // The raw filename is never written into the storage path.
-    let extension = form
-        .avatar
-        .file_name
-        .as_deref()
-        .and_then(|n| n.rsplit('.').next())
-        .filter(|ext| {
-            !ext.is_empty()
-                && ext.len() <= 8
-                && ext.chars().all(|c| c.is_ascii_alphanumeric())
-        })
-        .unwrap_or("bin");
+    // The client filename is never used for path construction.
+    let extension = form.avatar.extension_from_magic();
     let path = format!("avatars/{}.{extension}", user.id);
 
     let disk = Storage::disk("public")?;

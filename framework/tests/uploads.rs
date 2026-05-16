@@ -210,3 +210,34 @@ async fn derive_after_validation_hook_runs_after_construction() {
         .expect("size mismatch should fail after_validation");
     assert_eq!(err.status_code(), 422);
 }
+
+// ── extension_from_magic: magic-byte-derived storage extension ──
+
+#[tokio::test]
+async fn extension_from_magic_returns_canonical_for_png() {
+    let png = tiny_png();
+    let body = build_multipart_body("test", &[("avatar", Some("evil.exe"), &png)]);
+    let req = request_from_multipart("test", body).await;
+    let form = AvatarUpload::from_request(req).await.unwrap();
+    // Filename says ".exe", magic bytes say PNG — magic wins.
+    assert_eq!(form.avatar.extension_from_magic(), "png");
+}
+
+#[derive(MultipartRequest)]
+struct Blob {
+    #[field("file")]
+    file: UploadedFile,
+}
+
+#[tokio::test]
+async fn extension_from_magic_falls_back_to_bin_for_unknown_content() {
+    // 32 zero bytes don't match any infer signature. The field uses the
+    // no-op `UploadedFile<()>` so the Image validator isn't gating the
+    // request; we want to reach `extension_from_magic` and observe the
+    // `"bin"` fallback path.
+    let unknown = vec![0u8; 32];
+    let body = build_multipart_body("test", &[("file", Some("anything.tar"), &unknown)]);
+    let req = request_from_multipart("test", body).await;
+    let form = Blob::from_request(req).await.unwrap();
+    assert_eq!(form.file.extension_from_magic(), "bin");
+}

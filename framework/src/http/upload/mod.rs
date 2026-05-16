@@ -48,6 +48,31 @@ impl<V: UploadValidator> UploadedFile<V> {
             .map_err(|e| FrameworkError::internal(format!("storage write: {e}")))?;
         Ok(())
     }
+
+    /// Return the canonical file extension derived from the **content's**
+    /// magic bytes via the `infer` crate, NOT from the client-supplied
+    /// filename. Returns `"bin"` when the content type cannot be
+    /// identified (binary blobs, unrecognised formats).
+    ///
+    /// # Why this matters
+    ///
+    /// The client-supplied filename is untrusted. A request like
+    /// `avatar=@evil.exe` where the body is real PNG bytes would
+    /// otherwise be stored with a `.exe` extension if the storage path
+    /// is derived from `file_name`. Use this method whenever the path
+    /// you write to disk is content-addressed rather than caller-named.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let path = format!("avatars/{}.{}", user_id, file.extension_from_magic());
+    /// storage.write(&path, file.bytes.clone()).await?;
+    /// ```
+    pub fn extension_from_magic(&self) -> &'static str {
+        infer::get(&self.bytes)
+            .map(|kind| kind.extension())
+            .unwrap_or("bin")
+    }
 }
 
 /// Order-preserving list of fields from a multipart body. Duplicate
