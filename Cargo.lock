@@ -314,7 +314,7 @@ checksum = "c96bf972d85afc50bf5ab8fe2d54d1586b4e0b46c97c50a0c9e71e2f7bcd812a"
 dependencies = [
  "async-task",
  "concurrent-queue",
- "fastrand",
+ "fastrand 2.4.1",
  "futures-lite",
  "pin-project-lite",
  "slab",
@@ -522,7 +522,7 @@ version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cffb0e931875b666fc4fcb20fee52e9bbd1ef836fd9e9e04ec21555f9f85f7ef"
 dependencies = [
- "fastrand",
+ "fastrand 2.4.1",
  "gloo-timers",
  "tokio",
 ]
@@ -1434,6 +1434,15 @@ dependencies = [
 
 [[package]]
 name = "fastrand"
+version = "1.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e51093e27b0797c359783294ca4f0a911c270184cb10f85783b118614a1501be"
+dependencies = [
+ "instant",
+]
+
+[[package]]
+name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
@@ -1606,7 +1615,7 @@ version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f78e10609fe0e0b3f4157ffab1876319b5b0db102a2c60dc4626306dc46b44ad"
 dependencies = [
- "fastrand",
+ "fastrand 2.4.1",
  "futures-core",
  "futures-io",
  "parking",
@@ -2230,6 +2239,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "instant"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0242819d153cba4b4b05a5a8f2a7e9bbf97b6055b2a002b395c96b5ff3c0222"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "inventory"
 version = "0.3.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2467,7 +2485,7 @@ dependencies = [
  "base64 0.22.1",
  "email-encoding",
  "email_address",
- "fastrand",
+ "fastrand 2.4.1",
  "futures-io",
  "futures-util",
  "httpdate",
@@ -2516,6 +2534,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149"
 dependencies = [
  "cc",
+ "pkg-config",
+ "vcpkg",
+]
+
+[[package]]
+name = "libz-sys"
+version = "1.1.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc3a226e576f50782b3305c5ccf458698f92798987f551c6a02efe8276721e22"
+dependencies = [
+ "cc",
+ "libc",
  "pkg-config",
  "vcpkg",
 ]
@@ -2841,6 +2871,28 @@ checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
  "libm",
+]
+
+[[package]]
+name = "num_enum"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d0bca838442ec211fa11de3a8b0e0e8f3a4522575b5c4c06ed722e005036f26"
+dependencies = [
+ "num_enum_derive",
+ "rustversion",
+]
+
+[[package]]
+name = "num_enum_derive"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -3401,7 +3453,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c835479a4443ded371d6c535cbfd8d31ad92c5d23ae9770a61bc155e4992a3c1"
 dependencies = [
  "atomic-waker",
- "fastrand",
+ "fastrand 2.4.1",
  "futures-io",
 ]
 
@@ -3868,6 +3920,55 @@ name = "rand_core"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
+
+[[package]]
+name = "rdkafka"
+version = "0.36.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1beea247b9a7600a81d4cc33f659ce1a77e1988323d7d2809c7ed1c21f4c316d"
+dependencies = [
+ "futures-channel",
+ "futures-util",
+ "libc",
+ "log",
+ "rdkafka-sys",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "slab",
+ "tokio",
+]
+
+[[package]]
+name = "rdkafka-sys"
+version = "4.10.0+2.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e234cf318915c1059d4921ef7f75616b5219b10b46e9f3a511a15eb4b56a3f77"
+dependencies = [
+ "libc",
+ "libz-sys",
+ "num_enum",
+ "pkg-config",
+]
+
+[[package]]
+name = "redis"
+version = "0.25.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e46922bd01fefcfdcf58d9cd626da082bb2cde27211920dacfde6b2ecf9a35b"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "combine",
+ "futures-util",
+ "itoa",
+ "percent-encoding",
+ "pin-project-lite",
+ "ryu",
+ "tokio",
+ "tokio-util",
+ "url",
+]
 
 [[package]]
 name = "redis"
@@ -4555,6 +4656,119 @@ dependencies = [
 ]
 
 [[package]]
+name = "sea-streamer"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b85ee94bfb9b6e4e912a38186371cf02e70a785e2e939c86f98220180b4c4baf"
+dependencies = [
+ "sea-streamer-kafka",
+ "sea-streamer-redis",
+ "sea-streamer-runtime",
+ "sea-streamer-socket",
+ "sea-streamer-types",
+]
+
+[[package]]
+name = "sea-streamer-file"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5072bf729b4eba9bac2e0f2237a176c4dcf2b88ec708eb1969b01c56ed690c85"
+dependencies = [
+ "fastrand 1.9.0",
+ "flume",
+ "lazy_static",
+ "log",
+ "notify",
+ "sea-streamer-runtime",
+ "sea-streamer-types",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "sea-streamer-kafka"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd7bd866e445443c2a1587bab2264594fa011655e5cf758c29ecd41207c1fe33"
+dependencies = [
+ "lazy_static",
+ "mac_address",
+ "rdkafka",
+ "sea-streamer-runtime",
+ "sea-streamer-types",
+ "tokio",
+]
+
+[[package]]
+name = "sea-streamer-redis"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31538b8afac112dd97c1cb187388810b5905b101e0309e0783cf5a762caa450c"
+dependencies = [
+ "flume",
+ "lazy_static",
+ "log",
+ "mac_address",
+ "redis 0.25.5",
+ "sea-streamer-runtime",
+ "sea-streamer-types",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "sea-streamer-runtime"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e5be9d38d457fbca3cc80f68836f7981554315a1279ea4d60d618543f2170b6"
+dependencies = [
+ "futures",
+ "tokio",
+]
+
+[[package]]
+name = "sea-streamer-socket"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5b0a9931812d0c3b474ada5568557cca2fb735160881b8a75f31fc09398ead1"
+dependencies = [
+ "sea-streamer-file",
+ "sea-streamer-kafka",
+ "sea-streamer-redis",
+ "sea-streamer-stdio",
+ "sea-streamer-types",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "sea-streamer-stdio"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a79be6d02ed74805a5ae0f3e201afd5b482c4225d2e8b80a71764db494a0cfd0"
+dependencies = [
+ "flume",
+ "lazy_static",
+ "log",
+ "nom 7.1.3",
+ "sea-streamer-runtime",
+ "sea-streamer-types",
+ "thiserror 1.0.69",
+ "time",
+]
+
+[[package]]
+name = "sea-streamer-types"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "971ec0f94d12ca48d82042d8b669c67be1527c5b5a44350f28d55b341173feb1"
+dependencies = [
+ "futures",
+ "thiserror 1.0.69",
+ "time",
+ "url",
+]
+
+[[package]]
 name = "seahash"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5129,11 +5343,13 @@ dependencies = [
  "pretty_assertions",
  "prometheus-client",
  "rand 0.10.1",
- "redis",
+ "redis 1.2.1",
  "reqwest 0.13.3",
  "rust_decimal",
  "sea-orm",
  "sea-orm-migration",
+ "sea-streamer",
+ "sea-streamer-redis",
  "serde",
  "serde_json",
  "serde_urlencoded",
@@ -5142,6 +5358,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "torii",
  "torii-core",
  "torii-storage-seaorm",
@@ -5270,7 +5487,7 @@ version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
- "fastrand",
+ "fastrand 2.4.1",
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
@@ -5451,6 +5668,7 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "pin-project-lite",
+ "slab",
  "tokio",
 ]
 

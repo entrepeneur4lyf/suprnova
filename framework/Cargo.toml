@@ -35,7 +35,7 @@ serde_urlencoded = "0.7"
 pretty_assertions = "1.4"
 chrono = { version = "0.4", features = ["serde"] }
 bcrypt = "0.19"
-rand = "0.10"
+rand = { version = "0.10", features = ["std", "std_rng"] }
 aes-gcm = "0.10"
 base64 = "0.22"
 sha2 = "0.11"
@@ -115,6 +115,9 @@ url = "2"
 tempfile = "3"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form"] }
 getrandom = "0.4.2"
+tokio-util = { version = "0.7.18", features = ["time"] }
+sea-streamer = { version = "0.5.0", features = ["redis", "runtime-tokio"] }
+sea-streamer-redis = "0.5.2"
 
 [features]
 default = ["testing"]
