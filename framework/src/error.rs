@@ -201,6 +201,27 @@ impl ValidationErrors {
         self.errors.is_empty()
     }
 
+    /// Convert into a `Result`: `Ok(())` if the error bag is empty,
+    /// `Err(self)` otherwise.
+    ///
+    /// Designed for the tail of an `after_validation` body (and the
+    /// expansion of the [`crate::validate!`] macro):
+    ///
+    /// ```rust,ignore
+    /// fn after_validation(&self) -> Result<(), ValidationErrors> {
+    ///     let mut errs = ValidationErrors::new();
+    ///     // ... accumulate via Rule::check / AsyncRule::check_async ...
+    ///     errs.into_result()
+    /// }
+    /// ```
+    pub fn into_result(self) -> Result<(), Self> {
+        if self.errors.is_empty() {
+            Ok(())
+        } else {
+            Err(self)
+        }
+    }
+
     /// Convert from validator crate's ValidationErrors
     pub fn from_validator(errors: validator::ValidationErrors) -> Self {
         let mut result = Self::new();

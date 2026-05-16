@@ -26,6 +26,7 @@
 //! on the conditional rules. Consumers writing their own rules should
 //! pick a trait and stick to it.
 
+use crate::error::ValidationErrors;
 use std::collections::HashMap;
 
 /// A synchronous validator over a single string value.
@@ -37,6 +38,19 @@ pub trait Rule {
     /// Check `value`. Return `Ok(())` if it passes, `Err(message)` if
     /// it fails.
     fn passes(&self, value: &str) -> Result<(), String>;
+
+    /// Run the rule and push any failure message onto `errs` under
+    /// the given field key. Returns `()` so calls can be chained
+    /// without an `if let` per rule. Used by the [`validate!`] macro
+    /// and convenient for hand-written `after_validation` bodies that
+    /// accumulate errors across many checks.
+    ///
+    /// [`validate!`]: crate::validate
+    fn check(&self, value: &str, errs: &mut ValidationErrors, field: &str) {
+        if let Err(msg) = self.passes(value) {
+            errs.add(field.to_string(), msg);
+        }
+    }
 }
 
 /// Map of "field name → its current string value", supplied to rules
@@ -54,6 +68,17 @@ pub trait ContextualRule {
     /// Check `value` against `ctx`. Return `Ok(())` if it passes,
     /// `Err(message)` if it fails.
     fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String>;
+
+    /// Run the rule and push any failure message onto `errs` under
+    /// the given field key. The error-accumulating analogue of
+    /// [`Self::passes`]; used by the [`validate!`] macro.
+    ///
+    /// [`validate!`]: crate::validate
+    fn check(&self, value: &str, errs: &mut ValidationErrors, field: &str, ctx: &FormContext) {
+        if let Err(msg) = self.passes(value, ctx) {
+            errs.add(field.to_string(), msg);
+        }
+    }
 }
 
 /// Built-in synchronous rules — both pure ([`Rule`]) and contextual
@@ -146,7 +171,7 @@ pub mod rules {
     pub struct In(pub &'static [&'static str]);
     impl Rule for In {
         fn passes(&self, value: &str) -> Result<(), String> {
-            if self.0.iter().any(|v| *v == value) {
+            if self.0.contains(&value) {
                 Ok(())
             } else {
                 Err(format!("must be one of {:?}", self.0))
@@ -159,7 +184,7 @@ pub mod rules {
     pub struct NotIn(pub &'static [&'static str]);
     impl Rule for NotIn {
         fn passes(&self, value: &str) -> Result<(), String> {
-            if self.0.iter().any(|v| *v == value) {
+            if self.0.contains(&value) {
                 Err(format!("must not be one of {:?}", self.0))
             } else {
                 Ok(())
@@ -395,6 +420,29 @@ pub trait AsyncRule: Send + Sync {
     /// Check `value`. Return `Ok(())` if it passes, `Err(message)` if
     /// it fails.
     async fn passes(&self, value: &str) -> Result<(), String>;
+
+    /// Async analogue of [`Rule::check`]: run the rule and push any
+    /// failure message onto `errs` under the given field key.
+    ///
+    /// The [`validate!`] macro does not currently weave async rules
+    /// in (placing `.await` inside a declarative macro arm gets
+    /// awkward); use this helper to accumulate async rule failures
+    /// alongside your sync checks:
+    ///
+    /// ```rust,ignore
+    /// let mut errs = ValidationErrors::new();
+    /// Unique { table: "users", column: "email", except_id: None }
+    ///     .check_async(&self.email, &mut errs, "email")
+    ///     .await;
+    /// errs.into_result()
+    /// ```
+    ///
+    /// [`validate!`]: crate::validate
+    async fn check_async(&self, value: &str, errs: &mut ValidationErrors, field: &str) {
+        if let Err(msg) = self.passes(value).await {
+            errs.add(field.to_string(), msg);
+        }
+    }
 }
 
 /// Built-in asynchronous rules.
@@ -471,3 +519,90 @@ pub mod async_rules {
 }
 
 pub use async_rules::Unique;
+
+/// Run a chain of validation rules over fields of `$self`, accumulating
+/// errors into a single [`ValidationErrors`](crate::ValidationErrors).
+/// Returns `Ok(())` if every rule passes, `Err(ValidationErrors)`
+/// otherwise.
+///
+/// # Syntax
+///
+/// ```rust,ignore
+/// use suprnova::{validate, Required, Email, Min, Max, RequiredIf, ValidationErrors};
+///
+/// fn after_validation(&self) -> Result<(), ValidationErrors> {
+///     let ctx = self.to_form_context();
+///     validate! { self =>
+///         email       => Required, Email;
+///         password    => Min(8), Max(72);
+///         card_number => RequiredIf {
+///             other: "billing_type",
+///             value: "card",
+///         } => with ctx;
+///     }
+/// }
+/// ```
+///
+/// Each row is `field_ident => Rule1, Rule2, ... ;`. Each rule is
+/// either a plain [`Rule`] (no suffix) or a [`ContextualRule`]
+/// followed by `=> with $ctx_ident`. The contextual separator is
+/// `=> with` (not parenthesised) because `macro_rules!` matches
+/// `$rule:expr` greedily — placing the suffix in parentheses runs
+/// into Rust's `FOLLOW` set rules for `expr` fragments.
+///
+/// The macro expands to a fresh [`ValidationErrors`](crate::ValidationErrors),
+/// calls [`Rule::check`] / [`ContextualRule::check`] for each declared
+/// rule, then returns
+/// [`ValidationErrors::into_result`](crate::ValidationErrors::into_result).
+///
+/// # `Option<String>` fields
+///
+/// The macro accesses `&$self.$field` and passes it where the trait
+/// methods expect `&str`. `&String` auto-derefs; `&Option<String>`
+/// does not. For `Option<String>` fields, run the rule manually with
+/// `.as_deref().unwrap_or("")` (or build a small helper rule that
+/// understands `Option`).
+///
+/// # Async rules
+///
+/// The macro is sync-only. Call
+/// [`AsyncRule::check_async`](crate::AsyncRule::check_async) inline
+/// for async-backed checks; both styles accumulate into the same
+/// [`ValidationErrors`](crate::ValidationErrors).
+#[macro_export]
+macro_rules! validate {
+    ($self:ident => $($field:ident => $($rule:expr $(=> with $ctx:ident)?),+);+ $(;)?) => {{
+        let mut __errs = $crate::ValidationErrors::new();
+        $(
+            $(
+                $crate::__validate_one!(__errs, $self, $field, $rule $(=> with $ctx)?);
+            )+
+        )+
+        __errs.into_result()
+    }};
+}
+
+/// Internal dispatch macro used by [`validate!`]. Not part of the
+/// public API even though `#[macro_export]` makes it reachable at
+/// the crate root — `#[doc(hidden)]` keeps it out of rustdoc.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __validate_one {
+    ($errs:ident, $self:ident, $field:ident, $rule:expr => with $ctx:ident) => {
+        $crate::validation::rule::ContextualRule::check(
+            &$rule,
+            &$self.$field,
+            &mut $errs,
+            stringify!($field),
+            &$ctx,
+        );
+    };
+    ($errs:ident, $self:ident, $field:ident, $rule:expr) => {
+        $crate::validation::rule::Rule::check(
+            &$rule,
+            &$self.$field,
+            &mut $errs,
+            stringify!($field),
+        );
+    };
+}

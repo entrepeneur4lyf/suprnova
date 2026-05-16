@@ -355,3 +355,155 @@ mod after_validation_hook {
         assert!(req.after_validation().is_ok());
     }
 }
+
+// --- ValidationErrors::into_result ---
+
+#[test]
+fn validation_errors_into_result_returns_ok_when_empty() {
+    use suprnova::ValidationErrors;
+    let empty = ValidationErrors::new();
+    assert!(empty.into_result().is_ok());
+}
+
+#[test]
+fn validation_errors_into_result_returns_err_when_populated() {
+    use suprnova::ValidationErrors;
+    let mut errs = ValidationErrors::new();
+    errs.add("field", "msg");
+    let result = errs.into_result();
+    assert!(result.is_err());
+    let bag = result.unwrap_err();
+    assert!(bag.errors.contains_key("field"));
+}
+
+// --- validate! macro ---
+
+mod validate_macro {
+    use suprnova::rules::{Email, Min, Required, RequiredIf};
+    use suprnova::{validate, ValidationErrors};
+
+    struct UserForm {
+        email: String,
+        name: String,
+    }
+
+    #[test]
+    fn validate_macro_passes_when_all_rules_succeed() {
+        let form = UserForm {
+            email: "shawn@example.com".into(),
+            name: "Shawn".into(),
+        };
+        let result: Result<(), ValidationErrors> = validate! { form =>
+            email => Required, Email;
+            name => Required, Min(2);
+        };
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_macro_accumulates_failures_across_fields() {
+        let form = UserForm {
+            email: "not-an-email".into(),
+            name: "".into(),
+        };
+        let result: Result<(), ValidationErrors> = validate! { form =>
+            email => Required, Email;
+            name => Required, Min(2);
+        };
+        let errs = result.unwrap_err();
+        assert!(errs.errors.contains_key("email"), "email error missing");
+        assert!(errs.errors.contains_key("name"), "name error missing");
+        // Email field gets ONE error: Email fails; Required passes since
+        // "not-an-email" is a non-empty string.
+        assert_eq!(errs.errors["email"].len(), 1);
+        // Name field gets TWO errors: Required AND Min(2) both fail.
+        assert_eq!(errs.errors["name"].len(), 2);
+    }
+
+    #[test]
+    fn validate_macro_runs_contextual_rules_with_ctx_suffix() {
+        use std::collections::HashMap;
+
+        struct BillingForm {
+            billing_type: String,
+            card_number: String,
+        }
+
+        let form = BillingForm {
+            billing_type: "card".into(),
+            card_number: "".into(),
+        };
+
+        let mut ctx: HashMap<String, String> = HashMap::new();
+        ctx.insert("billing_type".to_string(), "card".to_string());
+
+        let result: Result<(), ValidationErrors> = validate! { form =>
+            billing_type => Required;
+            card_number => RequiredIf {
+                other: "billing_type",
+                value: "card",
+            } => with ctx;
+        };
+        let errs = result.unwrap_err();
+        assert!(errs.errors.contains_key("card_number"));
+    }
+
+    #[test]
+    fn validate_macro_with_trailing_semicolon_is_accepted() {
+        let form = UserForm {
+            email: "x@example.com".into(),
+            name: "ok".into(),
+        };
+        // Demonstrates the `$(;)?` tail in the macro matcher — having
+        // a trailing `;` after the last field row must not error.
+        let result: Result<(), ValidationErrors> = validate! { form =>
+            email => Required, Email;
+            name => Required;
+        };
+        assert!(result.is_ok());
+    }
+}
+
+// --- AsyncRule::check_async helper ---
+
+#[tokio::test]
+async fn async_rule_check_helper_accumulates_errors() {
+    use suprnova::ValidationErrors;
+
+    let _guard = TestContainer::fake();
+    let db = fresh_db().await;
+    seed_user_with_email(&db, "taken@example.com").await;
+    TestContainer::singleton(db);
+
+    let mut errs = ValidationErrors::new();
+    Unique {
+        table: "users",
+        column: "email",
+        except_id: None,
+    }
+    .check_async("taken@example.com", &mut errs, "email")
+    .await;
+    assert!(
+        errs.errors.contains_key("email"),
+        "duplicate email should produce an `email` error"
+    );
+}
+
+#[tokio::test]
+async fn async_rule_check_helper_leaves_empty_on_success() {
+    use suprnova::ValidationErrors;
+
+    let _guard = TestContainer::fake();
+    let db = fresh_db().await;
+    TestContainer::singleton(db);
+
+    let mut errs = ValidationErrors::new();
+    Unique {
+        table: "users",
+        column: "email",
+        except_id: None,
+    }
+    .check_async("nobody@example.com", &mut errs, "email")
+    .await;
+    assert!(errs.is_empty(), "no rows → no errors");
+}
