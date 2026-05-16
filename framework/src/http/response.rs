@@ -308,18 +308,52 @@ impl Redirect {
     }
 
     fn build_url(&self) -> String {
-        if self.query_params.is_empty() {
-            self.location.clone()
-        } else {
-            let query = self
-                .query_params
-                .iter()
-                .map(|(k, v)| format!("{}={}", k, v))
-                .collect::<Vec<_>>()
-                .join("&");
-            format!("{}?{}", self.location, query)
-        }
+        append_query_params(&self.location, &self.query_params)
     }
+}
+
+/// Append `params` to `base` as a URL-encoded query string.
+///
+/// Uses `url::form_urlencoded::Serializer` so keys and values are
+/// percent-encoded per `application/x-www-form-urlencoded`. Handles
+/// three cases:
+///
+/// - `params` empty → `base` is returned unchanged.
+/// - `base` already contains a query string (`?…`) → new pairs are
+///   appended with `&` after the existing string.
+/// - `base` has no query string → a `?<encoded>` query is appended.
+///
+/// Fragments (`#…`) on the base are preserved by stripping them before
+/// the append and re-attaching afterward, so a fragment never lands
+/// inside the query string.
+pub(crate) fn append_query_params<K, V>(base: &str, params: &[(K, V)]) -> String
+where
+    K: AsRef<str>,
+    V: AsRef<str>,
+{
+    if params.is_empty() {
+        return base.to_string();
+    }
+
+    // Split off any `#fragment` so we don't fold it into the query.
+    let (head, fragment) = match base.find('#') {
+        Some(i) => (&base[..i], Some(&base[i..])),
+        None => (base, None),
+    };
+
+    let encoded = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(params.iter().map(|(k, v)| (k.as_ref(), v.as_ref())))
+        .finish();
+
+    let separator = if head.contains('?') { '&' } else { '?' };
+    let mut out = String::with_capacity(head.len() + 1 + encoded.len() + fragment.map_or(0, str::len));
+    out.push_str(head);
+    out.push(separator);
+    out.push_str(&encoded);
+    if let Some(frag) = fragment {
+        out.push_str(frag);
+    }
+    out
 }
 
 /// Flash `_inertia.preserve_fragment = true` into the session when the
@@ -383,17 +417,8 @@ impl RedirectRouteBuilder {
     fn build_url(&self) -> Option<String> {
         use crate::routing::route_with_params;
 
-        let mut url = route_with_params(&self.name, &self.params)?;
-        if !self.query_params.is_empty() {
-            let query = self
-                .query_params
-                .iter()
-                .map(|(k, v)| format!("{}={}", k, v))
-                .collect::<Vec<_>>()
-                .join("&");
-            url = format!("{}?{}", url, query);
-        }
-        Some(url)
+        let url = route_with_params(&self.name, &self.params)?;
+        Some(append_query_params(&url, &self.query_params))
     }
 }
 
