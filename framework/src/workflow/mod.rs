@@ -99,7 +99,7 @@ impl WorkflowWorker {
 
     /// Create a worker with a custom config
     pub fn with_config(config: WorkflowConfig) -> Self {
-        let random: u64 = rand::thread_rng().r#gen();
+        let random: u64 = rand::rng().random();
         let worker_id = format!("{}-{}", std::process::id(), random);
         Self {
             config: Arc::new(config),

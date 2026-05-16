@@ -61,9 +61,21 @@ impl MagicLinkAuth {
             .await
             .map_err(|e| FrameworkError::internal(format!("torii magic_link send_link: {e}")))?;
 
-        // In the published torii-core 0.5.2, `SecureToken.token` is a plain `String`
-        // public field — not a method or Option. No unwrapping required.
-        Ok(secure_token.token)
+        // In the suprnova-torii-rs fork, `SecureToken::token` is a private field
+        // wrapping a `SecretString`, exposed via `.token()` which returns the
+        // plaintext as `Option<&str>` — `None` only when the token was loaded
+        // from storage (hash only). Freshly minted tokens from `send_link`
+        // always carry the plaintext, so the `None` branch indicates a torii
+        // contract violation (or a torii bug) and is mapped to an internal
+        // error.
+        secure_token
+            .token()
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                FrameworkError::internal(
+                    "torii magic_link send_link returned a token without plaintext",
+                )
+            })
     }
 
     /// Consume a magic-link token, returning the authenticated user and a new session.

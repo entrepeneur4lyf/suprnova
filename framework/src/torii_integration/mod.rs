@@ -23,7 +23,9 @@ use std::sync::{Arc, OnceLock};
 
 use torii::seaorm::SeaORMRepositoryProvider;
 use torii::Torii;
-use torii_core::repositories::{PasswordRepository, RepositoryProvider, UserRepository};
+use torii_core::repositories::{
+    PasswordRepository, PasswordRepositoryProvider, UserRepository, UserRepositoryProvider,
+};
 use torii_storage_seaorm::SeaORMStorage;
 
 use crate::error::FrameworkError;

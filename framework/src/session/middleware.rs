@@ -129,12 +129,12 @@ pub(crate) fn take_session() -> Option<SessionData> {
 ///
 /// Generates a 40-character alphanumeric string.
 pub fn generate_session_id() -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 
     (0..40)
         .map(|_| {
-            let idx = rng.gen_range(0..CHARSET.len());
+            let idx = rng.random_range(0..CHARSET.len());
             CHARSET[idx] as char
         })
         .collect()

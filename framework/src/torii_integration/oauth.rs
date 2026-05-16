@@ -43,7 +43,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use rand::RngCore;
+use rand::{rngs::OsRng, TryRngCore};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -494,13 +494,15 @@ impl OAuthAuth {
 ///
 /// The spec requires the verifier to be 43–128 characters from the
 /// unreserved set `[A-Za-z0-9-._~]`. We use 64 bytes of OS randomness
-/// (`rand::thread_rng()`), base64-url-no-pad encoded, which produces an
+/// (`rand::rngs::OsRng`), base64-url-no-pad encoded, which produces an
 /// 86-character string in the strict subset `[A-Za-z0-9_-]`. 86 chars
 /// gives 512 bits of entropy — comfortably above the 256-bit floor that
 /// would defeat brute-force, while still inside the spec maximum.
 fn generate_pkce_verifier() -> String {
     let mut bytes = [0u8; 64];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    OsRng
+        .try_fill_bytes(&mut bytes)
+        .expect("OS RNG must be available to mint PKCE verifier");
     URL_SAFE_NO_PAD.encode(bytes)
 }
 

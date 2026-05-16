@@ -74,10 +74,12 @@ pub const COOKIE_NAME: &str = "remember_me";
 #[doc(hidden)]
 pub fn generate_token() -> Result<(String, String), FrameworkError> {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-    use rand::RngCore;
+    use rand::{rngs::OsRng, TryRngCore};
 
     let mut bytes = [0u8; TOKEN_BYTES];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    OsRng
+        .try_fill_bytes(&mut bytes)
+        .expect("OS RNG must be available to mint remember-me tokens");
     let plaintext = URL_SAFE_NO_PAD.encode(bytes);
     let hash = hashing::hash(&plaintext)?;
     Ok((plaintext, hash))

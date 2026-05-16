@@ -10,8 +10,8 @@ path = "cmd/main.rs"
 [dependencies]
 suprnova = { path = "../framework" }
 tokio = { version = "1", features = ["full"] }
-sea-orm-migration = { version = "1.0", features = ["sqlx-sqlite", "sqlx-mysql", "sqlx-postgres", "runtime-tokio-native-tls"] }
-sea-orm = { version = "1.0", features = ["sqlx-sqlite", "sqlx-mysql", "sqlx-postgres", "runtime-tokio-native-tls", "macros"] }
+sea-orm-migration = { version = "1.1", features = ["sqlx-sqlite", "sqlx-mysql", "sqlx-postgres", "runtime-tokio-rustls"] }
+sea-orm = { version = "1.1", features = ["sqlx-sqlite", "sqlx-mysql", "sqlx-postgres", "runtime-tokio-rustls", "macros"] }
 serde = { version = "1.0", features = ["derive"] }
 validator = { version = "0.18", features = ["derive"] }
 async-trait = "0.1"

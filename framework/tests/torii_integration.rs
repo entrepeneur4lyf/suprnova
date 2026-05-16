@@ -1019,7 +1019,13 @@ fn bearer_token_middleware_binds_session_when_token_valid() {
             .await
             .unwrap();
 
-        let token_str = torii_session.token.to_string();
+        // Freshly authenticated sessions always carry the plaintext token —
+        // `None` is reserved for sessions loaded from storage (hash only).
+        let token_str = torii_session
+            .token
+            .as_ref()
+            .expect("freshly authenticated session must carry plaintext token")
+            .to_string();
         assert!(!token_str.is_empty());
 
         // Build a fake request with the bearer token.
@@ -1071,7 +1077,13 @@ fn bearer_middleware_stores_raw_user_id_not_hash() {
             .await
             .unwrap();
 
-        let token_str = torii_session.token.to_string();
+        // Freshly authenticated sessions always carry the plaintext token —
+        // `None` is reserved for sessions loaded from storage (hash only).
+        let token_str = torii_session
+            .token
+            .as_ref()
+            .expect("freshly authenticated session must carry plaintext token")
+            .to_string();
 
         let request = build_request_async(Some(&format!("Bearer {}", token_str))).await;
         let slot = suprnova::session::new_session_slot_for_test();

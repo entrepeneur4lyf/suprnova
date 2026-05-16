@@ -9,12 +9,14 @@
 //! reqwest, and SeaORM into the scaffolder.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use rand::{rngs::OsRng, RngCore};
+use rand::{rngs::OsRng, TryRngCore};
 
 /// Generate a random 32-byte key, encoded URL-safe base64 (no padding).
 pub fn generate_app_key() -> String {
     let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
+    OsRng
+        .try_fill_bytes(&mut bytes)
+        .expect("OS RNG must be available to mint an AES-256 key");
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
