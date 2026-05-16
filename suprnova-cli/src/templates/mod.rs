@@ -70,21 +70,55 @@ pub fn middleware_logging() -> &'static str {
     include_str!("files/backend/middleware/logging.rs.tpl")
 }
 
-/// Template for generating new middleware with make:middleware command
+/// Template for generating new middleware with make:middleware command.
+///
+/// Emits a real, working middleware skeleton: it logs the inbound method,
+/// path, and per-request id, runs the inner handler, and logs completion
+/// time once the response is in hand. Production-safe out of the box —
+/// users replace the body with whatever they actually need (auth checks,
+/// CORS, tracing context, etc).
 pub fn middleware_template(name: &str, struct_name: &str) -> String {
     format!(
         r#"//! {name} middleware
 
-use suprnova::{{async_trait, Middleware, Next, Request, Response}};
+use std::time::Instant;
 
-/// {name} middleware
+use suprnova::{{async_trait, current_request_id, Middleware, Next, Request, Response}};
+
+/// {name} middleware.
+///
+/// Times the wrapped request and logs both the inbound and outbound
+/// events with the per-request id installed by the framework's
+/// `RequestIdMiddleware`. Replace the body below with your own logic
+/// when you need different behavior.
 pub struct {struct_name};
 
 #[async_trait]
 impl Middleware for {struct_name} {{
     async fn handle(&self, request: Request, next: Next) -> Response {{
-        // TODO: Implement middleware logic
-        next(request).await
+        let method = request.method().to_string();
+        let path = request.path().to_string();
+        let request_id = current_request_id()
+            .map(|id| id.as_str().to_string())
+            .unwrap_or_default();
+        let started_at = Instant::now();
+
+        println!(
+            "[{struct_name}] --> {{}} {{}} (request_id={{}})",
+            method, path, request_id,
+        );
+
+        let response = next(request).await;
+
+        println!(
+            "[{struct_name}] <-- {{}} {{}} ({{}} ms, request_id={{}})",
+            method,
+            path,
+            started_at.elapsed().as_millis(),
+            request_id,
+        );
+
+        response
     }}
 }}
 "#,
@@ -111,21 +145,40 @@ pub async fn invoke(_req: Request) -> Response {{
     )
 }
 
-/// Template for generating new action with make:action command
+/// Template for generating new action with make:action command.
+///
+/// Emits a real, working single-responsibility action: a container-resolvable
+/// struct with an async `execute()` that returns `Result<String,
+/// FrameworkError>`. Compiles out of the box and demonstrates the resolve →
+/// invoke pattern that controllers use. Replace the body when you need
+/// different behavior; the signature is the production-safe shape every
+/// Suprnova action uses.
 pub fn action_template(name: &str, struct_name: &str) -> String {
     format!(
         r#"//! {name} action
 
-use suprnova::injectable;
+use suprnova::{{injectable, FrameworkError}};
 
+/// {struct_name}
+///
+/// Single-responsibility command resolved from the container. Inject any
+/// dependencies as fields and the `#[injectable]` macro wires them at
+/// resolve time.
 #[injectable]
 pub struct {struct_name} {{
-    // Dependencies injected via container
+    // Add injected dependencies as fields here, e.g.
+    // db: suprnova::DbConnection,
 }}
 
 impl {struct_name} {{
-    pub fn execute(&self) {{
-        // TODO: Implement action logic
+    /// Execute the action.
+    ///
+    /// Returns a status string by default so the skeleton compiles and
+    /// runs immediately. Swap the body for the real workflow when you
+    /// implement the feature — typically wrap fallible work in
+    /// `?` and return the produced value.
+    pub async fn execute(&self) -> Result<String, FrameworkError> {{
+        Ok("{struct_name} executed".to_string())
     }}
 }}
 "#,
@@ -1323,20 +1376,28 @@ pub fn tasks_mod() -> &'static str {
 
 // schedule_bin removed - scheduler now integrated into main binary
 
-/// Template for generating new scheduled task with make:task command
+/// Template for generating new scheduled task with make:task command.
+///
+/// Emits a real, working `Task` impl that logs a structured start/finish
+/// event. The skeleton runs cleanly the first time the scheduler invokes
+/// it; users replace the body with their actual job (cleanup, reminders,
+/// nightly aggregates, etc).
 pub fn task_template(file_name: &str, struct_name: &str) -> String {
     format!(
         r#"//! {struct_name} scheduled task
 //!
-//! Created with `suprnova make:task {file_name}`
+//! Created with `suprnova make:task {file_name}`.
+
+use std::time::Instant;
 
 use async_trait::async_trait;
 use suprnova::{{Task, TaskResult}};
 
-/// {struct_name} - A scheduled task
+/// {struct_name} - A scheduled task.
 ///
-/// Implement your task logic in the `handle()` method.
-/// Register this task in `src/schedule.rs` with the fluent API.
+/// Register the task in `src/schedule.rs` with the fluent API; the
+/// skeleton below times its own run and prints a structured log line on
+/// each invocation so it works end-to-end the first time you wire it up.
 ///
 /// # Example Registration
 ///
@@ -1349,13 +1410,13 @@ use suprnova::{{Task, TaskResult}};
 ///         .daily()
 ///         .at("03:00")
 ///         .name("{file_name}")
-///         .description("TODO: Add task description")
+///         .description("{struct_name} scheduled task")
 /// );
 /// ```
 pub struct {struct_name};
 
 impl {struct_name} {{
-    /// Create a new instance of this task
+    /// Create a new instance of this task.
     pub fn new() -> Self {{
         Self
     }}
@@ -1370,8 +1431,17 @@ impl Default for {struct_name} {{
 #[async_trait]
 impl Task for {struct_name} {{
     async fn handle(&self) -> TaskResult {{
-        // TODO: Implement your task logic here
-        println!("Running {struct_name}...");
+        let started_at = Instant::now();
+        println!("[{struct_name}] task started");
+
+        // Replace this with the real job. The skeleton ships as a
+        // no-op success so the task can be scheduled and observed
+        // before the implementation is filled in.
+
+        println!(
+            "[{struct_name}] task finished in {{}} ms",
+            started_at.elapsed().as_millis(),
+        );
         Ok(())
     }}
 }}

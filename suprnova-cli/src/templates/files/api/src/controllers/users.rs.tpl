@@ -1,4 +1,10 @@
-//! User controller -- list, show, register, login
+//! User controller -- list, show, register, login.
+//!
+//! `list_users` and `show_user` are backed by real SeaORM queries against
+//! the `users` table created by the bundled migration. The auth endpoints
+//! delegate to Torii via `Auth::password()` and mirror the app row into
+//! the `users` table so subsequent lookups return the freshly registered
+//! account.
 
 use serde::Deserialize;
 use suprnova::{handler, Auth, FrameworkError, Request, Resource, Response};
@@ -12,8 +18,8 @@ use crate::resources::user_resource::UserResource;
 
 #[handler]
 pub async fn list_users(_req: Request) -> Response {
-    // In a real app, query the database here.
-    let users: Vec<UserResource> = User::all_example()
+    let users: Vec<UserResource> = User::all()
+        .await?
         .into_iter()
         .map(UserResource::from)
         .collect();
@@ -33,8 +39,8 @@ pub async fn show_user(req: Request) -> Response {
         .parse()
         .map_err(|_| FrameworkError::param_parse("id", "i64"))?;
 
-    // In a real app, query by id and return 404 when not found.
-    let user = User::find_example(id)
+    let user = User::find_by_id(id)
+        .await?
         .ok_or_else(|| FrameworkError::model_not_found("User"))?;
 
     Ok(Resource::single(UserResource::from(user)).render().await?)
@@ -57,13 +63,23 @@ pub async fn register(req: Request) -> Response {
         .await
         .map_err(|e| FrameworkError::bad_request(e.to_string()))?;
 
-    let user = Auth::password()
+    // Register credentials with Torii.
+    let torii_user = Auth::password()
         .register(&body.email, &body.password)
         .await?;
 
+    // Mirror the user into the application's `users` table so the
+    // list/show endpoints see them. Idempotent: if the row already
+    // exists (re-register attempt), reuse it instead of creating a
+    // duplicate by email.
+    let user = match User::find_by_email(&body.email).await? {
+        Some(existing) => existing,
+        None => User::create(&body.email).await?,
+    };
+
     Ok(Resource::single(UserResource {
         id: user.id.to_string(),
-        email: user.email,
+        email: torii_user.email,
     })
     .render()
     .await?)

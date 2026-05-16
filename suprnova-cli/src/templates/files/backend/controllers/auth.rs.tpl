@@ -1,10 +1,17 @@
-//! Authentication controller
+//! Authentication controller.
+//!
+//! Renders the login/register Inertia pages on GET, validates and
+//! persists credentials on POST, redirects to `/dashboard` on success.
+//! Form bodies are extracted via `FormRequest`, which means per-field
+//! validation errors come back as a standard 422 with the Laravel-style
+//! `{ message, errors }` envelope — the Inertia client surfaces those
+//! automatically on the originating page.
 
-use suprnova::{
-    handler, inertia_response, redirect, serde_json, validator, Auth,
-    FormRequest as FormRequestDerive, InertiaProps, Redirect, Request, Response, Validate,
-};
 use serde::Deserialize;
+use suprnova::{
+    handler, inertia_response, redirect, serde_json, Auth, FormRequest, InertiaProps, Request,
+    Response, Validate, ValidationErrors,
+};
 
 use crate::models::user::User;
 
@@ -14,12 +21,16 @@ use crate::models::user::User;
 
 #[derive(InertiaProps)]
 pub struct LoginProps {
+    /// Errors carried over from the redirect-back flow. The Inertia
+    /// client merges any session-flashed errors into `errors` on its
+    /// own; this prop exists so the page can render before any
+    /// submission too.
     pub errors: Option<serde_json::Value>,
 }
 
 #[handler]
-pub async fn show_login(_req: Request) -> Response {
-    inertia_response!("auth/Login", LoginProps { errors: None })
+pub async fn show_login(req: Request) -> Response {
+    inertia_response!(&req, "auth/Login", LoginProps { errors: None })
 }
 
 #[derive(Deserialize, Validate)]
@@ -32,56 +43,33 @@ pub struct LoginRequest {
     pub remember: bool,
 }
 
+impl FormRequest for LoginRequest {}
+
+/// Build a `FrameworkError::Validation` that pins the failure to the
+/// `email` field, mirroring how the bundled validators surface errors.
+fn invalid_credentials() -> suprnova::FrameworkError {
+    let mut errs = ValidationErrors::new();
+    errs.add("email", "These credentials do not match our records.");
+    suprnova::FrameworkError::Validation(errs)
+}
+
 #[handler]
-pub async fn login(req: Request) -> Response {
-    let form: LoginRequest = req.input().await?;
+pub async fn login(form: LoginRequest) -> Response {
+    let user = User::find_by_email(&form.email)
+        .await?
+        .ok_or_else(invalid_credentials)?;
 
-    // Validate the form
-    if let Err(errors) = form.validate() {
-        return Ok(inertia_response!(
-            "auth/Login",
-            LoginProps {
-                errors: Some(serde_json::json!(errors))
-            }
-        )?
-        .status(422));
-    }
-
-    // Find user by email
-    let user = match User::find_by_email(&form.email).await? {
-        Some(u) => u,
-        None => {
-            return Ok(inertia_response!(
-                "auth/Login",
-                LoginProps {
-                    errors: Some(serde_json::json!({
-                        "email": ["These credentials do not match our records."]
-                    }))
-                }
-            )?
-            .status(422));
-        }
-    };
-
-    // Verify password
     if !user.verify_password(&form.password)? {
-        return Ok(inertia_response!(
-            "auth/Login",
-            LoginProps {
-                errors: Some(serde_json::json!({
-                    "email": ["These credentials do not match our records."]
-                }))
-            }
-        )?
-        .status(422));
+        return Err(invalid_credentials().into());
     }
 
-    // Log in the user
-    Auth::login(user.id);
+    // Log in the user. `Auth::login` takes the user id as a string so
+    // the session layer stays type-agnostic.
+    Auth::login(user.id.to_string());
 
-    // Handle remember me
     if form.remember {
-        // Generate and store remember token
+        // Persist a remember token so the auth provider can resume the
+        // session from a cookie after the in-memory session expires.
         let token = suprnova::session::generate_session_id();
         user.update_remember_token(Some(token)).await?;
     }
@@ -99,8 +87,8 @@ pub struct RegisterProps {
 }
 
 #[handler]
-pub async fn show_register(_req: Request) -> Response {
-    inertia_response!("auth/Register", RegisterProps { errors: None })
+pub async fn show_register(req: Request) -> Response {
+    inertia_response!(&req, "auth/Register", RegisterProps { errors: None })
 }
 
 #[derive(Deserialize, Validate)]
@@ -114,52 +102,30 @@ pub struct RegisterRequest {
     pub password_confirmation: String,
 }
 
+impl FormRequest for RegisterRequest {
+    /// Cross-field check: confirm the password and its confirmation
+    /// match. Runs after the per-field rules pass, so we know each
+    /// individual value is well-formed before comparing them.
+    fn after_validation(&self) -> Result<(), ValidationErrors> {
+        if self.password != self.password_confirmation {
+            let mut errs = ValidationErrors::new();
+            errs.add("password_confirmation", "Passwords do not match.");
+            return Err(errs);
+        }
+        Ok(())
+    }
+}
+
 #[handler]
-pub async fn register(req: Request) -> Response {
-    let form: RegisterRequest = req.input().await?;
-
-    // Validate the form
-    if let Err(errors) = form.validate() {
-        return Ok(inertia_response!(
-            "auth/Register",
-            RegisterProps {
-                errors: Some(serde_json::json!(errors))
-            }
-        )?
-        .status(422));
-    }
-
-    // Check password confirmation
-    if form.password != form.password_confirmation {
-        return Ok(inertia_response!(
-            "auth/Register",
-            RegisterProps {
-                errors: Some(serde_json::json!({
-                    "password_confirmation": ["Passwords do not match."]
-                }))
-            }
-        )?
-        .status(422));
-    }
-
-    // Check if email already exists
+pub async fn register(form: RegisterRequest) -> Response {
     if User::find_by_email(&form.email).await?.is_some() {
-        return Ok(inertia_response!(
-            "auth/Register",
-            RegisterProps {
-                errors: Some(serde_json::json!({
-                    "email": ["This email is already registered."]
-                }))
-            }
-        )?
-        .status(422));
+        let mut errs = ValidationErrors::new();
+        errs.add("email", "This email is already registered.");
+        return Err(suprnova::FrameworkError::Validation(errs).into());
     }
 
-    // Create user
     let user = User::create(&form.name, &form.email, &form.password).await?;
-
-    // Log in the new user
-    Auth::login(user.id);
+    Auth::login(user.id.to_string());
 
     redirect!("/dashboard").into()
 }

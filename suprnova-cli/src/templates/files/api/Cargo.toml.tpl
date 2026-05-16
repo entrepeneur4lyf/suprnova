@@ -11,9 +11,10 @@ path = "src/main.rs"
 suprnova = { package = "suprnova-rs", version = "0.1" }
 tokio = { version = "1", features = ["full"] }
 sea-orm-migration = { version = "1.0", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-native-tls"] }
-sea-orm = { version = "1.0", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-native-tls", "macros"] }
+sea-orm = { version = "1.0", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-native-tls", "macros", "with-chrono"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 async-trait = "0.1"
 dotenvy = "0.15"
 validator = { version = "0.18", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }

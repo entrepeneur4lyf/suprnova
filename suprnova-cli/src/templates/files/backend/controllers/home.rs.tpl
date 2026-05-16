@@ -7,9 +7,9 @@ pub struct HomeProps {
 }
 
 #[handler]
-pub async fn index(_req: Request) -> Response {
-    inertia_response!("Home", HomeProps {
+pub async fn index(req: Request) -> Response {
+    inertia_response!(&req, "Home", HomeProps {
         title: "Welcome to Suprnova!".to_string(),
-        message: "Your Inertia + React app is ready.".to_string(),
+        message: "Your Inertia app is ready.".to_string(),
     })
 }
