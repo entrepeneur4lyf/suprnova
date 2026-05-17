@@ -54,16 +54,16 @@ fn clear_memory_capture() {
 /// HTTP-backed providers (postmark, ses, sendgrid, mailgun, resend) also
 /// honor a corresponding `MAIL_<PROVIDER>_ENDPOINT` override for pointing
 /// at a regional URL or a mock server.
-pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
+///
+/// Synchronous: every supported transport's constructor is sync today.
+/// If a future transport adds async initialization (e.g. a connection
+/// pre-warm), flip this back to `async` and update the call sites — only
+/// `Server::serve` and the boot tests need to add `.await`.
+pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
     // Release any previous in-memory capture handle BEFORE matching, so
     // toggling `memory → postmark → memory` always exposes a fresh buffer
     // for the subsequent memory bootstrap.
     clear_memory_capture();
-
-    // Reserved for future async transport init (e.g. notification channels
-    // that pre-warm connections). The current branches are all sync — but
-    // callers in `server.rs` already `.await` this, so we keep the async
-    // signature for forward compatibility.
 
     let driver = std::env::var("MAIL_DRIVER").unwrap_or_else(|_| "log".into());
     match driver.as_str() {
