@@ -2,6 +2,7 @@
 
 pub mod envelope;
 pub mod job;
+pub mod retry;
 pub mod testing;
 pub mod worker;
 pub(crate) mod driver;
