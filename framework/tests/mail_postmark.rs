@@ -68,7 +68,9 @@ async fn postmark_maps_api_error_to_framework_error() {
     Mail::set_transport(Arc::new(transport));
     let err = Mail::to("blocked@example.org").send(Bing::default()).await.unwrap_err();
     let s = format!("{err}");
-    assert!(s.contains("Postmark") || s.contains("422"), "got: {s}");
+    assert!(s.contains("Postmark"), "error mentions provider: {s}");
+    assert!(s.contains("422"), "error includes HTTP status: {s}");
+    assert!(s.contains("Inactive recipient"), "error surfaces upstream body: {s}");
 }
 
 // Attachment test: shared HTTP-provider attachment shape (SES/SendGrid/Resend reuse it).

@@ -24,7 +24,7 @@ impl PostmarkMailTransport {
 
     pub fn with_endpoint(token: impl Into<String>, endpoint: impl AsRef<str>) -> Self {
         let endpoint = endpoint.as_ref().trim_end_matches('/');
-        let url = if endpoint.contains("/email") {
+        let url = if endpoint.ends_with("/email") {
             endpoint.to_string()
         } else {
             format!("{endpoint}/email")
@@ -33,6 +33,37 @@ impl PostmarkMailTransport {
             token: token.into(),
             endpoint: url,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_uses_default_endpoint() {
+        let t = PostmarkMailTransport::new("tok");
+        assert_eq!(t.endpoint, DEFAULT_ENDPOINT);
+    }
+
+    #[test]
+    fn with_endpoint_appends_email_path_when_missing() {
+        let t = PostmarkMailTransport::with_endpoint("tok", "https://proxy.example.com");
+        assert_eq!(t.endpoint, "https://proxy.example.com/email");
+    }
+
+    #[test]
+    fn with_endpoint_preserves_terminal_email_path() {
+        let t = PostmarkMailTransport::with_endpoint("tok", "https://proxy.example.com/email");
+        assert_eq!(t.endpoint, "https://proxy.example.com/email");
+    }
+
+    #[test]
+    fn with_endpoint_appends_email_for_paths_that_only_contain_email_substring() {
+        // Guard against the regression where `contains("/email")` would have
+        // skipped the suffix for a base URL like `/email-archive/api`.
+        let t = PostmarkMailTransport::with_endpoint("tok", "https://example.com/email-archive/api");
+        assert_eq!(t.endpoint, "https://example.com/email-archive/api/email");
     }
 }
 
