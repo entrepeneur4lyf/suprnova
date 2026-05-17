@@ -10,6 +10,7 @@
 
 use proc_macro::TokenStream;
 
+mod command;
 mod data;
 mod describe;
 mod domain_error;
@@ -382,6 +383,33 @@ pub fn request(attr: TokenStream, input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn suprnova_test(attr: TokenStream, input: TokenStream) -> TokenStream {
     suprnova_test::suprnova_test_impl(attr, input)
+}
+
+/// Attribute macro for registering an async fn as a console command.
+///
+/// Applied to `async fn(Vec<String>) -> Result<(), FrameworkError>`,
+/// the macro preserves the function, generates an `inventory`-shaped
+/// adapter, and submits a `CommandEntry` so `suprnova::console::dispatch_argv`
+/// can find it.
+///
+/// # Attributes
+///
+/// - `name = "db:seed"` (required) — invocation name on the CLI
+/// - `description = "..."` (optional) — help-line text
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use suprnova::{command, FrameworkError};
+///
+/// #[command(name = "db:seed", description = "Run all registered seeders")]
+/// async fn db_seed(_args: Vec<String>) -> Result<(), FrameworkError> {
+///     suprnova::seed::run_all().await
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn command(attr: TokenStream, input: TokenStream) -> TokenStream {
+    command::command_impl(attr, input)
 }
 
 /// Attribute macro for defining durable workflows

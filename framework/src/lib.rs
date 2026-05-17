@@ -216,6 +216,7 @@ pub use validator;
 pub use validator::Validate;
 
 // Re-export the proc-macros for compile-time component validation and type safety
+pub use suprnova_macros::command;
 pub use suprnova_macros::domain_error;
 pub use suprnova_macros::handler;
 pub use suprnova_macros::inertia_response;
