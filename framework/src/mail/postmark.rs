@@ -1,0 +1,125 @@
+//! Postmark HTTP transport. POSTs JSON to https://api.postmarkapp.com/email.
+
+use crate::error::FrameworkError;
+use crate::mail::address::Address;
+use crate::mail::http_provider::{err, shared_client};
+use crate::mail::transport::{MailTransport, OutgoingMessage};
+use async_trait::async_trait;
+use serde::Serialize;
+
+const DEFAULT_ENDPOINT: &str = "https://api.postmarkapp.com/email";
+
+pub struct PostmarkMailTransport {
+    token: String,
+    endpoint: String,
+}
+
+impl PostmarkMailTransport {
+    pub fn new(token: impl Into<String>) -> Self {
+        Self {
+            token: token.into(),
+            endpoint: DEFAULT_ENDPOINT.into(),
+        }
+    }
+
+    pub fn with_endpoint(token: impl Into<String>, endpoint: impl AsRef<str>) -> Self {
+        let endpoint = endpoint.as_ref().trim_end_matches('/');
+        let url = if endpoint.contains("/email") {
+            endpoint.to_string()
+        } else {
+            format!("{endpoint}/email")
+        };
+        Self {
+            token: token.into(),
+            endpoint: url,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct PostmarkBody<'a> {
+    #[serde(rename = "From")]
+    from: String,
+    #[serde(rename = "To")]
+    to: String,
+    #[serde(rename = "Cc", skip_serializing_if = "String::is_empty")]
+    cc: String,
+    #[serde(rename = "Bcc", skip_serializing_if = "String::is_empty")]
+    bcc: String,
+    #[serde(rename = "ReplyTo", skip_serializing_if = "String::is_empty")]
+    reply_to: String,
+    #[serde(rename = "Subject")]
+    subject: &'a str,
+    #[serde(rename = "HtmlBody", skip_serializing_if = "Option::is_none")]
+    html_body: Option<&'a str>,
+    #[serde(rename = "TextBody", skip_serializing_if = "Option::is_none")]
+    text_body: Option<&'a str>,
+    #[serde(rename = "Attachments", skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<PostmarkAttachment<'a>>,
+}
+
+#[derive(Serialize)]
+struct PostmarkAttachment<'a> {
+    #[serde(rename = "Name")]
+    name: &'a str,
+    #[serde(rename = "Content")]
+    content: String, // base64
+    #[serde(rename = "ContentType")]
+    content_type: &'a str,
+}
+
+fn join(addrs: &[Address]) -> String {
+    addrs
+        .iter()
+        .map(|a| a.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[async_trait]
+impl MailTransport for PostmarkMailTransport {
+    async fn send(&self, msg: &OutgoingMessage) -> Result<(), FrameworkError> {
+        use base64::Engine;
+        let attachments: Vec<PostmarkAttachment> = msg
+            .attachments
+            .iter()
+            .map(|a| PostmarkAttachment {
+                name: &a.filename,
+                content: base64::engine::general_purpose::STANDARD.encode(&a.content),
+                content_type: &a.content_type,
+            })
+            .collect();
+
+        let body = PostmarkBody {
+            from: msg.from.to_string(),
+            to: join(&msg.to),
+            cc: join(&msg.cc),
+            bcc: join(&msg.bcc),
+            reply_to: join(&msg.reply_to),
+            subject: &msg.subject,
+            html_body: msg.html.as_deref(),
+            text_body: msg.text.as_deref(),
+            attachments,
+        };
+
+        let resp = shared_client()
+            .post(&self.endpoint)
+            .header("x-postmark-server-token", &self.token)
+            .header("accept", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| FrameworkError::internal(format!("Postmark transport: {e}")))?;
+
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(err("Postmark", status, body));
+        }
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        "postmark"
+    }
+}

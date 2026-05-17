@@ -1,9 +1,11 @@
 //! Mail subsystem.
 
 pub mod address;
+pub(crate) mod http_provider;
 pub mod log;
 pub mod mailable;
 pub mod memory;
+pub mod postmark;
 pub mod smtp;
 pub mod transport;
 
