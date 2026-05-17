@@ -5,6 +5,7 @@ pub mod driver;
 pub mod envelope;
 pub mod job;
 pub mod memory;
+pub mod redis;
 pub mod retry;
 pub mod testing;
 pub mod worker;
@@ -14,6 +15,7 @@ pub use driver::{QueueDriver, Reservation, ReservationToken};
 pub use envelope::{Envelope, EnvelopeError, CURRENT_SCHEMA_VERSION};
 pub use job::{BackoffSchedule, Job};
 pub use memory::MemoryQueueDriver;
+pub use redis::RedisQueueDriver;
 
 use crate::error::FrameworkError;
 use chrono::Utc;
