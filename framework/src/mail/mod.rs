@@ -6,6 +6,7 @@ pub mod log;
 pub mod mailable;
 pub mod memory;
 pub mod postmark;
+pub mod ses;
 pub mod smtp;
 pub mod transport;
 

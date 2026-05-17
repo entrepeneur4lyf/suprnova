@@ -122,6 +122,7 @@ lettre = { version = "0.11.22", default-features = false, features = ["smtp-tran
 tera = "1"
 aws-sigv4 = "1"
 suprnova-web-push = { version = "0.1.0", path = "../crates/suprnova-web-push" }
+aws-credential-types = "1.2.14"
 
 [features]
 default = ["testing"]
