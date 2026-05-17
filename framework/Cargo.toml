@@ -118,6 +118,9 @@ getrandom = "0.4.2"
 tokio-util = { version = "0.7.18", features = ["time"] }
 sea-streamer = { version = "0.5.0", features = ["redis", "runtime-tokio"] }
 sea-streamer-redis = { version = "0.5.2", features = ["runtime-tokio"] }
+lettre = { version = "0.11.22", default-features = false, features = ["smtp-transport", "pool", "rustls-tls", "hostname", "builder", "tokio1", "tokio1-rustls"] }
+tera = "1"
+aws-sigv4 = "1"
 
 [features]
 default = ["testing"]
@@ -142,3 +145,4 @@ otel = [
 prometheus-client = "0.24"
 serial_test = "3.4.0"
 tokio = { version = "1", features = ["test-util"] }
+wiremock = "0.6"
