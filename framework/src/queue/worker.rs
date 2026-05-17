@@ -5,6 +5,22 @@
 //! Re-registering the same name is allowed (last writer wins) — useful
 //! for tests; deterministic in production because each Job has exactly
 //! one registration site.
+//!
+//! # At-least-once delivery and job idempotency
+//!
+//! Redis-backed queue drivers cannot make `nack` atomic — the
+//! re-publish (XADD) and ack (XACK) are two separate commands. A
+//! crash between them re-delivers the message. The in-memory driver
+//! and database driver are exactly-once-per-attempt, but the worker
+//! loop itself doesn't distinguish drivers, so **every job handler
+//! in a production deployment must be idempotent**.
+//!
+//! For typical command-style jobs, wrap the handler body in
+//! [`Idempotency::once`](crate::idempotency::Idempotency::once) or
+//! [`Idempotency::commit_on_success`](crate::idempotency::Idempotency::commit_on_success)
+//! keyed by a stable per-operation key (e.g. the entity id or a
+//! caller-supplied request id). Without this, a re-delivered job may
+//! execute the same side effect twice.
 
 use crate::error::FrameworkError;
 use crate::queue::driver::QueueDriver;
