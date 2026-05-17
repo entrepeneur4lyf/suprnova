@@ -152,7 +152,7 @@ pub use web_push::{
     ContentEncoding, PushResponse, SubscriptionInfo, VapidClaims, VapidKey, VapidSigner,
     WebPushClient, WebPushError,
 };
-pub use mail::{Address, Attachment, Mailable};
+pub use mail::{Address, Attachment, Mail, Mailable};
 
 // Re-export async_trait for middleware implementations
 pub use async_trait::async_trait;
