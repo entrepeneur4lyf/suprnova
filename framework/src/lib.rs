@@ -33,6 +33,7 @@ pub mod workflow;
 pub mod server;
 pub mod session;
 pub mod testing;
+pub mod rate_limit;
 
 extern crate self as suprnova;
 
@@ -143,6 +144,7 @@ pub use workflow::{
     start_named, StepStatus, WorkflowConfig, WorkflowContext, WorkflowHandle, WorkflowStatus,
     WorkflowWorker,
 };
+pub use rate_limit::{RateLimiter, SlidingWindowConfig};
 pub use server::{handle_request, Server};
 
 // Re-export async_trait for middleware implementations
