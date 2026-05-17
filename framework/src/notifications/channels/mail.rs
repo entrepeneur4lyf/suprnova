@@ -42,6 +42,11 @@ pub type MailFactory =
 /// the seam where consumers translate a notification type into a
 /// concrete email body — typically by matching on the notification name
 /// and rendering a Tera template per type.
+///
+/// In v1, CC, BCC, Reply-To, and Attachments on the outgoing message are
+/// unconditionally empty. Extend `MailRendering` if a future notification
+/// needs those fields — Mailable-driven transactional email already
+/// supports them via `MailBuilder`.
 pub struct MailChannel {
     factory: Box<MailFactory>,
 }

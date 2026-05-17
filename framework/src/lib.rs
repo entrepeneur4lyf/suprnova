@@ -155,6 +155,8 @@ pub use web_push::{
 };
 pub use mail::{Address, Attachment, Mail, Mailable};
 pub use notifications::{Channel, DynNotification, Notifiable, Notification, NotificationDispatcher};
+pub use notifications::channels::database::DatabaseChannel;
+pub use notifications::channels::mail::{MailChannel, MailFactory, MailRendering};
 
 // Re-export async_trait for middleware implementations
 pub use async_trait::async_trait;

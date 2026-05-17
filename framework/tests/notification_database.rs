@@ -45,6 +45,10 @@ impl Notifiable for User {
 const NOTIFICATIONS_MIGRATION: &str =
     include_str!("../migrations/20260516_create_notifications_table.sql");
 
+// Naive — truncates at the first `--` in each line. Safe ONLY because the
+// embedded migration has no quoted string literals containing "--". Don't
+// reuse this for arbitrary SQL; reach for a real tokenizer if the schema
+// ever grows a literal that contains the comment marker.
 fn strip_sql_line_comments(src: &str) -> String {
     src.lines()
         .map(|line| match line.find("--") {
