@@ -27,6 +27,8 @@
 - [core/sessions](core/sessions.md)
 - [core/csrf](core/csrf.md)
 - [core/cache](core/cache.md)
+- [core/mail](core/mail.md)
+- [core/notifications](core/notifications.md)
 - [core/scheduling](core/scheduling.md)
 - [core/testing](core/testing.md)
 
