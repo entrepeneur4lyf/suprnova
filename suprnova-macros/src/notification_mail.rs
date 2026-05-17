@@ -282,6 +282,12 @@ pub fn derive_notification_mailable_impl(input: TokenStream) -> TokenStream {
                         )
                     })?;
 
+                // `..Default::default()` for forward-compat: every existing
+                // `MailRendering` field is set explicitly above, and any
+                // future field (e.g. `headers`, `tags`) Defaults rather
+                // than wedging this generated code into requiring an
+                // explicit value. `MailRendering` already derives Default
+                // — that's the contract this lean on.
                 ::std::result::Result::Ok(
                     ::suprnova::notifications::channels::mail::MailRendering {
                         subject: __subject,
@@ -291,7 +297,7 @@ pub fn derive_notification_mailable_impl(input: TokenStream) -> TokenStream {
                         cc: #cc_init,
                         bcc: #bcc_init,
                         reply_to: #reply_to_init,
-                        attachments: ::std::vec::Vec::new(),
+                        ..::std::default::Default::default()
                     }
                 )
             }

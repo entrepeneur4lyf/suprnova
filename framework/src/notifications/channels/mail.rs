@@ -48,6 +48,14 @@ use std::sync::RwLock;
 ///     ..Default::default()
 /// }
 /// ```
+///
+/// # Forward-compat contract
+///
+/// `#[derive(NotificationMailable)]` populates every field listed below
+/// explicitly *plus* a trailing `..Default::default()`. **Adding a new
+/// field here must keep `MailRendering: Default`** so the derive's
+/// generated code stays valid without a macro change. Reorder freely;
+/// breaking the `Default` impl is the only thing to avoid.
 #[derive(Default)]
 pub struct MailRendering {
     pub subject: String,
