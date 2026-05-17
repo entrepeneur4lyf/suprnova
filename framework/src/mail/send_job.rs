@@ -8,7 +8,7 @@
 
 use crate::error::FrameworkError;
 use crate::mail::mailable_registry;
-use crate::mail::{Address, Mail};
+use crate::mail::{dispatch_with_telemetry, Address, Mail};
 use crate::queue::Job;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,6 @@ impl Job for SendMailJob {
             self.from_override,
         )?;
         let transport = Mail::current_transport()?;
-        transport.send(&msg).await
+        dispatch_with_telemetry(transport.as_ref(), &msg).await
     }
 }

@@ -19,7 +19,7 @@ pub mod transport;
 pub use address::{Address, Attachment};
 pub use mailable::{register_mailable_factory, Mailable};
 pub use send_job::SendMailJob;
-pub use transport::{MailTransport, OutgoingMessage};
+pub use transport::{dispatch_with_telemetry, MailTransport, OutgoingMessage};
 
 use crate::error::FrameworkError;
 use crate::mail::memory::InMemoryMailTransport;
@@ -123,7 +123,7 @@ impl MailBuilder {
             attachments: mailable.attachments(),
         };
 
-        transport.send(&msg).await
+        dispatch_with_telemetry(transport.as_ref(), &msg).await
     }
 
     /// Build a [`SendMailJob`] and push it onto the queue. The mailable's

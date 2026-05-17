@@ -25,7 +25,7 @@
 //! JSON.
 
 use crate::error::FrameworkError;
-use crate::mail::transport::OutgoingMessage;
+use crate::mail::transport::{dispatch_with_telemetry, OutgoingMessage};
 use crate::mail::{Address, Attachment, Mail};
 use crate::notifications::{Channel, DynNotification, Notification};
 use async_trait::async_trait;
@@ -187,6 +187,6 @@ impl Channel for MailChannel {
         };
 
         let transport = Mail::current_transport()?;
-        transport.send(&msg).await
+        dispatch_with_telemetry(transport.as_ref(), &msg).await
     }
 }

@@ -138,6 +138,14 @@ impl NotificationDispatcher {
     /// are not rolled back. For at-least-once semantics across multiple
     /// channels, dispatch each side via the queue (idempotency keys at the
     /// envelope layer protect against double-sends on retry).
+    ///
+    /// Telemetry: wraps the fan-out in a `notification.dispatch` info
+    /// span. The span carries the notification name + declared channel
+    /// count; per-channel sends emit their own events inside the span
+    /// (`mail.send` for the mail channel; database/webpush channels do
+    /// not currently span). On completion the span records a
+    /// `duration_ms` event so an observability backend can measure
+    /// fan-out latency end-to-end.
     pub async fn notify<N, R>(
         &self,
         recipient: &R,
@@ -147,21 +155,42 @@ impl NotificationDispatcher {
         N: Notification,
         R: Notifiable + ?Sized,
     {
-        for channel_name in notification.channels() {
-            let Some(channel) = self.channels.get(channel_name) else {
-                tracing::warn!(
-                    channel = %channel_name,
-                    notification = %N::notification_name(),
-                    "no channel registered; skipping"
-                );
-                continue;
-            };
-            let Some(route) = recipient.route_for(channel_name) else {
-                continue;
-            };
-            channel.deliver(&route, notification).await?;
+        use tracing::Instrument;
+        let channel_names = notification.channels();
+        let span = tracing::info_span!(
+            "notification.dispatch",
+            notification = N::notification_name(),
+            channel_count = channel_names.len(),
+        );
+        async move {
+            let start = std::time::Instant::now();
+            let mut result: Result<(), FrameworkError> = Ok(());
+            for channel_name in channel_names {
+                let Some(channel) = self.channels.get(channel_name) else {
+                    tracing::warn!(
+                        channel = %channel_name,
+                        notification = %N::notification_name(),
+                        "no channel registered; skipping"
+                    );
+                    continue;
+                };
+                let Some(route) = recipient.route_for(channel_name) else {
+                    continue;
+                };
+                if let Err(e) = channel.deliver(&route, notification).await {
+                    result = Err(e);
+                    break;
+                }
+            }
+            let duration_ms = start.elapsed().as_millis() as u64;
+            match &result {
+                Ok(()) => tracing::info!(duration_ms, "notification dispatched"),
+                Err(e) => tracing::warn!(duration_ms, error = %e, "notification dispatch failed"),
+            }
+            result
         }
-        Ok(())
+        .instrument(span)
+        .await
     }
 
     /// Look up a registered channel by name. Used by
