@@ -5,6 +5,7 @@ members = [
     "app",
     "suprnova-cli",
     "suprnova-macros",
+    "crates/suprnova-web-push",
 ]
 
 [workspace.package]

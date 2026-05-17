@@ -1,0 +1,21 @@
+[package]
+name = "suprnova-web-push"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Web Push (RFC 8030 + RFC 8291 + RFC 8292) for the Suprnova framework"
+
+[dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+ece = "2.2"
+jwt-simple = { version = "0.12", default-features = false, features = ["pure-rust"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+thiserror = "2"
+tracing = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+wiremock = "0.6"
