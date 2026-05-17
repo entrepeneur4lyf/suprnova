@@ -56,4 +56,46 @@ impl Idempotency {
             None => Ok(Idempotent::Duplicate),
         }
     }
+
+    /// Like [`once`](Self::once), but releases the dedupe lock if `body` returns `Err`,
+    /// allowing the operation to be retried within the TTL window.
+    ///
+    /// Use this when:
+    /// - The body has retryable failure modes (transient network error,
+    ///   rate limit, etc.)
+    /// - You want at-least-once semantics for success and at-most-once
+    ///   only after success
+    ///
+    /// Use [`once`](Self::once) instead when:
+    /// - The body's side effects must not repeat regardless of outcome
+    ///   (e.g., "I sent the email; even if I errored after sending,
+    ///   don't try again")
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`FrameworkError`] from the cache layer or from `body`.
+    pub async fn commit_on_success<F, Fut, T>(
+        key: &str,
+        ttl: Duration,
+        body: F,
+    ) -> Result<Idempotent<T>, FrameworkError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, FrameworkError>>,
+    {
+        let guard = Cache::lock(&format!("idem:{key}"), ttl).await?;
+        match guard {
+            Some(g) => {
+                match body().await {
+                    Ok(v) => Ok(Idempotent::Fresh(v)),
+                    Err(e) => {
+                        // Release the lock so a retry within the window can re-enter.
+                        let _ = g.release().await;
+                        Err(e)
+                    }
+                }
+            }
+            None => Ok(Idempotent::Duplicate),
+        }
+    }
 }
