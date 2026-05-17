@@ -29,6 +29,7 @@ pub mod schedule;
 pub mod sse;
 pub mod telemetry;
 pub mod validation;
+pub mod web_push;
 pub mod workflow;
 pub mod server;
 pub mod session;
@@ -146,6 +147,10 @@ pub use workflow::{
 };
 pub use rate_limit::{RateLimitMiddleware, RateLimiter, SlidingWindowConfig};
 pub use server::{handle_request, Server};
+pub use web_push::{
+    ContentEncoding, PushResponse, SubscriptionInfo, VapidClaims, VapidKey, VapidSigner,
+    WebPushClient, WebPushError,
+};
 
 // Re-export async_trait for middleware implementations
 pub use async_trait::async_trait;
