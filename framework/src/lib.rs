@@ -37,6 +37,7 @@ pub mod testing;
 pub mod rate_limit;
 pub mod mail;
 pub mod notifications;
+pub mod prelude;
 
 extern crate self as suprnova;
 
