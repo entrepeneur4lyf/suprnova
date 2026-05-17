@@ -23,6 +23,7 @@
 pub mod env;
 pub mod providers;
 pub mod repository;
+pub mod typed;
 
 pub use env::{env, env_optional, env_required, load_dotenv, Environment};
 pub use providers::{AppConfig, AppConfigBuilder, ServerConfig, ServerConfigBuilder};
@@ -135,5 +136,37 @@ impl Config {
     /// Check if debug mode is enabled
     pub fn is_debug() -> bool {
         Config::get::<AppConfig>().map(|c| c.debug).unwrap_or(true)
+    }
+
+    /// Deserialize the current process's environment into a typed
+    /// config struct via [`envy`]. Field names map to env vars
+    /// UPPER_SNAKE — `pub mail_host: String` reads `MAIL_HOST`. Use
+    /// `#[serde(default = "...")]` for fallbacks and
+    /// `#[serde(rename = "...")]` to override the env-var name.
+    ///
+    /// ```ignore
+    /// #[derive(serde::Deserialize)]
+    /// struct MailConfig {
+    ///     pub mail_driver: String,
+    ///     pub mail_host: String,
+    ///     #[serde(default = "default_port")]
+    ///     pub mail_port: u16,
+    /// }
+    /// fn default_port() -> u16 { 587 }
+    ///
+    /// let cfg: MailConfig = suprnova::Config::resolve()?;
+    /// ```
+    pub fn resolve<T: serde::de::DeserializeOwned>() -> Result<T, crate::error::FrameworkError> {
+        typed::resolve()
+    }
+
+    /// Like [`Config::resolve`] but only reads env vars starting with
+    /// `prefix`. The prefix is stripped before mapping to struct
+    /// fields: `Config::resolve_prefixed::<MailCfg>("MAIL_")` + a
+    /// `pub host: String` field reads `MAIL_HOST`.
+    pub fn resolve_prefixed<T: serde::de::DeserializeOwned>(
+        prefix: &str,
+    ) -> Result<T, crate::error::FrameworkError> {
+        typed::resolve_prefixed(prefix)
     }
 }
