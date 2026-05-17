@@ -23,6 +23,8 @@ use crate::error::FrameworkError;
 use std::future::Future;
 use std::pin::Pin;
 
+pub mod builtins;
+
 /// fn-pointer-compatible boxed-future returned by every command handler.
 /// The argument vector contains the trailing argv after `argv[1]` (the
 /// command name) — i.e. positional args that the command should parse.
