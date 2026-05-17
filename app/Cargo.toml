@@ -7,6 +7,14 @@ edition.workspace = true
 name = "app"
 path = "cmd/main.rs"
 
+# Per-project console binary — runtime command dispatch (`db:seed`,
+# user-defined commands via `#[command]`, etc.) Same crate as the
+# server, different `fn main` because console commands exit when
+# their handler returns whereas the server loops forever.
+[[bin]]
+name = "console"
+path = "src/bin/console.rs"
+
 [dependencies]
 suprnova = { path = "../framework" }
 tokio = { version = "1", features = ["full"] }
