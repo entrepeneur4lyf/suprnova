@@ -7,6 +7,21 @@
 //! message to this consumer; the message stays in the PEL (pending-entry list)
 //! until `ack` is called.
 //!
+//! ## Delivery semantics
+//!
+//! This driver provides **at-least-once delivery**. After `ack` returns
+//! `Ok(())`, the actual `XACK` may not yet be committed to Redis
+//! (sea-streamer batches commits under `AutoCommit::Disabled`); if the
+//! process crashes before the next flush, the message re-enters the
+//! pending entries list and is re-delivered. Idempotency belongs at the
+//! job level — see `framework/src/idempotency/mod.rs`.
+//!
+//! Similarly, `nack` performs two non-atomic Redis commands (XADD +
+//! XACK). If XACK fails after XADD succeeds, the original message stays
+//! in the PEL and is re-delivered via XAUTOCLAIM with the pre-nack
+//! `attempts` value, while the freshly-published copy carries
+//! `attempts + 1`. Job handlers MUST be idempotent.
+//!
 //! ## Visibility timeout
 //!
 //! `auto_claim_idle` is configured once at construction time (via the
@@ -193,6 +208,10 @@ impl QueueDriver for RedisQueueDriver {
     /// Acknowledge a previously popped message, removing it from the PEL.
     ///
     /// Idempotent: unknown / already-acked tokens are silently ignored.
+    ///
+    /// At-least-once: the XACK is queued by sea-streamer and flushed on the
+    /// next consumer interaction. A crash between `ack().await?` and the
+    /// next flush re-delivers the message.
     async fn ack(&self, token: &ReservationToken) -> Result<(), FrameworkError> {
         let entry = {
             let mut g = self.pending.lock().expect("redis pending map poisoned");
@@ -226,6 +245,10 @@ impl QueueDriver for RedisQueueDriver {
     /// 3. Set `envelope.available_at = now + requeue_delay`.
     /// 4. Re-publish the modified envelope via `XADD`.
     /// 5. Acknowledge the original message via `XACK` (removes it from the PEL).
+    ///
+    /// At-least-once: the re-publish (XADD) and ack (XACK) are non-atomic.
+    /// A crash between XADD success and XACK success causes one extra
+    /// delivery with the pre-nack attempts counter.
     async fn nack(
         &self,
         token: &ReservationToken,
