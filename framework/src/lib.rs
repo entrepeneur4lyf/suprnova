@@ -35,6 +35,7 @@ pub mod server;
 pub mod session;
 pub mod testing;
 pub mod rate_limit;
+pub mod mail;
 
 extern crate self as suprnova;
 
@@ -151,6 +152,7 @@ pub use web_push::{
     ContentEncoding, PushResponse, SubscriptionInfo, VapidClaims, VapidKey, VapidSigner,
     WebPushClient, WebPushError,
 };
+pub use mail::{Address, Attachment, Mailable};
 
 // Re-export async_trait for middleware implementations
 pub use async_trait::async_trait;
