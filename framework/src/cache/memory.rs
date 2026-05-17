@@ -219,4 +219,52 @@ impl CacheStore for InMemoryCache {
         }
         Ok(())
     }
+
+    async fn acquire_lock(&self, key: &str, ttl: Duration) -> Result<Option<String>, FrameworkError> {
+        let pkey = self.prefixed_key(&format!("lock:{key}"));
+        let mut s = self.store.write().map_err(|_| {
+            FrameworkError::internal("Cache lock poisoned")
+        })?;
+        let still_valid = s.get(&pkey).map(|e| !e.is_expired()).unwrap_or(false);
+        if still_valid {
+            return Ok(None);
+        }
+        let token = uuid::Uuid::new_v4().to_string();
+        s.insert(
+            pkey,
+            CacheEntry {
+                value: token.clone(),
+                expires_at: Some(Instant::now() + ttl),
+            },
+        );
+        Ok(Some(token))
+    }
+
+    async fn release_lock(&self, key: &str, token: &str) -> Result<bool, FrameworkError> {
+        let pkey = self.prefixed_key(&format!("lock:{key}"));
+        let mut s = self.store.write().map_err(|_| {
+            FrameworkError::internal("Cache lock poisoned")
+        })?;
+        match s.get(&pkey) {
+            Some(e) if !e.is_expired() && e.value == token => {
+                s.remove(&pkey);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    async fn refresh_lock(&self, key: &str, token: &str, ttl: Duration) -> Result<bool, FrameworkError> {
+        let pkey = self.prefixed_key(&format!("lock:{key}"));
+        let mut s = self.store.write().map_err(|_| {
+            FrameworkError::internal("Cache lock poisoned")
+        })?;
+        match s.get_mut(&pkey) {
+            Some(e) if !e.is_expired() && e.value == token => {
+                e.expires_at = Some(Instant::now() + ttl);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
 }

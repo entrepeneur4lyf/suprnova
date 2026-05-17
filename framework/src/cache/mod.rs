@@ -318,4 +318,63 @@ impl Cache {
         let store = Self::store()?;
         store.flush_tags(tags).await
     }
+
+    /// Try to acquire a distributed lock for `key` with the given TTL.
+    ///
+    /// On success returns `Ok(Some(guard))`. The guard holds the ownership
+    /// token and exposes `.release()` and `.refresh()`. Call `.release()`
+    /// explicitly — there is intentionally no `Drop` auto-release because
+    /// a Redis lock must be acknowledged across process boundaries.
+    ///
+    /// On contention returns `Ok(None)`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// if let Some(guard) = Cache::lock("job:42", Duration::from_secs(30)).await? {
+    ///     do_exclusive_work().await;
+    ///     guard.release().await?;
+    /// }
+    /// ```
+    pub async fn lock(key: &str, ttl: Duration) -> Result<Option<LockGuard>, FrameworkError> {
+        let store = Self::store()?;
+        match store.acquire_lock(key, ttl).await? {
+            Some(token) => Ok(Some(LockGuard {
+                key: key.into(),
+                token,
+                store,
+            })),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Guard returned by [`Cache::lock`].
+///
+/// Holds the ownership token for the acquired lock. Release explicitly via
+/// `.release()`. No `Drop` auto-release — cross-process Redis semantics
+/// require an explicit acknowledgement.
+pub struct LockGuard {
+    key: String,
+    token: String,
+    store: Arc<dyn CacheStore>,
+}
+
+impl LockGuard {
+    /// The ownership token for this lock.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// Release the lock. Returns `true` if the lock was successfully released,
+    /// `false` if the token no longer matches (already expired or stolen).
+    pub async fn release(self) -> Result<bool, FrameworkError> {
+        self.store.release_lock(&self.key, &self.token).await
+    }
+
+    /// Extend the lock's TTL. Returns `true` if refreshed, `false` if the
+    /// token no longer matches.
+    pub async fn refresh(&self, ttl: Duration) -> Result<bool, FrameworkError> {
+        self.store.refresh_lock(&self.key, &self.token, ttl).await
+    }
 }

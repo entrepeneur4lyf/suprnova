@@ -57,4 +57,18 @@ pub trait CacheStore: Send + Sync {
     /// keys with the same name are unaffected unless they were
     /// subsequently overwritten with a tagged write.
     async fn flush_tags(&self, tags: &[&str]) -> Result<(), FrameworkError>;
+
+    /// Try to acquire a distributed lock for `key` with a TTL. On success,
+    /// returns `Ok(Some(token))` where `token` is the ownership token needed
+    /// for `release_lock` / `refresh_lock`. On contention, returns `Ok(None)`.
+    async fn acquire_lock(&self, key: &str, ttl: Duration) -> Result<Option<String>, FrameworkError>;
+
+    /// Release a lock only if the supplied token matches the stored owner.
+    /// Returns `true` if the lock was released; `false` if it was held by
+    /// someone else or had already expired.
+    async fn release_lock(&self, key: &str, token: &str) -> Result<bool, FrameworkError>;
+
+    /// Extend the TTL of a lock only if the supplied token matches the stored
+    /// owner. Returns `true` if the TTL was extended; `false` otherwise.
+    async fn refresh_lock(&self, key: &str, token: &str, ttl: Duration) -> Result<bool, FrameworkError>;
 }

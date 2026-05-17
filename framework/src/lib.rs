@@ -40,7 +40,7 @@ pub use torii_integration::{
     init_torii, middleware::BearerTokenMiddleware, Session, SessionToken, ToriiConfig, User, UserId,
 };
 pub use authorization::{Gate, Policy};
-pub use cache::{Cache, CacheConfig, CacheStore, InMemoryCache, RedisCache};
+pub use cache::{Cache, CacheConfig, CacheStore, InMemoryCache, LockGuard, RedisCache};
 pub use config::{env, env_optional, env_required, AppConfig, Config, Environment, ServerConfig};
 pub use container::{App, Container};
 pub use context::{Context, ContextStore};

@@ -206,4 +206,57 @@ impl CacheStore for RedisCache {
         }
         Ok(())
     }
+
+    async fn acquire_lock(&self, key: &str, ttl: Duration) -> Result<Option<String>, FrameworkError> {
+        let mut conn = self.conn.clone();
+        let pkey = format!("{}lock:{}", self.prefix, key);
+        let token = uuid::Uuid::new_v4().to_string();
+
+        // SET key token NX EX ttl_secs — atomic: only sets if key does not exist
+        let res: Option<String> = redis::cmd("SET")
+            .arg(&pkey)
+            .arg(&token)
+            .arg("NX")
+            .arg("EX")
+            .arg(ttl.as_secs())
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("Lock acquire: {e}")))?;
+
+        // Redis returns "OK" string on success, nil (None) on contention
+        Ok(res.map(|_ok| token))
+    }
+
+    async fn release_lock(&self, key: &str, token: &str) -> Result<bool, FrameworkError> {
+        let mut conn = self.conn.clone();
+        let pkey = format!("{}lock:{}", self.prefix, key);
+        // Atomically: if GET key == token then DEL key, else return 0
+        let script = redis::Script::new(
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
+        );
+        let removed: i64 = script
+            .key(&pkey)
+            .arg(token)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("Lock release: {e}")))?;
+        Ok(removed == 1)
+    }
+
+    async fn refresh_lock(&self, key: &str, token: &str, ttl: Duration) -> Result<bool, FrameworkError> {
+        let mut conn = self.conn.clone();
+        let pkey = format!("{}lock:{}", self.prefix, key);
+        // Atomically: if GET key == token then EXPIRE key ttl, else return 0
+        let script = redis::Script::new(
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('EXPIRE', KEYS[1], ARGV[2]) else return 0 end",
+        );
+        let ok: i64 = script
+            .key(&pkey)
+            .arg(token)
+            .arg(ttl.as_secs() as i64)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("Lock refresh: {e}")))?;
+        Ok(ok == 1)
+    }
 }
