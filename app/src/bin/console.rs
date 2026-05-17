@@ -41,11 +41,11 @@ async fn main() -> ExitCode {
     app::bootstrap::register().await;
 
     let argv: Vec<String> = std::env::args().collect();
+    // dispatch_argv owns all user-facing stderr output (both clap
+    // parse errors and handler-returned errors). Main is pure
+    // Result → ExitCode translation.
     match suprnova::console::dispatch_argv(argv).await {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(_) => ExitCode::FAILURE,
     }
 }

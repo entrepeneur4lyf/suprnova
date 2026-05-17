@@ -107,10 +107,13 @@ async fn dispatch_returns_err_for_unknown_command() {
 
     let err = console::dispatch_argv(argv).await.unwrap_err();
 
-    let msg = format!("{err}");
+    // Clap printed the formatted error to stderr inside dispatch
+    // (with "did you mean ..." suggestions). The returned Err
+    // carries no message — main must not double-print.
     assert!(
-        msg.contains("unknown console command") && msg.contains("test:does-not-exist"),
-        "unknown-command error names the bad command: {msg}"
+        err.message().is_empty(),
+        "clap-reported errors carry empty message; got: {:?}",
+        err.message()
     );
 }
 
@@ -169,4 +172,18 @@ fn find_locates_registered_command_by_exact_name() {
 #[test]
 fn find_returns_none_for_unknown_command() {
     assert!(console::find("nonexistent:command").is_none());
+}
+
+#[tokio::test]
+async fn dispatch_handler_errors_preserve_message_for_programmatic_callers() {
+    // The handler returns Err(FrameworkError::internal("intentional test failure")).
+    // Dispatch prints to stderr (so users see it via the console binary)
+    // AND returns the same Err so programmatic callers can inspect.
+    let argv = vec!["console".to_string(), "test:fail".to_string()];
+    let err = console::dispatch_argv(argv).await.unwrap_err();
+    assert_eq!(
+        err.message(),
+        "intentional test failure",
+        "handler error message preserved on the returned Err"
+    );
 }

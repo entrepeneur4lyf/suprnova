@@ -113,7 +113,14 @@ pub async fn dispatch_argv(argv: Vec<String>) -> Result<(), FrameworkError> {
 
     if let Some((name, sub_matches)) = matches.subcommand() {
         if let Some(entry) = find(name) {
-            return (entry.handler)(sub_matches).await;
+            let result = (entry.handler)(sub_matches).await;
+            if let Err(ref e) = result {
+                let msg = e.message();
+                if !msg.is_empty() {
+                    eprintln!("error: {msg}");
+                }
+            }
+            return result;
         }
         // Unreachable: clap only routes to subcommands it knows
         // about, and we just built the root from `list()`.
@@ -135,37 +142,19 @@ pub async fn dispatch_argv(argv: Vec<String>) -> Result<(), FrameworkError> {
 /// resolve to `Err(FrameworkError::internal(...))` so the binary's
 /// `main` returns the right exit code.
 fn handle_clap_error(err: clap::Error) -> Result<(), FrameworkError> {
-    use clap::error::{ContextKind, ErrorKind};
+    use clap::error::ErrorKind;
+    // Clap formats the error / help / version output and writes it
+    // to the right stream (stdout for help, stderr for errors). We
+    // never let `main` add a redundant second print — for clap-shaped
+    // failures the returned Err carries an empty message; the binary
+    // skips its own eprintln and just translates to a non-zero
+    // ExitCode.
+    let _ = err.print();
     match err.kind() {
         ErrorKind::DisplayHelp
         | ErrorKind::DisplayVersion
-        | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
-            // `print()` routes by kind automatically (help → stdout,
-            // errors → stderr).
-            let _ = err.print();
-            Ok(())
-        }
-        ErrorKind::InvalidSubcommand => {
-            // Pull the offending value out of clap's context so the
-            // returned FrameworkError names it — useful in tests and
-            // logs. Clap's `print()` already wrote a colored message
-            // to stderr for the user.
-            let _ = err.print();
-            let bad = err
-                .get(ContextKind::InvalidSubcommand)
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "<unknown>".to_string());
-            Err(FrameworkError::internal(format!(
-                "unknown console command: '{bad}'"
-            )))
-        }
-        _ => {
-            let _ = err.print();
-            Err(FrameworkError::internal(format!(
-                "console arg parse failed: {}",
-                err.kind()
-            )))
-        }
+        | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => Ok(()),
+        _ => Err(FrameworkError::internal(String::new())),
     }
 }
 
