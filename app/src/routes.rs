@@ -1,4 +1,9 @@
-use suprnova::{delete, get, group, post, routes, AuthMiddleware as SessionAuthMiddleware};
+use std::sync::Arc;
+use std::time::Duration;
+use suprnova::{
+    container::App, delete, get, group, post, rate_limit::memory::InMemoryRateLimiter, routes,
+    AuthMiddleware as SessionAuthMiddleware, RateLimitMiddleware, RateLimiter, SlidingWindowConfig,
+};
 
 use crate::controllers;
 use crate::middleware::AuthMiddleware;
@@ -66,4 +71,36 @@ routes! {
         get!("/{id}", controllers::posts::show).name("api.posts.show"),
         post!("/", controllers::posts::store).name("api.posts.store"),
     }).middleware(SessionAuthMiddleware::new()),
+
+    // Phase 5A dogfood — rate-limited ping endpoint.
+    // 5 requests per 60-second window, keyed by X-Forwarded-For header
+    // (falls back to "anon"). The in-memory limiter is bootstrapped in
+    // bootstrap::register() so it is available here at route-build time.
+    group!("/api", {
+        post!("/ping", controllers::ping::pong).name("api.ping"),
+    }).middleware({
+        // Use the container binding if bootstrap has already wired it
+        // (production path); fall back to a fresh in-memory limiter so
+        // tests that assemble the router by hand without running
+        // bootstrap::register() keep working.
+        let limiter: Arc<dyn RateLimiter> = App::resolve_make::<dyn RateLimiter>()
+            .unwrap_or_else(|_| Arc::new(InMemoryRateLimiter::new()));
+        RateLimitMiddleware::new(
+            limiter,
+            SlidingWindowConfig {
+                max_requests: 5,
+                window: Duration::from_secs(60),
+            },
+            |req| {
+                req.header("x-forwarded-for")
+                    .map(|v| {
+                        format!(
+                            "ip:{}",
+                            v.split(',').next().unwrap_or("anon").trim()
+                        )
+                    })
+                    .unwrap_or_else(|| "ip:anon".into())
+            },
+        )
+    }),
 }

@@ -31,6 +31,7 @@ use suprnova::{
     InertiaRequestExt, InertiaSharedData, InertiaVersionMiddleware, Prop, S3Config, SessionConfig,
     SessionMiddleware, Storage, UserProvider, DB,
 };
+use suprnova::queue::worker::register_job;
 use tokio::sync::broadcast;
 
 use crate::events::UserRegistered;
@@ -127,6 +128,15 @@ pub async fn register() {
     // so wiring it here is what makes auth-aware controllers (e.g. the
     // avatar upload endpoint) functional in dev/prod.
     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
+
+    // Bootstrap rate-limit driver so App::resolve_make::<dyn RateLimiter>()
+    // succeeds when routes::register() runs immediately after bootstrap.
+    // Server::run also calls bootstrap_from_env() later — that call is
+    // idempotent (guarded by has_binding) so there is no double-init.
+    suprnova::rate_limit::bootstrap_default().await;
+
+    // Register queue jobs so the worker can dispatch them by name.
+    register_job::<crate::jobs::welcome_log::WelcomeLog>();
 }
 
 /// Register the application's storage disks.

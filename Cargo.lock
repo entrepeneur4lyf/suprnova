@@ -157,6 +157,7 @@ dependencies = [
  "sea-orm-migration",
  "serde",
  "serde_json",
+ "serial_test",
  "suprnova",
  "tempfile",
  "tokio",

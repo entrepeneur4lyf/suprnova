@@ -3,6 +3,7 @@ pub mod bootstrap;
 pub mod config;
 pub mod controllers;
 pub mod events;
+pub mod jobs;
 pub mod listeners;
 pub mod middleware;
 pub mod migrations;

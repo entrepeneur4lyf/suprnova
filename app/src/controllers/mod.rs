@@ -3,6 +3,7 @@ pub mod avatar_upload;
 pub mod config_example;
 pub mod home;
 pub mod paginated_users;
+pub mod ping;
 pub mod posts;
 pub mod sse_example;
 pub mod todo;
