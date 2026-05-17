@@ -172,6 +172,10 @@ impl Server {
         crate::queue::bootstrap_from_env().await?;
         crate::rate_limit::bootstrap_from_env().await?;
 
+        // Bootstrap the mail transport from MAIL_DRIVER. Defaults to the
+        // `log` driver when the env var is unset.
+        crate::mail::boot::bootstrap_from_env().await?;
+
         let addr: SocketAddr = self.get_addr()?;
         let listener = TcpListener::bind(addr).await?;
 

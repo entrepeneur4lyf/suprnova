@@ -1,12 +1,14 @@
 //! Mail subsystem.
 
 pub mod address;
+pub mod boot;
 pub(crate) mod http_provider;
 pub mod log;
 pub mod mailable;
 pub mod mailgun;
 pub mod memory;
 pub mod postmark;
+pub mod resend;
 pub mod sendgrid;
 pub mod ses;
 pub mod smtp;
