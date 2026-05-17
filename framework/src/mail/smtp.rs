@@ -16,7 +16,7 @@ pub struct SmtpMailTransport {
 
 impl SmtpMailTransport {
     /// STARTTLS relay on the standard port (587). Use this for production.
-    pub async fn starttls(host: &str, user: &str, password: &str) -> Result<Self, FrameworkError> {
+    pub fn starttls(host: &str, user: &str, password: &str) -> Result<Self, FrameworkError> {
         let creds = Credentials::new(user.to_string(), password.to_string());
         let inner = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
             .map_err(|e| FrameworkError::internal(format!("smtp starttls: {e}")))?
@@ -26,7 +26,7 @@ impl SmtpMailTransport {
     }
 
     /// TLS-wrapped relay on port 465.
-    pub async fn tls(host: &str, user: &str, password: &str) -> Result<Self, FrameworkError> {
+    pub fn tls(host: &str, user: &str, password: &str) -> Result<Self, FrameworkError> {
         let creds = Credentials::new(user.to_string(), password.to_string());
         let inner = AsyncSmtpTransport::<Tokio1Executor>::relay(host)
             .map_err(|e| FrameworkError::internal(format!("smtp tls relay: {e}")))?
@@ -36,15 +36,11 @@ impl SmtpMailTransport {
     }
 
     /// Plain unencrypted SMTP (for local Mailpit/MailHog dev only).
-    pub async fn unencrypted(host: &str, port: u16) -> Result<Self, FrameworkError> {
+    pub fn unencrypted(host: &str, port: u16) -> Result<Self, FrameworkError> {
         let inner = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host)
             .port(port)
             .build();
         Ok(Self { inner })
-    }
-
-    pub fn into_inner(self) -> AsyncSmtpTransport<Tokio1Executor> {
-        self.inner
     }
 }
 

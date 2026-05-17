@@ -146,4 +146,5 @@ otel = [
 prometheus-client = "0.24"
 serial_test = "3.4.0"
 tokio = { version = "1", features = ["test-util"] }
+tracing-test = { version = "0.2.6", features = ["no-env-filter"] }
 wiremock = "0.6"

@@ -31,7 +31,7 @@ async fn smtp_transport_sends_through_live_server() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1025);
-    let transport = SmtpMailTransport::unencrypted(&host, port).await.unwrap();
+    let transport = SmtpMailTransport::unencrypted(&host, port).unwrap();
     Mail::set_transport(Arc::new(transport));
     Mail::to("recipient@example.org")
         .send(LiveHello { msg: "hello".into() })

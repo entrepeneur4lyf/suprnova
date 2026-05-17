@@ -64,12 +64,15 @@ impl MailBuilder {
             .or_else(|| mailable.from())
             .unwrap_or_else(|| Address::new("noreply@localhost"));
 
-        // render_html / render_text are defaulted on the Mailable trait
-        // (Task 7) and run Tera with the mailable's serialized fields as
-        // the context. They return Ok(None) when the mailable has no
-        // template source for that body type.
         let html = mailable.render_html()?;
         let text = mailable.render_text()?;
+
+        if html.is_none() && text.is_none() {
+            return Err(FrameworkError::internal(format!(
+                "mail: {} has no text or html body — define text_template_source or html_template_source on the Mailable",
+                M::mailable_name()
+            )));
+        }
 
         let msg = OutgoingMessage {
             from,
