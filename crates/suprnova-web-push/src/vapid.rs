@@ -76,9 +76,16 @@ impl VapidSigner {
         // Use standard claim helpers — avoids duplicate aud/sub/exp keys that
         // would occur if we embedded those fields in a custom claims struct
         // and also let jwt-simple set them via JWTClaims.
-        let claims = Claims::create(Duration::from_secs(ttl_secs as u64))
+        //
+        // Drop `nbf` (invalid_before): jwt-simple sets it to "now" by default.
+        // Push services with even a few seconds of negative clock skew reject
+        // the JWT before nbf passes. RFC 8292 requires only aud/sub/exp; iat
+        // is optional but commonly included for replay-window tracking.
+        // Final claim set: {iat, exp, sub, aud}.
+        let mut claims = Claims::create(Duration::from_secs(ttl_secs as u64))
             .with_audience(audience)
             .with_subject(subject);
+        claims.invalid_before = None;
         let jwt = self.key.inner.sign(claims)
             .map_err(|e| WebPushError::Vapid(format!("JWT sign: {e}")))?;
         Ok(jwt)

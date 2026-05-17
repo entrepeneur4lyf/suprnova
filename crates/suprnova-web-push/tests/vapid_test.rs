@@ -36,6 +36,42 @@ fn vapid_signer_claims_have_aud_sub_exp() {
     assert!(exp > now && exp <= now + 12 * 3600 + 5, "exp must be ~12h in the future");
 }
 
+#[test]
+fn vapid_signer_emits_exact_rfc8292_claim_set() {
+    // Lock the JWT claim set down to {iat, exp, sub, aud}. RFC 8292 §2
+    // requires aud/sub/exp; we include iat for replay-window tracking.
+    // We deliberately DROP `nbf` (jwt-simple defaults to it) because push
+    // services with negative clock skew reject the request before nbf
+    // passes — observed against some non-FCM endpoints.
+    //
+    // We also assert NO unexpected extras (e.g. jti, iss, nonce) so a
+    // future jwt-simple bump or signer refactor that re-introduces extras
+    // fails this test rather than silently shipping a wider claim set.
+    let key = VapidKey::generate();
+    let signer = VapidSigner::new(key);
+    let jwt = signer
+        .sign("https://example.org", "mailto:admin@example.org", 12 * 3600)
+        .unwrap();
+    let parts: Vec<&str> = jwt.split('.').collect();
+    let claims_bytes = base64_url_no_pad_decode(parts[1]).unwrap();
+    let claims: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&claims_bytes).unwrap();
+
+    let keys: std::collections::BTreeSet<&str> = claims.keys().map(String::as_str).collect();
+    let expected: std::collections::BTreeSet<&str> =
+        ["iat", "exp", "sub", "aud"].into_iter().collect();
+    assert_eq!(
+        keys, expected,
+        "claim set must be exactly {{iat, exp, sub, aud}} — extras risk clock-skew rejection on strict push services"
+    );
+
+    // nbf rejection is the regression we're guarding — explicit absence.
+    assert!(
+        !claims.contains_key("nbf"),
+        "nbf must be absent — push services with negative clock skew reject otherwise"
+    );
+}
+
 fn base64_url_no_pad_decode(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
     use base64::Engine;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s)
