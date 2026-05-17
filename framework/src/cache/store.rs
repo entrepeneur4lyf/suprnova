@@ -42,4 +42,19 @@ pub trait CacheStore: Send + Sync {
     ///
     /// Returns the new value after decrementing.
     async fn decrement(&self, key: &str, amount: i64) -> Result<i64, FrameworkError>;
+
+    /// Store a tagged value. The tag index is updated on every write —
+    /// flushing a tag deletes every key associated with that tag.
+    async fn tagged_put_raw(
+        &self,
+        tags: &[&str],
+        key: &str,
+        value: &str,
+        ttl: Option<Duration>,
+    ) -> Result<(), FrameworkError>;
+
+    /// Remove every key associated with any of the given tags. Untagged
+    /// keys with the same name are unaffected unless they were
+    /// subsequently overwritten with a tagged write.
+    async fn flush_tags(&self, tags: &[&str]) -> Result<(), FrameworkError>;
 }

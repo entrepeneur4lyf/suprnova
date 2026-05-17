@@ -4,7 +4,7 @@
 //! Supports TTL expiration.
 
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
@@ -40,6 +40,7 @@ impl CacheEntry {
 /// ```
 pub struct InMemoryCache {
     store: RwLock<HashMap<String, CacheEntry>>,
+    tag_index: RwLock<HashMap<String, HashSet<String>>>,
     prefix: String,
 }
 
@@ -48,6 +49,7 @@ impl InMemoryCache {
     pub fn new() -> Self {
         Self {
             store: RwLock::new(HashMap::new()),
+            tag_index: RwLock::new(HashMap::new()),
             prefix: "suprnova_cache:".to_string(),
         }
     }
@@ -56,6 +58,7 @@ impl InMemoryCache {
     pub fn with_prefix(prefix: impl Into<String>) -> Self {
         Self {
             store: RwLock::new(HashMap::new()),
+            tag_index: RwLock::new(HashMap::new()),
             prefix: prefix.into(),
         }
     }
@@ -164,5 +167,56 @@ impl CacheStore for InMemoryCache {
 
     async fn decrement(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
         self.increment(key, -amount).await
+    }
+
+    async fn tagged_put_raw(
+        &self,
+        tags: &[&str],
+        key: &str,
+        value: &str,
+        ttl: Option<Duration>,
+    ) -> Result<(), FrameworkError> {
+        let pkey = self.prefixed_key(key);
+        {
+            let mut s = self.store.write().map_err(|_| {
+                FrameworkError::internal("Cache lock poisoned")
+            })?;
+            s.insert(
+                pkey.clone(),
+                CacheEntry {
+                    value: value.into(),
+                    expires_at: ttl.map(|d| Instant::now() + d),
+                },
+            );
+        }
+        let mut idx = self.tag_index.write().map_err(|_| {
+            FrameworkError::internal("Tag index poisoned")
+        })?;
+        for t in tags {
+            idx.entry((*t).into()).or_default().insert(pkey.clone());
+        }
+        Ok(())
+    }
+
+    async fn flush_tags(&self, tags: &[&str]) -> Result<(), FrameworkError> {
+        let keys: Vec<String> = {
+            let mut idx = self.tag_index.write().map_err(|_| {
+                FrameworkError::internal("Tag index poisoned")
+            })?;
+            let mut out = Vec::new();
+            for t in tags {
+                if let Some(set) = idx.remove(*t) {
+                    out.extend(set);
+                }
+            }
+            out
+        };
+        let mut s = self.store.write().map_err(|_| {
+            FrameworkError::internal("Cache lock poisoned")
+        })?;
+        for k in keys {
+            s.remove(&k);
+        }
+        Ok(())
     }
 }

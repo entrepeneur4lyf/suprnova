@@ -282,4 +282,40 @@ impl Cache {
     {
         Self::remember(key, None, default).await
     }
+
+    /// Store a tagged value via the static facade.
+    ///
+    /// The value is serialized to JSON and stored under `key`. Every tag in
+    /// `tags` records this key so that a subsequent `Cache::flush_tags` call
+    /// removes it.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// Cache::tags_put(&["users"], "user:1", &user, Some(Duration::from_secs(3600))).await?;
+    /// ```
+    pub async fn tags_put<T: Serialize>(
+        tags: &[&str],
+        key: &str,
+        value: &T,
+        ttl: Option<Duration>,
+    ) -> Result<(), FrameworkError> {
+        let store = Self::store()?;
+        let json = serde_json::to_string(value).map_err(|e| {
+            FrameworkError::internal(format!("Cache serialize error: {e}"))
+        })?;
+        store.tagged_put_raw(tags, key, &json, ttl).await
+    }
+
+    /// Remove every key that was stored under any of the given tags.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// Cache::flush_tags(&["users", "active"]).await?;
+    /// ```
+    pub async fn flush_tags(tags: &[&str]) -> Result<(), FrameworkError> {
+        let store = Self::store()?;
+        store.flush_tags(tags).await
+    }
 }

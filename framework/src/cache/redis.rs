@@ -147,4 +147,63 @@ impl CacheStore for RedisCache {
 
         Ok(value)
     }
+
+    async fn tagged_put_raw(
+        &self,
+        tags: &[&str],
+        key: &str,
+        value: &str,
+        ttl: Option<Duration>,
+    ) -> Result<(), FrameworkError> {
+        let mut conn = self.conn.clone();
+        let pkey = self.prefixed_key(key);
+
+        let mut pipe = redis::pipe();
+        pipe.atomic();
+        if let Some(d) = ttl.or(self.default_ttl) {
+            pipe.cmd("SET")
+                .arg(&pkey)
+                .arg(value)
+                .arg("EX")
+                .arg(d.as_secs())
+                .ignore();
+        } else {
+            pipe.cmd("SET").arg(&pkey).arg(value).ignore();
+        }
+        for t in tags {
+            let tag_key = format!("{}tag:{}", self.prefix, t);
+            pipe.cmd("SADD").arg(&tag_key).arg(&pkey).ignore();
+        }
+        pipe.query_async::<()>(&mut conn)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("Cache tagged set: {e}")))?;
+        Ok(())
+    }
+
+    async fn flush_tags(&self, tags: &[&str]) -> Result<(), FrameworkError> {
+        let mut conn = self.conn.clone();
+        for t in tags {
+            let tag_key = format!("{}tag:{}", self.prefix, t);
+            let members: Vec<String> = redis::cmd("SMEMBERS")
+                .arg(&tag_key)
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| FrameworkError::internal(format!("Cache tag scan: {e}")))?;
+            if !members.is_empty() {
+                redis::cmd("DEL")
+                    .arg(members)
+                    .query_async::<()>(&mut conn)
+                    .await
+                    .map_err(|e| FrameworkError::internal(format!("Cache tag flush: {e}")))?;
+            }
+            redis::cmd("DEL")
+                .arg(&tag_key)
+                .query_async::<()>(&mut conn)
+                .await
+                .map_err(|e| {
+                    FrameworkError::internal(format!("Cache tag-index delete: {e}"))
+                })?;
+        }
+        Ok(())
+    }
 }
