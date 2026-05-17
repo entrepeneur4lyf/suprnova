@@ -113,7 +113,7 @@ url = "2"
 # single upload exceeds the in-memory spill threshold so the framework never
 # materialises an arbitrarily large body in RAM.
 tempfile = "3"
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form", "multipart"] }
 getrandom = "0.4.2"
 tokio-util = { version = "0.7.18", features = ["time"] }
 sea-streamer = { version = "0.5.0", features = ["redis", "runtime-tokio"] }

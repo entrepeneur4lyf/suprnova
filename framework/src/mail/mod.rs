@@ -4,6 +4,7 @@ pub mod address;
 pub(crate) mod http_provider;
 pub mod log;
 pub mod mailable;
+pub mod mailgun;
 pub mod memory;
 pub mod postmark;
 pub mod sendgrid;
