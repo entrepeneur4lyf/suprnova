@@ -42,3 +42,92 @@ pub trait RateLimiter: Send + Sync {
         config: &SlidingWindowConfig,
     ) -> Result<Option<Duration>, FrameworkError>;
 }
+
+// ============================================================================
+// Middleware integration
+// ============================================================================
+
+use crate::http::{HttpResponse, Response};
+use crate::Request;
+use std::sync::Arc;
+
+/// HTTP middleware that enforces a sliding-window rate limit.
+///
+/// The bucket key is determined by a caller-supplied closure, making it
+/// trivial to rate-limit per-route, per-IP, per-user, or any composite.
+///
+/// On rejection the middleware short-circuits with HTTP 429 and a
+/// `Retry-After` header (seconds until the oldest slot expires). On a
+/// backend error it fails-open — the request is passed through — to
+/// avoid taking down the API when Redis has a hiccup.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use std::sync::Arc;
+/// use std::time::Duration;
+/// use suprnova::rate_limit::{RateLimitMiddleware, SlidingWindowConfig};
+/// use suprnova::rate_limit::memory::InMemoryRateLimiter;
+///
+/// let limiter = Arc::new(InMemoryRateLimiter::new());
+/// let cfg = SlidingWindowConfig { max_requests: 100, window: Duration::from_secs(60) };
+/// let mw = RateLimitMiddleware::new(limiter, cfg, |req| {
+///     format!("route:{}", req.path())
+/// });
+/// ```
+pub struct RateLimitMiddleware<F>
+where
+    F: Fn(&Request) -> String + Send + Sync + 'static,
+{
+    limiter: Arc<dyn RateLimiter>,
+    config: SlidingWindowConfig,
+    key_fn: F,
+}
+
+impl<F> RateLimitMiddleware<F>
+where
+    F: Fn(&Request) -> String + Send + Sync + 'static,
+{
+    /// Create a new `RateLimitMiddleware`.
+    ///
+    /// * `limiter` — the rate-limiter backend (in-memory or Redis)
+    /// * `config`  — window duration and per-key request cap
+    /// * `key_fn`  — closure that maps each incoming request to a bucket key string
+    pub fn new(limiter: Arc<dyn RateLimiter>, config: SlidingWindowConfig, key_fn: F) -> Self {
+        Self {
+            limiter,
+            config,
+            key_fn,
+        }
+    }
+}
+
+#[async_trait]
+impl<F> crate::Middleware for RateLimitMiddleware<F>
+where
+    F: Fn(&Request) -> String + Send + Sync + 'static,
+{
+    async fn handle(&self, request: Request, next: crate::Next) -> Response {
+        let key = (self.key_fn)(&request);
+        match self.limiter.try_acquire(&key, &self.config).await {
+            Ok(true) => next(request).await,
+            Ok(false) => {
+                // Compute how long the caller must wait before trying again.
+                let secs = self
+                    .limiter
+                    .retry_after(&key, &self.config)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                Err(HttpResponse::text("429 Too Many Requests")
+                    .status(429)
+                    .header("retry-after", secs.to_string()))
+            }
+            // Fail-open: a backend error (e.g. Redis down) must not
+            // take down the API — pass the request through.
+            Err(_) => next(request).await,
+        }
+    }
+}

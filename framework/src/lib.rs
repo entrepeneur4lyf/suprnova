@@ -144,7 +144,7 @@ pub use workflow::{
     start_named, StepStatus, WorkflowConfig, WorkflowContext, WorkflowHandle, WorkflowStatus,
     WorkflowWorker,
 };
-pub use rate_limit::{RateLimiter, SlidingWindowConfig};
+pub use rate_limit::{RateLimitMiddleware, RateLimiter, SlidingWindowConfig};
 pub use server::{handle_request, Server};
 
 // Re-export async_trait for middleware implementations
