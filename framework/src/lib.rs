@@ -160,7 +160,9 @@ pub use notifications::{
 };
 pub use notifications::channels::broadcast::BroadcastChannelStub;
 pub use notifications::channels::database::DatabaseChannel;
-pub use notifications::channels::mail::{MailChannel, MailFactory, MailRendering};
+pub use notifications::channels::mail::{
+    register_mail_renderer, MailChannel, MailRendering, NotificationMailable,
+};
 pub use notifications::channels::webpush::WebPushChannel;
 
 // Re-export async_trait for middleware implementations

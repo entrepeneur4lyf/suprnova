@@ -1,28 +1,19 @@
+//! `MailChannel` integration tests.
+//!
+//! All six tests share the process-global mail renderer registry, so
+//! every test runs `#[serial]` and uses a unique `notification_name()`
+//! to avoid colliding with prior registrations.
+
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
 use std::sync::Arc;
 use suprnova::mail::memory::InMemoryMailTransport;
 use suprnova::mail::{Address, Mail};
-use suprnova::notifications::channels::mail::{MailChannel, MailRendering};
+use suprnova::notifications::channels::mail::{
+    register_mail_renderer, MailChannel, MailRendering, NotificationMailable,
+};
 use suprnova::notifications::{Notifiable, Notification, NotificationDispatcher};
 use suprnova::FrameworkError;
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct OrderShipped {
-    tracking: String,
-}
-
-impl Notification for OrderShipped {
-    fn notification_name() -> &'static str {
-        "OrderShipped"
-    }
-    fn channels(&self) -> Vec<&'static str> {
-        vec!["mail"]
-    }
-    fn data(&self) -> serde_json::Value {
-        serde_json::json!({ "tracking": self.tracking })
-    }
-}
 
 struct User {
     email: String,
@@ -38,27 +29,51 @@ impl Notifiable for User {
     }
 }
 
+// ============================================================================
+// Test 1: happy path — registered renderer dispatches through transport
+// ============================================================================
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct HappyPath {
+    tracking: String,
+}
+
+impl Notification for HappyPath {
+    fn notification_name() -> &'static str {
+        "HappyPath"
+    }
+    fn channels(&self) -> Vec<&'static str> {
+        vec!["mail"]
+    }
+    fn data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("HappyPath serializes")
+    }
+}
+
+impl NotificationMailable for HappyPath {
+    fn to_mail(&self) -> Result<MailRendering, FrameworkError> {
+        Ok(MailRendering {
+            subject: format!("Your order shipped ({})", self.tracking),
+            html: None,
+            text: Some(format!("Tracking number: {}", self.tracking)),
+            from: Some(Address::new("orders@suprnova.dev").with_name("Suprnova Orders")),
+        })
+    }
+}
+
 #[tokio::test]
 #[serial]
-async fn mail_channel_dispatches_through_bound_transport() {
-    // Capture our own Arc to the transport before binding it globally so
-    // we can read the captured-message buffer post-dispatch without racing
-    // against the next test's `set_transport`.
+async fn mail_channel_dispatches_via_registered_renderer_through_in_memory_transport() {
+    // Capture our own Arc to the transport before binding it globally
+    // so we can read the captured-message buffer post-dispatch without
+    // racing against the next test's `set_transport`.
     let transport = Arc::new(InMemoryMailTransport::new());
     Mail::set_transport(transport.clone());
 
-    let channel = MailChannel::new(|name, data| {
-        assert_eq!(name, "OrderShipped");
-        let tracking = data["tracking"].as_str().unwrap_or_default().to_string();
-        Ok(MailRendering {
-            subject: format!("Your order shipped ({tracking})"),
-            html: None,
-            text: Some(format!("Tracking number: {tracking}")),
-            from: Some(Address::new("orders@suprnova.dev").with_name("Suprnova Orders")),
-        })
-    });
+    register_mail_renderer::<HappyPath>();
 
-    let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(channel));
+    let dispatcher =
+        NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
 
     let recipient = User {
         email: "alice@example.org".into(),
@@ -66,7 +81,7 @@ async fn mail_channel_dispatches_through_bound_transport() {
     dispatcher
         .notify(
             &recipient,
-            &OrderShipped {
+            &HappyPath {
                 tracking: "1Z999".into(),
             },
         )
@@ -85,34 +100,57 @@ async fn mail_channel_dispatches_through_bound_transport() {
     assert!(msg.html.is_none(), "html intentionally absent");
 }
 
-#[tokio::test]
-#[serial]
-async fn mail_channel_empty_body_fails_fast() {
-    // Bind a transport so any error must come from the empty-body guard,
-    // not from a missing transport. Without this binding a future
-    // reorder of the guard / transport-lookup could silently change
-    // which error surfaces.
-    let transport = Arc::new(InMemoryMailTransport::new());
-    Mail::set_transport(transport.clone());
+// ============================================================================
+// Test 2: empty-body guard fires on the rendering
+// ============================================================================
 
-    let channel = MailChannel::new(|_name, _data| {
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct EmptyBody;
+
+impl Notification for EmptyBody {
+    fn notification_name() -> &'static str {
+        "EmptyBody"
+    }
+    fn channels(&self) -> Vec<&'static str> {
+        vec!["mail"]
+    }
+    fn data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("EmptyBody serializes")
+    }
+}
+
+impl NotificationMailable for EmptyBody {
+    fn to_mail(&self) -> Result<MailRendering, FrameworkError> {
         Ok(MailRendering {
             subject: "ignored".into(),
             html: None,
             text: None,
             from: None,
         })
-    });
-    let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(channel));
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn mail_channel_empty_body_guard_fires() {
+    // Bind a transport so any error must come from the empty-body
+    // guard, not from a missing transport. Without this binding a
+    // future reorder of the guard / transport-lookup could silently
+    // change which error surfaces.
+    let transport = Arc::new(InMemoryMailTransport::new());
+    Mail::set_transport(transport.clone());
+
+    register_mail_renderer::<EmptyBody>();
+
+    let dispatcher =
+        NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
 
     let err = dispatcher
         .notify(
             &User {
                 email: "bob@example.org".into(),
             },
-            &OrderShipped {
-                tracking: "X".into(),
-            },
+            &EmptyBody,
         )
         .await
         .unwrap_err();
@@ -123,7 +161,7 @@ async fn mail_channel_empty_body_fails_fast() {
         "expected MailChannel error context, got: {msg}"
     );
     assert!(
-        msg.contains("OrderShipped"),
+        msg.contains("EmptyBody"),
         "expected notification name in error, got: {msg}"
     );
     assert!(
@@ -136,26 +174,177 @@ async fn mail_channel_empty_body_fails_fast() {
     );
 }
 
+// ============================================================================
+// Test 3: renderer Err propagates verbatim
+// ============================================================================
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct RenderErr;
+
+impl Notification for RenderErr {
+    fn notification_name() -> &'static str {
+        "RenderErr"
+    }
+    fn channels(&self) -> Vec<&'static str> {
+        vec!["mail"]
+    }
+    fn data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("RenderErr serializes")
+    }
+}
+
+impl NotificationMailable for RenderErr {
+    fn to_mail(&self) -> Result<MailRendering, FrameworkError> {
+        Err(FrameworkError::internal("renderer boom"))
+    }
+}
+
 #[tokio::test]
 #[serial]
-async fn mail_channel_propagates_factory_error() {
+async fn mail_channel_renderer_error_propagates() {
     // Same precaution as above — bind a transport so the test pins
-    // factory-error propagation rather than masking it with a
+    // renderer-error propagation rather than masking it with a
     // missing-transport error.
     Mail::set_transport(Arc::new(InMemoryMailTransport::new()));
 
-    let channel = MailChannel::new(|_name, _data| {
-        Err(FrameworkError::internal("factory boom"))
-    });
-    let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(channel));
+    register_mail_renderer::<RenderErr>();
+
+    let dispatcher =
+        NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
 
     let err = dispatcher
         .notify(
             &User {
                 email: "carol@example.org".into(),
             },
-            &OrderShipped {
-                tracking: "Y".into(),
+            &RenderErr,
+        )
+        .await
+        .unwrap_err();
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("renderer boom"),
+        "expected renderer error to surface verbatim, got: {msg}"
+    );
+}
+
+// ============================================================================
+// Test 4: unregistered notification surfaces a helpful error
+// ============================================================================
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct Unregistered;
+
+impl Notification for Unregistered {
+    fn notification_name() -> &'static str {
+        "Unregistered"
+    }
+    fn channels(&self) -> Vec<&'static str> {
+        vec!["mail"]
+    }
+    fn data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("Unregistered serializes")
+    }
+}
+// Note: NO NotificationMailable impl here — we never call to_mail on
+// this type. The point is that nothing ever registers a renderer for
+// the `"Unregistered"` name, so the channel must produce a helpful
+// error when it tries to look one up.
+
+#[tokio::test]
+#[serial]
+async fn mail_channel_errors_on_unregistered_notification() {
+    // Bind a transport so we know any error is from the missing
+    // renderer, not from a missing transport.
+    Mail::set_transport(Arc::new(InMemoryMailTransport::new()));
+
+    let dispatcher =
+        NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
+
+    let err = dispatcher
+        .notify(
+            &User {
+                email: "dave@example.org".into(),
+            },
+            &Unregistered,
+        )
+        .await
+        .unwrap_err();
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("no mail renderer for notification"),
+        "expected missing-renderer error, got: {msg}"
+    );
+    assert!(
+        msg.contains("Unregistered"),
+        "expected notification name in error, got: {msg}"
+    );
+    assert!(
+        msg.contains("register_mail_renderer"),
+        "expected register_mail_renderer hint in error, got: {msg}"
+    );
+}
+
+// ============================================================================
+// Test 5: payload that doesn't deserialize into the target N produces a
+// helpful error naming the notification
+// ============================================================================
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct DecodeFail {
+    // This field is required by serde, but the dispatched
+    // `Notification::data()` impl deliberately returns a JSON object
+    // missing it — so the renderer's `from_value::<DecodeFail>(...)`
+    // call must fail.
+    tracking: String,
+}
+
+impl Notification for DecodeFail {
+    fn notification_name() -> &'static str {
+        "DecodeFail"
+    }
+    fn channels(&self) -> Vec<&'static str> {
+        vec!["mail"]
+    }
+    fn data(&self) -> serde_json::Value {
+        // Deliberately wrong shape: missing the required `tracking`
+        // field. The renderer must surface a decode error mentioning
+        // the notification name.
+        serde_json::json!({ "wrong_field": 42 })
+    }
+}
+
+impl NotificationMailable for DecodeFail {
+    fn to_mail(&self) -> Result<MailRendering, FrameworkError> {
+        // Never reached — decode fails before `to_mail` runs.
+        Ok(MailRendering {
+            subject: "unreachable".into(),
+            html: None,
+            text: Some("unreachable".into()),
+            from: None,
+        })
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn mail_channel_renderer_decode_failure_propagates() {
+    Mail::set_transport(Arc::new(InMemoryMailTransport::new()));
+
+    register_mail_renderer::<DecodeFail>();
+
+    let dispatcher =
+        NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
+
+    let err = dispatcher
+        .notify(
+            &User {
+                email: "eve@example.org".into(),
+            },
+            &DecodeFail {
+                tracking: "irrelevant — data() returns wrong shape".into(),
             },
         )
         .await
@@ -163,7 +352,110 @@ async fn mail_channel_propagates_factory_error() {
 
     let msg = format!("{err}");
     assert!(
-        msg.contains("factory boom"),
-        "expected factory error to surface verbatim, got: {msg}"
+        msg.contains("decode"),
+        "expected decode-error prefix, got: {msg}"
+    );
+    assert!(
+        msg.contains("DecodeFail"),
+        "expected notification name in error, got: {msg}"
+    );
+}
+
+// ============================================================================
+// Test 6: re-registering for the same name is last-write-wins
+// ============================================================================
+//
+// Two distinct concrete types share a single notification_name so the
+// renderer registry is keyed identically. We register A, then B, then
+// dispatch through the channel using A. Because the fn-pointer slot is
+// keyed by name, A's dispatch must run B's renderer — captured by
+// observing B's distinguishable subject.
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct LastWriteWinsA;
+
+impl Notification for LastWriteWinsA {
+    fn notification_name() -> &'static str {
+        "LastWriteWinsNotif"
+    }
+    fn channels(&self) -> Vec<&'static str> {
+        vec!["mail"]
+    }
+    fn data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("LastWriteWinsA serializes")
+    }
+}
+
+impl NotificationMailable for LastWriteWinsA {
+    fn to_mail(&self) -> Result<MailRendering, FrameworkError> {
+        Ok(MailRendering {
+            subject: "rendered-by-A".into(),
+            html: None,
+            text: Some("body-from-A".into()),
+            from: None,
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct LastWriteWinsB;
+
+impl Notification for LastWriteWinsB {
+    fn notification_name() -> &'static str {
+        "LastWriteWinsNotif"
+    }
+    fn channels(&self) -> Vec<&'static str> {
+        vec!["mail"]
+    }
+    fn data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("LastWriteWinsB serializes")
+    }
+}
+
+impl NotificationMailable for LastWriteWinsB {
+    fn to_mail(&self) -> Result<MailRendering, FrameworkError> {
+        Ok(MailRendering {
+            subject: "rendered-by-B".into(),
+            html: None,
+            text: Some("body-from-B".into()),
+            from: None,
+        })
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn register_mail_renderer_is_last_write_wins() {
+    let transport = Arc::new(InMemoryMailTransport::new());
+    Mail::set_transport(transport.clone());
+
+    register_mail_renderer::<LastWriteWinsA>();
+    register_mail_renderer::<LastWriteWinsB>();
+
+    let dispatcher =
+        NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
+
+    // Dispatch via A — but B's renderer should run because B was the
+    // last write under the same notification name.
+    dispatcher
+        .notify(
+            &User {
+                email: "frank@example.org".into(),
+            },
+            &LastWriteWinsA,
+        )
+        .await
+        .unwrap();
+
+    let captured = transport.captured();
+    assert_eq!(captured.len(), 1, "exactly one message captured");
+    assert_eq!(
+        captured[0].subject, "rendered-by-B",
+        "last registered renderer (B) must win",
+    );
+    assert_eq!(
+        captured[0].text.as_deref(),
+        Some("body-from-B"),
+        "last registered renderer (B) must win",
     );
 }
