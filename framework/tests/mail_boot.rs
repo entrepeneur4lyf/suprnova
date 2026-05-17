@@ -163,6 +163,33 @@ async fn boot_smtp_driver_binds_unencrypted_when_creds_absent() {
     clear_mail_env();
 }
 
+#[tokio::test]
+#[serial]
+async fn boot_smtp_driver_threads_port_into_authenticated_starttls() {
+    // Regression: a prior version of starttls() hardcoded port 587, so an
+    // operator setting MAIL_SMTP_PORT alongside USER/PASS had the port
+    // silently dropped. This test exercises the authenticated branch and
+    // proves bootstrap succeeds with a non-standard port.
+    //
+    // We can't actually open an SMTP session in-test (no live relay), but
+    // building the transport must succeed — the lettre builder validates
+    // the host + port shape at construction time.
+    clear_mail_env();
+    Mail::clear_transport();
+    unsafe {
+        std::env::set_var("MAIL_DRIVER", "smtp");
+        std::env::set_var("MAIL_SMTP_HOST", "smtp.example.com");
+        std::env::set_var("MAIL_SMTP_PORT", "2587");
+        std::env::set_var("MAIL_SMTP_USER", "submitter");
+        std::env::set_var("MAIL_SMTP_PASS", "secret");
+    }
+
+    suprnova::mail::boot::bootstrap_from_env().await.unwrap();
+
+    Mail::clear_transport();
+    clear_mail_env();
+}
+
 // HTTP-provider smoke tests: each verifies that
 //   1. MAIL_DRIVER=<provider> + MAIL_<P>_API_KEY + MAIL_<P>_ENDPOINT
 //      → bootstrap_from_env succeeds

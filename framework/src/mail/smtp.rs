@@ -15,21 +15,35 @@ pub struct SmtpMailTransport {
 }
 
 impl SmtpMailTransport {
-    /// STARTTLS relay on the standard port (587). Use this for production.
-    pub fn starttls(host: &str, user: &str, password: &str) -> Result<Self, FrameworkError> {
+    /// STARTTLS submission. Pass `587` for the standard submission port,
+    /// or a non-default port for relays that use one (gateway, proxy).
+    pub fn starttls(
+        host: &str,
+        port: u16,
+        user: &str,
+        password: &str,
+    ) -> Result<Self, FrameworkError> {
         let creds = Credentials::new(user.to_string(), password.to_string());
         let inner = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
             .map_err(|e| FrameworkError::internal(format!("smtp starttls: {e}")))?
+            .port(port)
             .credentials(creds)
             .build();
         Ok(Self { inner })
     }
 
-    /// TLS-wrapped relay on port 465.
-    pub fn tls(host: &str, user: &str, password: &str) -> Result<Self, FrameworkError> {
+    /// TLS-wrapped SMTP. Pass `465` for the canonical implicit-TLS port,
+    /// or a non-default port for a custom relay.
+    pub fn tls(
+        host: &str,
+        port: u16,
+        user: &str,
+        password: &str,
+    ) -> Result<Self, FrameworkError> {
         let creds = Credentials::new(user.to_string(), password.to_string());
         let inner = AsyncSmtpTransport::<Tokio1Executor>::relay(host)
             .map_err(|e| FrameworkError::internal(format!("smtp tls relay: {e}")))?
+            .port(port)
             .credentials(creds)
             .build();
         Ok(Self { inner })

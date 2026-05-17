@@ -87,7 +87,7 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
             // Note: partial creds (only USER, only PASS) intentionally fall
             // through to unencrypted local-dev mode. Set BOTH to authenticate.
             let transport = match (user, pass) {
-                (Some(u), Some(p)) => SmtpMailTransport::starttls(&host, &u, &p)?,
+                (Some(u), Some(p)) => SmtpMailTransport::starttls(&host, port, &u, &p)?,
                 _ => SmtpMailTransport::unencrypted(&host, port)?,
             };
             Mail::set_transport(Arc::new(transport));
