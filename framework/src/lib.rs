@@ -159,7 +159,10 @@ pub use web_push::{
 };
 pub use factory::{persist_via_seaorm, Factory, FactoryBuilder, Persistable, Sequence};
 pub use seed::Seeder;
-pub use console::{dispatch_argv, CommandEntry, CommandHandler};
+pub use console::{dispatch_argv, CommandEntry, CommandHandler, TypedCommand};
+
+#[doc(hidden)]
+pub use clap as __clap;
 pub use mail::{Address, Attachment, Mail, MailFake, Mailable, SendMailJob};
 pub use notifications::{
     Channel, DynNotification, Notifiable, Notification, NotificationDispatcher,
@@ -217,6 +220,7 @@ pub use validator::Validate;
 
 // Re-export the proc-macros for compile-time component validation and type safety
 pub use suprnova_macros::command;
+pub use suprnova_macros::Command;
 pub use suprnova_macros::domain_error;
 pub use suprnova_macros::handler;
 pub use suprnova_macros::inertia_response;

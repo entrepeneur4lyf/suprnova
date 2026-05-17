@@ -1,30 +1,39 @@
-//! `greet` — dogfood for the framework's `#[command]` macro.
+//! `greet` — dogfood for the typed-command path (`#[derive(Command)]`
+//! + `TypedCommand`).
 //!
-//! Demonstrates the simplest possible user-defined console command:
-//! single attribute, async fn, parses args, prints to stdout.
+//! Demonstrates the structured shape every non-trivial console
+//! command should use: clap's `Parser` derive describes the args,
+//! our `Command` derive registers the command + adapter, the trait
+//! impl is the body.
 //!
 //! ```text
-//! cargo run --bin console -- greet              # "Hello, world!"
-//! cargo run --bin console -- greet Alice        # "Hello, Alice!"
-//! cargo run --bin console -- greet Alice Bob    # "Hello, Alice and Bob!"
+//! cargo run --bin console -- greet                   # "Hello, world!"
+//! cargo run --bin console -- greet --name Alice      # "Hello, Alice!"
+//! cargo run --bin console -- greet -n Alice --loud   # "HELLO, Alice!"
+//! cargo run --bin console -- greet --help            # per-command help
 //! ```
-//!
-//! The function is also callable directly from Rust (`greet(vec![...])`)
-//! — the macro preserves the original fn — which is what the integration
-//! test in `app/tests/console_greet.rs` exercises.
 
-use suprnova::{command, FrameworkError};
+use async_trait::async_trait;
+use clap::Parser;
+use suprnova::{Command, FrameworkError, TypedCommand};
 
-#[command(name = "greet", description = "Print a friendly greeting")]
-pub async fn greet(args: Vec<String>) -> Result<(), FrameworkError> {
-    let message = match args.len() {
-        0 => "Hello, world!".to_string(),
-        1 => format!("Hello, {}!", args[0]),
-        _ => {
-            let (last, rest) = args.split_last().expect("non-empty by match arm");
-            format!("Hello, {} and {}!", rest.join(", "), last)
-        }
-    };
-    println!("{message}");
-    Ok(())
+#[derive(Parser, Command, Debug)]
+#[console(name = "greet", description = "Print a friendly greeting")]
+pub struct Greet {
+    /// Who to greet. Defaults to "world".
+    #[arg(short, long, default_value = "world")]
+    pub name: String,
+
+    /// Use the uppercase greeting.
+    #[arg(long, default_value_t = false)]
+    pub loud: bool,
+}
+
+#[async_trait]
+impl TypedCommand for Greet {
+    async fn run(self) -> Result<(), FrameworkError> {
+        let prefix = if self.loud { "HELLO" } else { "Hello" };
+        println!("{prefix}, {name}!", name = self.name);
+        Ok(())
+    }
 }

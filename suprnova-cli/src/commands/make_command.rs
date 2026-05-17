@@ -32,6 +32,7 @@ pub fn run(name: String) {
     }
 
     let command_name = pick_command_name(&name, &snake);
+    let struct_name = to_pascal_case(&snake);
 
     let commands_dir = Path::new("src/commands");
     let command_file = commands_dir.join(format!("{}.rs", snake));
@@ -71,7 +72,7 @@ pub fn run(name: String) {
         }
     }
 
-    let content = templates::command_template(&snake, &command_name);
+    let content = templates::command_template(&struct_name, &command_name);
     if let Err(e) = fs::write(&command_file, content) {
         ui::error(&format!("Failed to write command file: {}", e));
         std::process::exit(1);
@@ -167,6 +168,28 @@ fn pick_command_name(raw: &str, snake_fn: &str) -> String {
     }
 }
 
+/// Convert a snake_case fn name to PascalCase for the struct name.
+/// `clean_cache` → `CleanCache`, `mail_send` → `MailSend`.
+fn to_pascal_case(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut capitalize = true;
+    for c in s.chars() {
+        if c == '_' {
+            capitalize = true;
+            continue;
+        }
+        if capitalize {
+            for uc in c.to_uppercase() {
+                out.push(uc);
+            }
+            capitalize = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn update_mod_file(mod_file: &Path, file_name: &str) -> Result<(), String> {
     let content =
         fs::read_to_string(mod_file).map_err(|e| format!("Failed to read mod.rs: {}", e))?;
@@ -226,5 +249,14 @@ mod tests {
         assert_eq!(pick_command_name("clean-cache", "clean_cache"), "clean-cache");
         assert_eq!(pick_command_name("mail:send", "mail_send"), "mail:send");
         assert_eq!(pick_command_name("db:seed", "db_seed"), "db:seed");
+    }
+
+    #[test]
+    fn to_pascal_case_from_snake() {
+        assert_eq!(to_pascal_case("greet"), "Greet");
+        assert_eq!(to_pascal_case("clean_cache"), "CleanCache");
+        assert_eq!(to_pascal_case("mail_send"), "MailSend");
+        assert_eq!(to_pascal_case("db_seed"), "DbSeed");
+        assert_eq!(to_pascal_case("a_b_c"), "ABC");
     }
 }

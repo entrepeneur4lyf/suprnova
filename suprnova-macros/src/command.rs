@@ -120,13 +120,19 @@ pub fn command_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
 
     let fn_name = &input_fn.sig.ident;
     let runner_ident = format_ident!("__suprnova_command_runner_{}", fn_name);
+    let builder_ident = format_ident!("__suprnova_command_builder_{}", fn_name);
 
     let expanded = quote! {
         #input_fn
 
         #[doc(hidden)]
+        fn #builder_ident() -> ::suprnova::__clap::Command {
+            ::suprnova::console::raw_clap_builder(#name, #description)
+        }
+
+        #[doc(hidden)]
         fn #runner_ident(
-            __args: ::std::vec::Vec<::std::string::String>,
+            __matches: &::suprnova::__clap::ArgMatches,
         ) -> ::std::pin::Pin<
             ::std::boxed::Box<
                 dyn ::std::future::Future<
@@ -134,6 +140,7 @@ pub fn command_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
                     > + ::std::marker::Send,
             >,
         > {
+            let __args = ::suprnova::console::collect_trailing_args(__matches);
             ::std::boxed::Box::pin(async move { #fn_name(__args).await })
         }
 
@@ -141,6 +148,7 @@ pub fn command_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
             ::suprnova::CommandEntry {
                 name: #name,
                 description: #description,
+                clap_builder: #builder_ident,
                 handler: #runner_ident,
             }
         }

@@ -2,18 +2,25 @@
 //! builtins.
 //!
 //! Each Suprnova project ships a `console` binary that calls
-//! [`dispatch_argv`] after running its `bootstrap::register()`. The
-//! framework looks up `argv[1]` against an inventory-collected registry
-//! of [`CommandEntry`] records, then runs the matching handler.
+//! [`dispatch_argv`] after running its `bootstrap::register()`. Every
+//! registered command contributes a [`clap::Command`] subcommand to a
+//! single parser tree, so per-command `--help`, typed args, value
+//! parsing, and error messages all come from clap rather than being
+//! reinvented here.
 //!
-//! Commands are registered via the [`#[command]`](suprnova_macros::command)
-//! attribute on an `async fn(Vec<String>) -> Result<(), FrameworkError>`.
-//! Builtin commands like `db:seed` live in [`builtins`] and are submitted
-//! by the framework itself.
+//! Two registration shapes feed the same registry:
 //!
-//! Why a per-project binary instead of a global CLI shell-out: a
-//! global `suprnova` binary cannot statically load the user's app
-//! types (seeders, commands, models) without either cargo-running the
+//! - `#[command(name = "...", description = "...")]` on an
+//!   `async fn(Vec<String>) -> Result<(), FrameworkError>` — the
+//!   simple path; clap captures the trailing positional args via
+//!   `trailing_var_arg` and hands them to the handler verbatim.
+//! - `#[derive(Command)]` on a `clap::Parser`-deriving struct that
+//!   implements [`TypedCommand`] — the typed path; clap parses
+//!   the struct fields, the dispatcher calls `parsed.run().await`.
+//!
+//! Why a per-project console binary instead of a global CLI shell-out:
+//! a global `suprnova` binary can't statically link user types
+//! (seeders, commands, models) without either cargo-running the
 //! project (slow, defeats the purpose) or dynamic loading (too much
 //! complexity for v1). Per-project console matches Laravel's
 //! `php artisan` model — same script, same process, same address
@@ -24,36 +31,38 @@ use std::future::Future;
 use std::pin::Pin;
 
 pub mod builtins;
+mod typed;
 
-/// fn-pointer-compatible boxed-future returned by every command handler.
-/// The argument vector contains the trailing argv after `argv[1]` (the
-/// command name) — i.e. positional args that the command should parse.
-pub type CommandHandler =
-    fn(Vec<String>) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send>>;
+pub use typed::TypedCommand;
 
-/// Registry entry submitted by `#[command]`. Each entry carries the
-/// invocation name (e.g. `"db:seed"`), a human-readable description,
-/// and the boxed-future runner.
+/// fn-pointer-compatible boxed-future returned by every command
+/// handler. Receives the per-subcommand `ArgMatches` clap parsed
+/// from argv.
+pub type CommandHandler = fn(
+    &clap::ArgMatches,
+) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send>>;
+
+/// Registry entry submitted by `#[command]` / `#[derive(Command)]`.
+/// Each entry carries the invocation name, a human-readable
+/// description, a clap subcommand builder, and the boxed-future
+/// runner.
 pub struct CommandEntry {
     pub name: &'static str,
     pub description: &'static str,
+    pub clap_builder: fn() -> clap::Command,
     pub handler: CommandHandler,
 }
 
 inventory::collect!(CommandEntry);
 
-/// Look up a registered command by name. Returns the first entry whose
-/// `name` matches exactly. With duplicate registrations the order is
-/// link-determined — don't rely on it; pick distinct names.
+/// Look up a registered command by name.
 pub fn find(name: &str) -> Option<&'static CommandEntry> {
     inventory::iter::<CommandEntry>
         .into_iter()
         .find(|entry| entry.name == name)
 }
 
-/// All registered commands, sorted alphabetically by name. Used by the
-/// built-in help output and by tooling that needs to enumerate the
-/// registry. Allocates fresh on every call.
+/// All registered commands, sorted alphabetically by name.
 pub fn list() -> Vec<&'static CommandEntry> {
     let mut entries: Vec<&'static CommandEntry> =
         inventory::iter::<CommandEntry>.into_iter().collect();
@@ -61,67 +70,130 @@ pub fn list() -> Vec<&'static CommandEntry> {
     entries
 }
 
+/// Build the top-level `clap::Command` with every registered
+/// subcommand attached. Name is the static literal "console" —
+/// help output reads "Usage: console <COMMAND>" regardless of where
+/// the binary lives on disk. Clap won't accept a runtime-owned
+/// `String` here because `clap::builder::Str` only converts from
+/// `&'static str` or `Box<str>`, and we'd rather not leak per call.
+fn build_root() -> clap::Command {
+    let mut root = clap::Command::new("console")
+        .about("Suprnova console — per-project command dispatch")
+        .arg_required_else_help(true)
+        .subcommand_required(false);
+    for entry in list() {
+        root = root.subcommand((entry.clap_builder)());
+    }
+    root
+}
+
 /// Dispatch the process's argv to a registered command. Pass
 /// `std::env::args().collect::<Vec<_>>()` from the console binary.
-/// `argv[0]` is the binary name (used for help output), `argv[1]` is
-/// the command name, and `argv[2..]` are passed to the handler.
 ///
-/// Special cases handled here so individual commands don't have to:
+/// The full clap tree (every registered subcommand) is built each
+/// call; clap then parses argv and routes to the right entry. Help
+/// flags (`--help`, `-h`, missing subcommand) are clap's
+/// responsibility — they print and exit via clap's own machinery,
+/// which preserves correct exit codes and color output.
 ///
-/// - empty (`argv.len() < 2`) or `--help` / `-h` / `help` → print the
-///   help summary and return `Ok(())`
-/// - unknown command → print an error + the available-command list
-///   to stderr and return `Err(FrameworkError::internal(...))`
+/// Returns:
+/// - `Ok(())` on a successful handler run
+/// - `Err(FrameworkError)` propagated from the handler
+///
+/// Clap's `--help` / `--version` / parse-error paths call
+/// `clap::Error::exit()` internally; they do not return through
+/// this function.
 pub async fn dispatch_argv(argv: Vec<String>) -> Result<(), FrameworkError> {
-    let binary_name = argv.first().map(String::as_str).unwrap_or("console");
-    let cmd = argv.get(1).map(String::as_str).unwrap_or("");
+    let root = build_root();
 
-    if cmd.is_empty() || cmd == "--help" || cmd == "-h" || cmd == "help" {
-        print_help(binary_name);
-        return Ok(());
+    let matches = match root.try_get_matches_from(argv) {
+        Ok(m) => m,
+        Err(e) => return handle_clap_error(e),
+    };
+
+    if let Some((name, sub_matches)) = matches.subcommand() {
+        if let Some(entry) = find(name) {
+            return (entry.handler)(sub_matches).await;
+        }
+        // Unreachable: clap only routes to subcommands it knows
+        // about, and we just built the root from `list()`.
+        return Err(FrameworkError::internal(format!(
+            "unknown console command: '{name}'"
+        )));
     }
 
-    match find(cmd) {
-        Some(entry) => {
-            let args: Vec<String> = argv.into_iter().skip(2).collect();
-            (entry.handler)(args).await
+    // `arg_required_else_help(true)` on the root makes clap return
+    // an Err with `DisplayHelpOnMissingArgumentOrSubcommand` before
+    // we get here. This is the safety net.
+    Ok(())
+}
+
+/// Translate a clap parse/help error into the right
+/// `Result<(), FrameworkError>` shape. Help-shaped clap errors
+/// (`--help`, `--version`, missing-subcommand) print to stdout and
+/// resolve to `Ok(())`. Real parse errors print to stderr and
+/// resolve to `Err(FrameworkError::internal(...))` so the binary's
+/// `main` returns the right exit code.
+fn handle_clap_error(err: clap::Error) -> Result<(), FrameworkError> {
+    use clap::error::{ContextKind, ErrorKind};
+    match err.kind() {
+        ErrorKind::DisplayHelp
+        | ErrorKind::DisplayVersion
+        | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+            // `print()` routes by kind automatically (help → stdout,
+            // errors → stderr).
+            let _ = err.print();
+            Ok(())
         }
-        None => {
-            eprintln!("error: unknown command '{cmd}'");
-            eprintln!();
-            print_command_list(&mut std::io::stderr());
+        ErrorKind::InvalidSubcommand => {
+            // Pull the offending value out of clap's context so the
+            // returned FrameworkError names it — useful in tests and
+            // logs. Clap's `print()` already wrote a colored message
+            // to stderr for the user.
+            let _ = err.print();
+            let bad = err
+                .get(ContextKind::InvalidSubcommand)
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
             Err(FrameworkError::internal(format!(
-                "unknown console command: '{cmd}'"
+                "unknown console command: '{bad}'"
+            )))
+        }
+        _ => {
+            let _ = err.print();
+            Err(FrameworkError::internal(format!(
+                "console arg parse failed: {}",
+                err.kind()
             )))
         }
     }
 }
 
-fn print_help(binary_name: &str) {
-    println!("Usage: {binary_name} <command> [args...]");
-    println!();
-    print_command_list(&mut std::io::stdout());
+/// Helper for `#[command]` macro expansion — extracts the trailing
+/// positional args (clap parsed via `trailing_var_arg`) into a
+/// `Vec<String>` for the legacy raw-fn handler shape.
+#[doc(hidden)]
+pub fn collect_trailing_args(matches: &clap::ArgMatches) -> Vec<String> {
+    matches
+        .get_many::<String>("__suprnova_trailing_args")
+        .map(|values| values.cloned().collect())
+        .unwrap_or_default()
 }
 
-fn print_command_list<W: std::io::Write>(out: &mut W) {
-    let entries = list();
-    if entries.is_empty() {
-        let _ = writeln!(out, "  (no commands registered)");
-        return;
-    }
-    let _ = writeln!(out, "Available commands:");
-    let name_width = entries
-        .iter()
-        .map(|e| e.name.len())
-        .max()
-        .unwrap_or(0);
-    for entry in entries {
-        let _ = writeln!(
-            out,
-            "  {name:width$}  {desc}",
-            name = entry.name,
-            width = name_width,
-            desc = entry.description,
-        );
-    }
+/// Helper for `#[command]` macro expansion — builds the clap
+/// subcommand for a raw `fn(Vec<String>)` handler. The single
+/// trailing-var-arg captures every positional after the command
+/// name; `.allow_hyphen_values(true)` lets users pass `-x` style
+/// flags through to the handler without clap intercepting them.
+#[doc(hidden)]
+pub fn raw_clap_builder(name: &'static str, description: &'static str) -> clap::Command {
+    clap::Command::new(name)
+        .about(description)
+        .arg(
+            clap::Arg::new("__suprnova_trailing_args")
+                .action(clap::ArgAction::Append)
+                .num_args(0..)
+                .trailing_var_arg(true)
+                .allow_hyphen_values(true),
+        )
 }

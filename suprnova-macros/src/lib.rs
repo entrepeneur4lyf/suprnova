@@ -11,6 +11,7 @@
 use proc_macro::TokenStream;
 
 mod command;
+mod console_derive;
 mod data;
 mod describe;
 mod domain_error;
@@ -383,6 +384,45 @@ pub fn request(attr: TokenStream, input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn suprnova_test(attr: TokenStream, input: TokenStream) -> TokenStream {
     suprnova_test::suprnova_test_impl(attr, input)
+}
+
+/// Derive macro for typed console commands.
+///
+/// Goes on top of `#[derive(clap::Parser)]`. Reads
+/// `#[console(name = "...", description = "...")]` for Suprnova-side
+/// metadata; clap's `#[command(...)]` continues to drive arg-parsing
+/// config. The struct must also implement
+/// [`suprnova::TypedCommand`](https://docs.rs/suprnova) so the
+/// generated runner knows where to send the parsed args.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use async_trait::async_trait;
+/// use suprnova::{Command, FrameworkError, TypedCommand};
+///
+/// #[derive(clap::Parser, Command)]
+/// #[console(name = "greet", description = "Greet someone")]
+/// pub struct Greet {
+///     #[arg(short, long)]
+///     name: Option<String>,
+///     #[arg(long)]
+///     loud: bool,
+/// }
+///
+/// #[async_trait]
+/// impl TypedCommand for Greet {
+///     async fn run(self) -> Result<(), FrameworkError> {
+///         let target = self.name.unwrap_or_else(|| "world".into());
+///         let prefix = if self.loud { "HELLO" } else { "Hello" };
+///         println!("{prefix}, {target}!");
+///         Ok(())
+///     }
+/// }
+/// ```
+#[proc_macro_derive(Command, attributes(console))]
+pub fn derive_command(input: TokenStream) -> TokenStream {
+    console_derive::derive_command_impl(input)
 }
 
 /// Attribute macro for registering an async fn as a console command.

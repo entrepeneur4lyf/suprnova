@@ -196,27 +196,51 @@ impl {struct_name} {{
     )
 }
 
-/// Template for generating a new console command file with `make:command`.
+/// Template for generating a new console command file with
+/// `make:command`.
 ///
-/// Emits a runnable `#[command]`-annotated async fn. The TODO marker
-/// in the body is intentional — the user fills in real behavior; the
-/// scaffold compiles immediately so the `make:command` → `cargo run`
-/// loop is fast.
-pub fn command_template(fn_name: &str, command_name: &str) -> String {
+/// Emits a runnable typed-command stub: `#[derive(clap::Parser,
+/// Command)]` on a struct + an `impl TypedCommand`. Clap parses the
+/// argv, the user fills in real behavior, the scaffold compiles
+/// immediately so the `make:command` → `cargo run` loop is fast.
+///
+/// The TODO marker in the body is intentional — it's a starting
+/// point, not deferred framework work.
+pub fn command_template(struct_name: &str, command_name: &str) -> String {
     format!(
         r#"//! `{command_name}` console command.
 
-use suprnova::{{command, FrameworkError}};
+use async_trait::async_trait;
+use clap::Parser;
+use suprnova::{{Command, FrameworkError, TypedCommand}};
 
-#[command(name = "{command_name}", description = "TODO: describe what {command_name} does")]
-pub async fn {fn_name}(_args: Vec<String>) -> Result<(), FrameworkError> {{
-    // TODO: implement the command body. `_args` carries argv past the
-    // command name; clap or your own parsing can take it from here.
-    println!("{command_name}: not yet implemented");
-    Ok(())
+#[derive(Parser, Command, Debug)]
+#[console(name = "{command_name}", description = "TODO: describe what {command_name} does")]
+pub struct {struct_name} {{
+    // Add clap-derive args here. Examples:
+    //
+    //   #[arg(short, long)]
+    //   pub name: Option<String>,
+    //
+    //   #[arg(long, default_value_t = false)]
+    //   pub dry_run: bool,
+    //
+    //   #[arg(value_name = "TARGET")]
+    //   pub target: String,
+}}
+
+#[async_trait]
+impl TypedCommand for {struct_name} {{
+    async fn run(self) -> Result<(), FrameworkError> {{
+        // TODO: implement the command body. Self's fields are the
+        // parsed args; reach for shared services via the framework's
+        // facades (`DB::connection()`, `Mail::to(...)`, etc.).
+        println!("{command_name}: not yet implemented");
+        Ok(())
+    }}
 }}
 "#,
-        fn_name = fn_name,
+        struct_name = struct_name,
         command_name = command_name
     )
 }

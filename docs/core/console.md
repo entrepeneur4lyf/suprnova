@@ -10,14 +10,30 @@ Each Suprnova project ships with a `console` binary — the runtime command disp
 
 ## Quick Start
 
-```rust
-use suprnova::{command, FrameworkError};
+The recommended shape uses `#[derive(clap::Parser, Command)]` for typed args:
 
-#[command(name = "greet", description = "Print a friendly greeting")]
-pub async fn greet(args: Vec<String>) -> Result<(), FrameworkError> {
-    let target = args.first().cloned().unwrap_or_else(|| "world".into());
-    println!("Hello, {target}!");
-    Ok(())
+```rust
+use async_trait::async_trait;
+use clap::Parser;
+use suprnova::{Command, FrameworkError, TypedCommand};
+
+#[derive(Parser, Command, Debug)]
+#[console(name = "greet", description = "Print a friendly greeting")]
+pub struct Greet {
+    #[arg(short, long, default_value = "world")]
+    pub name: String,
+
+    #[arg(long, default_value_t = false)]
+    pub loud: bool,
+}
+
+#[async_trait]
+impl TypedCommand for Greet {
+    async fn run(self) -> Result<(), FrameworkError> {
+        let prefix = if self.loud { "HELLO" } else { "Hello" };
+        println!("{prefix}, {}!", self.name);
+        Ok(())
+    }
 }
 ```
 
@@ -26,11 +42,29 @@ Drop that in `src/commands/greet.rs`, add `pub mod greet;` to `src/commands/mod.
 ```bash
 cargo run --bin console -- greet
 # Hello, world!
-cargo run --bin console -- greet Alice
-# Hello, Alice!
+cargo run --bin console -- greet --name Alice --loud
+# HELLO, Alice!
+cargo run --bin console -- greet --help
+# (clap-generated per-command help, including the typed flags)
 ```
 
-No registration step. The `#[command]` macro submits a `CommandEntry { name, description, handler }` into a global `inventory::collect!` registry; the console binary calls `suprnova::console::dispatch_argv(env::args)` and routes by name.
+No central registry to edit. `#[derive(Command)]` submits a `CommandEntry { name, description, clap_builder, handler }` via inventory; the console binary calls `suprnova::console::dispatch_argv(env::args)`, which builds one clap parser tree from every registered entry and routes the parsed `ArgMatches` to the right handler.
+
+### The simpler path: raw `Vec<String>`
+
+For trivial commands that don't need typed args, the `#[command]` attribute on an async fn works too:
+
+```rust
+use suprnova::{command, FrameworkError};
+
+#[command(name = "ping", description = "Smoke test")]
+pub async fn ping(_args: Vec<String>) -> Result<(), FrameworkError> {
+    println!("pong");
+    Ok(())
+}
+```
+
+Under the hood both paths land in the same `CommandEntry` registry; the raw shape just uses a clap subcommand with a `trailing_var_arg` to capture argv into the `Vec<String>`. Prefer the typed shape for any command with arguments — you get per-command `--help`, value parsing, default values, and short/long flag pairs without writing a parser by hand.
 
 ## The Console Binary
 
@@ -77,16 +111,51 @@ The framework registers a small set of commands itself. Linking the framework in
 
 `db:seed` runs whatever you've registered in `bootstrap::register()` with `suprnova::seed::register::<MySeeder>()`. On an empty registry it logs a `tracing::warn!` and returns `Ok(())` — invoking `db:seed` before registering seeders is a benign user mistake, not a programmer error.
 
-## Defining Commands with `#[command]`
+## Defining Commands
 
-The `#[command]` attribute macro accepts two keys:
+Two macros, one registry. Pick whichever fits the command's shape.
 
-| Key           | Required | Purpose                                      |
-|---------------|----------|----------------------------------------------|
-| `name`        | yes      | The invocation name on the CLI (`"db:seed"`, `"cache:clear"`, `"greet"`). |
-| `description` | no       | One-line help text shown by `help`.         |
+### `#[derive(Command)]` — typed args (recommended)
 
-The annotated function must be `async fn(Vec<String>) -> Result<(), FrameworkError>`. The macro preserves the original function, so you can also call it directly from Rust — useful for unit tests that don't want to thread argv strings through the dispatcher.
+Goes on top of `#[derive(clap::Parser)]`. The struct fields are the command's args; clap parses argv into the struct; the framework calls your `TypedCommand::run(self)`.
+
+```rust
+use async_trait::async_trait;
+use clap::Parser;
+use suprnova::{Command, FrameworkError, TypedCommand};
+
+#[derive(Parser, Command, Debug)]
+#[console(name = "users:purge", description = "Purge users older than N days")]
+pub struct UsersPurge {
+    #[arg(long)]
+    pub older_than_days: u32,
+
+    #[arg(long, default_value_t = false)]
+    pub dry_run: bool,
+}
+
+#[async_trait]
+impl TypedCommand for UsersPurge {
+    async fn run(self) -> Result<(), FrameworkError> {
+        // self.older_than_days, self.dry_run — typed, validated by clap
+        Ok(())
+    }
+}
+```
+
+Attributes:
+
+| Attribute    | Required | Purpose                                       |
+|--------------|----------|-----------------------------------------------|
+| `#[console(name = "...")]` | yes | The invocation name on the CLI (`"users:purge"`, `"mail:send"`, `"greet"`). |
+| `#[console(description = "...")]` | no | One-line description shown in top-level help. |
+| `#[arg(...)]` (clap) | n/a | Clap's own field attributes for short/long flags, defaults, value parsers, etc. |
+
+You also get clap's auto-generated per-command help (`console users:purge --help`) for free.
+
+### `#[command]` — raw `Vec<String>` (simple cases)
+
+For commands that take no arguments or only consume positionals as a list, the attribute on an async fn is enough:
 
 ```rust
 use suprnova::{command, FrameworkError};
@@ -97,35 +166,9 @@ pub async fn cache_clear(_args: Vec<String>) -> Result<(), FrameworkError> {
 }
 ```
 
-Names support Laravel-style namespacing: `mail:send`, `queue:work`, `db:fresh`. The colon is purely cosmetic — it's just a string the dispatcher matches against `argv[1]`.
+The annotated function must be `async fn(Vec<String>) -> Result<(), FrameworkError>`. The macro preserves the original function, so you can also call it directly from Rust — useful for unit tests that don't want to thread argv strings through the dispatcher.
 
-### Parsing arguments
-
-The handler receives a raw `Vec<String>` (everything after the command name). For non-trivial commands, parse it with `clap`:
-
-```rust
-use clap::Parser;
-use suprnova::{command, FrameworkError};
-
-#[derive(Parser)]
-struct UserPurgeArgs {
-    #[arg(long)]
-    older_than_days: u32,
-
-    #[arg(long, default_value_t = false)]
-    dry_run: bool,
-}
-
-#[command(name = "users:purge")]
-pub async fn users_purge(args: Vec<String>) -> Result<(), FrameworkError> {
-    let mut argv = vec!["users:purge".to_string()];
-    argv.extend(args);
-    let opts = UserPurgeArgs::try_parse_from(argv)
-        .map_err(|e| FrameworkError::bad_request(e.to_string()))?;
-    // ... use opts.older_than_days, opts.dry_run
-    Ok(())
-}
-```
+Names in both shapes support Laravel-style namespacing: `mail:send`, `queue:work`, `db:fresh`. The colon is purely cosmetic — it's a string the dispatcher matches against `argv[1]`.
 
 ## `suprnova make:command`
 
@@ -209,9 +252,11 @@ Console handlers print to stdout for human-readable output. If a downstream tool
 
 | Symbol                                    | Purpose                                       |
 |-------------------------------------------|-----------------------------------------------|
-| `suprnova::command` (attribute macro)     | Register an async fn as a console command.    |
-| `suprnova::console::dispatch_argv(argv)`  | Route argv to a registered handler. Called from the project's `console` binary. |
+| `suprnova::Command` (derive)              | Register a `clap::Parser`-deriving struct as a typed console command. Pairs with `TypedCommand`. |
+| `suprnova::TypedCommand` (trait)          | Trait with `async fn run(self) -> Result<...>` — the body of a typed command. |
+| `suprnova::command` (attribute)           | Register an async fn taking `Vec<String>` as a raw-args console command. |
+| `suprnova::console::dispatch_argv(argv)`  | Build the clap parser tree from every registered entry, parse argv, route to the handler. |
 | `suprnova::console::find(name)`           | Look up a registered command by exact name.   |
 | `suprnova::console::list()`               | All registered commands, sorted by name.      |
-| `suprnova::CommandEntry`                  | Inventory record: `{ name, description, handler }`. Submitted by the macro. |
-| `suprnova::CommandHandler`                | The fn-pointer type: `fn(Vec<String>) -> Pin<Box<dyn Future<...>>>`. |
+| `suprnova::CommandEntry`                  | Inventory record: `{ name, description, clap_builder, handler }`. Submitted by both macros. |
+| `suprnova::CommandHandler`                | The handler fn-pointer type: `fn(&clap::ArgMatches) -> Pin<Box<dyn Future<...>>>`. |

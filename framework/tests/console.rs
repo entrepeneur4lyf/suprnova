@@ -2,26 +2,32 @@
 //!
 //! Exercises `dispatch_argv` against fixtures registered via raw
 //! `inventory::submit!`. Tests pin:
-//!   - successful dispatch invokes the matching handler with `argv[2..]`
-//!   - unknown command returns an Err whose message names the missing
-//!     command
-//!   - help/empty argv returns Ok without invoking any handler
+//!   - successful dispatch invokes the matching handler and forwards
+//!     argv past the command name as the trailing var arg
+//!   - unknown command returns Err that names the missing command
+//!   - help / empty argv / `--help` paths return Ok (clap prints the
+//!     help text; dispatch resolves cleanly)
 //!   - `list()` returns entries sorted by name
 //!
-//! `inventory` registrations are link-time and cannot be cleared between
-//! tests — fixtures here use distinct command names to avoid collisions
-//! with other tests in the binary.
+//! `inventory` registrations are link-time and cannot be cleared
+//! between tests — fixtures here use distinct command names to
+//! avoid collisions with other tests in the binary.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use suprnova::console::{self, CommandEntry};
+use suprnova::console::{self, raw_clap_builder, collect_trailing_args, CommandEntry};
 use suprnova::FrameworkError;
 
 static GREET_INVOCATIONS: AtomicUsize = AtomicUsize::new(0);
 static LAST_GREET_ARG_LEN: AtomicUsize = AtomicUsize::new(0);
 
+fn build_test_greet() -> clap::Command {
+    raw_clap_builder("test:greet", "fixture: increments a counter")
+}
+
 fn run_test_greet(
-    args: Vec<String>,
+    matches: &clap::ArgMatches,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), FrameworkError>> + Send>> {
+    let args = collect_trailing_args(matches);
     Box::pin(async move {
         GREET_INVOCATIONS.fetch_add(1, Ordering::SeqCst);
         LAST_GREET_ARG_LEN.store(args.len(), Ordering::SeqCst);
@@ -29,8 +35,12 @@ fn run_test_greet(
     })
 }
 
+fn build_test_fail() -> clap::Command {
+    raw_clap_builder("test:fail", "fixture: always errors")
+}
+
 fn run_test_fail(
-    _args: Vec<String>,
+    _matches: &clap::ArgMatches,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), FrameworkError>> + Send>> {
     Box::pin(async move { Err(FrameworkError::internal("intentional test failure")) })
 }
@@ -39,6 +49,7 @@ inventory::submit! {
     CommandEntry {
         name: "test:greet",
         description: "fixture: increments a counter",
+        clap_builder: build_test_greet,
         handler: run_test_greet,
     }
 }
@@ -47,6 +58,7 @@ inventory::submit! {
     CommandEntry {
         name: "test:fail",
         description: "fixture: always errors",
+        clap_builder: build_test_fail,
         handler: run_test_fail,
     }
 }
@@ -69,7 +81,7 @@ async fn dispatch_invokes_registered_handler_with_trailing_args() {
     assert_eq!(
         LAST_GREET_ARG_LEN.load(Ordering::SeqCst),
         2,
-        "argv[2..] is forwarded to the handler"
+        "argv[2..] is forwarded to the handler via trailing_var_arg"
     );
 }
 
@@ -103,8 +115,10 @@ async fn dispatch_returns_err_for_unknown_command() {
 }
 
 #[tokio::test]
-async fn dispatch_with_only_binary_name_prints_help_and_returns_ok() {
-    // argv has only argv[0]; dispatch should treat that as help.
+async fn dispatch_with_only_binary_name_returns_ok() {
+    // argv has only argv[0]; clap's `arg_required_else_help(true)`
+    // prints help to stdout and our handler maps the resulting
+    // DisplayHelpOnMissingArgumentOrSubcommand to Ok(()).
     let argv = vec!["console".to_string()];
     console::dispatch_argv(argv)
         .await
@@ -113,12 +127,24 @@ async fn dispatch_with_only_binary_name_prints_help_and_returns_ok() {
 
 #[tokio::test]
 async fn dispatch_with_help_flag_returns_ok() {
-    for flag in ["help", "--help", "-h"] {
+    // Clap intercepts `--help` and `-h` at parse time and yields
+    // DisplayHelp; our handler treats those as Ok.
+    for flag in ["--help", "-h"] {
         let argv = vec!["console".to_string(), flag.to_string()];
         console::dispatch_argv(argv)
             .await
             .unwrap_or_else(|_| panic!("'{flag}' should be treated as help"));
     }
+}
+
+#[tokio::test]
+async fn dispatch_with_help_subcommand_returns_ok() {
+    // Clap auto-generates a `help` subcommand; invoking it prints
+    // top-level help and yields DisplayHelp.
+    let argv = vec!["console".to_string(), "help".to_string()];
+    console::dispatch_argv(argv)
+        .await
+        .expect("'help' subcommand prints help and returns Ok");
 }
 
 #[test]

@@ -33,9 +33,10 @@ fn make_command_with_simple_name_emits_kebab_case() {
     assert!(file.exists(), "command file at {}", file.display());
 
     let content = read(&file);
-    assert!(content.contains("#[command(name = \"clean-cache\""));
-    assert!(content.contains("pub async fn clean_cache"));
-    assert!(content.contains("use suprnova::{command, FrameworkError};"));
+    assert!(content.contains("#[console(name = \"clean-cache\""));
+    assert!(content.contains("pub struct CleanCache"));
+    assert!(content.contains("impl TypedCommand for CleanCache"));
+    assert!(content.contains("use suprnova::{Command, FrameworkError, TypedCommand};"));
 
     let mod_content = read(tmp.path().join("src/commands/mod.rs"));
     assert!(mod_content.contains("pub mod clean_cache;"));
@@ -51,7 +52,7 @@ fn make_command_pascal_case_input_becomes_kebab_case() {
         content.contains("name = \"clean-cache\""),
         "PascalCase input becomes kebab-case command name: {content}"
     );
-    assert!(content.contains("pub async fn clean_cache"));
+    assert!(content.contains("pub struct CleanCache"));
 }
 
 #[test]
@@ -64,7 +65,7 @@ fn make_command_with_colon_namespace_preserved_verbatim() {
     let content = read(&file);
     // Colon namespace preserved exactly as written.
     assert!(content.contains("name = \"mail:send\""));
-    assert!(content.contains("pub async fn mail_send"));
+    assert!(content.contains("pub struct MailSend"));
 }
 
 #[test]
