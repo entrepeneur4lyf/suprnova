@@ -16,7 +16,8 @@ pub mod channels;
 
 use crate::error::FrameworkError;
 use async_trait::async_trait;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -39,7 +40,6 @@ pub trait Notifiable: Send + Sync {
 /// `notification_name` is the stable identifier that channels (notably the
 /// database channel) persist alongside the data so callers can filter by
 /// notification type later.
-#[async_trait]
 pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// A stable name for this notification type. Persisted by the database
     /// channel; used by other channels for logging and metrics.
