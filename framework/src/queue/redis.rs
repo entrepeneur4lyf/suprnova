@@ -54,7 +54,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use sea_streamer::{Buffer, Consumer, ConsumerOptions, Message, Producer, StreamKey, Streamer, StreamerUri};
 use sea_streamer_redis::{
-    AutoCommit, RedisConsumer, RedisConsumerOptions, RedisProducer, RedisStreamer,
+    AutoCommit, AutoStreamReset, RedisConsumer, RedisConsumerOptions, RedisProducer, RedisStreamer,
 };
 use sea_streamer::ConsumerMode;
 use sea_streamer::{ConsumerGroup, ConsumerId};
@@ -124,6 +124,11 @@ impl RedisQueueDriver {
         opts.set_auto_claim_idle(visibility_timeout);
         // Allow consumer to create the group/stream if it doesn't exist yet.
         opts.set_mkstream(true);
+        // Create the consumer group at position 0 (beginning of stream) so
+        // messages pushed before the first `pop()` call are not missed.
+        // The default (Latest / `$`) would skip any messages already in the
+        // stream when the group is first initialized on the initial `next()`.
+        opts.set_auto_stream_reset(AutoStreamReset::Earliest);
 
         let consumer: RedisConsumer = streamer
             .create_consumer(std::slice::from_ref(&stream_key), opts)
@@ -160,24 +165,37 @@ impl QueueDriver for RedisQueueDriver {
     }
 
     /// Poll for the next message. Returns `None` if no message arrives within
-    /// ~100 ms. The `visibility_timeout` argument is accepted but ignored;
-    /// the idle window was set at construction time via `auto_claim_idle`.
-    async fn pop(&self, _visibility_timeout: Duration) -> Result<Option<Reservation>, FrameworkError> {
-        // Bound the wait to 100 ms so callers that are polled in a loop don't
-        // block indefinitely when the queue is empty.
-        let result =
-            tokio::time::timeout(Duration::from_millis(100), self.consumer.next()).await;
+    /// `visibility_timeout`. Internally polls in short (100 ms) probe windows
+    /// so the caller's deadline is respected without holding the consumer
+    /// locked across the full wait.
+    ///
+    /// Note: `visibility_timeout` controls how long *this call* waits for a
+    /// message. The XAUTOCLAIM idle window (how long an unacked message stays
+    /// in the PEL before reclaim) is set at construction time and is unrelated.
+    async fn pop(&self, visibility_timeout: Duration) -> Result<Option<Reservation>, FrameworkError> {
+        // Poll in short probe windows so we return promptly when the queue is
+        // empty AND honour the caller's deadline when a message is slow to arrive
+        // (e.g. right after a push on a fresh stream/consumer-group).
+        let probe = Duration::from_millis(100);
+        let deadline = tokio::time::Instant::now() + visibility_timeout;
 
-        let msg = match result {
-            // Timed out — queue is empty (or no new messages available).
-            Err(_elapsed) => return Ok(None),
-            // Consumer returned an error.
-            Ok(Err(e)) => {
-                return Err(FrameworkError::internal(format!(
-                    "redis consumer next error: {e}"
-                )))
+        let msg = loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
             }
-            Ok(Ok(msg)) => msg,
+            let wait = remaining.min(probe);
+            match tokio::time::timeout(wait, self.consumer.next()).await {
+                // This probe timed out — loop and check deadline.
+                Err(_elapsed) => continue,
+                // Consumer returned an error.
+                Ok(Err(e)) => {
+                    return Err(FrameworkError::internal(format!(
+                        "redis consumer next error: {e}"
+                    )))
+                }
+                Ok(Ok(msg)) => break msg,
+            }
         };
 
         // Parse the envelope from the message payload.
