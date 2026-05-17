@@ -36,6 +36,7 @@ pub mod session;
 pub mod testing;
 pub mod rate_limit;
 pub mod mail;
+pub mod notifications;
 
 extern crate self as suprnova;
 
@@ -153,6 +154,7 @@ pub use web_push::{
     WebPushClient, WebPushError,
 };
 pub use mail::{Address, Attachment, Mail, Mailable};
+pub use notifications::{Channel, DynNotification, Notifiable, Notification, NotificationDispatcher};
 
 // Re-export async_trait for middleware implementations
 pub use async_trait::async_trait;
