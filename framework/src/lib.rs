@@ -38,6 +38,7 @@ pub mod rate_limit;
 pub mod mail;
 pub mod notifications;
 pub mod factory;
+pub mod seed;
 pub mod prelude;
 
 extern crate self as suprnova;
@@ -156,6 +157,7 @@ pub use web_push::{
     WebPushClient, WebPushError,
 };
 pub use factory::{persist_via_seaorm, Factory, FactoryBuilder, Persistable, Sequence};
+pub use seed::Seeder;
 pub use mail::{Address, Attachment, Mail, MailFake, Mailable, SendMailJob};
 pub use notifications::{
     Channel, DynNotification, Notifiable, Notification, NotificationDispatcher,
