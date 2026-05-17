@@ -21,6 +21,7 @@ pub mod inertia;
 pub mod logging;
 pub mod middleware;
 pub mod pagination;
+pub mod queue;
 pub mod routing;
 pub mod schedule;
 pub mod sse;
@@ -89,6 +90,7 @@ pub use inertia::{
 pub use pagination::{
     CursorDirection, CursorPaginator, IntoInertiaScroll, LengthAwarePaginator, Paginated, Pagination,
 };
+pub use queue::{BackoffSchedule, Envelope, Job};
 pub use resources::{
     AsRelationshipValue,
     IncludeResolutionError,
