@@ -117,7 +117,7 @@ impl MailBuilder {
             cc: self.cc,
             bcc: self.bcc,
             reply_to: self.reply_to,
-            subject: mailable.subject(),
+            subject: mailable.render_subject()?,
             html,
             text,
             attachments: mailable.attachments(),

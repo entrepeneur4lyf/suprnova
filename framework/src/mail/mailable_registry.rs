@@ -32,10 +32,10 @@ pub(crate) type Factory =
 
 /// Object-safe view of [`Mailable`]. The blanket impl below forwards every
 /// method to the concrete `M`, including the Tera-backed `render_html` /
-/// `render_text` defaults — so the queued path never sees raw template
-/// source, only rendered output.
+/// `render_text` / `render_subject` defaults — so the queued path never
+/// sees raw template source, only rendered output.
 pub trait AnyMailable: Send + Sync {
-    fn subject(&self) -> String;
+    fn render_subject(&self) -> Result<String, FrameworkError>;
     fn render_html(&self) -> Result<Option<String>, FrameworkError>;
     fn render_text(&self) -> Result<Option<String>, FrameworkError>;
     fn from(&self) -> Option<Address>;
@@ -43,8 +43,8 @@ pub trait AnyMailable: Send + Sync {
 }
 
 impl<M: Mailable> AnyMailable for M {
-    fn subject(&self) -> String {
-        <M as Mailable>::subject(self)
+    fn render_subject(&self) -> Result<String, FrameworkError> {
+        <M as Mailable>::render_subject(self)
     }
     fn render_html(&self) -> Result<Option<String>, FrameworkError> {
         <M as Mailable>::render_html(self)
@@ -131,7 +131,7 @@ pub fn render_outgoing(
         cc,
         bcc,
         reply_to,
-        subject: any.subject(),
+        subject: any.render_subject()?,
         html,
         text,
         attachments: any.attachments(),

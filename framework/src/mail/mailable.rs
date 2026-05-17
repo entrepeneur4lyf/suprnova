@@ -26,7 +26,25 @@ pub trait Mailable: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// Stable name used in the queue envelope. Renaming breaks in-flight messages.
     fn mailable_name() -> &'static str where Self: Sized;
 
+    /// Computed subject. Used as the rendered subject when
+    /// [`subject_template_source`](Self::subject_template_source) returns
+    /// `None`. Use `format!` for runtime substitution, or override
+    /// `subject_template_source` to get Tera-style `{{ field }}`
+    /// interpolation with the mailable's serialized fields as the context.
     fn subject(&self) -> String;
+
+    /// Subject Tera template source. When `Some`, takes precedence over
+    /// [`subject`](Self::subject) and is rendered through Tera with the
+    /// mailable's serialized fields as the context — same semantics as
+    /// [`html_template_source`](Self::html_template_source) and
+    /// [`text_template_source`](Self::text_template_source).
+    ///
+    /// This lets `Mailable` impls write Tera-templated subjects without
+    /// duplicating field-formatting logic, and brings the trait's three
+    /// rendering paths (subject / html / text) onto one consistent
+    /// surface. The defaulted `None` keeps existing impls that only
+    /// override `subject()` working unchanged.
+    fn subject_template_source(&self) -> Option<String> { None }
 
     /// HTML template source (Tera syntax). Return None to skip HTML.
     fn html_template_source(&self) -> Option<String> { None }
@@ -38,6 +56,20 @@ pub trait Mailable: Serialize + DeserializeOwned + Send + Sync + 'static {
     fn from(&self) -> Option<Address> { None }
 
     fn attachments(&self) -> Vec<Attachment> { Vec::new() }
+
+    /// Render the subject. When `subject_template_source` returns `Some`,
+    /// Tera-renders that template with `self` as the context; otherwise
+    /// returns `subject()` unchanged. The dispatch path
+    /// (`MailBuilder::send`, the queue worker, the notification mail
+    /// channel) calls this — so a Tera-templated subject in any of the
+    /// supported surfaces renders correctly without each call site
+    /// reaching into the template source itself.
+    fn render_subject(&self) -> Result<String, FrameworkError> {
+        let Some(src) = self.subject_template_source() else {
+            return Ok(self.subject());
+        };
+        render_with_self(self, &src, "subject")
+    }
 
     /// Render the HTML body. Default impl uses Tera with the mailable's
     /// serialized fields as the context. Override if you need custom rendering
