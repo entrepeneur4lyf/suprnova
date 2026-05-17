@@ -133,6 +133,25 @@ async fn fake_restores_absent_transport_on_drop() {
         msg.contains("no mail transport configured"),
         "expected no-transport error after fake drops with no prior: {msg}"
     );
+
+    // The hint must point at the actually-callable path. Operators
+    // copying it into their code should not hit a compile error.
+    // `Mail::set_transport` is a real method. `bootstrap_from_env` is
+    // at `suprnova::mail::boot::bootstrap_from_env()` — NOT on the
+    // `Mail` struct directly. Pin both paths so a future hint rewrite
+    // can't regress to a non-existent symbol.
+    assert!(
+        msg.contains("Mail::set_transport"),
+        "hint names the set_transport method: {msg}"
+    );
+    assert!(
+        msg.contains("suprnova::mail::boot::bootstrap_from_env"),
+        "hint names the bootstrap function at its actual path: {msg}"
+    );
+    assert!(
+        !msg.contains("Mail::bootstrap_from_env"),
+        "hint must NOT point at the non-existent `Mail::bootstrap_from_env` path: {msg}"
+    );
 }
 
 #[tokio::test]

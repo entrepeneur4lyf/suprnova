@@ -73,7 +73,7 @@ impl Mail {
             .expect("mail transport lock poisoned")
             .clone()
             .ok_or_else(|| FrameworkError::internal(
-                "no mail transport configured; call Mail::set_transport(...) or run Mail::bootstrap_from_env()"
+                "no mail transport configured; call Mail::set_transport(...) or run suprnova::mail::boot::bootstrap_from_env()"
             ))
     }
 }
