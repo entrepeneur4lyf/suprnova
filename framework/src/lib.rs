@@ -153,7 +153,7 @@ pub use web_push::{
     ContentEncoding, PushResponse, SubscriptionInfo, VapidClaims, VapidKey, VapidSigner,
     WebPushClient, WebPushError,
 };
-pub use mail::{Address, Attachment, Mail, Mailable, SendMailJob};
+pub use mail::{Address, Attachment, Mail, MailFake, Mailable, SendMailJob};
 pub use notifications::{
     Channel, DynNotification, Notifiable, Notification, NotificationDispatcher,
     NotificationFactory, Notify, SendNotificationJob,

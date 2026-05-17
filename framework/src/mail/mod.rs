@@ -22,6 +22,7 @@ pub use send_job::SendMailJob;
 pub use transport::{MailTransport, OutgoingMessage};
 
 use crate::error::FrameworkError;
+use crate::mail::memory::InMemoryMailTransport;
 use std::sync::{Arc, RwLock};
 
 static TRANSPORT: RwLock<Option<Arc<dyn MailTransport>>> = RwLock::new(None);
@@ -38,6 +39,32 @@ impl Mail {
 
     pub fn to(addr: impl Into<Address>) -> MailBuilder {
         MailBuilder::default().to(addr)
+    }
+
+    /// Install an in-memory capture transport for the duration of the
+    /// returned guard. Mirrors `Bus::fake()` / `Queue::fake()` /
+    /// `Cache::fake()` — tests call `Mail::fake()`, dispatch mail
+    /// normally, then assert against the captured messages.
+    ///
+    /// The previously-bound transport (if any) is saved and restored
+    /// when the [`MailFake`] guard drops. Tests can freely intermix
+    /// `Mail::fake()` with other transport-mutating code without
+    /// leaking state.
+    ///
+    /// ```ignore
+    /// let fake = Mail::fake();
+    /// Mail::to("alice@example.org").send(welcome).await?;
+    /// fake.assert_sent(|m| m.subject.contains("Welcome"));
+    /// fake.assert_sent_count(1);
+    /// // fake drops here — previous transport (or absence) is restored.
+    /// ```
+    pub fn fake() -> MailFake {
+        let transport = Arc::new(InMemoryMailTransport::new());
+        let previous = TRANSPORT
+            .write()
+            .expect("mail transport lock poisoned")
+            .replace(transport.clone() as Arc<dyn MailTransport>);
+        MailFake { transport, previous }
     }
 
     pub(crate) fn current_transport() -> Result<Arc<dyn MailTransport>, FrameworkError> {
@@ -155,5 +182,79 @@ impl MailBuilder {
             mailable_name: M::mailable_name().to_string(),
             mailable_payload: payload,
         })
+    }
+}
+
+/// RAII guard returned by [`Mail::fake`]. Captures every dispatched
+/// outgoing message in memory and restores the previously-bound
+/// transport when dropped.
+///
+/// `MailFake` is `Send + Sync` — tests can share it across awaits or
+/// threads if they need to, though the typical pattern is a single
+/// `let fake = Mail::fake();` at the top of the test.
+pub struct MailFake {
+    transport: Arc<InMemoryMailTransport>,
+    previous: Option<Arc<dyn MailTransport>>,
+}
+
+impl MailFake {
+    /// All messages captured since the fake was installed.
+    pub fn captured(&self) -> Vec<OutgoingMessage> {
+        self.transport.captured()
+    }
+
+    /// Number of messages captured. Convenience over `captured().len()`.
+    pub fn count(&self) -> usize {
+        self.transport.captured().len()
+    }
+
+    /// Assert at least one captured message matches `predicate`.
+    /// Panics with the full captured set if no match is found.
+    pub fn assert_sent<F>(&self, predicate: F)
+    where
+        F: Fn(&OutgoingMessage) -> bool,
+    {
+        let captured = self.transport.captured();
+        if !captured.iter().any(&predicate) {
+            panic!(
+                "Mail::fake assertion failed: expected at least one message matching predicate; \
+                 captured {} message(s): {:#?}",
+                captured.len(),
+                captured
+            );
+        }
+    }
+
+    /// Assert NO captured message matches `predicate`.
+    pub fn assert_not_sent<F>(&self, predicate: F)
+    where
+        F: Fn(&OutgoingMessage) -> bool,
+    {
+        let captured = self.transport.captured();
+        if let Some(matching) = captured.iter().find(|m| predicate(m)) {
+            panic!(
+                "Mail::fake assertion failed: expected NO message matching predicate, \
+                 found at least one: {matching:#?}"
+            );
+        }
+    }
+
+    /// Assert the captured count equals `expected`.
+    pub fn assert_sent_count(&self, expected: usize) {
+        let actual = self.transport.captured().len();
+        assert_eq!(
+            actual, expected,
+            "Mail::fake: expected {expected} message(s), captured {actual}"
+        );
+    }
+}
+
+impl Drop for MailFake {
+    fn drop(&mut self) {
+        // Restore the previous transport. If a poisoned lock would
+        // panic during drop we accept that — losing transport state
+        // during teardown is preferable to silently leaving the fake
+        // bound (which would corrupt every subsequent test).
+        *TRANSPORT.write().expect("mail transport lock poisoned") = self.previous.take();
     }
 }
