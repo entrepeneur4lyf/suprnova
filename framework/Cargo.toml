@@ -140,3 +140,4 @@ otel = [
 # against — different majors of `prometheus-client` would fracture the
 # `Registry` type identity.
 prometheus-client = "0.24"
+tokio = { version = "1", features = ["test-util"] }

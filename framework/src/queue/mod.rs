@@ -1,18 +1,20 @@
 //! Queue subsystem: facade, drivers, envelope, worker.
 
+pub mod driver;
 pub mod envelope;
 pub mod job;
+pub mod memory;
 pub mod retry;
 pub mod testing;
 pub mod worker;
-pub(crate) mod driver;
 
+pub use driver::{QueueDriver, Reservation, ReservationToken};
 pub use envelope::{Envelope, EnvelopeError, CURRENT_SCHEMA_VERSION};
 pub use job::{BackoffSchedule, Job};
+pub use memory::MemoryQueueDriver;
 
 use crate::error::FrameworkError;
 use chrono::Utc;
-use driver::QueueDriver;
 use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 
