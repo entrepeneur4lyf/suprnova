@@ -37,6 +37,7 @@ pub mod testing;
 pub mod rate_limit;
 pub mod mail;
 pub mod notifications;
+pub mod factory;
 pub mod prelude;
 
 extern crate self as suprnova;
@@ -154,6 +155,7 @@ pub use web_push::{
     ContentEncoding, PushResponse, SubscriptionInfo, VapidClaims, VapidKey, VapidSigner,
     WebPushClient, WebPushError,
 };
+pub use factory::{Factory, FactoryBuilder, Sequence};
 pub use mail::{Address, Attachment, Mail, MailFake, Mailable, SendMailJob};
 pub use notifications::{
     Channel, DynNotification, Notifiable, Notification, NotificationDispatcher,

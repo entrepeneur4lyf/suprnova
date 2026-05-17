@@ -1,0 +1,136 @@
+//! Model factories — produce randomized model instances for tests and
+//! seed data with a Laravel-style fluent builder.
+//!
+//! ```ignore
+//! use suprnova::factory::Factory;
+//! use fake::{Fake, Faker};
+//!
+//! // The minimal hand-written form: pair a marker struct with a
+//! // `Factory` impl that knows how to build one instance.
+//! struct UserFactory;
+//! impl Factory for UserFactory {
+//!     type Model = User;
+//!     fn definition() -> User {
+//!         Faker.fake::<User>()  // assumes `User: fake::Dummy`
+//!     }
+//! }
+//!
+//! // Build one
+//! let user = UserFactory::new().make();
+//!
+//! // Build many
+//! let users = UserFactory::new().count(10).make_many();
+//!
+//! // Override per-call
+//! let admin = UserFactory::new()
+//!     .with(|u| u.is_admin = true)
+//!     .make();
+//! ```
+//!
+//! `create` / `create_many` (in [`persist`]) extend the builder with
+//! SeaORM persistence. The fluent surface is intentionally close to
+//! Laravel's `User::factory()->count(10)->create()` so the mental model
+//! ports without translation.
+//!
+//! For the typical case where a model derives `fake::Dummy`, see
+//! `#[derive(Factory)]` which generates the marker struct + impl from
+//! a `#[factory(model = "...")]` attribute.
+
+mod sequence;
+
+pub use sequence::Sequence;
+
+/// A factory produces randomized instances of `Model`. Each call to
+/// `definition()` returns a fresh, independently-randomized value —
+/// the trait carries no per-instance state.
+///
+/// Implementors are typically zero-sized marker types so callers can
+/// reach the factory by name (`UserFactory::new()`) without holding a
+/// handle.
+pub trait Factory {
+    type Model;
+
+    /// Build one instance with all default-randomized fields. The
+    /// builder's `with(...)` overrides run AFTER this returns, so
+    /// implementations should populate every field they want
+    /// randomized — overrides correct the parts the test cares about.
+    fn definition() -> Self::Model
+    where
+        Self: Sized;
+
+    /// Start a fluent builder. Default `count` is 1; default override
+    /// list is empty.
+    fn new() -> FactoryBuilder<Self::Model>
+    where
+        Self: Sized,
+    {
+        FactoryBuilder {
+            count: 1,
+            overrides: Vec::new(),
+            factory_fn: Self::definition,
+        }
+    }
+}
+
+/// Fluent builder returned by [`Factory::new`]. Owns the per-instance
+/// count and the list of override closures.
+///
+/// Boxed closures are `Send + Sync + 'static` so the builder itself is
+/// `Send` — important for the async `create` / `create_many` paths,
+/// which capture the builder across an `.await` point on the SeaORM
+/// insert.
+pub struct FactoryBuilder<M> {
+    pub(crate) count: usize,
+    pub(crate) overrides: Vec<Box<dyn Fn(&mut M) + Send + Sync + 'static>>,
+    pub(crate) factory_fn: fn() -> M,
+}
+
+impl<M> FactoryBuilder<M> {
+    /// Set the number of instances `make_many` / `create_many` will
+    /// produce. Has no effect on `make` / `create`, which always
+    /// return one instance.
+    pub fn count(mut self, n: usize) -> Self {
+        self.count = n;
+        self
+    }
+
+    /// Add an override closure that runs against every produced
+    /// instance after `definition()`. Multiple `with` calls compose
+    /// in registration order, so a later override can clobber an
+    /// earlier one.
+    pub fn with<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&mut M) + Send + Sync + 'static,
+    {
+        self.overrides.push(Box::new(f));
+        self
+    }
+
+    /// Build a single in-memory instance. Runs every registered
+    /// override against the produced value. Does NOT persist —
+    /// see [`persist::FactoryBuilder::create`] for the persisted
+    /// variant.
+    pub fn make(self) -> M {
+        let mut model = (self.factory_fn)();
+        for o in &self.overrides {
+            o(&mut model);
+        }
+        model
+    }
+
+    /// Build `count` instances in memory, applying overrides to each.
+    /// Each instance is independently randomized via a fresh call to
+    /// `definition()`.
+    pub fn make_many(self) -> Vec<M> {
+        let FactoryBuilder { count, overrides, factory_fn } = self;
+        (0..count)
+            .map(|_| {
+                let mut model = factory_fn();
+                for o in &overrides {
+                    o(&mut model);
+                }
+                model
+            })
+            .collect()
+    }
+}
