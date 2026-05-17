@@ -47,6 +47,38 @@ pub trait RateLimiter: Send + Sync {
 // Middleware integration
 // ============================================================================
 
+use crate::container::App;
+
+/// Wire the in-memory rate limiter as the default. Idempotent.
+pub async fn bootstrap_default() {
+    if App::has_binding::<dyn RateLimiter>() {
+        return;
+    }
+    App::bind::<dyn RateLimiter>(std::sync::Arc::new(memory::InMemoryRateLimiter::new()));
+}
+
+/// Read `RATE_LIMIT_DRIVER` env and configure the matching driver. Falls back
+/// to the in-memory default on any unrecognized value or when the var is unset.
+pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
+    let driver = std::env::var("RATE_LIMIT_DRIVER").unwrap_or_else(|_| "memory".into());
+    match driver.as_str() {
+        "memory" => bootstrap_default().await,
+        "redis" => {
+            let url = std::env::var("RATE_LIMIT_REDIS_URL")
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+            let prefix = std::env::var("RATE_LIMIT_PREFIX")
+                .unwrap_or_else(|_| "suprnova:".into());
+            let d = redis::RedisRateLimiter::connect(&url, &prefix).await?;
+            App::bind::<dyn RateLimiter>(std::sync::Arc::new(d));
+        }
+        other => {
+            tracing::warn!(driver = %other, "unknown RATE_LIMIT_DRIVER, falling back to memory");
+            bootstrap_default().await;
+        }
+    }
+    Ok(())
+}
+
 use crate::http::{HttpResponse, Response};
 use crate::Request;
 use std::sync::Arc;

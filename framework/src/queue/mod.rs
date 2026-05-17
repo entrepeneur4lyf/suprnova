@@ -87,6 +87,63 @@ pub(crate) fn current_driver() -> Result<Arc<dyn QueueDriver>, FrameworkError> {
         })
 }
 
+/// Wire the in-memory queue driver as the default. Idempotent.
+pub async fn bootstrap_default() {
+    if DRIVER.read().expect("queue driver lock poisoned").is_some() {
+        return;
+    }
+    Queue::set_driver(Arc::new(memory::MemoryQueueDriver::new()));
+}
+
+/// Read `QUEUE_DRIVER` env and configure the matching driver. Falls back to the
+/// in-memory default on any unrecognized value or when `QUEUE_DRIVER` is unset.
+pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
+    let driver = std::env::var("QUEUE_DRIVER").unwrap_or_else(|_| "memory".into());
+    match driver.as_str() {
+        "memory" => bootstrap_default().await,
+        "redis" => {
+            let url = std::env::var("QUEUE_REDIS_URL")
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+            let stream = std::env::var("QUEUE_REDIS_STREAM")
+                .unwrap_or_else(|_| "suprnova-queue".into());
+            let group =
+                std::env::var("QUEUE_REDIS_GROUP").unwrap_or_else(|_| "default".into());
+            let consumer = std::env::var("QUEUE_REDIS_CONSUMER")
+                .unwrap_or_else(|_| "consumer-1".into());
+            let visibility = std::time::Duration::from_secs(
+                std::env::var("QUEUE_VISIBILITY_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(60),
+            );
+            let d =
+                redis::RedisQueueDriver::connect(&url, &stream, &group, &consumer, visibility)
+                    .await?;
+            Queue::set_driver(Arc::new(d));
+        }
+        "database" => {
+            let table =
+                std::env::var("QUEUE_DB_TABLE").unwrap_or_else(|_| "jobs".into());
+            // Requires DB::init() (or DB::init_with(...)) to have been called first.
+            let db = crate::database::DB::connection().map_err(|e| {
+                FrameworkError::internal(format!(
+                    "QUEUE_DRIVER=database requires DB::init() to run first: {e}"
+                ))
+            })?;
+            // DatabaseConnection is Arc-backed (SeaORM pool), so clone is cheap.
+            Queue::set_driver(Arc::new(database::DatabaseQueueDriver::new(
+                db.inner().clone(),
+                table,
+            )));
+        }
+        other => {
+            tracing::warn!(driver = %other, "unknown QUEUE_DRIVER, falling back to memory");
+            bootstrap_default().await;
+        }
+    }
+    Ok(())
+}
+
 fn envelope_for<J: Job>(
     job: &J,
     available_at: chrono::DateTime<chrono::Utc>,

@@ -167,6 +167,11 @@ impl Server {
         // Bootstrap cache (Redis with in-memory fallback)
         Cache::bootstrap().await;
 
+        // Bootstrap queue and rate-limit drivers from env vars.
+        // Defaults to in-memory when QUEUE_DRIVER / RATE_LIMIT_DRIVER are unset.
+        crate::queue::bootstrap_from_env().await?;
+        crate::rate_limit::bootstrap_from_env().await?;
+
         let addr: SocketAddr = self.get_addr()?;
         let listener = TcpListener::bind(addr).await?;
 
