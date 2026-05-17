@@ -95,6 +95,12 @@ enum Commands {
         /// Name of the action (e.g., AddTodo, CreateUser)
         name: String,
     },
+    /// Generate a new console command
+    #[command(name = "make:command")]
+    MakeCommand {
+        /// Name of the command (e.g., `clean-cache`, `mail:send`, `CleanCache`)
+        name: String,
+    },
     /// Generate a new domain error
     #[command(name = "make:error")]
     MakeError {
@@ -257,6 +263,9 @@ fn main() {
         }
         Commands::MakeAction { name } => {
             commands::make_action::run(name);
+        }
+        Commands::MakeCommand { name } => {
+            commands::make_command::run(name);
         }
         Commands::MakeError { name } => {
             commands::make_error::run(name);

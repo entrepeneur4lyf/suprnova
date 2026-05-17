@@ -187,6 +187,31 @@ impl {struct_name} {{
     )
 }
 
+/// Template for generating a new console command file with `make:command`.
+///
+/// Emits a runnable `#[command]`-annotated async fn. The TODO marker
+/// in the body is intentional — the user fills in real behavior; the
+/// scaffold compiles immediately so the `make:command` → `cargo run`
+/// loop is fast.
+pub fn command_template(fn_name: &str, command_name: &str) -> String {
+    format!(
+        r#"//! `{command_name}` console command.
+
+use suprnova::{{command, FrameworkError}};
+
+#[command(name = "{command_name}", description = "TODO: describe what {command_name} does")]
+pub async fn {fn_name}(_args: Vec<String>) -> Result<(), FrameworkError> {{
+    // TODO: implement the command body. `_args` carries argv past the
+    // command name; clap or your own parsing can take it from here.
+    println!("{command_name}: not yet implemented");
+    Ok(())
+}}
+"#,
+        fn_name = fn_name,
+        command_name = command_name
+    )
+}
+
 /// Template for generating a new Inertia page with `make:inertia`.
 ///
 /// Dispatches to the right per-frontend snippet so the generated file
