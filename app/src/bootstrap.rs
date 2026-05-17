@@ -157,6 +157,13 @@ pub async fn register() {
         crate::notifications::order_shipped::OrderShipped,
     >();
     register_job::<suprnova::notifications::notify_job::SendNotificationJob>();
+
+    // Phase 6A T7 — factory + seeder dogfood. Registers `BaseSeeder`
+    // so a `suprnova db:seed` invocation (Phase 6B) will populate 50
+    // users + 200 posts via the framework's Factory / Persistable
+    // path. Tests reach the same path through `seed::run_all()`
+    // directly without the CLI.
+    suprnova::seed::register::<crate::seeders::BaseSeeder>();
 }
 
 /// Register the application's storage disks.
