@@ -130,6 +130,20 @@ impl MailTransport for SendGridMailTransport {
             })
             .collect();
 
+        // SendGrid v3 `/v3/mail/send` only accepts a single `reply_to`
+        // object — unlike Postmark (CSV) or SES (array). If the caller
+        // configured multiple addresses we still send the first but
+        // surface a warn so the dropped recipients aren't invisible.
+        let reply_to = msg.reply_to.first().map(to_sg);
+        if msg.reply_to.len() > 1 {
+            let dropped: Vec<&str> = msg.reply_to.iter().skip(1).map(|a| a.email.as_str()).collect();
+            tracing::warn!(
+                kept = %msg.reply_to[0].email,
+                dropped = ?dropped,
+                "SendGrid v3 supports only one reply_to; additional addresses ignored"
+            );
+        }
+
         let body = SgBody {
             personalizations: vec![SgPersonalization {
                 to: msg.to.iter().map(to_sg).collect(),
@@ -137,7 +151,7 @@ impl MailTransport for SendGridMailTransport {
                 bcc: msg.bcc.iter().map(to_sg).collect(),
             }],
             from: to_sg(&msg.from),
-            reply_to: msg.reply_to.first().map(to_sg),
+            reply_to,
             subject: &msg.subject,
             content,
             attachments,

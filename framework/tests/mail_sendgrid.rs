@@ -4,6 +4,7 @@ use std::sync::Arc;
 use suprnova::async_trait;
 use suprnova::mail::sendgrid::SendGridMailTransport;
 use suprnova::mail::{Address, Mail, Mailable};
+use tracing_test::traced_test;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -161,4 +162,38 @@ async fn sendgrid_encodes_attachments_as_base64_with_filename_and_content_type()
         .decode(attachments[0]["content"].as_str().unwrap())
         .unwrap();
     assert_eq!(decoded, b"%PDF-1.4\n%test-content");
+}
+
+#[tokio::test]
+#[serial]
+#[traced_test]
+async fn sendgrid_warns_when_multiple_reply_to_addresses_are_truncated() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(202))
+        .mount(&server)
+        .await;
+
+    let transport = SendGridMailTransport::with_endpoint("test-api-key", server.uri());
+    Mail::set_transport(Arc::new(transport));
+
+    Mail::to("alice@example.org")
+        .reply_to("first@reply.example")
+        .reply_to("second@reply.example")
+        .reply_to("third@reply.example")
+        .send(M::default())
+        .await
+        .unwrap();
+
+    // The wire payload only carries the first reply_to (SendGrid v3 hard-
+    // limit); the warn surfaces the kept + dropped addresses so the
+    // truncation isn't silent.
+    let reqs = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(body["reply_to"]["email"], "first@reply.example");
+
+    assert!(logs_contain("SendGrid v3 supports only one reply_to"));
+    assert!(logs_contain("first@reply.example"));
+    assert!(logs_contain("second@reply.example"));
+    assert!(logs_contain("third@reply.example"));
 }
