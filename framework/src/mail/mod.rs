@@ -1,8 +1,10 @@
 //! Mail subsystem.
 
 pub mod address;
+pub mod log;
 pub mod mailable;
 pub mod memory;
+pub mod smtp;
 pub mod transport;
 
 pub use address::{Address, Attachment};
