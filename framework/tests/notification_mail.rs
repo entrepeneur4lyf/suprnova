@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serial_test::serial;
 use std::sync::Arc;
 use suprnova::mail::memory::InMemoryMailTransport;
-use suprnova::mail::{Address, Mail};
+use suprnova::mail::{Address, Attachment, Mail};
 use suprnova::notifications::channels::mail::{
     register_mail_renderer, MailChannel, MailRendering, NotificationMailable,
 };
@@ -54,9 +54,9 @@ impl NotificationMailable for HappyPath {
     fn to_mail(&self) -> Result<MailRendering, FrameworkError> {
         Ok(MailRendering {
             subject: format!("Your order shipped ({})", self.tracking),
-            html: None,
             text: Some(format!("Tracking number: {}", self.tracking)),
             from: Some(Address::new("orders@suprnova.dev").with_name("Suprnova Orders")),
+            ..Default::default()
         })
     }
 }
@@ -123,9 +123,7 @@ impl NotificationMailable for EmptyBody {
     fn to_mail(&self) -> Result<MailRendering, FrameworkError> {
         Ok(MailRendering {
             subject: "ignored".into(),
-            html: None,
-            text: None,
-            from: None,
+            ..Default::default()
         })
     }
 }
@@ -321,9 +319,8 @@ impl NotificationMailable for DecodeFail {
         // Never reached — decode fails before `to_mail` runs.
         Ok(MailRendering {
             subject: "unreachable".into(),
-            html: None,
             text: Some("unreachable".into()),
-            from: None,
+            ..Default::default()
         })
     }
 }
@@ -390,9 +387,8 @@ impl NotificationMailable for LastWriteWinsA {
     fn to_mail(&self) -> Result<MailRendering, FrameworkError> {
         Ok(MailRendering {
             subject: "rendered-by-A".into(),
-            html: None,
             text: Some("body-from-A".into()),
-            from: None,
+            ..Default::default()
         })
     }
 }
@@ -416,9 +412,8 @@ impl NotificationMailable for LastWriteWinsB {
     fn to_mail(&self) -> Result<MailRendering, FrameworkError> {
         Ok(MailRendering {
             subject: "rendered-by-B".into(),
-            html: None,
             text: Some("body-from-B".into()),
-            from: None,
+            ..Default::default()
         })
     }
 }
@@ -458,4 +453,89 @@ async fn register_mail_renderer_is_last_write_wins() {
         Some("body-from-B"),
         "last registered renderer (B) must win",
     );
+}
+
+// ============================================================================
+// Test 7: cc / bcc / reply_to / attachments thread through the channel
+// ============================================================================
+//
+// Pins the MailRendering → OutgoingMessage wiring for the optional
+// fields. A future refactor that drops one of these fields when
+// assembling the OutgoingMessage would fail this test.
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct FullEnvelope;
+
+impl Notification for FullEnvelope {
+    fn notification_name() -> &'static str {
+        "FullEnvelope"
+    }
+    fn channels(&self) -> Vec<&'static str> {
+        vec!["mail"]
+    }
+    fn data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("FullEnvelope serializes")
+    }
+}
+
+impl NotificationMailable for FullEnvelope {
+    fn to_mail(&self) -> Result<MailRendering, FrameworkError> {
+        Ok(MailRendering {
+            subject: "with the full envelope".into(),
+            text: Some("body".into()),
+            from: Some(Address::new("sender@suprnova.dev")),
+            cc: vec![Address::new("carbon@example.org")],
+            bcc: vec![Address::new("blind@example.org")],
+            reply_to: vec![Address::new("replies@suprnova.dev")],
+            attachments: vec![Attachment {
+                filename: "receipt.pdf".into(),
+                content: b"%PDF-1.4\nreceipt".to_vec(),
+                content_type: "application/pdf".into(),
+            }],
+            ..Default::default()
+        })
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn mail_channel_threads_cc_bcc_reply_to_and_attachments_into_outgoing() {
+    let transport = Arc::new(InMemoryMailTransport::new());
+    Mail::set_transport(transport.clone());
+
+    register_mail_renderer::<FullEnvelope>();
+
+    let dispatcher =
+        NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
+
+    dispatcher
+        .notify(
+            &User {
+                email: "primary@example.org".into(),
+            },
+            &FullEnvelope,
+        )
+        .await
+        .unwrap();
+
+    let captured = transport.captured();
+    assert_eq!(captured.len(), 1, "exactly one message captured");
+    let msg = &captured[0];
+
+    assert_eq!(msg.to.len(), 1, "single primary recipient");
+    assert_eq!(msg.to[0].email, "primary@example.org");
+
+    assert_eq!(msg.cc.len(), 1, "cc threaded through");
+    assert_eq!(msg.cc[0].email, "carbon@example.org");
+
+    assert_eq!(msg.bcc.len(), 1, "bcc threaded through");
+    assert_eq!(msg.bcc[0].email, "blind@example.org");
+
+    assert_eq!(msg.reply_to.len(), 1, "reply_to threaded through");
+    assert_eq!(msg.reply_to[0].email, "replies@suprnova.dev");
+
+    assert_eq!(msg.attachments.len(), 1, "attachments threaded through");
+    assert_eq!(msg.attachments[0].filename, "receipt.pdf");
+    assert_eq!(msg.attachments[0].content_type, "application/pdf");
+    assert_eq!(msg.attachments[0].content, b"%PDF-1.4\nreceipt");
 }

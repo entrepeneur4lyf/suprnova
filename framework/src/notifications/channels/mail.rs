@@ -26,7 +26,7 @@
 
 use crate::error::FrameworkError;
 use crate::mail::transport::OutgoingMessage;
-use crate::mail::{Address, Mail};
+use crate::mail::{Address, Attachment, Mail};
 use crate::notifications::{Channel, DynNotification, Notification};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -36,11 +36,28 @@ use std::sync::RwLock;
 /// an outgoing message. `subject` is required; at least one of `html` /
 /// `text` must be `Some` or delivery will fail. `from` is optional and
 /// falls back to `noreply@localhost` to match `MailBuilder::send`.
+///
+/// `cc`, `bcc`, `reply_to`, and `attachments` are optional and default
+/// to empty. Use `..Default::default()` in the struct literal to skip
+/// any field you don't need:
+///
+/// ```ignore
+/// MailRendering {
+///     subject: "Order shipped".into(),
+///     text: Some("Tracking: 1Z999".into()),
+///     ..Default::default()
+/// }
+/// ```
+#[derive(Default)]
 pub struct MailRendering {
     pub subject: String,
     pub html: Option<String>,
     pub text: Option<String>,
     pub from: Option<Address>,
+    pub cc: Vec<Address>,
+    pub bcc: Vec<Address>,
+    pub reply_to: Vec<Address>,
+    pub attachments: Vec<Attachment>,
 }
 
 /// Opt-in trait for Notifications that want to be deliverable via the
@@ -92,17 +109,18 @@ pub fn register_mail_renderer<N: NotificationMailable>() {
 }
 
 fn renderer_for(name: &str) -> Result<MailRendererFn, FrameworkError> {
+    let missing = || {
+        FrameworkError::internal(format!(
+            "no mail renderer for notification {name} — register via suprnova::register_mail_renderer::<N>()"
+        ))
+    };
     let g = MAIL_RENDERERS
         .read()
         .expect("mail renderer registry poisoned");
-    let map = g
-        .as_ref()
-        .ok_or_else(|| FrameworkError::internal("no mail renderers registered"))?;
-    map.get(name).copied().ok_or_else(|| {
-        FrameworkError::internal(format!(
-            "no mail renderer for notification {name} — register via suprnova::notifications::register_mail_renderer::<N>()"
-        ))
-    })
+    // Treat "registry never initialized" identically to "this notification
+    // not registered" — the operator-facing fix is the same.
+    let map = g.as_ref().ok_or_else(missing)?;
+    map.get(name).copied().ok_or_else(missing)
 }
 
 /// Notification channel that delivers via the bound mail transport.
@@ -111,10 +129,9 @@ fn renderer_for(name: &str) -> Result<MailRendererFn, FrameworkError> {
 /// channel looks up the per-notification renderer in the global
 /// registry populated by [`register_mail_renderer`].
 ///
-/// In v1, CC, BCC, Reply-To, and Attachments on the outgoing message
-/// are unconditionally empty. Extend [`MailRendering`] if a future
-/// notification needs those fields — Mailable-driven transactional
-/// email already supports them via `MailBuilder`.
+/// `cc`, `bcc`, `reply_to`, and `attachments` ride through
+/// [`MailRendering`] — populate any of them in `to_mail` and the
+/// channel threads them into the outgoing message verbatim.
 pub struct MailChannel;
 
 impl MailChannel {
@@ -160,13 +177,13 @@ impl Channel for MailChannel {
         let msg = OutgoingMessage {
             from,
             to: vec![route.into()],
-            cc: Vec::new(),
-            bcc: Vec::new(),
-            reply_to: Vec::new(),
+            cc: rendering.cc,
+            bcc: rendering.bcc,
+            reply_to: rendering.reply_to,
             subject: rendering.subject,
             html: rendering.html,
             text: rendering.text,
-            attachments: Vec::new(),
+            attachments: rendering.attachments,
         };
 
         let transport = Mail::current_transport()?;
