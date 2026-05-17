@@ -33,6 +33,15 @@ pub trait QueueDriver: Send + Sync {
     async fn ack(&self, token: &ReservationToken) -> Result<(), FrameworkError>;
 
     /// Return a reserved message to the queue with `requeue_delay`.
+    ///
+    /// **Implementors MUST increment the stored envelope's `attempts`
+    /// before re-enqueuing**, so the worker's `attempts >= max_tries`
+    /// guard advances correctly across retry cycles. Drivers that store
+    /// the envelope server-side (Redis, SQL, etc.) bump on the server;
+    /// in-memory drivers bump in their `Inner` map. Failing to bump
+    /// causes infinite retry loops.
+    ///
+    /// Drivers MUST be tolerant of unknown / already-acked tokens (idempotent).
     async fn nack(&self, token: &ReservationToken, requeue_delay: Duration) -> Result<(), FrameworkError>;
 
     /// Driver name for logs/admin. Default uses type name.
