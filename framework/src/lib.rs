@@ -15,6 +15,7 @@ pub mod error;
 pub mod hashing;
 pub mod http;
 pub mod http_client;
+pub mod idempotency;
 pub mod events;
 pub mod filesystem;
 pub mod inertia;
@@ -53,6 +54,7 @@ pub use database::{
 };
 pub use error::{AppError, FrameworkError, HttpError, ValidationErrors};
 pub use hashing::{hash, needs_rehash, verify, DEFAULT_COST as HASH_DEFAULT_COST};
+pub use idempotency::{Idempotency, Idempotent};
 pub use http::{
     json, text, Cookie, CookieOptions, FormRequest, FromParam, FromRequest, HttpResponse, Redirect,
     Request, Response, ResponseExt, SameSite,
