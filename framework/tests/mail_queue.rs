@@ -10,6 +10,7 @@ use suprnova::queue::driver::QueueDriver;
 use suprnova::queue::memory::MemoryQueueDriver;
 use suprnova::queue::worker::{register_job, run_worker, WorkerConfig};
 use suprnova::queue::Queue;
+use suprnova::FrameworkError;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct WelcomeMail {
@@ -155,5 +156,70 @@ async fn mail_queue_unregistered_mailable_surfaces_unknown_error_from_job() {
     assert!(
         msg.contains("TotallyUnregisteredMailable"),
         "error names the missing mailable: {msg}"
+    );
+}
+
+// Regression: push-time guard must match `MailBuilder::send`'s guard
+// semantically. A Mailable with no template source but an override of
+// `render_html` that returns Some(...) must be accepted by BOTH paths.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+struct OverriddenRenderMail;
+
+#[async_trait]
+impl Mailable for OverriddenRenderMail {
+    fn mailable_name() -> &'static str { "OverriddenRenderMail" }
+    fn subject(&self) -> String { "rendered".into() }
+    // No template_source — relies entirely on the render override below.
+    fn render_html(&self) -> Result<Option<String>, FrameworkError> {
+        Ok(Some("<p>pre-rendered html, no template source</p>".into()))
+    }
+    fn from(&self) -> Option<Address> { Some("noreply@suprnova.dev".into()) }
+}
+
+#[tokio::test]
+#[serial]
+async fn mail_queue_accepts_mailable_that_overrides_render_without_template_source() {
+    let capture = Arc::new(InMemoryMailTransport::new());
+    Mail::set_transport(capture.clone());
+
+    suprnova::mail::register_mailable_factory::<OverriddenRenderMail>();
+    register_job::<SendMailJob>();
+
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    // Must succeed — the override produces a body even though
+    // html_template_source returns None.
+    Mail::to("alice@example.org")
+        .queue(OverriddenRenderMail)
+        .await
+        .expect("queue accepts mailables that override render_html");
+
+    // And the worker delivers the pre-rendered html through the transport.
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        WorkerConfig {
+            visibility_timeout: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(5),
+        },
+    ));
+    for _ in 0..200 {
+        if !capture.captured().is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    handle.abort();
+
+    let msgs = capture.captured();
+    assert_eq!(msgs.len(), 1, "queued override-mailable must deliver");
+    assert_eq!(
+        msgs[0].html.as_deref(),
+        Some("<p>pre-rendered html, no template source</p>")
+    );
+    assert!(
+        msgs[0].text.is_none(),
+        "no text body — only the html override produced output"
     );
 }

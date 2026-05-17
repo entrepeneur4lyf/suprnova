@@ -130,9 +130,15 @@ impl MailBuilder {
         self,
         mailable: M,
     ) -> Result<SendMailJob, FrameworkError> {
-        if mailable.html_template_source().is_none()
-            && mailable.text_template_source().is_none()
-        {
+        // Match `MailBuilder::send`'s guard exactly: call the trait-level
+        // `render_html`/`render_text` so a Mailable that overrides those
+        // methods (e.g. produces a pre-rendered body without setting a
+        // template source) is accepted here too. Checking only the raw
+        // `*_template_source` getters would diverge from the sync `send`
+        // path and reject valid overrides.
+        let html = mailable.render_html()?;
+        let text = mailable.render_text()?;
+        if html.is_none() && text.is_none() {
             return Err(FrameworkError::internal(format!(
                 "mail: {} has no text or html body — define text_template_source or html_template_source on the Mailable",
                 M::mailable_name()
