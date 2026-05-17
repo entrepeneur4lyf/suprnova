@@ -18,6 +18,7 @@ use std::sync::Arc;
 use suprnova::notifications::channels::webpush::WebPushChannel;
 use suprnova::notifications::{Channel, DynNotification, Notifiable, Notification, NotificationDispatcher};
 use suprnova::web_push::{VapidKey, VapidSigner, WebPushClient};
+use tracing_test::traced_test;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -105,6 +106,7 @@ async fn webpush_channel_posts_to_subscription_endpoint() {
 
 #[tokio::test]
 #[serial]
+#[traced_test]
 async fn webpush_channel_treats_subscription_gone_as_non_fatal() {
     // The push service replies 404 — per WebPushClient that maps to
     // WebPushError::SubscriptionGone, which the channel translates into
@@ -120,10 +122,11 @@ async fn webpush_channel_treats_subscription_gone_as_non_fatal() {
     let channel: Arc<dyn Channel> = build_channel();
     let dispatcher = NotificationDispatcher::new().register_channel(channel);
 
+    let endpoint = format!("{}/push", server.uri());
     dispatcher
         .notify(
             &Subscriber {
-                endpoint: format!("{}/push", server.uri()),
+                endpoint: endpoint.clone(),
             },
             &PingNote,
         )
@@ -132,6 +135,23 @@ async fn webpush_channel_treats_subscription_gone_as_non_fatal() {
 
     let reqs = server.received_requests().await.unwrap();
     assert_eq!(reqs.len(), 1, "channel attempted exactly one POST");
+
+    // Pin the operator-paper-trail contract — the doc comment promises a
+    // structured warn on subscription gone so ops can act on dead
+    // subscriptions even though dispatch returned Ok. If a future
+    // refactor silently drops the warn, this test must fail.
+    assert!(
+        logs_contain("subscription gone"),
+        "expected the subscription-gone warn message"
+    );
+    assert!(
+        logs_contain(&endpoint),
+        "expected the structured endpoint field to make it into the warn event"
+    );
+    assert!(
+        logs_contain("PingNote"),
+        "expected the notification name in the warn event"
+    );
 }
 
 #[tokio::test]
