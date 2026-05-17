@@ -8,10 +8,10 @@
 //! into the `notifications` table.
 //!
 //! Switching from a hand-written `impl NotificationMailable` to the
-//! derive is intentional: the multi-channel integration test in
-//! `app/tests/notification_order_shipped_multi_channel.rs` continues
-//! to pass byte-for-byte, proving the derive's generated rendering
-//! matches the previous manual impl.
+//! derive is intentional dogfood. The multi-channel integration test
+//! in `app/tests/notification_order_shipped_multi_channel.rs` pins
+//! subject + body via substring assertions; the derive's rendering
+//! satisfies them with the same field set the manual impl produced.
 
 use serde::{Deserialize, Serialize};
 use suprnova::serde_json;

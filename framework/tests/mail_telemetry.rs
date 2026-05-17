@@ -104,15 +104,10 @@ async fn successful_send_emits_mail_send_span_with_shape_fields() {
 #[traced_test]
 #[serial]
 async fn failed_send_emits_warn_event_with_error_field() {
-    // Drive the failure through the transport-missing path: clear the
-    // transport, then dispatch. `dispatch_with_telemetry` is NOT
-    // invoked in this case (the empty-transport guard fires upstream
-    // in `Mail::current_transport`), so we instead exercise the
-    // transport-error path by sending a Mailable with neither html
-    // nor text — `MailBuilder::send`'s body guard returns Err before
-    // dispatch — which is the OTHER pre-transport guard. To genuinely
-    // hit `dispatch_with_telemetry`'s warn arm we need a transport
-    // that fails. Use a tiny failing transport.
+    // Bind a transport that always fails so dispatch_with_telemetry's
+    // warn arm runs — the upstream "no transport" and "empty body"
+    // guards short-circuit before the helper, so a failing transport
+    // is the only way to exercise the warn path.
 
     use std::sync::Arc;
     use suprnova::mail::{MailTransport, OutgoingMessage};
