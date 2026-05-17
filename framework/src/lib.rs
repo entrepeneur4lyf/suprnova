@@ -190,6 +190,12 @@ pub use serde_json;
 // Re-export serde for InertiaProps derive macro
 pub use serde;
 
+// Re-export Tera for the `#[derive(NotificationMailable)]` macro — the
+// generated `to_mail` references `::suprnova::__tera::{Context, Tera}`
+// so consumers don't need to add `tera` to their `[dependencies]`.
+#[doc(hidden)]
+pub use tera as __tera;
+
 // Re-export validator for FormRequest validation
 pub use validator;
 pub use validator::Validate;
@@ -209,6 +215,7 @@ pub use suprnova_macros::Data;
 pub use suprnova_macros::FormRequest as FormRequestDerive;
 pub use suprnova_macros::InertiaProps;
 pub use suprnova_macros::MultipartRequest;
+pub use suprnova_macros::NotificationMailable;
 pub use suprnova_macros::suprnova_test;
 
 // Re-export Jest-like testing macros

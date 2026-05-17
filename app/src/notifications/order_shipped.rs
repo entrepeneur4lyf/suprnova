@@ -1,21 +1,31 @@
 //! OrderShipped notification — dogfood for the multi-channel
-//! Notification subsystem (Phase 5B Tasks 16-19, polished by Item 2).
+//! Notification subsystem (Phase 5B Tasks 16-19, polished by Item 2)
+//! and for the v2 `#[derive(NotificationMailable)]` macro.
 //!
 //! Channels: `mail` AND `database`. The mail variant is produced by
-//! `NotificationMailable::to_mail` (auto-deserialized from the
-//! `Notification::data()` payload at dispatch time); the database
-//! variant writes a row into the `notifications` table.
+//! `NotificationMailable::to_mail` — generated here by the derive from
+//! the `#[mail(...)]` attribute. The database variant writes a row
+//! into the `notifications` table.
 //!
-//! Note: the `Notification` trait is sync — no `#[async_trait]` here.
+//! Switching from a hand-written `impl NotificationMailable` to the
+//! derive is intentional: the multi-channel integration test in
+//! `app/tests/notification_order_shipped_multi_channel.rs` continues
+//! to pass byte-for-byte, proving the derive's generated rendering
+//! matches the previous manual impl.
 
 use serde::{Deserialize, Serialize};
-use suprnova::mail::Address;
-use suprnova::notifications::channels::mail::{MailRendering, NotificationMailable};
-use suprnova::notifications::Notification;
 use suprnova::serde_json;
-use suprnova::FrameworkError;
+use suprnova::NotificationMailable;
+use suprnova::Notification;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, NotificationMailable)]
+#[mail(
+    subject = "Your order shipped — tracking {{ tracking }}",
+    html = "<p>Your order is on its way.</p><p>Tracking: <code>{{ tracking }}</code></p>",
+    text = "Your order is on its way.\nTracking: {{ tracking }}",
+    from = "orders@suprnova.dev",
+    from_name = "Suprnova Orders",
+)]
 pub struct OrderShipped {
     pub tracking: String,
 }
@@ -33,22 +43,3 @@ impl Notification for OrderShipped {
         serde_json::json!({ "tracking": self.tracking })
     }
 }
-
-impl NotificationMailable for OrderShipped {
-    fn to_mail(&self) -> Result<MailRendering, FrameworkError> {
-        Ok(MailRendering {
-            subject: format!("Your order shipped — tracking {}", self.tracking),
-            html: Some(format!(
-                "<p>Your order is on its way.</p><p>Tracking: <code>{}</code></p>",
-                self.tracking
-            )),
-            text: Some(format!(
-                "Your order is on its way.\nTracking: {}",
-                self.tracking
-            )),
-            from: Some(Address::new("orders@suprnova.dev").with_name("Suprnova Orders")),
-            ..Default::default()
-        })
-    }
-}
-

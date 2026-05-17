@@ -17,6 +17,7 @@ mod handler;
 mod inertia;
 mod injectable;
 mod multipart;
+mod notification_mail;
 mod suprnova_test;
 mod redirect;
 mod request;
@@ -539,4 +540,87 @@ pub fn policy(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_derive(MultipartRequest, attributes(field, multipart))]
 pub fn multipart_request(input: TokenStream) -> TokenStream {
     multipart::expand(input)
+}
+
+/// Derive macro for `NotificationMailable` — auto-generates `to_mail`
+/// from a `#[mail(...)]` attribute.
+///
+/// The struct must also derive `Serialize` (used as the Tera template
+/// context) and `Deserialize` (so the queued path can rebuild the
+/// notification from the envelope payload), and must already implement
+/// [`Notification`](::suprnova::notifications::Notification).
+///
+/// # Attributes
+///
+/// All values are string literals. Inline templates use [Tera](https://keats.github.io/tera/) syntax.
+///
+/// | Key             | Required? | Purpose                                                                    |
+/// |-----------------|-----------|----------------------------------------------------------------------------|
+/// | `subject`       | yes       | Subject Tera template — rendered with `self` as the JSON context.          |
+/// | `html`          | ‡         | Inline HTML body Tera template.                                            |
+/// | `html_template` | ‡         | Path to an HTML body Tera template, embedded via `include_str!`.           |
+/// | `text`          | ‡         | Inline plain-text body Tera template.                                      |
+/// | `text_template` | ‡         | Path to a plain-text body Tera template, embedded via `include_str!`.      |
+/// | `from`          | no        | Sender email address — overrides the framework default `noreply@localhost`. |
+/// | `from_name`     | no        | Display name for the sender. Requires `from`.                              |
+/// | `cc`            | no        | Comma-separated CC list (e.g. `"a@x.com, b@y.com"`). Whitespace is ignored. |
+/// | `bcc`           | no        | Comma-separated BCC list.                                                  |
+/// | `reply_to`      | no        | Comma-separated Reply-To list.                                             |
+///
+/// ‡ At least one of `html` / `html_template` / `text` / `text_template`
+///   must be present. `html` and `html_template` are mutually exclusive;
+///   same for `text` and `text_template`.
+///
+/// # Compile-time errors
+///
+/// The derive refuses to compile when:
+/// - `subject` is missing.
+/// - Both `html` and `html_template` are set (or both `text` variants).
+/// - Neither an HTML nor a text body is provided (empty-body invariant).
+/// - `from_name` is set without `from`.
+/// - Any unknown key is used.
+///
+/// The runtime empty-body guard in `MailChannel::deliver` stays as
+/// defense in depth, but a misconfigured `#[mail(...)]` should never
+/// reach that guard.
+///
+/// # Examples
+///
+/// ## Inline templates
+///
+/// ```rust,ignore
+/// use serde::{Serialize, Deserialize};
+/// use suprnova::{NotificationMailable, Notification};
+///
+/// #[derive(Serialize, Deserialize, NotificationMailable)]
+/// #[mail(
+///     subject = "Your order shipped — tracking {{ tracking }}",
+///     html    = "<p>Tracking: <code>{{ tracking }}</code></p>",
+///     text    = "Tracking: {{ tracking }}",
+///     from    = "orders@suprnova.dev",
+///     from_name = "Suprnova Orders",
+/// )]
+/// pub struct OrderShipped { pub tracking: String }
+///
+/// impl Notification for OrderShipped { /* notification_name + channels + data */ }
+/// ```
+///
+/// ## File-backed templates
+///
+/// `html_template` and `text_template` paths are resolved relative to
+/// the source file containing the derive (standard `include_str!`
+/// behavior). A missing template file fails the build.
+///
+/// ```rust,ignore
+/// #[derive(Serialize, Deserialize, NotificationMailable)]
+/// #[mail(
+///     subject       = "Order #{{ order_id }} shipped",
+///     html_template = "templates/order_shipped.html",
+///     text_template = "templates/order_shipped.txt",
+/// )]
+/// pub struct OrderShipped { pub order_id: u64 }
+/// ```
+#[proc_macro_derive(NotificationMailable, attributes(mail))]
+pub fn derive_notification_mailable(input: TokenStream) -> TokenStream {
+    notification_mail::derive_notification_mailable_impl(input)
 }
