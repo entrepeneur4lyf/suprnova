@@ -72,6 +72,12 @@ routes! {
         post!("/", controllers::posts::store).name("api.posts.store"),
     }).middleware(SessionAuthMiddleware::new()),
 
+    // Phase 5B Task 20 — mail dogfood. `POST /api/welcome?email=...&name=...`
+    // queues a WelcomeEmail Mailable onto the mail queue via Mail::queue.
+    // The Mailable + SendMailJob are registered in bootstrap::register so
+    // the worker can re-hydrate and dispatch.
+    post!("/api/welcome", controllers::welcome::queue).name("api.welcome"),
+
     // Phase 5A dogfood — rate-limited ping endpoint.
     // 5 requests per 60-second window, keyed by X-Forwarded-For header
     // (falls back to "anon"). The in-memory limiter is bootstrapped in

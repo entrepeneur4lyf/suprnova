@@ -184,6 +184,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "url",
  "validator",
 ]
 

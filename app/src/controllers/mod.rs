@@ -8,3 +8,4 @@ pub mod posts;
 pub mod sse_example;
 pub mod todo;
 pub mod user;
+pub mod welcome;

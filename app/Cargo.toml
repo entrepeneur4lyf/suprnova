@@ -23,6 +23,7 @@ tracing = "0.1"
 # dogfood handler (broadcast → BroadcastStream → HttpResponse::sse).
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+url = "2.5.8"
 
 [dev-dependencies]
 # End-to-end tests against a one-shot server using the framework's

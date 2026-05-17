@@ -137,6 +137,32 @@ pub async fn register() {
 
     // Register queue jobs so the worker can dispatch them by name.
     register_job::<crate::jobs::welcome_log::WelcomeLog>();
+
+    // Phase 5B Task 20 — mail dogfood.
+    //
+    // Register the WelcomeEmail mailable factory so the worker can
+    // re-hydrate it from a `SendMailJob` envelope, and register
+    // `SendMailJob` itself as a worker-dispatchable job. Both calls are
+    // idempotent (last-write-wins) per the framework's registry contract.
+    suprnova::mail::register_mailable_factory::<crate::mail::welcome::WelcomeEmail>();
+    register_job::<suprnova::mail::send_job::SendMailJob>();
+
+    // Phase 5B Task 20 — notifications dogfood.
+    //
+    // Register an OrderShipped factory so `SendNotificationJob` can rebuild
+    // the notification from its JSON payload at dispatch time, and register
+    // the notification job for worker dispatch. The factory is a
+    // non-capturing closure that coerces to the required `fn` pointer.
+    suprnova::notifications::register_notification_factory::<
+        crate::notifications::order_shipped::OrderShipped,
+    >(|payload| {
+        let n: crate::notifications::order_shipped::OrderShipped =
+            suprnova::serde_json::from_value(payload).map_err(|e| {
+                suprnova::FrameworkError::internal(format!("decode OrderShipped: {e}"))
+            })?;
+        Ok(Box::new(n))
+    });
+    register_job::<suprnova::notifications::notify_job::SendNotificationJob>();
 }
 
 /// Register the application's storage disks.
