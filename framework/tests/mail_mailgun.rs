@@ -204,6 +204,106 @@ async fn mailgun_uses_multipart_form_data_when_attachments_present() {
     );
 }
 
+// Mailgun's protocol for multiple attachments is repeated `attachment=` parts
+// in the same multipart envelope. Verify both files land — a future refactor
+// that hoists `form.part(...)` out of the loop or resets the Form would
+// silently lose all but one attachment.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+struct MWithTwoAttachments {
+    _placeholder: (),
+}
+
+#[async_trait]
+impl Mailable for MWithTwoAttachments {
+    fn mailable_name() -> &'static str { "MWithTwoAttachments" }
+    fn subject(&self) -> String { "bundle".into() }
+    fn text_template_source(&self) -> Option<String> { Some("two files attached".into()) }
+    fn from(&self) -> Option<Address> { Some("noreply@suprnova.dev".into()) }
+    fn attachments(&self) -> Vec<suprnova::mail::Attachment> {
+        vec![
+            suprnova::mail::Attachment {
+                filename: "invoice.pdf".into(),
+                content: b"%PDF-1.4\nfirst-file".to_vec(),
+                content_type: "application/pdf".into(),
+            },
+            suprnova::mail::Attachment {
+                filename: "data.csv".into(),
+                content: b"name,value\nfoo,42".to_vec(),
+                content_type: "text/csv".into(),
+            },
+        ]
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn mailgun_carries_all_attachments_in_repeated_multipart_parts() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v3/example.com/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "<bundle@mg.example.com>",
+            "message": "Queued"
+        })))
+        .mount(&server)
+        .await;
+
+    let transport = MailgunMailTransport::with_endpoint("test-key", "example.com", server.uri());
+    Mail::set_transport(Arc::new(transport));
+    Mail::to("alice@example.org")
+        .send(MWithTwoAttachments::default())
+        .await
+        .unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 1);
+
+    let body = String::from_utf8_lossy(&reqs[0].body);
+
+    // Both attachment parts must use the repeated `attachment` field name —
+    // Mailgun's documented protocol for multi-file uploads.
+    let invoice_disposition =
+        "Content-Disposition: form-data; name=\"attachment\"; filename=\"invoice.pdf\"";
+    let csv_disposition =
+        "Content-Disposition: form-data; name=\"attachment\"; filename=\"data.csv\"";
+    assert!(
+        body.contains(invoice_disposition),
+        "first attachment disposition present: {body}"
+    );
+    assert!(
+        body.contains(csv_disposition),
+        "second attachment disposition present: {body}"
+    );
+
+    // Both content-types ride along.
+    assert!(
+        body.contains("Content-Type: application/pdf"),
+        "PDF content-type present: {body}"
+    );
+    assert!(
+        body.contains("Content-Type: text/csv"),
+        "CSV content-type present: {body}"
+    );
+
+    // Bytes for both attachments must round-trip unchanged.
+    assert!(
+        body.contains("%PDF-1.4\nfirst-file"),
+        "first attachment bytes present: {body}"
+    );
+    assert!(
+        body.contains("name,value\nfoo,42"),
+        "second attachment bytes present: {body}"
+    );
+
+    // Defense in depth: count the `name="attachment"` occurrences to catch
+    // an off-by-one where one of the parts is silently dropped.
+    let attachment_field_count = body.matches("name=\"attachment\"").count();
+    assert_eq!(
+        attachment_field_count, 2,
+        "exactly 2 attachment parts: {body}"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn mailgun_routes_to_eu_region_endpoint() {
