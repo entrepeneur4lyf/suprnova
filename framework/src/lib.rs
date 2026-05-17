@@ -198,6 +198,15 @@ pub use serde;
 #[doc(hidden)]
 pub use tera as __tera;
 
+// Re-export fake for the `#[derive(Factory)]` macro and for consumers
+// who want to hand-write `Mailable::definition`-style code referencing
+// `::suprnova::__fake::Faker.fake()`. The public re-exports below cover
+// the common surface: `Dummy` derive (struct auto-fill), `Fake` trait
+// (`.fake()` method), `Faker` (universal generator).
+#[doc(hidden)]
+pub use fake as __fake;
+pub use fake::{Dummy, Fake, Faker};
+
 // Re-export validator for FormRequest validation
 pub use validator;
 pub use validator::Validate;
@@ -216,6 +225,10 @@ pub use suprnova_macros::workflow_step;
 pub use suprnova_macros::Data;
 pub use suprnova_macros::FormRequest as FormRequestDerive;
 pub use suprnova_macros::InertiaProps;
+// Derives + traits live in separate namespaces, so the `Factory`
+// derive re-export coexists with the `Factory` trait re-export above.
+// Same pattern as `serde::Serialize` (trait + derive same name).
+pub use suprnova_macros::Factory;
 pub use suprnova_macros::MultipartRequest;
 pub use suprnova_macros::NotificationMailable;
 pub use suprnova_macros::suprnova_test;

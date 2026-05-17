@@ -13,6 +13,7 @@ use proc_macro::TokenStream;
 mod data;
 mod describe;
 mod domain_error;
+mod factory;
 mod handler;
 mod inertia;
 mod injectable;
@@ -623,4 +624,50 @@ pub fn multipart_request(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(NotificationMailable, attributes(mail))]
 pub fn derive_notification_mailable(input: TokenStream) -> TokenStream {
     notification_mail::derive_notification_mailable_impl(input)
+}
+
+/// Derive macro for `Factory` — generates a sibling marker struct plus
+/// the `Factory` impl from a struct that implements `fake::Dummy`.
+///
+/// Applied to a model `User`, the derive emits:
+///
+/// ```rust,ignore
+/// pub struct UserFactory;
+///
+/// impl ::suprnova::Factory for UserFactory {
+///     type Model = User;
+///     fn definition() -> User { ::suprnova::__fake::Faker.fake::<User>() }
+/// }
+/// ```
+///
+/// The marker's visibility matches the model's. The generated name
+/// defaults to `<ModelName>Factory`; override via `#[factory(name = "...")]`.
+///
+/// The model must implement `fake::Dummy<fake::Faker>` — typically via
+/// `#[derive(suprnova::Dummy)]`. `Dummy` is re-exported from suprnova so
+/// consumers don't need a direct `fake` dependency.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use suprnova::{Dummy, Factory};
+///
+/// #[derive(Dummy, Factory)]
+/// pub struct User {
+///     pub id: i32,
+///     pub name: String,
+///     pub email: String,
+/// }
+///
+/// // `UserFactory` exists; call:
+/// let users = UserFactory::new().count(10).make_many();
+/// ```
+///
+/// # Limitations
+///
+/// v1 only supports plain (non-generic) structs. Enums, unions, and
+/// generics fail to compile with a clear error.
+#[proc_macro_derive(Factory, attributes(factory))]
+pub fn derive_factory(input: TokenStream) -> TokenStream {
+    factory::derive_factory_impl(input)
 }
