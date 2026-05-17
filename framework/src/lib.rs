@@ -3,6 +3,7 @@ pub mod auth;
 pub mod resources;
 pub mod torii_integration;
 pub mod authorization;
+pub mod bus;
 pub mod cache;
 pub mod config;
 pub mod container;
@@ -92,6 +93,7 @@ pub use inertia::{
 pub use pagination::{
     CursorDirection, CursorPaginator, IntoInertiaScroll, LengthAwarePaginator, Paginated, Pagination,
 };
+pub use bus::Bus;
 pub use queue::{BackoffSchedule, Envelope, EnvelopeError, Job, Queue};
 pub use resources::{
     AsRelationshipValue,
