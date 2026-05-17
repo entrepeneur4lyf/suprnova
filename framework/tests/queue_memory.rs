@@ -72,3 +72,33 @@ async fn nack_returns_message_to_the_head_of_the_queue() {
     let r2 = d.pop(Duration::from_secs(60)).await.unwrap().unwrap();
     assert_eq!(r2.envelope.payload["x"], 2);
 }
+
+#[tokio::test(start_paused = true)]
+async fn delayed_jobs_become_visible_after_available_at() {
+    let d = MemoryQueueDriver::new();
+    let now = chrono::Utc::now();
+    let env = Envelope {
+        schema_version: CURRENT_SCHEMA_VERSION,
+        id: Uuid::new_v4(),
+        job_name: "DelayedJob".into(),
+        payload: serde_json::json!({}),
+        dispatched_at: now,
+        available_at: now + chrono::Duration::seconds(60),
+        attempts: 0,
+        max_tries: 3,
+        backoff: BackoffSchedule::default(),
+        timeout_secs: None,
+        fail_on_timeout: false,
+        idempotency_key: None,
+    };
+    d.push(env).await.unwrap();
+
+    // Before 60s, queue appears empty:
+    let nothing = d.pop(std::time::Duration::from_millis(10)).await.unwrap();
+    assert!(nothing.is_none(), "delayed job must not be visible yet");
+
+    // After advancing past available_at, it pops:
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    let visible = d.pop(std::time::Duration::from_millis(10)).await.unwrap();
+    assert!(visible.is_some(), "delayed job must be visible after available_at");
+}

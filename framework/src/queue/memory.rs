@@ -4,16 +4,19 @@
 //! - a `VecDeque<Envelope>` for the visible queue,
 //! - a `HashMap<ReservationToken, Envelope>` for reservations,
 //! - a `tokio_util::time::DelayQueue<ReservationToken>` for visibility-timeout expiry,
-//! - a `Vec<(DateTime<Utc>, Envelope)>` for delayed jobs.
+//! - a `tokio_util::time::DelayQueue<Envelope>` for delayed jobs.
 //!
 //! # Design note — paused-clock compatibility
 //!
-//! `pop` itself drains expired visibility reservations synchronously
-//! (via a noop-waker context) before checking the visible queue. This
-//! means that even in `#[tokio::test(start_paused = true)]` tests —
-//! where the background reaper's `sleep(50ms)` never fires — reclaim
-//! still happens on the next `pop` call after the caller has advanced
-//! the clock past the reservation deadline.
+//! Both DelayQueues run on Tokio's virtual clock. Under
+//! `#[tokio::test(start_paused = true)]`, `tokio::time::advance(N)` correctly
+//! fires their expirations, so paused-clock tests for delayed jobs work without
+//! any wall-clock comparison.
+//!
+//! `pop` drains both DelayQueues synchronously (via a noop-waker context) before
+//! checking the visible queue. This means that even when the background reaper's
+//! `sleep(50ms)` never fires, reclaim and delayed-job promotion both happen on
+//! the next `pop` call after the caller has advanced the virtual clock.
 //!
 //! The reaper is retained for production use where `pop` is infrequent
 //! and background reclaim is needed.
@@ -35,14 +38,16 @@ use uuid::Uuid;
 struct Inner {
     visible: VecDeque<Envelope>,
     reserved: HashMap<ReservationToken, Envelope>,
-    delayed: Vec<(chrono::DateTime<chrono::Utc>, Envelope)>,
 }
 
 pub struct MemoryQueueDriver {
     inner: Arc<Mutex<Inner>>,
-    /// Async mutex guards the DelayQueue so both `pop` and the reaper
+    /// Async mutex guards the visibility DelayQueue so both `pop` and the reaper
     /// can poll it synchronously after acquiring the lock.
     visibility: Arc<AsyncMutex<DelayQueue<ReservationToken>>>,
+    /// Async mutex guards the delayed DelayQueue — runs on Tokio's virtual clock
+    /// so `tokio::time::advance` correctly fires expirations in paused-clock tests.
+    delayed: Arc<AsyncMutex<DelayQueue<Envelope>>>,
     reaper: tokio::task::JoinHandle<()>,
 }
 
@@ -52,9 +57,10 @@ impl Drop for MemoryQueueDriver {
     }
 }
 
-/// Drain all currently-expired entries from `dq` into the `inner` visible
-/// queue. The noop waker context must be created and dropped within this
-/// call — callers must ensure it is not held across an await.
+/// Drain all currently-expired visibility reservations from `dq` back into
+/// the visible queue (push_front — reservation reclaim is priority).
+/// The noop waker context must be created and dropped within this call —
+/// callers must ensure it is not held across an await.
 fn drain_expired(
     inner: &Mutex<Inner>,
     dq: &mut DelayQueue<ReservationToken>,
@@ -76,29 +82,47 @@ fn drain_expired(
     }
 }
 
+/// Drain all currently-expired delayed envelopes from `dq` into the visible
+/// queue (push_back — delayed jobs join the back of the FIFO line).
+/// The noop waker context must be created and dropped within this call —
+/// callers must ensure it is not held across an await.
+fn drain_delayed(
+    inner: &Mutex<Inner>,
+    dq: &mut DelayQueue<Envelope>,
+) {
+    let waker = futures::task::noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    let mut ready = Vec::new();
+    while let Poll::Ready(Some(item)) = dq.poll_expired(&mut cx) {
+        ready.push(item.into_inner());
+    }
+    // cx / waker are dropped here — no await has occurred.
+    if !ready.is_empty() {
+        let mut g = inner.lock().expect("memory queue poisoned");
+        for env in ready {
+            g.visible.push_back(env);
+        }
+    }
+}
+
 impl MemoryQueueDriver {
     pub fn new() -> Self {
         let inner = Arc::new(Mutex::new(Inner::default()));
         let visibility = Arc::new(AsyncMutex::new(DelayQueue::new()));
+        let delayed: Arc<AsyncMutex<DelayQueue<Envelope>>> =
+            Arc::new(AsyncMutex::new(DelayQueue::new()));
 
         let inner2 = inner.clone();
         let visibility2 = visibility.clone();
+        let delayed2 = delayed.clone();
 
         let reaper = tokio::spawn(async move {
             loop {
-                // Promote "available now" delayed jobs.
+                // Promote expired delayed jobs into the visible queue.
                 {
-                    let mut g = inner2.lock().expect("memory queue poisoned");
-                    let now = Utc::now();
-                    let mut i = 0;
-                    while i < g.delayed.len() {
-                        if g.delayed[i].0 <= now {
-                            let (_, env) = g.delayed.swap_remove(i);
-                            g.visible.push_back(env);
-                        } else {
-                            i += 1;
-                        }
-                    }
+                    let mut dq = delayed2.lock().await;
+                    drain_delayed(&inner2, &mut dq);
+                    // Lock released here — before the sleep await.
                 }
 
                 // Reclaim expired visibility reservations. Acquire the async
@@ -116,6 +140,7 @@ impl MemoryQueueDriver {
         Self {
             inner,
             visibility,
+            delayed,
             reaper,
         }
     }
@@ -131,36 +156,33 @@ impl Default for MemoryQueueDriver {
 impl QueueDriver for MemoryQueueDriver {
     async fn push(&self, env: Envelope) -> Result<(), FrameworkError> {
         let now = Utc::now();
-        let mut g = self.inner.lock().expect("memory queue poisoned");
         if env.available_at <= now {
+            let mut g = self.inner.lock().expect("memory queue poisoned");
             g.visible.push_back(env);
         } else {
-            g.delayed.push((env.available_at, env));
+            // Compute delay on the Tokio virtual clock so paused-clock tests work.
+            let delay = (env.available_at - now)
+                .to_std()
+                .unwrap_or(Duration::ZERO);
+            let mut dq = self.delayed.lock().await;
+            dq.insert(env, delay);
         }
         Ok(())
     }
 
     async fn pop(&self, visibility_timeout: Duration) -> Result<Option<Reservation>, FrameworkError> {
-        // Acquire visibility lock, drain expired reservations + promote delayed jobs.
+        // Drain expired delayed jobs into the visible queue (Tokio virtual clock).
+        {
+            let mut dq = self.delayed.lock().await;
+            drain_delayed(&self.inner, &mut dq);
+            // dq lock released here.
+        }
+
+        // Drain expired visibility reservations back into the visible queue.
         {
             let mut dq = self.visibility.lock().await;
             drain_expired(&self.inner, &mut dq);
             // dq lock released here.
-        }
-
-        // Promote any "available now" delayed entries.
-        {
-            let mut g = self.inner.lock().expect("memory queue poisoned");
-            let now = Utc::now();
-            let mut i = 0;
-            while i < g.delayed.len() {
-                if g.delayed[i].0 <= now {
-                    let (_, env) = g.delayed.swap_remove(i);
-                    g.visible.push_back(env);
-                } else {
-                    i += 1;
-                }
-            }
         }
 
         let env_opt = {
@@ -208,8 +230,9 @@ impl QueueDriver for MemoryQueueDriver {
                     + chrono::Duration::from_std(requeue_delay).map_err(|e| {
                         FrameworkError::internal(format!("requeue delay overflow: {e}"))
                     })?;
-                let mut g = self.inner.lock().expect("memory queue poisoned");
-                g.delayed.push((env.available_at, env));
+                // Insert into the Tokio-virtual-clock DelayQueue.
+                let mut dq = self.delayed.lock().await;
+                dq.insert(env, requeue_delay);
             }
         }
         Ok(())
