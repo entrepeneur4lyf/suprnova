@@ -259,4 +259,17 @@ impl CacheStore for RedisCache {
             .map_err(|e| FrameworkError::internal(format!("Lock refresh: {e}")))?;
         Ok(ok == 1)
     }
+
+    async fn touch(&self, key: &str, ttl: Duration) -> Result<bool, FrameworkError> {
+        let mut conn = self.conn.clone();
+        let pkey = self.prefixed_key(key);
+        // EXPIRE returns 1 if the TTL was set, 0 if the key does not exist
+        let ok: i64 = redis::cmd("EXPIRE")
+            .arg(&pkey)
+            .arg(ttl.as_secs())
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("Cache touch: {e}")))?;
+        Ok(ok == 1)
+    }
 }

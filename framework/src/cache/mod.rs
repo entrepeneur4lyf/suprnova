@@ -347,6 +347,20 @@ impl Cache {
             None => Ok(None),
         }
     }
+
+    /// Refresh the TTL of an existing key without changing its value.
+    ///
+    /// Returns `true` if the key existed (and wasn't expired) and was refreshed;
+    /// `false` otherwise.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let refreshed = Cache::touch("user:1", Duration::from_secs(3600)).await?;
+    /// ```
+    pub async fn touch(key: &str, ttl: Duration) -> Result<bool, FrameworkError> {
+        Self::store()?.touch(key, ttl).await
+    }
 }
 
 /// Guard returned by [`Cache::lock`].

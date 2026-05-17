@@ -267,4 +267,18 @@ impl CacheStore for InMemoryCache {
             _ => Ok(false),
         }
     }
+
+    async fn touch(&self, key: &str, ttl: Duration) -> Result<bool, FrameworkError> {
+        let pkey = self.prefixed_key(key);
+        let mut s = self.store.write().map_err(|_| {
+            FrameworkError::internal("Cache lock poisoned")
+        })?;
+        match s.get_mut(&pkey) {
+            Some(e) if !e.is_expired() => {
+                e.expires_at = Some(Instant::now() + ttl);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
 }

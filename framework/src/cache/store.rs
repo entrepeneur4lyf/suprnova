@@ -71,4 +71,9 @@ pub trait CacheStore: Send + Sync {
     /// Extend the TTL of a lock only if the supplied token matches the stored
     /// owner. Returns `true` if the TTL was extended; `false` otherwise.
     async fn refresh_lock(&self, key: &str, token: &str, ttl: Duration) -> Result<bool, FrameworkError>;
+
+    /// Refresh the TTL of an existing key without changing its value.
+    /// Returns `true` if the key existed (and wasn't expired) and was
+    /// refreshed; `false` otherwise.
+    async fn touch(&self, key: &str, ttl: Duration) -> Result<bool, FrameworkError>;
 }
