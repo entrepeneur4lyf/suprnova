@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
+use serial_test::serial;
 use suprnova::cache::store::CacheStore;
 use suprnova::cache::InMemoryCache;
 use suprnova::container::App;
@@ -14,6 +15,7 @@ fn install_memory_cache() {
 }
 
 #[tokio::test]
+#[serial]
 async fn first_call_runs_body_subsequent_call_is_duplicate() {
     RAN.store(0, Ordering::SeqCst);
     install_memory_cache();
@@ -34,6 +36,7 @@ async fn first_call_runs_body_subsequent_call_is_duplicate() {
 }
 
 #[tokio::test]
+#[serial]
 async fn key_expires_after_ttl() {
     install_memory_cache();
     let _ = Idempotency::once::<_, _, ()>("k-2", Duration::from_millis(50), || async { Ok(()) }).await.unwrap();
