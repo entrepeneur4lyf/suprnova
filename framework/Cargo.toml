@@ -117,7 +117,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 getrandom = "0.4.2"
 tokio-util = { version = "0.7.18", features = ["time"] }
 sea-streamer = { version = "0.5.0", features = ["redis", "runtime-tokio"] }
-sea-streamer-redis = "0.5.2"
+sea-streamer-redis = { version = "0.5.2", features = ["runtime-tokio"] }
 
 [features]
 default = ["testing"]
