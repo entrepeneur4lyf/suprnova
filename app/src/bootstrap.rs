@@ -151,17 +151,11 @@ pub async fn register() {
     //
     // Register an OrderShipped factory so `SendNotificationJob` can rebuild
     // the notification from its JSON payload at dispatch time, and register
-    // the notification job for worker dispatch. The factory is a
-    // non-capturing closure that coerces to the required `fn` pointer.
+    // the notification job for worker dispatch. The factory is now
+    // auto-derived from `N: Notification`'s `Deserialize` impl.
     suprnova::notifications::register_notification_factory::<
         crate::notifications::order_shipped::OrderShipped,
-    >(|payload| {
-        let n: crate::notifications::order_shipped::OrderShipped =
-            suprnova::serde_json::from_value(payload).map_err(|e| {
-                suprnova::FrameworkError::internal(format!("decode OrderShipped: {e}"))
-            })?;
-        Ok(Box::new(n))
-    });
+    >();
     register_job::<suprnova::notifications::notify_job::SendNotificationJob>();
 }
 

@@ -76,12 +76,7 @@ async fn notification_queue_dispatches_through_queue_and_lands_in_db() {
         .register_channel(Arc::new(DatabaseChannel::new(db.clone(), "users")));
     suprnova::notifications::set_dispatcher(Arc::new(dispatcher));
 
-    suprnova::notifications::register_notification_factory::<OrderShipped>(|payload| {
-        let n: OrderShipped = serde_json::from_value(payload).map_err(|e| {
-            suprnova::FrameworkError::internal(format!("decode OrderShipped: {e}"))
-        })?;
-        Ok(Box::new(n))
-    });
+    suprnova::notifications::register_notification_factory::<OrderShipped>();
     register_job::<SendNotificationJob>();
 
     let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());

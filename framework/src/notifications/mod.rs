@@ -216,7 +216,16 @@ pub(crate) fn dispatcher_for_queue() -> Result<Arc<NotificationDispatcher>, Fram
 /// Re-registering the same name silently replaces the existing factory
 /// (last-write-wins) — matches the mailable registry and the dispatcher's
 /// channel registration.
-pub fn register_notification_factory<N: Notification>(factory: NotificationFactory) {
+pub fn register_notification_factory<N: Notification>() {
+    let factory: NotificationFactory = |payload| {
+        let n: N = serde_json::from_value(payload).map_err(|e| {
+            FrameworkError::internal(format!(
+                "decode notification {}: {e}",
+                N::notification_name()
+            ))
+        })?;
+        Ok(Box::new(n))
+    };
     let mut g = FACTORIES.write().expect("notification factory lock poisoned");
     g.get_or_insert_with(HashMap::new)
         .insert(N::notification_name().to_string(), factory);
