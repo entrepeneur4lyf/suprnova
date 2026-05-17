@@ -155,7 +155,7 @@ pub use web_push::{
     ContentEncoding, PushResponse, SubscriptionInfo, VapidClaims, VapidKey, VapidSigner,
     WebPushClient, WebPushError,
 };
-pub use factory::{Factory, FactoryBuilder, Sequence};
+pub use factory::{persist_via_seaorm, Factory, FactoryBuilder, Persistable, Sequence};
 pub use mail::{Address, Attachment, Mail, MailFake, Mailable, SendMailJob};
 pub use notifications::{
     Channel, DynNotification, Notifiable, Notification, NotificationDispatcher,

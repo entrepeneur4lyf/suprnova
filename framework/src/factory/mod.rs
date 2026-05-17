@@ -36,8 +36,10 @@
 //! `#[derive(Factory)]` which generates the marker struct + impl from
 //! a `#[factory(model = "...")]` attribute.
 
+mod persist;
 mod sequence;
 
+pub use persist::{persist_via_seaorm, Persistable};
 pub use sequence::Sequence;
 
 /// A factory produces randomized instances of `Model`. Each call to
@@ -137,5 +139,33 @@ impl<M> FactoryBuilder<M> {
                 model
             })
             .collect()
+    }
+}
+
+/// Persistence-aware builder methods. Available whenever `M:
+/// Persistable` — which, thanks to the blanket impl in
+/// [`persist`], every SeaORM `Model` satisfies for free.
+impl<M> FactoryBuilder<M>
+where
+    M: Persistable + 'static,
+{
+    /// Build one instance + persist it through the bound storage.
+    /// Returns the canonicalized post-insert model (assigned id,
+    /// defaulted columns resolved, etc.).
+    pub async fn create(self) -> Result<M, crate::error::FrameworkError> {
+        self.make().persist().await
+    }
+
+    /// Build `count` instances + persist each in turn. Returns every
+    /// post-insert model. Persists sequentially — if a later insert
+    /// fails, the prior inserts are NOT rolled back (the call site is
+    /// expected to wrap a transaction if it needs atomicity).
+    pub async fn create_many(self) -> Result<Vec<M>, crate::error::FrameworkError> {
+        let models = self.make_many();
+        let mut out = Vec::with_capacity(models.len());
+        for m in models {
+            out.push(m.persist().await?);
+        }
+        Ok(out)
     }
 }
