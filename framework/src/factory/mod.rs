@@ -72,6 +72,11 @@ pub trait Factory {
     }
 }
 
+/// Boxed override closure shape — extracted into a type alias so the
+/// builder's field reads clean and clippy's `type_complexity` lint is
+/// satisfied at the public API boundary.
+pub(crate) type Override<M> = Box<dyn Fn(&mut M) + Send + Sync + 'static>;
+
 /// Fluent builder returned by [`Factory::new`]. Owns the per-instance
 /// count and the list of override closures.
 ///
@@ -81,7 +86,7 @@ pub trait Factory {
 /// insert.
 pub struct FactoryBuilder<M> {
     pub(crate) count: usize,
-    pub(crate) overrides: Vec<Box<dyn Fn(&mut M) + Send + Sync + 'static>>,
+    pub(crate) overrides: Vec<Override<M>>,
     pub(crate) factory_fn: fn() -> M,
 }
 
