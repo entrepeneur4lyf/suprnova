@@ -3,6 +3,7 @@
 pub mod envelope;
 pub mod job;
 pub mod testing;
+pub mod worker;
 pub(crate) mod driver;
 
 pub use envelope::{Envelope, EnvelopeError, CURRENT_SCHEMA_VERSION};
