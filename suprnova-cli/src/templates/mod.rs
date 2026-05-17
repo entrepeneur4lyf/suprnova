@@ -36,6 +36,15 @@ pub fn cmd_main_rs(package_name: &str) -> String {
         .replace("{package_name}", package_name)
 }
 
+pub fn console_main_rs(package_name: &str) -> String {
+    include_str!("files/backend/src/bin/console.rs.tpl")
+        .replace("{package_name}", package_name)
+}
+
+pub fn commands_mod_rs() -> &'static str {
+    include_str!("files/backend/src/commands/mod.rs.tpl")
+}
+
 pub fn lib_rs() -> &'static str {
     include_str!("files/backend/lib.rs.tpl")
 }
@@ -638,6 +647,14 @@ pub mod api {
             .replace("{package_name}", package_name)
             .replace("{project_name}", project_name)
     }
+    pub fn console_main_rs(package_name: &str, project_name: &str) -> String {
+        include_str!("files/api/src/bin/console.rs.tpl")
+            .replace("{package_name}", package_name)
+            .replace("{project_name}", project_name)
+    }
+    pub fn commands_mod_rs() -> &'static str {
+        include_str!("files/api/src/commands/mod.rs.tpl")
+    }
     pub fn lib_rs() -> &'static str {
         include_str!("files/api/src/lib.rs.tpl")
     }
@@ -696,13 +713,17 @@ pub fn scaffold_api(
     package_name: &str,
 ) -> Result<(), String> {
     let src = project_path.join("src");
+    let bin = src.join("bin");
+    let commands = src.join("commands");
     let config = src.join("config");
     let controllers = src.join("controllers");
     let resources = src.join("resources");
     let models = src.join("models");
     let migrations = src.join("migrations");
 
-    for d in [&src, &config, &controllers, &resources, &models, &migrations] {
+    for d in [
+        &src, &bin, &commands, &config, &controllers, &resources, &models, &migrations,
+    ] {
         fs::create_dir_all(d)
             .map_err(|e| format!("Failed to create {}: {}", d.display(), e))?;
     }
@@ -716,6 +737,11 @@ pub fn scaffold_api(
             src.join("main.rs"),
             api::main_rs(package_name, project_name),
         ),
+        (
+            bin.join("console.rs"),
+            api::console_main_rs(package_name, project_name),
+        ),
+        (commands.join("mod.rs"), api::commands_mod_rs().to_string()),
         (src.join("lib.rs"), api::lib_rs().to_string()),
         (src.join("bootstrap.rs"), api::bootstrap_rs().to_string()),
         (src.join("routes.rs"), api::routes_rs().to_string()),

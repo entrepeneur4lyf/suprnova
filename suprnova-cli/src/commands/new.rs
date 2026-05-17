@@ -259,6 +259,10 @@ fn create_project(
         .map_err(|e| format!("Failed to create directories: {}", e))?;
     fs::create_dir_all(project_path.join("src/actions"))
         .map_err(|e| format!("Failed to create directories: {}", e))?;
+    fs::create_dir_all(project_path.join("src/bin"))
+        .map_err(|e| format!("Failed to create directories: {}", e))?;
+    fs::create_dir_all(project_path.join("src/commands"))
+        .map_err(|e| format!("Failed to create directories: {}", e))?;
     fs::create_dir_all(project_path.join("src/models"))
         .map_err(|e| format!("Failed to create directories: {}", e))?;
     fs::create_dir_all(project_path.join("src/migrations"))
@@ -300,6 +304,22 @@ fn create_project(
         templates::cmd_main_rs(package_name),
     )
     .map_err(|e| format!("Failed to write cmd/main.rs: {}", e))?;
+
+    // Write src/bin/console.rs — per-project console binary that
+    // dispatches argv to `#[command]`-registered handlers.
+    fs::write(
+        project_path.join("src/bin/console.rs"),
+        templates::console_main_rs(package_name),
+    )
+    .map_err(|e| format!("Failed to write src/bin/console.rs: {}", e))?;
+
+    // Write src/commands/mod.rs — empty stub for user `#[command]`s.
+    // `suprnova make:command <name>` appends `pub mod <snake>;` lines.
+    fs::write(
+        project_path.join("src/commands/mod.rs"),
+        templates::commands_mod_rs(),
+    )
+    .map_err(|e| format!("Failed to write src/commands/mod.rs: {}", e))?;
 
     // Write src/lib.rs
     fs::write(project_path.join("src/lib.rs"), templates::lib_rs())

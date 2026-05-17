@@ -8,6 +8,14 @@ description = "{description}"
 name = "{package_name}"
 path = "cmd/main.rs"
 
+# Per-project console binary — runtime command dispatch (db:seed,
+# user-defined `#[command]` async fns, etc.). Same crate, different
+# `fn main` because console commands exit when their handler returns
+# whereas the server binary loops forever.
+[[bin]]
+name = "console"
+path = "src/bin/console.rs"
+
 [dependencies]
 suprnova = {{ package = "suprnova-rs", version = "0.1" }}
 tokio = {{ version = "1", features = ["full"] }}

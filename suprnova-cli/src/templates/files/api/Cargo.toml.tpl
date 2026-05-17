@@ -7,6 +7,12 @@ edition = "2021"
 name = "{package_name}"
 path = "src/main.rs"
 
+# Per-project console binary — runtime command dispatch (db:seed,
+# user-defined `#[command]` async fns, etc.).
+[[bin]]
+name = "console"
+path = "src/bin/console.rs"
+
 [dependencies]
 suprnova = { package = "suprnova-rs", version = "0.1" }
 tokio = { version = "1", features = ["full"] }
