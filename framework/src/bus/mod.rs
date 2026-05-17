@@ -13,6 +13,47 @@ use std::any::TypeId;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+/// Result of a `Bus::dispatch` call.
+///
+/// In normal mode, dispatch returns `Executed(output)`. Under
+/// `Bus::fake()` it returns `Captured` — the command is recorded for
+/// `assert_dispatched` but the handler is not run.
+#[derive(Debug)]
+pub enum Dispatched<T> {
+    Executed(T),
+    Captured,
+}
+
+impl<T> Dispatched<T> {
+    /// Unwrap `Executed`, panicking on `Captured` (typical real-mode use).
+    pub fn unwrap_executed(self) -> T {
+        match self {
+            Dispatched::Executed(v) => v,
+            Dispatched::Captured => panic!(
+                "expected Dispatched::Executed but got Captured (fake mode active?)"
+            ),
+        }
+    }
+
+    /// `true` if the command was actually run.
+    pub fn is_executed(&self) -> bool {
+        matches!(self, Dispatched::Executed(_))
+    }
+
+    /// `true` if the command was captured (fake mode).
+    pub fn is_captured(&self) -> bool {
+        matches!(self, Dispatched::Captured)
+    }
+
+    /// Convert to `Option<T>` — `Some(T)` if executed, `None` if captured.
+    pub fn executed(self) -> Option<T> {
+        match self {
+            Dispatched::Executed(v) => Some(v),
+            Dispatched::Captured => None,
+        }
+    }
+}
+
 type ErasedDispatcher = Arc<
     dyn Fn(serde_json::Value) -> BoxFuture<'static, Result<serde_json::Value, FrameworkError>>
         + Send
@@ -58,20 +99,19 @@ impl Bus {
     }
 
     /// Dispatch a command. Runs the registered handler in-process and returns
-    /// its typed output.
+    /// its typed output wrapped in [`Dispatched`].
     ///
-    /// Under [`testing::install_fake`], the command is captured and an error
-    /// is returned — the handler is **not** invoked.
-    pub async fn dispatch<C: Command>(cmd: C) -> Result<C::Output, FrameworkError>
+    /// Under [`testing::install_fake`], the command is captured and
+    /// `Ok(Dispatched::Captured)` is returned — the handler is **not** invoked.
+    /// Real failures (no handler registered, encode/decode errors, handler error)
+    /// still produce `Err(_)`.
+    pub async fn dispatch<C: Command>(cmd: C) -> Result<Dispatched<C::Output>, FrameworkError>
     where
         C::Output: serde::Serialize + serde::de::DeserializeOwned,
     {
         if testing::is_active() {
             testing::record::<C>(&cmd)?;
-            return Err(FrameworkError::internal(format!(
-                "Bus::dispatch called under Bus::fake() — command {} captured but not executed",
-                C::command_name()
-            )));
+            return Ok(Dispatched::Captured);
         }
         let dispatcher = {
             let g = REGISTRY.read().expect("bus registry poisoned");
@@ -87,11 +127,11 @@ impl Bus {
         let result = dispatcher(payload).await?;
         let out: C::Output = serde_json::from_value(result)
             .map_err(|e| FrameworkError::internal(format!("Bus decode result: {e}")))?;
-        Ok(out)
+        Ok(Dispatched::Executed(out))
     }
 
     /// Run commands sequentially, stopping on (and including) the first error.
-    pub async fn chain<C: Command + Clone>(cmds: Vec<C>) -> Vec<Result<C::Output, FrameworkError>>
+    pub async fn chain<C: Command + Clone>(cmds: Vec<C>) -> Vec<Result<Dispatched<C::Output>, FrameworkError>>
     where
         C::Output: serde::Serialize + serde::de::DeserializeOwned,
     {
@@ -108,7 +148,7 @@ impl Bus {
     }
 
     /// Run commands concurrently and collect results in input order.
-    pub async fn batch<C: Command + Clone>(cmds: Vec<C>) -> Vec<Result<C::Output, FrameworkError>>
+    pub async fn batch<C: Command + Clone>(cmds: Vec<C>) -> Vec<Result<Dispatched<C::Output>, FrameworkError>>
     where
         C::Output: serde::Serialize + serde::de::DeserializeOwned,
     {

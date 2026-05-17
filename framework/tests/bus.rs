@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicI64, Ordering};
-use suprnova::bus::Bus;
+use suprnova::bus::{Bus, Dispatched};
 use suprnova::bus::command::{Command, Handler};
 use suprnova::bus::testing::{assert_dispatched, install_fake};
 use suprnova::{async_trait, FrameworkError};
@@ -38,7 +38,7 @@ async fn bus_dispatch_runs_handler_inline() {
     TOTAL.store(0, Ordering::SeqCst);
     Bus::register::<AddCommand, _>(AddHandler);
     let r = Bus::dispatch(AddCommand { a: 3, b: 4 }).await.unwrap();
-    assert_eq!(r, 7);
+    assert!(matches!(r, Dispatched::Executed(7)));
     assert_eq!(TOTAL.load(Ordering::SeqCst), 7);
 }
 
@@ -52,8 +52,11 @@ async fn bus_chain_runs_sequentially_until_first_error() {
         AddCommand { a: 2, b: 2 },
     ])
     .await;
-    let oks: Vec<_> = results.into_iter().filter_map(|r| r.ok()).collect();
-    assert_eq!(oks, vec![2, 4]);
+    let outputs: Vec<i64> = results
+        .into_iter()
+        .filter_map(|r| r.ok().and_then(|d| d.executed()))
+        .collect();
+    assert_eq!(outputs, vec![2, 4]);
 }
 
 #[tokio::test]
@@ -67,20 +70,19 @@ async fn bus_batch_runs_concurrently() {
         AddCommand { a: 3, b: 3 },
     ])
     .await;
-    let mut oks: Vec<_> = results.into_iter().filter_map(|r| r.ok()).collect();
-    oks.sort();
-    assert_eq!(oks, vec![2, 4, 6]);
+    let mut outputs: Vec<i64> = results
+        .into_iter()
+        .filter_map(|r| r.ok().and_then(|d| d.executed()))
+        .collect();
+    outputs.sort();
+    assert_eq!(outputs, vec![2, 4, 6]);
 }
 
 #[tokio::test]
 #[serial]
-async fn bus_fake_captures_dispatched_commands() {
+async fn bus_fake_captures_dispatched_commands_without_executing() {
     let _guard = install_fake();
-    let r = Bus::dispatch(AddCommand { a: 9, b: 9 }).await;
-    // Under fake, dispatch returns an explicit error; the captured command is still observable.
-    assert!(
-        r.is_err(),
-        "fake-mode dispatch must signal that the command was captured, not executed"
-    );
+    let r = Bus::dispatch(AddCommand { a: 9, b: 9 }).await.unwrap();
+    assert!(matches!(r, Dispatched::Captured));
     assert_dispatched::<AddCommand>(|c| c.a == 9 && c.b == 9);
 }
