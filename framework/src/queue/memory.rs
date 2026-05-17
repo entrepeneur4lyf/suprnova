@@ -222,6 +222,7 @@ impl QueueDriver for MemoryQueueDriver {
             g.reserved.remove(token)
         };
         if let Some(mut env) = env {
+            env.attempts += 1;
             if requeue_delay.is_zero() {
                 let mut g = self.inner.lock().expect("memory queue poisoned");
                 g.visible.push_front(env);
