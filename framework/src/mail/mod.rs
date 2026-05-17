@@ -5,17 +5,20 @@ pub mod boot;
 pub(crate) mod http_provider;
 pub mod log;
 pub mod mailable;
+pub mod mailable_registry;
 pub mod mailgun;
 pub mod memory;
 pub mod postmark;
 pub mod resend;
+pub mod send_job;
 pub mod sendgrid;
 pub mod ses;
 pub mod smtp;
 pub mod transport;
 
 pub use address::{Address, Attachment};
-pub use mailable::Mailable;
+pub use mailable::{register_mailable_factory, Mailable};
+pub use send_job::SendMailJob;
 pub use transport::{MailTransport, OutgoingMessage};
 
 use crate::error::FrameworkError;
@@ -94,5 +97,57 @@ impl MailBuilder {
         };
 
         transport.send(&msg).await
+    }
+
+    /// Build a [`SendMailJob`] and push it onto the queue. The mailable's
+    /// concrete type must be registered via
+    /// [`register_mailable_factory`](crate::mail::register_mailable_factory)
+    /// before the worker dispatches the job.
+    ///
+    /// Fails fast (push-time, before any envelope is created) if the
+    /// mailable defines neither `html_template_source` nor
+    /// `text_template_source`. This mirrors `MailBuilder::send`'s
+    /// empty-body guard so a misconfigured mailable cannot silently emit
+    /// blank messages through the queue path. The same guard runs again
+    /// inside `mailable_registry::render_outgoing` as defense in depth.
+    pub async fn queue<M: Mailable>(self, mailable: M) -> Result<(), FrameworkError> {
+        let job = self.build_send_job(mailable)?;
+        crate::queue::Queue::push(job).await
+    }
+
+    /// Queue the mailable for a delayed dispatch. Same empty-body guard
+    /// and registry requirements as [`MailBuilder::queue`].
+    pub async fn later<M: Mailable>(
+        self,
+        delay: std::time::Duration,
+        mailable: M,
+    ) -> Result<(), FrameworkError> {
+        let job = self.build_send_job(mailable)?;
+        crate::queue::Queue::later(delay, job).await
+    }
+
+    fn build_send_job<M: Mailable>(
+        self,
+        mailable: M,
+    ) -> Result<SendMailJob, FrameworkError> {
+        if mailable.html_template_source().is_none()
+            && mailable.text_template_source().is_none()
+        {
+            return Err(FrameworkError::internal(format!(
+                "mail: {} has no text or html body — define text_template_source or html_template_source on the Mailable",
+                M::mailable_name()
+            )));
+        }
+        let payload = serde_json::to_value(&mailable)
+            .map_err(|e| FrameworkError::internal(format!("Mail::queue encode: {e}")))?;
+        Ok(SendMailJob {
+            to: self.to,
+            cc: self.cc,
+            bcc: self.bcc,
+            reply_to: self.reply_to,
+            from_override: self.from_override,
+            mailable_name: M::mailable_name().to_string(),
+            mailable_payload: payload,
+        })
     }
 }

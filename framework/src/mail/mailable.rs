@@ -67,8 +67,16 @@ fn render_with_self<M: Mailable>(
         .map_err(|e| FrameworkError::internal(format!("mail: Tera template ({label}): {e}")))
 }
 
-// Registry — fleshed out in Task 19 when queue integration lands.
-#[allow(dead_code)]
-pub(crate) fn register_mailable<M: Mailable>() {
-    let _ = M::mailable_name();
+/// Register a [`Mailable`] type for queue dispatch. Call once at boot for
+/// every concrete mailable that is reachable via `Mail::queue` or
+/// `Mail::later`. The worker rebuilds the mailable through this registry
+/// using `mailable_name` as the lookup key; an unregistered mailable
+/// surfaces as `unknown mailable: {name}` and either retries or
+/// dead-letters per the envelope's backoff policy.
+///
+/// Re-registering the same name silently replaces the existing factory
+/// (last-write-wins) — matches the queue worker registry and the
+/// notification dispatcher's channel registration.
+pub fn register_mailable_factory<M: Mailable>() {
+    crate::mail::mailable_registry::register::<M>();
 }

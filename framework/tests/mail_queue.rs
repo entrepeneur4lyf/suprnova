@@ -1,0 +1,159 @@
+use serde::{Deserialize, Serialize};
+use serial_test::serial;
+use std::sync::Arc;
+use std::time::Duration;
+use suprnova::async_trait;
+use suprnova::mail::memory::InMemoryMailTransport;
+use suprnova::mail::send_job::SendMailJob;
+use suprnova::mail::{Address, Mail, Mailable};
+use suprnova::queue::driver::QueueDriver;
+use suprnova::queue::memory::MemoryQueueDriver;
+use suprnova::queue::worker::{register_job, run_worker, WorkerConfig};
+use suprnova::queue::Queue;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct WelcomeMail {
+    name: String,
+}
+
+#[async_trait]
+impl Mailable for WelcomeMail {
+    fn mailable_name() -> &'static str {
+        "WelcomeMail"
+    }
+    fn subject(&self) -> String {
+        format!("Welcome, {}", self.name)
+    }
+    fn text_template_source(&self) -> Option<String> {
+        Some("Hi {{ name }}!".into())
+    }
+    fn from(&self) -> Option<Address> {
+        Some("noreply@suprnova.dev".into())
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct EmptyBodyMail;
+
+#[async_trait]
+impl Mailable for EmptyBodyMail {
+    fn mailable_name() -> &'static str {
+        "EmptyBodyMail"
+    }
+    fn subject(&self) -> String {
+        "nope".into()
+    }
+    // No html_template_source, no text_template_source.
+}
+
+#[tokio::test]
+#[serial]
+async fn mail_queue_dispatches_through_queue_and_send_job_renders_via_transport() {
+    let capture = Arc::new(InMemoryMailTransport::new());
+    Mail::set_transport(capture.clone());
+
+    suprnova::mail::register_mailable_factory::<WelcomeMail>();
+    register_job::<SendMailJob>();
+
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    Mail::to("alice@example.org")
+        .queue(WelcomeMail {
+            name: "Alice".into(),
+        })
+        .await
+        .unwrap();
+
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        WorkerConfig {
+            visibility_timeout: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(5),
+        },
+    ));
+
+    for _ in 0..200 {
+        if !capture.captured().is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    handle.abort();
+
+    let msgs = capture.captured();
+    assert_eq!(msgs.len(), 1, "queued mail must end up in the transport");
+    assert_eq!(msgs[0].subject, "Welcome, Alice");
+    assert_eq!(msgs[0].text.as_deref(), Some("Hi Alice!"));
+    assert_eq!(msgs[0].to.len(), 1);
+    assert_eq!(msgs[0].to[0].email, "alice@example.org");
+    assert_eq!(msgs[0].from.email, "noreply@suprnova.dev");
+}
+
+#[tokio::test]
+#[serial]
+async fn mail_queue_rejects_mailable_without_any_body_at_push_time() {
+    // Defense layer 1: MailBuilder::queue's empty-body guard must fire
+    // before any envelope is created. The queue driver stays empty.
+    let capture = Arc::new(InMemoryMailTransport::new());
+    Mail::set_transport(capture.clone());
+
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    let err = Mail::to("alice@example.org")
+        .queue(EmptyBodyMail)
+        .await
+        .unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("EmptyBodyMail"),
+        "error mentions the Mailable name: {msg}"
+    );
+    assert!(
+        msg.contains("text_template_source") || msg.contains("html_template_source"),
+        "error suggests which methods to implement: {msg}"
+    );
+
+    // The queue stays empty — no envelope was committed.
+    let popped = driver.pop(Duration::from_secs(60)).await.unwrap();
+    assert!(popped.is_none(), "no envelope should have been pushed");
+}
+
+#[tokio::test]
+#[serial]
+async fn mail_queue_unregistered_mailable_surfaces_unknown_error_from_job() {
+    // If a Mailable's factory isn't registered, SendMailJob::handle
+    // returns `unknown mailable: {name}` from the registry. We invoke
+    // handle directly rather than round-tripping through the worker so
+    // the assertion is targeted at the registry lookup, not at
+    // end-to-end retry/dead-letter behavior. This protects against
+    // silent retry loops on a typo'd mailable_name.
+    use suprnova::queue::Job;
+
+    // A transport must be bound — handle resolves the transport AFTER
+    // the registry lookup, but we still set one to keep failure modes
+    // unambiguous.
+    Mail::set_transport(Arc::new(InMemoryMailTransport::new()));
+
+    let job = SendMailJob {
+        to: vec!["alice@example.org".into()],
+        cc: vec![],
+        bcc: vec![],
+        reply_to: vec![],
+        from_override: None,
+        mailable_name: "TotallyUnregisteredMailable".to_string(),
+        mailable_payload: serde_json::json!({}),
+    };
+    let err = job.handle().await.unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("unknown mailable"),
+        "error names the missing registry entry: {msg}"
+    );
+    assert!(
+        msg.contains("TotallyUnregisteredMailable"),
+        "error names the missing mailable: {msg}"
+    );
+}

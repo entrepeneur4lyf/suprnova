@@ -13,13 +13,16 @@
 //! Concrete channels (Mail, Database, WebPush) land in Tasks 17 and 18.
 
 pub mod channels;
+pub mod notify_job;
+
+pub use notify_job::SendNotificationJob;
 
 use crate::error::FrameworkError;
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 /// A target of notifications — a `User`, an `Order`, etc.
 ///
@@ -159,5 +162,130 @@ impl NotificationDispatcher {
             channel.deliver(&route, notification).await?;
         }
         Ok(())
+    }
+
+    /// Look up a registered channel by name. Used by
+    /// [`SendNotificationJob`] to fan out a deserialized notification at
+    /// dispatch time.
+    pub fn channel(&self, name: &str) -> Option<Arc<dyn Channel>> {
+        self.channels.get(name).cloned()
+    }
+}
+
+// ============================================================================
+// Queue integration: dispatcher binding, factory registry, Notify facade
+// ============================================================================
+
+/// Factory type for the notification registry. v1 uses `fn(...)` rather
+/// than `Arc<dyn Fn>` because registered factories are stateless and a
+/// function pointer keeps clone/copy ergonomics trivial. Bump to
+/// `Arc<dyn Fn>` if a future caller needs to capture state.
+pub type NotificationFactory =
+    fn(serde_json::Value) -> Result<Box<dyn DynNotification>, FrameworkError>;
+
+static DISPATCHER: RwLock<Option<Arc<NotificationDispatcher>>> = RwLock::new(None);
+static FACTORIES: RwLock<Option<HashMap<String, NotificationFactory>>> = RwLock::new(None);
+
+/// Bind a dispatcher for queued and `Notify::send` delivery. Replaces any
+/// previously-bound dispatcher (last-write-wins).
+pub fn set_dispatcher(d: Arc<NotificationDispatcher>) {
+    *DISPATCHER
+        .write()
+        .expect("notification dispatcher lock poisoned") = Some(d);
+}
+
+pub(crate) fn dispatcher_for_queue() -> Result<Arc<NotificationDispatcher>, FrameworkError> {
+    DISPATCHER
+        .read()
+        .expect("notification dispatcher lock poisoned")
+        .clone()
+        .ok_or_else(|| {
+            FrameworkError::internal(
+                "no NotificationDispatcher registered; call notifications::set_dispatcher(...)",
+            )
+        })
+}
+
+/// Register a notification type for queue dispatch. Call once at boot for
+/// every concrete notification that is reachable via `Notify::queue`. The
+/// worker rebuilds the notification through this registry using
+/// `notification_name` as the lookup key; an unregistered notification
+/// surfaces as `unknown notification: {name}` and either retries or
+/// dead-letters per the envelope's backoff policy.
+///
+/// Re-registering the same name silently replaces the existing factory
+/// (last-write-wins) — matches the mailable registry and the dispatcher's
+/// channel registration.
+pub fn register_notification_factory<N: Notification>(factory: NotificationFactory) {
+    let mut g = FACTORIES.write().expect("notification factory lock poisoned");
+    g.get_or_insert_with(HashMap::new)
+        .insert(N::notification_name().to_string(), factory);
+}
+
+pub(crate) fn factory_for(name: &str) -> Result<NotificationFactory, FrameworkError> {
+    let g = FACTORIES.read().expect("notification factory lock poisoned");
+    let map = g.as_ref().ok_or_else(|| {
+        FrameworkError::internal(format!("unknown notification: {name}"))
+    })?;
+    map.get(name)
+        .copied()
+        .ok_or_else(|| FrameworkError::internal(format!("unknown notification: {name}")))
+}
+
+/// Notification facade — mirrors the [`Mail`](crate::mail::Mail),
+/// [`Queue`](crate::queue::Queue), [`Bus`](crate::bus::Bus), and
+/// [`Cache`](crate::cache::Cache) patterns.
+///
+/// `Notify::queue` builds a [`SendNotificationJob`] and pushes it onto the
+/// Phase 5A queue. `Notify::send` is the synchronous, in-process sibling —
+/// it delegates straight to the bound [`NotificationDispatcher`] with no
+/// queueing.
+pub struct Notify;
+
+impl Notify {
+    /// Queue a notification for asynchronous delivery via the bound
+    /// dispatcher. Pre-resolves the per-channel routes from `recipient` so
+    /// the worker does not need a `Notifiable` handle at execute time.
+    pub async fn queue<N, R>(
+        recipient: &R,
+        notification: N,
+    ) -> Result<(), FrameworkError>
+    where
+        N: Notification,
+        R: Notifiable + ?Sized,
+    {
+        let channels = notification.channels();
+        let mut routes: HashMap<String, String> = HashMap::new();
+        for c in &channels {
+            if let Some(r) = recipient.route_for(c) {
+                routes.insert((*c).to_string(), r);
+            }
+        }
+        let payload = serde_json::to_value(&notification).map_err(|e| {
+            FrameworkError::internal(format!("Notify::queue encode: {e}"))
+        })?;
+        let job = SendNotificationJob {
+            notifiable_route_per_channel: routes,
+            notification_name: N::notification_name().to_string(),
+            notification_payload: payload,
+            channels: channels.into_iter().map(String::from).collect(),
+        };
+        crate::queue::Queue::push(job).await
+    }
+
+    /// Send a notification synchronously (in-process, no queue) via the
+    /// bound dispatcher. Returns on the first channel error per the
+    /// dispatcher contract — channels that already succeeded are not
+    /// rolled back.
+    pub async fn send<N, R>(
+        recipient: &R,
+        notification: &N,
+    ) -> Result<(), FrameworkError>
+    where
+        N: Notification,
+        R: Notifiable + ?Sized,
+    {
+        let dispatcher = dispatcher_for_queue()?;
+        dispatcher.notify(recipient, notification).await
     }
 }
