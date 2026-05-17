@@ -1,5 +1,6 @@
 //! Queue subsystem: facade, drivers, envelope, worker.
 
+pub mod database;
 pub mod driver;
 pub mod envelope;
 pub mod job;
@@ -8,6 +9,7 @@ pub mod retry;
 pub mod testing;
 pub mod worker;
 
+pub use database::DatabaseQueueDriver;
 pub use driver::{QueueDriver, Reservation, ReservationToken};
 pub use envelope::{Envelope, EnvelopeError, CURRENT_SCHEMA_VERSION};
 pub use job::{BackoffSchedule, Job};
