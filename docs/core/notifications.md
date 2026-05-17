@@ -266,6 +266,56 @@ async fn shipping_a_box_dispatches_mail() {
 
 Tests touching the dispatcher / renderer / transport globals must be `#[serial_test::serial]` — those are process-global statics.
 
+## Best Practices
+
+### Register every factory + renderer at boot
+
+`Notify::queue` pushes a `SendNotificationJob` that the worker rebuilds via the notification factory registry; the mail channel renders via `register_mail_renderer`. Bind every queueable type up front:
+
+```rust
+// bootstrap.rs
+pub fn register() {
+    // Notification factories (one per Notification implementor).
+    suprnova::notifications::register_notification_factory::<OrderShipped>();
+    suprnova::notifications::register_notification_factory::<InvoicePaid>();
+
+    // Mail renderers (one per NotificationMailable implementor).
+    suprnova::register_mail_renderer::<OrderShipped>();
+    suprnova::register_mail_renderer::<InvoicePaid>();
+}
+```
+
+A `Notify::queue` for an unregistered notification fails the worker at execution time and retries through the dead-letter path. A mail channel dispatch for an unregistered renderer fails with the same "register via `suprnova::register_mail_renderer::<N>()`" message you'd see at runtime — but as a process-wide hint instead of a per-notification surprise.
+
+### Queue for fan-outs
+
+`Notify::send` is at-most-once across the fan-out: the dispatcher visits channels in order, and returns on the first error. A failure on channel #2 leaves channel #1's work committed and channels #3+ un-attempted. For any user-visible notification crossing more than one channel, prefer `Notify::queue` so the queue worker handles retries with backoff and the dispatch is durable across process crashes.
+
+```rust
+// One row in the queue + one worker pass = at-least-once across channels.
+Notify::queue(&user, OrderShipped { tracking }).await?;
+```
+
+### Make channel deliveries idempotent
+
+Worker retries mean the same `SendNotificationJob` can execute more than once. The framework channels are already idempotent-friendly — the mail transport doesn't dedupe but most providers do (Postmark message-id, SES idempotency tokens), and `DatabaseChannel` writes a fresh uuid row per execution which is what you want for an audit-style table.
+
+Custom channels should target idempotent operations: HTTP POSTs to providers with a stable client-side dedupe key, upserts rather than blind inserts when persisting application state, no "increment a counter" side-effects on the delivery path.
+
+### Bind the dispatcher in a single place
+
+`NotificationDispatcher::register_channel` is last-write-wins on the channel name, so tests can swap a `MailChannel` for `BroadcastChannelStub` in setup without affecting production. Keep the production binding in `bootstrap.rs`:
+
+```rust
+let dispatcher = NotificationDispatcher::new()
+    .register_channel(Arc::new(MailChannel::new()))
+    .register_channel(Arc::new(DatabaseChannel::new(db, "users")))
+    .register_channel(Arc::new(WebPushChannel::new(push, 86_400)));
+set_dispatcher(Arc::new(dispatcher));
+```
+
+Tests then build their own dispatcher with stubs where they need them. Don't `register_channel` lazily inside request handlers — the global lock writes and the last-write-wins semantics make it surprising under concurrent test loads.
+
 ## Reference
 
 - Traits: `suprnova::Notifiable`, `suprnova::Notification`, `suprnova::Channel`, `suprnova::DynNotification`

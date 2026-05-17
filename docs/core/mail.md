@@ -124,12 +124,13 @@ impl Mailable for OrderShipped {
 | Method | Required? | Purpose |
 |--------|-----------|---------|
 | `mailable_name()` | yes | Stable name persisted in the queue envelope — renaming breaks in-flight queued mail. |
-| `subject(&self)` | yes | Renders the subject. Computed (not Tera-templated by default — use `format!` or override). |
+| `subject(&self)` | yes | Computed subject. Used verbatim when `subject_template_source` returns `None`. |
+| `subject_template_source(&self)` | optional | Tera template for the subject — when `Some`, takes precedence over `subject()` and renders with `self` as the context. Same semantics as the body template sources. |
 | `html_template_source(&self)` | optional | HTML body Tera template. Return `None` to skip HTML. |
 | `text_template_source(&self)` | optional | Plain-text body Tera template. Return `None` to skip text. |
 | `from(&self)` | optional | Override the global default `noreply@localhost`. |
 | `attachments(&self)` | optional | Files to attach. Each is `name + bytes + mime`. |
-| `render_html(&self)` / `render_text(&self)` | optional | Override if you want to bypass Tera (Markdown → HTML, pre-rendered content, etc.). |
+| `render_subject(&self)` / `render_html(&self)` / `render_text(&self)` | optional | Override if you want to bypass Tera (Markdown → HTML, pre-rendered content, custom subject logic, etc.). |
 
 At least one of `html_template_source` or `text_template_source` must return `Some` (or `render_html`/`render_text` must produce content). An empty-body mailable is refused both at dispatch (`Mail::send`) and at enqueue (`Mail::queue`).
 
@@ -248,6 +249,57 @@ suprnova::mail::Mail::set_transport(Arc::new(StdoutTransport));
 ```
 
 Transports run on Tokio's runtime — async IO, connection pooling, and concurrent send are first-class. There is no per-request fork penalty.
+
+## Best Practices
+
+### Register factories at boot, not per-request
+
+`Mail::queue` and `Mail::later` push a `SendMailJob` carrying the mailable's name and JSON payload — the worker rebuilds the concrete type via `mailable_registry`. Register every queueable `Mailable` once at `Server::serve` time:
+
+```rust
+// bootstrap.rs
+pub fn register() {
+    suprnova::mail::register_mailable_factory::<WelcomeEmail>();
+    suprnova::mail::register_mailable_factory::<PasswordReset>();
+    suprnova::mail::register_mailable_factory::<InvoiceShipped>();
+}
+```
+
+A `Mail::queue` for an unregistered mailable lands on the queue, runs once, hits "unknown mailable", retries per the envelope's backoff policy, and dead-letters — costing observability time you would not have spent if the factory was bound at boot.
+
+### Queue mail for any slow or unreliable render
+
+Sending mail in a request handler couples the user's response latency to your SMTP server (or whichever provider's HTTP API). Use `Mail::queue` for anything beyond a synchronous local-dev render, and `Mail::later` when you want the dispatch deferred — onboarding follow-ups, reminder emails, scheduled digests.
+
+```rust
+// Bad: ties response time to the mail provider
+Mail::to(&user.email).send(Welcome { ... }).await?;
+return json_response!({ "ok": true });
+
+// Good: 200 OK returns immediately; the worker delivers the mail.
+Mail::to(&user.email).queue(Welcome { ... }).await?;
+return json_response!({ "ok": true });
+```
+
+### Always set `from` on a Mailable
+
+The framework's default sender is `noreply@localhost` — useful for catching missing senders in development, not a sender any provider will accept in production. Override `Mailable::from(&self)` (or set `from = "..."` in the `#[mail(...)]` attribute on a `NotificationMailable`) so every dispatched message has a real sender identity:
+
+```rust
+fn from(&self) -> Option<Address> {
+    Some(Address::new("orders@example.com").with_name("Acme Orders"))
+}
+```
+
+The per-message override on `MailBuilder` (`.from(("Operations", "ops@example.com"))`) takes precedence over the mailable's default — useful for one-off transactional sends.
+
+### Use the queue for at-least-once delivery, not the direct path
+
+`MailBuilder::send` is at-most-once: if the transport fails halfway through dispatching to two providers, you cannot retry without risking double-send. `MailBuilder::queue` rides the Phase 5A FROZEN envelope, which supports idempotency keys and worker-level retry. For any mail you must not lose AND must not double-send, queue with a stable idempotency key tied to the originating event.
+
+### Test against `Mail::fake()`, not against the bound transport
+
+`Mail::fake()` installs a process-local capture transport for the duration of the RAII guard and restores whatever was bound before. Tests using it do not need to clear globals on every entry/exit — drop semantics handle that. Combine `#[serial_test::serial]` with `Mail::fake()` for tests that mutate the transport global; concurrent tests would clobber each other otherwise.
 
 ## Reference
 
