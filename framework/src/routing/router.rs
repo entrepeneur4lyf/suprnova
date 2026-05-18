@@ -438,9 +438,12 @@ impl WsMatch {
         &self.pattern
     }
 
-    /// Captured path params as a `HashMap<String, String>` for
-    /// handler consumption.
-    pub fn params(&self) -> HashMap<String, String> {
-        self.params.clone()
+    /// Captured path params as a borrowed `HashMap<String, String>`
+    /// for handler consumption. The map is materialized once at
+    /// match time so the lifetime is bound to the `WsMatch` itself,
+    /// not the underlying matchit::Params reference. Callers that
+    /// need owned data can `.clone()` at the call site.
+    pub fn params(&self) -> &HashMap<String, String> {
+        &self.params
     }
 }
