@@ -22,8 +22,17 @@ use suprnova::torii_integration::{init_torii, ToriiConfig};
 /// One tokio runtime shared across every test in this file.
 static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
 
-/// One-time Torii initialisation shared across all tests.
+/// One-time Torii initialisation shared across all tests. Also sets
+/// `MAIL_FROM` because `PasswordReset::send_link` and `::complete`
+/// require it (auth_flows fails closed when the env var is unset —
+/// production DMARC/SPF hardening).
 static SETUP: Lazy<()> = Lazy::new(|| {
+    // SAFETY: tests in this file are `#[serial]`; no parallel reader
+    // can observe a torn write. The variable is set once and not
+    // mutated again.
+    unsafe {
+        std::env::set_var("MAIL_FROM", "test-mailer@example.com");
+    }
     RT.block_on(async {
         let config = ToriiConfig::sqlite_in_memory()
             .await

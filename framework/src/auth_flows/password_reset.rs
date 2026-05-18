@@ -118,9 +118,13 @@ impl PasswordReset {
     ///    is fired. A dispatcher error is discarded (the dispatcher itself
     ///    logs listener errors via tracing).
     ///
-    /// Reads `APP_NAME` and `MAIL_FROM` from the process environment for
-    /// the notification email's subject branding and from-address. Both
-    /// default — `"Suprnova"` and `"noreply@example.com"` — when unset.
+    /// Reads `APP_NAME` (defaults to `"Suprnova"`) and `MAIL_FROM`
+    /// (required — errors if unset) from the process environment.
+    /// Defaulting `MAIL_FROM` to a placeholder breaks DMARC/SPF in
+    /// production, so the facade fails closed instead of silently
+    /// sending from a domain the operator doesn't control. If
+    /// `MAIL_FROM` is unset the password change itself still commits
+    /// — the failure surfaces from the notification path only.
     pub async fn complete(token: &str, new_password: &str) -> Result<User, FrameworkError> {
         let user = instance()?
             .password_reset()
@@ -130,19 +134,31 @@ impl PasswordReset {
 
         // Fire-and-forget security notification. A delivery failure here
         // must not roll back the already-committed password change.
-        let to_address = user.email.clone();
-        let mail = PasswordChangedMail {
-            to_address: to_address.clone(),
-            user_name: user.name.clone(),
-            app_name: std::env::var("APP_NAME").unwrap_or_else(|_| "Suprnova".into()),
-            from_address: std::env::var("MAIL_FROM")
-                .unwrap_or_else(|_| "noreply@example.com".into()),
-        };
-        if let Err(e) = Mail::to(to_address.as_str()).send(mail).await {
-            tracing::warn!(
-                "password-changed security notification failed for user {}: {e}",
-                user.id
-            );
+        // require_mail_from() errors when MAIL_FROM is unset — same
+        // fire-and-forget posture: log via tracing::warn, do not
+        // surface to the caller.
+        match crate::auth_flows::require_mail_from() {
+            Ok(from_address) => {
+                let to_address = user.email.clone();
+                let mail = PasswordChangedMail {
+                    to_address: to_address.clone(),
+                    user_name: user.name.clone(),
+                    app_name: crate::auth_flows::app_name(),
+                    from_address,
+                };
+                if let Err(e) = Mail::to(to_address.as_str()).send(mail).await {
+                    tracing::warn!(
+                        "password-changed security notification failed for user {}: {e}",
+                        user.id
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "password-changed security notification skipped for user {}: {e}",
+                    user.id
+                );
+            }
         }
 
         // Intentionally discard the dispatch error — the reset has
@@ -173,9 +189,11 @@ impl PasswordReset {
     /// distinguish for internal accounting should call [`PasswordReset::request`]
     /// directly.
     ///
-    /// Reads `APP_NAME` and `MAIL_FROM` from the process environment for
-    /// the outgoing subject branding and from-address. Both default — `"Suprnova"`
-    /// and `"noreply@example.com"` — when unset.
+    /// Reads `APP_NAME` (defaults to `"Suprnova"`) and `MAIL_FROM`
+    /// (required — errors if unset) from the process environment.
+    /// Defaulting `MAIL_FROM` to a placeholder breaks DMARC/SPF in
+    /// production, so the facade fails closed instead of silently
+    /// sending from a domain the operator doesn't control.
     pub async fn send_link(email: &str, base_url: &str) -> Result<(), FrameworkError> {
         let Some((user, token)) = Self::request(email).await? else {
             // Anti-enumeration: silently succeed when the email is absent.
@@ -188,9 +206,8 @@ impl PasswordReset {
             to_address: to_address.clone(),
             user_name: user.name,
             reset_link: url,
-            app_name: std::env::var("APP_NAME").unwrap_or_else(|_| "Suprnova".into()),
-            from_address: std::env::var("MAIL_FROM")
-                .unwrap_or_else(|_| "noreply@example.com".into()),
+            app_name: crate::auth_flows::app_name(),
+            from_address: crate::auth_flows::require_mail_from()?,
         };
 
         Mail::to(to_address.as_str()).send(mail).await

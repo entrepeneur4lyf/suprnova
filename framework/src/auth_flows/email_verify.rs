@@ -123,9 +123,11 @@ impl EmailVerification {
     /// trailing slash on `base_url` is trimmed before the query string
     /// is appended.
     ///
-    /// Reads `APP_NAME` and `MAIL_FROM` from the process environment for
-    /// the outgoing subject and from-address. Both default — `"Suprnova"`
-    /// and `"noreply@example.com"` — when unset.
+    /// Reads `APP_NAME` (defaults to `"Suprnova"`) and `MAIL_FROM`
+    /// (required — errors if unset) from the process environment.
+    /// Defaulting `MAIL_FROM` to a placeholder breaks DMARC/SPF in
+    /// production, so the facade fails closed instead of silently
+    /// sending from a domain the operator doesn't control.
     pub async fn send_link(user: &User, base_url: &str) -> Result<(), FrameworkError> {
         let token = Self::generate_token(&user.id).await?;
         let token_str = token
@@ -147,9 +149,8 @@ impl EmailVerification {
             to_address: to_address.clone(),
             user_name: user.name.clone(),
             verification_link: url,
-            app_name: std::env::var("APP_NAME").unwrap_or_else(|_| "Suprnova".into()),
-            from_address: std::env::var("MAIL_FROM")
-                .unwrap_or_else(|_| "noreply@example.com".into()),
+            app_name: crate::auth_flows::app_name(),
+            from_address: crate::auth_flows::require_mail_from()?,
         };
 
         Mail::to(to_address.as_str()).send(mail).await

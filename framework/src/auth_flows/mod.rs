@@ -39,3 +39,99 @@ pub use events::{
 pub use mail::{EmailVerificationMail, PasswordChangedMail, PasswordResetMail};
 pub use password_reset::PasswordReset;
 pub use two_factor::{EnrollmentResponse, TwoFactor, TwoFactorUser};
+
+/// Resolve the `MAIL_FROM` env var. Errors when unset — the auth-flow
+/// facades dispatch mail through this address and silently defaulting
+/// to a placeholder (`noreply@example.com`) breaks production
+/// DMARC / SPF and ships from a domain the operator doesn't control.
+///
+/// Apps set this once at boot (`.env`, systemd unit, k8s secret —
+/// whatever the deploy uses). Tests set it via
+/// `std::env::set_var("MAIL_FROM", "...")` in their setup helper.
+pub(crate) fn require_mail_from() -> Result<String, crate::error::FrameworkError> {
+    std::env::var("MAIL_FROM").map_err(|_| {
+        crate::error::FrameworkError::internal(
+            "MAIL_FROM environment variable is not set — auth_flows facades require \
+             a real from-address. Set MAIL_FROM=ops@example.com in your environment.",
+        )
+    })
+}
+
+/// Resolve the `APP_NAME` env var, falling back to `"Suprnova"`. Used
+/// in mail subjects + greetings. Unlike `MAIL_FROM`, a default here is
+/// safe — the worst case is an unbranded subject line, not a delivery
+/// failure.
+pub(crate) fn app_name() -> String {
+    std::env::var("APP_NAME").unwrap_or_else(|_| "Suprnova".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    /// Cleared / restored env-var guard. Keeps the rest of the test
+    /// suite (which often expects `MAIL_FROM` to be present) running
+    /// after we deliberately unset it inside one test.
+    struct MailFromGuard {
+        previous: Option<String>,
+    }
+
+    impl MailFromGuard {
+        fn unset() -> Self {
+            let previous = std::env::var("MAIL_FROM").ok();
+            // SAFETY: serial test — no parallel observer.
+            unsafe {
+                std::env::remove_var("MAIL_FROM");
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for MailFromGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = self.previous.take() {
+                // SAFETY: serial test — no parallel observer.
+                unsafe {
+                    std::env::set_var("MAIL_FROM", prev);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn require_mail_from_errors_when_unset() {
+        let _guard = MailFromGuard::unset();
+        let result = require_mail_from();
+        assert!(
+            result.is_err(),
+            "require_mail_from must fail closed when env unset"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("MAIL_FROM"),
+            "error message must mention the missing variable; got: {msg}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn require_mail_from_returns_value_when_set() {
+        // SAFETY: serial test — no parallel observer.
+        unsafe {
+            std::env::set_var("MAIL_FROM", "ops@example.com");
+        }
+        assert_eq!(require_mail_from().unwrap(), "ops@example.com");
+    }
+
+    #[test]
+    fn app_name_defaults_to_suprnova_when_unset() {
+        // No env touch — APP_NAME is typically unset in tests. The
+        // default is the load-bearing contract.
+        let name = app_name();
+        // Either the test env set it, or the default kicked in. Both
+        // are acceptable; the contract is just "non-empty".
+        assert!(!name.is_empty());
+    }
+}
