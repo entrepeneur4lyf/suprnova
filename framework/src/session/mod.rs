@@ -54,6 +54,26 @@ pub use middleware::{
 };
 pub use store::{SessionData, SessionStore};
 
+/// Destroy every session belonging to `user_id`. Wraps
+/// [`SessionStore::destroy_for_user`] against the framework's default
+/// [`DatabaseSessionDriver`] — the same store [`SessionMiddleware`]
+/// uses by default. Returns the number of session rows deleted.
+///
+/// Called after security-state transitions where a credential rotation
+/// must not leave stale sessions valid:
+/// - [`crate::auth_flows::PasswordReset::complete`] — password rotated,
+///   stolen sessions revoked.
+/// - Future hooks for 2FA disable, account recovery, admin-forced
+///   logout.
+///
+/// Apps using a custom [`SessionStore`] should invoke
+/// `destroy_for_user` on their own bound store directly rather than
+/// this helper.
+pub async fn destroy_all_for_user(user_id: &str) -> Result<u64, crate::error::FrameworkError> {
+    let driver = driver::DatabaseSessionDriver::new(std::time::Duration::from_secs(0));
+    driver.destroy_for_user(user_id).await
+}
+
 // Test helpers — these mirror the per-request session scope that
 // `SessionMiddleware` sets up at runtime. Crates outside the framework
 // shouldn't need these; they exist for unit/integration tests that

@@ -132,6 +132,41 @@ impl PasswordReset {
             .await
             .map_err(map_err)?;
 
+        // Revoke every session + remember-me row for this user. A
+        // stolen session must not outlive the credential it depended
+        // on; same for any persistent remember-me cookie. Both are
+        // best-effort: failures log but do not roll back the
+        // committed password change.
+        let user_id_str = user.id.to_string();
+        match crate::session::destroy_all_for_user(&user_id_str).await {
+            Ok(n) => {
+                if n > 0 {
+                    tracing::info!(
+                        "revoked {n} session row(s) for user {user_id_str} after password reset"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "session revocation failed for user {user_id_str} after password reset: {e}"
+                );
+            }
+        }
+        match crate::auth::remember::revoke_all_for_user(&user_id_str).await {
+            Ok(n) => {
+                if n > 0 {
+                    tracing::info!(
+                        "revoked {n} remember-me row(s) for user {user_id_str} after password reset"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "remember-me revocation failed for user {user_id_str} after password reset: {e}"
+                );
+            }
+        }
+
         // Fire-and-forget security notification. A delivery failure here
         // must not roll back the already-committed password change.
         // require_mail_from() errors when MAIL_FROM is unset — same

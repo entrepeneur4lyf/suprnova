@@ -167,6 +167,14 @@ pub trait SessionStore: Send + Sync {
     /// Destroy a session by its ID
     async fn destroy(&self, id: &str) -> Result<(), FrameworkError>;
 
+    /// Destroy every session belonging to a given `user_id`.
+    ///
+    /// Called after security-state transitions (password reset, 2FA
+    /// change, account compromise recovery) to ensure stolen sessions
+    /// cannot outlive the credential change. Returns the number of
+    /// rows deleted.
+    async fn destroy_for_user(&self, user_id: &str) -> Result<u64, FrameworkError>;
+
     /// Garbage collect expired sessions
     ///
     /// Returns the number of sessions cleaned up.

@@ -125,6 +125,18 @@ impl SessionStore for DatabaseSessionDriver {
         Ok(())
     }
 
+    async fn destroy_for_user(&self, user_id: &str) -> Result<u64, FrameworkError> {
+        let db = DB::connection()?;
+
+        let result = sessions::Entity::delete_many()
+            .filter(sessions::Column::UserId.eq(user_id))
+            .exec(db.inner())
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+
+        Ok(result.rows_affected)
+    }
+
     async fn gc(&self) -> Result<u64, FrameworkError> {
         let db = DB::connection()?;
 
