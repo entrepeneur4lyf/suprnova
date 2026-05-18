@@ -82,7 +82,11 @@ pub struct Router {
     /// (`BoxedWebSocketHandler` vs `Arc<BoxedHandler>`) and the match
     /// returns a different shape (`WsMatch` instead of `(pattern,
     /// handler, params)`).
-    ws_routes: MatchitRouter<(String, BoxedWebSocketHandler)>,
+    ///
+    /// Each entry stores `(pattern, handler, per_route_middleware)` so
+    /// the per-route middleware chain can be recovered by `match_ws`
+    /// and run in `handle_ws_upgrade` before dispatching the handler.
+    ws_routes: MatchitRouter<(String, BoxedWebSocketHandler, Vec<BoxedMiddleware>)>,
     /// Middleware assignments: (method, path) -> boxed middleware instances.
     ///
     /// Keying by `(Method, String)` rather than path alone prevents
@@ -260,9 +264,9 @@ impl Router {
     /// can read cookies, session, headers, and captured route params.
     ///
     /// Unlike `get` / `post` / etc., this returns `Router` directly
-    /// (not `RouteBuilder`) — WS routes don't take per-route
-    /// middleware or names in v1. Per-WS-route auth middleware
-    /// lands in Phase 7B alongside broadcasting.
+    /// (not `RouteBuilder`) — WS routes support per-route middleware
+    /// via [`Router::ws_with_middleware`] or the `ws!(...).middleware(M)`
+    /// chain on `WsRouteDef`.
     ///
     /// [`WsSocket`]: crate::ws::WsSocket
     pub fn ws<H>(self, path: &str, handler: H) -> Router
@@ -270,7 +274,27 @@ impl Router {
         H: crate::ws::WebSocketHandler,
     {
         let boxed: BoxedWebSocketHandler = std::sync::Arc::new(handler);
-        self.ws_boxed(path, boxed)
+        self.ws_boxed_with_middleware(path, boxed, Vec::new())
+    }
+
+    /// Register a WebSocket route with a pre-populated middleware list.
+    ///
+    /// Middleware runs over the upgrade `Request` before the handler is
+    /// dispatched. A non-2xx response from any middleware short-circuits
+    /// the upgrade (the peer receives the rejection response and the
+    /// WebSocket future drops cleanly). Middleware can substitute a
+    /// modified `Request` via `next(modified_req)`.
+    pub fn ws_with_middleware<H>(
+        self,
+        path: &str,
+        handler: H,
+        middleware: Vec<BoxedMiddleware>,
+    ) -> Router
+    where
+        H: crate::ws::WebSocketHandler,
+    {
+        let boxed: BoxedWebSocketHandler = std::sync::Arc::new(handler);
+        self.ws_boxed_with_middleware(path, boxed, middleware)
     }
 
     /// Register a pre-boxed WebSocket handler. Used internally by
@@ -278,16 +302,31 @@ impl Router {
     /// site so the macro's `WsRouteDef` shape doesn't need a generic
     /// parameter.
     #[doc(hidden)]
-    pub fn ws_boxed(mut self, path: &str, handler: BoxedWebSocketHandler) -> Router {
+    pub fn ws_boxed(self, path: &str, handler: BoxedWebSocketHandler) -> Router {
+        self.ws_boxed_with_middleware(path, handler, Vec::new())
+    }
+
+    /// Register a pre-boxed WebSocket handler with a per-route middleware list.
+    ///
+    /// Used internally by `WsRouteDef::register` when middleware has been
+    /// chained via `.middleware(M)`.
+    #[doc(hidden)]
+    pub fn ws_boxed_with_middleware(
+        mut self,
+        path: &str,
+        handler: BoxedWebSocketHandler,
+        middleware: Vec<BoxedMiddleware>,
+    ) -> Router {
         self.ws_routes
-            .insert(path, (path.to_string(), handler))
+            .insert(path, (path.to_string(), handler, middleware))
             .ok();
         self
     }
 
     /// Look up a WebSocket route by path. Returns the matched
-    /// handler + captured params if any route registered with
-    /// [`Router::ws`] matches.
+    /// handler + captured params + per-route middleware if any route
+    /// registered with [`Router::ws`] or [`Router::ws_with_middleware`]
+    /// matches.
     pub fn match_ws(&self, path: &str) -> Option<WsMatch> {
         self.ws_routes.at(path).ok().map(|m| {
             let params: HashMap<String, String> = m
@@ -295,11 +334,12 @@ impl Router {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect();
-            let (pattern, handler) = m.value;
+            let (pattern, handler, middleware) = m.value;
             WsMatch {
                 handler: handler.clone(),
                 pattern: pattern.clone(),
                 params,
+                middleware: middleware.clone(),
             }
         })
     }
@@ -426,12 +466,15 @@ impl From<RouteBuilder> for Router {
 }
 
 /// Result of a [`Router::match_ws`] lookup. Bundles the matched
-/// handler with the matched pattern (e.g. `/ws/rooms/{id}`) and
-/// the captured path parameters (e.g. `{"id": "42"}`).
+/// handler with the matched pattern (e.g. `/ws/rooms/{id}`),
+/// the captured path parameters (e.g. `{"id": "42"}`), and
+/// the per-route middleware list (empty if registered via plain
+/// [`Router::ws`]).
 pub struct WsMatch {
     handler: BoxedWebSocketHandler,
     pattern: String,
     params: HashMap<String, String>,
+    middleware: Vec<BoxedMiddleware>,
 }
 
 impl WsMatch {
@@ -454,5 +497,12 @@ impl WsMatch {
     /// need owned data can `.clone()` at the call site.
     pub fn params(&self) -> &HashMap<String, String> {
         &self.params
+    }
+
+    /// Per-route middleware to run over the upgrade `Request` before
+    /// dispatching to the handler. Empty slice when the route was
+    /// registered without any `.middleware(M)` chaining.
+    pub fn middleware(&self) -> &Vec<BoxedMiddleware> {
+        &self.middleware
     }
 }

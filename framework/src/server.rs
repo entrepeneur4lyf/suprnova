@@ -499,14 +499,22 @@ async fn handle_ws_upgrade(
     mut req: hyper::Request<hyper::body::Incoming>,
     ws_match: crate::routing::WsMatch,
 ) -> hyper::Response<ServerBody> {
+    use crate::middleware::MiddlewareChain;
+    use crate::routing::BoxedHandler;
+    use std::sync::Mutex;
+
     let handler = ws_match.handler();
     let pattern = ws_match.pattern().to_string();
     let params: HashMap<String, String> = ws_match.params().clone();
+    let middleware_list: Vec<crate::middleware::BoxedMiddleware> =
+        ws_match.middleware().clone();
 
     let config = crate::ws::WsConfig::default();
     let heartbeat_interval = config.ping_interval;
     let tungstenite_config = config.to_tungstenite_config();
 
+    // hyper_tungstenite::upgrade MUST come before Request::new because
+    // it needs `&mut req` before we consume `req`.
     let (response, websocket) =
         match hyper_tungstenite::upgrade(&mut req, Some(tungstenite_config)) {
             Ok(pair) => pair,
@@ -519,13 +527,61 @@ async fn handle_ws_upgrade(
     // Build the framework's Request from the upgrade request. The
     // body is empty for an upgrade request (RFC 6455); we still
     // construct via Request::new(req) so headers and cookies are
-    // intact for the handler. Note: middleware does NOT run for WS
-    // upgrades in v1 — per-route auth middleware lands in 7B. Until
-    // then, handlers do auth checks inline by reading cookies/session
-    // state from the Request and calling `socket.close(1008, ...)` on
-    // rejection.
+    // intact for the handler.
     let path = req.uri().path().to_string();
-    let suprnova_req = Request::new(req).with_params(params);
+    let initial_request = Request::new(req).with_params(params);
+
+    // Per-route middleware chain. Runs over the upgrade Request before
+    // dispatching the handler. A non-2xx response from any middleware
+    // (e.g. AuthMiddleware returning 401) aborts the upgrade — the
+    // unwoken websocket future drops cleanly. Middleware can substitute
+    // a modified Request via `next(modified_req)`; the terminator
+    // captures the final Request into a shared Mutex slot.
+    let suprnova_req = if middleware_list.is_empty() {
+        initial_request
+    } else {
+        let captured: Arc<Mutex<Option<Request>>> = Arc::new(Mutex::new(None));
+        let captured_for_terminator = captured.clone();
+
+        let terminator: Arc<BoxedHandler> = Arc::new(Box::new(move |req: Request| {
+            let captured = captured_for_terminator.clone();
+            Box::pin(async move {
+                *captured
+                    .lock()
+                    .expect("WS middleware terminator mutex poisoned") = Some(req);
+                Ok(HttpResponse::text("").status(200))
+            })
+                as std::pin::Pin<
+                    Box<dyn std::future::Future<Output = crate::http::Response> + Send>,
+                >
+        }));
+
+        let mut chain = MiddlewareChain::new();
+        chain.extend(middleware_list);
+
+        let chain_response = chain.execute(initial_request, terminator).await;
+
+        // Response = Result<HttpResponse, HttpResponse>; collapse both
+        // arms to a single HttpResponse the same way handle_request does.
+        let http_response = chain_response.unwrap_or_else(|e| e);
+        let status = http_response.status_code();
+        if !(200..300).contains(&status) {
+            // Middleware short-circuited (e.g. 401, 403). Convert to
+            // ServerBody and return; the upgrade future drops cleanly.
+            tracing::debug!(
+                status = status,
+                route = %pattern,
+                "websocket upgrade rejected by per-route middleware"
+            );
+            return http_response.into_hyper();
+        }
+
+        captured
+            .lock()
+            .expect("WS middleware terminator mutex poisoned")
+            .take()
+            .expect("WS middleware terminator must have captured the request")
+    };
 
     // Tracing span covers the entire WS connection lifecycle from
     // upgrade-resolved to handler-returned. Operators get a single

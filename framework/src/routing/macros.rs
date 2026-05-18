@@ -314,23 +314,58 @@ pub fn __ws_impl<H>(path: &'static str, handler: H) -> WsRouteDef
 where
     H: crate::ws::WebSocketHandler,
 {
-    let boxed: crate::ws::BoxedWebSocketHandler = std::sync::Arc::new(handler);
-    WsRouteDef { path, handler: boxed }
+    WsRouteDef::new(path, handler)
 }
 
 /// One WebSocket route item, produced by the `ws!` macro. The
 /// `routes!` macro calls `register(router)` on each item to fold
 /// them into a single `Router`.
+///
+/// Per-route middleware can be chained via `.middleware(M)`:
+///
+/// ```rust,ignore
+/// ws!("/ws/private", PrivateHandler).middleware(SessionMiddleware::new())
+/// ```
+///
+/// The chain runs over the upgrade `Request` before the handler is
+/// dispatched; a non-2xx response short-circuits the upgrade.
 pub struct WsRouteDef {
     path: &'static str,
     handler: crate::ws::BoxedWebSocketHandler,
+    middleware: Vec<BoxedMiddleware>,
 }
 
 impl WsRouteDef {
+    /// Create a new `WsRouteDef` for a typed handler. Used by
+    /// `__ws_impl` (and therefore the `ws!` macro) to type-erase
+    /// the handler at the call site.
+    pub fn new<H>(path: &'static str, handler: H) -> Self
+    where
+        H: crate::ws::WebSocketHandler,
+    {
+        let boxed: crate::ws::BoxedWebSocketHandler = std::sync::Arc::new(handler);
+        Self {
+            path,
+            handler: boxed,
+            middleware: Vec::new(),
+        }
+    }
+
+    /// Attach a middleware to this WS route. Multiple calls chain in
+    /// registration order; all middleware run over the upgrade
+    /// `Request` before the handler is dispatched.
+    ///
+    /// A non-2xx response from any middleware (e.g. `AuthMiddleware`
+    /// returning 401) short-circuits the upgrade.
+    pub fn middleware<M: Middleware + 'static>(mut self, m: M) -> Self {
+        self.middleware.push(into_boxed(m));
+        self
+    }
+
     /// Register this WS route on the given `Router`. Called by the
     /// `routes!` macro's expansion; not intended for direct use.
     pub fn register(self, router: Router) -> Router {
-        router.ws_boxed(self.path, self.handler)
+        router.ws_boxed_with_middleware(self.path, self.handler, self.middleware)
     }
 }
 
