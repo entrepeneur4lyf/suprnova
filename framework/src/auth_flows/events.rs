@@ -81,8 +81,11 @@ impl Event for TwoFactorEnrolled {
 /// Fires when 2FA is disabled for a user via
 /// [`crate::auth_flows::TwoFactor::disable`].
 ///
-/// Dispatched unconditionally - even if no row existed - so admin /
-/// audit listeners can observe every attempted disable call.
+/// **Only** emitted when a real state transition occurs — i.e. a row
+/// existed in `two_factor_credentials` and was removed. A no-op
+/// disable on a user who never enrolled does not fire, mirroring the
+/// [`AccountUnlocked`] contract so audit listeners can treat each
+/// `TwoFactorDisabled` as a meaningful security event.
 #[derive(Debug, Clone)]
 pub struct TwoFactorDisabled {
     pub user_id: String,

@@ -186,11 +186,22 @@ impl TwoFactor {
 
     /// Try to consume one recovery code. Returns `true` if a code
     /// matched and was removed (single-use), `false` if no row, no
-    /// codes, or no match.
+    /// codes, no match, or the enrollment has not been confirmed yet.
+    ///
+    /// Recovery codes are a backup for an **active** 2FA enrollment,
+    /// so this method short-circuits to `Ok(false)` while
+    /// `confirmed_at` is NULL — matching [`Self::verify`]'s symmetry.
+    /// Without this gate, an attacker who triggered enrollment on a
+    /// victim account (or any flow that creates the row without
+    /// confirming) could authenticate using only a fresh recovery
+    /// code, bypassing TOTP entirely.
     pub async fn consume_recovery_code<U: TwoFactorUser>(
         user: &U,
         code: &str,
     ) -> Result<bool, FrameworkError> {
+        if !Self::is_enabled(user).await? {
+            return Ok(false);
+        }
         recovery::consume(user.user_id(), code).await
     }
 
@@ -206,21 +217,29 @@ impl TwoFactor {
     }
 
     /// Disable 2FA entirely. Deletes the row and dispatches
-    /// [`TwoFactorDisabled`]. Idempotent: deleting a row that doesn't
-    /// exist is not an error, but the event is dispatched
-    /// unconditionally so admin listeners can audit attempted
-    /// disable calls regardless of prior state.
+    /// [`TwoFactorDisabled`] **only** when a row was actually
+    /// removed.
+    ///
+    /// Idempotent: a no-op disable on a user who never enrolled is
+    /// not an error. The event only fires on a real state transition
+    /// (mirrors the [`super::events::AccountUnlocked`] contract) so
+    /// audit listeners see one entry per actual disable, not one per
+    /// click on a no-op button.
     pub async fn disable<U: TwoFactorUser>(user: &U) -> Result<(), FrameworkError> {
         let db = DB::connection()?;
-        entity::Entity::delete_by_id(user.user_id().to_string())
+        let result = entity::Entity::delete_by_id(user.user_id().to_string())
             .exec(db.inner())
             .await
             .map_err(|e| FrameworkError::internal(format!("two_factor delete: {e}")))?;
 
-        let _ = crate::events::EventFacade::dispatch(TwoFactorDisabled {
-            user_id: user.user_id().to_string(),
-        })
-        .await;
+        if result.rows_affected > 0 {
+            // Discard dispatch errors - the delete has already
+            // committed; a listener failure must not surface here.
+            let _ = crate::events::EventFacade::dispatch(TwoFactorDisabled {
+                user_id: user.user_id().to_string(),
+            })
+            .await;
+        }
 
         Ok(())
     }

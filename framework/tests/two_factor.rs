@@ -205,6 +205,12 @@ async fn re_enroll_invalidates_old_recovery_codes_and_resets_confirmed() {
     assert_ne!(first.otpauth_url, second.otpauth_url);
     assert_ne!(first.recovery_codes, second.recovery_codes);
 
+    // Confirm the new enrollment so recovery codes become consumable
+    // again (the unconfirmed-enrollment lock is exercised in
+    // `recovery_codes_locked_until_confirmation`).
+    let confirm_two = totp_code_for(&second.otpauth_url);
+    TwoFactor::confirm(&user, &confirm_two).await.unwrap();
+
     // Old recovery codes can no longer be consumed.
     let stale = &first.recovery_codes[0];
     assert!(!TwoFactor::consume_recovery_code(&user, stale).await.unwrap());
@@ -226,6 +232,94 @@ async fn verify_returns_false_when_never_enrolled() {
 
     assert!(!TwoFactor::is_enabled(&user).await.unwrap());
     assert!(!TwoFactor::verify(&user, "123456").await.unwrap());
+}
+
+#[tokio::test]
+async fn recovery_codes_locked_until_confirmation() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+
+    let user = FakeUser {
+        id: "user-unconfirmed-rec".into(),
+        email: "pre@example.com".into(),
+    };
+
+    // Enroll but DO NOT confirm.
+    let response = TwoFactor::enroll(&user).await.unwrap();
+    let code = &response.recovery_codes[0];
+
+    // Recovery consumption must mirror verify() and refuse to act on
+    // an unconfirmed enrollment - otherwise a recovery code becomes
+    // a bypass for the TOTP confirmation step entirely.
+    assert!(
+        !TwoFactor::consume_recovery_code(&user, code).await.unwrap(),
+        "recovery codes must be inert until confirm() runs"
+    );
+
+    // After confirm(), the SAME code now works.
+    let live = totp_code_for(&response.otpauth_url);
+    TwoFactor::confirm(&user, &live).await.unwrap();
+    assert!(TwoFactor::consume_recovery_code(&user, code).await.unwrap());
+}
+
+#[tokio::test]
+async fn disable_event_fires_only_on_real_transition() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use suprnova::auth_flows::events::TwoFactorDisabled;
+    use suprnova::events::{EventFacade, Listener};
+    use suprnova::FrameworkError;
+
+    // Unique user id so this listener can filter out unrelated
+    // TwoFactorDisabled dispatches from other tests sharing the
+    // process-global EventDispatcher.
+    let user = FakeUser {
+        id: "user-event-fire-unique-marker".into(),
+        email: "fire@example.com".into(),
+    };
+
+    // Spying listener — counts dispatches whose user_id matches the
+    // target user. Filters out cross-test noise.
+    struct ScopedCounter {
+        target_user: String,
+        count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Listener<TwoFactorDisabled> for ScopedCounter {
+        async fn handle(&self, event: &TwoFactorDisabled) -> Result<(), FrameworkError> {
+            if event.user_id == self.target_user {
+                self.count.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    let count = Arc::new(AtomicUsize::new(0));
+    let listener: Arc<ScopedCounter> = Arc::new(ScopedCounter {
+        target_user: user.id.clone(),
+        count: count.clone(),
+    });
+    EventFacade::listen::<TwoFactorDisabled, _>(listener).await;
+
+    // Disable with no row — must NOT fire the event.
+    TwoFactor::disable(&user).await.unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+
+    // Enroll + confirm + disable — fires exactly once.
+    let response = TwoFactor::enroll(&user).await.unwrap();
+    let code = totp_code_for(&response.otpauth_url);
+    TwoFactor::confirm(&user, &code).await.unwrap();
+    TwoFactor::disable(&user).await.unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+
+    // Disable again — must NOT fire (no rows affected).
+    TwoFactor::disable(&user).await.unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
