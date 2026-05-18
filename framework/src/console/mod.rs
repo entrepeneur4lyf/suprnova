@@ -87,21 +87,38 @@ fn build_root() -> clap::Command {
     root
 }
 
-/// Dispatch the process's argv to a registered command. Pass
-/// `std::env::args().collect::<Vec<_>>()` from the console binary.
+/// Dispatch the process's argv to a registered command. Same as
+/// [`dispatch_argv_with_init`] but with a no-op init callback —
+/// convenient for tests and programmatic callers that don't need
+/// lazy bootstrapping.
+pub async fn dispatch_argv(argv: Vec<String>) -> Result<(), FrameworkError> {
+    dispatch_argv_with_init(argv, || async {}).await
+}
+
+/// Dispatch the process's argv to a registered command, running
+/// `lazy_init` between clap's argv parse and the matched handler.
+///
+/// `lazy_init` runs only when clap matches a real registered
+/// subcommand — help, version, missing-subcommand, and parse-error
+/// paths all skip it. The typical use is to defer expensive
+/// bootstrap (DB connect, queue init, event listener wiring) so
+/// `console --help` doesn't require `DATABASE_URL` to be set.
 ///
 /// The full clap tree (every registered subcommand) is built each
-/// call; clap then parses argv and routes to the right entry. Help
-/// flags (`--help`, `-h`, missing subcommand) are clap's
-/// responsibility — they print and exit via clap's own machinery,
-/// which preserves correct exit codes and color output.
-///
-/// Returns:
-/// - `Ok(())` on a successful handler run
-/// - `Err(FrameworkError)` propagated from the handler
-pub async fn dispatch_argv(argv: Vec<String>) -> Result<(), FrameworkError> {
+/// call; clap then parses argv and routes to the right entry.
+/// Help flags (`--help`, `-h`, missing subcommand) are clap's
+/// responsibility — handled via `handle_clap_error` which prints
+/// formatted output and returns Ok (for help/version) or a silent
+/// Err (for parse failures) so `main` doesn't double-print.
+pub async fn dispatch_argv_with_init<F, Fut>(
+    argv: Vec<String>,
+    lazy_init: F,
+) -> Result<(), FrameworkError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
     let root = build_root();
-
     let matches = match root.try_get_matches_from(argv) {
         Ok(m) => m,
         Err(e) => return handle_clap_error(e),
@@ -109,22 +126,18 @@ pub async fn dispatch_argv(argv: Vec<String>) -> Result<(), FrameworkError> {
 
     if let Some((name, sub_matches)) = matches.subcommand() {
         if let Some(entry) = find(name) {
+            lazy_init().await;
             let result = (entry.handler)(sub_matches).await;
             if let Err(ref e) = result && !e.is_silent() {
                 eprintln!("error: {}", e.message());
             }
             return result;
         }
-        // Unreachable: clap only routes to subcommands it knows
-        // about, and we just built the root from `list()`.
         return Err(FrameworkError::internal(format!(
             "unknown console command: '{name}'"
         )));
     }
 
-    // `arg_required_else_help(true)` on the root makes clap return
-    // an Err with `DisplayHelpOnMissingArgumentOrSubcommand` before
-    // we get here. This is the safety net.
     Ok(())
 }
 

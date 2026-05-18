@@ -187,3 +187,53 @@ async fn dispatch_handler_errors_preserve_message_for_programmatic_callers() {
         "handler error message preserved on the returned Err"
     );
 }
+
+#[tokio::test]
+async fn dispatch_with_help_skips_lazy_init() {
+    use std::sync::atomic::AtomicUsize;
+    let init_calls = std::sync::Arc::new(AtomicUsize::new(0));
+    let init_calls_inner = init_calls.clone();
+
+    let argv = vec!["console".to_string(), "--help".to_string()];
+    console::dispatch_argv_with_init(argv, move || {
+        let counter = init_calls_inner.clone();
+        async move {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    })
+    .await
+    .expect("--help returns Ok");
+
+    assert_eq!(
+        init_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "lazy_init must not run for help-shaped argv"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_with_real_subcommand_runs_lazy_init() {
+    use std::sync::atomic::AtomicUsize;
+    let init_calls = std::sync::Arc::new(AtomicUsize::new(0));
+    let init_calls_inner = init_calls.clone();
+
+    // Use test:fail so this test doesn't touch the shared GREET_INVOCATIONS
+    // counter that dispatch_invokes_registered_handler_with_trailing_args
+    // resets and checks. The lazy-init contract only requires that init
+    // fires once for any real subcommand — which command doesn't matter.
+    let argv = vec!["console".to_string(), "test:fail".to_string()];
+    let _ = console::dispatch_argv_with_init(argv, move || {
+        let counter = init_calls_inner.clone();
+        async move {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    })
+    .await;
+    // test:fail returns Err — that's expected; we only care about init count.
+
+    assert_eq!(
+        init_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "lazy_init runs exactly once before the handler"
+    );
+}

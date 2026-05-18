@@ -27,24 +27,24 @@ use std::process::ExitCode;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
-    // Load `.env` first so config::register_all sees DATABASE_URL etc.
-    // The server's `Application::run` does this for us; the console
-    // binary takes the same responsibility on directly. Ignore the
-    // "no .env" result — env may already be populated by the shell.
     let _ = dotenvy::dotenv();
 
-    // Register configs, then run the same bootstrap the HTTP server
-    // runs. Matches the `Application::new().config(...).bootstrap(...)`
-    // ordering in `cmd/main.rs` — DB init in bootstrap reads the
-    // DatabaseConfig that `register_all` parks in `Config::register`.
-    app::config::register_all();
-    app::bootstrap::register().await;
-
     let argv: Vec<String> = std::env::args().collect();
-    // dispatch_argv owns all user-facing stderr output (both clap
-    // parse errors and handler-returned errors). Main is pure
-    // Result → ExitCode translation.
-    match suprnova::console::dispatch_argv(argv).await {
+    // Bootstrap runs only when a real subcommand is matched — help,
+    // version, missing-subcommand, and parse-error paths all skip
+    // it. That's how `console --help` works without DATABASE_URL
+    // set (DB::init would panic during bootstrap otherwise).
+    //
+    // dispatch_argv_with_init owns all user-facing stderr output
+    // (both clap parse errors and handler-returned errors); main is
+    // pure Result → ExitCode translation.
+    let result = suprnova::console::dispatch_argv_with_init(argv, || async {
+        app::config::register_all();
+        app::bootstrap::register().await;
+    })
+    .await;
+
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::FAILURE,
     }
