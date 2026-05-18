@@ -67,10 +67,30 @@ impl WsSocket {
         }
     }
 
-    /// Clone the outbound channel sender wrapped to expose `Message`
+    /// Clone the outbound channel sender, wrapped to expose `Message`
     /// (not the internal `Outbound`). Used internally by the framework
-    /// to spawn heartbeat tasks that can push pings without contending
+    /// to spawn auxiliary tasks (heartbeat pings in T8, future
+    /// broadcaster fanout) that can push messages without contending
     /// with the handler's `send_*` methods.
+    ///
+    /// # Caller contract
+    ///
+    /// The caller **must** drop or abort the returned `Sender` before
+    /// (or alongside) the `WsSocket` itself. The bridge task spawned
+    /// here holds an internal `Sender<Outbound>` clone for the lifetime
+    /// of the returned `Sender<Message>`; if it outlives the WsSocket,
+    /// the forwarder task will not detect channel-close and the
+    /// underlying TCP connection will remain open until the peer
+    /// drops it.
+    ///
+    /// In practice this means the framework spawns the auxiliary task
+    /// with an `AbortHandle` and aborts it when the handler future
+    /// resolves (see `server::handle_ws_upgrade` in T5/T8).
+    ///
+    /// # Multiple callers
+    ///
+    /// Each invocation spawns a fresh bridge task and adds an extra
+    /// `SEND_CHANNEL_CAPACITY`-deep buffer. Call once per connection.
     #[allow(dead_code)] // used by heartbeat task in T8
     pub(crate) fn sender(&self) -> mpsc::Sender<Message> {
         let (bridge_tx, mut bridge_rx) = mpsc::channel::<Message>(SEND_CHANNEL_CAPACITY);
