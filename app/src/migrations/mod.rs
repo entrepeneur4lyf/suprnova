@@ -17,6 +17,13 @@ impl MigratorTrait for Migrator {
             Box::new(m20251208_220000_create_sessions_table::Migration),
             Box::new(m20251208_230000_create_remember_tokens_table::Migration),
             Box::new(m20251208_240000_create_posts_table::Migration),
+            // Phase 11 — framework-owned 2FA credentials table. The
+            // framework ships the migration; the app's `Migrator`
+            // just lists it so `suprnova migrate` provisions
+            // `two_factor_credentials` alongside this project's own
+            // schema. Listed last so re-runs against existing dev
+            // databases pick it up as a new pending migration.
+            Box::new(suprnova::auth_flows::two_factor::migration::Migration),
         ]
     }
 }

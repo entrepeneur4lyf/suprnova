@@ -1,4 +1,7 @@
 pub mod admin;
+pub mod auth_2fa;
+pub mod auth_reset;
+pub mod auth_verify;
 pub mod avatar_upload;
 pub mod config_example;
 pub mod home;

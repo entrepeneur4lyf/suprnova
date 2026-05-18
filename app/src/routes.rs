@@ -111,6 +111,33 @@ routes! {
     // the worker can re-hydrate and dispatch.
     post!("/api/welcome", controllers::welcome::queue).name("api.welcome"),
 
+    // Phase 11 — auth-flows dogfood.
+    //
+    // Public endpoints (no session middleware — they consume tokens
+    // minted out-of-band or implement anti-enumeration responses for
+    // arbitrary input):
+    //   POST /auth/verify/resend?email=...  → 200, anti-enumeration
+    //   GET  /auth/verify?token=...         → 302 / on success
+    //   POST /auth/password/request         → 200, anti-enumeration
+    //   POST /auth/password/reset           → 302 /?reset=ok on success
+    //
+    // Session-gated endpoints (require an authenticated session via
+    // `SessionAuthMiddleware`):
+    //   POST /auth/2fa/enroll   → 200 JSON {otpauth_url, qr_code_svg, recovery_codes}
+    //   POST /auth/2fa/confirm  → 200 JSON {status:"confirmed"}
+    //   POST /auth/2fa/disable  → 200 JSON {status:"disabled"}
+    post!("/auth/verify/resend", controllers::auth_verify::resend).name("auth.verify.resend"),
+    get!("/auth/verify", controllers::auth_verify::verify).name("auth.verify.confirm"),
+    post!("/auth/password/request", controllers::auth_reset::request_reset)
+        .name("auth.password.request"),
+    post!("/auth/password/reset", controllers::auth_reset::complete_reset)
+        .name("auth.password.complete"),
+    group!("/auth/2fa", {
+        post!("/enroll", controllers::auth_2fa::enroll).name("auth.2fa.enroll"),
+        post!("/confirm", controllers::auth_2fa::confirm).name("auth.2fa.confirm"),
+        post!("/disable", controllers::auth_2fa::disable).name("auth.2fa.disable"),
+    }).middleware(SessionAuthMiddleware::new()),
+
     // Phase 5A dogfood — rate-limited ping endpoint.
     // 5 requests per 60-second window, keyed by X-Forwarded-For header
     // (falls back to "anon"). The in-memory limiter is bootstrapped in
