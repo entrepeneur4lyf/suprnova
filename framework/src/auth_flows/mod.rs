@@ -8,6 +8,10 @@
 //!
 //! See `docs/core/auth-flows.md` for usage.
 
+pub mod email_verify;
+pub mod events;
 pub mod mail;
 
+pub use email_verify::EmailVerification;
+pub use events::EmailVerified;
 pub use mail::{EmailVerificationMail, PasswordChangedMail, PasswordResetMail};
