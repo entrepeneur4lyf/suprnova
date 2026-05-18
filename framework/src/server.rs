@@ -441,6 +441,7 @@ async fn handle_ws_upgrade(
     let params: HashMap<String, String> = ws_match.params().clone();
 
     let config = crate::ws::WsConfig::default();
+    let heartbeat_interval = config.ping_interval;
     let tungstenite_config = config.to_tungstenite_config();
 
     let (response, websocket) =
@@ -461,13 +462,37 @@ async fn handle_ws_upgrade(
     // Spawn the handler task. hyper switches the connection to
     // upgraded I/O once `response` flushes; then `websocket.await`
     // resolves with the upgraded WebSocketStream and we hand it
-    // to the handler. Heartbeat task lands in T8 (it'll spawn here
-    // and use socket.sender() + abort_handle for clean teardown).
+    // to the handler. The heartbeat task is spawned alongside and
+    // aborted via AbortHandle when the handler resolves — without
+    // that abort the bridge task spawned by socket.sender() keeps
+    // an internal Sender clone alive, the forwarder doesn't see
+    // channel-close, and the TCP connection lingers.
     tokio::spawn(async move {
         match websocket.await {
             Ok(ws_stream) => {
                 let socket = crate::ws::WsSocket::from_stream(ws_stream);
-                if let Err(e) = handler.handle(socket, suprnova_req).await {
+                let heartbeat_sender = socket.sender();
+
+                // Spawn the heartbeat alongside the handler. We hold
+                // an AbortHandle so we can tear it down when the
+                // handler future resolves — without that, the bridge
+                // task spawned by `socket.sender()` keeps an internal
+                // sender clone alive, the forwarder doesn't see
+                // channel-close, and the TCP connection lingers.
+                let heartbeat = tokio::spawn(crate::ws::heartbeat::run(
+                    heartbeat_sender,
+                    heartbeat_interval,
+                ));
+                let heartbeat_handle = heartbeat.abort_handle();
+
+                let result = handler.handle(socket, suprnova_req).await;
+
+                // Abort the heartbeat BEFORE we log the handler error;
+                // this releases the bridge task immediately so the
+                // forwarder can drain and close the sink.
+                heartbeat_handle.abort();
+
+                if let Err(e) = result {
                     tracing::error!(error = %e, "websocket handler returned error");
                 }
             }

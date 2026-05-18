@@ -91,7 +91,6 @@ impl WsSocket {
     ///
     /// Each invocation spawns a fresh bridge task and adds an extra
     /// `SEND_CHANNEL_CAPACITY`-deep buffer. Call once per connection.
-    #[allow(dead_code)] // used by heartbeat task in T8
     pub(crate) fn sender(&self) -> mpsc::Sender<Message> {
         let (bridge_tx, mut bridge_rx) = mpsc::channel::<Message>(SEND_CHANNEL_CAPACITY);
         let internal = self.sender.clone();

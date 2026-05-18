@@ -186,3 +186,27 @@ async fn missing_ws_route_returns_normal_404() {
         "plain GET to unregistered path should 404; got:\n{s}"
     );
 }
+
+#[tokio::test]
+async fn idle_connection_survives_quiet_period_and_can_still_send() {
+    // Verify the heartbeat machinery's presence doesn't BREAK an
+    // otherwise-idle connection. The default ping interval is 30s
+    // (we don't wait that long); we just confirm the connection
+    // stays usable across a short quiet period — proving the
+    // forwarder task and the heartbeat coexistence are correct.
+    let port = spawn_test_server().await;
+    let url = format!("ws://127.0.0.1:{port}/ws/echo");
+
+    let (mut ws, _) =
+        tokio_tungstenite::connect_async(&url).await.expect("connect");
+
+    // Idle for >150ms — significantly longer than the spawn delay
+    // and any plausible network blip but well under the 30s ping.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    ws.send(Message::text("still here")).await.unwrap();
+    let reply = ws.next().await.unwrap().unwrap();
+    assert_eq!(reply.to_text().unwrap(), "echo: still here");
+
+    ws.close(None).await.unwrap();
+}
