@@ -74,6 +74,18 @@ fn ws_route_def_chained_middleware_surfaces_in_match() {
     assert_eq!(m.middleware().len(), 2, "two middleware attached via WsRouteDef chaining");
 }
 
+#[test]
+fn ws_macro_middleware_chaining_compiles_and_surfaces_in_match() {
+    // Pin that the ws! macro syntax (headline API) chains middleware
+    // correctly end-to-end. ws! expands to __ws_impl → WsRouteDef::new,
+    // so this also validates the macro expansion path.
+    let router = suprnova::ws!("/ws/gated", NoopHandler)
+        .middleware(Rejector)
+        .register(Router::new());
+    let m = router.match_ws("/ws/gated").expect("matches");
+    assert_eq!(m.middleware().len(), 1, "ws! macro .middleware() chain");
+}
+
 // The end-to-end "middleware actually runs on upgrade" assertion
 // lands in broadcasting_e2e.rs (T5) where we have the full upgrade
 // fixture. This file pins the wiring.
