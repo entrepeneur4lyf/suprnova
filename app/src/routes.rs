@@ -1,12 +1,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 use suprnova::{
-    container::App, delete, get, group, post, rate_limit::memory::InMemoryRateLimiter, routes,
+    container::App, delete, get, group, post, rate_limit::memory::InMemoryRateLimiter, routes, ws,
     AuthMiddleware as SessionAuthMiddleware, RateLimitMiddleware, RateLimiter, SlidingWindowConfig,
 };
 
 use crate::controllers;
 use crate::middleware::AuthMiddleware;
+use crate::ws as app_ws;
 
 routes! {
     get!("/", controllers::home::index).name("home"),
@@ -48,6 +49,10 @@ routes! {
 
     // SSE dogfood — streams UserRegistered broadcast events
     get!("/events/stream", controllers::sse_example::stream).name("events.stream"),
+
+    // Phase 7A WebSocket dogfood — echo handler at /ws/echo.
+    // Round-trips text messages with an "echo: " prefix; exits on peer close.
+    ws!("/ws/echo", app_ws::echo::EchoHandler),
 
     // Phase 2 dogfood — cursor pagination over a 100-user fixture
     get!("/api/users", controllers::paginated_users::index).name("api.users.index"),
