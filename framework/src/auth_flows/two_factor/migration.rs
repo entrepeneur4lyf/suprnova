@@ -7,8 +7,19 @@
 
 use sea_orm_migration::prelude::*;
 
-#[derive(DeriveMigrationName)]
 pub struct Migration;
+
+impl MigrationName for Migration {
+    // Explicit, file-stable name. `DeriveMigrationName` derives from
+    // the parent module path, which produces just `migration` here —
+    // not unique enough for the `seaql_migrations` table once a
+    // second framework-owned migration lands in another module with
+    // the same file name. The date prefix matches the convention the
+    // example app uses for its own migrations.
+    fn name(&self) -> &str {
+        "m20260101_000001_create_two_factor_credentials"
+    }
+}
 
 #[derive(DeriveIden)]
 enum TwoFactorCredentials {
