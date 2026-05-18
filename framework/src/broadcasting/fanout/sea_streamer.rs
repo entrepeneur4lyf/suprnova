@@ -236,6 +236,10 @@ impl SeaStreamerBroadcastHub {
 
     /// Connect with a custom presence TTL.
     ///
+    /// `streamer_uri` — the streamer URI, e.g. `"stdio://"`.
+    /// `stream_key`   — the stream name shared by all processes, e.g.
+    ///                  `"suprnova-broadcast"`.
+    ///
     /// Presence members whose `last_seen` exceeds `ttl` are pruned. The
     /// heartbeat interval is derived as `ttl / 6` so that live members
     /// are refreshed well within the TTL window.
@@ -250,9 +254,10 @@ impl SeaStreamerBroadcastHub {
     /// clusters where 60 s of stale presence is unacceptable).
     pub async fn new_with_presence_ttl(
         streamer_uri: &str,
+        stream_key: &str,
         ttl: std::time::Duration,
     ) -> Result<Self, FrameworkError> {
-        Self::connect(streamer_uri, "suprnova-broadcast", false, ttl).await
+        Self::connect(streamer_uri, stream_key, false, ttl).await
     }
 
     /// Connect with stdio loopback enabled.
