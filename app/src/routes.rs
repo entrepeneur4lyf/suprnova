@@ -4,10 +4,33 @@ use suprnova::{
     container::App, delete, get, group, post, rate_limit::memory::InMemoryRateLimiter, routes, ws,
     AuthMiddleware as SessionAuthMiddleware, RateLimitMiddleware, RateLimiter, SlidingWindowConfig,
 };
+use suprnova::broadcasting::{
+    BroadcastHub, BroadcastingWsHandler, ChannelRegistry, InMemoryBroadcastHub,
+};
 
+use crate::broadcasting::{ChatChannel, UserRegisteredChannel};
 use crate::controllers;
 use crate::middleware::AuthMiddleware;
 use crate::ws as app_ws;
+
+/// Build the `BroadcastingWsHandler` for `/ws/broadcast` by resolving
+/// the hub and channel registry from the App container.
+///
+/// Falls back to a fresh in-process hub + registry when the container
+/// hasn't been bootstrapped (e.g. in unit tests that assemble the
+/// router without running `bootstrap::register()`). This mirrors the
+/// pattern used by the rate-limit middleware.
+fn broadcasting_handler() -> BroadcastingWsHandler {
+    let hub: Arc<dyn BroadcastHub> = App::make::<dyn BroadcastHub>()
+        .unwrap_or_else(|| Arc::new(InMemoryBroadcastHub::new()));
+    let registry: Arc<ChannelRegistry> = App::get::<Arc<ChannelRegistry>>().unwrap_or_else(|| {
+        let mut r = ChannelRegistry::new();
+        r.register(UserRegisteredChannel);
+        r.register(ChatChannel);
+        Arc::new(r)
+    });
+    BroadcastingWsHandler::new(hub, registry)
+}
 
 routes! {
     get!("/", controllers::home::index).name("home"),
@@ -53,6 +76,11 @@ routes! {
     // Phase 7A WebSocket dogfood — echo handler at /ws/echo.
     // Round-trips text messages with an "echo: " prefix; exits on peer close.
     ws!("/ws/echo", app_ws::echo::EchoHandler),
+
+    // Phase 7B WebSocket broadcasting — JSON-envelope subscribe/publish.
+    // Clients send {"type":"subscribe","channel":"user_registered"} to
+    // receive UserRegistered events; ChatChannel requires a token in data.
+    ws!("/ws/broadcast", broadcasting_handler()),
 
     // Phase 2 dogfood — cursor pagination over a 100-user fixture
     get!("/api/users", controllers::paginated_users::index).name("api.users.index"),

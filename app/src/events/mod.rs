@@ -6,13 +6,14 @@
 //! the framework's event surface (Phase 1) and as the integration
 //! point that the `/events/stream` SSE handler subscribes to.
 
+use suprnova::broadcasting::Broadcastable;
 use suprnova::Event;
 
 /// Fired when a new user finishes registration. Carries enough
 /// identity to drive welcome emails, audit trails, and the SSE
 /// activity feed without needing a database round-trip on the
 /// listener side.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UserRegistered {
     /// Database id assigned to the new user.
     pub user_id: i64,
@@ -24,5 +25,11 @@ pub struct UserRegistered {
 impl Event for UserRegistered {
     fn event_name() -> &'static str {
         "UserRegistered"
+    }
+}
+
+impl Broadcastable for UserRegistered {
+    fn broadcast_on(&self) -> Vec<String> {
+        vec!["user_registered".to_string()]
     }
 }
