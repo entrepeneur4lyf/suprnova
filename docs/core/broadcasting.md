@@ -237,7 +237,9 @@ All messages over the broadcasting WebSocket route are UTF-8 JSON frames. Two fr
 |----------|----------------|-----------------|---------|
 | `subscribe` | `channel` | `data` | Subscribe to the named channel. `data` is forwarded to `authorize`. |
 | `unsubscribe` | `channel` | | Unsubscribe from the named channel. |
-| `publish` | `channel`, `event`, `data` | | Publish an event to all subscribers on the channel. |
+| `publish` | `channel`, `event`, `data` | | Publish an event to all subscribers on the channel. Gated by `Channel::authorize_publish` — see note below. |
+
+`Publish` envelopes are gated by `Channel::authorize_publish`. The default is to reject — channels must explicitly opt in to client-side publishes by overriding the hook. Most server-side broadcasting channels never want client-initiated events; the default-deny shape matches that intent. An unauthorized publish results in a `ServerFrame::Error { reason: "publish unauthorized" }` response to the sender; other subscribers are not notified.
 
 ```json
 {"action":"subscribe","channel":"chat.42","data":{"token":"abc"}}
@@ -296,6 +298,31 @@ ws!("/ws/broadcast", build_broadcasting_handler())
 
 Channel-level authorization (who may subscribe to which channel) happens inside `Channel::authorize`. Transport-level middleware (who may open a connection at all) happens here.
 
+### Per-Route WsConfig
+
+Each broadcasting (or plain WebSocket) route can carry its own `WsConfig` that overrides the process-wide defaults. Chain `.config(WsConfig { ... })` after the handler — before or after `.middleware(M)`, the order does not matter:
+
+```rust
+ws!("/ws/chat", BroadcastingWsHandler::new(hub, registry))
+    .config(WsConfig {
+        ping_interval: Duration::from_secs(5),
+        max_missed_pings: 1,
+        ..Default::default()
+    })
+    .middleware(SessionMiddleware::new())
+```
+
+The four configurable fields and their typical use cases:
+
+| Field | Default | Use case |
+|-------|---------|----------|
+| `ping_interval` | 30s | Chat routes: shorten to 5–10s to detect dead mobile connections quickly. Bulk-data streaming: lengthen to reduce overhead. |
+| `max_missed_pings` | 2 | Set to `1` for chat where a single missed Pong should close immediately. Set to `3+` for flaky mobile networks where brief gaps are expected. |
+| `max_message_size` | 64 KB | Increase for file-transfer or rich-media channels. Keep tight for chat to prevent abuse. |
+| `max_frame_size` | 16 KB | Usually left at default; raise only when the client sends unfragmented large frames. |
+
+When no `.config(...)` is provided, the route inherits `WsConfig::default()`. Explicit per-route config always wins over the process-wide default.
+
 ## Presence Channels
 
 Presence channels surface membership information — who is currently subscribed — to every subscriber on the channel.
@@ -320,7 +347,7 @@ All three frames arrive as `event` action frames with reserved `event` names:
 
 **Detecting your own join echo.** When you subscribe, you receive both `presence.here` (snapshot) and a `presence.joined` (your own join). Clients that want to suppress the self-join echo should compare the joining member's identity to their own known identity and skip the notification if it matches.
 
-**v1 scope note.** `list_members` on the in-process hub returns only the members connected to this process. In a multi-replica deployment using the `broadcasting-fanout` feature, members connected to other processes are not visible. Cross-process presence tracking is out of v1 scope; see [Out of v1 scope](#out-of-v1-scope).
+Across processes, presence state is replicated via the `__presence__` meta-channel when using `SeaStreamerBroadcastHub`. Track/untrack operations on any process propagate to all subscribers; `list_members` returns the merged view (local and remote). Dead processes whose `untrack_member` never fired have their members pruned after 60 seconds via TTL. See [Cross-process presence](#cross-process-presence) for details.
 
 ## Multi-Process Fanout
 
@@ -357,7 +384,11 @@ pub async fn register() {
 
 Published events flow through the broker to every process in the cluster. Each process's local in-memory layer delivers the event to its own WebSocket subscribers. The application code that dispatches events does not change — only the bootstrap wiring changes.
 
-**Presence and multi-process.** In v1, `list_members` returns only the members connected to the local process. Members connected to other replicas are not included. Cross-process presence is explicitly out of v1 scope.
+### Cross-process presence
+
+`SeaStreamerBroadcastHub` replicates presence state across processes automatically. Each instance gets a UUID `instance_id` at construction; `track_member` / `untrack_member` publish `PresenceEvent`s to a reserved `__presence__` meta-channel. Every process maintains a `cross_process_view` updated by the consumer task; `list_members` returns this merged view (local and remote uniformly).
+
+**Liveness.** Each process re-publishes its members every 10 seconds (heartbeat). Stale entries — members whose `last_seen` is older than 60 seconds — get pruned every 30 seconds. This handles process crashes that did not get to publish `MemberRemoved`.
 
 ## Close-on-No-Pong
 
@@ -386,15 +417,11 @@ Active WebSocket handler tasks (including broadcasting connections) are tracked 
 
 The following items are intentionally deferred. Each note describes the path forward when it is taken up.
 
-- **Per-channel rate limiting / publish authorization.** Today, applications gate publish actions inside the channel implementation (inspect `data`, return early, etc.). A first-class `authorize_publish` hook on the `Channel` trait is a natural v2 addition.
-
-- **Cross-process presence.** `list_members` is local-only in v1. Cross-process membership requires either gossip between replicas or a shared presence key in the broker; both approaches are feasible with the `broadcasting-fanout` stack and are deferred to a follow-on phase.
-
 - **Cross-region replication.** `SeaStreamerBroadcastHub` is single-cluster. Multi-region fan-out would require a higher-level broker topology or a replication layer above sea-streamer.
 
 - **End-to-end encryption per channel.** Channels today are plaintext from the server's perspective. E2EE (where the server cannot read message content) requires key-exchange support in the wire protocol.
 
-- **Per-route `WsConfig` override.** `max_missed_pings` and `ping_interval` are currently global. Attaching a per-route `WsConfig` via `.config(WsConfig { ... })` on the route entry is scoped to a future phase.
+- **Per-instance presence visibility.** The framework merges all connected members into one unified view; there is no admin-facing surface for "which members are connected to which specific process." This is a monitoring/ops concern rather than a product concern and is deferred.
 
 ## Reference
 
@@ -411,3 +438,8 @@ The following items are intentionally deferred. Each note describes the path for
 | `build_broadcasting_handler()` | Returns a `WebSocketHandler` that implements the full JSON envelope protocol. Resolves the hub and registry from the container. Pass directly to `ws!(...)`. |
 | `suprnova::ws::WsConfig::max_missed_pings` | `u32` (default 2). Number of consecutive missed Pongs before the heartbeat closes the connection with code 1011. |
 | `ws!(path, build_broadcasting_handler()).middleware(M)` | Route macro syntax. Chains middleware onto the broadcasting route. A non-2xx middleware response short-circuits the upgrade. |
+| `Channel::authorize_publish(&self, req: &Request, event: &str, data: &Value) -> bool` | Per-channel publish authorization hook. Default returns `false` (fail-closed). Override to allow specific client-initiated event names. |
+| `WsRouteDef::config(WsConfig)` | Attaches a per-route `WsConfig` that overrides process-wide defaults for this route. Composes with `.middleware(M)` in either order. |
+| `Router::ws_with_config(path, handler, config)` | Lower-level variant of `ws!` that accepts an explicit `WsConfig`. |
+| `Router::ws_with_middleware_and_config(path, handler, middleware, config)` | Lower-level variant that accepts both middleware and an explicit `WsConfig`. |
+| `WsMatch::config() -> Option<&WsConfig>` | Returns the per-route `WsConfig` if one was set, or `None` (causing the framework to fall back to `WsConfig::default()`). |

@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use std::time::Duration;
 use suprnova::supervisor::{RestartPolicy, Supervisor};
 use suprnova::FrameworkError;
+use tokio_util::sync::CancellationToken;
 
 pub struct LogHeartbeat;
 
@@ -28,10 +29,14 @@ pub struct LogHeartbeat;
 impl Supervisor for LogHeartbeat {
     fn name(&self) -> &'static str { "heartbeat" }
 
-    async fn run(&self) -> Result<(), FrameworkError> {
+    async fn run(&self, cancel: CancellationToken) -> Result<(), FrameworkError> {
         loop {
-            tracing::info!("supervisor heartbeat tick");
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                    tracing::info!("supervisor heartbeat tick");
+                }
+            }
         }
     }
 
@@ -104,6 +109,27 @@ The backoff counter resets to zero on a successful run. A "successful run" for `
 
 The 60-second cap prevents a permanently-broken supervisor from sleeping indefinitely or hammering external dependencies on every retry. Combine with `error!`-level logging to alert when a supervisor enters the high-backoff band.
 
+## Graceful Shutdown
+
+Supervisors receive a `CancellationToken` as a parameter to `run()`. The framework cancels this token on Ctrl-C / SIGTERM as part of `Server::run`'s shutdown sequence. Supervisors that want to flush state, finish in-flight work, or otherwise exit cleanly should `tokio::select!` on `cancel.cancelled()`:
+
+```rust
+async fn run(&self, cancel: CancellationToken) -> Result<(), FrameworkError> {
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                tracing::info!("supervisor heartbeat tick");
+            }
+        }
+    }
+}
+```
+
+The framework drains the supervisor JoinSet with a 5-second grace window after cancellation. Supervisors that do not honor the token within that window get aborted via `JoinSet::abort_all`. The drain runs after the WebSocket handler drain (so WS connections clean up first) and before telemetry buffers flush.
+
+Supervisors that ignore the token entirely will run until the 5-second window expires and then be forcibly aborted. If your supervisor holds resources that need flushing (open file handles, in-flight HTTP requests, partially-written records), always select on `cancel.cancelled()` and clean up before returning.
+
 ## Observability
 
 Every restart emits an `error!`-level log entry with:
@@ -120,12 +146,17 @@ ERROR suprnova::supervisor: supervisor "heartbeat" panicked; restarting in 800ms
 Supervisors do not get an automatic tracing span around `run()` — the registry spans the lifecycle (start, restart) but not the interior of the task. Emit your own `info_span!` or `instrument` your loop body if you want span context on work done inside the supervisor:
 
 ```rust
-async fn run(&self) -> Result<(), FrameworkError> {
+async fn run(&self, cancel: CancellationToken) -> Result<(), FrameworkError> {
     loop {
-        let span = tracing::info_span!("heartbeat.tick");
-        let _guard = span.enter();
-        do_work().await?;
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            _ = async {
+                let span = tracing::info_span!("heartbeat.tick");
+                let _guard = span.enter();
+                do_work().await.ok();
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            } => {}
+        }
     }
 }
 ```
@@ -133,8 +164,6 @@ async fn run(&self) -> Result<(), FrameworkError> {
 ## Out of v1 Scope
 
 The following items are intentionally deferred:
-
-- **Graceful shutdown draining.** In v1, supervisor tasks are detached — they are not joined on process shutdown. Work in progress when the process receives a shutdown signal is abandoned. Drain-on-shutdown (waiting for current loop iterations to complete before exiting) is a follow-on phase concern.
 
 - **Supervisor trees (parent/child).** There is no hierarchy — all supervisors are peers under the single `SupervisorRegistry`. Structured supervision (where one supervisor owns and restarts child supervisors) is orchestrator territory.
 
@@ -146,7 +175,7 @@ The following items are intentionally deferred:
 
 | Symbol | Purpose |
 |--------|---------|
-| `suprnova::supervisor::Supervisor` | Trait to implement on your supervisor struct. Required methods: `name() -> &'static str`, `async fn run(&self) -> Result<(), FrameworkError>`. Optional: `restart_policy() -> RestartPolicy` (defaults to `OnError`). |
+| `suprnova::supervisor::Supervisor` | Trait to implement on your supervisor struct. Required methods: `name() -> &'static str`, `async fn run(&self, cancel: CancellationToken) -> Result<(), FrameworkError>`. Optional: `restart_policy() -> RestartPolicy` (defaults to `OnError`). The `cancel` token is signalled on process shutdown; select on `cancel.cancelled()` to exit cleanly before the 5-second abort window expires. |
 | `suprnova::supervisor::RestartPolicy` | Enum with variants `OnError`, `Always`, `Never`. Controls when the registry spawns a replacement task. |
 | `suprnova::supervisor::SupervisorEntry` | Inventory item. Declare `factory: fn() -> Box<dyn Supervisor>`. Submit one entry per supervisor via `inventory::submit!(SupervisorEntry { factory: || Box::new(MySupervisor) })`. |
 | `suprnova::supervisor::SupervisorRegistry::start_all()` | Async fn. Iterates all submitted `SupervisorEntry` values, spawns each supervisor as a detached Tokio task, and begins monitoring for restarts. Call once from your bootstrap `register()`. |
