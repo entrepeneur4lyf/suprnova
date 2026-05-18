@@ -38,6 +38,7 @@ pub mod session;
 pub mod testing;
 pub mod rate_limit;
 pub mod mail;
+pub mod auth_flows;
 pub mod notifications;
 pub mod factory;
 pub mod seed;
@@ -169,6 +170,7 @@ pub use supervisor::{RestartPolicy, Supervisor, SupervisorEntry, SupervisorRegis
 #[doc(hidden)]
 pub use clap as __clap;
 pub use mail::{Address, Attachment, Mail, MailFake, Mailable, SendMailJob};
+pub use auth_flows::{EmailVerificationMail, PasswordChangedMail, PasswordResetMail};
 pub use notifications::{
     Channel, DynNotification, Notifiable, Notification, NotificationDispatcher,
     NotificationFactory, Notify, SendNotificationJob,
