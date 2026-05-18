@@ -145,10 +145,13 @@ async fn typed_command_missing_required_arg_returns_err() {
     let err = console::dispatch_argv(argv)
         .await
         .expect_err("missing required positional ⇒ clap parse error ⇒ Err");
-    let msg = format!("{err}");
+    // Clap formatted the error to stderr inside dispatch (the user sees
+    // it via the binary). The returned Err is silent so the binary's
+    // main doesn't double-print — same contract that
+    // `dispatch_returns_err_for_unknown_command` pins in tests/console.rs.
     assert!(
-        msg.contains("arg parse failed") || msg.contains("MissingRequiredArgument"),
-        "err message indicates a clap parse failure: {msg}"
+        err.is_silent(),
+        "clap-reported missing-arg errors are silent"
     );
 }
 
