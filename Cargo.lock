@@ -6320,6 +6320,7 @@ dependencies = [
  "tera",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "torii",
  "torii-core",

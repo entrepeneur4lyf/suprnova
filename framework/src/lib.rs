@@ -103,7 +103,7 @@ pub use inertia::{
 pub use pagination::{
     CursorDirection, CursorPaginator, IntoInertiaScroll, LengthAwarePaginator, Paginated, Pagination,
 };
-pub use broadcasting::{BroadcastEnvelope, BroadcastHub, InMemoryBroadcastHub};
+pub use broadcasting::{BroadcastEnvelope, BroadcastHub, BroadcastingWsHandler, InMemoryBroadcastHub};
 pub use bus::{Bus, Dispatched};
 pub use queue::{BackoffSchedule, Envelope, EnvelopeError, Job, Queue};
 pub use resources::{

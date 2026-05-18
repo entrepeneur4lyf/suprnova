@@ -19,4 +19,4 @@ mod protocol;
 pub use channel::{BoxedChannel, Channel, ChannelRegistry, PresenceChannel, PrivateChannel};
 pub use hub::{BroadcastEnvelope, BroadcastHub, InMemoryBroadcastHub};
 pub use protocol::{ClientFrame, ServerFrame};
-// Re-exports for the other submodules land in T4/T5/T7.
+pub use handler::BroadcastingWsHandler;
