@@ -107,9 +107,29 @@ pub fn run(name: String) {
     ui::br();
     ui::hint("Run it through the project console:");
     ui::command(&format!("cargo run --bin console -- {}", command_name));
-    ui::br();
-    ui::hint("Make sure `pub mod commands;` is declared in src/lib.rs so the");
-    ui::hint("inventory submission is link-reachable from the console binary.");
+
+    // Guardrail: if `src/lib.rs` doesn't declare `pub mod commands;`,
+    // the generated file is invisible to the console binary at link
+    // time (inventory::submit! never reaches the registry). Don't
+    // auto-edit lib.rs — too magical for a generator — but emit a
+    // loud warning so the user knows to add the line.
+    let lib_rs = Path::new("src/lib.rs");
+    if lib_rs.exists() {
+        let contents = fs::read_to_string(lib_rs).unwrap_or_default();
+        let has_commands_mod = contents.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed == "pub mod commands;" || trimmed.starts_with("pub mod commands;")
+        });
+        if !has_commands_mod {
+            ui::br();
+            ui::warning(
+                "src/lib.rs does not declare `pub mod commands;` — the new command \
+                 will NOT be linked into the console binary until you add this line.",
+            );
+            ui::hint("Add `pub mod commands;` to src/lib.rs (alongside the other `pub mod` declarations).");
+        }
+    }
+
     ui::br();
 }
 

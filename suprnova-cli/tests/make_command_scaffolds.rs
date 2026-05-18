@@ -89,3 +89,63 @@ fn make_command_appends_to_existing_mod_rs() {
     assert!(mod_content.contains("pub mod first;"));
     assert!(mod_content.contains("pub mod second;"));
 }
+
+#[test]
+fn make_command_warns_when_lib_rs_missing_commands_mod_declaration() {
+    let tmp = TempDir::new().unwrap();
+    // Pre-create src/lib.rs WITHOUT `pub mod commands;`.
+    std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+    std::fs::write(
+        tmp.path().join("src/lib.rs"),
+        "pub mod controllers;\npub mod models;\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_suprnova"))
+        .arg("make:command")
+        .arg("greet")
+        .current_dir(tmp.path())
+        .output()
+        .expect("suprnova binary spawnable");
+
+    assert!(output.status.success(), "make:command should still succeed");
+
+    let combined = String::from_utf8_lossy(&output.stdout).to_string()
+        + &String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        combined.contains("pub mod commands"),
+        "warning must name the missing declaration; got:\n{combined}"
+    );
+    assert!(
+        combined.contains("lib.rs"),
+        "warning must name the file to edit; got:\n{combined}"
+    );
+}
+
+#[test]
+fn make_command_does_not_warn_when_lib_rs_has_commands_mod_declaration() {
+    let tmp = TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+    std::fs::write(
+        tmp.path().join("src/lib.rs"),
+        "pub mod commands;\npub mod controllers;\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_suprnova"))
+        .arg("make:command")
+        .arg("greet")
+        .current_dir(tmp.path())
+        .output()
+        .expect("suprnova binary spawnable");
+
+    assert!(output.status.success());
+    let combined = String::from_utf8_lossy(&output.stdout).to_string()
+        + &String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !combined.contains("pub mod commands;` is missing"),
+        "no warning when the declaration is present; got:\n{combined}"
+    );
+}
