@@ -133,9 +133,17 @@ where
             }
             return result;
         }
-        return Err(FrameworkError::internal(format!(
-            "unknown console command: '{name}'"
-        )));
+        // Unreachable by construction: `build_root()` adds a subcommand
+        // for every entry returned by `inventory::iter::<CommandEntry>`,
+        // and `find(name)` searches the same iterator. Clap therefore
+        // cannot match a name that `find` then misses unless those two
+        // call sites disagree about the registry — a contract violation,
+        // not a runtime condition. Panic so the breakage surfaces
+        // immediately rather than silently exiting non-zero.
+        unreachable!(
+            "clap matched subcommand '{name}' but the inventory registry has no entry \
+             by that name — build_root() and find() are out of sync"
+        );
     }
 
     Ok(())
