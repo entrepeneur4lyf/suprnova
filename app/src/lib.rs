@@ -19,4 +19,5 @@ pub mod providers;
 pub mod resources;
 pub mod routes;
 pub mod seeders;
+pub mod supervisors;
 pub mod ws;

@@ -29,7 +29,7 @@ use std::sync::Arc;
 use suprnova::{
     bind, global_middleware, singleton, App, EventFacade, FrameworkError, IncludeMiddleware,
     InertiaRequestExt, InertiaSharedData, InertiaVersionMiddleware, Prop, S3Config, SessionConfig,
-    SessionMiddleware, Storage, UserProvider, DB,
+    SessionMiddleware, Storage, SupervisorRegistry, UserProvider, DB,
 };
 use suprnova::broadcasting::{BroadcastHub, ChannelRegistry, InMemoryBroadcastHub};
 use suprnova::queue::worker::register_job;
@@ -146,6 +146,13 @@ pub async fn register() {
     // path. Tests reach the same path through `seed::run_all()`
     // directly without the CLI.
     suprnova::seed::register::<crate::seeders::BaseSeeder>();
+
+    // Phase 7B T10 — supervised long-running tasks.
+    //
+    // Spawn every supervisor registered via `inventory::submit!` into its own
+    // restart-loop task. The tasks are detached (v1 does not drain them on
+    // shutdown); they run for the lifetime of the process.
+    SupervisorRegistry::start_all().await;
 }
 
 /// Register the application's storage disks.
