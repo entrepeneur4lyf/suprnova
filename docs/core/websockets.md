@@ -8,7 +8,7 @@ icon: "bolt"
 
 Suprnova WebSocket routes sit alongside HTTP routes in the same router. You register a path and a handler; the framework detects the `Upgrade: websocket` request at that path, completes the RFC 6455 handshake, and calls your handler with a typed `WsSocket` and the original `Request`. There is no separate WebSocket server to run — WebSocket connections are upgraded from the same hyper listener that serves your HTTP traffic.
 
-The handler receives the `Request` that triggered the upgrade. Everything that populates a normal HTTP request — cookies, session state, query string, captured path parameters, headers — is available on it. This means auth checks, session reads, and header inspection all work the same way inside a WS handler as they do inside an HTTP controller. There is no separate middleware chain at the WebSocket connect point in v1; per-route auth middleware lands in Phase 7B. Until then, you perform auth checks at the top of the handler and close the socket explicitly if the caller is unauthorized.
+The handler receives the `Request` that triggered the upgrade. **Headers, raw cookies, captured path parameters, and the query string are all available** — anything that can be read directly off the upgrade request. **Middleware does not run on WebSocket upgrade requests in v1**, so anything that depends on middleware (the thread-local `session()` accessor, `RequestIdMiddleware`-attached request IDs, `AuthMiddleware`-derived identity) is *not* populated. Auth checks happen inline inside the handler — typically via a bearer token or a raw session cookie validated against your session store — and the handler closes the socket explicitly if the caller is unauthorized. Per-route WebSocket middleware lands in Phase 7B.
 
 When the handler returns `Ok(())`, the framework sends a clean close frame (code 1000) and tears down the connection. When it returns `Err(_)`, the error is logged and the connection closes with code 1011 (internal error). The framework also runs a heartbeat task for each connection — it sends a Ping every 30 seconds by default — so idle connections stay alive through NAT gateways and load balancers without any work on your part.
 
@@ -188,25 +188,34 @@ For the full `Request` API — headers, cookies, session, query string — see [
 
 ## Auth at Connect
 
-The handler receives the full `Request` from the HTTP upgrade. Read session data, cookies, or headers exactly as you would in an HTTP controller, then close the socket if the caller is not authorized:
+The handler receives the full `Request` from the HTTP upgrade. You can read headers and cookies exactly as you would in an HTTP controller, then close the socket if the caller is not authorized.
+
+> **v1 caveat: middleware does not run on WebSocket upgrade requests.** Phase 7A's upgrade branch sits *above* the HTTP middleware chain — the upgrade is detected, handed off to the handler, and the middleware chain is bypassed entirely. That means `SessionMiddleware` does not populate the thread-local `session()` accessor for WS connections, and any other middleware you registered does not run either. Per-route WebSocket middleware (including a Phase 7B–native session attach) lands in Phase 7B. Until then, handlers do their auth check inline by reading the raw request directly.
+
+The pattern for v1 is **bearer-token-in-header** (the most portable choice — `wscat`, browser clients, and load balancers all pass headers cleanly):
 
 ```rust
 use async_trait::async_trait;
 use suprnova::{FrameworkError, http::Request, ws::{WebSocketHandler, WsSocket}};
-use suprnova::session::session;
 
 pub struct PrivateChatHandler;
 
 #[async_trait]
 impl WebSocketHandler for PrivateChatHandler {
-    async fn handle(&self, mut socket: WsSocket, _req: Request) -> Result<(), FrameworkError> {
-        // Read the user ID from the thread-local session (populated by
-        // SessionMiddleware before the handler is called).
-        let user_id = session()
-            .and_then(|s| s.get::<i64>("user_id"));
+    async fn handle(&self, mut socket: WsSocket, req: Request) -> Result<(), FrameworkError> {
+        // Read the Authorization header from the upgrade request and
+        // validate it against your token store. Replace `verify_token`
+        // with your own validation; the framework doesn't run any
+        // middleware here, so this is the only auth gate.
+        let Some(token) = req.header("authorization")
+            .and_then(|v| v.strip_prefix("Bearer "))
+        else {
+            socket.close(1008, "missing bearer token").await?;
+            return Ok(());
+        };
 
-        let Some(user_id) = user_id else {
-            socket.close(1008, "unauthorized").await?;
+        let Some(user_id) = verify_token(token).await else {
+            socket.close(1008, "invalid bearer token").await?;
             return Ok(());
         };
 
@@ -217,11 +226,18 @@ impl WebSocketHandler for PrivateChatHandler {
         Ok(())
     }
 }
+
+async fn verify_token(_token: &str) -> Option<i64> {
+    // Your token-store lookup goes here.
+    Some(42)
+}
 ```
+
+Cookie-based auth works the same way — `req.cookie("session_id")` returns `Option<String>` from the raw cookie header (no middleware required). You then look the session up in your own session store. If your store uses the framework's `SessionStore` directly, you can resolve it from the container the same way controllers do, just without the thread-local convenience accessor.
 
 Always return `Ok(())` after calling `close`. Returning `Err` after a close would log a spurious error; the socket is already closing cleanly.
 
-Per-route auth middleware — where the framework rejects the upgrade request before your handler code runs — lands in Phase 7B.
+Per-route auth middleware — where the framework rejects the upgrade request *before* your handler code runs, and where `SessionMiddleware` attaches the session before `handle()` is invoked — lands in Phase 7B.
 
 ## Production Deployment
 

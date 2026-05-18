@@ -12,16 +12,31 @@ use http_body_util::{BodyExt, Full};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::net::TcpListener;
-use std::collections::HashMap;
+use tokio::sync::Mutex as TokioMutex;
+use tokio::task::JoinSet;
+use tracing::Instrument;
 
 /// Alias for the body type the server returns into hyper. All
 /// `HttpResponse` variants (static + streaming) collapse to this so
 /// the service signature stays uniform.
 type ServerBody = BoxBody<Bytes, Infallible>;
+
+/// Per-process registry of in-flight WebSocket handler tasks.
+///
+/// `handle_ws_upgrade` spawns each handler into this `JoinSet` so
+/// `Server::run`'s shutdown sequence can drain them alongside the
+/// HTTP connections JoinSet — without that, in-flight WS connections
+/// get force-dropped on Ctrl-C / SIGTERM with no close frame to the
+/// peer. Initialized lazily by `Server::run`; embedders that call
+/// `handle_request` directly (T7 test fixture, custom hyper service
+/// loops) get a bare `tokio::spawn` fallback so they don't have to
+/// know about this registry.
+static WS_TASKS: OnceLock<TokioMutex<JoinSet<()>>> = OnceLock::new();
 
 pub struct Server {
     router: Arc<Router>,
@@ -185,6 +200,13 @@ impl Server {
         let router = self.router;
         let middleware = Arc::new(self.middleware);
 
+        // Initialize the WS handler-task registry so handle_ws_upgrade
+        // can spawn into it instead of detaching via bare tokio::spawn.
+        // `set` returns Err if already initialized (e.g. a previous
+        // Server::run in the same process); that's fine — both servers
+        // share the same drain registry and shutdown handles both.
+        let _ = WS_TASKS.set(TokioMutex::new(JoinSet::new()));
+
         // Track in-flight connections so shutdown can drain them
         // before flushing OTel buffers. Each accepted connection is
         // spawned into this JoinSet rather than via bare tokio::spawn.
@@ -254,6 +276,46 @@ impl Server {
                         "drain deadline exceeded; abandoning remaining connections"
                     );
                     break;
+                }
+            }
+        }
+
+        // Drain in-flight WebSocket handlers. These were spawned into
+        // WS_TASKS by handle_ws_upgrade and are decoupled from the HTTP
+        // connection JoinSet above (the connection task ends when the
+        // 101 response flushes; the handler task runs independently).
+        // Bound the drain window so a peer that never sends a close
+        // frame can't block shutdown forever — after the deadline we
+        // abort_all, which cancels the handler futures so the runtime
+        // shutdown can proceed cleanly.
+        if let Some(ws_tasks) = WS_TASKS.get() {
+            let mut tasks = ws_tasks.lock().await;
+            if !tasks.is_empty() {
+                let in_flight = tasks.len();
+                tracing::info!(
+                    ws_in_flight = in_flight,
+                    "draining in-flight WebSocket handlers (max 5s)"
+                );
+                let ws_drain_deadline =
+                    tokio::time::sleep(std::time::Duration::from_secs(5));
+                tokio::pin!(ws_drain_deadline);
+                loop {
+                    tokio::select! {
+                        next = tasks.join_next() => {
+                            if next.is_none() {
+                                break; // JoinSet drained
+                            }
+                        }
+                        _ = &mut ws_drain_deadline => {
+                            tracing::warn!(
+                                ws_in_flight = tasks.len(),
+                                "WS drain deadline exceeded; aborting remaining handlers"
+                            );
+                            tasks.abort_all();
+                            while tasks.join_next().await.is_some() {}
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -438,6 +500,7 @@ async fn handle_ws_upgrade(
     ws_match: crate::routing::WsMatch,
 ) -> hyper::Response<ServerBody> {
     let handler = ws_match.handler();
+    let pattern = ws_match.pattern().to_string();
     let params: HashMap<String, String> = ws_match.params().clone();
 
     let config = crate::ws::WsConfig::default();
@@ -448,37 +511,41 @@ async fn handle_ws_upgrade(
         match hyper_tungstenite::upgrade(&mut req, Some(tungstenite_config)) {
             Ok(pair) => pair,
             Err(e) => {
-                tracing::warn!(error = %e, "websocket upgrade rejected");
+                tracing::warn!(error = %e, route = %pattern, "websocket upgrade rejected");
                 return bad_request_text(&format!("websocket upgrade failed: {e}"));
             }
         };
 
     // Build the framework's Request from the upgrade request. The
     // body is empty for an upgrade request (RFC 6455); we still
-    // construct via Request::new(req) so headers/cookies/session
-    // are intact for the handler.
+    // construct via Request::new(req) so headers and cookies are
+    // intact for the handler. Note: middleware does NOT run for WS
+    // upgrades in v1 — per-route auth middleware lands in 7B. Until
+    // then, handlers do auth checks inline by reading cookies/session
+    // state from the Request and calling `socket.close(1008, ...)` on
+    // rejection.
+    let path = req.uri().path().to_string();
     let suprnova_req = Request::new(req).with_params(params);
 
-    // Spawn the handler task. hyper switches the connection to
-    // upgraded I/O once `response` flushes; then `websocket.await`
-    // resolves with the upgraded WebSocketStream and we hand it
-    // to the handler. The heartbeat task is spawned alongside and
-    // aborted via AbortHandle when the handler resolves — without
-    // that abort the bridge task spawned by socket.sender() keeps
-    // an internal Sender clone alive, the forwarder doesn't see
-    // channel-close, and the TCP connection lingers.
-    tokio::spawn(async move {
+    // Tracing span covers the entire WS connection lifecycle from
+    // upgrade-resolved to handler-returned. Operators get a single
+    // span per connection plus `connected` / `disconnected` events
+    // bracketing the handler future.
+    let span = tracing::info_span!("ws.connection", route = %pattern, path = %path);
+
+    let handler_task = async move {
         match websocket.await {
             Ok(ws_stream) => {
-                let socket = crate::ws::WsSocket::from_stream(ws_stream);
-                let heartbeat_sender = socket.sender();
+                tracing::info!("websocket connected");
 
-                // Spawn the heartbeat alongside the handler. We hold
-                // an AbortHandle so we can tear it down when the
-                // handler future resolves — without that, the bridge
-                // task spawned by `socket.sender()` keeps an internal
-                // sender clone alive, the forwarder doesn't see
-                // channel-close, and the TCP connection lingers.
+                let socket = crate::ws::WsSocket::from_stream(ws_stream);
+                // One bridge task feeds two senders: heartbeat clones
+                // `outbound`, and we keep `outbound` itself for the
+                // final close frame. When both senders drop, the
+                // bridge task exits and the forwarder closes the sink.
+                let outbound = socket.sender();
+                let heartbeat_sender = outbound.clone();
+
                 let heartbeat = tokio::spawn(crate::ws::heartbeat::run(
                     heartbeat_sender,
                     heartbeat_interval,
@@ -487,20 +554,61 @@ async fn handle_ws_upgrade(
 
                 let result = handler.handle(socket, suprnova_req).await;
 
-                // Abort the heartbeat BEFORE we log the handler error;
-                // this releases the bridge task immediately so the
-                // forwarder can drain and close the sink.
+                // Abort the heartbeat FIRST so its sender clone drops
+                // and only `outbound` remains feeding the bridge.
                 heartbeat_handle.abort();
 
-                if let Err(e) = result {
-                    tracing::error!(error = %e, "websocket handler returned error");
+                match result {
+                    Ok(()) => {
+                        // Send an explicit Close(1000) frame so the
+                        // peer sees a normal-closure disconnect rather
+                        // than the protocol-default 1005 ("No Status
+                        // Received") that `sink.close()` alone produces.
+                        // Best-effort: if the handler already called
+                        // `socket.close()` the bridge has terminated
+                        // and the send Errs — fine, we just move on.
+                        let close = tokio_tungstenite::tungstenite::Message::Close(Some(
+                            tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                                code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
+                                reason: tokio_tungstenite::tungstenite::Utf8Bytes::from_static(""),
+                            },
+                        ));
+                        let _ = outbound.send(close).await;
+                        tracing::info!("websocket disconnected (ok)");
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "websocket handler returned error");
+                    }
                 }
+                // Drop outbound so the bridge task exits and the
+                // forwarder reads None → calls sink.close(), completing
+                // the WebSocket close handshake.
+                drop(outbound);
             }
             Err(e) => {
                 tracing::error!(error = %e, "hyper upgrade failed");
             }
         }
-    });
+    }
+    .instrument(span);
+
+    // Track the spawned handler in WS_TASKS so Server::run can drain
+    // it on shutdown. Fall back to a bare tokio::spawn when WS_TASKS
+    // isn't initialized (T7 test fixtures and external embedders that
+    // call handle_request without going through Server::run).
+    match WS_TASKS.get() {
+        Some(tasks) => {
+            let mut tasks = tasks.lock().await;
+            // Opportunistic reap so the JoinSet doesn't grow unbounded
+            // under long-running operation; completed handles get
+            // dropped here instead of accumulating until shutdown.
+            while tasks.try_join_next().is_some() {}
+            tasks.spawn(handler_task);
+        }
+        None => {
+            tokio::spawn(handler_task);
+        }
+    }
 
     convert_response_body(response)
 }
