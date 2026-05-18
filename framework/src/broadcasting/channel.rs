@@ -52,6 +52,29 @@ pub trait Channel: Send + Sync + 'static {
         true
     }
 
+    /// Authorize a client-initiated publish. Default: `false` (deny).
+    ///
+    /// Override to allow client-side publishes on channels that support
+    /// them (chat rooms, presence updates, etc.). The channel impl
+    /// typically inspects the event name, data shape, and the
+    /// subscriber's identity (via the `Request`) before returning `true`.
+    ///
+    /// The default is `false` (fail closed): a channel that doesn't
+    /// explicitly opt in to client publishes rejects them. Most
+    /// server-side broadcasting channels never want client-initiated
+    /// events; this default matches that expectation. Note that this
+    /// hook only governs `ClientFrame::Publish` received over the
+    /// WebSocket connection — server-side `hub.publish()` calls are
+    /// unaffected and bypass this gate entirely.
+    async fn authorize_publish(
+        &self,
+        _req: &Request,
+        _event: &str,
+        _data: &Value,
+    ) -> bool {
+        false
+    }
+
     /// If this channel carries presence semantics, return `Some(self)`
     /// cast as `&dyn PresenceChannel`. Default: `None` (non-presence).
     ///

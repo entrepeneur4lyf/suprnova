@@ -10,11 +10,12 @@
 //!
 //! # Security note
 //!
-//! v1 accepts `ClientFrame::Publish` from any authenticated subscriber
-//! without per-channel publish-side authorization. Applications that
-//! need to restrict which clients may publish should implement a
-//! channel-level publish gate; a `can_publish` hook on `Channel` lands
-//! in Phase 7B+.
+//! Client-initiated `Publish` frames are gated by per-channel
+//! authorization via `Channel::authorize_publish`. The default
+//! implementation returns `false` (deny), so only channels that
+//! explicitly override the hook to return `true` accept client-side
+//! publishes. Unknown channels always reject. Server-side
+//! `hub.publish()` calls bypass this gate entirely.
 
 use crate::broadcasting::channel::ChannelRegistry;
 use crate::broadcasting::hub::{BroadcastEnvelope, BroadcastHub};
@@ -129,9 +130,32 @@ impl WebSocketHandler for BroadcastingWsHandler {
                             .await?;
                         }
                         Ok(ClientFrame::Publish { channel, event, data }) => {
-                            self.hub
-                                .publish(BroadcastEnvelope { channel, event, data })
-                                .await;
+                            // Per-channel publish authorization. Default Channel impl
+                            // returns false; channels that explicitly opt in must
+                            // override `authorize_publish`. Fail closed on:
+                            //   - Unknown channel: no impl to consult → reject
+                            //   - Channel says no: reject with Error frame
+                            //   - Channel says yes: proceed to hub.publish
+                            let allowed = match self.registry.resolve(&channel) {
+                                Some(ch) => ch.authorize_publish(&req, &event, &data).await,
+                                None => false,
+                            };
+
+                            if !allowed {
+                                let err = ServerFrame::Error {
+                                    channel: Some(channel.clone()),
+                                    reason: "publish unauthorized".into(),
+                                };
+                                socket
+                                    .send_text(
+                                        serde_json::to_string(&err).unwrap_or_default(),
+                                    )
+                                    .await?;
+                            } else {
+                                self.hub
+                                    .publish(BroadcastEnvelope { channel, event, data })
+                                    .await;
+                            }
                         }
                         Err(e) => {
                             let err = ServerFrame::Error {

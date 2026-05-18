@@ -23,6 +23,16 @@ impl Channel for PublicChat {
     fn name(&self) -> &'static str {
         "chat.public"
     }
+
+    /// Allow client-initiated publishes for standard chat events only.
+    async fn authorize_publish(
+        &self,
+        _req: &Request,
+        event: &str,
+        _data: &Value,
+    ) -> bool {
+        event == "MessagePosted"
+    }
 }
 
 struct PrivateChat;
@@ -36,6 +46,19 @@ impl Channel for PrivateChat {
         // Accept only if data carries `{"token":"valid"}`
         data["token"] == "valid"
     }
+    // No authorize_publish override → inherits default false (deny).
+}
+
+/// A channel that inherits the default `authorize_publish` (false) to
+/// verify the deny path in publish-authorization tests.
+struct NoPublishChat;
+
+#[async_trait]
+impl Channel for NoPublishChat {
+    fn name(&self) -> &'static str {
+        "chat.no_publish"
+    }
+    // No authorize_publish override → default deny.
 }
 
 async fn spawn_broadcasting_server() -> (u16, Arc<InMemoryBroadcastHub>) {
@@ -44,6 +67,7 @@ async fn spawn_broadcasting_server() -> (u16, Arc<InMemoryBroadcastHub>) {
     let mut registry = ChannelRegistry::new();
     registry.register(PublicChat);
     registry.register(PrivateChat);
+    registry.register(NoPublishChat);
     let registry = Arc::new(registry);
 
     let handler = BroadcastingWsHandler::new(hub.clone(), registry.clone());
@@ -230,6 +254,146 @@ async fn unknown_channel_returns_error_frame() {
     let frame = read_server_frame(&mut ws).await;
     assert_eq!(frame["action"], "error");
     assert_eq!(frame["channel"], "nonexistent");
+
+    ws.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn client_publish_rejected_when_channel_denies() {
+    let (port, _hub) = spawn_broadcasting_server().await;
+    let url = format!("ws://127.0.0.1:{port}/ws/broadcast");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
+
+    // Subscribe to chat.no_publish (which has default authorize_publish = false).
+    ws.send(Message::text(
+        serde_json::to_string(&json!({
+            "action": "subscribe",
+            "channel": "chat.no_publish"
+        }))
+        .unwrap(),
+    ))
+    .await
+    .unwrap();
+    let _ = read_server_frame(&mut ws).await; // subscribed
+
+    // Attempt to publish — should be rejected.
+    ws.send(Message::text(
+        serde_json::to_string(&json!({
+            "action": "publish",
+            "channel": "chat.no_publish",
+            "event": "Spam",
+            "data": {"text": "blocked"}
+        }))
+        .unwrap(),
+    ))
+    .await
+    .unwrap();
+
+    let frame = read_server_frame(&mut ws).await;
+    assert_eq!(frame["action"], "error");
+    assert_eq!(frame["channel"], "chat.no_publish");
+    assert!(
+        frame["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("unauthorized"),
+        "expected 'unauthorized' in reason, got: {:?}",
+        frame["reason"]
+    );
+
+    ws.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn client_publish_allowed_when_channel_authorizes() {
+    let (port, _hub) = spawn_broadcasting_server().await;
+    let url = format!("ws://127.0.0.1:{port}/ws/broadcast");
+    let (mut publisher, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("publisher connects");
+    let (mut listener, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("listener connects");
+
+    // Both subscribe to chat.public (which authorizes "MessagePosted").
+    for ws in [&mut publisher, &mut listener] {
+        ws.send(Message::text(
+            serde_json::to_string(&json!({
+                "action": "subscribe",
+                "channel": "chat.public"
+            }))
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+        let _ = read_server_frame(ws).await; // subscribed
+    }
+
+    // Publisher sends a client-initiated publish.
+    publisher
+        .send(Message::text(
+            serde_json::to_string(&json!({
+                "action": "publish",
+                "channel": "chat.public",
+                "event": "MessagePosted",
+                "data": {"text": "hi"}
+            }))
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    // Listener should receive the event.
+    let frame = read_server_frame(&mut listener).await;
+    assert_eq!(frame["action"], "event");
+    assert_eq!(frame["event"], "MessagePosted");
+    assert_eq!(frame["data"]["text"], "hi");
+
+    publisher.close(None).await.unwrap();
+    listener.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn client_publish_rejected_when_event_name_disallowed() {
+    let (port, _hub) = spawn_broadcasting_server().await;
+    let url = format!("ws://127.0.0.1:{port}/ws/broadcast");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
+
+    ws.send(Message::text(
+        serde_json::to_string(&json!({
+            "action": "subscribe",
+            "channel": "chat.public"
+        }))
+        .unwrap(),
+    ))
+    .await
+    .unwrap();
+    let _ = read_server_frame(&mut ws).await; // subscribed
+
+    // chat.public only authorizes "MessagePosted" — "Spam" should be rejected.
+    ws.send(Message::text(
+        serde_json::to_string(&json!({
+            "action": "publish",
+            "channel": "chat.public",
+            "event": "Spam",
+            "data": {}
+        }))
+        .unwrap(),
+    ))
+    .await
+    .unwrap();
+
+    let frame = read_server_frame(&mut ws).await;
+    assert_eq!(frame["action"], "error");
+    assert_eq!(frame["channel"], "chat.public");
+    assert!(
+        frame["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("unauthorized"),
+        "expected 'unauthorized' in reason, got: {:?}",
+        frame["reason"]
+    );
 
     ws.close(None).await.unwrap();
 }

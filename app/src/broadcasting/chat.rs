@@ -2,9 +2,10 @@
 //! subscribe data payload.
 //!
 //! Real authentication (session-cookie-on-WS + `Auth::user()`)
-//! lands in Phase 7B+. For now, the gate accepts any token that
-//! starts with `"chat_"` as a placeholder, which is sufficient to
-//! verify the authorize hook is actually invoked by the handler.
+//! will land when the auth stack covers WebSocket upgrades. For now,
+//! the gate accepts any token that starts with `"chat_"` as a
+//! placeholder, which is sufficient to verify the authorize hook is
+//! actually invoked by the handler.
 
 use async_trait::async_trait;
 use suprnova::serde_json::Value;
@@ -33,6 +34,18 @@ impl Channel for ChatChannel {
             .as_str()
             .map(|t| t.starts_with("chat_"))
             .unwrap_or(false)
+    }
+
+    /// Allow standard chat events from authenticated subscribers.
+    /// The subscribe gate (`authorize`) already validated the token,
+    /// so anyone past that point is permitted to send chat events.
+    async fn authorize_publish(
+        &self,
+        _req: &Request,
+        event: &str,
+        _data: &Value,
+    ) -> bool {
+        matches!(event, "MessagePosted" | "Typing")
     }
 }
 
