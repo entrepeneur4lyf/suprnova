@@ -278,6 +278,63 @@ where
 }
 
 // ============================================================================
+// WebSocket Route Support
+// ============================================================================
+
+/// Create a WebSocket route definition with compile-time path validation.
+///
+/// # Example
+/// ```rust,ignore
+/// ws!("/ws/echo", EchoHandler)
+/// ```
+///
+/// Note: WebSocket routes do NOT support `.name()` or `.middleware()`
+/// chaining in v1 — those land in Phase 7B alongside broadcasting
+/// (specifically for per-WS-route auth middleware).
+///
+/// # Compile Error
+///
+/// Fails to compile if path doesn't start with '/'.
+#[macro_export]
+macro_rules! ws {
+    ($path:expr, $handler:expr) => {{
+        const _: &str = $crate::validate_route_path($path);
+        $crate::__ws_impl($path, $handler)
+    }};
+}
+
+/// Internal implementation for WebSocket routes (used by the `ws!` macro).
+///
+/// Type-erases the handler at the call site so `WsRouteDef` doesn't need
+/// a generic parameter — the comma-separated `routes! { ... }` list can
+/// then mix HTTP `RouteDefBuilder<H>` items and `WsRouteDef` items
+/// without inference fights at the macro boundary.
+#[doc(hidden)]
+pub fn __ws_impl<H>(path: &'static str, handler: H) -> WsRouteDef
+where
+    H: crate::ws::WebSocketHandler,
+{
+    let boxed: crate::ws::BoxedWebSocketHandler = std::sync::Arc::new(handler);
+    WsRouteDef { path, handler: boxed }
+}
+
+/// One WebSocket route item, produced by the `ws!` macro. The
+/// `routes!` macro calls `register(router)` on each item to fold
+/// them into a single `Router`.
+pub struct WsRouteDef {
+    path: &'static str,
+    handler: crate::ws::BoxedWebSocketHandler,
+}
+
+impl WsRouteDef {
+    /// Register this WS route on the given `Router`. Called by the
+    /// `routes!` macro's expansion; not intended for direct use.
+    pub fn register(self, router: Router) -> Router {
+        router.ws_boxed(self.path, self.handler)
+    }
+}
+
+// ============================================================================
 // Fallback Route Support
 // ============================================================================
 

@@ -265,13 +265,22 @@ impl Router {
     /// lands in Phase 7B alongside broadcasting.
     ///
     /// [`WsSocket`]: crate::ws::WsSocket
-    pub fn ws<H>(mut self, path: &str, handler: H) -> Router
+    pub fn ws<H>(self, path: &str, handler: H) -> Router
     where
         H: crate::ws::WebSocketHandler,
     {
         let boxed: BoxedWebSocketHandler = std::sync::Arc::new(handler);
+        self.ws_boxed(path, boxed)
+    }
+
+    /// Register a pre-boxed WebSocket handler. Used internally by
+    /// the `ws!` macro which type-erases the handler at the call
+    /// site so the macro's `WsRouteDef` shape doesn't need a generic
+    /// parameter.
+    #[doc(hidden)]
+    pub fn ws_boxed(mut self, path: &str, handler: BoxedWebSocketHandler) -> Router {
         self.ws_routes
-            .insert(path, (path.to_string(), boxed))
+            .insert(path, (path.to_string(), handler))
             .ok();
         self
     }
