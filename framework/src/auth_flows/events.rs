@@ -20,3 +20,21 @@ impl Event for EmailVerified {
         "EmailVerified"
     }
 }
+
+/// Fires when a user successfully completes a password reset via
+/// [`crate::auth_flows::PasswordReset::complete`].
+///
+/// `user_id` is the stringified torii `UserId`. Listeners typically
+/// revoke active sessions, audit-log the event, or trigger
+/// supplemental security notifications beyond the built-in
+/// [`crate::auth_flows::PasswordChangedMail`].
+#[derive(Debug, Clone)]
+pub struct PasswordResetCompleted {
+    pub user_id: String,
+}
+
+impl Event for PasswordResetCompleted {
+    fn event_name() -> &'static str {
+        "PasswordResetCompleted"
+    }
+}

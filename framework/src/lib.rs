@@ -171,7 +171,8 @@ pub use supervisor::{RestartPolicy, Supervisor, SupervisorEntry, SupervisorRegis
 pub use clap as __clap;
 pub use mail::{Address, Attachment, Mail, MailFake, Mailable, SendMailJob};
 pub use auth_flows::{
-    EmailVerification, EmailVerificationMail, PasswordChangedMail, PasswordResetMail,
+    EmailVerification, EmailVerificationMail, PasswordChangedMail, PasswordReset,
+    PasswordResetMail,
 };
 pub use notifications::{
     Channel, DynNotification, Notifiable, Notification, NotificationDispatcher,
