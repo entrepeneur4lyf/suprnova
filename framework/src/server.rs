@@ -594,7 +594,11 @@ async fn handle_ws_upgrade(
             Ok(ws_stream) => {
                 tracing::info!("websocket connected");
 
-                let socket = crate::ws::WsSocket::from_stream(ws_stream);
+                let missed_pings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let socket = crate::ws::WsSocket::from_stream_with_heartbeat(
+                    ws_stream,
+                    missed_pings.clone(),
+                );
                 // One bridge task feeds two senders: heartbeat clones
                 // `outbound`, and we keep `outbound` itself for the
                 // final close frame. When both senders drop, the
@@ -605,6 +609,8 @@ async fn handle_ws_upgrade(
                 let heartbeat = tokio::spawn(crate::ws::heartbeat::run(
                     heartbeat_sender,
                     heartbeat_interval,
+                    missed_pings,
+                    config.max_missed_pings,
                 ));
                 let heartbeat_handle = heartbeat.abort_handle();
 

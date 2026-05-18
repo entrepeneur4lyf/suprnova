@@ -8,6 +8,8 @@
 
 use crate::error::FrameworkError;
 use futures_util::{SinkExt, StreamExt};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{
@@ -31,6 +33,7 @@ const SEND_CHANNEL_CAPACITY: usize = 32;
 pub struct WsSocket {
     sender: mpsc::Sender<Outbound>,
     receiver: ReceiverHalf,
+    missed_pings: Arc<AtomicUsize>,
 }
 
 /// What the forwarder task drains. `Close(_)` is special-cased so the
@@ -58,12 +61,29 @@ impl WsSocket {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
+        Self::from_stream_with_heartbeat(stream, Arc::new(AtomicUsize::new(0)))
+    }
+
+    /// Build a `WsSocket` with a shared missed-pings counter.
+    ///
+    /// The counter is incremented by the heartbeat task on each ping
+    /// send and reset to 0 by `WsSocket`'s recv path whenever a Pong
+    /// is received from the peer. Pass the same `Arc` to
+    /// `heartbeat::run` so the two halves share state.
+    pub fn from_stream_with_heartbeat<S>(
+        stream: WebSocketStream<S>,
+        missed_pings: Arc<AtomicUsize>,
+    ) -> Self
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         let (sink, stream) = stream.split();
         let (tx, rx) = mpsc::channel(SEND_CHANNEL_CAPACITY);
         tokio::spawn(forwarder_task(sink, rx));
         Self {
             sender: tx,
             receiver: Box::pin(stream),
+            missed_pings,
         }
     }
 
@@ -129,7 +149,12 @@ impl WsSocket {
             match self.receiver.next().await {
                 Some(Ok(Message::Text(t))) => return Ok(Some(t.to_string())),
                 Some(Ok(Message::Binary(_))) => continue,
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                Some(Ok(Message::Pong(_))) => {
+                    // Pong from peer — reset the missed-ping counter.
+                    self.missed_pings.store(0, Ordering::Release);
+                    continue;
+                }
+                Some(Ok(Message::Ping(_))) => continue,
                 Some(Ok(Message::Close(_))) | None => return Ok(None),
                 Some(Ok(Message::Frame(_))) => continue,
                 Some(Err(e)) => return Err(FrameworkError::internal(format!("ws recv: {e}"))),
@@ -140,7 +165,13 @@ impl WsSocket {
     /// Receive the next message of any type.
     pub async fn recv(&mut self) -> Result<Option<Message>, FrameworkError> {
         match self.receiver.next().await {
-            Some(Ok(msg)) => Ok(Some(msg)),
+            Some(Ok(msg)) => {
+                if matches!(msg, Message::Pong(_)) {
+                    // Pong from peer — reset the missed-ping counter.
+                    self.missed_pings.store(0, Ordering::Release);
+                }
+                Ok(Some(msg))
+            }
             Some(Err(e)) => Err(FrameworkError::internal(format!("ws recv: {e}"))),
             None => Ok(None),
         }

@@ -58,6 +58,9 @@ pub struct WsConfig {
     pub max_message_size: usize,
     /// Max single-frame size in bytes. Default 16 MiB.
     pub max_frame_size: usize,
+    /// Consecutive missed pongs before the connection is closed
+    /// with code 1011. Default: 2. Set to `usize::MAX` to disable.
+    pub max_missed_pings: usize,
 }
 
 impl Default for WsConfig {
@@ -66,6 +69,7 @@ impl Default for WsConfig {
             ping_interval: std::time::Duration::from_secs(30),
             max_message_size: 64 * 1024 * 1024,
             max_frame_size: 16 * 1024 * 1024,
+            max_missed_pings: 2,
         }
     }
 }
