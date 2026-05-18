@@ -16,6 +16,9 @@ mod handler;
 mod hub;
 mod protocol;
 
+#[cfg(feature = "broadcasting-fanout")]
+pub mod fanout;
+
 pub use broadcastable::{BroadcastListener, Broadcastable};
 pub use channel::{BoxedChannel, Channel, ChannelRegistry, PresenceChannel, PrivateChannel};
 pub use hub::{BroadcastEnvelope, BroadcastHub, InMemoryBroadcastHub};
