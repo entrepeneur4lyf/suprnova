@@ -38,3 +38,24 @@ impl Event for PasswordResetCompleted {
         "PasswordResetCompleted"
     }
 }
+
+/// Fires when an administrator (or another flow such as a successful
+/// password reset) forcibly unlocks an account that was previously
+/// locked due to too many failed login attempts. See
+/// [`crate::auth_flows::BruteForce::unlock_account`].
+///
+/// The event is **only** emitted when `unlock_account` reports that
+/// the account had been locked; a no-op unlock on an already-unlocked
+/// email does not fire. Listeners can therefore treat each
+/// `AccountUnlocked` as a real security-state transition (audit log,
+/// admin notification, etc.).
+#[derive(Debug, Clone)]
+pub struct AccountUnlocked {
+    pub email: String,
+}
+
+impl Event for AccountUnlocked {
+    fn event_name() -> &'static str {
+        "AccountUnlocked"
+    }
+}

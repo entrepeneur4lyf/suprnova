@@ -8,12 +8,14 @@
 //!
 //! See `docs/core/auth-flows.md` for usage.
 
+pub mod brute_force;
 pub mod email_verify;
 pub mod events;
 pub mod mail;
 pub mod password_reset;
 
+pub use brute_force::{BruteForce, LoginThrottleMiddleware};
 pub use email_verify::EmailVerification;
-pub use events::{EmailVerified, PasswordResetCompleted};
+pub use events::{AccountUnlocked, EmailVerified, PasswordResetCompleted};
 pub use mail::{EmailVerificationMail, PasswordChangedMail, PasswordResetMail};
 pub use password_reset::PasswordReset;

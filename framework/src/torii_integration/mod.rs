@@ -31,7 +31,11 @@ use torii_storage_seaorm::SeaORMStorage;
 use crate::error::FrameworkError;
 
 // Re-export torii's User and Session so consumers only depend on suprnova::*.
-pub use torii::{Session, SessionToken, User, UserId};
+// LockoutStatus surfaces through `auth_flows::BruteForce` return types, so
+// consumers that hold and inspect a status (e.g. a controller branching on
+// `status.failed_attempts`) can do so without adding `torii` as a direct
+// dependency.
+pub use torii::{LockoutStatus, Session, SessionToken, User, UserId};
 
 /// The single global Torii instance, pinned to the SeaORM repository provider.
 static TORII: OnceLock<Torii<SeaORMRepositoryProvider>> = OnceLock::new();
