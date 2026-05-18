@@ -13,13 +13,26 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// A named subscription target.
+/// A named subscription target with auth + presence semantics.
 ///
-/// Public channels accept any subscriber (default `authorize`
-/// returns `true`). Private channels override `authorize` to gate by
-/// session/token. Presence channels additionally publish
-/// `presence.joined` / `presence.left` events — implement
-/// [`PresenceChannel`] for them.
+/// Channels are registered with [`ChannelRegistry`] at bootstrap;
+/// [`BroadcastingWsHandler`](crate::broadcasting::BroadcastingWsHandler)
+/// resolves them by name when parsing client envelopes.
+///
+/// # Default behavior — asymmetric by design
+///
+/// - [`authorize`](Self::authorize) defaults to `true` (subscribe is
+///   **public by default**). Most channels accept any subscriber; private
+///   channels override this to gate by session, role, etc.
+/// - [`authorize_publish`](Self::authorize_publish) defaults to `false`
+///   (client-side publish is **denied by default**). Most broadcasting
+///   channels only accept server-side events (via `Broadcastable` +
+///   `EventFacade::dispatch`); channels that want client-initiated publishes
+///   (chat rooms, presence pings) explicitly opt in by overriding the hook.
+///
+/// The asymmetry is intentional: it fails closed on the dangerous action
+/// (writing data) and open on the safe one (reading public data). When in
+/// doubt, leave both defaults alone.
 ///
 /// # Example
 ///
@@ -144,9 +157,24 @@ impl ChannelRegistry {
     /// Register a channel. Subsequent subscribes against `channel.name()`
     /// resolve to this instance. Re-registering the same name
     /// replaces the previous entry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the channel's `name()` starts with `"__"`. Names beginning
+    /// with `__` are reserved for framework meta-channels (e.g.
+    /// `__presence__` for cross-process presence replication). Attempting to
+    /// register a user channel with such a name is a programming error that is
+    /// caught at registration time rather than at runtime.
     pub fn register<C: Channel + 'static>(&mut self, channel: C) {
-        let name = channel.name().to_string();
-        self.channels.insert(name, Arc::new(channel));
+        let name = channel.name();
+        assert!(
+            !name.starts_with("__"),
+            "Channel name '{}' starts with '__' which is reserved for framework \
+             meta-channels (e.g. __presence__ for cross-process presence \
+             replication). Pick a different name.",
+            name
+        );
+        self.channels.insert(name.to_string(), Arc::new(channel));
     }
 
     /// Look up a channel by name. Returns `None` if no channel with
@@ -169,5 +197,45 @@ impl ChannelRegistry {
 impl Default for ChannelRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    struct DummyChannel {
+        name: &'static str,
+    }
+
+    #[async_trait]
+    impl Channel for DummyChannel {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+    }
+
+    #[test]
+    fn register_normal_channel_succeeds() {
+        let mut registry = ChannelRegistry::new();
+        registry.register(DummyChannel { name: "chat.lobby" });
+        assert!(registry.resolve("chat.lobby").is_some());
+    }
+
+    #[test]
+    #[should_panic(expected = "starts with '__'")]
+    fn register_reserved_name_panics() {
+        let mut registry = ChannelRegistry::new();
+        // `__presence__` is a framework-reserved name; registration must panic.
+        registry.register(DummyChannel { name: "__presence__" });
+    }
+
+    #[test]
+    #[should_panic(expected = "starts with '__'")]
+    fn register_any_double_underscore_prefix_panics() {
+        let mut registry = ChannelRegistry::new();
+        // Any `__foo__` prefix is reserved, not just `__presence__`.
+        registry.register(DummyChannel { name: "__rpc__" });
     }
 }

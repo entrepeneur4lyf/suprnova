@@ -32,6 +32,33 @@ use std::time::Duration;
 use suprnova::broadcasting::fanout::SeaStreamerBroadcastHub;
 use suprnova::broadcasting::{BroadcastEnvelope, BroadcastHub};
 
+/// Poll until `hub.list_members(channel).await.len() == expected`.
+///
+/// Returns when the count matches. Panics with a clear message if `timeout`
+/// elapses before the count reaches the expected value.
+/// Use this instead of fixed `tokio::time::sleep` calls to avoid CI flake.
+async fn wait_for_member_count(
+    hub: &SeaStreamerBroadcastHub,
+    channel: &str,
+    expected: usize,
+    timeout: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let count = hub.list_members(channel).await.len();
+        if count == expected {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "timeout waiting for member count to reach {expected} on '{channel}'; \
+                 last seen: {count}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// Convenience: build a test envelope.
 fn envelope(channel: &str, event: &str, data: serde_json::Value) -> BroadcastEnvelope {
     BroadcastEnvelope {
@@ -271,8 +298,9 @@ async fn cross_process_member_visibility() {
         .track_member("presence.lobby", "bob", json!({ "user_id": 2 }))
         .await;
 
-    // Allow presence events to round-trip through the stream.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Poll until both hubs see both members (stream round-trip complete).
+    wait_for_member_count(&hub_a, "presence.lobby", 2, Duration::from_secs(2)).await;
+    wait_for_member_count(&hub_b, "presence.lobby", 2, Duration::from_secs(2)).await;
 
     let members_a = hub_a.list_members("presence.lobby").await;
     let members_b = hub_b.list_members("presence.lobby").await;
@@ -320,8 +348,8 @@ async fn untrack_propagates_across_processes() {
         .track_member("presence.lobby", "bob", json!({ "user_id": 2 }))
         .await;
 
-    // Wait for both members to be visible on hub_b before removing one.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Poll until hub_b sees both members before removing one.
+    wait_for_member_count(&hub_b, "presence.lobby", 2, Duration::from_secs(2)).await;
     assert_eq!(
         hub_b.list_members("presence.lobby").await.len(),
         2,
@@ -331,8 +359,8 @@ async fn untrack_propagates_across_processes() {
     // Remove alice from hub_a.
     hub_a.untrack_member("presence.lobby", "alice").await;
 
-    // Allow the MemberRemoved event to propagate.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Poll until hub_b sees alice has been removed.
+    wait_for_member_count(&hub_b, "presence.lobby", 1, Duration::from_secs(2)).await;
 
     let members = hub_b.list_members("presence.lobby").await;
     assert_eq!(
@@ -345,4 +373,59 @@ async fn untrack_propagates_across_processes() {
         2,
         "remaining member should be bob; got {members:?}"
     );
+}
+
+// ── TTL / crash-recovery ─────────────────────────────────────────────────────
+
+/// Simulate a hub crash: hub_a is dropped (all its background tasks abort),
+/// which stops its heartbeat. hub_b should prune hub_a's member (alice) once
+/// her `last_seen` passes the configured TTL.
+///
+/// Uses `new_loopback_with_presence_ttl` with a 600 ms TTL (100 ms heartbeat,
+/// 300 ms prune scan) so the full crash-recovery path executes within seconds
+/// rather than the production 60 s default.
+#[tokio::test]
+async fn crashed_hub_members_pruned_via_ttl() {
+    let ttl = Duration::from_millis(600); // heartbeat = 100ms, prune = 300ms
+
+    let hub_b =
+        SeaStreamerBroadcastHub::new_loopback_with_presence_ttl("stdio://", "suprnova-test-ttl-prune", ttl)
+            .await
+            .expect("hub_b connect");
+
+    // Allow hub_b's consumer pump to start.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    {
+        // hub_a is scoped so its Drop aborts the heartbeat task, simulating a crash.
+        let hub_a = SeaStreamerBroadcastHub::new_loopback_with_presence_ttl(
+            "stdio://",
+            "suprnova-test-ttl-prune",
+            ttl,
+        )
+        .await
+        .expect("hub_a connect");
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        hub_a
+            .track_member("presence.lobby", "alice", json!({ "user_id": 1 }))
+            .await;
+
+        // Wait until hub_b sees alice (presence event propagated).
+        wait_for_member_count(&hub_b, "presence.lobby", 1, Duration::from_secs(2)).await;
+    } // hub_a dropped here — heartbeat task aborted, alice's last_seen goes stale
+
+    // Wait until hub_b prunes alice (TTL expired + prune scan fired).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    loop {
+        let count = hub_b.list_members("presence.lobby").await.len();
+        if count == 0 {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("alice not pruned after TTL expired; still {count} members visible on hub_b");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }

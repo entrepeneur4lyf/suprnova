@@ -323,39 +323,10 @@ impl Server {
         // Signal supervisors to exit cleanly, then drain their tasks.
         // This runs AFTER WS_TASKS so in-flight WebSocket connections get
         // their close frames before the process tears down background work.
-        if let Some(token) = crate::supervisor::supervisor_cancel_token() {
-            token.cancel();
-        }
-        if let Some(sv_tasks) = crate::supervisor::supervisor_tasks() {
-            let mut tasks = sv_tasks.lock().await;
-            if !tasks.is_empty() {
-                tracing::info!(
-                    supervisor_count = tasks.len(),
-                    "draining supervisors (max 5s)"
-                );
-                let drain_deadline =
-                    tokio::time::sleep(std::time::Duration::from_secs(5));
-                tokio::pin!(drain_deadline);
-                loop {
-                    tokio::select! {
-                        next = tasks.join_next() => {
-                            if next.is_none() {
-                                break; // JoinSet drained
-                            }
-                        }
-                        _ = &mut drain_deadline => {
-                            tracing::warn!(
-                                remaining = tasks.len(),
-                                "supervisor drain deadline exceeded; aborting remaining"
-                            );
-                            tasks.abort_all();
-                            while tasks.join_next().await.is_some() {}
-                            break;
-                        }
-                    }
-                }
-            }
-        }
+        crate::supervisor::SupervisorRegistry::shutdown(
+            std::time::Duration::from_secs(5),
+        )
+        .await;
 
         // Flush buffered telemetry before returning. Safe to call when
         // OTel is disabled — guard just no-ops.

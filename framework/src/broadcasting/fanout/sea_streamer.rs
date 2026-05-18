@@ -45,8 +45,9 @@
 //! `list_members` reads exclusively from `cross_process_view`, which includes
 //! all members regardless of origin. Members whose process died without
 //! sending `MemberRemoved` are pruned by a periodic pruning task once their
-//! `last_seen` exceeds `PRESENCE_TTL`. A heartbeat task re-publishes local
-//! members every `HEARTBEAT_INTERVAL` to refresh `last_seen` on all consumers.
+//! `last_seen` exceeds the configured TTL (default 60 s). A heartbeat task
+//! re-publishes local members at `ttl / 6` so remote hubs see a continuous
+//! liveness signal and don't prune live members.
 //!
 //! ## Backends
 //!
@@ -90,15 +91,12 @@ use uuid::Uuid;
 /// local broadcast hub. App code should never publish to this channel name.
 const PRESENCE_META_CHANNEL: &str = "__presence__";
 
-/// How often each hub re-publishes its local members as heartbeats. Must be
-/// well below `PRESENCE_TTL` so remote hubs see a continuous liveness signal.
-const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// How often the pruning task scans for stale entries.
-const PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Entries whose `last_seen` is older than this are dropped. Handles processes
-/// that crashed without publishing `MemberRemoved`.
+/// Default presence TTL. Entries whose `last_seen` is older than this are
+/// dropped, handling processes that crashed without publishing `MemberRemoved`.
+///
+/// The heartbeat interval is derived as `TTL / 6` (10 s) and the prune scan
+/// interval as `TTL / 2` (30 s). Use
+/// [`SeaStreamerBroadcastHub::new_with_presence_ttl`] to override for tests.
 const PRESENCE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 // ── internal wire format ─────────────────────────────────────────────────────
@@ -225,12 +223,36 @@ impl SeaStreamerBroadcastHub {
     /// `stream_key`   — the stream name shared by all processes, e.g.
     ///                  `"suprnova-broadcast"`.
     ///
+    /// Uses the default presence TTL (60 s). See
+    /// [`new_with_presence_ttl`](Self::new_with_presence_ttl) to override.
+    ///
     /// # Errors
     ///
     /// Returns `FrameworkError::Internal` if the URI is invalid or the
     /// backend fails to connect.
     pub async fn new(streamer_uri: &str, stream_key: &str) -> Result<Self, FrameworkError> {
-        Self::connect(streamer_uri, stream_key, false).await
+        Self::connect(streamer_uri, stream_key, false, PRESENCE_TTL).await
+    }
+
+    /// Connect with a custom presence TTL.
+    ///
+    /// Presence members whose `last_seen` exceeds `ttl` are pruned. The
+    /// heartbeat interval is derived as `ttl / 6` so that live members
+    /// are refreshed well within the TTL window.
+    ///
+    /// **Mostly useful for tests** — setting `ttl` to e.g.
+    /// `Duration::from_millis(600)` gives a 100 ms heartbeat and a
+    /// sub-second prune cycle, allowing the crash-recovery path to be
+    /// exercised without multi-minute waits.
+    ///
+    /// Production deployments should leave the default TTL (60 s) unless
+    /// they have a specific reason to shorten it (e.g., extremely volatile
+    /// clusters where 60 s of stale presence is unacceptable).
+    pub async fn new_with_presence_ttl(
+        streamer_uri: &str,
+        ttl: std::time::Duration,
+    ) -> Result<Self, FrameworkError> {
+        Self::connect(streamer_uri, "suprnova-broadcast", false, ttl).await
     }
 
     /// Connect with stdio loopback enabled.
@@ -239,8 +261,22 @@ impl SeaStreamerBroadcastHub {
     /// same process. **Use only in tests.** The duplicate-delivery guard
     /// (instance_id) ensures local subscribers still receive each app-data
     /// event exactly once. Presence events round-trip intentionally.
+    ///
+    /// Uses the default presence TTL (60 s).
     pub async fn new_loopback(streamer_uri: &str, stream_key: &str) -> Result<Self, FrameworkError> {
-        Self::connect(streamer_uri, stream_key, true).await
+        Self::connect(streamer_uri, stream_key, true, PRESENCE_TTL).await
+    }
+
+    /// Connect with loopback enabled and a custom presence TTL.
+    ///
+    /// Combines the loopback test mode with a configurable TTL for tests
+    /// that need to exercise the crash-recovery / TTL-prune path quickly.
+    pub async fn new_loopback_with_presence_ttl(
+        streamer_uri: &str,
+        stream_key: &str,
+        ttl: std::time::Duration,
+    ) -> Result<Self, FrameworkError> {
+        Self::connect(streamer_uri, stream_key, true, ttl).await
     }
 
     /// Internal constructor.
@@ -248,6 +284,7 @@ impl SeaStreamerBroadcastHub {
         streamer_uri: &str,
         stream_key_str: &str,
         loopback: bool,
+        presence_ttl: std::time::Duration,
     ) -> Result<Self, FrameworkError> {
         let uri = StreamerUri::from_str(streamer_uri).map_err(|e| {
             FrameworkError::internal(format!(
@@ -293,6 +330,12 @@ impl SeaStreamerBroadcastHub {
                 ))
             })?;
 
+        // Derive heartbeat and prune intervals from the TTL:
+        //   heartbeat = ttl / 6   (refresh well within the TTL window)
+        //   prune     = ttl / 2   (scan twice per TTL window)
+        let heartbeat_interval = presence_ttl / 6;
+        let prune_interval = presence_ttl / 2;
+
         let instance_id = Uuid::new_v4();
         let local = Arc::new(InMemoryBroadcastHub::new());
         let cross_process_view: CrossProcessView =
@@ -311,19 +354,20 @@ impl SeaStreamerBroadcastHub {
         });
 
         // Spawn the heartbeat task — re-publishes local members every
-        // HEARTBEAT_INTERVAL so other process instances refresh last_seen.
+        // `heartbeat_interval` so other process instances refresh last_seen.
         let hb_producer = producer.clone();
         let hb_instance_id = instance_id.to_string();
         let hb_local_members = Arc::clone(&local_members);
         let heartbeat_task = tokio::spawn(async move {
-            heartbeat_task(hb_producer, hb_instance_id, hb_local_members).await;
+            heartbeat_task(hb_producer, hb_instance_id, hb_local_members, heartbeat_interval)
+                .await;
         });
 
         // Spawn the pruning task — drops MemberRecord entries whose last_seen
-        // exceeds PRESENCE_TTL, cleaning up after crashed processes.
+        // exceeds `presence_ttl`, cleaning up after crashed processes.
         let prune_view = Arc::clone(&cross_process_view);
         let prune_task = tokio::spawn(async move {
-            prune_task(prune_view).await;
+            prune_task(prune_view, prune_interval, presence_ttl).await;
         });
 
         Ok(Self {
@@ -496,9 +540,10 @@ async fn heartbeat_task(
     producer: sea_streamer::stdio::StdioProducer,
     instance_id: String,
     local_members: Arc<AsyncRwLock<HashMap<(String, String), Value>>>,
+    interval: std::time::Duration,
 ) {
     loop {
-        tokio::time::sleep(HEARTBEAT_INTERVAL).await;
+        tokio::time::sleep(interval).await;
         let snapshot = {
             let guard = local_members.read().await;
             guard.clone()
@@ -517,16 +562,19 @@ async fn heartbeat_task(
 }
 
 /// Periodically drops cross_process_view entries whose `last_seen` is older
-/// than `PRESENCE_TTL`. Cleans up after processes that crashed without
-/// publishing `MemberRemoved`.
-async fn prune_task(view: CrossProcessView) {
+/// than `ttl`. Cleans up after processes that crashed without publishing
+/// `MemberRemoved`. All entries are pruned uniformly regardless of which
+/// hub instance produced them — including this hub's own instance_id, which
+/// is important for crash-recovery tests where a dropped hub's heartbeat
+/// task has been aborted.
+async fn prune_task(view: CrossProcessView, interval: std::time::Duration, ttl: std::time::Duration) {
     loop {
-        tokio::time::sleep(PRUNE_INTERVAL).await;
+        tokio::time::sleep(interval).await;
         let now = Instant::now();
         let mut map = view.write().await;
         for ch_map in map.values_mut() {
             ch_map.retain(|_, record| {
-                now.duration_since(record.last_seen) < PRESENCE_TTL
+                now.duration_since(record.last_seen) < ttl
             });
         }
         // Also remove empty channel entries.

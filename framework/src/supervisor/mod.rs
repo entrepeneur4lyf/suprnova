@@ -209,6 +209,60 @@ impl SupervisorRegistry {
             tracing::info!(supervisor = name, "supervisor started");
         }
     }
+
+    /// Cancel all running supervisors and drain their tasks.
+    ///
+    /// 1. Fires [`SUPERVISOR_CANCEL`] so every supervisor that
+    ///    `tokio::select!`s on `cancel.cancelled()` exits cleanly.
+    /// 2. Drains [`SUPERVISOR_TASKS`] up to `timeout`.
+    /// 3. After the deadline, calls `abort_all` and drains the remaining
+    ///    aborted handles so the runtime can shut down cleanly.
+    ///
+    /// This is a no-op if [`SupervisorRegistry::start_all`] was never called
+    /// (i.e., there are no supervisor statics initialized).
+    ///
+    /// `Server::run` calls this as part of its shutdown sequence (after
+    /// WebSocket handler drain). Embedders and tests that call
+    /// [`start_all`](Self::start_all) outside of `Server::run` must call
+    /// `shutdown` themselves to avoid leaking supervisor tasks.
+    pub async fn shutdown(timeout: std::time::Duration) {
+        // Cancel the token — supervisors watching it will exit within the
+        // grace window.
+        if let Some(token) = SUPERVISOR_CANCEL.get() {
+            token.cancel();
+        }
+
+        if let Some(sv_tasks) = SUPERVISOR_TASKS.get() {
+            let mut tasks = sv_tasks.lock().await;
+            if !tasks.is_empty() {
+                tracing::info!(
+                    supervisor_count = tasks.len(),
+                    timeout_secs = timeout.as_secs_f64(),
+                    "draining supervisors"
+                );
+                let drain_deadline = tokio::time::sleep(timeout);
+                tokio::pin!(drain_deadline);
+                loop {
+                    tokio::select! {
+                        next = tasks.join_next() => {
+                            if next.is_none() {
+                                break; // JoinSet drained
+                            }
+                        }
+                        _ = &mut drain_deadline => {
+                            tracing::warn!(
+                                remaining = tasks.len(),
+                                "supervisor drain deadline exceeded; aborting remaining"
+                            );
+                            tasks.abort_all();
+                            while tasks.join_next().await.is_some() {}
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ── Restart loop ─────────────────────────────────────────────────────────────
