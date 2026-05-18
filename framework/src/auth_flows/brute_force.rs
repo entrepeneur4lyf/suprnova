@@ -26,7 +26,7 @@
 //! and a notification path must never roll back a successful
 //! security-state transition.
 
-use crate::auth_flows::events::AccountUnlocked;
+use crate::auth_flows::events::{AccountLocked, AccountUnlocked};
 use crate::error::FrameworkError;
 use crate::torii_integration::instance;
 use torii::LockoutStatus;
@@ -63,15 +63,36 @@ impl BruteForce {
     /// Returns the updated [`LockoutStatus`]. If the attempt crossed
     /// the configured threshold, `status.is_locked` is `true` and
     /// `status.locked_until` is populated.
+    ///
+    /// Fires [`AccountLocked`] **only** on the unlocked → locked
+    /// state transition. Subsequent calls while the account remains
+    /// locked do not re-fire the event — listeners can treat each
+    /// `AccountLocked` as a fresh security incident worth notifying.
     pub async fn record_failed_attempt(
         email: &str,
         ip: Option<&str>,
     ) -> Result<LockoutStatus, FrameworkError> {
-        instance()?
+        let torii = instance()?;
+        let was_locked = torii
+            .brute_force()
+            .is_locked(email)
+            .await
+            .map_err(map_err)?;
+        let status = torii
             .brute_force()
             .record_failed_attempt(email, ip)
             .await
-            .map_err(map_err)
+            .map_err(map_err)?;
+
+        if !was_locked && status.is_locked {
+            let _ = crate::events::EventFacade::dispatch(AccountLocked {
+                email: email.to_string(),
+                failed_attempts: status.failed_attempts,
+            })
+            .await;
+        }
+
+        Ok(status)
     }
 
     /// Fetch the current [`LockoutStatus`] for `email` without

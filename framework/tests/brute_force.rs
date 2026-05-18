@@ -404,3 +404,39 @@ fn middleware_429s_when_account_locked() {
         );
     });
 }
+
+#[test]
+#[serial]
+fn account_locked_fires_once_on_transition() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        use suprnova::auth_flows::AccountLocked;
+        use suprnova::events::EventFacade;
+        use suprnova::events::testing::dispatched_count;
+
+        suprnova::Auth::password()
+            .register("eve-bf@example.com", "longpassword123")
+            .await
+            .unwrap();
+
+        let _guard = EventFacade::fake();
+
+        // Threshold = 5. The 5th call crosses unlocked → locked; only
+        // that one should fire AccountLocked. The 6th should not
+        // re-fire because the account is already locked when we
+        // observe state before recording.
+        for _ in 0..6 {
+            BruteForce::record_failed_attempt("eve-bf@example.com", None)
+                .await
+                .unwrap();
+        }
+
+        let fires =
+            dispatched_count::<AccountLocked>(|e| e.email == "eve-bf@example.com");
+        assert_eq!(
+            fires, 1,
+            "AccountLocked must fire exactly once on the unlocked→locked transition, got {fires}"
+        );
+    });
+}

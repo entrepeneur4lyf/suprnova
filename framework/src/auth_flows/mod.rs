@@ -18,7 +18,8 @@ pub mod two_factor;
 pub use brute_force::{BruteForce, LoginThrottleMiddleware};
 pub use email_verify::EmailVerification;
 pub use events::{
-    AccountUnlocked, EmailVerified, PasswordResetCompleted, TwoFactorDisabled, TwoFactorEnrolled,
+    AccountLocked, AccountUnlocked, EmailVerified, PasswordResetCompleted, TwoFactorDisabled,
+    TwoFactorEnrolled,
 };
 pub use mail::{EmailVerificationMail, PasswordChangedMail, PasswordResetMail};
 pub use password_reset::PasswordReset;

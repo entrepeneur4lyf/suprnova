@@ -1,7 +1,22 @@
 //! Phase 11 auth-flow events.
 //!
-//! The complete catalogue lands in Task 7 — this module grows
-//! incrementally as subsequent tasks need additional event types.
+//! Six events covering the security-state transitions emitted by the
+//! auth_flows facades:
+//!
+//! - [`EmailVerified`] — `EmailVerification::verify` consumed a valid token.
+//! - [`PasswordResetCompleted`] — `PasswordReset::complete` succeeded.
+//! - [`AccountLocked`] — `BruteForce::record_failed_attempt` pushed an
+//!   account across the threshold (unlocked → locked transition).
+//! - [`AccountUnlocked`] — `BruteForce::unlock_account` cleared a real
+//!   lock (no-op unlocks on already-unlocked accounts do not fire).
+//! - [`TwoFactorEnrolled`] — `TwoFactor::confirm` set `confirmed_at`.
+//! - [`TwoFactorDisabled`] — `TwoFactor::disable` removed an existing
+//!   2FA row (no-op disables on never-enrolled users do not fire).
+//!
+//! Every event is `Debug + Clone + 'static`, carries no sensitive data
+//! (no plaintext tokens, no IPs), and uses stringy identifiers so
+//! listeners can serialize them across task boundaries without leaking
+//! type information from the user-storage backend.
 
 use crate::events::Event;
 
@@ -36,6 +51,29 @@ pub struct PasswordResetCompleted {
 impl Event for PasswordResetCompleted {
     fn event_name() -> &'static str {
         "PasswordResetCompleted"
+    }
+}
+
+/// Fires when [`crate::auth_flows::BruteForce::record_failed_attempt`]
+/// pushes an account across the lockout threshold — the
+/// unlocked → locked state transition. Subsequent failed attempts
+/// while the account remains locked do not re-fire the event, so
+/// listeners can treat each `AccountLocked` as a fresh security
+/// incident worth notifying (admin alert, audit log, throttle a peer
+/// IP, etc.).
+///
+/// `failed_attempts` is the count at the moment of lock — useful when
+/// the threshold is configurable and the listener wants to log how
+/// many attempts triggered this specific lock.
+#[derive(Debug, Clone)]
+pub struct AccountLocked {
+    pub email: String,
+    pub failed_attempts: u32,
+}
+
+impl Event for AccountLocked {
+    fn event_name() -> &'static str {
+        "AccountLocked"
     }
 }
 
@@ -94,5 +132,30 @@ pub struct TwoFactorDisabled {
 impl Event for TwoFactorDisabled {
     fn event_name() -> &'static str {
         "TwoFactorDisabled"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_names_distinct() {
+        let mut names = vec![
+            EmailVerified::event_name(),
+            PasswordResetCompleted::event_name(),
+            AccountLocked::event_name(),
+            AccountUnlocked::event_name(),
+            TwoFactorEnrolled::event_name(),
+            TwoFactorDisabled::event_name(),
+        ];
+        let before = names.len();
+        names.sort();
+        names.dedup();
+        assert_eq!(
+            names.len(),
+            before,
+            "duplicate event_name() across auth_flows events: {names:?}"
+        );
     }
 }
