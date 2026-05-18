@@ -16,6 +16,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use std::collections::HashMap;
 
 /// Alias for the body type the server returns into hyper. All
 /// `HttpResponse` variants (static + streaming) collapse to this so
@@ -206,7 +207,11 @@ impl Server {
                             }
                         });
 
-                        if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
+                        if let Err(err) = http1::Builder::new()
+                            .serve_connection(io, service)
+                            .with_upgrades()
+                            .await
+                        {
                             tracing::error!(?err, "error serving connection");
                         }
                     });
@@ -297,6 +302,18 @@ pub async fn handle_request(
 ) -> hyper::Response<ServerBody> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
+
+    // WebSocket upgrade branch. hyper-tungstenite checks the request
+    // headers (Connection: Upgrade, Upgrade: websocket, Sec-WebSocket-*)
+    // and returns true iff this is a well-formed WS upgrade. If a
+    // ws_route matches the path, we hand off to handle_ws_upgrade;
+    // the request never reaches the HTTP routing path. If no ws_route
+    // matches, fall through to normal HTTP routing so the path can
+    // 404 like any other unrouted GET.
+    if hyper_tungstenite::is_upgrade_request(&req) && let Some(ws_match) = router.match_ws(&path) {
+        return handle_ws_upgrade(req, ws_match).await;
+    }
+
     let query = req.uri().query().unwrap_or("");
 
     // Built-in health check endpoint at /_suprnova/health
@@ -416,7 +433,71 @@ async fn handle_request_inner(
     }
 }
 
+async fn handle_ws_upgrade(
+    mut req: hyper::Request<hyper::body::Incoming>,
+    ws_match: crate::routing::WsMatch,
+) -> hyper::Response<ServerBody> {
+    let handler = ws_match.handler();
+    let params: HashMap<String, String> = ws_match.params().clone();
 
+    let config = crate::ws::WsConfig::default();
+    let tungstenite_config = config.to_tungstenite_config();
+
+    let (response, websocket) =
+        match hyper_tungstenite::upgrade(&mut req, Some(tungstenite_config)) {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::warn!(error = %e, "websocket upgrade rejected");
+                return bad_request_text(&format!("websocket upgrade failed: {e}"));
+            }
+        };
+
+    // Build the framework's Request from the upgrade request. The
+    // body is empty for an upgrade request (RFC 6455); we still
+    // construct via Request::new(req) so headers/cookies/session
+    // are intact for the handler.
+    let suprnova_req = Request::new(req).with_params(params);
+
+    // Spawn the handler task. hyper switches the connection to
+    // upgraded I/O once `response` flushes; then `websocket.await`
+    // resolves with the upgraded WebSocketStream and we hand it
+    // to the handler. Heartbeat task lands in T8 (it'll spawn here
+    // and use socket.sender() + abort_handle for clean teardown).
+    tokio::spawn(async move {
+        match websocket.await {
+            Ok(ws_stream) => {
+                let socket = crate::ws::WsSocket::from_stream(ws_stream);
+                if let Err(e) = handler.handle(socket, suprnova_req).await {
+                    tracing::error!(error = %e, "websocket handler returned error");
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "hyper upgrade failed");
+            }
+        }
+    });
+
+    convert_response_body(response)
+}
+
+fn bad_request_text(msg: &str) -> hyper::Response<ServerBody> {
+    hyper::Response::builder()
+        .status(hyper::StatusCode::BAD_REQUEST)
+        .body(
+            Full::new(Bytes::from(msg.to_string()))
+                .map_err(|never| match never {})
+                .boxed(),
+        )
+        .expect("build 400 response")
+}
+
+fn convert_response_body(
+    response: hyper::Response<http_body_util::Full<Bytes>>,
+) -> hyper::Response<ServerBody> {
+    let (parts, body) = response.into_parts();
+    let boxed = body.map_err(|never| match never {}).boxed();
+    hyper::Response::from_parts(parts, boxed)
+}
 
 /// Built-in health check endpoint at /_suprnova/health
 /// Returns {"status": "ok", "timestamp": "..."} by default
