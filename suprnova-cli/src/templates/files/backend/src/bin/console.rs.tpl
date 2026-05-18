@@ -2,36 +2,46 @@
 //!
 //! Per-project entry point for `db:seed`, your own `#[command]`s, and
 //! other one-shot CLI tasks. Calls `{package_name}::bootstrap::register()`
-//! so seeders, queue jobs, mail factories, etc. are wired up before
-//! dispatch, then routes argv to a registered console command.
+//! lazily (only when a real subcommand matches), then routes argv to
+//! a registered console command.
 //!
 //! ```text
 //! cargo run --bin console -- db:seed
+//! cargo run --bin console -- --version
 //! cargo run --bin console -- help
 //! ./target/debug/console <your-command>
 //! ```
 //!
 //! Tokio flavor is `current_thread` — console commands are one-shot,
-//! so the multi-threaded worker pool would buy nothing.
+//! so the multi-threaded worker pool would buy nothing. Bootstrap
+//! runs only when a real subcommand is matched, so `console --help`
+//! and `console --version` work without DATABASE_URL set.
 
 use std::process::ExitCode;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
-    // Load `.env` so configs read DATABASE_URL etc.
     let _ = dotenvy::dotenv();
 
-    // Mirror the server's `Application::new().config(...).bootstrap(...)`
-    // ordering — DB init in bootstrap reads what config registered.
-    {package_name}::config::register_all();
-    {package_name}::bootstrap::register().await;
+    // Surface this project's package version via `--version` and
+    // `--help`. `env!("CARGO_PKG_VERSION")` reflects {package_name},
+    // not the framework.
+    suprnova::console::set_version(env!("CARGO_PKG_VERSION"));
 
     let argv: Vec<String> = std::env::args().collect();
-    match suprnova::console::dispatch_argv(argv).await {
+    // dispatch_argv_with_init owns all user-facing stderr (both clap
+    // parse errors and handler-returned errors); main is pure
+    // Result → ExitCode translation. The bootstrap closure runs only
+    // when clap matches a real registered subcommand — help, version,
+    // and parse-error paths skip it entirely.
+    let result = suprnova::console::dispatch_argv_with_init(argv, || async {
+        {package_name}::config::register_all();
+        {package_name}::bootstrap::register().await;
+    })
+    .await;
+
+    match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("error: {{e}}");
-            ExitCode::FAILURE
-        }
+        Err(_) => ExitCode::FAILURE,
     }
 }

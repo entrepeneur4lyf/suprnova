@@ -29,6 +29,11 @@ use std::process::ExitCode;
 async fn main() -> ExitCode {
     let _ = dotenvy::dotenv();
 
+    // Surface this project's package version via `--version` and
+    // `--help`. Uses `env!("CARGO_PKG_VERSION")` so the value reflects
+    // the user's app, not the framework's version.
+    suprnova::console::set_version(env!("CARGO_PKG_VERSION"));
+
     let argv: Vec<String> = std::env::args().collect();
     // Bootstrap runs only when a real subcommand is matched — help,
     // version, missing-subcommand, and parse-error paths all skip

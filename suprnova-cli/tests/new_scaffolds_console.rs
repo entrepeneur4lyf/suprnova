@@ -46,7 +46,14 @@ fn inertia_starter_scaffolds_console_binary_and_commands_dir() {
     let console = project.join("src/bin/console.rs");
     assert!(console.exists(), "console binary written");
     let console_src = read(&console);
-    assert!(console_src.contains("suprnova::console::dispatch_argv"));
+    assert!(
+        console_src.contains("suprnova::console::dispatch_argv_with_init"),
+        "console uses the lazy-bootstrap form so --help / --version skip DB init"
+    );
+    assert!(
+        console_src.contains("suprnova::console::set_version(env!(\"CARGO_PKG_VERSION\"))"),
+        "console registers the user's package version so --version works"
+    );
     assert!(console_src.contains("smoke_inertia::bootstrap::register"));
     assert!(console_src.contains("tokio::main(flavor = \"current_thread\")"));
 
@@ -76,7 +83,14 @@ fn api_starter_scaffolds_console_binary_and_commands_dir() {
     let console = project.join("src/bin/console.rs");
     assert!(console.exists(), "api console binary written");
     let console_src = read(&console);
-    assert!(console_src.contains("suprnova::console::dispatch_argv"));
+    assert!(
+        console_src.contains("suprnova::console::dispatch_argv_with_init"),
+        "api console uses the lazy-bootstrap form"
+    );
+    assert!(
+        console_src.contains("suprnova::console::set_version(env!(\"CARGO_PKG_VERSION\"))"),
+        "api console registers the user's package version"
+    );
     assert!(console_src.contains("smoke_api::bootstrap::register"));
 
     let commands_mod = project.join("src/commands/mod.rs");

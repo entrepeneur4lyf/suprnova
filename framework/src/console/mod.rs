@@ -29,6 +29,7 @@
 use crate::error::FrameworkError;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::OnceLock;
 
 pub mod builtins;
 mod typed;
@@ -54,6 +55,26 @@ pub struct CommandEntry {
 }
 
 inventory::collect!(CommandEntry);
+
+/// Version string surfaced via `--version` and in `--help` output.
+/// Set once at app boot via [`set_version`]; not set ⇒ clap omits
+/// the `--version` flag entirely (typing it errors as an unknown
+/// argument, which is the honest behavior when no version was
+/// declared).
+static VERSION: OnceLock<&'static str> = OnceLock::new();
+
+/// Register the version string the console exposes via `--version`
+/// and in its top-level `--help` output. Call once at the start of
+/// the app's `console` binary `main`, typically with
+/// `env!("CARGO_PKG_VERSION")` so the value reflects the user's
+/// project, not the framework.
+///
+/// Subsequent calls are silently ignored (`OnceLock` semantics) —
+/// the first registration wins. Tests and programmatic callers that
+/// don't call this just get no `--version` support, which is fine.
+pub fn set_version(version: &'static str) {
+    let _ = VERSION.set(version);
+}
 
 /// Look up a registered command by name.
 pub fn find(name: &str) -> Option<&'static CommandEntry> {
@@ -81,6 +102,9 @@ fn build_root() -> clap::Command {
         .about("Suprnova console — per-project command dispatch")
         .arg_required_else_help(true)
         .subcommand_required(false);
+    if let Some(v) = VERSION.get() {
+        root = root.version(*v);
+    }
     for entry in list() {
         root = root.subcommand((entry.clap_builder)());
     }

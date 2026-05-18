@@ -105,6 +105,33 @@ fn unknown_command_exits_nonzero_with_clap_formatted_stderr() {
 }
 
 #[test]
+fn version_flag_returns_package_version_without_database_env() {
+    // Same lazy-bootstrap fast-path as `--help`: `--version` resolves
+    // before the bootstrap closure runs. Clap writes the version to
+    // stdout in the form "console <version>".
+    let tmp = TempDir::new().expect("tmpdir");
+    let output = Command::new(CONSOLE_BIN)
+        .arg("--version")
+        .current_dir(tmp.path())
+        .env_remove("DATABASE_URL")
+        .output()
+        .expect("console binary spawnable");
+
+    assert!(
+        output.status.success(),
+        "exit {:?}; stderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let expected = env!("CARGO_PKG_VERSION");
+    assert!(
+        stdout.contains(expected),
+        "stdout names the project's package version ({expected}); got:\n{stdout}"
+    );
+}
+
+#[test]
 fn per_command_help_works_without_database_env() {
     // Use a temp dir as CWD so dotenvy can't reload DATABASE_URL
     // from the app's .env file.
