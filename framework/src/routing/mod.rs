@@ -10,5 +10,5 @@ pub use macros::{
     RouteDefBuilder,
 };
 pub use router::{
-    register_route_name, route, route_with_params, BoxedHandler, RouteBuilder, Router,
+    register_route_name, route, route_with_params, BoxedHandler, RouteBuilder, Router, WsMatch,
 };

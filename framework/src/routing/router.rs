@@ -1,5 +1,6 @@
 use crate::http::{Request, Response};
 use crate::middleware::{into_boxed, BoxedMiddleware, Middleware};
+use crate::ws::BoxedWebSocketHandler;
 use hyper::Method;
 use matchit::Router as MatchitRouter;
 use std::collections::HashMap;
@@ -76,6 +77,12 @@ pub struct Router {
     post_routes: MatchitRouter<(String, Arc<BoxedHandler>)>,
     put_routes: MatchitRouter<(String, Arc<BoxedHandler>)>,
     delete_routes: MatchitRouter<(String, Arc<BoxedHandler>)>,
+    /// WebSocket route registry. Separate from the HTTP route
+    /// registries because the handler type is different
+    /// (`BoxedWebSocketHandler` vs `Arc<BoxedHandler>`) and the match
+    /// returns a different shape (`WsMatch` instead of `(pattern,
+    /// handler, params)`).
+    ws_routes: MatchitRouter<(String, BoxedWebSocketHandler)>,
     /// Middleware assignments: (method, path) -> boxed middleware instances.
     ///
     /// Keying by `(Method, String)` rather than path alone prevents
@@ -99,6 +106,7 @@ impl Router {
             post_routes: MatchitRouter::new(),
             put_routes: MatchitRouter::new(),
             delete_routes: MatchitRouter::new(),
+            ws_routes: MatchitRouter::new(),
             route_middleware: HashMap::new(),
             fallback_handler: None,
             fallback_middleware: Vec::new(),
@@ -246,6 +254,47 @@ impl Router {
         }
     }
 
+    /// Register a WebSocket route. The handler runs after the
+    /// framework completes the HTTP/1.1 Upgrade handshake; it
+    /// receives a [`WsSocket`] plus the original [`Request`] so it
+    /// can read cookies, session, headers, and captured route params.
+    ///
+    /// Unlike `get` / `post` / etc., this returns `Router` directly
+    /// (not `RouteBuilder`) — WS routes don't take per-route
+    /// middleware or names in v1. Per-WS-route auth middleware
+    /// lands in Phase 7B alongside broadcasting.
+    ///
+    /// [`WsSocket`]: crate::ws::WsSocket
+    pub fn ws<H>(mut self, path: &str, handler: H) -> Router
+    where
+        H: crate::ws::WebSocketHandler,
+    {
+        let boxed: BoxedWebSocketHandler = std::sync::Arc::new(handler);
+        self.ws_routes
+            .insert(path, (path.to_string(), boxed))
+            .ok();
+        self
+    }
+
+    /// Look up a WebSocket route by path. Returns the matched
+    /// handler + captured params if any route registered with
+    /// [`Router::ws`] matches.
+    pub fn match_ws(&self, path: &str) -> Option<WsMatch> {
+        self.ws_routes.at(path).ok().map(|m| {
+            let params: HashMap<String, String> = m
+                .params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let (pattern, handler) = m.value;
+            WsMatch {
+                handler: handler.clone(),
+                pattern: pattern.clone(),
+                params,
+            }
+        })
+    }
+
     /// Match a request and return the matched route's **pattern**, its
     /// handler, and the extracted path parameters.
     ///
@@ -364,5 +413,34 @@ impl RouteBuilder {
 impl From<RouteBuilder> for Router {
     fn from(builder: RouteBuilder) -> Self {
         builder.router
+    }
+}
+
+/// Result of a [`Router::match_ws`] lookup. Bundles the matched
+/// handler with the matched pattern (e.g. `/ws/rooms/{id}`) and
+/// the captured path parameters (e.g. `{"id": "42"}`).
+pub struct WsMatch {
+    handler: BoxedWebSocketHandler,
+    pattern: String,
+    params: HashMap<String, String>,
+}
+
+impl WsMatch {
+    /// The matched handler. Clone the `Arc` to move it into the
+    /// spawned handler task.
+    pub fn handler(&self) -> BoxedWebSocketHandler {
+        self.handler.clone()
+    }
+
+    /// The registered route pattern that matched (e.g.
+    /// `/ws/rooms/{id}`). Useful for telemetry / observability.
+    pub fn pattern(&self) -> &str {
+        &self.pattern
+    }
+
+    /// Captured path params as a `HashMap<String, String>` for
+    /// handler consumption.
+    pub fn params(&self) -> HashMap<String, String> {
+        self.params.clone()
     }
 }
