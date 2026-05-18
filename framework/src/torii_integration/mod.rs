@@ -69,11 +69,14 @@ pub(crate) async fn find_or_create_user_by_email(email: &str) -> Result<User, Fr
 /// Look up a user by email. Returns `Ok(None)` if the user doesn't exist —
 /// the caller decides what to do with the absence.
 ///
-/// Use this for authentication / login flows. **Never** use
-/// [`find_or_create_user_by_email`] in login paths: it would silently create
-/// accounts from failed login attempts (account-enumeration / probing
-/// footgun, codex review finding #3).
-pub(crate) async fn find_user_by_email_lookup_only(
+/// Use this for authentication / login flows and for anti-enumeration
+/// surfaces (e.g. "resend verification email" / "send password reset link"
+/// endpoints) that must respond identically whether or not the email is
+/// on file. **Never** use [`find_or_create_user_by_email`] in login or
+/// resend paths: it would silently create accounts from failed login
+/// attempts (account-enumeration / probing footgun, codex review
+/// finding #3).
+pub async fn find_user_by_email_lookup_only(
     email: &str,
 ) -> Result<Option<User>, FrameworkError> {
     let provider = PROVIDER
@@ -84,6 +87,28 @@ pub(crate) async fn find_user_by_email_lookup_only(
         .find_by_email(email)
         .await
         .map_err(|e| FrameworkError::internal(format!("find_user_by_email_lookup_only: {e}")))
+}
+
+/// Look up a torii [`User`] by their opaque [`UserId`]-string.
+///
+/// Returns `Ok(None)` when no user with that id exists; the caller
+/// decides what to do with the absence.
+///
+/// The string is the same value that the framework stores in the session
+/// (via [`crate::session::set_auth_user`] / [`crate::auth::Auth::id`]) and
+/// the same value emitted by [`UserId::as_str`] / `Display`. Use this when
+/// you have a session-resolved user-id string and need the full torii
+/// [`User`] payload (e.g. `user.email` for a 2FA enrollment label).
+pub async fn find_user_by_id(user_id: &str) -> Result<Option<User>, FrameworkError> {
+    let provider = PROVIDER
+        .get()
+        .ok_or_else(|| FrameworkError::internal("Torii not initialised. Call init_torii() first."))?;
+    let id = UserId::new(user_id);
+    provider
+        .user()
+        .find_by_id(&id)
+        .await
+        .map_err(|e| FrameworkError::internal(format!("find_user_by_id: {e}")))
 }
 
 /// Test-only helper: returns `true` if a user row exists for this email.
