@@ -487,6 +487,29 @@ impl FrameworkError {
         }
     }
 
+    /// CLI sentinel: returns an error variant signaling "the user
+    /// has already seen the message." The console dispatcher uses
+    /// this when clap's `try_get_matches_from` produces an error
+    /// that clap formatted and printed itself — the binary's `main`
+    /// translates this to a non-zero exit code without `eprintln`,
+    /// avoiding a double-print.
+    ///
+    /// Pair with [`Self::is_silent`] at the consume site.
+    pub fn silent() -> Self {
+        Self::Internal {
+            message: String::new(),
+        }
+    }
+
+    /// Whether this error has already been reported to the user.
+    /// See [`Self::silent`] for the producer side. The console
+    /// dispatcher checks this before emitting its own `eprintln`
+    /// for handler-returned errors, so users never see two error
+    /// messages for the same failure.
+    pub fn is_silent(&self) -> bool {
+        matches!(self, Self::Internal { message } if message.is_empty())
+    }
+
     /// Create a Domain error with custom status code
     pub fn domain(message: impl Into<String>, status_code: u16) -> Self {
         Self::Domain {

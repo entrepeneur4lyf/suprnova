@@ -111,9 +111,8 @@ async fn dispatch_returns_err_for_unknown_command() {
     // (with "did you mean ..." suggestions). The returned Err
     // carries no message — main must not double-print.
     assert!(
-        err.message().is_empty(),
-        "clap-reported errors carry empty message; got: {:?}",
-        err.message()
+        err.is_silent(),
+        "clap-reported errors are silent so main doesn't double-print"
     );
 }
 
@@ -177,8 +176,9 @@ fn find_returns_none_for_unknown_command() {
 #[tokio::test]
 async fn dispatch_handler_errors_preserve_message_for_programmatic_callers() {
     // The handler returns Err(FrameworkError::internal("intentional test failure")).
-    // Dispatch prints to stderr (so users see it via the console binary)
-    // AND returns the same Err so programmatic callers can inspect.
+    // Dispatch propagates the Err with its message intact so programmatic
+    // callers can inspect. (Stderr-print behavior is covered end-to-end
+    // by the binary integration tests in Task 5.)
     let argv = vec!["console".to_string(), "test:fail".to_string()];
     let err = console::dispatch_argv(argv).await.unwrap_err();
     assert_eq!(

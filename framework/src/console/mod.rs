@@ -99,10 +99,6 @@ fn build_root() -> clap::Command {
 /// Returns:
 /// - `Ok(())` on a successful handler run
 /// - `Err(FrameworkError)` propagated from the handler
-///
-/// Clap's `--help` / `--version` / parse-error paths call
-/// `clap::Error::exit()` internally; they do not return through
-/// this function.
 pub async fn dispatch_argv(argv: Vec<String>) -> Result<(), FrameworkError> {
     let root = build_root();
 
@@ -114,11 +110,8 @@ pub async fn dispatch_argv(argv: Vec<String>) -> Result<(), FrameworkError> {
     if let Some((name, sub_matches)) = matches.subcommand() {
         if let Some(entry) = find(name) {
             let result = (entry.handler)(sub_matches).await;
-            if let Err(ref e) = result {
-                let msg = e.message();
-                if !msg.is_empty() {
-                    eprintln!("error: {msg}");
-                }
+            if let Err(ref e) = result && !e.is_silent() {
+                eprintln!("error: {}", e.message());
             }
             return result;
         }
@@ -154,7 +147,7 @@ fn handle_clap_error(err: clap::Error) -> Result<(), FrameworkError> {
         ErrorKind::DisplayHelp
         | ErrorKind::DisplayVersion
         | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => Ok(()),
-        _ => Err(FrameworkError::internal(String::new())),
+        _ => Err(FrameworkError::silent()),
     }
 }
 
