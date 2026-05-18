@@ -115,6 +115,19 @@ impl Event {
         global().listen(listener).await;
     }
 
+    /// Register a `BroadcastListener<E>` so dispatching events of
+    /// type `E` also publishes them to the hub channels named by
+    /// `E::broadcast_on()`. Call once per Broadcastable type at
+    /// boot.
+    pub async fn broadcast<E: crate::broadcasting::Broadcastable>(
+        hub: std::sync::Arc<dyn crate::broadcasting::BroadcastHub>,
+    ) {
+        Self::listen::<E, crate::broadcasting::BroadcastListener<E>>(std::sync::Arc::new(
+            crate::broadcasting::BroadcastListener::<E>::new(hub),
+        ))
+        .await;
+    }
+
     /// Replace the global dispatcher with a fake. Returns a guard
     /// that restores listener invocation on drop. Available to
     /// consumer-crate tests by default — no feature gate.
