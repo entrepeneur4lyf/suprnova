@@ -17,4 +17,5 @@ mod hub;
 mod protocol;
 
 pub use hub::{BroadcastEnvelope, BroadcastHub, InMemoryBroadcastHub};
-// Re-exports for the other submodules land in T2/T4/T5/T7.
+pub use channel::{BoxedChannel, Channel, ChannelRegistry, PresenceChannel, PrivateChannel};
+// Re-exports for the other submodules land in T4/T5/T7.
