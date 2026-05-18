@@ -450,6 +450,16 @@ pub enum FrameworkError {
     /// envelope.
     #[error("Precognition validation failed")]
     PrecognitionFailure(ValidationErrors),
+
+    /// CLI sentinel: the failure has already been reported to the user
+    /// (e.g. clap formatted and printed its own parse error). Callers
+    /// translate this to a non-zero exit code without printing
+    /// anything — see [`Self::silent`] / [`Self::is_silent`] for the
+    /// pair used by the console dispatcher. Has no HTTP meaning;
+    /// `status_code()` returns 500 only because the enum is
+    /// HTTP-flavored.
+    #[error("")]
+    AlreadyReported,
 }
 
 impl FrameworkError {
@@ -487,18 +497,18 @@ impl FrameworkError {
         }
     }
 
-    /// CLI sentinel: returns an error variant signaling "the user
-    /// has already seen the message." The console dispatcher uses
-    /// this when clap's `try_get_matches_from` produces an error
+    /// CLI sentinel: returns a [`Self::AlreadyReported`] variant signaling
+    /// "the user has already seen the message." The console dispatcher
+    /// uses this when clap's `try_get_matches_from` produces an error
     /// that clap formatted and printed itself — the binary's `main`
     /// translates this to a non-zero exit code without `eprintln`,
     /// avoiding a double-print.
     ///
-    /// Pair with [`Self::is_silent`] at the consume site.
+    /// Pair with [`Self::is_silent`] at the consume site. Type-safe:
+    /// constructing `FrameworkError::internal("")` directly does NOT
+    /// produce a silent error — only this constructor does.
     pub fn silent() -> Self {
-        Self::Internal {
-            message: String::new(),
-        }
+        Self::AlreadyReported
     }
 
     /// Whether this error has already been reported to the user.
@@ -507,7 +517,7 @@ impl FrameworkError {
     /// for handler-returned errors, so users never see two error
     /// messages for the same failure.
     pub fn is_silent(&self) -> bool {
-        matches!(self, Self::Internal { message } if message.is_empty())
+        matches!(self, Self::AlreadyReported)
     }
 
     /// Create a Domain error with custom status code
@@ -541,6 +551,7 @@ impl FrameworkError {
             Self::ParamParse { .. } => 400,
             Self::PrecognitionSuccess => 204,
             Self::PrecognitionFailure(_) => 422,
+            Self::AlreadyReported => 500,
         }
     }
 
@@ -587,6 +598,7 @@ impl FrameworkError {
             Self::ParamParse { param, .. } => param,
             Self::PrecognitionSuccess => "Precognition validation passed",
             Self::PrecognitionFailure(_) => "Precognition validation failed",
+            Self::AlreadyReported => "",
         }
     }
 
