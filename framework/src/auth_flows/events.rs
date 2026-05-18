@@ -59,3 +59,37 @@ impl Event for AccountUnlocked {
         "AccountUnlocked"
     }
 }
+
+/// Fires when a user successfully confirms 2FA enrollment via
+/// [`crate::auth_flows::TwoFactor::confirm`].
+///
+/// `user_id` is the stringy identifier passed to the
+/// [`crate::auth_flows::TwoFactorUser`] contract (typically
+/// `torii::UserId.to_string()`). The event fires once per successful
+/// confirmation; re-enrolling and re-confirming fires a fresh event.
+#[derive(Debug, Clone)]
+pub struct TwoFactorEnrolled {
+    pub user_id: String,
+}
+
+impl Event for TwoFactorEnrolled {
+    fn event_name() -> &'static str {
+        "TwoFactorEnrolled"
+    }
+}
+
+/// Fires when 2FA is disabled for a user via
+/// [`crate::auth_flows::TwoFactor::disable`].
+///
+/// Dispatched unconditionally - even if no row existed - so admin /
+/// audit listeners can observe every attempted disable call.
+#[derive(Debug, Clone)]
+pub struct TwoFactorDisabled {
+    pub user_id: String,
+}
+
+impl Event for TwoFactorDisabled {
+    fn event_name() -> &'static str {
+        "TwoFactorDisabled"
+    }
+}

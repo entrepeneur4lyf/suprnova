@@ -128,7 +128,7 @@ envy = "0.4.2"
 hyper-tungstenite = "0.20.0"
 futures-util = "0.3.32"
 tokio-tungstenite = "0.29.0"
-totp-rs = { version = "5", features = ["otpauth", "qr"] }
+totp-rs = { version = "5", features = ["gen_secret", "otpauth", "qr"] }
 qrcode = "0.14"
 
 [features]
@@ -160,4 +160,5 @@ prometheus-client = "0.24"
 serial_test = "3.4.0"
 tokio = { version = "1", features = ["test-util"] }
 tracing-test = { version = "0.2.6", features = ["no-env-filter"] }
+url = "2"
 wiremock = "0.6"
