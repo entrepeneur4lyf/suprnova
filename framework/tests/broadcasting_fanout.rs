@@ -237,3 +237,112 @@ async fn channel_isolation() {
     let bleed = tokio::time::timeout(Duration::from_millis(50), rx_a.recv()).await;
     assert!(bleed.is_err(), "ch.a should not receive ch.b events");
 }
+
+// ── cross-process presence ───────────────────────────────────────────────────
+
+/// Two hub instances sharing the same stream in loopback mode simulate two
+/// different processes. Each hub tracks a different member; after a brief
+/// propagation window both hubs must be able to list both members via
+/// `list_members`.
+///
+/// This exercises the presence-replication path:
+///   track_member → publish PresenceEvent to __presence__ meta-channel →
+///   consumer pump → apply_presence_event → cross_process_view
+///
+/// Note: `track_member` updates `cross_process_view` directly for the local
+/// instance (immediate consistency), so hub_a sees its own member right away.
+/// The remote member arrives via the stream round-trip within the 500ms window.
+#[tokio::test]
+async fn cross_process_member_visibility() {
+    let hub_a = SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-presence-vis")
+        .await
+        .expect("hub_a connect");
+    let hub_b = SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-presence-vis")
+        .await
+        .expect("hub_b connect");
+
+    // Allow consumer pumps to start.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    hub_a
+        .track_member("presence.lobby", "alice", json!({ "user_id": 1 }))
+        .await;
+    hub_b
+        .track_member("presence.lobby", "bob", json!({ "user_id": 2 }))
+        .await;
+
+    // Allow presence events to round-trip through the stream.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let members_a = hub_a.list_members("presence.lobby").await;
+    let members_b = hub_b.list_members("presence.lobby").await;
+
+    assert_eq!(
+        members_a.len(),
+        2,
+        "hub_a should see both alice and bob; got {members_a:?}"
+    );
+    assert_eq!(
+        members_b.len(),
+        2,
+        "hub_b should see both alice and bob; got {members_b:?}"
+    );
+
+    // Verify the actual member data is present, not just the count.
+    let user_ids_a: Vec<i64> = members_a
+        .iter()
+        .filter_map(|v| v["user_id"].as_i64())
+        .collect();
+    assert!(user_ids_a.contains(&1), "hub_a missing alice; {members_a:?}");
+    assert!(user_ids_a.contains(&2), "hub_a missing bob; {members_a:?}");
+}
+
+/// `untrack_member` removes a member from the cross-process view. After the
+/// removal propagates, the other hub must no longer include that member in
+/// `list_members`.
+#[tokio::test]
+async fn untrack_propagates_across_processes() {
+    let hub_a =
+        SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-presence-untrack")
+            .await
+            .expect("hub_a connect");
+    let hub_b =
+        SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-presence-untrack")
+            .await
+            .expect("hub_b connect");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    hub_a
+        .track_member("presence.lobby", "alice", json!({ "user_id": 1 }))
+        .await;
+    hub_b
+        .track_member("presence.lobby", "bob", json!({ "user_id": 2 }))
+        .await;
+
+    // Wait for both members to be visible on hub_b before removing one.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        hub_b.list_members("presence.lobby").await.len(),
+        2,
+        "setup: hub_b should see both members before untrack"
+    );
+
+    // Remove alice from hub_a.
+    hub_a.untrack_member("presence.lobby", "alice").await;
+
+    // Allow the MemberRemoved event to propagate.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let members = hub_b.list_members("presence.lobby").await;
+    assert_eq!(
+        members.len(),
+        1,
+        "hub_b should only see bob after alice is untracked; got {members:?}"
+    );
+    assert_eq!(
+        members[0]["user_id"],
+        2,
+        "remaining member should be bob; got {members:?}"
+    );
+}
