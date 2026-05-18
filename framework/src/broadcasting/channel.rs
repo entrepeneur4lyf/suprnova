@@ -51,6 +51,24 @@ pub trait Channel: Send + Sync + 'static {
     async fn authorize(&self, _req: &Request, _data: &Value) -> bool {
         true
     }
+
+    /// If this channel carries presence semantics, return `Some(self)`
+    /// cast as `&dyn PresenceChannel`. Default: `None` (non-presence).
+    ///
+    /// Implementers of [`PresenceChannel`] must override this to return
+    /// `Some(self)` — this is the detection hook used by
+    /// `BroadcastingWsHandler` at subscribe time (T6).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// fn presence_info<'a>(&'a self) -> Option<&'a dyn PresenceChannel> {
+    ///     Some(self)
+    /// }
+    /// ```
+    fn presence_info(&self) -> Option<&dyn PresenceChannel> {
+        None
+    }
 }
 
 /// Marker trait for private channels. Used as a type-level signal

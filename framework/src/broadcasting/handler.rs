@@ -23,10 +23,33 @@ use crate::http::Request;
 use crate::ws::{WebSocketHandler, WsSocket};
 use crate::FrameworkError;
 use async_trait::async_trait;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use uuid::Uuid;
+
+// ---------------------------------------------------------------------------
+// Presence state carried alongside each forwarder.
+// ---------------------------------------------------------------------------
+
+/// Presence metadata for a single channel subscription. `None` for
+/// non-presence channels.
+struct PresenceState {
+    member_id: String,
+    info: Value,
+}
+
+/// Combined forwarder entry stored in the per-connection map.
+struct ForwarderEntry {
+    handle: JoinHandle<()>,
+    presence: Option<PresenceState>,
+}
+
+// ---------------------------------------------------------------------------
+// Handler
+// ---------------------------------------------------------------------------
 
 /// The framework's reusable WS handler that implements the
 /// broadcasting subscribe/unsubscribe/publish protocol over the
@@ -57,9 +80,9 @@ impl BroadcastingWsHandler {
 #[async_trait]
 impl WebSocketHandler for BroadcastingWsHandler {
     async fn handle(&self, mut socket: WsSocket, req: Request) -> Result<(), FrameworkError> {
-        // Per-channel forwarder JoinHandles.  Aborted on unsubscribe
-        // or when the connection ends.
-        let forwarders: Arc<Mutex<HashMap<String, JoinHandle<()>>>> =
+        // Per-channel forwarder entries.  Aborted on unsubscribe or
+        // when the connection ends.
+        let forwarders: Arc<Mutex<HashMap<String, ForwarderEntry>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         // Outbound mpsc: forwarders push serialised ServerFrame::Event
@@ -97,7 +120,13 @@ impl WebSocketHandler for BroadcastingWsHandler {
                             .await?;
                         }
                         Ok(ClientFrame::Unsubscribe { channel }) => {
-                            handle_unsubscribe(&channel, &forwarders, &mut socket).await?;
+                            handle_unsubscribe(
+                                &channel,
+                                &self.hub,
+                                &forwarders,
+                                &mut socket,
+                            )
+                            .await?;
                         }
                         Ok(ClientFrame::Publish { channel, event, data }) => {
                             self.hub
@@ -118,10 +147,21 @@ impl WebSocketHandler for BroadcastingWsHandler {
             }
         }
 
-        // Connection closed — abort all forwarder tasks.
+        // Connection closed — publish presence.left for any remaining
+        // presence subscriptions, then abort all forwarder tasks.
         let mut map = forwarders.lock().await;
-        for (_, handle) in map.drain() {
-            handle.abort();
+        for (channel, entry) in map.drain() {
+            if let Some(ps) = entry.presence {
+                self.hub.untrack_member(&channel, &ps.member_id).await;
+                self.hub
+                    .publish(BroadcastEnvelope {
+                        channel: channel.clone(),
+                        event: "presence.left".into(),
+                        data: ps.info,
+                    })
+                    .await;
+            }
+            entry.handle.abort();
         }
         Ok(())
     }
@@ -141,7 +181,7 @@ async fn handle_subscribe(
     req: &Request,
     hub: &Arc<dyn BroadcastHub>,
     registry: &Arc<ChannelRegistry>,
-    forwarders: &Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    forwarders: &Arc<Mutex<HashMap<String, ForwarderEntry>>>,
     outbound_tx: &tokio::sync::mpsc::Sender<String>,
     socket: &mut WsSocket,
 ) -> Result<(), FrameworkError> {
@@ -168,6 +208,18 @@ async fn handle_subscribe(
             .await?;
         return Ok(());
     }
+
+    // Collect presence bootstrap data (snapshot + member id + info) for use
+    // after the forwarder is inserted so hub.subscribe() is already live.
+    let presence_bootstrap: Option<(Vec<Value>, String, Value)> = if let Some(pc) = ch.presence_info()
+    {
+        let existing = hub.list_members(channel).await;
+        let info = pc.member_info(req).await?;
+        let member_id = Uuid::new_v4().to_string();
+        Some((existing, member_id, info))
+    } else {
+        None
+    };
 
     // Subscribe to the hub and spawn a forwarder.
     let mut rx = hub.subscribe(channel);
@@ -201,32 +253,112 @@ async fn handle_subscribe(
         }
     });
 
-    // Replace any existing forwarder for this channel (idempotent re-subscribe).
-    let mut map = forwarders.lock().await;
-    if let Some(old) = map.insert(channel.to_string(), forwarder) {
-        old.abort();
-    }
-    drop(map);
+    // Destructure bootstrap data — used after the forwarder is inserted.
+    let (presence_here_members, presence_member_id, presence_info) =
+        if let Some((existing, mid, info)) = presence_bootstrap {
+            (Some(existing), Some(mid), Some(info))
+        } else {
+            (None, None, None)
+        };
 
+    // Replace any existing forwarder for this channel (idempotent re-subscribe).
+    {
+        let mut map = forwarders.lock().await;
+        if let Some(old) = map.remove(channel) {
+            // Existing subscription being replaced — clean up presence if needed.
+            if let Some(ps) = old.presence {
+                hub.untrack_member(channel, &ps.member_id).await;
+                hub.publish(BroadcastEnvelope {
+                    channel: channel.to_string(),
+                    event: "presence.left".into(),
+                    data: ps.info,
+                })
+                .await;
+            }
+            old.handle.abort();
+        }
+
+        let final_presence = match (presence_member_id.as_deref(), presence_info.as_ref()) {
+            (Some(mid), Some(info)) => Some(PresenceState {
+                member_id: mid.to_string(),
+                info: info.clone(),
+            }),
+            _ => None,
+        };
+
+        map.insert(
+            channel.to_string(),
+            ForwarderEntry {
+                handle: forwarder,
+                presence: final_presence,
+            },
+        );
+    }
+
+    // Send Subscribed ack first.
     let ack = ServerFrame::Subscribed {
         channel: channel.to_string(),
     };
     socket
         .send_text(serde_json::to_string(&ack).unwrap_or_default())
         .await?;
+
+    // Presence post-subscribe steps — forwarder is now live so
+    // hub.subscribe() receiver is already active.
+    if let (Some(existing), Some(mid), Some(info)) =
+        (presence_here_members, presence_member_id, presence_info)
+    {
+        // Track member AFTER taking the snapshot so self is absent from
+        // the presence.here payload (standard Pusher behaviour).
+        hub.track_member(channel, &mid, info.clone()).await;
+
+        // presence.here — sent directly to this socket only (not via hub).
+        let here = ServerFrame::Event {
+            channel: channel.to_string(),
+            event: "presence.here".into(),
+            data: json!({ "members": existing }),
+        };
+        socket
+            .send_text(serde_json::to_string(&here).unwrap_or_default())
+            .await?;
+
+        // presence.joined — published via hub so all subscribers receive it
+        // (including the new subscriber via their forwarder — that's the
+        // standard Pusher self-join behaviour; clients filter by member_id).
+        hub.publish(BroadcastEnvelope {
+            channel: channel.to_string(),
+            event: "presence.joined".into(),
+            data: info,
+        })
+        .await;
+    }
+
     Ok(())
 }
 
 async fn handle_unsubscribe(
     channel: &str,
-    forwarders: &Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    hub: &Arc<dyn BroadcastHub>,
+    forwarders: &Arc<Mutex<HashMap<String, ForwarderEntry>>>,
     socket: &mut WsSocket,
 ) -> Result<(), FrameworkError> {
-    let mut map = forwarders.lock().await;
-    if let Some(handle) = map.remove(channel) {
-        handle.abort();
+    let entry = {
+        let mut map = forwarders.lock().await;
+        map.remove(channel)
+    };
+
+    if let Some(e) = entry {
+        if let Some(ps) = e.presence {
+            hub.untrack_member(channel, &ps.member_id).await;
+            hub.publish(BroadcastEnvelope {
+                channel: channel.to_string(),
+                event: "presence.left".into(),
+                data: ps.info,
+            })
+            .await;
+        }
+        e.handle.abort();
     }
-    drop(map);
 
     let ack = ServerFrame::Unsubscribed {
         channel: channel.to_string(),

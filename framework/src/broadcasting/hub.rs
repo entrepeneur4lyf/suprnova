@@ -11,6 +11,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
+use tokio::sync::RwLock as AsyncRwLock;
 
 /// Per-channel broadcast buffer capacity. Subscribers that fall this
 /// far behind get a `RecvError::Lagged(n)` on the next recv; the
@@ -55,17 +56,39 @@ pub trait BroadcastHub: Send + Sync + 'static {
     fn subscriber_count(&self, _channel: &str) -> usize {
         0
     }
+
+    /// Track a presence member on a channel. The `member_id` is a
+    /// per-connection UUID assigned by the handler; `info` is the
+    /// public payload returned by [`PresenceChannel::member_info`].
+    ///
+    /// Default: no-op, so future fanout implementations (T11) can
+    /// implement member tracking lazily.
+    async fn track_member(&self, _channel: &str, _member_id: &str, _info: Value) {}
+
+    /// Remove a previously tracked member. Called on unsubscribe or
+    /// connection close. Default: no-op.
+    async fn untrack_member(&self, _channel: &str, _member_id: &str) {}
+
+    /// Return the current member list for a channel — each element is
+    /// the `info` value passed to [`track_member`] for a live member.
+    /// Default: empty vec.
+    async fn list_members(&self, _channel: &str) -> Vec<Value> {
+        Vec::new()
+    }
 }
 
 /// In-process broadcast hub. Default for single-process apps.
 pub struct InMemoryBroadcastHub {
     channels: Arc<RwLock<HashMap<String, broadcast::Sender<BroadcastEnvelope>>>>,
+    /// Per-channel presence members: channel → (member_id → info).
+    members: Arc<AsyncRwLock<HashMap<String, HashMap<String, Value>>>>,
 }
 
 impl InMemoryBroadcastHub {
     pub fn new() -> Self {
         Self {
             channels: Arc::new(RwLock::new(HashMap::new())),
+            members: Arc::new(AsyncRwLock::new(HashMap::new())),
         }
     }
 
@@ -115,6 +138,27 @@ impl BroadcastHub for InMemoryBroadcastHub {
             .ok()
             .and_then(|m| m.get(channel).map(|tx| tx.receiver_count()))
             .unwrap_or(0)
+    }
+
+    async fn track_member(&self, channel: &str, member_id: &str, info: Value) {
+        let mut map = self.members.write().await;
+        map.entry(channel.to_string())
+            .or_default()
+            .insert(member_id.to_string(), info);
+    }
+
+    async fn untrack_member(&self, channel: &str, member_id: &str) {
+        let mut map = self.members.write().await;
+        if let Some(ch_members) = map.get_mut(channel) {
+            ch_members.remove(member_id);
+        }
+    }
+
+    async fn list_members(&self, channel: &str) -> Vec<Value> {
+        let map = self.members.read().await;
+        map.get(channel)
+            .map(|ch| ch.values().cloned().collect())
+            .unwrap_or_default()
     }
 }
 
