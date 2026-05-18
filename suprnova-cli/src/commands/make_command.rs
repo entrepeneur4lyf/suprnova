@@ -116,10 +116,9 @@ pub fn run(name: String) {
     let lib_rs = Path::new("src/lib.rs");
     if lib_rs.exists() {
         let contents = fs::read_to_string(lib_rs).unwrap_or_default();
-        let has_commands_mod = contents.lines().any(|line| {
-            let trimmed = line.trim();
-            trimmed == "pub mod commands;" || trimmed.starts_with("pub mod commands;")
-        });
+        let has_commands_mod = contents
+            .lines()
+            .any(|line| line.trim().starts_with("pub mod commands;"));
         if !has_commands_mod {
             ui::br();
             ui::warning(

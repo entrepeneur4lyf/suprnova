@@ -145,7 +145,7 @@ fn make_command_does_not_warn_when_lib_rs_has_commands_mod_declaration() {
         + &String::from_utf8_lossy(&output.stderr);
 
     assert!(
-        !combined.contains("pub mod commands;` is missing"),
+        !combined.contains("does not declare `pub mod commands"),
         "no warning when the declaration is present; got:\n{combined}"
     );
 }
