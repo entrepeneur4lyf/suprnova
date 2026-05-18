@@ -14,6 +14,11 @@ use suprnova_macros::command;
 #[command(name = "db:seed", description = "Run all registered seeders")]
 async fn db_seed(_args: Vec<String>) -> Result<(), FrameworkError> {
     if seed::count() == 0 {
+        // Two channels by design: eprintln so the user actually
+        // sees feedback in the absence of a configured tracing
+        // subscriber; tracing::warn so observability tools still
+        // pick it up in production.
+        eprintln!("db:seed: no seeders registered — nothing to run");
         tracing::warn!("db:seed: no seeders registered — nothing to run");
         return Ok(());
     }
