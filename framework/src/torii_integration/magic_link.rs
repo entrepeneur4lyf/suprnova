@@ -2,24 +2,25 @@
 //!
 //! Wraps torii's `MagicLinkAuth` service behind the Suprnova `Auth::magic_link()` facade.
 //!
-//! # Mailer behaviour
+//! # Email delivery
 //!
-//! The underlying [`torii::MagicLinkAuth::send_link`] sends a magic-link email when a
-//! mailer is configured on the Torii instance **and** the `mailer` feature is active.
-//! In the current Phase-3 setup, neither is true — so `send_link` degrades to a pure
-//! token-generation call (the `callback_url` is accepted but not emailed). Real email
-//! delivery is Phase 5 (Queue + Mail) territory.
+//! Suprnova owns the [`crate::Mail`] facade — torii's optional `mailer` feature
+//! is intentionally disabled. The facade always returns the plaintext token to
+//! the caller, who is responsible for shipping it to the user (typically by
+//! constructing `{callback_url}?token={token}` and dispatching a `Mailable`
+//! via `Mail::send`).
 //!
-//! The Suprnova facade **always returns the token string** so callers can emit it
-//! themselves (e.g. embed it in a URL and write it to a log/channel for tests, or hand
-//! it to a queue job for actual delivery later).
+//! For email-verification, password-reset, and password-changed emails the
+//! framework provides ready-made flows in [`crate::auth_flows`] that wire
+//! token generation to a [`crate::mail::Mailable`]. Magic-link delivery is
+//! left to the application because the message body is product-specific.
 //!
 //! # Example
 //!
 //! ```rust,ignore
 //! use suprnova::Auth;
 //!
-//! // Generate a magic-link token (and optionally email it, if a mailer is configured).
+//! // Generate a magic-link token. The framework does NOT email it for you.
 //! let token = Auth::magic_link()
 //!     .send("alice@example.com", "http://localhost:8000/auth/magic")
 //!     .await?;
@@ -41,12 +42,12 @@ pub struct MagicLinkAuth;
 impl MagicLinkAuth {
     /// Generate a magic-link token for the given email address.
     ///
-    /// If a mailer is configured on the Torii instance the user also receives an
-    /// email containing `{callback_url}?token={token}`.  Without a mailer, this
-    /// call simply creates and returns the token — the caller is responsible for
-    /// delivering it.
+    /// Returns the plaintext token — the caller assembles the URL
+    /// (`{callback_url}?token={token}`) and emails it. Suprnova does not
+    /// dispatch the magic-link email automatically; build a [`crate::mail::Mailable`]
+    /// and call [`crate::Mail::send`].
     ///
-    /// The email account is created on first use (torii's `get_or_create_user`
+    /// The user account is created on first use (torii's `get_or_create_user`
     /// semantics), so callers do not need to pre-register a user.
     ///
     /// # Errors
