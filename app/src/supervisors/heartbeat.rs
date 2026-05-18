@@ -4,13 +4,16 @@
 //! confirming the process is alive. The dogfood interval is 5 seconds so the
 //! log is visible quickly in `cargo run --bin app` output.
 //!
-//! The supervisor never returns normally (`RestartPolicy::Always`), so if it
-//! somehow exits it will be restarted by the framework.
+//! The supervisor uses `tokio::select!` on the cancel token so it exits
+//! cleanly during graceful shutdown instead of being force-aborted.
+//! Without the select the `RestartPolicy::Always` loop would keep the
+//! process alive past the 5-second drain deadline.
 
 use async_trait::async_trait;
 use std::time::Duration;
 use suprnova::supervisor::{RestartPolicy, Supervisor};
 use suprnova::{FrameworkError, SupervisorEntry};
+use tokio_util::sync::CancellationToken;
 
 /// Emits `INFO supervisor heartbeat tick` every 5 seconds.
 ///
@@ -23,16 +26,18 @@ impl Supervisor for LogHeartbeat {
         "heartbeat"
     }
 
-    async fn run(&self) -> Result<(), FrameworkError> {
+    async fn run(&self, cancel: CancellationToken) -> Result<(), FrameworkError> {
         loop {
-            tracing::info!("supervisor heartbeat tick");
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    tracing::info!("heartbeat shutdown");
+                    return Ok(());
+                }
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                    tracing::info!("supervisor heartbeat tick");
+                }
+            }
         }
-        // Unreachable in normal operation — the loop above never returns.
-        // The Always restart policy ensures the supervisor is restarted if
-        // this somehow exits (e.g. due to a future code change).
-        #[allow(unreachable_code)]
-        Ok(())
     }
 
     fn restart_policy(&self) -> RestartPolicy {

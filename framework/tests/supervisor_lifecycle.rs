@@ -1,15 +1,18 @@
 //! Integration tests for the supervisor restart lifecycle.
 //!
-//! These tests exercise `run_with_restart_for_testing` directly — bypassing
-//! the inventory registry — so they can construct supervisors with test state.
+//! These tests exercise `run_with_restart_for_testing` (and the cancel-token
+//! variant) directly — bypassing the inventory registry — so they can
+//! construct supervisors with test state.
 
 use async_trait::async_trait;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use suprnova::supervisor::{RestartPolicy, Supervisor, SupervisorRegistry};
 use suprnova::supervisor::run_with_restart_for_testing;
+use suprnova::supervisor::run_with_restart_for_testing_with_cancel;
 use suprnova::FrameworkError;
+use tokio_util::sync::CancellationToken;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -25,7 +28,7 @@ impl Supervisor for CountingSupervisor {
         "counting"
     }
 
-    async fn run(&self) -> Result<(), FrameworkError> {
+    async fn run(&self, _cancel: CancellationToken) -> Result<(), FrameworkError> {
         let n = self.counter.fetch_add(1, Ordering::SeqCst);
         if n < self.fail_until {
             return Err(FrameworkError::internal("fake failure"));
@@ -51,7 +54,7 @@ impl Supervisor for AlwaysOkSupervisor {
         "always_ok"
     }
 
-    async fn run(&self) -> Result<(), FrameworkError> {
+    async fn run(&self, _cancel: CancellationToken) -> Result<(), FrameworkError> {
         let n = self.counter.fetch_add(1, Ordering::SeqCst);
         if n >= self.stop_after {
             // Park so the outer test timeout fires and aborts the task.
@@ -127,7 +130,7 @@ async fn never_policy_runs_once() {
     #[async_trait]
     impl Supervisor for NeverSupervisor {
         fn name(&self) -> &'static str { "never" }
-        async fn run(&self) -> Result<(), FrameworkError> {
+        async fn run(&self, _cancel: CancellationToken) -> Result<(), FrameworkError> {
             self.counter.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -185,4 +188,85 @@ async fn backoff_increases_between_restarts() {
 #[tokio::test]
 async fn start_all_does_not_panic() {
     SupervisorRegistry::start_all().await;
+}
+
+/// A supervisor that honours the cancel token exits cleanly within the
+/// grace window — no timeout, no abort needed.
+#[tokio::test]
+async fn supervisor_exits_when_cancel_token_fires() {
+    struct ExitOnCancel {
+        exited: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl Supervisor for ExitOnCancel {
+        fn name(&self) -> &'static str { "exit_on_cancel" }
+
+        async fn run(&self, cancel: CancellationToken) -> Result<(), FrameworkError> {
+            cancel.cancelled().await;
+            self.exited.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn restart_policy(&self) -> RestartPolicy { RestartPolicy::Never }
+    }
+
+    let exited = Arc::new(AtomicBool::new(false));
+    let sv: Arc<dyn Supervisor> = Arc::new(ExitOnCancel { exited: exited.clone() });
+    let cancel = CancellationToken::new();
+    let handle = tokio::spawn(run_with_restart_for_testing_with_cancel(sv, cancel.clone()));
+
+    // Sanity check: the supervisor is parked waiting for the token — not yet exited.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!exited.load(Ordering::SeqCst), "supervisor should still be running");
+
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_millis(500), handle)
+        .await
+        .expect("supervisor did not exit within 500ms after cancel")
+        .expect("supervisor task panicked");
+
+    assert!(exited.load(Ordering::SeqCst), "supervisor exited cleanly on cancel");
+}
+
+/// Cancelling a supervisor that uses Always policy does NOT cause a restart:
+/// the restart loop checks cancel.is_cancelled() before each new run.
+#[tokio::test]
+async fn cancel_prevents_restart_under_always_policy() {
+    struct AlwaysOkInstant {
+        counter: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Supervisor for AlwaysOkInstant {
+        fn name(&self) -> &'static str { "always_ok_instant" }
+
+        async fn run(&self, _cancel: CancellationToken) -> Result<(), FrameworkError> {
+            self.counter.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn restart_policy(&self) -> RestartPolicy { RestartPolicy::Always }
+    }
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let sv: Arc<dyn Supervisor> = Arc::new(AlwaysOkInstant { counter: counter.clone() });
+    let cancel = CancellationToken::new();
+
+    // Cancel before spawning — the restart loop should exit immediately after
+    // the first run (cancel.is_cancelled() is true at the top of loop #2).
+    cancel.cancel();
+    let handle = tokio::spawn(run_with_restart_for_testing_with_cancel(sv, cancel));
+
+    tokio::time::timeout(Duration::from_millis(500), handle)
+        .await
+        .expect("supervisor did not exit within 500ms")
+        .expect("supervisor task panicked");
+
+    // Should have run exactly once: the pre-cancel check fires before any restart.
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "Always supervisor should run once then stop when pre-cancelled"
+    );
 }

@@ -17,6 +17,7 @@
 //! use async_trait::async_trait;
 //! use suprnova::{FrameworkError, supervisor::{RestartPolicy, Supervisor, SupervisorEntry}};
 //! use std::time::Duration;
+//! use tokio_util::sync::CancellationToken;
 //!
 //! pub struct MyPoller;
 //!
@@ -24,10 +25,14 @@
 //! impl Supervisor for MyPoller {
 //!     fn name(&self) -> &'static str { "my_poller" }
 //!
-//!     async fn run(&self) -> Result<(), FrameworkError> {
+//!     async fn run(&self, cancel: CancellationToken) -> Result<(), FrameworkError> {
 //!         loop {
-//!             // do work
-//!             tokio::time::sleep(Duration::from_secs(30)).await;
+//!             tokio::select! {
+//!                 _ = cancel.cancelled() => return Ok(()),
+//!                 _ = tokio::time::sleep(Duration::from_secs(30)) => {
+//!                     // do work
+//!                 }
+//!             }
 //!         }
 //!     }
 //!
@@ -60,16 +65,57 @@
 //!
 //! # Shutdown
 //!
-//! v1 does not drain supervisors on graceful shutdown. `start_all` detaches
-//! every spawned task. Graceful shutdown lands alongside the WebSocket task
-//! drain pattern in a future release.
+//! [`SupervisorRegistry::start_all`] initializes a per-process
+//! [`SUPERVISOR_TASKS`] JoinSet and a shared [`SUPERVISOR_CANCEL`]
+//! CancellationToken. Every supervisor task is spawned into the JoinSet.
+//! On Ctrl-C / SIGTERM, `Server::run` cancels the token and drains the
+//! JoinSet with a 5-second grace window, then `abort_all` for any
+//! stragglers — the same pattern used by the WebSocket task drain.
+//!
+//! Supervisors that `tokio::select!` on `cancel.cancelled()` exit cleanly
+//! within the grace window. Supervisors that ignore the token get aborted
+//! after the deadline.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
+use tokio::sync::Mutex as TokioMutex;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use crate::error::FrameworkError;
 
 pub mod registry;
 pub use registry::SupervisorEntry;
+
+// ── Per-process statics ───────────────────────────────────────────────────────
+
+/// JoinSet of all active supervisor restart-loop tasks.
+///
+/// Initialized by [`SupervisorRegistry::start_all`]. `Server::run` drains
+/// this on shutdown (5-second grace window + `abort_all` fallback).
+static SUPERVISOR_TASKS: OnceLock<TokioMutex<JoinSet<()>>> = OnceLock::new();
+
+/// Shared cancellation token broadcast to every supervisor's `run()`.
+///
+/// `Server::run` calls `.cancel()` at shutdown; supervisor implementations
+/// that `tokio::select!` on `cancel.cancelled()` exit cleanly within the
+/// grace window.
+static SUPERVISOR_CANCEL: OnceLock<CancellationToken> = OnceLock::new();
+
+// ── Public accessors (used by Server::run) ────────────────────────────────────
+
+/// Returns a reference to the supervisor task JoinSet, if initialized.
+///
+/// `None` before [`SupervisorRegistry::start_all`] has been called.
+pub fn supervisor_tasks() -> Option<&'static TokioMutex<JoinSet<()>>> {
+    SUPERVISOR_TASKS.get()
+}
+
+/// Returns a reference to the shared cancellation token, if initialized.
+///
+/// `None` before [`SupervisorRegistry::start_all`] has been called.
+pub fn supervisor_cancel_token() -> Option<&'static CancellationToken> {
+    SUPERVISOR_CANCEL.get()
+}
 
 // ── Trait ────────────────────────────────────────────────────────────────────
 
@@ -78,16 +124,34 @@ pub use registry::SupervisorEntry;
 /// Implement this trait and register your concrete type via
 /// `inventory::submit!(SupervisorEntry { factory: || Box::new(MyType) })`.
 /// The framework will spawn your `run()` in a restart loop at boot.
+///
+/// The `cancel` token is shared across all restarts of this supervisor
+/// instance. When `Server::run` initiates shutdown it calls `.cancel()`,
+/// signalling every running supervisor to stop. Supervisors should
+/// `tokio::select!` on `cancel.cancelled()` so they exit cleanly within
+/// the 5-second drain window. Supervisors that do not honor the token are
+/// aborted by the JoinSet after the deadline.
 #[async_trait]
 pub trait Supervisor: Send + Sync + 'static {
     /// Human-readable identifier used in log output. Must be `'static`.
     fn name(&self) -> &'static str;
 
-    /// The body of the supervised task. Return `Err` on failure (triggers a
-    /// restart under `OnError` / `Always` policies). Return `Ok(())` to
-    /// signal natural completion (only makes sense for `Never` / `OnError`
-    /// one-shot supervisors).
-    async fn run(&self) -> Result<(), FrameworkError>;
+    /// The body of the supervised task.
+    ///
+    /// Return `Err` on failure (triggers a restart under `OnError` /
+    /// `Always` policies). Return `Ok(())` to signal natural completion
+    /// (only makes sense for `Never` / `OnError` one-shot supervisors).
+    ///
+    /// The `cancel` token is cancelled by the framework when the server
+    /// shuts down. Use `tokio::select!` to watch it:
+    ///
+    /// ```rust,ignore
+    /// tokio::select! {
+    ///     _ = cancel.cancelled() => return Ok(()),
+    ///     _ = do_work() => {}
+    /// }
+    /// ```
+    async fn run(&self, cancel: CancellationToken) -> Result<(), FrameworkError>;
 
     /// How the framework reacts when `run()` returns (or panics).
     ///
@@ -124,17 +188,24 @@ impl SupervisorRegistry {
     /// Spawn every supervisor that was registered via `inventory::submit!` at
     /// compile time.
     ///
-    /// Each supervisor runs in its own `tokio::spawn` restart loop. The
-    /// spawned tasks are detached — they run for the lifetime of the process
-    /// with no handle retained by the caller (v1 does not implement graceful
-    /// shutdown for supervisors).
+    /// Each supervisor runs in its own restart-loop task spawned into the
+    /// per-process [`SUPERVISOR_TASKS`] JoinSet. The shared
+    /// [`SUPERVISOR_CANCEL`] token is passed into every `run()` call so
+    /// supervisors can exit cleanly on shutdown.
     ///
     /// Call this once at application boot, e.g. inside `bootstrap::register`.
+    /// Subsequent calls are idempotent — the statics are `OnceLock`s.
     pub async fn start_all() {
+        // OnceLock::set silently fails if already initialized — idempotent.
+        let _ = SUPERVISOR_TASKS.set(TokioMutex::new(JoinSet::new()));
+        let cancel = SUPERVISOR_CANCEL.get_or_init(CancellationToken::new).clone();
+
+        let mut tasks_guard = SUPERVISOR_TASKS.get().unwrap().lock().await;
         for entry in inventory::iter::<SupervisorEntry> {
             let supervisor: Arc<dyn Supervisor> = Arc::from((entry.factory)());
             let name = supervisor.name();
-            tokio::spawn(run_with_restart(supervisor));
+            let cancel_clone = cancel.clone();
+            tasks_guard.spawn(run_with_restart(supervisor, cancel_clone));
             tracing::info!(supervisor = name, "supervisor started");
         }
     }
@@ -150,11 +221,16 @@ impl SupervisorRegistry {
 ///
 /// The backoff starts at 100 ms and doubles on each restart, capped at 60 s.
 /// Backoff applies on every restart path (both `Err` and `Always`-on-`Ok`).
-async fn run_with_restart(supervisor: Arc<dyn Supervisor>) {
+///
+/// The `cancel` token is shared across all restarts. If it is cancelled at
+/// the top of the loop (or during the backoff sleep), the restart loop exits
+/// immediately without spawning another run.
+async fn run_with_restart(supervisor: Arc<dyn Supervisor>, cancel: CancellationToken) {
     let mut backoff_ms: u64 = 100;
     loop {
         let sv = Arc::clone(&supervisor);
-        let handle = tokio::spawn(async move { sv.run().await });
+        let cancel_for_run = cancel.clone();
+        let handle = tokio::spawn(async move { sv.run(cancel_for_run).await });
 
         let outcome: Result<(), String> = match handle.await {
             Ok(Ok(())) => Ok(()),
@@ -165,7 +241,8 @@ async fn run_with_restart(supervisor: Arc<dyn Supervisor>) {
             Err(join_err) => Err(format!("join error: {:?}", join_err)),
         };
 
-        match (supervisor.restart_policy(), outcome) {
+        // Decide whether to restart. Never / OnError+Ok return early here.
+        match (supervisor.restart_policy(), &outcome) {
             (RestartPolicy::Never, _) => {
                 // One-shot — never restart regardless of outcome.
                 return;
@@ -178,7 +255,7 @@ async fn run_with_restart(supervisor: Arc<dyn Supervisor>) {
                 );
                 return;
             }
-            (RestartPolicy::OnError, Err(ref e)) | (RestartPolicy::Always, Err(ref e)) => {
+            (RestartPolicy::OnError, Err(e)) | (RestartPolicy::Always, Err(e)) => {
                 tracing::error!(
                     supervisor = supervisor.name(),
                     error = %e,
@@ -195,7 +272,24 @@ async fn run_with_restart(supervisor: Arc<dyn Supervisor>) {
             }
         }
 
-        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+        // If cancel fired while run() was executing (or was already set when
+        // we reach this point), don't restart — exit cleanly.
+        if cancel.is_cancelled() {
+            tracing::info!(
+                supervisor = supervisor.name(),
+                "supervisor shutdown requested; not restarting"
+            );
+            return;
+        }
+
+        // Wait for the backoff delay, but abort early if cancel fires.
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::info!(supervisor = supervisor.name(), "supervisor shutdown during backoff; exiting");
+                return;
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)) => {}
+        }
         backoff_ms = (backoff_ms * 2).min(60_000); // cap at 60 s
     }
 }
@@ -203,10 +297,25 @@ async fn run_with_restart(supervisor: Arc<dyn Supervisor>) {
 /// Public entry point for integration tests that need to exercise the restart
 /// loop directly without going through the inventory registry.
 ///
+/// Passes a fresh [`CancellationToken`] that is never cancelled, so existing
+/// tests that don't need cancel-token behaviour continue to work unchanged.
+///
 /// Exposed as `pub` only because it is needed by `framework/tests/supervisor_lifecycle.rs`.
 /// Application code should use [`SupervisorRegistry::start_all`] instead.
 pub async fn run_with_restart_for_testing(supervisor: Arc<dyn Supervisor>) {
-    run_with_restart(supervisor).await
+    let cancel = CancellationToken::new();
+    run_with_restart(supervisor, cancel).await
+}
+
+/// Variant of [`run_with_restart_for_testing`] that accepts an explicit
+/// [`CancellationToken`], enabling tests that verify graceful shutdown.
+///
+/// Exposed as `pub` only for `framework/tests/supervisor_lifecycle.rs`.
+pub async fn run_with_restart_for_testing_with_cancel(
+    supervisor: Arc<dyn Supervisor>,
+    cancel: CancellationToken,
+) {
+    run_with_restart(supervisor, cancel).await
 }
 
 // ── Unit tests ───────────────────────────────────────────────────────────────
@@ -225,7 +334,7 @@ mod tests {
         fn name(&self) -> &'static str {
             "one_shot"
         }
-        async fn run(&self) -> Result<(), FrameworkError> {
+        async fn run(&self, _cancel: CancellationToken) -> Result<(), FrameworkError> {
             self.counter.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -240,7 +349,7 @@ mod tests {
         let sv: Arc<dyn Supervisor> = Arc::new(OneShotSupervisor {
             counter: counter.clone(),
         });
-        run_with_restart(sv).await;
+        run_with_restart(sv, CancellationToken::new()).await;
         assert_eq!(counter.load(Ordering::SeqCst), 1, "Never should run exactly once");
     }
 
@@ -254,7 +363,7 @@ mod tests {
         fn name(&self) -> &'static str {
             "panicking"
         }
-        async fn run(&self) -> Result<(), FrameworkError> {
+        async fn run(&self, _cancel: CancellationToken) -> Result<(), FrameworkError> {
             let n = self.counter.fetch_add(1, Ordering::SeqCst);
             if n < self.max_runs - 1 {
                 panic!("deliberate test panic");
@@ -276,7 +385,7 @@ mod tests {
 
         // Wrap in a separate spawn so the panic handling in run_with_restart
         // can work correctly.
-        let handle = tokio::spawn(run_with_restart(sv));
+        let handle = tokio::spawn(run_with_restart(sv, CancellationToken::new()));
 
         // Wait generously for 2 runs (1 panic + 1 ok): 100 ms backoff after first.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
