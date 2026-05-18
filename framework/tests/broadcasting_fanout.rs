@@ -165,6 +165,45 @@ async fn track_and_list_members() {
     assert_eq!(members[0]["name"], "Bob");
 }
 
+// ── cross-hub delivery ───────────────────────────────────────────────────────
+
+/// Two hub instances sharing the same stream_key (loopback): a message
+/// published on hub1 reaches hub2's subscriber.
+///
+/// This exercises the deliver branch of the consumer pump — the path that
+/// calls `local.publish(tagged.envelope)` when the inbound message's
+/// `instance_id` does NOT match the receiving hub's own ID.
+///
+/// Both hubs share the process-global stdio consumer table keyed by stream
+/// name. With loopback enabled, hub1's producer write is dispatched to all
+/// registered consumers on the same stream_key, including hub2's consumer.
+#[tokio::test]
+async fn cross_hub_delivery() {
+    let hub1 = SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-cross")
+        .await
+        .expect("hub1 connect");
+    let hub2 = SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-cross")
+        .await
+        .expect("hub2 connect");
+
+    // Subscribe on hub2 before hub1 publishes.
+    let mut rx = hub2.subscribe("chat.shared");
+
+    hub1.publish(envelope("chat.shared", "Posted", json!({ "from": "hub1" })))
+        .await;
+
+    // hub2's subscriber must receive the message (via the consumer pump's
+    // deliver branch, NOT local fanout — hub2 didn't call publish locally).
+    let msg = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("hub2 received hub1's message within 1s")
+        .expect("recv ok");
+
+    assert_eq!(msg.channel, "chat.shared");
+    assert_eq!(msg.event, "Posted");
+    assert_eq!(msg.data["from"], "hub1");
+}
+
 // ── multi-channel isolation ──────────────────────────────────────────────────
 
 /// Subscribers on different channels don't bleed messages.
