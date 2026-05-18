@@ -321,18 +321,25 @@ where
 /// `routes!` macro calls `register(router)` on each item to fold
 /// them into a single `Router`.
 ///
-/// Per-route middleware can be chained via `.middleware(M)`:
+/// Per-route middleware can be chained via `.middleware(M)`, and a
+/// per-route [`WsConfig`] can be set via `.config(WsConfig)`:
 ///
 /// ```rust,ignore
-/// ws!("/ws/private", PrivateHandler).middleware(SessionMiddleware::new())
+/// ws!("/ws/chat", ChatHandler)
+///     .config(WsConfig { ping_interval: Duration::from_secs(5), ..Default::default() })
+///     .middleware(SessionMiddleware::new())
 /// ```
 ///
-/// The chain runs over the upgrade `Request` before the handler is
-/// dispatched; a non-2xx response short-circuits the upgrade.
+/// Both chains compose in any order. The middleware chain runs over
+/// the upgrade `Request` before the handler is dispatched; a non-2xx
+/// response short-circuits the upgrade.
+///
+/// [`WsConfig`]: crate::ws::WsConfig
 pub struct WsRouteDef {
     path: &'static str,
     handler: crate::ws::BoxedWebSocketHandler,
     middleware: Vec<BoxedMiddleware>,
+    config: Option<crate::ws::WsConfig>,
 }
 
 impl WsRouteDef {
@@ -348,6 +355,7 @@ impl WsRouteDef {
             path,
             handler: boxed,
             middleware: Vec::new(),
+            config: None,
         }
     }
 
@@ -362,10 +370,35 @@ impl WsRouteDef {
         self
     }
 
+    /// Override the default [`WsConfig`] for this route. Use to set
+    /// per-route `ping_interval`, `max_message_size`, `max_frame_size`,
+    /// or `max_missed_pings`. Routes without `.config(...)` use the
+    /// framework default ([`WsConfig::default()`]).
+    ///
+    /// Can be chained before or after `.middleware(M)`:
+    ///
+    /// ```rust,ignore
+    /// ws!("/ws/chat", ChatHandler)
+    ///     .config(WsConfig { ping_interval: Duration::from_secs(5), ..Default::default() })
+    ///     .middleware(SessionMiddleware::new())
+    /// ```
+    ///
+    /// [`WsConfig`]: crate::ws::WsConfig
+    /// [`WsConfig::default()`]: crate::ws::WsConfig::default
+    pub fn config(mut self, config: crate::ws::WsConfig) -> Self {
+        self.config = Some(config);
+        self
+    }
+
     /// Register this WS route on the given `Router`. Called by the
     /// `routes!` macro's expansion; not intended for direct use.
     pub fn register(self, router: Router) -> Router {
-        router.ws_boxed_with_middleware(self.path, self.handler, self.middleware)
+        router.ws_boxed_with_middleware_and_config(
+            self.path,
+            self.handler,
+            self.middleware,
+            self.config,
+        )
     }
 }
 

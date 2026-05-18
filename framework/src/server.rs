@@ -509,7 +509,10 @@ async fn handle_ws_upgrade(
     let middleware_list: Vec<crate::middleware::BoxedMiddleware> =
         ws_match.middleware().clone();
 
-    let config = crate::ws::WsConfig::default();
+    let config = ws_match
+        .config()
+        .cloned()
+        .unwrap_or_default();
     let heartbeat_interval = config.ping_interval;
     let tungstenite_config = config.to_tungstenite_config();
 

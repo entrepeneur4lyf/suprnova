@@ -83,10 +83,11 @@ pub struct Router {
     /// returns a different shape (`WsMatch` instead of `(pattern,
     /// handler, params)`).
     ///
-    /// Each entry stores `(pattern, handler, per_route_middleware)` so
-    /// the per-route middleware chain can be recovered by `match_ws`
-    /// and run in `handle_ws_upgrade` before dispatching the handler.
-    ws_routes: MatchitRouter<(String, BoxedWebSocketHandler, Vec<BoxedMiddleware>)>,
+    /// Each entry stores `(pattern, handler, per_route_middleware,
+    /// optional_ws_config)` so the per-route middleware chain and
+    /// optional `WsConfig` override can be recovered by `match_ws`
+    /// and used in `handle_ws_upgrade`.
+    ws_routes: MatchitRouter<(String, BoxedWebSocketHandler, Vec<BoxedMiddleware>, Option<crate::ws::WsConfig>)>,
     /// Middleware assignments: (method, path) -> boxed middleware instances.
     ///
     /// Keying by `(Method, String)` rather than path alone prevents
@@ -274,7 +275,34 @@ impl Router {
         H: crate::ws::WebSocketHandler,
     {
         let boxed: BoxedWebSocketHandler = std::sync::Arc::new(handler);
-        self.ws_boxed_with_middleware(path, boxed, Vec::new())
+        self.ws_boxed_with_middleware_and_config(path, boxed, Vec::new(), None)
+    }
+
+    /// Register a WebSocket route with a per-route [`WsConfig`] override.
+    ///
+    /// Use to set per-route ping_interval, max_message_size, max_frame_size,
+    /// or max_missed_pings. Routes without an explicit config use the
+    /// framework default.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use std::time::Duration;
+    /// use suprnova::ws::WsConfig;
+    ///
+    /// Router::new().ws_with_config("/ws/chat", ChatHandler, WsConfig {
+    ///     ping_interval: Duration::from_secs(5),
+    ///     ..Default::default()
+    /// })
+    /// ```
+    ///
+    /// [`WsConfig`]: crate::ws::WsConfig
+    pub fn ws_with_config<H>(self, path: &str, handler: H, config: crate::ws::WsConfig) -> Router
+    where
+        H: crate::ws::WebSocketHandler,
+    {
+        let boxed: BoxedWebSocketHandler = std::sync::Arc::new(handler);
+        self.ws_boxed_with_middleware_and_config(path, boxed, Vec::new(), Some(config))
     }
 
     /// Register a WebSocket route with a pre-populated middleware list.
@@ -294,7 +322,23 @@ impl Router {
         H: crate::ws::WebSocketHandler,
     {
         let boxed: BoxedWebSocketHandler = std::sync::Arc::new(handler);
-        self.ws_boxed_with_middleware(path, boxed, middleware)
+        self.ws_boxed_with_middleware_and_config(path, boxed, middleware, None)
+    }
+
+    /// Register a WebSocket route with both a middleware list and a per-route
+    /// [`WsConfig`] override.
+    pub fn ws_with_middleware_and_config<H>(
+        self,
+        path: &str,
+        handler: H,
+        middleware: Vec<BoxedMiddleware>,
+        config: crate::ws::WsConfig,
+    ) -> Router
+    where
+        H: crate::ws::WebSocketHandler,
+    {
+        let boxed: BoxedWebSocketHandler = std::sync::Arc::new(handler);
+        self.ws_boxed_with_middleware_and_config(path, boxed, middleware, Some(config))
     }
 
     /// Register a pre-boxed WebSocket handler. Used internally by
@@ -303,7 +347,7 @@ impl Router {
     /// parameter.
     #[doc(hidden)]
     pub fn ws_boxed(self, path: &str, handler: BoxedWebSocketHandler) -> Router {
-        self.ws_boxed_with_middleware(path, handler, Vec::new())
+        self.ws_boxed_with_middleware_and_config(path, handler, Vec::new(), None)
     }
 
     /// Register a pre-boxed WebSocket handler with a per-route middleware list.
@@ -312,21 +356,40 @@ impl Router {
     /// chained via `.middleware(M)`.
     #[doc(hidden)]
     pub fn ws_boxed_with_middleware(
-        mut self,
+        self,
         path: &str,
         handler: BoxedWebSocketHandler,
         middleware: Vec<BoxedMiddleware>,
     ) -> Router {
+        self.ws_boxed_with_middleware_and_config(path, handler, middleware, None)
+    }
+
+    /// Register a pre-boxed WebSocket handler with a per-route middleware list
+    /// and an optional [`WsConfig`] override. This is the canonical registration
+    /// method — all other `ws*` variants delegate to this one.
+    ///
+    /// [`WsConfig`]: crate::ws::WsConfig
+    #[doc(hidden)]
+    pub fn ws_boxed_with_middleware_and_config(
+        mut self,
+        path: &str,
+        handler: BoxedWebSocketHandler,
+        middleware: Vec<BoxedMiddleware>,
+        config: Option<crate::ws::WsConfig>,
+    ) -> Router {
         self.ws_routes
-            .insert(path, (path.to_string(), handler, middleware))
+            .insert(path, (path.to_string(), handler, middleware, config))
             .ok();
         self
     }
 
     /// Look up a WebSocket route by path. Returns the matched
-    /// handler + captured params + per-route middleware if any route
-    /// registered with [`Router::ws`] or [`Router::ws_with_middleware`]
-    /// matches.
+    /// handler + captured params + per-route middleware + optional
+    /// per-route [`WsConfig`] if any route registered with
+    /// [`Router::ws`], [`Router::ws_with_config`], or
+    /// [`Router::ws_with_middleware`] matches.
+    ///
+    /// [`WsConfig`]: crate::ws::WsConfig
     pub fn match_ws(&self, path: &str) -> Option<WsMatch> {
         self.ws_routes.at(path).ok().map(|m| {
             let params: HashMap<String, String> = m
@@ -334,12 +397,13 @@ impl Router {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect();
-            let (pattern, handler, middleware) = m.value;
+            let (pattern, handler, middleware, config) = m.value;
             WsMatch {
                 handler: handler.clone(),
                 pattern: pattern.clone(),
                 params,
                 middleware: middleware.clone(),
+                config: config.clone(),
             }
         })
     }
@@ -467,14 +531,17 @@ impl From<RouteBuilder> for Router {
 
 /// Result of a [`Router::match_ws`] lookup. Bundles the matched
 /// handler with the matched pattern (e.g. `/ws/rooms/{id}`),
-/// the captured path parameters (e.g. `{"id": "42"}`), and
-/// the per-route middleware list (empty if registered via plain
-/// [`Router::ws`]).
+/// the captured path parameters (e.g. `{"id": "42"}`), the
+/// per-route middleware list (empty if registered via plain
+/// [`Router::ws`]), and an optional per-route [`WsConfig`] override.
+///
+/// [`WsConfig`]: crate::ws::WsConfig
 pub struct WsMatch {
     handler: BoxedWebSocketHandler,
     pattern: String,
     params: HashMap<String, String>,
     middleware: Vec<BoxedMiddleware>,
+    config: Option<crate::ws::WsConfig>,
 }
 
 impl WsMatch {
@@ -504,5 +571,16 @@ impl WsMatch {
     /// registered without any `.middleware(M)` chaining.
     pub fn middleware(&self) -> &Vec<BoxedMiddleware> {
         &self.middleware
+    }
+
+    /// Per-route [`WsConfig`] override, if the route was registered
+    /// with `.config(WsConfig)` or [`Router::ws_with_config`].
+    /// Returns `None` when no override was set — the caller should
+    /// fall back to [`WsConfig::default()`].
+    ///
+    /// [`WsConfig`]: crate::ws::WsConfig
+    /// [`WsConfig::default()`]: crate::ws::WsConfig::default
+    pub fn config(&self) -> Option<&crate::ws::WsConfig> {
+        self.config.as_ref()
     }
 }
