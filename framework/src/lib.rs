@@ -31,6 +31,7 @@ pub mod telemetry;
 pub mod validation;
 pub mod web_push;
 pub mod workflow;
+pub mod ws;
 pub mod server;
 pub mod session;
 pub mod testing;
@@ -174,6 +175,8 @@ pub use notifications::channels::mail::{
     register_mail_renderer, MailChannel, MailRendering, NotificationMailable,
 };
 pub use notifications::channels::webpush::WebPushChannel;
+
+pub use ws::{WebSocketHandler, WsConfig, WsSocket};
 
 // Re-export async_trait for middleware implementations
 pub use async_trait::async_trait;
