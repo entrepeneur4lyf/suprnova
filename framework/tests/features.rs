@@ -98,3 +98,125 @@ async fn database_evaluator_unknown_returns_none() {
 
     assert_eq!(result, None);
 }
+
+// =============================================================================
+// T6 — Admin CRUD tests
+//
+// The admin module operates against the global `DB::connection()`
+// (not the standalone connection `DatabaseEvaluator::new_in_memory`
+// holds), so these tests use `TestDatabase::fresh::<TestMigrator>` to
+// install a connection in the container plus apply the framework's
+// `features` migration.
+// =============================================================================
+
+#[tokio::test]
+async fn admin_upsert_inserts_then_updates_returning_canonical_row() {
+    use sea_orm_migration::MigratorTrait;
+    use suprnova::features::admin;
+    use suprnova::features::migrations::CreateFeaturesTable;
+    use suprnova::testing::TestDatabase;
+
+    struct TestMigrator;
+    impl MigratorTrait for TestMigrator {
+        fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
+            vec![Box::new(CreateFeaturesTable)]
+        }
+    }
+
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+
+    // Initial insert.
+    let row = admin::upsert(
+        "checkout-v2",
+        "",
+        true,
+        Some("new checkout flow".into()),
+        Some(7),
+    )
+    .await
+    .unwrap();
+    assert_eq!(row.name, "checkout-v2");
+    assert_eq!(row.scope_key, "");
+    assert!(row.enabled);
+    assert_eq!(row.description.as_deref(), Some("new checkout flow"));
+    assert_eq!(row.updated_by, Some(7));
+    let initial_id = row.id;
+
+    // Update via the same name+scope_key — `OnConflict` updates in place.
+    let updated = admin::upsert(
+        "checkout-v2",
+        "",
+        false,
+        Some("rolling back".into()),
+        Some(9),
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated.id, initial_id, "upsert must preserve the row id");
+    assert!(!updated.enabled);
+    assert_eq!(updated.description.as_deref(), Some("rolling back"));
+    assert_eq!(updated.updated_by, Some(9));
+}
+
+#[tokio::test]
+async fn admin_list_returns_rows_sorted_by_name_then_scope() {
+    use sea_orm_migration::MigratorTrait;
+    use suprnova::features::admin;
+    use suprnova::features::migrations::CreateFeaturesTable;
+    use suprnova::testing::TestDatabase;
+
+    struct TestMigrator;
+    impl MigratorTrait for TestMigrator {
+        fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
+            vec![Box::new(CreateFeaturesTable)]
+        }
+    }
+
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+
+    admin::upsert("zeta", "", true, None, None).await.unwrap();
+    admin::upsert("alpha", "user:99", false, None, None)
+        .await
+        .unwrap();
+    admin::upsert("alpha", "", true, None, None).await.unwrap();
+
+    let rows = admin::list().await.unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].name, "alpha");
+    assert_eq!(rows[0].scope_key, "");
+    assert_eq!(rows[1].name, "alpha");
+    assert_eq!(rows[1].scope_key, "user:99");
+    assert_eq!(rows[2].name, "zeta");
+}
+
+#[tokio::test]
+async fn admin_delete_returns_true_then_false_on_repeat() {
+    use sea_orm_migration::MigratorTrait;
+    use suprnova::features::admin;
+    use suprnova::features::migrations::CreateFeaturesTable;
+    use suprnova::testing::TestDatabase;
+
+    struct TestMigrator;
+    impl MigratorTrait for TestMigrator {
+        fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
+            vec![Box::new(CreateFeaturesTable)]
+        }
+    }
+
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+
+    admin::upsert("toggle-me", "", true, None, None)
+        .await
+        .unwrap();
+
+    let first = admin::delete("toggle-me", "", Some(3)).await.unwrap();
+    assert!(first, "first delete must report the row was removed");
+
+    let second = admin::delete("toggle-me", "", Some(3)).await.unwrap();
+    assert!(
+        !second,
+        "second delete on the same key must report no-op (false)"
+    );
+
+    assert!(admin::get("toggle-me", "").await.unwrap().is_none());
+}
