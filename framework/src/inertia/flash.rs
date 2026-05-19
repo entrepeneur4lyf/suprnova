@@ -31,6 +31,7 @@
 //! ship the in-request flash bag and the protocol-level emission;
 //! the cross-redirect persistence wires up when session-flash lands.
 
+use crate::lock;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -62,7 +63,7 @@ pub(crate) fn encrypt_history_flag() -> Option<bool> {
 /// outside an HTTP handler in tests that don't set up the scope).
 pub fn push(key: impl Into<String>, value: Value) {
     let _ = FLASH_BAG.try_with(|bag| {
-        bag.lock().expect("flash bag poisoned").insert(key.into(), value);
+        lock::lock(bag).expect("flash bag poisoned").insert(key.into(), value);
     });
 }
 
@@ -73,7 +74,7 @@ pub fn push(key: impl Into<String>, value: Value) {
 pub fn drain() -> serde_json::Map<String, Value> {
     FLASH_BAG
         .try_with(|bag| {
-            let mut guard = bag.lock().expect("flash bag poisoned");
+            let mut guard = lock::lock(bag).expect("flash bag poisoned");
             let entries = std::mem::take(&mut *guard);
             entries.into_iter().collect()
         })

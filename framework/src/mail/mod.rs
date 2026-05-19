@@ -22,6 +22,7 @@ pub use send_job::SendMailJob;
 pub use transport::{dispatch_with_telemetry, MailTransport, OutgoingMessage};
 
 use crate::error::FrameworkError;
+use crate::lock;
 use crate::mail::memory::InMemoryMailTransport;
 use std::sync::{Arc, RwLock};
 
@@ -31,10 +32,10 @@ pub struct Mail;
 
 impl Mail {
     pub fn set_transport(transport: Arc<dyn MailTransport>) {
-        *TRANSPORT.write().expect("mail transport lock poisoned") = Some(transport);
+        *lock::write(&TRANSPORT).expect("mail transport lock poisoned") = Some(transport);
     }
     pub fn clear_transport() {
-        *TRANSPORT.write().expect("mail transport lock poisoned") = None;
+        *lock::write(&TRANSPORT).expect("mail transport lock poisoned") = None;
     }
 
     pub fn to(addr: impl Into<Address>) -> MailBuilder {
@@ -60,16 +61,14 @@ impl Mail {
     /// ```
     pub fn fake() -> MailFake {
         let transport = Arc::new(InMemoryMailTransport::new());
-        let previous = TRANSPORT
-            .write()
+        let previous = lock::write(&TRANSPORT)
             .expect("mail transport lock poisoned")
             .replace(transport.clone() as Arc<dyn MailTransport>);
         MailFake { transport, previous }
     }
 
     pub(crate) fn current_transport() -> Result<Arc<dyn MailTransport>, FrameworkError> {
-        TRANSPORT
-            .read()
+        lock::read(&TRANSPORT)
             .expect("mail transport lock poisoned")
             .clone()
             .ok_or_else(|| FrameworkError::internal(
@@ -255,6 +254,6 @@ impl Drop for MailFake {
         // panic during drop we accept that — losing transport state
         // during teardown is preferable to silently leaving the fake
         // bound (which would corrupt every subsequent test).
-        *TRANSPORT.write().expect("mail transport lock poisoned") = self.previous.take();
+        *lock::write(&TRANSPORT).expect("mail transport lock poisoned") = self.previous.take();
     }
 }

@@ -55,6 +55,7 @@
 
 use crate::database::DB;
 use crate::error::FrameworkError;
+use crate::lock;
 use crate::features::entity::{
     self as features_entity, ActiveModel as FeatureActive, Entity as FeatureEntity,
 };
@@ -163,9 +164,7 @@ impl DatabaseEvaluator {
             next.insert((row.name, row.scope_key), row.enabled);
         }
 
-        let mut store = self
-            .flags
-            .write()
+        let mut store = lock::write(&self.flags)
             .expect("DatabaseEvaluator flags RwLock poisoned");
         *store = next;
         Ok(())
@@ -230,9 +229,7 @@ impl DatabaseEvaluator {
         // separate reload() remains available for picking up edits
         // made out-of-band.
         {
-            let mut store = self
-                .flags
-                .write()
+            let mut store = lock::write(&self.flags)
                 .expect("DatabaseEvaluator flags RwLock poisoned");
             store.insert((name.to_string(), scope_key.to_string()), enabled);
         }
@@ -277,9 +274,7 @@ impl DatabaseEvaluator {
 
 impl Evaluator for DatabaseEvaluator {
     fn is_enabled(&self, feature: &str, context: &Context) -> Option<bool> {
-        let store = self
-            .flags
-            .read()
+        let store = lock::read(&self.flags)
             .expect("DatabaseEvaluator flags RwLock poisoned");
 
         for key in self.scope_keys_for(context) {

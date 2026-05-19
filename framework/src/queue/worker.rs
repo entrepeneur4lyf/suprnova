@@ -23,6 +23,7 @@
 //! execute the same side effect twice.
 
 use crate::error::FrameworkError;
+use crate::lock;
 use crate::queue::driver::QueueDriver;
 use crate::queue::retry::next_delay;
 use crate::queue::Job;
@@ -43,13 +44,13 @@ pub fn register_job<J: Job>() {
             job.handle().await
         })
     });
-    let mut g = REGISTRY.write().expect("queue registry poisoned");
+    let mut g = lock::write(&REGISTRY).expect("queue registry poisoned");
     g.get_or_insert_with(HashMap::new).insert(J::job_name().to_string(), f);
 }
 
 pub async fn dispatch_by_name(name: &str, payload: serde_json::Value) -> Result<(), FrameworkError> {
     let dispatcher = {
-        let g = REGISTRY.read().expect("queue registry poisoned");
+        let g = lock::read(&REGISTRY).expect("queue registry poisoned");
         let map = g.as_ref()
             .ok_or_else(|| FrameworkError::internal(format!("unknown job: {name}")))?;
         map.get(name)
@@ -62,7 +63,7 @@ pub async fn dispatch_by_name(name: &str, payload: serde_json::Value) -> Result<
 /// Return all registered job names. Used by admin inspectors and
 /// `cargo run --bin app -- jobs:list` (Phase 6B).
 pub fn registered_job_names() -> Vec<String> {
-    REGISTRY.read().expect("queue registry poisoned")
+    lock::read(&REGISTRY).expect("queue registry poisoned")
         .as_ref()
         .map(|m| { let mut v: Vec<_> = m.keys().cloned().collect(); v.sort(); v })
         .unwrap_or_default()

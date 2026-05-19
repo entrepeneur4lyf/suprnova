@@ -48,6 +48,7 @@
 //! ever fires. The caller drives all acknowledgements through `ack`/`nack`.
 
 use crate::error::FrameworkError;
+use crate::lock;
 use crate::queue::driver::{QueueDriver, Reservation, ReservationToken};
 use crate::queue::envelope::Envelope;
 use async_trait::async_trait;
@@ -216,7 +217,7 @@ impl QueueDriver for RedisQueueDriver {
         // Call the `Message` trait's `to_owned` explicitly (not `ToOwned`).
         let shared = sea_streamer::Message::to_owned(&msg);
         {
-            let mut g = self.pending.lock().expect("redis pending map poisoned");
+            let mut g = lock::lock(&self.pending).expect("redis pending map poisoned");
             g.insert(token.0, (envelope.clone(), shared));
         }
 
@@ -232,7 +233,7 @@ impl QueueDriver for RedisQueueDriver {
     /// next flush re-delivers the message.
     async fn ack(&self, token: &ReservationToken) -> Result<(), FrameworkError> {
         let entry = {
-            let mut g = self.pending.lock().expect("redis pending map poisoned");
+            let mut g = lock::lock(&self.pending).expect("redis pending map poisoned");
             g.remove(&token.0)
         };
 
@@ -273,7 +274,7 @@ impl QueueDriver for RedisQueueDriver {
         requeue_delay: Duration,
     ) -> Result<(), FrameworkError> {
         let entry = {
-            let mut g = self.pending.lock().expect("redis pending map poisoned");
+            let mut g = lock::lock(&self.pending).expect("redis pending map poisoned");
             g.remove(&token.0)
         };
 

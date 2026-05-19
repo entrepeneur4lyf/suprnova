@@ -7,6 +7,7 @@ pub mod command;
 pub mod testing;
 
 use crate::error::FrameworkError;
+use crate::lock;
 use command::{Command, Handler};
 use futures::future::BoxFuture;
 use std::any::TypeId;
@@ -93,7 +94,7 @@ impl Bus {
                 Ok(json)
             })
         });
-        let mut g = REGISTRY.write().expect("bus registry poisoned");
+        let mut g = lock::write(&REGISTRY).expect("bus registry poisoned");
         g.get_or_insert_with(HashMap::new)
             .insert(TypeId::of::<C>(), dispatcher);
     }
@@ -114,7 +115,7 @@ impl Bus {
             return Ok(Dispatched::Captured);
         }
         let dispatcher = {
-            let g = REGISTRY.read().expect("bus registry poisoned");
+            let g = lock::read(&REGISTRY).expect("bus registry poisoned");
             let map = g
                 .as_ref()
                 .ok_or_else(|| FrameworkError::internal("Bus: no handlers registered"))?;

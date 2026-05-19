@@ -44,6 +44,7 @@
 //!   pointers anyway so object safety is not needed.
 
 use crate::error::FrameworkError;
+use crate::lock;
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use indexmap::IndexMap;
@@ -82,7 +83,7 @@ pub trait Seeder: Send + Sync {
 /// position, so test stubs slot in cleanly).
 pub fn register<S: Seeder + 'static>() {
     let f: SeederFn = || Box::pin(S::run());
-    let mut g = REGISTRY.write().expect("seeder registry poisoned");
+    let mut g = lock::write(&REGISTRY).expect("seeder registry poisoned");
     g.get_or_insert_with(IndexMap::new)
         .insert(S::name().to_string(), f);
 }
@@ -93,7 +94,7 @@ pub fn register<S: Seeder + 'static>() {
 /// can also drive this directly after registering seeders.
 pub async fn run_all() -> Result<(), FrameworkError> {
     let entries: Vec<(String, SeederFn)> = {
-        let g = REGISTRY.read().expect("seeder registry poisoned");
+        let g = lock::read(&REGISTRY).expect("seeder registry poisoned");
         g.as_ref()
             .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
             .unwrap_or_default()
@@ -108,8 +109,7 @@ pub async fn run_all() -> Result<(), FrameworkError> {
 /// Number of currently-registered seeders. Useful for tests asserting
 /// "the bootstrap registered all expected seeders."
 pub fn count() -> usize {
-    REGISTRY
-        .read()
+    lock::read(&REGISTRY)
         .expect("seeder registry poisoned")
         .as_ref()
         .map(|m| m.len())
@@ -121,5 +121,5 @@ pub fn count() -> usize {
 /// at boot.
 #[doc(hidden)]
 pub fn clear() {
-    *REGISTRY.write().expect("seeder registry poisoned") = None;
+    *lock::write(&REGISTRY).expect("seeder registry poisoned") = None;
 }

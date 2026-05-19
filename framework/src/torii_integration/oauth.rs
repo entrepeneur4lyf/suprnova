@@ -49,6 +49,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     error::FrameworkError,
+    lock,
     session::{session, session_mut},
     torii_integration::{Session, User, instance},
 };
@@ -191,8 +192,7 @@ impl OAuthAuth {
     ///
     /// Idempotent: calling again replaces the existing config.
     pub fn configure(&self, config: OAuthProviderConfig) {
-        configs()
-            .write()
+        lock::write(configs())
             .expect("OAuthProviderConfig lock poisoned")
             .insert(self.provider.clone(), config);
     }
@@ -452,8 +452,7 @@ impl OAuthAuth {
     // ── Private helpers ────────────────────────────────────────────────────────
 
     fn config(&self) -> Result<OAuthProviderConfig, FrameworkError> {
-        configs()
-            .read()
+        lock::read(configs())
             .expect("OAuthProviderConfig lock poisoned")
             .get(&self.provider)
             .cloned()

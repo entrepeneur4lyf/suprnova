@@ -14,6 +14,7 @@ pub mod csrf;
 pub mod data;
 pub mod database;
 pub mod error;
+pub(crate) mod lock;
 pub mod hashing;
 pub mod http;
 pub mod http_client;

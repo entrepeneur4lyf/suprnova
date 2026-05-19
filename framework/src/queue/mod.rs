@@ -18,6 +18,7 @@ pub use memory::MemoryQueueDriver;
 pub use redis::RedisQueueDriver;
 
 use crate::error::FrameworkError;
+use crate::lock;
 use chrono::Utc;
 use std::sync::{Arc, RwLock};
 use uuid::Uuid;
@@ -71,14 +72,17 @@ impl Queue {
     /// Replace the registered driver. Primarily for boot-time wiring;
     /// in tests prefer `testing::install_fake()`.
     pub fn set_driver(driver: Arc<dyn QueueDriver>) {
-        *DRIVER.write().expect("queue driver lock poisoned") = Some(driver);
+        *lock::write(&DRIVER).unwrap_or_else(|e| panic!("{e}")) = Some(driver);
     }
 }
 
 pub(crate) fn current_driver() -> Result<Arc<dyn QueueDriver>, FrameworkError> {
-    DRIVER
-        .read()
-        .expect("queue driver lock poisoned")
+    lock::read(&DRIVER)
+        .map_err(|_| {
+            FrameworkError::internal(
+                "queue driver registry lock poisoned",
+            )
+        })?
         .clone()
         .ok_or_else(|| {
             FrameworkError::internal(
@@ -89,7 +93,11 @@ pub(crate) fn current_driver() -> Result<Arc<dyn QueueDriver>, FrameworkError> {
 
 /// Wire the in-memory queue driver as the default. Idempotent.
 pub async fn bootstrap_default() {
-    if DRIVER.read().expect("queue driver lock poisoned").is_some() {
+    if lock::read(&DRIVER)
+        .map_err(|_| FrameworkError::internal("queue driver registry lock poisoned"))
+        .map(|g| g.is_some())
+        .unwrap_or(false)
+    {
         return;
     }
     Queue::set_driver(Arc::new(memory::MemoryQueueDriver::new()));

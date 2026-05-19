@@ -3,6 +3,7 @@
 //! `MAIL_DRIVER` is unset or names an unknown driver.
 
 use crate::error::FrameworkError;
+use crate::lock;
 use crate::mail::log::LogMailTransport;
 use crate::mail::mailgun::MailgunMailTransport;
 use crate::mail::memory::InMemoryMailTransport;
@@ -26,21 +27,18 @@ static MEMORY_CAPTURE: RwLock<Option<Arc<InMemoryMailTransport>>> = RwLock::new(
 /// tests can inspect captured messages. Returns `None` after a switch to
 /// any non-memory driver.
 pub fn captured_in_memory() -> Option<Arc<InMemoryMailTransport>> {
-    MEMORY_CAPTURE
-        .read()
+    lock::read(&MEMORY_CAPTURE)
         .expect("memory capture lock poisoned")
         .clone()
 }
 
 fn set_memory_capture(t: Arc<InMemoryMailTransport>) {
-    *MEMORY_CAPTURE
-        .write()
+    *lock::write(&MEMORY_CAPTURE)
         .expect("memory capture lock poisoned") = Some(t);
 }
 
 fn clear_memory_capture() {
-    *MEMORY_CAPTURE
-        .write()
+    *lock::write(&MEMORY_CAPTURE)
         .expect("memory capture lock poisoned") = None;
 }
 

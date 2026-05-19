@@ -5,6 +5,7 @@
 //! Subscriber drops are reflected in `subscriber_count` after the
 //! next publish operation, per `tokio::sync::broadcast` semantics.
 
+use crate::lock;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -103,9 +104,7 @@ impl InMemoryBroadcastHub {
             return tx;
         }
         // Slow path — create the channel under a write lock.
-        let mut map = self
-            .channels
-            .write()
+        let mut map = lock::write(&self.channels)
             .expect("BroadcastHub channels RwLock poisoned");
         map.entry(channel.to_string())
             .or_insert_with(|| broadcast::channel(CHANNEL_CAPACITY).0)

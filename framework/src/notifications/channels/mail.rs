@@ -25,6 +25,7 @@
 //! JSON.
 
 use crate::error::FrameworkError;
+use crate::lock;
 use crate::mail::transport::{dispatch_with_telemetry, OutgoingMessage};
 use crate::mail::{Address, Attachment, Mail};
 use crate::notifications::{Channel, DynNotification, Notification};
@@ -109,8 +110,7 @@ pub fn register_mail_renderer<N: NotificationMailable>() {
         })?;
         n.to_mail()
     };
-    let mut g = MAIL_RENDERERS
-        .write()
+    let mut g = lock::write(&MAIL_RENDERERS)
         .expect("mail renderer registry poisoned");
     g.get_or_insert_with(HashMap::new)
         .insert(N::notification_name(), renderer);
@@ -122,8 +122,7 @@ fn renderer_for(name: &str) -> Result<MailRendererFn, FrameworkError> {
             "no mail renderer for notification {name} — register via suprnova::register_mail_renderer::<N>()"
         ))
     };
-    let g = MAIL_RENDERERS
-        .read()
+    let g = lock::read(&MAIL_RENDERERS)
         .expect("mail renderer registry poisoned");
     // Treat "registry never initialized" identically to "this notification
     // not registered" — the operator-facing fix is the same.

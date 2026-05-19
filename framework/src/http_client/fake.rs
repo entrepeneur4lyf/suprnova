@@ -22,6 +22,7 @@
 //! canned responses are shared with the parent through the same Arc —
 //! `assert_sent` on the parent sees what the child sent.
 
+use crate::lock;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
@@ -234,7 +235,7 @@ pub(crate) fn intercept(req: &RequestBuilder) -> ClientResponse {
 fn with_state<R>(f: impl FnOnce(&mut FakeState) -> R) -> R {
     FAKE_STATE
         .try_with(|state| {
-            let mut guard = state.lock().expect("FakeState mutex poisoned");
+            let mut guard = lock::lock(state).expect("FakeState mutex poisoned");
             f(&mut guard)
         })
         .unwrap_or_else(|_| {

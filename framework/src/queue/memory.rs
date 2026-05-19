@@ -22,6 +22,7 @@
 //! and background reclaim is needed.
 
 use crate::error::FrameworkError;
+use crate::lock;
 use crate::queue::driver::{QueueDriver, Reservation, ReservationToken};
 use crate::queue::envelope::Envelope;
 use async_trait::async_trait;
@@ -73,7 +74,7 @@ fn drain_expired(
     }
     // cx / waker are dropped here — no await has occurred.
     if !expired_tokens.is_empty() {
-        let mut g = inner.lock().expect("memory queue poisoned");
+        let mut g = lock::lock(inner).expect("memory queue poisoned");
         for token in expired_tokens {
             if let Some(env) = g.reserved.remove(&token) {
                 g.visible.push_front(env);
@@ -98,7 +99,7 @@ fn drain_delayed(
     }
     // cx / waker are dropped here — no await has occurred.
     if !ready.is_empty() {
-        let mut g = inner.lock().expect("memory queue poisoned");
+        let mut g = lock::lock(inner).expect("memory queue poisoned");
         for env in ready {
             g.visible.push_back(env);
         }
@@ -157,7 +158,7 @@ impl QueueDriver for MemoryQueueDriver {
     async fn push(&self, env: Envelope) -> Result<(), FrameworkError> {
         let now = Utc::now();
         if env.available_at <= now {
-            let mut g = self.inner.lock().expect("memory queue poisoned");
+            let mut g = lock::lock(&self.inner).expect("memory queue poisoned");
             g.visible.push_back(env);
         } else {
             // Compute delay on the Tokio virtual clock so paused-clock tests work.
@@ -186,14 +187,14 @@ impl QueueDriver for MemoryQueueDriver {
         }
 
         let env_opt = {
-            let mut g = self.inner.lock().expect("memory queue poisoned");
+            let mut g = lock::lock(&self.inner).expect("memory queue poisoned");
             g.visible.pop_front()
         };
 
         if let Some(env) = env_opt {
             let token = ReservationToken(Uuid::new_v4());
             {
-                let mut g = self.inner.lock().expect("memory queue poisoned");
+                let mut g = lock::lock(&self.inner).expect("memory queue poisoned");
                 g.reserved.insert(token.clone(), env.clone());
             }
             self.visibility
@@ -207,7 +208,7 @@ impl QueueDriver for MemoryQueueDriver {
     }
 
     async fn ack(&self, token: &ReservationToken) -> Result<(), FrameworkError> {
-        let mut g = self.inner.lock().expect("memory queue poisoned");
+        let mut g = lock::lock(&self.inner).expect("memory queue poisoned");
         g.reserved.remove(token);
         Ok(())
     }
@@ -218,13 +219,13 @@ impl QueueDriver for MemoryQueueDriver {
         requeue_delay: Duration,
     ) -> Result<(), FrameworkError> {
         let env = {
-            let mut g = self.inner.lock().expect("memory queue poisoned");
+            let mut g = lock::lock(&self.inner).expect("memory queue poisoned");
             g.reserved.remove(token)
         };
         if let Some(mut env) = env {
             env.attempts += 1;
             if requeue_delay.is_zero() {
-                let mut g = self.inner.lock().expect("memory queue poisoned");
+                let mut g = lock::lock(&self.inner).expect("memory queue poisoned");
                 g.visible.push_front(env);
             } else {
                 env.available_at = Utc::now()

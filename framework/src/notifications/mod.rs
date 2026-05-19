@@ -18,6 +18,7 @@ pub mod notify_job;
 pub use notify_job::SendNotificationJob;
 
 use crate::error::FrameworkError;
+use crate::lock;
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -218,14 +219,11 @@ static FACTORIES: RwLock<Option<HashMap<String, NotificationFactory>>> = RwLock:
 /// Bind a dispatcher for queued and `Notify::send` delivery. Replaces any
 /// previously-bound dispatcher (last-write-wins).
 pub fn set_dispatcher(d: Arc<NotificationDispatcher>) {
-    *DISPATCHER
-        .write()
-        .expect("notification dispatcher lock poisoned") = Some(d);
+    *lock::write(&DISPATCHER).expect("notification dispatcher lock poisoned") = Some(d);
 }
 
 pub(crate) fn dispatcher_for_queue() -> Result<Arc<NotificationDispatcher>, FrameworkError> {
-    DISPATCHER
-        .read()
+    lock::read(&DISPATCHER)
         .expect("notification dispatcher lock poisoned")
         .clone()
         .ok_or_else(|| {
@@ -255,13 +253,13 @@ pub fn register_notification_factory<N: Notification>() {
         })?;
         Ok(Box::new(n))
     };
-    let mut g = FACTORIES.write().expect("notification factory lock poisoned");
+    let mut g = lock::write(&FACTORIES).expect("notification factory lock poisoned");
     g.get_or_insert_with(HashMap::new)
         .insert(N::notification_name().to_string(), factory);
 }
 
 pub(crate) fn factory_for(name: &str) -> Result<NotificationFactory, FrameworkError> {
-    let g = FACTORIES.read().expect("notification factory lock poisoned");
+    let g = lock::read(&FACTORIES).expect("notification factory lock poisoned");
     let map = g.as_ref().ok_or_else(|| {
         FrameworkError::internal(format!("unknown notification: {name}"))
     })?;

@@ -17,6 +17,7 @@
 //! module and the call sites in `send_job::SendMailJob::handle`.
 
 use crate::error::FrameworkError;
+use crate::lock;
 use crate::mail::address::{Address, Attachment};
 use crate::mail::mailable::Mailable;
 use crate::mail::transport::OutgoingMessage;
@@ -75,7 +76,7 @@ pub fn register<M: Mailable>() {
         })?;
         Ok(Box::new(m))
     };
-    let mut g = REGISTRY.write().expect("mailable registry poisoned");
+    let mut g = lock::write(&REGISTRY).expect("mailable registry poisoned");
     g.get_or_insert_with(HashMap::new)
         .insert(M::mailable_name().to_string(), factory);
 }
@@ -87,7 +88,7 @@ pub fn build(
     name: &str,
     payload: serde_json::Value,
 ) -> Result<Box<dyn AnyMailable>, FrameworkError> {
-    let g = REGISTRY.read().expect("mailable registry poisoned");
+    let g = lock::read(&REGISTRY).expect("mailable registry poisoned");
     let map = g
         .as_ref()
         .ok_or_else(|| FrameworkError::internal(format!("unknown mailable: {name}")))?;

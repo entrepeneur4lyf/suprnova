@@ -7,6 +7,7 @@
 //! fields)` helper below stays available for tests that need to inject
 //! ad-hoc allowlists. Default-deny: a DTO not registered allows nothing.
 
+use crate::lock;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -28,7 +29,7 @@ inventory::collect!(AllowedIncludes);
 fn ensure_initialized() {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
-        let mut map = REGISTRY.write().expect("data::registry REGISTRY write lock poisoned");
+        let mut map = lock::write(&REGISTRY).expect("data::registry REGISTRY write lock poisoned");
         for entry in inventory::iter::<AllowedIncludes> {
             map.insert(entry.struct_name, entry.fields.to_vec());
         }
@@ -48,8 +49,7 @@ fn ensure_initialized() {
 /// This is the primary test-injection path for ad-hoc allowlists.
 pub fn register(struct_name: &'static str, fields: &'static [&'static str]) {
     ensure_initialized();
-    let mut map = REGISTRY
-        .write()
+    let mut map = lock::write(&REGISTRY)
         .expect("data::registry REGISTRY write lock poisoned");
     map.insert(struct_name, fields.to_vec());
 }
@@ -57,8 +57,7 @@ pub fn register(struct_name: &'static str, fields: &'static [&'static str]) {
 /// Check whether `field` is includable on `struct_name`.
 pub fn is_allowed(struct_name: &str, field: &str) -> bool {
     ensure_initialized();
-    REGISTRY
-        .read()
+    lock::read(&REGISTRY)
         .expect("data::registry REGISTRY read lock poisoned")
         .get(struct_name)
         .map(|fields| fields.contains(&field))
@@ -69,8 +68,7 @@ pub fn is_allowed(struct_name: &str, field: &str) -> bool {
 /// has not been registered.
 pub fn allowed_for(struct_name: &str) -> Vec<&'static str> {
     ensure_initialized();
-    REGISTRY
-        .read()
+    lock::read(&REGISTRY)
         .expect("data::registry REGISTRY read lock poisoned")
         .get(struct_name)
         .cloned()

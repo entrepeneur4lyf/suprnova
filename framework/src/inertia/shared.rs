@@ -20,6 +20,7 @@
 
 use super::prop::{InertiaRequestExt, OnceConfig, Prop, PropResolver};
 use crate::error::FrameworkError;
+use crate::lock;
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use serde::Serialize;
@@ -110,7 +111,7 @@ impl InertiaRegistry {
     }
 
     fn upsert(&self, key: String, prop: Prop) {
-        let mut reg = self.shares.write().expect("inertia share registry poisoned");
+        let mut reg = lock::write(&self.shares).expect("inertia share registry poisoned");
         if let Some(existing) = reg.iter_mut().find(|e| e.key == key) {
             existing.prop = prop;
         } else {
@@ -121,7 +122,7 @@ impl InertiaRegistry {
     /// Register the singleton [`InertiaSharedData`] implementation.
     /// Subsequent calls replace any prior registration.
     pub fn register_trait(&self, provider: Arc<dyn InertiaSharedData>) {
-        let mut slot = self.provider.write().expect("inertia shared trait slot poisoned");
+        let mut slot = lock::write(&self.provider).expect("inertia shared trait slot poisoned");
         *slot = Some(provider);
     }
 
@@ -129,7 +130,7 @@ impl InertiaRegistry {
     /// `Prop` either holds a `Value` (cheap clone) or an `Arc`-backed
     /// resolver. Internal use by `InertiaResponse::resolve`.
     pub(crate) fn snapshot_static(&self) -> Vec<(String, Prop)> {
-        let reg = self.shares.read().expect("inertia share registry poisoned");
+        let reg = lock::read(&self.shares).expect("inertia share registry poisoned");
         reg.iter()
             .map(|e| (e.key.clone(), e.prop.clone()))
             .collect()
@@ -137,8 +138,7 @@ impl InertiaRegistry {
 
     /// Currently registered trait provider, if any. Internal use.
     pub(crate) fn trait_provider(&self) -> Option<Arc<dyn InertiaSharedData>> {
-        self.provider
-            .read()
+        lock::read(&self.provider)
             .expect("inertia shared trait slot poisoned")
             .clone()
     }
