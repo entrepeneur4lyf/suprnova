@@ -12,49 +12,17 @@
 
 pub mod attrs;
 pub mod builder;
+pub mod casts;
 pub mod fillable;
 pub mod model;
 pub mod registry;
 
-/// Runtime cast bridge. T7a fills in the full module; T5 ships the
-/// trait stub so [`Builder::with_casts`] can compile against
-/// `Arc<dyn DynCast>` in this module's namespace. The `Send + Sync`
-/// supertraits keep the trait-object usable across `tokio` task
-/// boundaries.
-pub mod casts {
-    use crate::error::FrameworkError;
-
-    /// Storage-shape ↔ rust-shape cast applied at row materialisation
-    /// (`from_storage_json`) and at write (`to_storage_json`). T5
-    /// ships the surface only; T7a wires the per-cast implementations
-    /// (Json, Encrypted, Decimal, ...).
-    ///
-    /// The `from_*` / `to_*` names take `&self` because the cast
-    /// instance carries config (e.g. the encryption key for an
-    /// `Encrypted` cast); they're not Rust's conventional consume-self
-    /// constructors. Clippy's `wrong_self_convention` lint is allowed
-    /// here for that reason.
-    #[allow(clippy::wrong_self_convention)]
-    pub trait DynCast: Send + Sync {
-        /// Convert a raw storage value into the in-memory shape (e.g.
-        /// decode a JSON column into a `serde_json::Value`).
-        fn from_storage_json(
-            &self,
-            v: &serde_json::Value,
-        ) -> Result<serde_json::Value, FrameworkError>;
-
-        /// Convert an in-memory value into its storage shape (e.g.
-        /// encode a `serde_json::Value` back into a JSON string for
-        /// the underlying TEXT column).
-        fn to_storage_json(
-            &self,
-            v: &serde_json::Value,
-        ) -> Result<serde_json::Value, FrameworkError>;
-    }
-}
-
 pub use attrs::Attrs;
 pub use builder::{Builder, Direction, IntoColumn, IntoVal};
+pub use casts::{
+    AsBool, AsDate, AsDateTime, AsDecimal, AsFloat, AsImmutableDate, AsImmutableDateTime, AsInt,
+    AsString, AsTimestamp, Cast, DynCast, IntoDynCast,
+};
 pub use fillable::{unguarded, Fillable};
 pub use model::{FirstOrCreate, Model, ReplicateExt};
 pub use registry::{find_model_by_table, models, ModelEntry};

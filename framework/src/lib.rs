@@ -217,8 +217,10 @@ pub use featureflag::{feature, is_enabled};
 // time by `#[suprnova::model]` (Task 3) and walked at boot by Phase 8
 // (Admin), `model:prune`, and future tooling.
 pub use eloquent::{
-    find_model_by_table, models, unguarded, Attrs, Builder, Direction, EloquentModel, Fillable,
-    FirstOrCreate, IntoColumn, IntoVal, Model, ModelEntry, ReplicateExt,
+    find_model_by_table, models, unguarded, AsBool, AsDate, AsDateTime, AsDecimal, AsFloat,
+    AsImmutableDate, AsImmutableDateTime, AsInt, AsString, AsTimestamp, Attrs, Builder, Cast,
+    Direction, DynCast, EloquentModel, Fillable, FirstOrCreate, IntoColumn, IntoDynCast, IntoVal,
+    Model, ModelEntry, ReplicateExt,
 };
 pub use notifications::{
     Channel, DynNotification, Notifiable, Notification, NotificationDispatcher,

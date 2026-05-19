@@ -1,8 +1,9 @@
 //! Phase 11 — `PasswordReset` facade integration tests.
 //!
-//! Shape mirrors `framework/tests/email_verify.rs` (shared tokio runtime
-//! + one-time `init_torii` via `Lazy<()>`). See that file's module docs
-//! for the reasoning around the shared runtime and `#[serial]`.
+//! Shape mirrors `framework/tests/email_verify.rs` (shared tokio
+//! runtime + one-time `init_torii` via `Lazy<()>`). See that file's
+//! module docs for the reasoning around the shared runtime and
+//! `#[serial]`.
 //!
 //! Every test in this file runs `#[serial]`, even ones that don't
 //! install a `Mail::fake()` themselves: `PasswordReset::complete()`

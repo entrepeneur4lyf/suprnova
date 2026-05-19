@@ -22,6 +22,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::Result;
 
+use super::casts;
 use super::parse::ModelInput;
 
 pub fn emit(input: &ModelInput) -> Result<TokenStream> {
@@ -81,23 +82,14 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         .collect();
     let field_strs: Vec<String> = field_idents.iter().map(|i| i.to_string()).collect();
 
+    // T7a — route per-field through `casts::apply_arm`. Fields with a
+    // declared cast (in `input.casts`) decode JSON → Runtime →
+    // `Cast::to_storage` → ActiveModel; uncast fields use the same
+    // direct `serde_json::from_value` shape as before T7a.
     let apply_arms = field_idents
         .iter()
         .zip(field_strs.iter())
-        .map(|(ident, name)| {
-            quote! {
-                #name => {
-                    am.#ident = ::suprnova::sea_orm::Set(
-                        ::suprnova::serde_json::from_value(val.clone()).map_err(|e| {
-                            ::suprnova::FrameworkError::validation(
-                                #name,
-                                ::std::format!("cannot decode JSON into column type: {e}"),
-                            )
-                        })?
-                    );
-                }
-            }
-        });
+        .map(|(ident, name)| casts::apply_arm(name, ident, input.cast_for_field(name)));
 
     let replicate_arms = field_idents
         .iter()
@@ -136,17 +128,34 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     // makes the resulting UPDATE a no-op. So we build the ActiveModel
     // explicitly: PK as Unchanged (it's the WHERE clause), every other
     // field as Set.
+    //
+    // T7a — cast fields route through `Cast::to_storage` here so the
+    // inner Model's Storage-typed field matches what `derive_seaorm`
+    // emitted. Without this the ActiveModel write would type-check
+    // against the user's Runtime type and miscompile.
     let active_model_for_update_arms = field_idents
         .iter()
         .zip(field_strs.iter())
         .map(|(ident, name)| {
             let is_pk = name == pk_name;
-            if is_pk {
-                quote! { am.#ident = ::suprnova::sea_orm::ActiveValue::Unchanged(self.#ident.clone()); }
-            } else {
-                quote! { am.#ident = ::suprnova::sea_orm::Set(self.#ident.clone()); }
-            }
+            casts::active_model_update_stmt(ident, is_pk, input.cast_for_field(name))
         });
+
+    // T7a — read-direction arm for `From<inner::Model> for UserStruct`.
+    // Cast fields call `Cast::from_storage` to inflate the storage
+    // shape back into the runtime type.
+    let from_storage_arms = field_idents
+        .iter()
+        .zip(field_strs.iter())
+        .map(|(ident, name)| casts::from_storage_arm(ident, input.cast_for_field(name)));
+
+    // T7a — write-direction arm for `From<UserStruct> for inner::Model`.
+    // Cast fields call `Cast::to_storage` to flatten the runtime
+    // shape back into the storage type the inner Model expects.
+    let to_storage_arms = field_idents
+        .iter()
+        .zip(field_strs.iter())
+        .map(|(ident, name)| casts::to_storage_arm(ident, input.cast_for_field(name)));
 
     Ok(quote! {
         impl ::suprnova::eloquent::EloquentModel for #struct_ident {
@@ -159,17 +168,19 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
         // Bridge the user struct <-> SeaORM Model row. The inner
         // module's `Model` is what SeaORM returns from queries; the
-        // user struct is what their code names. Same field set, so
-        // field-by-field move both ways.
+        // user struct is what their code names. Cast fields route
+        // through `Cast::from_storage` / `Cast::to_storage` so the
+        // user's Runtime type matches even when the inner Model
+        // stores a different Storage type (e.g. INTEGER for bool).
         impl ::core::convert::From<#module_name::Model> for #struct_ident {
             fn from(row: #module_name::Model) -> Self {
-                Self { #( #field_idents: row.#field_idents, )* }
+                Self { #( #from_storage_arms ),* }
             }
         }
 
         impl ::core::convert::From<#struct_ident> for #module_name::Model {
             fn from(s: #struct_ident) -> Self {
-                Self { #( #field_idents: s.#field_idents, )* }
+                Self { #( #to_storage_arms ),* }
             }
         }
 

@@ -16,6 +16,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::Result;
 
+mod casts;
 mod columns;
 mod derive_eloquent;
 mod derive_seaorm;
