@@ -53,5 +53,6 @@ pub mod evaluators;
 pub mod fields;
 pub mod migrations;
 
+pub use evaluators::cached::CachedEvaluator;
 pub use evaluators::database::DatabaseEvaluator;
 pub use fields::{TeamField, UserIdField};

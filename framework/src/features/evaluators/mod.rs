@@ -5,4 +5,5 @@
 //! or wired in as the global default with
 //! [`set_global_default`](featureflag::evaluator::set_global_default).
 
+pub mod cached;
 pub mod database;
