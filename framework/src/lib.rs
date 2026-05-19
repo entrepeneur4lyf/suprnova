@@ -39,6 +39,7 @@ pub mod testing;
 pub mod rate_limit;
 pub mod mail;
 pub mod auth_flows;
+pub mod features;
 pub mod notifications;
 pub mod factory;
 pub mod seed;
@@ -176,6 +177,17 @@ pub use auth_flows::{
     LoginThrottleMiddleware, PasswordChangedMail, PasswordReset, PasswordResetMail, TwoFactor,
     TwoFactorUser,
 };
+// Phase 13 — feature flags.
+//
+// `Feature`, `Evaluator`, and `EvaluatorRef` re-export cleanly at the
+// crate root. `Context` and the `context!` macro cannot — both names
+// collide with the framework's own per-request context module
+// (`crate::context`). Consumers reach for the featureflag context as
+// `suprnova::features::Context` and the macro as
+// `featureflag::context!` (the crate is in scope transitively); we
+// expose the rest of the primitives + the non-colliding macros here.
+pub use features::{Evaluator, EvaluatorRef, Feature};
+pub use featureflag::{feature, is_enabled};
 pub use notifications::{
     Channel, DynNotification, Notifiable, Notification, NotificationDispatcher,
     NotificationFactory, Notify, SendNotificationJob,
