@@ -8,7 +8,7 @@
 // Re-export the auto-generated entity
 pub use super::entities::users::*;
 
-use suprnova::database::{ModelMut, QueryBuilder};
+use suprnova::database::{EntityExtMut, QueryBuilder};
 use suprnova::Authenticatable;
 use sea_orm::{entity::prelude::*, Set};
 use std::any::Any;
@@ -22,8 +22,8 @@ pub type User = Model;
 
 impl ActiveModelBehavior for ActiveModel {}
 
-impl suprnova::database::Model for Entity {}
-impl suprnova::database::ModelMut for Entity {}
+impl suprnova::database::EntityExt for Entity {}
+impl suprnova::database::EntityExtMut for Entity {}
 
 // ============================================================================
 // ELOQUENT-LIKE API

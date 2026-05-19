@@ -65,9 +65,30 @@ pub use crypto::{Crypt, EncryptionKey};
 pub use csrf::{csrf_field, csrf_meta_tag, csrf_token, CsrfMiddleware};
 pub use data::{current_include_set, scope_include_set, Field, IncludeError, IncludeMiddleware, IsRelationLoaded, RequestIncludeSet};
 pub use database::{
-    AutoRouteBinding, Database, DatabaseConfig, DatabaseType, DbConnection, Model, ModelMut,
-    RouteBinding, DB,
+    AutoRouteBinding, Database, DatabaseConfig, DatabaseType, DbConnection, EntityExt,
+    EntityExtMut, RouteBinding, DB,
 };
+
+// SeaORM type aliasing — Suprnova design principle #4: SeaORM is an
+// implementation detail; consumers reach for `suprnova::*` and never
+// `use sea_orm::*`. Every type a user would name in handler / model /
+// migration code is re-exported here.
+pub use sea_orm::{
+    ActiveModelBehavior, ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait,
+    DatabaseConnection, DatabaseTransaction, DeriveActiveEnum, EntityName, EntityTrait,
+    Iden, IntoActiveModel, ModelTrait, NotSet, PrimaryKeyToColumn, PrimaryKeyTrait,
+    QueryFilter, QueryOrder, QuerySelect, RelationDef, RelationTrait, Schema, Select,
+    Set, TransactionTrait,
+};
+pub use sea_orm::sea_query;
+pub use sea_orm::strum::IntoEnumIterator as Iterable;
+
+// Top-level escape hatch (spec 02-seaorm-aliasing §Rationale): the full
+// `sea_orm` module is reachable as `suprnova::sea_orm::*` so users who
+// need a type we haven't aliased can still get to it without adding
+// `sea_orm` to their Cargo.toml. The aliased names above remain the
+// documented surface; this is the "I know what I'm doing" path.
+pub use ::sea_orm;
 pub use error::{AppError, FrameworkError, HttpError, ValidationErrors};
 pub use hashing::{hash, needs_rehash, verify, DEFAULT_COST as HASH_DEFAULT_COST};
 pub use idempotency::{Idempotency, Idempotent};

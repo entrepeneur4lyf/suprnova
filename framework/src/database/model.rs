@@ -1,6 +1,10 @@
-//! Model traits for suprnova ORM
+//! Entity-trait extensions (legacy surface — superseded by the Eloquent `Model` trait in `eloquent::Model`).
 //!
-//! Provides Laravel-like active record pattern over SeaORM entities.
+//! Provides Laravel-like active record convenience methods over SeaORM
+//! entities via two extension traits — [`EntityExt`] (read) and
+//! [`EntityExtMut`] (write). These are blanket-friendly add-ons on
+//! `EntityTrait`; the new full Eloquent `Model` trait shipped in Phase 10A
+//! is the modern surface and reserves the bare `Model` name.
 
 use async_trait::async_trait;
 use sea_orm::{
@@ -19,7 +23,7 @@ use crate::error::FrameworkError;
 /// # Example
 ///
 /// ```rust,ignore
-/// use suprnova::database::Model;
+/// use suprnova::database::EntityExt;
 /// use sea_orm::entity::prelude::*;
 ///
 /// #[derive(Clone, Debug, DeriveEntityModel)]
@@ -36,15 +40,15 @@ use crate::error::FrameworkError;
 ///
 /// impl ActiveModelBehavior for ActiveModel {}
 ///
-/// // Add suprnova's Model trait
-/// impl suprnova::database::Model for Entity {}
+/// // Add suprnova's EntityExt trait
+/// impl suprnova::database::EntityExt for Entity {}
 ///
 /// // Now you can use:
 /// let users = Entity::all().await?;
 /// let user = Entity::find_by_pk(1).await?;
 /// ```
 #[async_trait]
-pub trait Model: EntityTrait + Sized
+pub trait EntityExt: EntityTrait + Sized
 where
     Self::Model: ModelTrait<Entity = Self> + Send + Sync,
 {
@@ -141,17 +145,17 @@ where
 
 /// Trait providing Laravel-like write operations on SeaORM entities
 ///
-/// Implement this trait alongside `Model` to get insert/update/delete methods.
+/// Implement this trait alongside `EntityExt` to get insert/update/delete methods.
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use suprnova::database::{Model, ModelMut};
+/// use suprnova::database::{EntityExt, EntityExtMut};
 /// use sea_orm::Set;
 ///
 /// // Implement both traits
-/// impl suprnova::database::Model for Entity {}
-/// impl suprnova::database::ModelMut for Entity {}
+/// impl suprnova::database::EntityExt for Entity {}
+/// impl suprnova::database::EntityExtMut for Entity {}
 ///
 /// // Insert a new record
 /// let new_user = user::ActiveModel {
@@ -165,7 +169,7 @@ where
 /// user::Entity::delete_by_pk(user.id).await?;
 /// ```
 #[async_trait]
-pub trait ModelMut: Model
+pub trait EntityExtMut: EntityExt
 where
     Self::Model: ModelTrait<Entity = Self> + IntoActiveModel<Self::ActiveModel> + Send + Sync,
     Self::ActiveModel: ActiveModelTrait<Entity = Self> + ActiveModelBehavior + Send,

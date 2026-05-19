@@ -138,6 +138,71 @@ impl TestDatabase {
     pub fn db(&self) -> &DbConnection {
         &self.conn
     }
+
+    /// Connect to an in-memory SQLite database WITHOUT running any migrations.
+    ///
+    /// Companion to [`Self::fresh`] for tests that build their own ad-hoc tables
+    /// via [`Self::execute_unprepared`]. Same container registration semantics
+    /// as `fresh` — any code calling `DB::connection()` resolves to this DB.
+    ///
+    /// Use `fresh::<M>()` for end-to-end tests with a real migrator; use
+    /// `sqlite_memory()` for unit tests that need precise column-shape control.
+    pub async fn sqlite_memory() -> Result<Self, FrameworkError> {
+        let guard = TestContainer::fake();
+        let config = DatabaseConfig::builder()
+            .url("sqlite::memory:")
+            .max_connections(1)
+            .min_connections(1)
+            .logging(false)
+            .build();
+        let conn = DbConnection::connect(&config).await?;
+        TestContainer::singleton(conn.clone());
+        Ok(Self { conn, _guard: guard })
+    }
+
+    /// Execute a DDL / DML statement with no placeholders. Delegator over
+    /// `ConnectionTrait::execute_unprepared` so tests don't need to import
+    /// the trait nor reach through `self.conn()`.
+    pub async fn execute_unprepared(&self, sql: &str) -> Result<(), FrameworkError> {
+        use sea_orm::ConnectionTrait;
+        self.conn.inner()
+            .execute_unprepared(sql)
+            .await
+            .map(|_| ())
+            .map_err(|e| FrameworkError::database(e.to_string()))
+    }
+
+    /// Run a SELECT and return the first row (errors if zero rows). Used by
+    /// cast tests to assert on raw storage shape after a round-trip.
+    pub async fn fetch_one(
+        &self,
+        sql: &str,
+        bindings: Vec<sea_orm::Value>,
+    ) -> Result<sea_orm::QueryResult, FrameworkError> {
+        use sea_orm::ConnectionTrait;
+        let backend = self.conn.inner().get_database_backend();
+        let stmt = sea_orm::Statement::from_sql_and_values(backend, sql, bindings);
+        self.conn.inner()
+            .query_one(stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?
+            .ok_or_else(|| FrameworkError::not_found("fetch_one: no rows"))
+    }
+
+    /// Run a SELECT and return every row. Companion to [`Self::fetch_one`].
+    pub async fn fetch_all(
+        &self,
+        sql: &str,
+        bindings: Vec<sea_orm::Value>,
+    ) -> Result<Vec<sea_orm::QueryResult>, FrameworkError> {
+        use sea_orm::ConnectionTrait;
+        let backend = self.conn.inner().get_database_backend();
+        let stmt = sea_orm::Statement::from_sql_and_values(backend, sql, bindings);
+        self.conn.inner()
+            .query_all(stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))
+    }
 }
 
 /// Create a test database with default migrator

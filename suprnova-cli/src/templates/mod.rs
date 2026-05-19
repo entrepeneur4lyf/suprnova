@@ -943,7 +943,7 @@ pub fn user_model_template(table_name: &str, struct_name: &str, columns: &[Colum
 // Re-export the auto-generated entity
 pub use super::entities::{table_name}::*;
 
-use suprnova::database::{{ModelMut, QueryBuilder}};
+use suprnova::database::{{EntityExtMut, QueryBuilder}};
 use sea_orm::{{entity::prelude::*, Set}};
 
 /// Type alias for convenient access
@@ -955,8 +955,8 @@ pub type {struct_name} = Model;
 
 impl ActiveModelBehavior for ActiveModel {{}}
 
-impl suprnova::database::Model for Entity {{}}
-impl suprnova::database::ModelMut for Entity {{}}
+impl suprnova::database::EntityExt for Entity {{}}
+impl suprnova::database::EntityExtMut for Entity {{}}
 
 // ============================================================================
 // ELOQUENT-LIKE API

@@ -1,6 +1,6 @@
 //! Todo actions
 
-use suprnova::database::{Model, ModelMut};
+use suprnova::database::{EntityExt, EntityExtMut};
 use suprnova::injectable;
 use sea_orm::Set;
 

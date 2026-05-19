@@ -5,7 +5,7 @@
 //! # Automatic Route Model Binding
 //!
 //! Route model binding is automatic for all SeaORM models whose Entity implements
-//! `suprnova::database::Model`. Simply use the Model type as a handler parameter:
+//! `suprnova::database::EntityExt`. Simply use the Model type as a handler parameter:
 //!
 //! ```rust,ignore
 //! use suprnova::{handler, json_response, Response};
@@ -82,7 +82,7 @@ pub trait RouteBinding: Sized + Send {
 /// Trait for automatic route model binding
 ///
 /// This trait is automatically implemented for all SeaORM models whose Entity
-/// implements `suprnova::database::Model`. You don't need to implement this manually.
+/// implements `suprnova::database::EntityExt`. You don't need to implement this manually.
 ///
 /// Unlike [`RouteBinding`], this trait doesn't require a `param_name()` method.
 /// The parameter name is derived from the handler function signature.
@@ -114,13 +114,13 @@ pub trait AutoRouteBinding: Sized + Send {
 /// Blanket implementation of AutoRouteBinding for all SeaORM models
 ///
 /// This automatically implements route model binding for any SeaORM Model type
-/// whose Entity implements `suprnova::database::Model`. Supports any primary key type
+/// whose Entity implements `suprnova::database::EntityExt`. Supports any primary key type
 /// that implements `FromStr` (i32, i64, String, UUID, etc.).
 #[async_trait]
 impl<M, E> AutoRouteBinding for M
 where
     M: SeaModelTrait<Entity = E> + Send + Sync,
-    E: EntityTrait<Model = M> + crate::database::Model + Sync,
+    E: EntityTrait<Model = M> + crate::database::EntityExt + Sync,
     E::PrimaryKey: PrimaryKeyTrait,
     <E::PrimaryKey as PrimaryKeyTrait>::ValueType: std::str::FromStr + Send,
 {
@@ -132,7 +132,7 @@ where
             )
         })?;
 
-        <E as crate::database::Model>::find_by_pk(id)
+        <E as crate::database::EntityExt>::find_by_pk(id)
             .await?
             .ok_or_else(|| {
                 // Extract a cleaner model name from the full type name
@@ -146,7 +146,7 @@ where
 /// Convenience macro to implement RouteBinding for a SeaORM model
 ///
 /// **DEPRECATED**: This macro is no longer needed. Route model binding is now
-/// automatic for any model whose Entity implements `suprnova::database::Model`.
+/// automatic for any model whose Entity implements `suprnova::database::EntityExt`.
 /// Simply use the Model type in your handler parameter.
 ///
 /// This macro implements the `RouteBinding` trait for a model, enabling
@@ -196,7 +196,7 @@ macro_rules! route_binding {
                     .parse()
                     .map_err(|_| $crate::FrameworkError::param_parse(value, "i32"))?;
 
-                <$entity as $crate::Model>::find_by_pk(id)
+                <$entity as $crate::database::EntityExt>::find_by_pk(id)
                     .await?
                     .ok_or_else(|| $crate::FrameworkError::model_not_found(stringify!($model)))
             }

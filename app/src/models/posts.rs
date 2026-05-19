@@ -16,7 +16,7 @@
 pub use super::entities::posts::*;
 
 use sea_orm::{entity::prelude::*, Set};
-use suprnova::database::{ModelMut, QueryBuilder};
+use suprnova::database::{EntityExtMut, QueryBuilder};
 
 /// Type alias matching the existing dogfood naming
 /// (`Post` rather than `Model`). PostPolicy and the admin controller
@@ -27,8 +27,8 @@ pub type Post = Model;
 
 impl ActiveModelBehavior for ActiveModel {}
 
-impl suprnova::database::Model for Entity {}
-impl suprnova::database::ModelMut for Entity {}
+impl suprnova::database::EntityExt for Entity {}
+impl suprnova::database::EntityExtMut for Entity {}
 
 // ── Eloquent-style API ─────────────────────────────────────────────
 
