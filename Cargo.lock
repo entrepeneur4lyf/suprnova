@@ -1708,6 +1708,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "featureflag"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55481f664c18da83cb6d9a789faa4f2d69222eb78ad9399f716db11b56b42004"
+dependencies = [
+ "futures-core",
+ "inventory",
+ "thread_local",
+]
+
+[[package]]
 name = "ff"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6051,6 +6062,7 @@ dependencies = [
  "dotenvy",
  "envy",
  "fake",
+ "featureflag",
  "futures",
  "futures-util",
  "getrandom 0.4.2",
