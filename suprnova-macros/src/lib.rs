@@ -20,6 +20,7 @@ mod handler;
 mod inertia;
 mod injectable;
 mod model;
+mod model_attribute;
 mod multipart;
 mod notification_mail;
 mod suprnova_test;
@@ -735,6 +736,86 @@ pub fn derive_notification_mailable(input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn model(attr: TokenStream, item: TokenStream) -> TokenStream {
     model::expand(attr.into(), item.into())
+        .unwrap_or_else(|e| e.to_compile_error())
+        .into()
+}
+
+/// `#[accessor]` — function-level attribute that marks an
+/// `impl Model { ... }` method as an Eloquent attribute reader.
+///
+/// Applied to `fn name(&self) -> T`. When the field name appears in
+/// `#[model(appends = [...])]`, the model's `to_json()` calls the
+/// method and inserts the JSON-encoded result under that key.
+///
+/// The macro itself is a pass-through; the real wiring lives in the
+/// struct-level `#[suprnova::model]` macro's `to_json` emission.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[suprnova::model(appends = ["full_name"])]
+/// pub struct User {
+///     pub id: i64,
+///     pub first_name: String,
+///     pub last_name: String,
+/// }
+///
+/// impl User {
+///     #[suprnova::accessor]
+///     pub fn full_name(&self) -> String {
+///         format!("{} {}", self.first_name, self.last_name)
+///     }
+/// }
+///
+/// // u.to_json() includes "full_name": "Alice X"
+/// ```
+#[proc_macro_attribute]
+pub fn accessor(attr: TokenStream, item: TokenStream) -> TokenStream {
+    model_attribute::accessor(attr.into(), item.into())
+        .unwrap_or_else(|e| e.to_compile_error())
+        .into()
+}
+
+/// `#[mutator]` — function-level attribute that marks an
+/// `impl Model { ... }` method as the routed write-path for a column.
+///
+/// Applied to
+/// `fn set_<field>(&mut self, value: serde_json::Value) -> Result<(), FrameworkError>`.
+/// When the field name appears in `#[model(mutators = [...])]`, the
+/// model's `fill` / `create` / `update` path calls
+/// `self.set_<field>(value)?` instead of direct field assignment. The
+/// body owns the deserialise + transform.
+///
+/// Direct field assignment (`user.password = "raw"`) bypasses the
+/// mutator — same as Laravel's `$user->password = ...` vs
+/// `$user->fill(...)`.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[suprnova::model(fillable = ["password"], mutators = ["password"])]
+/// pub struct User {
+///     pub id: i64,
+///     pub password: String,
+/// }
+///
+/// impl User {
+///     #[suprnova::mutator]
+///     pub fn set_password(
+///         &mut self,
+///         value: serde_json::Value,
+///     ) -> Result<(), suprnova::FrameworkError> {
+///         let raw: String = serde_json::from_value(value).map_err(|e| {
+///             suprnova::FrameworkError::validation("password", format!("{e}"))
+///         })?;
+///         self.password = bcrypt(raw);
+///         Ok(())
+///     }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn mutator(attr: TokenStream, item: TokenStream) -> TokenStream {
+    model_attribute::mutator(attr.into(), item.into())
         .unwrap_or_else(|e| e.to_compile_error())
         .into()
 }

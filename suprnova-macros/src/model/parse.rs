@@ -71,6 +71,19 @@ impl ModelInput {
             ));
         }
 
+        // T8 — `hidden` is a denylist, `visible` an allowlist. Both at
+        // once is incoherent (one says "drop these", the other "keep
+        // only these") and Laravel rejects the same combination via
+        // `$hidden` / `$visible` semantics.
+        if !attrs.hidden.as_ref().is_none_or(Vec::is_empty)
+            && attrs.visible.as_ref().is_some_and(|v| !v.is_empty())
+        {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "cannot specify both `hidden` and `visible` on the same model",
+            ));
+        }
+
         Ok(Self {
             item,
             table,
@@ -312,6 +325,24 @@ mod tests {
             Ok(_) => panic!("expected fillable + guarded conflict, got Ok"),
             Err(e) => assert!(
                 e.to_string().contains("both `fillable` and `guarded`"),
+                "unexpected error message: {e}",
+            ),
+        }
+    }
+
+    #[test]
+    fn hidden_and_visible_conflict_errors() {
+        // T8 — `hidden` is a denylist, `visible` an allowlist; the
+        // pair is incoherent. Mirrors fillable + guarded mutual
+        // exclusion.
+        let result = ModelInput::parse(
+            quote! { hidden = ["secret"], visible = ["name"] },
+            quote! { pub struct X { pub id: i64, pub name: String, pub secret: String } },
+        );
+        match result {
+            Ok(_) => panic!("expected hidden + visible conflict, got Ok"),
+            Err(e) => assert!(
+                e.to_string().contains("both `hidden` and `visible`"),
                 "unexpected error message: {e}",
             ),
         }

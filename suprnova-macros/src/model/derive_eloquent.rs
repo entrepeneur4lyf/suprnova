@@ -86,10 +86,22 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     // declared cast (in `input.casts`) decode JSON → Runtime →
     // `Cast::to_storage` → ActiveModel; uncast fields use the same
     // direct `serde_json::from_value` shape as before T7a.
-    let apply_arms = field_idents
-        .iter()
-        .zip(field_strs.iter())
-        .map(|(ident, name)| casts::apply_arm(name, ident, input.cast_for_field(name)));
+    //
+    // T8 — fields listed in `mutators = [...]` take precedence over
+    // the cast/direct apply paths. The mutator arm builds a scratch
+    // `Self::default()`, calls `scratch.set_<field>(val)?`, then
+    // serialises the transformed value back into JSON and feeds it
+    // into the same cast/direct apply logic. This means a field can
+    // declare both a mutator and a cast; the mutator transforms the
+    // runtime value, the cast handles the storage shape.
+    let mutators_list = &input.mutators;
+    let apply_arms = field_idents.iter().zip(field_strs.iter()).map(|(ident, name)| {
+        if mutators_list.iter().any(|m| m == name) {
+            casts::mutator_apply_arm(name, ident, input.cast_for_field(name))
+        } else {
+            casts::apply_arm(name, ident, input.cast_for_field(name))
+        }
+    });
 
     let replicate_arms = field_idents
         .iter()
@@ -109,16 +121,29 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             }
         });
 
-    let from_attrs_unsaved_arms = field_idents
-        .iter()
-        .zip(field_strs.iter())
-        .map(|(ident, name)| {
+    // T8 — when the field name is in `mutators = [...]`, route
+    // through `s.set_<field>(value)?` so unsaved-instance builders
+    // (`first_or_new`) apply the same transformation as `create` /
+    // `update`. Non-mutator fields keep the direct
+    // `serde_json::from_value` apply (which silently swallows decode
+    // errors via `unwrap_or_default` — matching the pre-T8
+    // first-or-new behaviour for non-mutator fields).
+    let from_attrs_unsaved_arms = field_idents.iter().zip(field_strs.iter()).map(|(ident, name)| {
+        if mutators_list.iter().any(|m| m == name) {
+            let setter = quote::format_ident!("set_{}", ident);
+            quote! {
+                #name => {
+                    s.#setter(v.clone())?;
+                }
+            }
+        } else {
             quote! {
                 #name => {
                     s.#ident = ::suprnova::serde_json::from_value(v.clone()).unwrap_or_default();
                 }
             }
-        });
+        }
+    });
 
     // For `save()`, we need every non-PK field marked as Set so SeaORM
     // emits a real UPDATE statement. The SeaORM-derived
@@ -156,6 +181,85 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         .iter()
         .zip(field_strs.iter())
         .map(|(ident, name)| casts::to_storage_arm(ident, input.cast_for_field(name)));
+
+    // T8 — `to_json` integration. For every accessor name listed in
+    // `appends = [...]`, call the method (declared in user code with
+    // `#[accessor]`) and insert the JSON-encoded result under that
+    // key. The macro doesn't try to validate that the method exists
+    // — if it's missing, the call site produces a clear compiler
+    // error pointing at the user's struct.
+    let appends = &input.appends;
+    let hidden = &input.hidden;
+    let visible_opt = &input.visible;
+    let append_inserts = appends.iter().map(|name| {
+        let method = quote::format_ident!("{}", name);
+        quote! {
+            out.insert(
+                #name.to_string(),
+                ::suprnova::serde_json::to_value(&self.#method())
+                    .unwrap_or(::suprnova::serde_json::Value::Null),
+            );
+        }
+    });
+    // T8 — filter applied to the base struct serialization.
+    //
+    // - `visible = [...]` is an allowlist: every column NOT in the
+    //   list is dropped. Used for tightly-controlled API output.
+    // - `hidden = [...]` is a denylist: every column in the list is
+    //   dropped. Used for sensitive fields like `password`.
+    //
+    // Mutual exclusion is enforced in `parse.rs`. Appended accessors
+    // bypass both filters (they're inserted after the base map is
+    // filtered) — this matches Laravel: `$appends` always serialises.
+    let filter_apply: TokenStream = match visible_opt {
+        Some(list) => {
+            let lits = list.iter().map(|s| quote! { #s });
+            quote! {
+                let visible_list: &[&str] = &[ #(#lits),* ];
+                for (k, v) in map {
+                    if visible_list.contains(&k.as_str()) {
+                        out.insert(k, v);
+                    }
+                }
+            }
+        }
+        None => {
+            let lits = hidden.iter().map(|s| quote! { #s });
+            quote! {
+                let hidden_list: &[&str] = &[ #(#lits),* ];
+                for (k, v) in map {
+                    if !hidden_list.contains(&k.as_str()) {
+                        out.insert(k, v);
+                    }
+                }
+            }
+        }
+    };
+
+    // T8 — `fill` body arms. Mutator-routed fields call
+    // `self.set_<field>(value.clone())?`; non-mutator fields
+    // direct-assign via `serde_json::from_value(...)`. We skip the
+    // duplicate match-pattern hazard by partitioning the lists.
+    let fill_mutator_arms = mutators_list.iter().map(|name| {
+        let setter = quote::format_ident!("set_{}", name);
+        quote! {
+            #name => { self.#setter(v.clone())?; }
+        }
+    });
+    let fill_direct_arms = field_idents.iter().zip(field_strs.iter()).filter_map(|(ident, name)| {
+        if mutators_list.iter().any(|m| m == name) {
+            // Mutator-listed: skip — its arm is emitted above. Emitting
+            // both arms would produce duplicate match patterns and a
+            // hard rustc error.
+            None
+        } else {
+            Some(quote! {
+                #name => {
+                    self.#ident = ::suprnova::serde_json::from_value(v.clone()).unwrap_or_default();
+                }
+            })
+        }
+    });
 
     Ok(quote! {
         impl ::suprnova::eloquent::EloquentModel for #struct_ident {
@@ -280,6 +384,73 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     }
                 }
                 ::core::result::Result::Ok(s)
+            }
+        }
+
+        // T8 — serialization + fill surface. These methods are
+        // inherent on the user's struct (NOT on the `Model` trait)
+        // because they reference accessor / mutator names that vary
+        // per model, and the trait signature is fixed.
+        //
+        // Two `impl #struct_ident { ... }` blocks coexist on the same
+        // type as long as no method name collides; `to_json`,
+        // `to_array`, `fill` don't clash with the static shortcuts
+        // (`filter`, `where_in`, `count`, etc.) emitted below.
+        impl #struct_ident {
+            /// Serialize the model to a JSON object.
+            ///
+            /// - Fields listed in `#[model(hidden = [...])]` are
+            ///   stripped from the output.
+            /// - Methods listed in `#[model(appends = [...])]` are
+            ///   called and their results inserted under their name.
+            ///
+            /// The base serialization uses the struct's `Serialize`
+            /// impl, so casts have already converted Runtime → JSON
+            /// shape by the time `to_json` reads them.
+            pub fn to_json(&self) -> ::suprnova::serde_json::Value {
+                let mut out = ::suprnova::serde_json::Map::new();
+                let base = ::suprnova::serde_json::to_value(self)
+                    .unwrap_or(::suprnova::serde_json::Value::Null);
+                if let ::suprnova::serde_json::Value::Object(map) = base {
+                    #filter_apply
+                }
+                #(#append_inserts)*
+                ::suprnova::serde_json::Value::Object(out)
+            }
+
+            /// Alias for [`Self::to_json`] — matches Laravel's
+            /// `$model->toArray()` naming.
+            pub fn to_array(&self) -> ::suprnova::serde_json::Value {
+                self.to_json()
+            }
+
+            /// Apply `attrs` to `self`, routing through any matching
+            /// mutator (`set_<field>(value)`) before falling back to
+            /// direct field assignment. Unknown columns are silently
+            /// skipped to match Laravel's `$model->fill($attrs)`
+            /// semantics.
+            ///
+            /// Honours mass-assignment: the `fillable` / `guarded`
+            /// filter declared on `#[model]` runs first, dropping any
+            /// columns the caller isn't allowed to set. To bypass the
+            /// filter, wrap the call in
+            /// [`::suprnova::eloquent::unguarded`] — the same
+            /// task-local escape hatch `Model::create` / `update`
+            /// honour.
+            pub fn fill(
+                &mut self,
+                attrs: ::suprnova::eloquent::Attrs,
+            ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
+                let attrs = <Self as ::suprnova::eloquent::Model>::fillable_filter()
+                    .apply(attrs);
+                for (k, v) in attrs.iter() {
+                    match k {
+                        #(#fill_mutator_arms,)*
+                        #(#fill_direct_arms,)*
+                        _ => {} // unknown column — silently skip (Laravel parity)
+                    }
+                }
+                ::core::result::Result::Ok(())
             }
         }
 

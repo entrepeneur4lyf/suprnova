@@ -59,6 +59,70 @@ pub fn apply_arm(name: &str, ident: &syn::Ident, cast_ty: Option<&Type>) -> Toke
     }
 }
 
+/// Generate a `match` arm for `apply_attrs_to_active_model` that
+/// routes through a user-supplied mutator before writing to the
+/// ActiveModel. Used when the field name appears in
+/// `#[model(mutators = [...])]`.
+///
+/// Shape:
+///
+/// 1. Build a fresh `Self::default()` scratch instance.
+/// 2. Call `scratch.set_<field>(val.clone())?` — the user's body owns
+///    the deserialise + transform.
+/// 3. Serialise `scratch.<field>` back into JSON so the rest of the
+///    write path matches the direct apply (same cast / from_value
+///    behaviour as a non-mutator field with that name).
+/// 4. Apply the resulting JSON the same way `apply_arm` would have —
+///    via `Cast::to_storage` if the field also declares a cast,
+///    otherwise direct `serde_json::from_value` into the storage type.
+///
+/// T8: mutator fields take precedence over the direct apply path.
+/// A field that's both `mutators = [...]` and `casts = { ... }` keeps
+/// both — the mutator transforms the runtime value, the cast handles
+/// the storage shape.
+pub fn mutator_apply_arm(
+    name: &str,
+    ident: &syn::Ident,
+    cast_ty: Option<&Type>,
+) -> TokenStream {
+    let setter = quote::format_ident!("set_{}", ident);
+    let storage_apply = match cast_ty {
+        Some(cast_ty) => quote! {
+            let runtime: <#cast_ty as ::suprnova::eloquent::casts::Cast>::Runtime =
+                ::suprnova::serde_json::from_value(transformed)
+                    .map_err(|e| ::suprnova::FrameworkError::validation(
+                        #name,
+                        ::std::format!("cast decode after mutator: {e}"),
+                    ))?;
+            let storage = <#cast_ty as ::suprnova::eloquent::casts::Cast>::to_storage(&runtime)?;
+            am.#ident = ::suprnova::sea_orm::Set(storage);
+        },
+        None => quote! {
+            am.#ident = ::suprnova::sea_orm::Set(
+                ::suprnova::serde_json::from_value(transformed).map_err(|e| {
+                    ::suprnova::FrameworkError::validation(
+                        #name,
+                        ::std::format!("cannot decode mutator output into column type: {e}"),
+                    )
+                })?
+            );
+        },
+    };
+    quote! {
+        #name => {
+            let mut scratch = <Self as ::core::default::Default>::default();
+            scratch.#setter(val.clone())?;
+            let transformed: ::suprnova::serde_json::Value =
+                ::suprnova::serde_json::to_value(&scratch.#ident)
+                    .map_err(|e| ::suprnova::FrameworkError::validation(
+                        #name,
+                        ::std::format!("mutator output serialize: {e}"),
+                    ))?;
+            #storage_apply
+        }
+    }
+}
+
 /// Generate the struct-init arm for `From<inner::Model> for UserStruct`.
 /// Cast fields call `Cast::from_storage` to inflate the storage shape
 /// back into the runtime type.
