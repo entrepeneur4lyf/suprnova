@@ -1047,6 +1047,7 @@ where
     M: From<<M::Entity as sea_orm::EntityTrait>::Model>,
     <M::Entity as sea_orm::EntityTrait>::Model: From<M>
         + sea_orm::IntoActiveModel<<M::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + serde::Serialize
         + Send
         + Sync,
     <M::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
@@ -1124,10 +1125,13 @@ where
 // Model and convert via `M::from(row)`.
 impl<M: Model> Builder<M>
 where
-    M: From<<M::Entity as sea_orm::EntityTrait>::Model>,
+    M: From<<M::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned,
     <M::Entity as sea_orm::EntityTrait>::Model: From<M>
         + sea_orm::IntoActiveModel<<M::Entity as sea_orm::EntityTrait>::ActiveModel>
         + FromQueryResult
+        + serde::Serialize
         + Send
         + Sync,
     <M::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
@@ -1135,18 +1139,71 @@ where
         Send + Into<sea_orm::Value>,
 {
     /// Execute the SELECT and return every row.
+    ///
+    /// ## Fast path vs slow path
+    ///
+    /// When [`with_casts`] has NOT been called (`runtime_casts` empty)
+    /// — the common case — rows are materialised through the
+    /// macro-emitted `From<inner::Model> for M` impl, which routes
+    /// through any *static* casts declared via `#[model(casts =
+    /// { ... })]`. This is one allocation per row.
+    ///
+    /// When `runtime_casts` has entries, the static cast pipeline is
+    /// bypassed entirely for this query — runtime casts are an
+    /// *override*, not an addition. For each row the framework
+    /// serialises the storage-shape inner Model directly to JSON,
+    /// routes each listed column through the runtime cast's
+    /// `DynCast::from_storage_json`, and deserialises the result
+    /// straight into `M`. Columns with no runtime cast entry land in
+    /// `M` in their raw storage shape — so a runtime override is
+    /// expected to specify every column that needs coercion.
+    ///
+    /// [`with_casts`]: Self::with_casts
     pub async fn get(self) -> Result<Vec<M>, FrameworkError> {
         let db = DB::connection()?;
         let backend = db.inner().get_database_backend();
+        let runtime_casts = self.runtime_casts.clone();
         let (sql, vals) = self.render_select_for(backend, M::TABLE, "*");
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
-        let rows = <<M as EloquentModel>::Entity as sea_orm::EntityTrait>::Model::find_by_statement(
-            stmt,
-        )
-        .all(db.inner())
-        .await
-        .map_err(|e| FrameworkError::database(e.to_string()))?;
-        Ok(rows.into_iter().map(M::from).collect())
+
+        // Fetch into the entity's `Model` — the SeaORM type that's
+        // auto-implementing `FromQueryResult`. This is the storage-shape
+        // type, not the user's runtime struct.
+        let raw_rows = <<M as EloquentModel>::Entity as sea_orm::EntityTrait>::Model
+            ::find_by_statement(stmt)
+            .all(db.inner())
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+
+        if runtime_casts.is_empty() {
+            // Fast path — convert each row directly via the
+            // macro-emitted `From<inner::Model> for M`.
+            return Ok(raw_rows.into_iter().map(M::from).collect());
+        }
+
+        // Slow path (override mode) — serialise the storage-shape row
+        // to JSON, apply each runtime cast in place, then deserialise
+        // into M. Static casts on M are NOT applied; the runtime cast
+        // map is treated as a full replacement for this query.
+        let mut out = Vec::with_capacity(raw_rows.len());
+        for row in raw_rows {
+            let mut as_json = serde_json::to_value(&row).map_err(|e| {
+                FrameworkError::database(format!("serialise inner Model for runtime cast: {e}"))
+            })?;
+            if let serde_json::Value::Object(ref mut map) = as_json {
+                for (col, cast) in &runtime_casts {
+                    if let Some(v) = map.get(*col).cloned() {
+                        let coerced = cast.from_storage_json(&v)?;
+                        map.insert((*col).to_string(), coerced);
+                    }
+                }
+            }
+            let coerced_model: M = serde_json::from_value(as_json).map_err(|e| {
+                FrameworkError::database(format!("rehydrate model after runtime cast: {e}"))
+            })?;
+            out.push(coerced_model);
+        }
+        Ok(out)
     }
 
     /// Execute the SELECT and return at most one row.

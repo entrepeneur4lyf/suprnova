@@ -217,11 +217,14 @@ pub use featureflag::{feature, is_enabled};
 // time by `#[suprnova::model]` (Task 3) and walked at boot by Phase 8
 // (Admin), `model:prune`, and future tooling.
 pub use eloquent::{
-    find_model_by_table, models, unguarded, AsBool, AsDate, AsDateTime, AsDecimal, AsFloat,
-    AsImmutableDate, AsImmutableDateTime, AsInt, AsString, AsTimestamp, Attrs, Builder, Cast,
-    Direction, DynCast, EloquentModel, Fillable, FirstOrCreate, IntoColumn, IntoDynCast, IntoVal,
-    Model, ModelEntry, ReplicateExt,
+    find_model_by_table, models, unguarded, AsArray, AsArrayObject, AsBool, AsCollection, AsDate,
+    AsDateTime, AsDecimal, AsEnum, AsFloat, AsImmutableDate, AsImmutableDateTime, AsInt, AsJson,
+    AsObject, AsString, AsTimestamp, Attrs, Builder, Cast, Collection, Direction, DynCast,
+    EloquentModel, Fillable, FirstOrCreate, IntoColumn, IntoDynCast, IntoVal, Model, ModelEntry,
+    ReplicateExt,
 };
+// `casts!` macro is `#[macro_export]` in eloquent/casts/mod.rs — re-exported
+// at the crate root automatically. No `pub use` needed here.
 pub use notifications::{
     Channel, DynNotification, Notifiable, Notification, NotificationDispatcher,
     NotificationFactory, Notify, SendNotificationJob,

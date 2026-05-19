@@ -159,6 +159,7 @@ broadcasting-fanout = []
 # `Registry` type identity.
 prometheus-client = "0.24"
 serial_test = "3.4.0"
+strum = { version = "0.28.0", features = ["derive"] }
 tokio = { version = "1", features = ["test-util"] }
 tracing-test = { version = "0.2.6", features = ["no-env-filter"] }
 url = "2"

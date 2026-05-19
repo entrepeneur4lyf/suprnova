@@ -13,6 +13,7 @@
 pub mod attrs;
 pub mod builder;
 pub mod casts;
+pub mod collection;
 pub mod fillable;
 pub mod model;
 pub mod registry;
@@ -20,9 +21,11 @@ pub mod registry;
 pub use attrs::Attrs;
 pub use builder::{Builder, Direction, IntoColumn, IntoVal};
 pub use casts::{
-    AsBool, AsDate, AsDateTime, AsDecimal, AsFloat, AsImmutableDate, AsImmutableDateTime, AsInt,
-    AsString, AsTimestamp, Cast, DynCast, IntoDynCast,
+    AsArray, AsArrayObject, AsBool, AsCollection, AsDate, AsDateTime, AsDecimal, AsEnum, AsFloat,
+    AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsObject, AsString, AsTimestamp, Cast,
+    DynCast, IntoDynCast,
 };
+pub use collection::Collection;
 pub use fillable::{unguarded, Fillable};
 pub use model::{FirstOrCreate, Model, ReplicateExt};
 pub use registry::{find_model_by_table, models, ModelEntry};

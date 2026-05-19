@@ -14,7 +14,9 @@
 //! enum + `with_casts` runtime override. T7c adds encrypted +
 //! hashed casts.
 
+pub mod enum_cast;
 pub mod primitive;
+pub mod structured;
 pub mod temporal;
 
 use crate::error::FrameworkError;
@@ -38,9 +40,6 @@ pub trait Cast: Send + Sync {
     fn to_storage(value: &Self::Runtime) -> Result<Self::Storage, FrameworkError>;
     fn from_storage(stored: &Self::Storage) -> Result<Self::Runtime, FrameworkError>;
 }
-
-pub use primitive::*;
-pub use temporal::*;
 
 /// Type-erased cast for `Builder::with_casts(...)` runtime override.
 /// The Builder stores `HashMap<&str, Arc<dyn DynCast>>` so heterogeneous
@@ -79,4 +78,50 @@ pub trait DynCast: Send + Sync {
 /// `("col_name", <AsBool as IntoDynCast>::into_dyn())`.
 pub trait IntoDynCast {
     fn into_dyn() -> Box<dyn DynCast>;
+}
+
+// ---- Submodule re-exports ------------------------------------------------
+//
+// Hoist every cast type to `suprnova::eloquent::casts::*` so users can
+// `use suprnova::eloquent::casts::AsArray;` regardless of which file
+// the type was originally declared in. The crate root in `lib.rs`
+// re-exports the user-facing names further (`suprnova::AsArray`).
+
+pub use enum_cast::AsEnum;
+pub use primitive::{AsBool, AsDecimal, AsFloat, AsInt, AsString};
+pub use structured::{AsArray, AsArrayObject, AsCollection, AsJson, AsObject};
+pub use temporal::{AsDate, AsDateTime, AsImmutableDate, AsImmutableDateTime, AsTimestamp};
+
+/// Construct a `HashMap<&'static str, Arc<dyn DynCast>>` for use with
+/// `Builder::with_casts(...)`. Each entry is `field_name = CastType`;
+/// the macro materialises the dyn-cast box via `IntoDynCast::into_dyn`
+/// and wraps it in an `Arc` so the resulting map can be cloned per
+/// builder reuse.
+///
+/// ```ignore
+/// use suprnova::{casts, AsDate, AsJson};
+///
+/// let map = casts! {
+///     birthday = AsDate,
+///     metadata = AsJson<serde_json::Value>,
+/// };
+/// let rows = User::query().with_casts(map).get().await?;
+/// ```
+#[macro_export]
+macro_rules! casts {
+    ($($field:ident = $cast:ty),* $(,)?) => {{
+        let mut map: ::std::collections::HashMap<
+            &'static str,
+            ::std::sync::Arc<dyn $crate::eloquent::casts::DynCast>,
+        > = ::std::collections::HashMap::new();
+        $(
+            map.insert(
+                stringify!($field),
+                ::std::sync::Arc::<dyn $crate::eloquent::casts::DynCast>::from(
+                    <$cast as $crate::eloquent::casts::IntoDynCast>::into_dyn(),
+                ),
+            );
+        )*
+        map
+    }};
 }

@@ -53,8 +53,11 @@ use crate::error::FrameworkError;
 pub trait Model: EloquentModel + Send + Sync + Sized + Clone + Serialize + DeserializeOwned
 where
     Self: From<<Self::Entity as EntityTrait>::Model>,
-    <Self::Entity as EntityTrait>::Model:
-        From<Self> + IntoActiveModel<<Self::Entity as EntityTrait>::ActiveModel> + Send + Sync,
+    <Self::Entity as EntityTrait>::Model: From<Self>
+        + IntoActiveModel<<Self::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
     <Self::Entity as EntityTrait>::ActiveModel: Send,
     <<Self::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
         Send + Into<sea_orm::Value>,
@@ -288,8 +291,11 @@ where
     where
         T: Model + DeserializeOwned + Serialize,
         T: From<<T::Entity as EntityTrait>::Model>,
-        <T::Entity as EntityTrait>::Model:
-            From<T> + IntoActiveModel<<T::Entity as EntityTrait>::ActiveModel> + Send + Sync,
+        <T::Entity as EntityTrait>::Model: From<T>
+            + IntoActiveModel<<T::Entity as EntityTrait>::ActiveModel>
+            + Serialize
+            + Send
+            + Sync,
         <T::Entity as EntityTrait>::ActiveModel: Send,
         <<T::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
             Send + Into<sea_orm::Value>,
@@ -414,8 +420,11 @@ pub trait ReplicateExt: Sized {
 pub trait FirstOrCreate: Model + Send + Sync
 where
     Self: From<<Self::Entity as EntityTrait>::Model>,
-    <Self::Entity as EntityTrait>::Model:
-        From<Self> + IntoActiveModel<<Self::Entity as EntityTrait>::ActiveModel> + Send + Sync,
+    <Self::Entity as EntityTrait>::Model: From<Self>
+        + IntoActiveModel<<Self::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
     <Self::Entity as EntityTrait>::ActiveModel: Send,
     <<Self::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
         Send + Into<sea_orm::Value>,
