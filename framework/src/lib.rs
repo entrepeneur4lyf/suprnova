@@ -216,7 +216,10 @@ pub use featureflag::{feature, is_enabled};
 // `eloquent` module. The `ModelEntry` registry is populated at compile
 // time by `#[suprnova::model]` (Task 3) and walked at boot by Phase 8
 // (Admin), `model:prune`, and future tooling.
-pub use eloquent::{find_model_by_table, models, EloquentModel, ModelEntry};
+pub use eloquent::{
+    find_model_by_table, models, Attrs, Builder, EloquentModel, Fillable, FirstOrCreate,
+    IntoColumn, Model, ModelEntry, ReplicateExt,
+};
 pub use notifications::{
     Channel, DynNotification, Notifiable, Notification, NotificationDispatcher,
     NotificationFactory, Notify, SendNotificationJob,
