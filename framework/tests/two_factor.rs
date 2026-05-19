@@ -200,8 +200,12 @@ async fn re_enroll_invalidates_old_recovery_codes_and_resets_confirmed() {
     TwoFactor::confirm(&user, &confirm_code).await.unwrap();
     assert!(TwoFactor::is_enabled(&user).await.unwrap());
 
-    // Re-enroll: the prior row is overwritten, confirmed_at cleared.
-    let second = TwoFactor::enroll(&user).await.unwrap();
+    // Re-enroll: proof required because the existing enrollment is
+    // confirmed. A live TOTP code from the current secret satisfies
+    // the proof check; the prior row is then overwritten and
+    // confirmed_at cleared.
+    let proof = totp_code_for(&first.otpauth_url);
+    let second = TwoFactor::re_enroll(&user, &proof).await.unwrap();
     assert!(!TwoFactor::is_enabled(&user).await.unwrap());
 
     // Sanity: the new enrollment must produce a different secret /
@@ -421,6 +425,131 @@ async fn verify_rejects_replay_within_same_timestep() {
 }
 
 #[tokio::test]
+async fn enroll_errors_when_2fa_already_confirmed() {
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    ensure_crypt();
+
+    let user = FakeUser {
+        id: "block-uid".into(),
+        email: "block@example.com".into(),
+    };
+
+    // Initial enroll + confirm establishes confirmed 2FA.
+    let resp = TwoFactor::enroll(&user).await.unwrap();
+    TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
+        .await
+        .unwrap();
+    assert!(TwoFactor::is_enabled(&user).await.unwrap());
+
+    // A second enroll must NOT silently overwrite the secret — that
+    // would let a session-hijacked attacker pivot. Expect 409.
+    let err = TwoFactor::enroll(&user).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("already enabled"),
+        "error message must mention the already-enabled state; got: {msg}"
+    );
+
+    // The original confirmation must still be intact.
+    assert!(
+        TwoFactor::is_enabled(&user).await.unwrap(),
+        "blocked enroll must not have touched the existing row"
+    );
+}
+
+#[tokio::test]
+async fn re_enroll_with_valid_recovery_code_succeeds() {
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    ensure_crypt();
+
+    let user = FakeUser {
+        id: "rerec-uid".into(),
+        email: "rerec@example.com".into(),
+    };
+
+    let resp1 = TwoFactor::enroll(&user).await.unwrap();
+    TwoFactor::confirm(&user, &totp_code_for(&resp1.otpauth_url))
+        .await
+        .unwrap();
+
+    // Use a recovery code as proof — it consumes the code in the
+    // process, so the same code can't be re-used as proof later.
+    let recovery_proof = resp1.recovery_codes[0].clone();
+    let resp2 = TwoFactor::re_enroll(&user, &recovery_proof).await.unwrap();
+
+    // New enrollment is pending; old enrollment cleared.
+    assert!(!TwoFactor::is_enabled(&user).await.unwrap());
+    assert_ne!(resp1.otpauth_url, resp2.otpauth_url);
+
+    // Same recovery code can't be reused (consumed during re_enroll +
+    // the new enrollment generated fresh codes anyway).
+    TwoFactor::confirm(&user, &totp_code_for(&resp2.otpauth_url))
+        .await
+        .unwrap();
+    assert!(
+        !TwoFactor::consume_recovery_code(&user, &recovery_proof)
+            .await
+            .unwrap(),
+        "consumed recovery code must not be reusable, and the new enrollment's codes are different anyway"
+    );
+}
+
+#[tokio::test]
+async fn re_enroll_with_invalid_proof_errors() {
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    ensure_crypt();
+
+    let user = FakeUser {
+        id: "badproof-uid".into(),
+        email: "badproof@example.com".into(),
+    };
+
+    let resp = TwoFactor::enroll(&user).await.unwrap();
+    TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
+        .await
+        .unwrap();
+
+    // Garbage proof — neither a valid TOTP code nor any recovery code.
+    let err = TwoFactor::re_enroll(&user, "garbage-proof-xyz")
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("proof"),
+        "error message must indicate the proof was rejected; got: {msg}"
+    );
+
+    // The original enrollment must still be active.
+    assert!(TwoFactor::is_enabled(&user).await.unwrap());
+}
+
+#[tokio::test]
+async fn re_enroll_without_existing_enrollment_errors() {
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    ensure_crypt();
+
+    let user = FakeUser {
+        id: "noprior-uid".into(),
+        email: "noprior@example.com".into(),
+    };
+
+    // No prior enrollment at all.
+    let err = TwoFactor::re_enroll(&user, "anything").await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("no confirmed"),
+        "error must direct caller to enroll() when no prior enrollment exists; got: {msg}"
+    );
+
+    // Pending (unconfirmed) enrollment is also "no confirmed" from
+    // re_enroll's perspective.
+    TwoFactor::enroll(&user).await.unwrap();
+    assert!(!TwoFactor::is_enabled(&user).await.unwrap());
+    let err = TwoFactor::re_enroll(&user, "anything").await.unwrap_err();
+    assert!(err.to_string().contains("no confirmed"));
+}
+
+#[tokio::test]
 async fn verify_replay_state_resets_on_re_enrollment() {
     let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
     ensure_crypt();
@@ -441,8 +570,12 @@ async fn verify_replay_state_resets_on_re_enrollment() {
     // Re-enroll wipes the row's last_used_timestep along with the
     // secret — the new secret produces different codes anyway, but
     // even within the same timestep window the new verify path must
-    // not inherit the old replay block.
-    let resp2 = TwoFactor::enroll(&user).await.unwrap();
+    // not inherit the old replay block. Proof here is a recovery
+    // code (single-use, doesn't trigger replay protection on its
+    // own — TOTP from the old secret would be blocked by the
+    // replay check we just installed).
+    let recovery_proof = resp1.recovery_codes[0].clone();
+    let resp2 = TwoFactor::re_enroll(&user, &recovery_proof).await.unwrap();
     TwoFactor::confirm(&user, &totp_code_for(&resp2.otpauth_url))
         .await
         .unwrap();

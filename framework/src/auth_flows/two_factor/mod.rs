@@ -71,16 +71,90 @@ pub trait TwoFactorUser: Send + Sync {
 
 impl TwoFactor {
     /// Begin enrollment: generate a fresh secret + 10 recovery codes,
-    /// persist them encrypted (overwriting any prior row for this
-    /// user, including a previously confirmed enrollment), and return
-    /// the otpauth URL, a QR-code SVG, and the plaintext recovery
-    /// codes.
+    /// persist them encrypted, and return the otpauth URL, a QR-code
+    /// SVG, and the plaintext recovery codes (shown to the user once).
     ///
     /// The user must call [`Self::confirm`] with a valid TOTP code
-    /// before 2FA actually gates logins - until then
+    /// before 2FA actually gates logins — until then
     /// [`Self::is_enabled`] returns `false` and [`Self::verify`]
     /// short-circuits to `Ok(false)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `FrameworkError::domain(.., 409)` when the user
+    /// **already has a confirmed 2FA enrollment**. Overwriting a
+    /// confirmed secret without proof of the existing one would let a
+    /// session-hijacked attacker pivot from "I have a session" to "I
+    /// have 2FA on this account." Call [`Self::re_enroll`] with a
+    /// valid TOTP code or recovery code as proof.
+    ///
+    /// Re-enrolling on an unconfirmed (pending) row is allowed — the
+    /// prior enrollment never became authoritative.
     pub async fn enroll<U: TwoFactorUser>(
+        user: &U,
+    ) -> Result<EnrollmentResponse, FrameworkError> {
+        if Self::is_enabled(user).await? {
+            return Err(FrameworkError::domain(
+                "2FA is already enabled for this account; call re_enroll with a valid TOTP or recovery code as proof to rotate the secret",
+                409,
+            ));
+        }
+        Self::write_new_enrollment(user).await
+    }
+
+    /// Rotate the secret for an existing confirmed 2FA enrollment.
+    /// Requires either a valid current TOTP code or an unused
+    /// recovery code as proof of possession.
+    ///
+    /// On success, the row is overwritten with a fresh secret + 10
+    /// fresh recovery codes; `confirmed_at` is reset to NULL so the
+    /// user must call [`Self::confirm`] with a code from the new
+    /// secret before 2FA is active again.
+    ///
+    /// # Errors
+    ///
+    /// - `FrameworkError::domain(.., 401)` when `proof` validates as
+    ///   neither a TOTP code (current or within the replay-protected
+    ///   window) nor a recovery code.
+    /// - `FrameworkError::domain(.., 400)` when no confirmed
+    ///   enrollment exists — call [`Self::enroll`] instead.
+    pub async fn re_enroll<U: TwoFactorUser>(
+        user: &U,
+        proof: &str,
+    ) -> Result<EnrollmentResponse, FrameworkError> {
+        if !Self::is_enabled(user).await? {
+            return Err(FrameworkError::domain(
+                "no confirmed 2FA enrollment to rotate; call enroll first",
+                400,
+            ));
+        }
+
+        // Accept either path. TOTP path runs verify() which already
+        // enforces replay protection; recovery path consumes a code
+        // (single-use). Both block attackers without observed proof.
+        let totp_accepted = Self::verify(user, proof).await?;
+        let proof_accepted = if totp_accepted {
+            true
+        } else {
+            Self::consume_recovery_code(user, proof).await?
+        };
+
+        if !proof_accepted {
+            return Err(FrameworkError::domain(
+                "re-enrollment proof is neither a valid TOTP code nor a recovery code",
+                401,
+            ));
+        }
+
+        Self::write_new_enrollment(user).await
+    }
+
+    /// Internal helper — generate + persist a fresh secret. Used by
+    /// [`Self::enroll`] (no prior state) and [`Self::re_enroll`]
+    /// (after proof). Overwrites any existing row's secret, recovery
+    /// codes, and `confirmed_at` (re-confirmation required against
+    /// the new secret).
+    async fn write_new_enrollment<U: TwoFactorUser>(
         user: &U,
     ) -> Result<EnrollmentResponse, FrameworkError> {
         let secret_bytes = Secret::generate_secret()
