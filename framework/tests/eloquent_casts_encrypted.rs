@@ -367,7 +367,7 @@ async fn as_hashed_is_idempotent_across_re_saves() {
     let hash_after_create = made.password.clone();
     assert!(suprnova::hashing::verify("plain-secret", &hash_after_create).unwrap());
 
-    let mut reloaded = HashIdemModel::find(made.id).await.unwrap().unwrap();
+    let reloaded = HashIdemModel::find(made.id).await.unwrap().unwrap();
     assert_eq!(reloaded.password, hash_after_create);
 
     // Save again — same hash in memory, the update path walks every
