@@ -131,7 +131,7 @@ async fn admin_upsert_inserts_then_updates_returning_canonical_row() {
         "",
         true,
         Some("new checkout flow".into()),
-        Some(7),
+        Some("7".to_string()),
     )
     .await
     .unwrap();
@@ -139,7 +139,7 @@ async fn admin_upsert_inserts_then_updates_returning_canonical_row() {
     assert_eq!(row.scope_key, "");
     assert!(row.enabled);
     assert_eq!(row.description.as_deref(), Some("new checkout flow"));
-    assert_eq!(row.updated_by, Some(7));
+    assert_eq!(row.updated_by.as_deref(), Some("7"));
     let initial_id = row.id;
 
     // Update via the same name+scope_key — `OnConflict` updates in place.
@@ -148,14 +148,14 @@ async fn admin_upsert_inserts_then_updates_returning_canonical_row() {
         "",
         false,
         Some("rolling back".into()),
-        Some(9),
+        Some("9".to_string()),
     )
     .await
     .unwrap();
     assert_eq!(updated.id, initial_id, "upsert must preserve the row id");
     assert!(!updated.enabled);
     assert_eq!(updated.description.as_deref(), Some("rolling back"));
-    assert_eq!(updated.updated_by, Some(9));
+    assert_eq!(updated.updated_by.as_deref(), Some("9"));
 }
 
 #[tokio::test]
@@ -209,10 +209,14 @@ async fn admin_delete_returns_true_then_false_on_repeat() {
         .await
         .unwrap();
 
-    let first = admin::delete("toggle-me", "", Some(3)).await.unwrap();
+    let first = admin::delete("toggle-me", "", Some("3".to_string()))
+        .await
+        .unwrap();
     assert!(first, "first delete must report the row was removed");
 
-    let second = admin::delete("toggle-me", "", Some(3)).await.unwrap();
+    let second = admin::delete("toggle-me", "", Some("3".to_string()))
+        .await
+        .unwrap();
     assert!(
         !second,
         "second delete on the same key must report no-op (false)"

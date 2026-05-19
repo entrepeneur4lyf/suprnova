@@ -10,7 +10,7 @@
 //!   scope_key   VARCHAR(255) NOT NULL DEFAULT ''  -- '' = global; "user:42" / "team:staff" etc.
 //!   enabled     BOOLEAN     NOT NULL
 //!   description TEXT
-//!   updated_by  BIGINT                            -- audit: which user toggled it
+//!   updated_by  VARCHAR(255)                      -- audit: which user toggled it (opaque id, string-typed for UUID/ULID support)
 //!   created_at  TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP
 //!   updated_at  TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP
 //!   UNIQUE INDEX (name, scope_key)
@@ -81,7 +81,7 @@ impl MigrationTrait for Migration {
                             .not_null(),
                     )
                     .col(ColumnDef::new(Features::Description).text().null())
-                    .col(ColumnDef::new(Features::UpdatedBy).big_integer().null())
+                    .col(ColumnDef::new(Features::UpdatedBy).string_len(255).null())
                     .col(
                         ColumnDef::new(Features::CreatedAt)
                             .timestamp_with_time_zone()

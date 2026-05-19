@@ -32,7 +32,7 @@ pub struct FeatureRow {
     pub scope_key: String,
     pub enabled: bool,
     pub description: Option<String>,
-    pub updated_by: Option<i64>,
+    pub updated_by: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -95,7 +95,7 @@ pub async fn upsert(
     scope_key: &str,
     enabled: bool,
     description: Option<String>,
-    actor_id: Option<i64>,
+    actor_id: Option<String>,
 ) -> Result<FeatureRow, FrameworkError> {
     let db = DB::connection()?;
     let now = chrono::Utc::now();
@@ -105,7 +105,7 @@ pub async fn upsert(
         scope_key: Set(scope_key.to_string()),
         enabled: Set(enabled),
         description: Set(description.clone()),
-        updated_by: Set(actor_id),
+        updated_by: Set(actor_id.clone()),
         created_at: Set(now),
         updated_at: Set(now),
         ..Default::default()
@@ -152,7 +152,7 @@ pub async fn upsert(
 pub async fn delete(
     name: &str,
     scope_key: &str,
-    actor_id: Option<i64>,
+    actor_id: Option<String>,
 ) -> Result<bool, FrameworkError> {
     let db = DB::connection()?;
     let result = entity::Entity::delete_many()

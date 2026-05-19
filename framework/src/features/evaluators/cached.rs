@@ -116,12 +116,12 @@ impl CachedEvaluator {
         let user = context
             .iter()
             .find_map(|c| c.extensions().get::<UserIdField>())
-            .map(|UserIdField(id)| id.to_string())
+            .map(|field| field.as_str().to_string())
             .unwrap_or_default();
         let team = context
             .iter()
             .find_map(|c| c.extensions().get::<TeamField>())
-            .map(|TeamField(team)| team.clone())
+            .map(|field| field.as_str().to_string())
             .unwrap_or_default();
         format!("{feature}::u={user}::t={team}")
     }

@@ -238,17 +238,17 @@ impl DatabaseEvaluator {
         // user_id we recognize. featureflag does not promote child
         // extensions into a flattened view, so the explicit `iter()`
         // walk is required.
-        if let Some(UserIdField(id)) = context
+        if let Some(field) = context
             .iter()
             .find_map(|c| c.extensions().get::<UserIdField>())
         {
-            keys.push(format!("user:{}", id));
+            keys.push(format!("user:{}", field.as_str()));
         }
-        if let Some(TeamField(team)) = context
+        if let Some(field) = context
             .iter()
             .find_map(|c| c.extensions().get::<TeamField>())
         {
-            keys.push(format!("team:{}", team));
+            keys.push(format!("team:{}", field.as_str()));
         }
 
         keys.push(String::new());
@@ -277,9 +277,19 @@ impl Evaluator for DatabaseEvaluator {
     /// (`user_id` then `team`). Unknown fields pass through silently;
     /// future evaluators in a [`Chain`](featureflag::evaluator::Chain)
     /// get their own chance to handle them.
+    ///
+    /// `user_id` accepts both string and i64 raw values so apps with
+    /// either id shape interoperate without ceremony — strings pass
+    /// through; integers stringify via `to_string`.
     fn on_new_context(&self, mut context: ContextRef<'_>, fields: Fields<'_>) {
-        if let Some(id) = fields.get("user_id").and_then(|v| v.as_i64()) {
-            context.extensions_mut().insert(UserIdField(id));
+        if let Some(value) = fields.get("user_id") {
+            let id = value
+                .as_str()
+                .map(String::from)
+                .or_else(|| value.as_i64().map(|i| i.to_string()));
+            if let Some(id) = id {
+                context.extensions_mut().insert(UserIdField(id));
+            }
         }
         if let Some(team) = fields.get("team").and_then(|v| v.as_str()) {
             context

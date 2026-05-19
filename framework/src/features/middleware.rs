@@ -38,11 +38,10 @@ use std::task::{Context as TaskContext, Poll};
 ///
 /// Currently extracts:
 ///
-/// - `user_id: i64` from [`Auth::id`] when the session is
-///   authenticated and the stored identifier parses as an `i64`.
-///   Non-numeric identifiers (e.g. UUID-shaped torii ids) skip the
-///   user-scope field; global flags still resolve. Custom field
-///   extractors land in a future iteration.
+/// - `user_id: String` from [`Auth::id`] when the session is
+///   authenticated. Carries torii's opaque (UUID/ULID) ids verbatim
+///   and numeric ids in their stringified form — both shapes participate
+///   in user-scoped flag resolution.
 #[derive(Default)]
 pub struct FeatureMiddleware {
     _private: (),
@@ -99,12 +98,10 @@ impl<F: Future + Unpin> Future for InContext<F> {
 /// Read the active session via `Auth::id()` and build a featureflag
 /// [`Context`] capturing whatever scope fields we can resolve.
 ///
-/// Returns [`Context::root`] when no user is authenticated or the
-/// stored identifier is not numeric — global flags still resolve in
-/// that case.
+/// Returns [`Context::root`] when no user is authenticated — global
+/// flags still resolve in that case.
 fn build_context() -> Context {
-    let user_id: Option<i64> = Auth::id().and_then(|s| s.parse().ok());
-    match user_id {
+    match Auth::id() {
         Some(id) => featureflag::context! { user_id = id },
         None => Context::root(),
     }
@@ -120,7 +117,7 @@ mod tests {
     /// Inspector evaluator: records the user_id it sees on
     /// each `is_enabled` call.
     struct InspectingEvaluator {
-        last_user_id: std::sync::Mutex<Option<i64>>,
+        last_user_id: std::sync::Mutex<Option<String>>,
     }
 
     impl InspectingEvaluator {
@@ -130,8 +127,8 @@ mod tests {
             }
         }
 
-        fn last_user_id(&self) -> Option<i64> {
-            *self.last_user_id.lock().unwrap()
+        fn last_user_id(&self) -> Option<String> {
+            self.last_user_id.lock().unwrap().clone()
         }
     }
 
@@ -140,7 +137,7 @@ mod tests {
             let id = context
                 .iter()
                 .find_map(|c| c.extensions().get::<UserIdField>())
-                .map(|f| f.0);
+                .map(|f| f.0.clone());
             *self.last_user_id.lock().unwrap() = id;
             None
         }
@@ -152,9 +149,14 @@ mod tests {
         ) {
             // Translate the raw `user_id` field into a typed
             // `UserIdField` extension — same translation
-            // `DatabaseEvaluator` performs.
+            // `DatabaseEvaluator` performs, including i64→String
+            // coercion for numeric-keyed apps.
             if let Some(value) = fields.get("user_id") {
-                if let Some(id) = value.as_i64() {
+                let id = value
+                    .as_str()
+                    .map(String::from)
+                    .or_else(|| value.as_i64().map(|i| i.to_string()));
+                if let Some(id) = id {
                     context.extensions_mut().insert(UserIdField(id));
                 }
             }
@@ -175,11 +177,36 @@ mod tests {
     }
 
     #[test]
-    fn build_context_skips_non_numeric_user_id() {
-        // Auth::id() relies on the session task-local; tests without
-        // a session see None. The "non-numeric id => skip" branch is
-        // covered by direct unit testing of the parse step:
-        let parsed: Option<i64> = Some("not-a-number".to_string()).and_then(|s| s.parse().ok());
-        assert!(parsed.is_none());
+    fn user_id_field_accepts_uuid_string_via_context_macro() {
+        // Exercise the on_new_context coercion path that backs
+        // build_context: a UUID-shaped string id flows through the
+        // `context!` macro into a `UserIdField(String)`.
+        let evaluator = Arc::new(InspectingEvaluator::new());
+        with_default(evaluator.clone(), || {
+            let uuid = "01HZK6V3J7Q5G4P8X9N2D1B0M3".to_string();
+            let ctx = featureflag::context! { user_id = uuid.clone() };
+            evaluator.is_enabled("any", &ctx);
+            assert_eq!(
+                evaluator.last_user_id(),
+                Some(uuid),
+                "uuid-shaped string ids must round-trip into UserIdField verbatim",
+            );
+        });
+    }
+
+    #[test]
+    fn user_id_field_coerces_i64_via_context_macro() {
+        // Numeric-keyed apps still get to write `user_id = 42i64` — the
+        // coercion in on_new_context stringifies for storage.
+        let evaluator = Arc::new(InspectingEvaluator::new());
+        with_default(evaluator.clone(), || {
+            let ctx = featureflag::context! { user_id = 42_i64 };
+            evaluator.is_enabled("any", &ctx);
+            assert_eq!(
+                evaluator.last_user_id(),
+                Some("42".to_string()),
+                "i64 ids must coerce into the String form",
+            );
+        });
     }
 }

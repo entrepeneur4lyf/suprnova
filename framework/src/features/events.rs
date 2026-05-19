@@ -14,13 +14,13 @@ use crate::events::Event;
 ///
 /// `actor_id` is the user id that performed the change, if known.
 /// `NULL` means "system-initiated" (e.g. a CLI bootstrap or
-/// migration seed).
+/// migration seed). String-typed to carry torii's opaque user ids.
 #[derive(Debug, Clone)]
 pub struct FeatureUpdated {
     pub name: String,
     pub scope_key: String,
     pub enabled: bool,
-    pub actor_id: Option<i64>,
+    pub actor_id: Option<String>,
 }
 
 impl Event for FeatureUpdated {
@@ -39,7 +39,7 @@ impl Event for FeatureUpdated {
 pub struct FeatureDeleted {
     pub name: String,
     pub scope_key: String,
-    pub actor_id: Option<i64>,
+    pub actor_id: Option<String>,
 }
 
 impl Event for FeatureDeleted {

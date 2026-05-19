@@ -9,7 +9,9 @@
 //!   string so the read path stays a single string lookup.
 //! * `description` is operator-facing context for the admin UI.
 //! * `updated_by` is a nullable audit pointer to the user who last
-//!   toggled the flag (NULL for system-initiated changes).
+//!   toggled the flag (NULL for system-initiated changes). String-typed
+//!   to carry torii's opaque (UUID / ULID) user ids — numeric-keyed apps
+//!   round-trip via `Option<String>` without loss.
 
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -24,7 +26,7 @@ pub struct Model {
     pub enabled: bool,
     #[sea_orm(column_type = "Text", nullable)]
     pub description: Option<String>,
-    pub updated_by: Option<i64>,
+    pub updated_by: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
