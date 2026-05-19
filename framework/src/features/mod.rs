@@ -47,3 +47,11 @@ pub use featureflag::{
     evaluator::{set_global_default, try_set_global_default, Evaluator, EvaluatorRef},
     feature::Feature,
 };
+
+pub mod entity;
+pub mod evaluators;
+pub mod fields;
+pub mod migrations;
+
+pub use evaluators::database::DatabaseEvaluator;
+pub use fields::{TeamField, UserIdField};
