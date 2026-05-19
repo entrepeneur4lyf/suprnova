@@ -51,8 +51,10 @@ pub use featureflag::{
 pub mod entity;
 pub mod evaluators;
 pub mod fields;
+pub mod middleware;
 pub mod migrations;
 
 pub use evaluators::cached::CachedEvaluator;
 pub use evaluators::database::DatabaseEvaluator;
 pub use fields::{TeamField, UserIdField};
+pub use middleware::FeatureMiddleware;
