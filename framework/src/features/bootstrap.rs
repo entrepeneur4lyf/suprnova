@@ -46,7 +46,7 @@ use crate::container::App;
 use crate::error::FrameworkError;
 use crate::features::sync::{CompositeFeatureSync, FeatureSync};
 use crate::features::{CachedEvaluator, DatabaseEvaluator};
-use featureflag::evaluator::{set_global_default, Evaluator};
+use featureflag::evaluator::{try_set_global_default, Evaluator};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -79,11 +79,26 @@ pub fn is_installed() -> bool {
 /// Register `evaluator` as featureflag's global default and flip the
 /// framework's installation tracker.
 ///
-/// Equivalent to [`set_global_default`] for the featureflag side, but
-/// also records that the framework knows about it — keeps
-/// [`FeatureMiddleware`]'s startup warning quiet.
+/// Uses [`try_set_global_default`] under the hood — featureflag's
+/// global slot is `OnceLock`-backed, so a second installation in the
+/// same process is impossible to make stick. We swallow the error
+/// silently and log a `tracing::warn!`: the first install wins, the
+/// installation tracker still flips (the framework knows *something*
+/// is installed), and the App container's `dyn FeatureSync` binding
+/// still updates to the new composite — that part isn't OnceLock'd.
+///
+/// In practice, the only callers that would re-install in the same
+/// process are tests that bootstrap twice. Production boots install
+/// exactly once.
 pub fn install_evaluator(evaluator: Arc<dyn Evaluator + Send + Sync>) {
-    set_global_default(evaluator);
+    if try_set_global_default(evaluator).is_err() {
+        tracing::warn!(
+            target: "suprnova::features",
+            "install_evaluator: featureflag global default was already set in this process; \
+             the first installation wins. Subsequent calls update the FeatureSync container \
+             binding but do not change which evaluator featureflag's `is_enabled!` reads.",
+        );
+    }
     mark_installed();
 }
 
@@ -133,12 +148,18 @@ pub struct BootstrappedFeatures {
 ///
 /// # Idempotency
 ///
-/// Calling twice replaces the global default and rebinds the
-/// container entry. The old evaluators stay alive only as long as
-/// existing `Arc` clones hold them. There's no double-bootstrap guard
-/// because there's no clean meaning for "what to do on conflict" —
-/// applications that need re-wire-on-config-change get the right
-/// behaviour from a plain second call.
+/// Calling twice updates the container's `Arc<dyn FeatureSync>`
+/// binding to the new composite, but **featureflag's global default
+/// is set-once-per-process** (OnceLock semantics). The second call
+/// emits a `tracing::warn!` and the original evaluator stays as the
+/// global default — meaning `is_enabled!` calls keep reading from the
+/// first chain while admin writes propagate via the new composite,
+/// which would desync the two layers. In practice this matters only
+/// for tests that bootstrap twice; production boots install exactly
+/// once. Tests that need a clean re-bootstrap should use
+/// [`crate::testing::TestContainer::fake`] for the container side
+/// and `featureflag::evaluator::with_default` to scope a different
+/// evaluator inside the test.
 pub async fn bootstrap_database_cached(
     ttl: Duration,
 ) -> Result<BootstrappedFeatures, FrameworkError> {
@@ -163,13 +184,16 @@ pub async fn bootstrap_database_cached(
 mod tests {
     use super::*;
 
-    // INSTALLED is process-wide static. Running these two tests in
-    // parallel against the shared bit means one of them could
-    // observe state mutated by the other. We serialize through a
-    // single test so the assertions remain deterministic without
-    // pulling in a test-ordering crate. The combined test covers
-    // both behaviours we care about: install flips the bit, and
-    // repeated marks don't flip it back off.
+    // INSTALLED is process-wide static. Running these tests in
+    // parallel against the shared bit means one of them could observe
+    // state mutated by the other. We serialize through one test that
+    // covers the full installation lifecycle so the assertions stay
+    // deterministic without pulling in a test-ordering crate. Covers:
+    //
+    // 1. tracker starts false, first install flips it true
+    // 2. repeated mark_installed calls stay true (no toggle-off bug)
+    // 3. install_evaluator on an already-set OnceLock doesn't panic
+    //    (regression for the advisor-flagged idempotency lie)
     #[test]
     fn tracker_starts_false_install_flips_repeats_stay_true() {
         // Snapshot the current state so we can restore it — other
@@ -196,7 +220,15 @@ mod tests {
         install_evaluator(Arc::new(NoopEvaluator) as Arc<dyn Evaluator + Send + Sync>);
         assert!(is_installed(), "install_evaluator must flip tracker");
 
-        // Idempotent: a second call doesn't toggle off.
+        // Second install does NOT panic. featureflag's
+        // set_global_default panics on a second call; install_evaluator
+        // routes through try_set_global_default and swallows the
+        // already-set error, so a double-bootstrap (e.g. a test that
+        // calls bootstrap_database_cached twice) is recoverable.
+        install_evaluator(Arc::new(NoopEvaluator) as Arc<dyn Evaluator + Send + Sync>);
+        assert!(is_installed(), "second install must keep tracker true");
+
+        // Idempotent: a third call doesn't toggle off.
         mark_installed();
         mark_installed();
         assert!(is_installed(), "repeated mark_installed stays true");
