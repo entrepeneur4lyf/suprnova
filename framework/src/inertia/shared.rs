@@ -129,18 +129,16 @@ impl InertiaRegistry {
     /// Snapshot of the static registry — clones each entry. Cheap because
     /// `Prop` either holds a `Value` (cheap clone) or an `Arc`-backed
     /// resolver. Internal use by `InertiaResponse::resolve`.
-    pub(crate) fn snapshot_static(&self) -> Vec<(String, Prop)> {
-        let reg = lock::read(&self.shares).expect("inertia share registry poisoned");
-        reg.iter()
+    pub(crate) fn snapshot_static(&self) -> Result<Vec<(String, Prop)>, FrameworkError> {
+        let reg = lock::read(&self.shares)?;
+        Ok(reg.iter()
             .map(|e| (e.key.clone(), e.prop.clone()))
-            .collect()
+            .collect())
     }
 
     /// Currently registered trait provider, if any. Internal use.
-    pub(crate) fn trait_provider(&self) -> Option<Arc<dyn InertiaSharedData>> {
-        lock::read(&self.provider)
-            .expect("inertia shared trait slot poisoned")
-            .clone()
+    pub(crate) fn trait_provider(&self) -> Result<Option<Arc<dyn InertiaSharedData>>, FrameworkError> {
+        Ok(lock::read(&self.provider)?.clone())
     }
 }
 
@@ -179,7 +177,7 @@ mod tests {
     fn share_value_inserts() {
         let reg = InertiaRegistry::new();
         reg.share_value("appName", "Suprnova");
-        let snap = reg.snapshot_static();
+        let snap = reg.snapshot_static().unwrap();
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].0, "appName");
         match &snap[0].1 {
@@ -193,7 +191,7 @@ mod tests {
         let reg = InertiaRegistry::new();
         reg.share_value("k", "v1");
         reg.share_value("k", "v2");
-        let snap = reg.snapshot_static();
+        let snap = reg.snapshot_static().unwrap();
         assert_eq!(snap.len(), 1);
         match &snap[0].1 {
             Prop::Eager(v) => assert_eq!(v, &Value::String("v2".into())),
@@ -205,7 +203,7 @@ mod tests {
     async fn share_lazy_resolver_runs_when_resolved() {
         let reg = InertiaRegistry::new();
         reg.share_lazy("count", || async { Ok::<_, FrameworkError>(42u32) });
-        let snap = reg.snapshot_static();
+        let snap = reg.snapshot_static().unwrap();
         match snap[0].1.clone() {
             Prop::Lazy(r) => {
                 let v = r().await.unwrap();
@@ -244,7 +242,7 @@ mod tests {
             }
         }
 
-        let provider = reg.trait_provider().unwrap();
+        let provider = reg.trait_provider().unwrap().unwrap();
         let shared = provider.share(&DummyReq).await.unwrap();
         assert_eq!(shared.len(), 1);
         assert!(shared.contains_key("auth"));
@@ -255,7 +253,7 @@ mod tests {
         let r1 = InertiaRegistry::new();
         let r2 = InertiaRegistry::new();
         r1.share_value("only_in_r1", "x");
-        assert_eq!(r1.snapshot_static().len(), 1);
-        assert!(r2.snapshot_static().is_empty());
+        assert_eq!(r1.snapshot_static().unwrap().len(), 1);
+        assert!(r2.snapshot_static().unwrap().is_empty());
     }
 }

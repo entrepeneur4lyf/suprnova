@@ -24,3 +24,12 @@ docs/superpowers/
 .claude/
 .codex
 .gitnexus
+
+# Local-only AI review notes (Grok, Opus, etc.) — working artifacts, not source
+/GROK-*.md
+/grok-*.md
+/opus-*.md
+/*-grok.md
+/*-review.md
+/*-REVIEW.md
+/remediate-*.md

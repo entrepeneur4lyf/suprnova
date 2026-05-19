@@ -115,7 +115,7 @@ impl Bus {
             return Ok(Dispatched::Captured);
         }
         let dispatcher = {
-            let g = lock::read(&REGISTRY).expect("bus registry poisoned");
+            let g = lock::read(&REGISTRY)?;
             let map = g
                 .as_ref()
                 .ok_or_else(|| FrameworkError::internal("Bus: no handlers registered"))?;

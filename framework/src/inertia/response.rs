@@ -603,13 +603,13 @@ impl InertiaResponse {
         let registry = App::inertia_registry();
         let mut merged: IndexMap<String, Prop> = IndexMap::new();
         let mut shared_keys: Vec<String> = Vec::new();
-        for (k, v) in registry.snapshot_static() {
+        for (k, v) in registry.snapshot_static()? {
             if !shared_keys.contains(&k) {
                 shared_keys.push(k.clone());
             }
             merged.insert(k, v);
         }
-        if let Some(provider) = registry.trait_provider() {
+        if let Some(provider) = registry.trait_provider()? {
             let trait_shared = provider.share(req).await?;
             for (k, v) in trait_shared {
                 if !shared_keys.contains(&k) {

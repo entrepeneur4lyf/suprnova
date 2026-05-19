@@ -122,8 +122,7 @@ fn renderer_for(name: &str) -> Result<MailRendererFn, FrameworkError> {
             "no mail renderer for notification {name} — register via suprnova::register_mail_renderer::<N>()"
         ))
     };
-    let g = lock::read(&MAIL_RENDERERS)
-        .expect("mail renderer registry poisoned");
+    let g = lock::read(&MAIL_RENDERERS)?;
     // Treat "registry never initialized" identically to "this notification
     // not registered" — the operator-facing fix is the same.
     let map = g.as_ref().ok_or_else(missing)?;

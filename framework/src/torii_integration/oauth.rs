@@ -452,8 +452,7 @@ impl OAuthAuth {
     // ── Private helpers ────────────────────────────────────────────────────────
 
     fn config(&self) -> Result<OAuthProviderConfig, FrameworkError> {
-        lock::read(configs())
-            .expect("OAuthProviderConfig lock poisoned")
+        lock::read(configs())?
             .get(&self.provider)
             .cloned()
             .ok_or_else(|| FrameworkError::Domain {

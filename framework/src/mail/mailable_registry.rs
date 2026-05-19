@@ -88,7 +88,7 @@ pub fn build(
     name: &str,
     payload: serde_json::Value,
 ) -> Result<Box<dyn AnyMailable>, FrameworkError> {
-    let g = lock::read(&REGISTRY).expect("mailable registry poisoned");
+    let g = lock::read(&REGISTRY)?;
     let map = g
         .as_ref()
         .ok_or_else(|| FrameworkError::internal(format!("unknown mailable: {name}")))?;

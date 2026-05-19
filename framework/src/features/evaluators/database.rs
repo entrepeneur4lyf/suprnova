@@ -164,8 +164,7 @@ impl DatabaseEvaluator {
             next.insert((row.name, row.scope_key), row.enabled);
         }
 
-        let mut store = lock::write(&self.flags)
-            .expect("DatabaseEvaluator flags RwLock poisoned");
+        let mut store = lock::write(&self.flags)?;
         *store = next;
         Ok(())
     }
@@ -229,8 +228,7 @@ impl DatabaseEvaluator {
         // separate reload() remains available for picking up edits
         // made out-of-band.
         {
-            let mut store = lock::write(&self.flags)
-                .expect("DatabaseEvaluator flags RwLock poisoned");
+            let mut store = lock::write(&self.flags)?;
             store.insert((name.to_string(), scope_key.to_string()), enabled);
         }
 

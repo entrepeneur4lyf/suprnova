@@ -94,7 +94,7 @@ pub fn register<S: Seeder + 'static>() {
 /// can also drive this directly after registering seeders.
 pub async fn run_all() -> Result<(), FrameworkError> {
     let entries: Vec<(String, SeederFn)> = {
-        let g = lock::read(&REGISTRY).expect("seeder registry poisoned");
+        let g = lock::read(&REGISTRY)?;
         g.as_ref()
             .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
             .unwrap_or_default()

@@ -68,8 +68,7 @@ impl Mail {
     }
 
     pub(crate) fn current_transport() -> Result<Arc<dyn MailTransport>, FrameworkError> {
-        lock::read(&TRANSPORT)
-            .expect("mail transport lock poisoned")
+        lock::read(&TRANSPORT)?
             .clone()
             .ok_or_else(|| FrameworkError::internal(
                 "no mail transport configured; call Mail::set_transport(...) or run suprnova::mail::boot::bootstrap_from_env()"

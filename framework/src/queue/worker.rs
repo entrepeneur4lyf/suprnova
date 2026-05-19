@@ -50,7 +50,7 @@ pub fn register_job<J: Job>() {
 
 pub async fn dispatch_by_name(name: &str, payload: serde_json::Value) -> Result<(), FrameworkError> {
     let dispatcher = {
-        let g = lock::read(&REGISTRY).expect("queue registry poisoned");
+        let g = lock::read(&REGISTRY)?;
         let map = g.as_ref()
             .ok_or_else(|| FrameworkError::internal(format!("unknown job: {name}")))?;
         map.get(name)

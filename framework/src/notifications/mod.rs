@@ -223,8 +223,7 @@ pub fn set_dispatcher(d: Arc<NotificationDispatcher>) {
 }
 
 pub(crate) fn dispatcher_for_queue() -> Result<Arc<NotificationDispatcher>, FrameworkError> {
-    lock::read(&DISPATCHER)
-        .expect("notification dispatcher lock poisoned")
+    lock::read(&DISPATCHER)?
         .clone()
         .ok_or_else(|| {
             FrameworkError::internal(
@@ -259,7 +258,7 @@ pub fn register_notification_factory<N: Notification>() {
 }
 
 pub(crate) fn factory_for(name: &str) -> Result<NotificationFactory, FrameworkError> {
-    let g = lock::read(&FACTORIES).expect("notification factory lock poisoned");
+    let g = lock::read(&FACTORIES)?;
     let map = g.as_ref().ok_or_else(|| {
         FrameworkError::internal(format!("unknown notification: {name}"))
     })?;

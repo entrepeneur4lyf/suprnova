@@ -65,7 +65,7 @@ impl Drop for MemoryQueueDriver {
 fn drain_expired(
     inner: &Mutex<Inner>,
     dq: &mut DelayQueue<ReservationToken>,
-) {
+) -> Result<(), FrameworkError> {
     let waker = futures::task::noop_waker();
     let mut cx = std::task::Context::from_waker(&waker);
     let mut expired_tokens = Vec::new();
@@ -74,13 +74,14 @@ fn drain_expired(
     }
     // cx / waker are dropped here — no await has occurred.
     if !expired_tokens.is_empty() {
-        let mut g = lock::lock(inner).expect("memory queue poisoned");
+        let mut g = lock::lock(inner)?;
         for token in expired_tokens {
             if let Some(env) = g.reserved.remove(&token) {
                 g.visible.push_front(env);
             }
         }
     }
+    Ok(())
 }
 
 /// Drain all currently-expired delayed envelopes from `dq` into the visible
@@ -90,7 +91,7 @@ fn drain_expired(
 fn drain_delayed(
     inner: &Mutex<Inner>,
     dq: &mut DelayQueue<Envelope>,
-) {
+) -> Result<(), FrameworkError> {
     let waker = futures::task::noop_waker();
     let mut cx = std::task::Context::from_waker(&waker);
     let mut ready = Vec::new();
@@ -99,11 +100,12 @@ fn drain_delayed(
     }
     // cx / waker are dropped here — no await has occurred.
     if !ready.is_empty() {
-        let mut g = lock::lock(inner).expect("memory queue poisoned");
+        let mut g = lock::lock(inner)?;
         for env in ready {
             g.visible.push_back(env);
         }
     }
+    Ok(())
 }
 
 impl MemoryQueueDriver {
@@ -122,7 +124,8 @@ impl MemoryQueueDriver {
                 // Promote expired delayed jobs into the visible queue.
                 {
                     let mut dq = delayed2.lock().await;
-                    drain_delayed(&inner2, &mut dq);
+                    drain_delayed(&inner2, &mut dq)
+                        .expect("memory queue poisoned in reaper");
                     // Lock released here — before the sleep await.
                 }
 
@@ -130,7 +133,8 @@ impl MemoryQueueDriver {
                 // mutex, then poll synchronously (no await while lock held).
                 {
                     let mut dq = visibility2.lock().await;
-                    drain_expired(&inner2, &mut dq);
+                    drain_expired(&inner2, &mut dq)
+                        .expect("memory queue poisoned in reaper");
                     // Lock released here — before the sleep await.
                 }
 
@@ -158,7 +162,7 @@ impl QueueDriver for MemoryQueueDriver {
     async fn push(&self, env: Envelope) -> Result<(), FrameworkError> {
         let now = Utc::now();
         if env.available_at <= now {
-            let mut g = lock::lock(&self.inner).expect("memory queue poisoned");
+            let mut g = lock::lock(&self.inner)?;
             g.visible.push_back(env);
         } else {
             // Compute delay on the Tokio virtual clock so paused-clock tests work.
@@ -175,26 +179,26 @@ impl QueueDriver for MemoryQueueDriver {
         // Drain expired delayed jobs into the visible queue (Tokio virtual clock).
         {
             let mut dq = self.delayed.lock().await;
-            drain_delayed(&self.inner, &mut dq);
+            drain_delayed(&self.inner, &mut dq)?;
             // dq lock released here.
         }
 
         // Drain expired visibility reservations back into the visible queue.
         {
             let mut dq = self.visibility.lock().await;
-            drain_expired(&self.inner, &mut dq);
+            drain_expired(&self.inner, &mut dq)?;
             // dq lock released here.
         }
 
         let env_opt = {
-            let mut g = lock::lock(&self.inner).expect("memory queue poisoned");
+            let mut g = lock::lock(&self.inner)?;
             g.visible.pop_front()
         };
 
         if let Some(env) = env_opt {
             let token = ReservationToken(Uuid::new_v4());
             {
-                let mut g = lock::lock(&self.inner).expect("memory queue poisoned");
+                let mut g = lock::lock(&self.inner)?;
                 g.reserved.insert(token.clone(), env.clone());
             }
             self.visibility
@@ -208,7 +212,7 @@ impl QueueDriver for MemoryQueueDriver {
     }
 
     async fn ack(&self, token: &ReservationToken) -> Result<(), FrameworkError> {
-        let mut g = lock::lock(&self.inner).expect("memory queue poisoned");
+        let mut g = lock::lock(&self.inner)?;
         g.reserved.remove(token);
         Ok(())
     }
@@ -219,13 +223,13 @@ impl QueueDriver for MemoryQueueDriver {
         requeue_delay: Duration,
     ) -> Result<(), FrameworkError> {
         let env = {
-            let mut g = lock::lock(&self.inner).expect("memory queue poisoned");
+            let mut g = lock::lock(&self.inner)?;
             g.reserved.remove(token)
         };
         if let Some(mut env) = env {
             env.attempts += 1;
             if requeue_delay.is_zero() {
-                let mut g = lock::lock(&self.inner).expect("memory queue poisoned");
+                let mut g = lock::lock(&self.inner)?;
                 g.visible.push_front(env);
             } else {
                 env.available_at = Utc::now()
