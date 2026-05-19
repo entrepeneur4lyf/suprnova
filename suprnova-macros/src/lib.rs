@@ -19,6 +19,7 @@ mod factory;
 mod handler;
 mod inertia;
 mod injectable;
+mod model;
 mod multipart;
 mod notification_mail;
 mod suprnova_test;
@@ -692,6 +693,50 @@ pub fn multipart_request(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(NotificationMailable, attributes(mail))]
 pub fn derive_notification_mailable(input: TokenStream) -> TokenStream {
     notification_mail::derive_notification_mailable_impl(input)
+}
+
+/// `#[suprnova::model]` — declare a Suprnova/Eloquent model.
+///
+/// Generates SeaORM Entity, Model, ActiveModel, Column enum, Relation
+/// stub, and Eloquent trait impls. Registers the model via
+/// `inventory::submit!` so Phase 8 (Admin) can enumerate every model
+/// at boot.
+///
+/// # Attribute keys (Phase 10A T3)
+///
+/// - `table = "..."` — SQL table name. Defaults to the naive plural of
+///   the struct's snake-case name (`User` → `users`).
+/// - `primary_key = "..."` — primary-key column name. Defaults to `"id"`.
+/// - `key_type = "..."` — primary-key Rust type (parsed as a `Type`).
+///   Defaults to `"i64"`.
+/// - `auto_increment = true|false` — defaults to `true`.
+/// - `connection = "..."` — multi-connection routing identifier.
+///   Defaults to `"default"`.
+///
+/// Additional keys (`fillable`, `guarded`, `casts`, `timestamps`,
+/// `created_at`, `updated_at`, `soft_deletes`, `soft_deletes_column`,
+/// `appends`, `hidden`, `visible`, `mutators`, `touches`) are parsed
+/// here but only consumed by later Phase 10A tasks.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use suprnova::model;
+///
+/// #[model(table = "users")]
+/// pub struct User {
+///     pub id: i64,
+///     pub name: String,
+///     pub email: String,
+/// }
+/// ```
+///
+/// See `docs/core/eloquent.md` for the full reference.
+#[proc_macro_attribute]
+pub fn model(attr: TokenStream, item: TokenStream) -> TokenStream {
+    model::expand(attr.into(), item.into())
+        .unwrap_or_else(|e| e.to_compile_error())
+        .into()
 }
 
 /// Derive macro for `Factory` — generates a sibling marker struct plus

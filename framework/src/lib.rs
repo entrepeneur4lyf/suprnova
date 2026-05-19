@@ -280,6 +280,7 @@ pub use suprnova_macros::domain_error;
 pub use suprnova_macros::handler;
 pub use suprnova_macros::inertia_response;
 pub use suprnova_macros::injectable;
+pub use suprnova_macros::model;
 pub use suprnova_macros::redirect;
 pub use suprnova_macros::request;
 pub use suprnova_macros::service;

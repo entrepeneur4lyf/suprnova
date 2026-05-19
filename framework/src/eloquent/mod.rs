@@ -10,6 +10,7 @@
 //! Phase 10B adds relationships; Phase 10C adds collections /
 //! pagination / observers / transactions / multi-connection.
 
+pub mod builder;
 pub mod registry;
 
 pub use registry::{find_model_by_table, models, ModelEntry};
