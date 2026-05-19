@@ -27,6 +27,11 @@ impl MigratorTrait for Migrator {
             // Phase 11 R4 — adds last_used_timestep to
             // two_factor_credentials for TOTP replay protection.
             Box::new(suprnova::auth_flows::two_factor::migration_replay::Migration),
+            // Phase 13 — framework-owned features table. Powers
+            // DatabaseEvaluator + admin CRUD. The app's Migrator
+            // includes it so `suprnova migrate` provisions the table
+            // alongside this project's own schema.
+            Box::new(suprnova::features::migrations::CreateFeaturesTable),
         ]
     }
 }

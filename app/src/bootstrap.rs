@@ -24,6 +24,7 @@
 //! ```
 
 use std::sync::Arc;
+use std::time::Duration;
 
 #[allow(unused_imports)]
 use suprnova::{
@@ -32,6 +33,7 @@ use suprnova::{
     SessionMiddleware, Storage, SupervisorRegistry, UserProvider, DB,
 };
 use suprnova::broadcasting::{BroadcastHub, ChannelRegistry, InMemoryBroadcastHub};
+use suprnova::features::{bootstrap_database_cached, FeatureMiddleware};
 use suprnova::queue::worker::register_job;
 
 use crate::broadcasting::{ChatChannel, UserRegisteredChannel};
@@ -153,6 +155,33 @@ pub async fn register() {
     // restart-loop task. The tasks are detached (v1 does not drain them on
     // shutdown); they run for the lifetime of the process.
     SupervisorRegistry::start_all().await;
+
+    // Phase 13 — feature flags.
+    //
+    // Wire the canonical Cached(Database) chain. After this call:
+    //
+    // * `is_enabled!("flag-name", default)` resolves through the
+    //   per-process cache backed by the `features` table.
+    // * `admin::upsert` / `admin::delete` propagate to the live
+    //   evaluator before returning (sub-second kill-switch semantics).
+    // * `FeatureMiddleware` below opens a per-request context with the
+    //   authenticated user_id; no team extraction wired in this app
+    //   since we don't yet have a multi-tenant story.
+    //
+    // 60-second TTL is a sensible default: long enough to amortize the
+    // scope-resolution walk for hot paths, short enough that an
+    // out-of-band SQL edit (e.g. ops console) reflects within the
+    // minute. Operator-initiated changes via admin::* bypass the TTL
+    // entirely via the FeatureSync fan-out.
+    bootstrap_database_cached(Duration::from_secs(60))
+        .await
+        .expect("feature-flag chain wired");
+
+    // Global middleware: opens a featureflag::Context per request so
+    // user-scoped flags (`is_enabled!("...", default)` inside any
+    // handler) see the right scope. Placed after SessionMiddleware so
+    // Auth::id() returns the live session's user id.
+    global_middleware!(FeatureMiddleware::new());
 }
 
 /// Register the application's storage disks.

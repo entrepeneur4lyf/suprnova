@@ -6,6 +6,7 @@ pub mod config;
 pub mod controllers;
 pub mod events;
 pub mod factories;
+pub mod features;
 pub mod jobs;
 pub mod listeners;
 pub mod mail;

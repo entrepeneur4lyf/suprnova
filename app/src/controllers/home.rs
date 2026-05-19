@@ -3,6 +3,7 @@ use suprnova::{
 };
 
 use crate::actions::example_action::ExampleAction;
+use crate::features::NEW_CHECKOUT_FLOW;
 
 #[derive(InertiaProps)]
 pub struct User {
@@ -20,13 +21,35 @@ pub async fn index(req: Request) -> Response {
     let action = App::resolve::<ExampleAction>()?;
     let message = action.execute();
 
+    // Phase 13 — feature-flag gated prop. `Feature::is_enabled()`
+    // resolves NEW_CHECKOUT_FLOW against the active featureflag
+    // context (populated by `FeatureMiddleware` at the request edge):
+    // user-scoped flag rows beat the global, which beats the
+    // compile-time `false` default in `crate::features`.
+    //
+    // Flag off → `new_checkout_banner` is absent from the props and
+    // the frontend renders the legacy banner. Flag on → the new copy
+    // ships. Toggling is one
+    // `admin::upsert("new-checkout-flow", "", true, ...)` call away;
+    // the change is visible to .is_enabled() here before that call
+    // returns.
+    let banner = if NEW_CHECKOUT_FLOW.is_enabled() {
+        Some("Try the new checkout — faster, fewer steps.")
+    } else {
+        None
+    };
+
     // Dogfood the full Tier 0–2 builder API. Mixes eager props with
     // Lazy / Defer / Merge / Once / Flash so every variant runs against
     // a real handler. The macro (`inertia_response!`) only handles the
     // typed-eager case — anything more interesting uses the builder.
-    let resp = InertiaResponse::new("Home")
+    let mut response = InertiaResponse::new("Home")
         .with("title", "Welcome to Suprnova!")
-        .with("message", message)
+        .with("message", message);
+    if let Some(banner) = banner {
+        response = response.with("new_checkout_banner", banner);
+    }
+    let resp = response
         .with(
             "user",
             User {
