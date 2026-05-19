@@ -384,35 +384,60 @@ mod tests {
 
     #[test]
     fn warn_once_flips_atomic_on_first_call_and_short_circuits_after() {
-        // Reset so we can observe the first-call branch deterministically.
-        MISSING_EVALUATOR_WARNED.store(false, Ordering::SeqCst);
-        let prior_installed = crate::features::is_installed();
-        // We need is_installed == false to exercise the warn branch;
-        // if a prior test marked it true, undo locally and restore.
-        // (mark_installed is monotonic; we read the bit via the
-        // bootstrap module's INSTALLED static which has no public
-        // resetter, so this test must own that bit. The combined
-        // bootstrap test restores prior state after running for the
-        // same reason — see features/bootstrap.rs::tests.)
+        // Both globals this test touches (MISSING_EVALUATOR_WARNED and
+        // bootstrap::INSTALLED) are process-shared. Save → force-known
+        // state → assert → restore. Mirrors the pattern bootstrap.rs's
+        // `tracker_starts_false_install_flips_repeats_stay_true` uses
+        // and keeps the assertions deterministic regardless of which
+        // other tests ran earlier.
+        let prior_warned = MISSING_EVALUATOR_WARNED.swap(false, Ordering::SeqCst);
+        let prior_installed = crate::features::bootstrap::is_installed();
+
+        // is_installed() reads bootstrap::INSTALLED — force false so
+        // the warn_once_if_no_evaluator branch fires. We restore the
+        // prior value at the end.
+        // Direct access via re-export: we can't write INSTALLED directly
+        // (it's pub(super) to the bootstrap module's tests), but the
+        // public install_evaluator / mark_installed only flip false→true,
+        // never true→false. To force false we read+observe rather than
+        // write — which is fine because the only thing that flipped it
+        // is mark_installed, and a fresh process starts false. Tests in
+        // the same binary that called mark_installed (e.g. bootstrap
+        // tests) restore the prior bit themselves. If is_installed is
+        // true here, the warn branch is genuinely dead-by-design — the
+        // contract is "warn only when no evaluator installed", so the
+        // test asserts the contract by exercising both branches: if
+        // installed, no warn fires; if not installed, exactly one warn.
+        warn_once_if_no_evaluator();
+        let after_first = MISSING_EVALUATOR_WARNED.load(Ordering::SeqCst);
         if prior_installed {
-            // Skip emission test when an evaluator is genuinely
-            // installed in this process — the warn branch is dead
-            // by design.
-            return;
+            // The warn branch was a no-op (correct: an evaluator IS
+            // installed, so warning would be wrong). The bit stays
+            // false. This branch verifies the "stays quiet when
+            // installed" half of the contract.
+            assert!(
+                !after_first,
+                "warn_once must not flip the bit when an evaluator is installed",
+            );
+        } else {
+            // The warn branch fired. The bit is now true. Subsequent
+            // calls must NOT re-fire — the AtomicBool swap is the
+            // observable signal that the emission short-circuited.
+            assert!(
+                after_first,
+                "first call with no installed evaluator must flip the warning bit",
+            );
+            warn_once_if_no_evaluator();
+            warn_once_if_no_evaluator();
+            assert!(
+                MISSING_EVALUATOR_WARNED.load(Ordering::SeqCst),
+                "subsequent calls leave the bit set",
+            );
         }
-        let _ = prior_installed; // suppress unused warning if branch skipped
 
-        warn_once_if_no_evaluator();
-        assert!(
-            MISSING_EVALUATOR_WARNED.load(Ordering::SeqCst),
-            "first call must flip the warning bit",
-        );
-
-        warn_once_if_no_evaluator();
-        warn_once_if_no_evaluator();
-        assert!(
-            MISSING_EVALUATOR_WARNED.load(Ordering::SeqCst),
-            "subsequent calls leave the bit set",
-        );
+        // Restore so a downstream test in this binary observes what it
+        // would have observed without us touching state.
+        MISSING_EVALUATOR_WARNED.store(prior_warned, Ordering::SeqCst);
+        let _ = prior_installed; // already consumed above; explicit drop for clarity
     }
 }
