@@ -36,6 +36,40 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     let pk_name = &input.primary_key;
     let pk_ident = quote::format_ident!("{pk_name}");
 
+    // T6 — wire the parsed `fillable = [...]` / `guarded = [...]`
+    // attributes into the per-model `fillable_filter()` impl. Mutual
+    // exclusion was already enforced at parse time (parse.rs:67-72), so
+    // the `(Some, Some)` arm here is unreachable.
+    let fillable_impl = match (&input.fillable, &input.guarded) {
+        (Some(list), None) => {
+            let lits = list.iter().map(|s| quote! { #s });
+            quote! {
+                fn fillable_filter() -> ::suprnova::eloquent::Fillable {
+                    ::suprnova::eloquent::Fillable::fillable(::std::vec![#(#lits),*])
+                }
+            }
+        }
+        (None, Some(list)) => {
+            let lits = list.iter().map(|s| quote! { #s });
+            quote! {
+                fn fillable_filter() -> ::suprnova::eloquent::Fillable {
+                    ::suprnova::eloquent::Fillable::guarded(::std::vec![#(#lits),*])
+                }
+            }
+        }
+        (None, None) => quote! {
+            fn fillable_filter() -> ::suprnova::eloquent::Fillable {
+                // T4 default — guard the macro-parsed PK name (NOT a
+                // hardcoded "id") so models with `primary_key = "uid"`
+                // still have their PK protected from mass assignment.
+                ::suprnova::eloquent::Fillable::guarded(::std::vec![#pk_name])
+            }
+        },
+        (Some(_), Some(_)) => unreachable!(
+            "fillable / guarded mutual exclusion validated at parse time (parse.rs:67-72)"
+        ),
+    };
+
     let fields = match &input.item.fields {
         syn::Fields::Named(named) => &named.named,
         _ => unreachable!("validated in derive_seaorm"),
@@ -152,14 +186,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         impl ::suprnova::eloquent::Model for #struct_ident {
             fn primary_key_name() -> &'static str { #pk_name }
 
-            fn fillable_filter() -> ::suprnova::eloquent::Fillable {
-                // T4 default — guard the macro-parsed PK name (NOT a
-                // hardcoded "id") so models with `primary_key = "uid"`
-                // still have their PK protected from mass assignment.
-                // T6 swaps this branch out when `fillable` / `guarded`
-                // are specified.
-                ::suprnova::eloquent::Fillable::guarded(::std::vec![#pk_name])
-            }
+            #fillable_impl
 
             fn primary_key_value(
                 &self,

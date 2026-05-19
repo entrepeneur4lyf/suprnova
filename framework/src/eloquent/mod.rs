@@ -55,7 +55,7 @@ pub mod casts {
 
 pub use attrs::Attrs;
 pub use builder::{Builder, Direction, IntoColumn, IntoVal};
-pub use fillable::Fillable;
+pub use fillable::{unguarded, Fillable};
 pub use model::{FirstOrCreate, Model, ReplicateExt};
 pub use registry::{find_model_by_table, models, ModelEntry};
 
