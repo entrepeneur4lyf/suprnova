@@ -56,7 +56,7 @@ impl ModelInput {
             .unwrap_or_else(|| syn::parse_str("i64").expect("i64 parses"));
         let auto_increment = attrs.auto_increment.unwrap_or(true);
         let connection = attrs.connection.unwrap_or_else(|| "default".to_string());
-        let timestamps = attrs.timestamps.unwrap_or(true);
+        let timestamps_default = attrs.timestamps.unwrap_or(true);
         let created_at = attrs.created_at.unwrap_or_else(|| "created_at".to_string());
         let updated_at = attrs.updated_at.unwrap_or_else(|| "updated_at".to_string());
         let soft_deletes = attrs.soft_deletes.unwrap_or(false);
@@ -84,6 +84,81 @@ impl ModelInput {
             ));
         }
 
+        // T9 — auto-detect timestamp columns from the struct fields.
+        //
+        //   user attribute       | struct has BOTH      | exactly ONE     | NEITHER
+        //   ---------------------+----------------------+-----------------+---------
+        //   timestamps = false   | disabled             | disabled        | disabled
+        //   timestamps (default) | enabled              | compile_error!  | disabled
+        //
+        // The default-enabled case used to fail at compile time if the
+        // struct lacked `created_at` / `updated_at` (the macro emitted
+        // `am.created_at = Set(now)` against a non-existent ActiveModel
+        // field). Auto-detect lets users skip the `timestamps = false`
+        // opt-out ceremony for join tables / pivots / no-history models.
+        // The exactly-one case still errors loudly because it's almost
+        // certainly a typo (e.g. `craeted_at`) — silently skipping
+        // there would mask the bug.
+        let field_names: std::collections::HashSet<String> = match &item.fields {
+            syn::Fields::Named(named) => named
+                .named
+                .iter()
+                .filter_map(|f| f.ident.as_ref().map(|i| i.to_string()))
+                .collect(),
+            _ => std::collections::HashSet::new(),
+        };
+        let has_created = field_names.contains(&created_at);
+        let has_updated = field_names.contains(&updated_at);
+        let timestamps = if !timestamps_default {
+            false
+        } else {
+            match (has_created, has_updated) {
+                (true, true) => true,
+                (false, false) => false,
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        &item.ident,
+                        format!(
+                            "model has only one of `{}` / `{}`. Eloquent timestamps need both \
+                             columns (or neither). Add the missing field, or set \
+                             `#[model(timestamps = false)]` to disable timestamp tracking \
+                             entirely.",
+                            created_at, updated_at,
+                        ),
+                    ));
+                }
+            }
+        };
+
+        // T9 — auto-inject `AsDateTime` casts for the timestamp columns
+        // unless the user already declared a cast for them. The casts
+        // do double duty: they unblock SeaORM's `DeriveEntityModel`
+        // parser (which mis-parses bare `DateTime<Utc>` as
+        // `NaiveDateTime`, since it can't see through generics) AND
+        // they wire the same Runtime <-> Storage bridge the rest of
+        // the cast machinery uses, so `.touch()` and the auto-set
+        // injection don't need a parallel datetime-formatting path.
+        let mut casts = attrs.casts.unwrap_or_default();
+        if timestamps {
+            for col_name in [&created_at, &updated_at] {
+                if !casts.iter().any(|(i, _)| i == col_name) {
+                    let ident: Ident = syn::parse_str(col_name).map_err(|e| {
+                        syn::Error::new_spanned(
+                            &item.ident,
+                            format!(
+                                "timestamp column name `{}` is not a valid Rust identifier: {}",
+                                col_name, e,
+                            ),
+                        )
+                    })?;
+                    let ty: Type = syn::parse_str("::suprnova::AsDateTime").expect(
+                        "::suprnova::AsDateTime parses — Suprnova lib re-exports this type",
+                    );
+                    casts.push((ident, ty));
+                }
+            }
+        }
+
         Ok(Self {
             item,
             table,
@@ -93,7 +168,7 @@ impl ModelInput {
             connection,
             fillable: attrs.fillable,
             guarded: attrs.guarded,
-            casts: attrs.casts.unwrap_or_default(),
+            casts,
             timestamps,
             created_at,
             updated_at,
@@ -358,5 +433,144 @@ mod tests {
         assert_eq!(input.casts.len(), 2);
         assert_eq!(input.casts[0].0.to_string(), "active");
         assert_eq!(input.casts[1].0.to_string(), "tags");
+    }
+
+    #[test]
+    fn timestamps_auto_detect_both_columns_enabled() {
+        // Default `timestamps = true` + struct has both columns →
+        // timestamps enabled + AsDateTime casts auto-injected.
+        let input = ModelInput::parse(
+            quote! {},
+            quote! {
+                pub struct User {
+                    pub id: i64,
+                    pub created_at: chrono::DateTime<chrono::Utc>,
+                    pub updated_at: chrono::DateTime<chrono::Utc>,
+                }
+            },
+        )
+        .unwrap();
+        assert!(input.timestamps);
+        assert!(input.casts.iter().any(|(i, _)| i == "created_at"));
+        assert!(input.casts.iter().any(|(i, _)| i == "updated_at"));
+    }
+
+    #[test]
+    fn timestamps_auto_detect_neither_column_disabled() {
+        // Default `timestamps = true` + struct has neither column →
+        // auto-detect silently skips.
+        let input = ModelInput::parse(
+            quote! {},
+            quote! { pub struct Pivot { pub id: i64, pub user_id: i64, pub role_id: i64 } },
+        )
+        .unwrap();
+        assert!(!input.timestamps);
+        assert!(input.casts.is_empty(), "no auto-injected casts on disabled timestamps");
+    }
+
+    #[test]
+    fn timestamps_auto_detect_partial_errors() {
+        // Default `timestamps = true` + struct has only updated_at →
+        // compile error (typo guard).
+        let result = ModelInput::parse(
+            quote! {},
+            quote! {
+                pub struct Half {
+                    pub id: i64,
+                    pub updated_at: chrono::DateTime<chrono::Utc>,
+                }
+            },
+        );
+        match result {
+            Ok(_) => panic!("expected partial-timestamps error, got Ok"),
+            Err(e) => assert!(
+                e.to_string().contains("only one of"),
+                "unexpected error message: {e}",
+            ),
+        }
+    }
+
+    #[test]
+    fn timestamps_false_disables_regardless_of_fields() {
+        // Explicit opt-out wins even when the struct has both
+        // columns. Used when a model has columns named created_at /
+        // updated_at for unrelated reasons.
+        let input = ModelInput::parse(
+            quote! { timestamps = false },
+            quote! {
+                pub struct AuditLog {
+                    pub id: i64,
+                    pub created_at: chrono::DateTime<chrono::Utc>,
+                    pub updated_at: chrono::DateTime<chrono::Utc>,
+                }
+            },
+        )
+        .unwrap();
+        assert!(!input.timestamps);
+        assert!(input.casts.is_empty(), "no auto-injected casts when timestamps = false");
+    }
+
+    #[test]
+    fn timestamps_custom_column_names() {
+        // `created_at = "..."` / `updated_at = "..."` overrides apply
+        // to both the field detection and the auto-cast injection.
+        let input = ModelInput::parse(
+            quote! { created_at = "creado_en", updated_at = "actualizado_en" },
+            quote! {
+                pub struct Post {
+                    pub id: i64,
+                    pub creado_en: chrono::DateTime<chrono::Utc>,
+                    pub actualizado_en: chrono::DateTime<chrono::Utc>,
+                }
+            },
+        )
+        .unwrap();
+        assert!(input.timestamps);
+        assert_eq!(input.created_at, "creado_en");
+        assert_eq!(input.updated_at, "actualizado_en");
+        assert!(input.casts.iter().any(|(i, _)| i == "creado_en"));
+        assert!(input.casts.iter().any(|(i, _)| i == "actualizado_en"));
+    }
+
+    #[test]
+    fn timestamps_user_cast_override_preserved() {
+        // If the user explicitly declares a cast for created_at /
+        // updated_at, the macro doesn't replace it. AsImmutableDateTime
+        // here would survive the auto-injection.
+        let input = ModelInput::parse(
+            quote! { casts = { created_at = AsImmutableDateTime } },
+            quote! {
+                pub struct Post {
+                    pub id: i64,
+                    pub created_at: chrono::DateTime<chrono::Utc>,
+                    pub updated_at: chrono::DateTime<chrono::Utc>,
+                }
+            },
+        )
+        .unwrap();
+        assert!(input.timestamps);
+        let created_cast = input.casts.iter().find(|(i, _)| i == "created_at").unwrap();
+        let ty_token = &created_cast.1;
+        let ty = quote!(#ty_token).to_string();
+        // The user's `AsImmutableDateTime` wins; auto-injection didn't
+        // overwrite. (We don't probe the type literally to keep the
+        // assertion robust against whitespace.)
+        assert!(
+            ty.contains("AsImmutableDateTime"),
+            "expected user-declared AsImmutableDateTime, got: {ty}",
+        );
+        // updated_at still got auto-injected since the user only
+        // overrode created_at.
+        assert!(input.casts.iter().any(|(i, _)| i == "updated_at"));
+    }
+
+    #[test]
+    fn touches_attribute_parses() {
+        let input = ModelInput::parse(
+            quote! { touches = ["post", "author"] },
+            quote! { pub struct Comment { pub id: i64 } },
+        )
+        .unwrap();
+        assert_eq!(input.touches, vec!["post".to_string(), "author".to_string()]);
     }
 }

@@ -222,6 +222,7 @@ pub use eloquent::{
     AsEnum, AsFloat, AsHashed, AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsObject,
     AsString, AsTimestamp, Attrs, Builder, Cast, Collection, Direction, DynCast, EloquentModel,
     Fillable, FirstOrCreate, IntoColumn, IntoDynCast, IntoVal, Model, ModelEntry, ReplicateExt,
+    Touchable,
 };
 // `casts!` macro is `#[macro_export]` in eloquent/casts/mod.rs — re-exported
 // at the crate root automatically. No `pub use` needed here.
@@ -261,6 +262,13 @@ pub use serde_json;
 
 // Re-export serde for InertiaProps derive macro
 pub use serde;
+
+// Re-export chrono so macros (e.g. the `#[suprnova::model]` timestamp
+// injection in T9) can emit `::suprnova::chrono::Utc::now()` without
+// requiring downstream user crates to add `chrono` to their
+// `[dependencies]`. Public (not doc-hidden) because `DateTime<Utc>`
+// is a Laravel-shape column type users name in their own structs.
+pub use chrono;
 
 // Re-export Tera for the `#[derive(NotificationMailable)]` macro — the
 // generated `to_mail` references `::suprnova::__tera::{Context, Tera}`

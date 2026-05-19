@@ -261,6 +261,127 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         }
     });
 
+    // T9 — auto-managed timestamps + `Touchable` impl + `touches`
+    // marker. The macro auto-detects timestamps in `parse.rs` (both
+    // columns present → enabled, neither → disabled, partial →
+    // compile_error) and auto-injects `AsDateTime` casts for the
+    // timestamp columns. Here we wire the runtime injections:
+    //
+    // - `apply_attrs_to_active_model`: AFTER the for-loop, always
+    //   overwrite `updated_at` with NOW so both `create()` and
+    //   `update(attrs)` bump it. Then set `created_at` to NOW only if
+    //   it's still `NotSet` (create path). On `update(attrs)` it's
+    //   `Unchanged(old)` from `into_active_model()`, which the check
+    //   correctly leaves alone.
+    //
+    // - `into_active_model_for_update`: AFTER the per-field arms,
+    //   overwrite `updated_at` with NOW so `save()` bumps it. The
+    //   arms have already populated `created_at` with the in-memory
+    //   value (Set), which we keep.
+    //
+    // - `impl Touchable for #struct_ident`: builds a minimal
+    //   ActiveModel with PK Unchanged + updated_at Set(now), runs an
+    //   UPDATE. No other column changes.
+    //
+    // - `TOUCHES` const: stores the parsed `touches = [...]` list
+    //   even on models without timestamps. Phase 10B reads this to
+    //   wire parent-touching post-save hooks once relations land.
+    //   Today it's just a const — the cascade is a no-op.
+    let timestamps_enabled = input.timestamps;
+    let created_col_ident = quote::format_ident!("{}", input.created_at);
+    let updated_col_ident = quote::format_ident!("{}", input.updated_at);
+
+    let timestamp_inject_apply = if timestamps_enabled {
+        quote! {
+            // Always bump updated_at — covers create() and
+            // update(attrs) in one place.
+            let __suprnova_now = ::suprnova::chrono::Utc::now();
+            am.#updated_col_ident = ::suprnova::sea_orm::Set(
+                <::suprnova::AsDateTime as ::suprnova::eloquent::casts::Cast>::to_storage(
+                    &__suprnova_now,
+                )?,
+            );
+            // Set created_at only on first save (NotSet); update()
+            // builds the AM from a row, so created_at is
+            // Unchanged(old) and the check correctly leaves it alone.
+            if matches!(
+                am.#created_col_ident,
+                ::suprnova::sea_orm::ActiveValue::NotSet
+            ) {
+                am.#created_col_ident = ::suprnova::sea_orm::Set(
+                    <::suprnova::AsDateTime as ::suprnova::eloquent::casts::Cast>::to_storage(
+                        &__suprnova_now,
+                    )?,
+                );
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let timestamp_inject_save = if timestamps_enabled {
+        quote! {
+            // save() rebuilds the AM from `self`; the arms have
+            // already populated updated_at with the in-memory value.
+            // Overwrite with NOW so save() bumps the column even when
+            // the caller didn't touch it.
+            let __suprnova_now = ::suprnova::chrono::Utc::now();
+            am.#updated_col_ident = ::suprnova::sea_orm::Set(
+                <::suprnova::AsDateTime as ::suprnova::eloquent::casts::Cast>::to_storage(
+                    &__suprnova_now,
+                )?,
+            );
+        }
+    } else {
+        quote! {}
+    };
+
+    let touchable_impl = if timestamps_enabled {
+        quote! {
+            #[::suprnova::__async_trait::async_trait]
+            impl ::suprnova::eloquent::Touchable for #struct_ident {
+                async fn touch(&self) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
+                    let now = ::suprnova::chrono::Utc::now();
+                    let mut am = <<#module_name::Entity as ::suprnova::EntityTrait>::ActiveModel
+                        as ::core::default::Default>::default();
+                    am.#pk_ident = ::suprnova::sea_orm::ActiveValue::Unchanged(self.#pk_ident.clone());
+                    am.#updated_col_ident = ::suprnova::sea_orm::Set(
+                        <::suprnova::AsDateTime as ::suprnova::eloquent::casts::Cast>::to_storage(
+                            &now,
+                        )?,
+                    );
+                    let db = ::suprnova::DB::connection()?;
+                    <<#module_name::Entity as ::suprnova::EntityTrait>::ActiveModel
+                        as ::suprnova::ActiveModelTrait>::update(am, db.inner())
+                        .await
+                        .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+                    ::core::result::Result::Ok(())
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let touches_marker = if !input.touches.is_empty() {
+        let touches_lits = input.touches.iter().map(|t| quote! { #t });
+        quote! {
+            impl #struct_ident {
+                /// Names of relations whose parent rows should be
+                /// "touched" (their `updated_at` bumped) when this
+                /// model is saved. Populated by
+                /// `#[model(touches = [...])]`.
+                ///
+                /// Phase 10B reads this to wire post-save hooks once
+                /// the relations API lands; in 10A it's a static
+                /// metadata only.
+                pub const TOUCHES: &'static [&'static str] = &[ #(#touches_lits),* ];
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     Ok(quote! {
         impl ::suprnova::eloquent::EloquentModel for #struct_ident {
             type Entity = #module_name::Entity;
@@ -349,6 +470,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                         }
                     }
                 }
+                #timestamp_inject_apply
                 ::core::result::Result::Ok(())
             }
 
@@ -361,9 +483,13 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 let mut am = <<Self::Entity as ::suprnova::EntityTrait>::ActiveModel
                     as ::core::default::Default>::default();
                 #( #active_model_for_update_arms )*
+                #timestamp_inject_save
                 ::core::result::Result::Ok(am)
             }
         }
+
+        #touchable_impl
+        #touches_marker
 
         impl ::suprnova::eloquent::ReplicateExt for #struct_ident {
             fn replicate_with(&self, except: ::std::vec::Vec<::std::string::String>) -> Self {
