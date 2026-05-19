@@ -12,8 +12,9 @@
 //!
 //! T7a ships the 10 primitive + temporal casts. T7b adds structured +
 //! enum + `with_casts` runtime override. T7c adds encrypted +
-//! hashed casts.
+//! hashed casts, completing the 21-cast surface from spec §4.
 
+pub mod encrypted;
 pub mod enum_cast;
 pub mod primitive;
 pub mod structured;
@@ -87,6 +88,9 @@ pub trait IntoDynCast {
 // the type was originally declared in. The crate root in `lib.rs`
 // re-exports the user-facing names further (`suprnova::AsArray`).
 
+pub use encrypted::{
+    AsEncrypted, AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject, AsHashed,
+};
 pub use enum_cast::AsEnum;
 pub use primitive::{AsBool, AsDecimal, AsFloat, AsInt, AsString};
 pub use structured::{AsArray, AsArrayObject, AsCollection, AsJson, AsObject};

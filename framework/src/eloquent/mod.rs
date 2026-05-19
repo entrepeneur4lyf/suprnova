@@ -21,7 +21,8 @@ pub mod registry;
 pub use attrs::Attrs;
 pub use builder::{Builder, Direction, IntoColumn, IntoVal};
 pub use casts::{
-    AsArray, AsArrayObject, AsBool, AsCollection, AsDate, AsDateTime, AsDecimal, AsEnum, AsFloat,
+    AsArray, AsArrayObject, AsBool, AsCollection, AsDate, AsDateTime, AsDecimal, AsEncrypted,
+    AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject, AsEnum, AsFloat, AsHashed,
     AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsObject, AsString, AsTimestamp, Cast,
     DynCast, IntoDynCast,
 };
