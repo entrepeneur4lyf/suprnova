@@ -79,7 +79,7 @@ pub use sea_orm::{
     DatabaseConnection, DatabaseTransaction, DeriveActiveEnum, EntityName, EntityTrait,
     Iden, IntoActiveModel, ModelTrait, NotSet, PrimaryKeyToColumn, PrimaryKeyTrait,
     QueryFilter, QueryOrder, QuerySelect, RelationDef, RelationTrait, Schema, Select,
-    Set, TransactionTrait,
+    Set, TransactionTrait, TryGetable,
 };
 pub use sea_orm::sea_query;
 pub use sea_orm::strum::IntoEnumIterator as Iterable;
@@ -217,8 +217,8 @@ pub use featureflag::{feature, is_enabled};
 // time by `#[suprnova::model]` (Task 3) and walked at boot by Phase 8
 // (Admin), `model:prune`, and future tooling.
 pub use eloquent::{
-    find_model_by_table, models, Attrs, Builder, EloquentModel, Fillable, FirstOrCreate,
-    IntoColumn, Model, ModelEntry, ReplicateExt,
+    find_model_by_table, models, Attrs, Builder, Direction, EloquentModel, Fillable,
+    FirstOrCreate, IntoColumn, IntoVal, Model, ModelEntry, ReplicateExt,
 };
 pub use notifications::{
     Channel, DynNotification, Notifiable, Notification, NotificationDispatcher,

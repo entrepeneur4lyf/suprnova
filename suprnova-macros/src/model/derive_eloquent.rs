@@ -244,5 +244,136 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 ::core::result::Result::Ok(s)
             }
         }
+
+        // Static-style shortcuts on the user's struct. Each delegates to
+        // `<Self as Model>::query()` so the dual-API surface stays in
+        // one place. These are the Laravel-shape entry points that
+        // make `User::filter("email", ...)` and `User::count()` read
+        // the way users expect from PHP.
+        impl #struct_ident {
+            /// `SELECT COUNT(*) FROM table`.
+            pub async fn count() -> ::core::result::Result<i64, ::suprnova::FrameworkError> {
+                <Self as ::suprnova::eloquent::Model>::query().count().await
+            }
+
+            /// `SELECT COALESCE(SUM(col), 0) FROM table`.
+            pub async fn sum<T>(
+                col: impl ::suprnova::eloquent::builder::IntoColumn,
+            ) -> ::core::result::Result<T, ::suprnova::FrameworkError>
+            where
+                T: ::suprnova::sea_orm::TryGetable + ::core::default::Default,
+            {
+                <Self as ::suprnova::eloquent::Model>::query().sum(col).await
+            }
+
+            /// `SELECT COALESCE(AVG(col), 0) FROM table`.
+            pub async fn avg<T>(
+                col: impl ::suprnova::eloquent::builder::IntoColumn,
+            ) -> ::core::result::Result<T, ::suprnova::FrameworkError>
+            where
+                T: ::suprnova::sea_orm::TryGetable + ::core::default::Default,
+            {
+                <Self as ::suprnova::eloquent::Model>::query().avg(col).await
+            }
+
+            /// `SELECT MIN(col) FROM table`.
+            pub async fn min<T>(
+                col: impl ::suprnova::eloquent::builder::IntoColumn,
+            ) -> ::core::result::Result<::core::option::Option<T>, ::suprnova::FrameworkError>
+            where
+                T: ::suprnova::sea_orm::TryGetable,
+            {
+                <Self as ::suprnova::eloquent::Model>::query().min(col).await
+            }
+
+            /// `SELECT MAX(col) FROM table`.
+            pub async fn max<T>(
+                col: impl ::suprnova::eloquent::builder::IntoColumn,
+            ) -> ::core::result::Result<::core::option::Option<T>, ::suprnova::FrameworkError>
+            where
+                T: ::suprnova::sea_orm::TryGetable,
+            {
+                <Self as ::suprnova::eloquent::Model>::query().max(col).await
+            }
+
+            /// `SELECT col FROM table` — returns one column from every row.
+            pub async fn pluck<T>(
+                col: impl ::suprnova::eloquent::builder::IntoColumn,
+            ) -> ::core::result::Result<::std::vec::Vec<T>, ::suprnova::FrameworkError>
+            where
+                T: ::suprnova::sea_orm::TryGetable,
+            {
+                <Self as ::suprnova::eloquent::Model>::query().pluck(col).await
+            }
+
+            /// `SELECT key_col, val_col FROM table` — returns a `HashMap`
+            /// keyed by `key_col`, valued by `val_col`.
+            pub async fn pluck_keyed<K, V>(
+                key_col: impl ::suprnova::eloquent::builder::IntoColumn,
+                val_col: impl ::suprnova::eloquent::builder::IntoColumn,
+            ) -> ::core::result::Result<
+                ::std::collections::HashMap<K, V>,
+                ::suprnova::FrameworkError,
+            >
+            where
+                K: ::suprnova::sea_orm::TryGetable + ::core::cmp::Eq + ::std::hash::Hash,
+                V: ::suprnova::sea_orm::TryGetable,
+            {
+                <Self as ::suprnova::eloquent::Model>::query()
+                    .pluck_keyed(key_col, val_col)
+                    .await
+            }
+
+            /// Static-style `filter` — opens a `Builder<Self>` with
+            /// one equality WHERE clause already attached.
+            #[doc(alias = "db_where")]
+            pub fn filter(
+                col: impl ::suprnova::eloquent::builder::IntoColumn,
+                val: impl ::suprnova::eloquent::builder::IntoVal,
+            ) -> ::suprnova::Builder<Self> {
+                <Self as ::suprnova::eloquent::Model>::query().filter(col, val)
+            }
+
+            /// Laravel-shape alias for [`Self::filter`].
+            #[doc(alias = "filter")]
+            pub fn db_where(
+                col: impl ::suprnova::eloquent::builder::IntoColumn,
+                val: impl ::suprnova::eloquent::builder::IntoVal,
+            ) -> ::suprnova::Builder<Self> {
+                <Self as ::suprnova::eloquent::Model>::query().db_where(col, val)
+            }
+
+            /// Static-style `where_in`.
+            pub fn where_in<V, I>(
+                col: impl ::suprnova::eloquent::builder::IntoColumn,
+                vals: I,
+            ) -> ::suprnova::Builder<Self>
+            where
+                I: ::core::iter::IntoIterator<Item = V>,
+                V: ::suprnova::eloquent::builder::IntoVal,
+            {
+                <Self as ::suprnova::eloquent::Model>::query().where_in(col, vals)
+            }
+
+            /// Static-style `where_like`.
+            pub fn where_like(
+                col: impl ::suprnova::eloquent::builder::IntoColumn,
+                pattern: impl ::core::convert::Into<::std::string::String>,
+            ) -> ::suprnova::Builder<Self> {
+                <Self as ::suprnova::eloquent::Model>::query().where_like(col, pattern)
+            }
+
+            /// Static-style `latest` — `ORDER BY created_at DESC`. Models
+            /// without a `created_at` column will fail at the SQL layer;
+            /// timestamp surface lands in T9.
+            pub fn latest() -> ::suprnova::Builder<Self> {
+                <Self as ::suprnova::eloquent::Model>::query().order_by_desc("created_at")
+            }
+
+            /// Static-style `oldest` — `ORDER BY created_at ASC`.
+            pub fn oldest() -> ::suprnova::Builder<Self> {
+                <Self as ::suprnova::eloquent::Model>::query().order_by_asc("created_at")
+            }
+        }
     })
 }
