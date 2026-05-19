@@ -24,6 +24,9 @@ impl MigratorTrait for Migrator {
             // schema. Listed last so re-runs against existing dev
             // databases pick it up as a new pending migration.
             Box::new(suprnova::auth_flows::two_factor::migration::Migration),
+            // Phase 11 R4 — adds last_used_timestep to
+            // two_factor_credentials for TOTP replay protection.
+            Box::new(suprnova::auth_flows::two_factor::migration_replay::Migration),
         ]
     }
 }

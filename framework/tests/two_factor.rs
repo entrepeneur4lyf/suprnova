@@ -8,6 +8,7 @@
 //! binary (pattern lifted from `framework/tests/pagination.rs`).
 
 use suprnova::auth_flows::two_factor::migration::Migration as TwoFactorMigration;
+use suprnova::auth_flows::two_factor::migration_replay::Migration as TwoFactorReplayMigration;
 use suprnova::auth_flows::{TwoFactor, TwoFactorUser};
 use suprnova::testing::TestDatabase;
 use suprnova::{Crypt, EncryptionKey};
@@ -28,7 +29,10 @@ struct TestMigrator;
 #[async_trait::async_trait]
 impl sea_orm_migration::MigratorTrait for TestMigrator {
     fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
-        vec![Box::new(TwoFactorMigration)]
+        vec![
+            Box::new(TwoFactorMigration),
+            Box::new(TwoFactorReplayMigration),
+        ]
     }
 }
 
@@ -373,4 +377,79 @@ async fn consuming_all_codes_clears_recovery_column() {
     // verify() still works via TOTP.
     let live = totp_code_for(&response.otpauth_url);
     assert!(TwoFactor::verify(&user, &live).await.unwrap());
+}
+
+#[tokio::test]
+async fn verify_rejects_replay_within_same_timestep() {
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    ensure_crypt();
+
+    let user = FakeUser {
+        id: "replay-uid".into(),
+        email: "replay@example.com".into(),
+    };
+
+    let response = TwoFactor::enroll(&user).await.unwrap();
+    let code = totp_code_for(&response.otpauth_url);
+
+    // Confirm enrollment with the code — this also exercises check_code
+    // but the verify-replay path only kicks in for `verify()`.
+    TwoFactor::confirm(&user, &code).await.unwrap();
+
+    // First verify after confirmation accepts the current code.
+    let live = totp_code_for(&response.otpauth_url);
+    assert!(
+        TwoFactor::verify(&user, &live).await.unwrap(),
+        "first verify on a fresh confirmation must accept the live code"
+    );
+
+    // Replay the SAME code immediately. Within the same 30-second
+    // window, current_timestep == last_used_timestep — must be
+    // rejected even though the code is still structurally valid.
+    assert!(
+        !TwoFactor::verify(&user, &live).await.unwrap(),
+        "replay within the same TOTP timestep must be rejected"
+    );
+
+    // A different (fake) code in the same window is also rejected,
+    // demonstrating that the rejection is timestep-driven, not just
+    // a code-equality check.
+    assert!(
+        !TwoFactor::verify(&user, "000000").await.unwrap(),
+        "any verify in the same timestep as the last successful verify must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn verify_replay_state_resets_on_re_enrollment() {
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    ensure_crypt();
+
+    let user = FakeUser {
+        id: "replay-reset-uid".into(),
+        email: "replay-reset@example.com".into(),
+    };
+
+    // Enroll, confirm, verify (sets last_used_timestep).
+    let resp1 = TwoFactor::enroll(&user).await.unwrap();
+    TwoFactor::confirm(&user, &totp_code_for(&resp1.otpauth_url))
+        .await
+        .unwrap();
+    let live1 = totp_code_for(&resp1.otpauth_url);
+    assert!(TwoFactor::verify(&user, &live1).await.unwrap());
+
+    // Re-enroll wipes the row's last_used_timestep along with the
+    // secret — the new secret produces different codes anyway, but
+    // even within the same timestep window the new verify path must
+    // not inherit the old replay block.
+    let resp2 = TwoFactor::enroll(&user).await.unwrap();
+    TwoFactor::confirm(&user, &totp_code_for(&resp2.otpauth_url))
+        .await
+        .unwrap();
+
+    let live2 = totp_code_for(&resp2.otpauth_url);
+    assert!(
+        TwoFactor::verify(&user, &live2).await.unwrap(),
+        "re-enrollment must reset replay state so verify succeeds against the new secret"
+    );
 }

@@ -29,6 +29,11 @@ pub struct Model {
     /// codes. `None` once every code has been consumed.
     #[sea_orm(column_type = "Text", nullable)]
     pub recovery_codes: Option<String>,
+    /// Last TOTP timestep (`unix_seconds / step`) successfully accepted
+    /// by [`crate::auth_flows::TwoFactor::verify`]. Rejecting codes
+    /// whose timestep equals this value prevents replay within the
+    /// 30-second window where a TOTP remains valid.
+    pub last_used_timestep: Option<i64>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }

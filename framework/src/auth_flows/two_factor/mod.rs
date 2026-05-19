@@ -25,6 +25,7 @@
 
 pub mod entity;
 pub mod migration;
+pub mod migration_replay;
 pub mod recovery;
 
 use crate::auth_flows::events::{TwoFactorDisabled, TwoFactorEnrolled};
@@ -165,6 +166,18 @@ impl TwoFactor {
     /// Returns `Ok(false)` when 2FA is not enabled (no row, or row
     /// exists but `confirmed_at` is NULL) or the code does not match.
     /// Storage failures surface as `Err`.
+    ///
+    /// # Replay protection
+    ///
+    /// On a successful verify the server's current TOTP timestep is
+    /// persisted to `last_used_timestep`. Subsequent verifications
+    /// where `current_timestep <= last_used_timestep` are rejected
+    /// even when the code itself is structurally valid — preventing
+    /// an attacker who observed a valid code from re-submitting it
+    /// within the same 30-second window. The legitimate cost is that
+    /// a user who needs to 2FA twice within 30 seconds must wait for
+    /// the next timestep; for the typical "verify once per login"
+    /// flow this is invisible.
     pub async fn verify<U: TwoFactorUser>(
         user: &U,
         code: &str,
@@ -180,8 +193,32 @@ impl TwoFactor {
         if row.confirmed_at.is_none() {
             return Ok(false);
         }
+
+        let current_timestep = current_totp_timestep();
+        if let Some(last) = row.last_used_timestep
+            && current_timestep <= last
+        {
+            // Within or before the timestep the user last successfully
+            // verified at — refuse to accept ANY code, even one that
+            // would structurally validate. Closes the in-window replay
+            // window.
+            return Ok(false);
+        }
+
         let secret_b32 = Crypt::decrypt_string(&row.secret)?;
-        check_code(&secret_b32, code)
+        let matched = check_code(&secret_b32, code)?;
+        if matched {
+            // Persist the timestep so the same code (or any other
+            // structurally-valid code in this window) can't be
+            // replayed within this 30-second slot.
+            let mut active: entity::ActiveModel = row.into();
+            active.last_used_timestep = Set(Some(current_timestep));
+            active.updated_at = Set(chrono::Utc::now());
+            active.update(db.inner()).await.map_err(|e| {
+                FrameworkError::internal(format!("two_factor update: {e}"))
+            })?;
+        }
+        Ok(matched)
     }
 
     /// Try to consume one recovery code. Returns `true` if a code
@@ -267,6 +304,9 @@ async fn upsert_row(
         active.secret = Set(encrypted_secret);
         active.confirmed_at = Set(confirmed_at);
         active.recovery_codes = Set(encrypted_recovery);
+        // Re-enrollment generates a fresh secret — any timestep
+        // remembered against the old secret is meaningless.
+        active.last_used_timestep = Set(None);
         active.updated_at = Set(now);
         active
             .update(conn)
@@ -278,6 +318,9 @@ async fn upsert_row(
             secret: Set(encrypted_secret),
             confirmed_at: Set(confirmed_at),
             recovery_codes: Set(encrypted_recovery),
+            // Fresh enrollment — no prior verification timestep to
+            // guard against replay yet.
+            last_used_timestep: Set(None),
             created_at: Set(now),
             updated_at: Set(now),
         }
@@ -319,6 +362,16 @@ async fn load_secret(user_id: &str) -> Result<Option<String>, FrameworkError> {
         return Ok(None);
     };
     Ok(Some(Crypt::decrypt_string(&row.secret)?))
+}
+
+/// Current server-side TOTP timestep. Used by [`TwoFactor::verify`]
+/// for replay protection — a successful verify stamps the row with
+/// this value, and subsequent verifies at the same or earlier
+/// timestep are refused even when the code itself would structurally
+/// validate. 30-second step matches the TOTP construction in
+/// [`check_code`] / enrollment.
+fn current_totp_timestep() -> i64 {
+    chrono::Utc::now().timestamp() / 30
 }
 
 /// Verify a TOTP code against a base32-encoded secret. Centralised so
