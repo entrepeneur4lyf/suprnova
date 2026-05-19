@@ -252,6 +252,17 @@ impl TwoFactor {
     /// a user who needs to 2FA twice within 30 seconds must wait for
     /// the next timestep; for the typical "verify once per login"
     /// flow this is invisible.
+    ///
+    /// # Brute-force throttling
+    ///
+    /// Failed verifies are recorded against the user's email via
+    /// [`crate::auth_flows::BruteForce::record_failed_attempt`].
+    /// Crossing the configured threshold locks the account from
+    /// **both** 2FA and password login until an admin unlocks it or
+    /// the lockout window expires — defense in depth against online
+    /// brute-force of the TOTP search space. Successful verifies
+    /// reset the failed-attempt counter via
+    /// [`crate::auth_flows::BruteForce::reset_attempts`].
     pub async fn verify<U: TwoFactorUser>(
         user: &U,
         code: &str,
@@ -275,7 +286,9 @@ impl TwoFactor {
             // Within or before the timestep the user last successfully
             // verified at — refuse to accept ANY code, even one that
             // would structurally validate. Closes the in-window replay
-            // window.
+            // window. Counted as a failed attempt — replays from an
+            // observer should trip the lockout.
+            record_2fa_failure(user.email()).await;
             return Ok(false);
         }
 
@@ -291,6 +304,9 @@ impl TwoFactor {
             active.update(db.inner()).await.map_err(|e| {
                 FrameworkError::internal(format!("two_factor update: {e}"))
             })?;
+            reset_2fa_failures(user.email()).await;
+        } else {
+            record_2fa_failure(user.email()).await;
         }
         Ok(matched)
     }
@@ -313,7 +329,16 @@ impl TwoFactor {
         if !Self::is_enabled(user).await? {
             return Ok(false);
         }
-        recovery::consume(user.user_id(), code).await
+        let consumed = recovery::consume(user.user_id(), code).await?;
+        // Same brute-force throttling as TwoFactor::verify — a wrong
+        // recovery code counts as a failed attempt against the user's
+        // email, so an attacker can't grind the 40-bit code space.
+        if consumed {
+            reset_2fa_failures(user.email()).await;
+        } else {
+            record_2fa_failure(user.email()).await;
+        }
+        Ok(consumed)
     }
 
     /// Returns `true` when an active (confirmed) 2FA enrollment
@@ -446,6 +471,32 @@ async fn load_secret(user_id: &str) -> Result<Option<String>, FrameworkError> {
 /// [`check_code`] / enrollment.
 fn current_totp_timestep() -> i64 {
     chrono::Utc::now().timestamp() / 30
+}
+
+/// Best-effort record of a failed 2FA attempt against
+/// `BruteForce::record_failed_attempt`. Logs and swallows errors —
+/// the throttling layer must never break the auth check it's
+/// supplementing. This includes the "torii not initialised" case
+/// (test environments that don't boot torii get no throttling, which
+/// is acceptable — production deployments always init torii when 2FA
+/// is in play).
+async fn record_2fa_failure(email: &str) {
+    if let Err(e) = crate::auth_flows::BruteForce::record_failed_attempt(email, None).await {
+        tracing::debug!(
+            "BruteForce::record_failed_attempt skipped for 2FA failure on {email}: {e}"
+        );
+    }
+}
+
+/// Best-effort reset of the failed-attempt counter after a successful
+/// 2FA verify or recovery-code consume. Same swallow-and-log posture
+/// as [`record_2fa_failure`].
+async fn reset_2fa_failures(email: &str) {
+    if let Err(e) = crate::auth_flows::BruteForce::reset_attempts(email).await {
+        tracing::debug!(
+            "BruteForce::reset_attempts skipped for 2FA success on {email}: {e}"
+        );
+    }
 }
 
 /// Verify a TOTP code against a base32-encoded secret. Centralised so
