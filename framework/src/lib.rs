@@ -13,6 +13,7 @@ pub mod crypto;
 pub mod csrf;
 pub mod data;
 pub mod database;
+pub mod eloquent;
 pub mod error;
 pub(crate) mod lock;
 pub mod hashing;
@@ -210,6 +211,12 @@ pub use auth_flows::{
 // expose the rest of the primitives + the non-colliding macros here.
 pub use features::{Evaluator, EvaluatorRef, Feature};
 pub use featureflag::{feature, is_enabled};
+// Phase 10 — Eloquent. Foundation primitives land in 10A; relationships
+// (10B) and collections/pagination/observers (10C) extend the same
+// `eloquent` module. The `ModelEntry` registry is populated at compile
+// time by `#[suprnova::model]` (Task 3) and walked at boot by Phase 8
+// (Admin), `model:prune`, and future tooling.
+pub use eloquent::{find_model_by_table, models, EloquentModel, ModelEntry};
 pub use notifications::{
     Channel, DynNotification, Notifiable, Notification, NotificationDispatcher,
     NotificationFactory, Notify, SendNotificationJob,
