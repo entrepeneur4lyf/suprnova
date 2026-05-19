@@ -49,15 +49,22 @@ pub use featureflag::{
 };
 
 pub mod admin;
+pub mod bootstrap;
 pub mod entity;
 pub mod evaluators;
 pub mod events;
 pub mod fields;
 pub mod middleware;
 pub mod migrations;
+pub mod sync;
 
+pub use bootstrap::{
+    bootstrap_database_cached, install_evaluator, is_installed, mark_installed,
+    BootstrappedFeatures,
+};
 pub use evaluators::cached::CachedEvaluator;
 pub use evaluators::database::DatabaseEvaluator;
 pub use events::{FeatureDeleted, FeatureUpdated};
 pub use fields::{TeamField, UserIdField};
 pub use middleware::FeatureMiddleware;
+pub use sync::{CompositeFeatureSync, FeatureSync};

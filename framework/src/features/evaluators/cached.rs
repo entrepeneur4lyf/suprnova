@@ -46,6 +46,8 @@
 //! already bounded by the TTL.
 
 use crate::features::fields::{TeamField, UserIdField};
+use crate::features::sync::FeatureSync;
+use async_trait::async_trait;
 use dashmap::DashMap;
 use featureflag::{context::Context, evaluator::Evaluator};
 use std::sync::Arc;
@@ -53,7 +55,7 @@ use std::time::{Duration, Instant};
 
 /// TTL-cached wrapper around any [`Evaluator`].
 pub struct CachedEvaluator {
-    inner: Arc<dyn Evaluator>,
+    inner: Arc<dyn Evaluator + Send + Sync>,
     ttl: Duration,
     /// Key format: `"{feature}::u={user_id?}::t={team?}"`. Empty
     /// segments encode "field absent in this context."
@@ -71,7 +73,7 @@ impl CachedEvaluator {
     /// zero degenerates to "no caching" — every call falls through
     /// to `inner`. A very long TTL bounds the cross-replica staleness
     /// window; tune to taste.
-    pub fn new(inner: Arc<dyn Evaluator>, ttl: Duration) -> Self {
+    pub fn new(inner: Arc<dyn Evaluator + Send + Sync>, ttl: Duration) -> Self {
         Self {
             inner,
             ttl,
@@ -82,7 +84,7 @@ impl CachedEvaluator {
     /// Reference to the underlying evaluator. Exposed for tests and
     /// for callers that need to dispatch a cache-bypassed lookup
     /// (e.g. admin tooling rendering "current vs cached" diffs).
-    pub fn inner(&self) -> &Arc<dyn Evaluator> {
+    pub fn inner(&self) -> &Arc<dyn Evaluator + Send + Sync> {
         &self.inner
     }
 
@@ -124,6 +126,19 @@ impl CachedEvaluator {
             .map(|field| field.as_str().to_string())
             .unwrap_or_default();
         format!("{feature}::u={user}::t={team}")
+    }
+}
+
+#[async_trait]
+impl FeatureSync for CachedEvaluator {
+    /// Drops every cached entry for `feature` (all scopes). The
+    /// `scope_key` argument is currently ignored — entries are keyed
+    /// by `(feature, user, team)` and the user/team scope isn't
+    /// derivable from the bare `scope_key` string, so we invalidate
+    /// the whole feature prefix. For per-scope invalidation, an app
+    /// would need a custom cache impl with a richer key.
+    async fn on_flag_changed(&self, feature: &str, _scope_key: &str) {
+        self.invalidate(feature);
     }
 }
 

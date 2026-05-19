@@ -60,7 +60,9 @@ use crate::features::entity::{
 };
 use crate::features::fields::{TeamField, UserIdField};
 use crate::features::migrations::CreateFeaturesTable;
+use crate::features::sync::FeatureSync;
 
+use async_trait::async_trait;
 use chrono::Utc;
 use featureflag::{
     context::{Context, ContextRef},
@@ -177,6 +179,13 @@ impl DatabaseEvaluator {
     /// reserves `user:` and `team:` prefixes for the built-in
     /// resolution path — see module docs).
     ///
+    /// Fires [`crate::features::sync::notify`] after the snapshot
+    /// updates so any [`CachedEvaluator`](super::cached::CachedEvaluator)
+    /// in front of this `DatabaseEvaluator` invalidates its entries.
+    /// The notify call is a no-op for the `DatabaseEvaluator` itself
+    /// (it just refreshed its own snapshot above), so the redundant
+    /// reload is the cheap price of unified write-path fan-out.
+    ///
     /// # Errors
     ///
     /// Returns an error if the upsert SQL fails. The in-memory
@@ -220,11 +229,21 @@ impl DatabaseEvaluator {
         // callers don't need to call reload() after every write. A
         // separate reload() remains available for picking up edits
         // made out-of-band.
-        let mut store = self
-            .flags
-            .write()
-            .expect("DatabaseEvaluator flags RwLock poisoned");
-        store.insert((name.to_string(), scope_key.to_string()), enabled);
+        {
+            let mut store = self
+                .flags
+                .write()
+                .expect("DatabaseEvaluator flags RwLock poisoned");
+            store.insert((name.to_string(), scope_key.to_string()), enabled);
+        }
+
+        // Fan out to other `FeatureSync` implementors (caches,
+        // listeners) so any state ahead of the DB sees the change
+        // before this call returns. The composite executes data
+        // sources before caches, so a `CachedEvaluator` wrapping this
+        // evaluator invalidates *after* the snapshot update above.
+        crate::features::sync::notify(name, scope_key).await;
+
         Ok(())
     }
 
@@ -295,6 +314,28 @@ impl Evaluator for DatabaseEvaluator {
             context
                 .extensions_mut()
                 .insert(TeamField(team.to_string()));
+        }
+    }
+}
+
+#[async_trait]
+impl FeatureSync for DatabaseEvaluator {
+    /// `reload()`s the full snapshot from the `features` table. Cheap
+    /// enough for a flag-count in the hundreds; apps with thousands of
+    /// flags should swap in a custom impl that targets the specific
+    /// `(feature, scope_key)`.
+    async fn on_flag_changed(&self, _feature: &str, _scope_key: &str) {
+        if let Err(err) = self.reload().await {
+            // Reload failures leave the snapshot untouched — the
+            // pre-mutation values stay live. Surface the failure so
+            // an operator notices the snapshot is now stale relative
+            // to the persisted row, but don't propagate (the calling
+            // admin::upsert has already committed and we don't want
+            // it to misreport success-as-failure on a refresh hiccup).
+            tracing::warn!(
+                error = %err,
+                "features: DatabaseEvaluator::reload failed after mutation; snapshot is stale until the next successful reload",
+            );
         }
     }
 }

@@ -2,15 +2,15 @@
 //!
 //! Intended to back Phase 8's admin panel + any custom admin UI a
 //! consumer builds. All mutations fire the appropriate event
-//! ([`FeatureUpdated`] / [`FeatureDeleted`]) so audit listeners
-//! observe every state transition.
-//!
-//! Mutations are persisted but **do NOT auto-refresh** any in-process
-//! [`DatabaseEvaluator`](crate::features::DatabaseEvaluator) snapshot
-//! — the framework doesn't track which evaluators are live. Callers
-//! who hold an evaluator handle should call `evaluator.reload().await`
-//! after a mutation; long-running deployments typically pair this
-//! module with a periodic reload task or a pub-sub invalidator.
+//! ([`FeatureUpdated`] / [`FeatureDeleted`]) for audit listeners and
+//! also call [`crate::features::sync::notify`] so live in-process
+//! evaluators (DB snapshot + caches) reflect the new state before the
+//! mutation returns. Bind a
+//! [`FeatureSync`](crate::features::FeatureSync) into the App
+//! container (the default is the composite produced by
+//! [`crate::features::bootstrap_database_cached`]) to enable
+//! sub-second propagation; without it `notify` is a no-op and the
+//! row reaches readers only after a manual reload or TTL.
 
 use crate::database::DB;
 use crate::error::FrameworkError;
@@ -132,6 +132,12 @@ pub async fn upsert(
         .await?
         .ok_or_else(|| FrameworkError::internal("features upsert: row missing after insert"))?;
 
+    // Propagate to live evaluators *before* returning — kill-switch
+    // semantics require the in-memory snapshot + any cache to reflect
+    // the new row by the time the admin call comes back. No-op when
+    // no `FeatureSync` is bound.
+    crate::features::sync::notify(name, scope_key).await;
+
     // Fire-and-forget audit event. A listener panic does not roll
     // back the committed insert.
     let _ = crate::events::EventFacade::dispatch(FeatureUpdated {
@@ -164,6 +170,11 @@ pub async fn delete(
 
     let deleted = result.rows_affected > 0;
     if deleted {
+        // Propagate the deletion: DB snapshots drop the row, caches
+        // drop matching entries. After this, `is_enabled!` falls back
+        // to the compile-time default for the flag.
+        crate::features::sync::notify(name, scope_key).await;
+
         let _ = crate::events::EventFacade::dispatch(FeatureDeleted {
             name: name.to_string(),
             scope_key: scope_key.to_string(),
