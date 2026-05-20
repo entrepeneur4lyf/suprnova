@@ -26,6 +26,7 @@ doesn't cover (see the [SeaORM escape hatches](#dropping-to-seaorm)).
 - [Casts](#casts)
 - [Accessors and mutators](#accessors-and-mutators)
 - [Timestamps](#timestamps)
+- [Observers and lifecycle events](#observers-and-lifecycle-events)
 - [Prunable](#prunable)
 - [Testing models](#testing-models)
 - [Dropping to SeaORM](#dropping-to-seaorm)
@@ -1732,6 +1733,246 @@ relation API — the metadata is already in place.
 Always ISO 8601 with UTC. No `Model::$timestampsFormat` override
 (per the divergence-from-Eloquent table — frontend interop comes
 first; locale formatting belongs in the i18n layer).
+
+## Observers and lifecycle events
+
+Every model goes through a fixed 16-event lifecycle as it moves
+through `create` / `save` / `update` / `delete` / `restore` /
+`replicate` / Builder query paths. Listeners can hook each event
+to log, audit, side-effect, validate, or cancel the in-flight
+operation.
+
+### The 16 lifecycle events
+
+Events split into two groups by cancellability:
+
+**Cancellable (5)** — fire BEFORE the database write. A listener
+returning `EventResult::cancel("reason")` aborts the operation with
+`FrameworkError::bad_request(reason)`.
+
+| Event       | When                                      | Payload                                                 |
+|-------------|-------------------------------------------|---------------------------------------------------------|
+| `Saving`    | Before both `create` and `save`           | `Arc<Mutex<Attrs>>` + `is_creating: bool`               |
+| `Creating`  | Before `create`                           | `Arc<Mutex<Attrs>>`                                     |
+| `Updating`  | Before `save` / `update` on existing row  | Pre-update model snapshot + `Arc<Mutex<Attrs>>`         |
+| `Deleting`  | Before `delete` (soft or hard)            | Model + `is_force: bool` (force-delete on soft-delete)  |
+| `Restoring` | Before `restore` on soft-delete model     | Model                                                   |
+
+**Non-cancellable (11)** — fire AFTER the operation. Listener errors
+propagate but cannot stop a write that already landed.
+
+| Event           | When                                              | Payload                          |
+|-----------------|---------------------------------------------------|----------------------------------|
+| `Retrieving`    | Once per Builder query, before the DB call        | None                             |
+| `Retrieved`     | Once per row returned by a Builder query          | Model                            |
+| `Created`       | After successful `create`                         | Model                            |
+| `Updated`       | After successful `save` / `update`                | Previous + current snapshots     |
+| `Saved`         | After both `create` and `save`                    | Model                            |
+| `Deleted`       | After successful `delete`                         | Model + `is_force: bool`         |
+| `Trashed`       | After soft-delete (NOT force-delete)              | Model                            |
+| `Restored`      | After successful `restore`                        | Model                            |
+| `Replicating`   | During `replicate` / `replicate_into`, before return | Source + `Arc<Mutex<replica>>` (mutable) |
+| `ForceDeleting` | Before `force_delete` on soft-delete model        | Model                            |
+| `ForceDeleted`  | After successful `force_delete`                   | Model                            |
+
+The cancellable / non-cancellable split mirrors Laravel's `creating`
+vs `created` hook pair. `Saving` fires for both insert and update —
+override that one when the behaviour is identical across both paths
+and discriminate via `is_creating`.
+
+`Replicating` is the one non-cancellable hook that hands a mutable
+reference (the replica is `Arc<Mutex<M>>`). Use it to clear
+timestamps, regenerate UUIDs, reset auto-increments, etc. before the
+clone is returned to the caller.
+
+### Observers vs raw listeners
+
+Two ways to hook lifecycle events:
+
+1. **Raw listeners** — call `EventFacade::listen::<Created, _>(Arc::new(MyListener))`
+   for each event you want, one impl per event. This is the
+   underlying mechanism; observers ride on top of it.
+
+2. **Observers** — bundle all 16 hooks under one trait. The macro
+   sees which methods the user overrode and registers exactly those.
+   This is the recommended path for any non-trivial set of hooks.
+
+```rust
+use async_trait::async_trait;
+use suprnova::eloquent::attrs::Attrs;
+use suprnova::eloquent::events::EventResult;
+use suprnova::eloquent::observers::Observer;
+use suprnova::FrameworkError;
+
+pub struct AuditObserver;
+
+#[suprnova::observer(User)]   // <- MUST precede #[async_trait]
+#[async_trait]
+impl Observer<User> for AuditObserver {
+    async fn creating(&self, attrs: &mut Attrs) -> EventResult {
+        if attrs.get("email").is_none() {
+            return EventResult::cancel("email is required");
+        }
+        EventResult::ok()
+    }
+
+    async fn created(&self, user: &User) -> Result<(), FrameworkError> {
+        tracing::info!(user.id = user.id, "user created");
+        Ok(())
+    }
+}
+```
+
+Every trait method has a default no-op, so the impl block contains
+only the events you care about. The macro identifies overrides by
+name match against the closed 16-method set; methods you don't
+override register no listeners.
+
+### Required attribute ordering
+
+`#[suprnova::observer(M)]` MUST appear ABOVE `#[async_trait]`:
+
+```rust
+#[suprnova::observer(User)]   // outer — runs first, sees raw async fns
+#[async_trait]                // inner — rewrites async fn signatures
+impl Observer<User> for AuditObserver { /* ... */ }
+```
+
+Attribute macros expand outside-in. `async_trait` rewrites every
+`async fn` into a desugared `Pin<Box<dyn Future>>` poll-fn shape;
+if `#[async_trait]` ran first, the observer macro's name-match
+against the 16 trait method names would find nothing and silently
+emit zero listeners.
+
+### Four registration paths
+
+| Path                                         | When to use                                         |
+|----------------------------------------------|-----------------------------------------------------|
+| `#[suprnova::observer(M)]` (inventory)       | Static observer known at compile time. Auto-installs on boot. |
+| `#[model(observers = [Foo, Bar])]`           | Documentation + compile-time validation that the listed types resolve. Does NOT itself register. |
+| `Model::observe(MyObs).await`                | Runtime registration. Hand-driven; useful when registration depends on config. |
+| `EventFacade::listen::<events::Created, _>(...)` | Lowest level — one event at a time. Use when an observer feels heavy. |
+
+The `observers = [...]` attribute on `#[model]` is a documentation
+marker. It compiles to a `const _: fn() = || { let _ =
+::std::any::type_name::<T>; ... };` block that proves each listed
+type resolves to a real Rust item; typos surface at the model
+declaration site. Actual install is via the inventory pathway —
+the `#[observer(M)]` attribute on `Foo` is what enrolls `Foo` for
+auto-install.
+
+### Bootstrap
+
+Call `bootstrap_observers()` once at startup to drain the inventory
+and install every `#[observer(M)]`-registered observer:
+
+```rust
+suprnova::eloquent::observers::bootstrap_observers().await?;
+```
+
+The drain is idempotent for the inventory pathway — each observer's
+install closure is gated by a per-type `AtomicBool` (T2b's macro
+emission), so calling `bootstrap_observers()` twice does not
+double-register.
+
+The runtime `Model::observe(MyObs)` shim is NOT gated. Calling it
+twice registers two listener sets, matching Laravel's manual
+`Model::observe(MyObs::class)` semantics. If a hand-driven observer
+also has `#[observer]`, the inventory adapter fires in addition to
+the manually-installed ones.
+
+### Cancelling from an observer
+
+The five cancellable hooks return `EventResult`. To abort the
+operation, return `EventResult::cancel("reason")`:
+
+```rust
+#[suprnova::observer(Subscription)]
+#[async_trait]
+impl Observer<Subscription> for PolicyObserver {
+    async fn creating(&self, attrs: &mut Attrs) -> EventResult {
+        if let Some(plan) = attrs.get("plan") {
+            if plan == "blocked" {
+                return EventResult::cancel("plan is blocked");
+            }
+        }
+        EventResult::ok()
+    }
+}
+```
+
+The cancel reason surfaces as `FrameworkError::bad_request(reason)`
+from `Subscription::create`. The row never lands in the database —
+cancel is a true abort, not a "delete after the fact".
+
+Multiple observers may register cancellable hooks on the same model;
+any one of them returning `Cancel` stops the operation. Order is the
+inventory enrolment order (link order in practice).
+
+### Multiple observers on one model
+
+Multiple `Observer<M>` impls all fire for the same event —
+EventFacade dispatch fans out to every registered listener rather
+than picking one:
+
+```rust
+#[suprnova::observer(Comment)]
+#[async_trait]
+impl Observer<Comment> for AuditObserver { /* ... */ }
+
+#[suprnova::observer(Comment)]
+#[async_trait]
+impl Observer<Comment> for NotifyObserver { /* ... */ }
+
+// Comment::create(...) fires AuditObserver::created AND NotifyObserver::created.
+```
+
+This matches Laravel's fan-out semantics and is the load-bearing
+property behind the "decompose hooks by concern" pattern: an
+`AuditObserver` only knows about audit, a `NotifyObserver` only
+knows about notifications, and the model declaration doesn't care
+how many observers attach.
+
+### Manual `Model::observe()`
+
+Every `#[suprnova::model]` struct gets a per-model `observe<O>()`
+shim. Call it at boot for dynamic registration:
+
+```rust
+#[derive(Clone)]
+struct MyObs;
+
+#[async_trait]
+impl Observer<User> for MyObs { /* ... */ }
+
+// At runtime:
+User::observe(MyObs).await;
+```
+
+The shim's `O: Clone + 'static` bound is what lets the framework
+hand a fresh observer clone to each of the 16 internal adapter
+listeners. All 16 listener adapters install on every call — the
+trait defaults make non-overridden methods cheap no-ops.
+
+### Constraints
+
+- **The macro version requires the impl block use plain method
+  names matching the trait's 16 hooks.** Renamed methods,
+  `#[allow]`-suppressed defaults, and `#[cfg]`-gated bodies fall
+  outside the name-match and don't register listeners.
+
+- **Observer structs the macro inspects must be zero-sized** (no
+  fields) in v1. The macro constructs the observer via `let obs =
+  MyObserver;` inside each adapter. Stateful observers (carrying
+  `Arc<Inner>`) need the runtime `Model::observe()` path, which
+  takes the observer by value and clones it into each adapter.
+
+- **Test isolation: use unique model types per scenario.** The
+  process-global EventDispatcher means listeners installed for
+  `User` are visible to every test in the same binary. Per-test
+  unique model types (`T2Comment`, `T2Subscription`, …) keep
+  cross-test bleed out of the counter assertions. The
+  `eloquent_observers.rs` integration tests exercise this pattern.
 
 ## Prunable
 
