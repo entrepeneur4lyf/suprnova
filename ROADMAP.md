@@ -261,13 +261,109 @@ is what makes Rust frameworks reach 80% production-ready and stall.
   `AsyncRule` with `Unique` issuing real parameterized DB queries
   (no in-memory fakes). `FormRequest::after_validation` cross-field
   hook. `ValidationErrors::add_to_bag` for named-scope errors.
+- **Queue + Rate Limiter + Cache** (Phase 5A) — `Queue::dispatch` /
+  `Queue::push` over Redis / Database / in-process drivers; typed
+  `Job` trait; supervised workers via `queue:work`. `RateLimiter::for`
+  fluent attempts/decay/lockout API + `ThrottleRequests` middleware.
+  Multi-store `Cache::store("redis")` / `Cache::store("memory")` with
+  `remember` / `forever` / `tags` / `lock` (atomic per-key lock).
+- **Mail + Notifications** (Phase 5B) — `Mail::to(&user).send(WelcomeEmail)`
+  facade over SMTP / SES / Postmark / Mailgun / Resend / SendGrid /
+  log drivers (six first-class transports). `Mailable` trait +
+  Markdown + plain-text + HTML rendering via `tera`. `Notifications`
+  facade with mail + database + slack channels. `#[derive(NotificationMailable)]`
+  for compile-time notification wiring. Test fakes (`Mail::fake()` /
+  `Notification::fake()`) record sends for `assert_sent` / `assert_to`.
+- **Factories + Seeders + Typed Config + Console** (Phases 6A + 6B) —
+  `Factory` trait + `FactoryBuilder` with `Sequence`, `count(n)`,
+  `state(closure)`. `Persistable` bridges factory output to the DB.
+  `Seeder` trait with `db:seed` console command. `Config::resolve::<T>()`
+  uses `envy` for compile-time-typed env-driven config. `#[command]`
+  attribute + `#[derive(Command)]` typed args + `inventory`-registered
+  CLI surface. App-binary console runner (`cargo run --bin console`) —
+  Rust analogue of `php artisan`. `make:command` generator. `silent`
+  error variant for graceful CLI exit codes.
+- **WebSockets + Broadcasting + Supervised Workers** (Phases 7A + 7B) —
+  `ws!()` macro + `Router::ws` + `hyper-tungstenite` upgrade
+  integration. `WsSocket` Sink/Stream split. Per-connection heartbeat
+  with close-on-no-pong. `BroadcastHub` trait + in-memory + sea-streamer
+  fanout (feature-gated). `Channel` / `PrivateChannel` / `PresenceChannel`
+  with join/leave/here events. JSON envelope protocol (`ClientFrame` /
+  `ServerFrame`). `Broadcastable` trait bridges typed events to
+  channels via `EventFacade`. Per-route `ws!(...).middleware(...)`.
+  `Supervisor` trait + registry with panic-catch auto-restart and
+  graceful shutdown. Cross-process presence via sea-streamer
+  meta-channel.
+- **Eloquent Foundation** (Phase 10A) — `#[suprnova::model]` attribute
+  macro emits SeaORM-bridged Entity + Column + ActiveModel + inner
+  Model. `Model` trait CRUD (`find` / `save` / `update` / `delete` /
+  `refresh` / `replicate` / `first_or_create` / `update_or_create` /
+  `increment` / `decrement`). `Builder<M>` with dual-API where surface
+  (`filter*` Rust-shape + `db_where`/`where_*` Laravel-shape, both
+  first-class aliases). Inventory-backed `ModelEntry` registry for
+  Phase 8 admin enumeration. `Fillable` / `Guarded` + `attrs!` macro +
+  `unguarded(closure)` task-local bypass. **21 built-in casts**:
+  primitive (`AsBool` / `AsInt` / `AsFloat` / `AsString` / `AsDecimal`),
+  temporal (`AsDate` / `AsDateTime` / `AsTimestamp` / `AsImmutableDate*`),
+  structured (`AsJson` / `AsObject` / `AsArray` / `AsArrayObject` /
+  `AsCollection`), enum (`AsEnum`), encrypted (`AsEncrypted` /
+  `AsEncryptedObject` / `AsEncryptedArray` / `AsEncryptedCollection`
+  with `APP_KEY_PREVIOUS` rotation ring), hashed (`AsHashed`). Custom
+  cast trait + `with_casts` runtime override. `#[accessor]` /
+  `#[mutator]` function-level macros with `appends = [...]`. Auto-managed
+  timestamps + `touch()` + parent touching via `#[model(touches=...)]`.
+  Soft deletes (`delete` / `restore` / `force_delete` / `with_trashed`
+  / `only_trashed`). `Prunable` (per-row with `pruning()` hook) +
+  `MassPrunable` (set-based DELETE) + inventory-registered `model:prune`
+  command.
+- **Eloquent Relationships** (Phase 10B) — every Eloquent relation
+  kind: `HasOne` / `BelongsTo` (with `with_default` closure) / `HasMany`
+  / `BelongsToMany` (first-class `Pivot` models as their own
+  `#[suprnova::model]`, `attach` / `detach` / `sync` mutators, transactional
+  sync, pivot context surfaced via `row.pivot::<P>()` accessor) /
+  `HasOneThrough` + `HasManyThrough` (with key inference) /
+  `MorphTo` (with per-family generated enum `<Name>Morph { Variant(T),
+  Unknown(String, i64) }`) / `MorphOne` / `MorphMany` / `MorphToMany`
+  / `MorphedByMany`. Relations declared in `#[model(relations = { ... })]`
+  with options (`fk`, `lk`, `with_pivot`, `with_timestamps`,
+  `with_default`, `related_key`, `pivot_*`, `first_key`, `second_key`,
+  `target_morph_type`, `name`, `targets`). **Eager loading** — `with(["posts"])`,
+  nested paths (`"posts.comments.author"`), `with_count` + `with_sum`
+  / `with_avg` / `with_min` / `with_max` (per-relation `<rel>_sum_of(col)`
+  accessors that compose), `with_where_<rel>(closure)` (typed
+  per-relation methods, no `Builder<R>` annotation needed),
+  `Collection::load` / `load_missing` (per-row partition + nested-tail
+  recursion). All count + aggregate dispatchers issue **server-side
+  GROUP BY** queries (zero client-side reduce). `EagerLoadCache` +
+  `__pivot` fields auto-injected per model via macro field rewriting.
+  `EagerLoadDispatch` sealed trait + four per-model dispatchers
+  (`__eager_load` / `__recurse_eager_load` / `__count_relation` /
+  `__aggregate_relation`) with backend-aware CAST + parameter
+  placeholders. `MorphTypeEntry` inventory provides runtime
+  `morph_type -> TypeId` lookup; MorphTo dispatch consults the
+  registry (not heuristic keys) so custom `morph_type = "blog_post"`
+  declarations route correctly. `with_trashed` / `only_trashed`
+  forwarding on all 10 relation types. Prunable does NOT cascade
+  (correct Laravel default); cascade via DB FK or `pruning()` hook.
+- **Auth Flows** (Phase 11) — `EmailVerification::send` / `verify` /
+  `resend` over signed URLs. `PasswordReset::start` / `verify` /
+  `complete` with token expiry + session-revocation on completion +
+  remember-me cookie invalidation. `BruteForce` facade + `LoginThrottleMiddleware`
+  (configurable attempts/decay/lockout). **2FA** TOTP enrollment +
+  verify + recovery codes (one-time-use); time-step replay prevention;
+  rate-limited verify path. Six events (`Registered` / `Verified` /
+  `PasswordReset` / `LockoutTriggered` / `TwoFactorEnabled` / etc.).
+- **Feature Flags** (Phase 13) — `Features::active("flag_name")` /
+  `for_user` / `for_team` evaluation. `DatabaseEvaluator` (SeaORM-backed
+  snapshot) + `CachedEvaluator` (TTL over `Cache`) composition.
+  `FeatureMiddleware` with extractor builder for per-request
+  `Context`. Admin CRUD endpoints. `FeatureSync` trait for sub-second
+  propagation (live evaluator refresh on admin mutations). String-typed
+  user IDs end-to-end. `FeatureRetrieved` event for analytics.
 
 **Partial - needs filling in:**
 
-- Cache (Redis + in-memory drivers; needs tags, locks, rate-limiter)
 - Cookie (via session; standalone API unclear)
-- HTTP request/response (inbound great + streaming responses ship;
-  outbound `Http` client + `Http::fake()` shipped in Phase 2)
 - Container scoped bindings (singletons work; per-request scoping
   underspecified)
 - Schema DSL + Query Builder facades (migrations work via SeaORM's
@@ -279,8 +375,34 @@ is what makes Rust frameworks reach 80% production-ready and stall.
   exposing `suprnova::schema::*` and `suprnova::query::*` as thin
   re-export facades is free leverage. Covers MySQL/Postgres/SQLite
   with the same DSL.
+- **Eloquent Lifecycle + Collections + Querying Power** (Phase 10C —
+  next up). Model events (16 lifecycle), `Observer<M>` trait + auto-registration,
+  local scopes (`#[scope]` macro), global scopes + `without_global_scope`,
+  `Collection<M>` full Laravel surface (~40 methods), serialization
+  (`to_array` / `to_json` + hidden/visible/appends — partial, see 10A),
+  pagination (LengthAware + Simple + Cursor — already shipped at the
+  HTTP layer; needs Model trait method integration), chunking + lazy
+  (`chunk` / `chunk_by_id` / `each` / `lazy` / `cursor`), locking
+  (`lock_for_update` / `shared_lock`), DB facade (`DB::table` raw
+  query builder), transactions (closure + manual + savepoints +
+  retry-on-deadlock), multi-connection (`User::on(name)` +
+  `#[model(connection=...)]` + read-write split), `replicate` /
+  `replicate_except` / `replicate_into`.
 
 **Missing - the rest of this document.**
+
+Major missing tracks beyond Phase 10C:
+
+- **Phase 8 — Admin Panel** (8A backend contract + 8B Scheduler/Queue
+  inspectors + 8C UI shell on Inertia). Phase 8A walks the
+  `ModelEntry` + `RelationEntry` + `MorphTypeEntry` + `CommandEntry` +
+  `SupervisorEntry` inventories to enumerate every administerable
+  surface in the binary.
+- **Phase 9A — Vector** (Qdrant + Pinecone + Memory drivers verified;
+  Weaviate + Milvus + LanceDB + pgvector + MariaDB + LibSQL planned).
+  Laravel ships pgvector-only; we don't gatekeep.
+- **Phase 12 — Billing v1** (Stripe + PayPal + Paddle). Subscription
+  + one-off + webhook handling.
 
 ## The remaining tracks
 
