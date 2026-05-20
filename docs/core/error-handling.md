@@ -513,7 +513,7 @@ impl UserService {
 
         // Check for duplicates
         if self.find_by_email(&data.email).await.is_ok() {
-            return Err(FrameworkError::conflict("Email already exists").into());
+            return Err(AppError::conflict("Email already exists").into());
         }
 
         // Create user

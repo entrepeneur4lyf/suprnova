@@ -529,7 +529,7 @@ TwoFactor::confirm(&user_2fa, &user_typed_code).await?;
 // 3. On subsequent logins, gate the session on verify():
 let ok: bool = TwoFactor::verify(&user_2fa, &code_from_login_form).await?;
 if !ok {
-    return Err(FrameworkError::unauthorized("invalid 2FA code"));
+    return Err(FrameworkError::domain("invalid 2FA code", 401));
 }
 ```
 
