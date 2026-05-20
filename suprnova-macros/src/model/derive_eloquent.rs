@@ -697,6 +697,41 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         #touches_marker
         #soft_deletes_impl
 
+        // Persistable bridge for the Eloquent-facing struct.
+        //
+        // The framework's blanket `impl<M, E> Persistable for M where
+        // M: ModelTrait<Entity = E> + IntoActiveModel<...>` covers
+        // SeaORM Models — but the user-facing `#[suprnova::model]`
+        // struct (e.g. `User`) is NOT itself a `ModelTrait`. Adding a
+        // second blanket impl gated on `EloquentModel` would conflict
+        // with the existing one under Rust's coherence rules (the
+        // compiler can't prove `ModelTrait` and `EloquentModel` are
+        // disjoint), so we emit a per-struct impl here instead.
+        //
+        // The bridge piggybacks on the From<...> impls emitted above:
+        //   1. Convert `self` to the inner SeaORM Model (storage shape).
+        //   2. Hand off to `persist_via_seaorm` — which knows how to
+        //      flip the PK to NotSet so the database assigns the id.
+        //   3. Convert the post-insert inner Model back to the
+        //      Eloquent-facing struct (running `Cast::from_storage`
+        //      again, so any storage→runtime translation re-runs
+        //      against the canonicalised row).
+        //
+        // The net effect: factories returning the Eloquent struct
+        // (`User`, `Post`) work with `.create()` / `.create_many()`
+        // the same way factories returning the inner Model do.
+        // Runtime values (`active: true`, `Utc::now()`) flow in;
+        // canonicalised runtime values flow out.
+        #[::suprnova::__async_trait::async_trait]
+        impl ::suprnova::Persistable for #struct_ident {
+            async fn persist(self) -> ::core::result::Result<Self, ::suprnova::FrameworkError> {
+                let inner: #module_name::Model = self.into();
+                let db = ::suprnova::DB::connection()?;
+                let inserted = ::suprnova::persist_via_seaorm(inner, db.inner()).await?;
+                ::core::result::Result::Ok(<Self as ::core::convert::From<#module_name::Model>>::from(inserted))
+            }
+        }
+
         impl ::suprnova::eloquent::ReplicateExt for #struct_ident {
             fn replicate_with(&self, except: ::std::vec::Vec<::std::string::String>) -> Self {
                 Self { #( #replicate_arms, )* }

@@ -1,19 +1,18 @@
 //! `UserFactory` — dogfood for the framework's Factory trait against
-//! the migrated `#[suprnova::model]` `User` entity.
+//! the Eloquent-facing `#[suprnova::model]` `User` struct.
 //!
-//! Phase 10A T11 migrated `User` from a hand-rolled SeaORM entity to
-//! the `#[suprnova::model]` macro. The macro emits the SeaORM
-//! `Model` row type inside the per-struct inner module (here
-//! `crate::models::users::user::Model`); that inner row is what the
-//! framework's blanket `Persistable for SeaORM::Model` impl covers,
-//! so the factory targets it directly. End-user reads still use the
-//! Eloquent-facing `User` struct via the macro-emitted
-//! `From<user::Model> for User` bridge.
+//! Phase 10A T11 polish broadened `Persistable` to cover Eloquent
+//! structs directly (via a per-struct impl emitted by the macro), so
+//! the factory targets the user-facing `User` rather than the inner
+//! SeaORM `user::Model` row. The factory writes runtime values
+//! (`active: true`, `chrono::Utc::now()`) — the cast pipeline
+//! (`AsBool`, the auto-injected `AsDateTime` / `AsOptionalDateTime`)
+//! converts to storage shape on insert.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use suprnova::Factory;
 
-use crate::models::users::user::Model as UserRow;
+use crate::models::users::User;
 
 /// Process-wide counter so successive `definition()` calls produce
 /// unique emails — the `users.email` column isn't UNIQUE in the
@@ -23,31 +22,30 @@ static UNIQUE: AtomicU64 = AtomicU64::new(1);
 pub struct UserFactory;
 
 impl Factory for UserFactory {
-    type Model = UserRow;
+    type Model = User;
 
-    fn definition() -> UserRow {
+    fn definition() -> User {
         let seq = UNIQUE.fetch_add(1, Ordering::Relaxed);
-        // Storage-typed (i.e. column-shape) value here — the macro's
-        // cast pipeline only enters via `User::create(attrs!{...})`.
-        // For the SeaORM-direct persist path the factory writes
-        // straight into the column's stored type. `active` is INTEGER
-        // because `AsBool::Storage = i64`, but the field name on the
-        // inner Model still matches the user-facing column name.
-        UserRow {
-            // `0` here is a placeholder — the framework's blanket
-            // `Persistable` impl flips primary-key columns to `NotSet`
-            // before inserting so SQLite assigns the real id.
+        let now = chrono::Utc::now();
+        // Runtime shape — no storage-side translation leaks into the
+        // factory. The macro-emitted `Persistable for User` bridges
+        // through the inner `user::Model` and runs every cast's
+        // `to_storage` on insert.
+        User {
+            // `0` here is a placeholder — `persist_via_seaorm` flips
+            // primary-key columns to `NotSet` before inserting so
+            // SQLite assigns the real id.
             id: 0,
             name: format!("Factory User #{seq}"),
             email: format!("factory-{seq}@example.suprnova.app"),
             password: "factory-placeholder".into(),
             remember_token: None,
-            // AsBool stores as i64.
-            active: 1,
-            // AsDateTime stores as String (RFC-3339).
-            created_at: chrono::Utc::now().to_rfc3339(),
-            updated_at: chrono::Utc::now().to_rfc3339(),
-            // AsOptionalDateTime stores as Option<String>.
+            // AsBool cast handles `bool` → INTEGER at storage time.
+            active: true,
+            created_at: now,
+            updated_at: now,
+            // Soft-delete tombstone; the AsOptionalDateTime cast
+            // routes `None` → NULL.
             deleted_at: None,
         }
     }

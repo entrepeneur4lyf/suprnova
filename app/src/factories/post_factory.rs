@@ -1,18 +1,20 @@
 //! `PostFactory` — dogfood for the `Faker.fake::<T>() + Dummy<Faker>`
 //! path on a richer model.
 //!
-//! Phase 10A T11 migrated `Post` to `#[suprnova::model]`. The factory
-//! targets the SeaORM inner Model (`crate::models::posts::post::Model`)
-//! so the blanket `Persistable for ModelTrait` impl handles persistence
-//! transparently — the same path the pre-T11 dogfood relied on.
+//! Phase 10A T11 polish broadened `Persistable` to cover Eloquent
+//! structs directly, so the factory targets `Post` (the user-facing
+//! struct) instead of the inner `post::Model`. The `Dummy<Faker>`
+//! impl produces runtime values; the macro-emitted `Persistable for
+//! Post` bridges through the inner Model on insert, running every
+//! cast's `to_storage` along the way.
 
 use suprnova::__fake::rand::Rng;
 use suprnova::__fake::{Dummy, Fake, Faker};
 use suprnova::Factory;
 
-use crate::models::posts::post::Model as PostRow;
+use crate::models::posts::Post;
 
-impl Dummy<Faker> for PostRow {
+impl Dummy<Faker> for Post {
     fn dummy_with_rng<R: Rng + ?Sized>(_: &Faker, rng: &mut R) -> Self {
         // Lorem-style fake content.
         let title: String =
@@ -22,17 +24,20 @@ impl Dummy<Faker> for PostRow {
         // Reference a "user" id in 1..=50 — matches the typical
         // UsersSeeder count.
         let author_id: i64 = (1..=50i64).fake_with_rng(rng);
+        let now = chrono::Utc::now();
 
-        PostRow {
-            // PK placeholder — `Persistable` flips to `NotSet`.
+        Post {
+            // PK placeholder — `persist_via_seaorm` flips to `NotSet`.
             id: 0,
             author_id,
             title,
             body,
             is_public: Faker.fake_with_rng::<bool, _>(rng),
-            // AsDateTime storage shape (RFC-3339 string).
-            created_at: chrono::Utc::now().to_rfc3339(),
-            updated_at: chrono::Utc::now().to_rfc3339(),
+            // Runtime shape — the auto-injected `AsDateTime` cast on
+            // the macro converts to TEXT (RFC-3339) at the storage
+            // boundary.
+            created_at: now,
+            updated_at: now,
         }
     }
 }
@@ -40,9 +45,9 @@ impl Dummy<Faker> for PostRow {
 pub struct PostFactory;
 
 impl Factory for PostFactory {
-    type Model = PostRow;
+    type Model = Post;
 
-    fn definition() -> PostRow {
-        Faker.fake::<PostRow>()
+    fn definition() -> Post {
+        Faker.fake::<Post>()
     }
 }

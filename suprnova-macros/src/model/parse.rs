@@ -130,60 +130,64 @@ impl ModelInput {
             }
         };
 
-        // T9 — auto-inject `AsDateTime` casts for the timestamp columns
-        // unless the user already declared a cast for them. The casts
-        // do double duty: they unblock SeaORM's `DeriveEntityModel`
-        // parser (which mis-parses bare `DateTime<Utc>` as
-        // `NaiveDateTime`, since it can't see through generics) AND
-        // they wire the same Runtime <-> Storage bridge the rest of
-        // the cast machinery uses, so `.touch()` and the auto-set
-        // injection don't need a parallel datetime-formatting path.
+        // Auto-inject `AsDateTime` / `AsOptionalDateTime` casts on
+        // every field whose declared type is `DateTime<Utc>` /
+        // `Option<DateTime<Utc>>`. The cast does double duty: it
+        // unblocks SeaORM's `DeriveEntityModel` parser (which
+        // mis-parses bare `DateTime<Utc>` as `NaiveDateTime` since
+        // SeaORM's prelude shadows the chrono name and the parser
+        // can't see through generics), AND it wires the same Runtime
+        // <-> Storage bridge the rest of the cast machinery uses, so
+        // `.touch()` / auto-set injection / soft-delete tombstones
+        // don't need parallel datetime-formatting paths.
+        //
+        // The auto-inject is per-field type, NOT per-column-name —
+        // so user-defined columns like `pub last_seen_at:
+        // DateTime<Utc>` get the cast just like framework-managed
+        // `created_at` / `updated_at` / `deleted_at` do. Subsumes
+        // the T9 / T10 column-name-keyed injections that existed
+        // before this polish.
+        //
+        // Fields with a user-declared cast are skipped — explicit
+        // intent wins. So `casts = { foo = AsImmutableDateTime }`
+        // overrides the default `AsDateTime` on that field.
         let mut casts = attrs.casts.unwrap_or_default();
-        if timestamps {
-            for col_name in [&created_at, &updated_at] {
-                if !casts.iter().any(|(i, _)| i == col_name) {
-                    let ident: Ident = syn::parse_str(col_name).map_err(|e| {
-                        syn::Error::new_spanned(
-                            &item.ident,
-                            format!(
-                                "timestamp column name `{}` is not a valid Rust identifier: {}",
-                                col_name, e,
-                            ),
-                        )
-                    })?;
-                    let ty: Type = syn::parse_str("::suprnova::AsDateTime").expect(
-                        "::suprnova::AsDateTime parses — Suprnova lib re-exports this type",
-                    );
-                    casts.push((ident, ty));
+        if let syn::Fields::Named(named) = &item.fields {
+            for field in &named.named {
+                let ident = match field.ident.as_ref() {
+                    Some(i) => i,
+                    None => continue,
+                };
+                let name = ident.to_string();
+                // PK isn't cast-routed (see derive_seaorm.rs — PK
+                // fields keep their declared type), so even if a
+                // PK happened to be DateTime<Utc> the injection
+                // would be a no-op. Skipping explicitly clarifies
+                // intent.
+                if name == primary_key {
+                    continue;
+                }
+                if casts.iter().any(|(i, _)| i == &name) {
+                    // User already declared a cast for this field —
+                    // their intent wins.
+                    continue;
+                }
+                match classify_datetime(&field.ty) {
+                    DateTimeShape::DateTime => {
+                        let ty: Type = syn::parse_str("::suprnova::AsDateTime").expect(
+                            "::suprnova::AsDateTime parses — Suprnova lib re-exports this type",
+                        );
+                        casts.push((ident.clone(), ty));
+                    }
+                    DateTimeShape::OptionalDateTime => {
+                        let ty: Type = syn::parse_str("::suprnova::AsOptionalDateTime").expect(
+                            "::suprnova::AsOptionalDateTime parses — Suprnova lib re-exports this type",
+                        );
+                        casts.push((ident.clone(), ty));
+                    }
+                    DateTimeShape::Other => {}
                 }
             }
-        }
-
-        // T10 — soft_deletes auto-injects `AsOptionalDateTime` on the
-        // tombstone column. The user types the field as
-        // `Option<DateTime<Utc>>` (Laravel-shape) but SeaORM's
-        // `DeriveEntityModel` parses field types in a prelude scope
-        // that shadows `chrono::DateTime` with `NaiveDateTime`; the
-        // cast routes through `<AsOptionalDateTime as Cast>::Storage =
-        // Option<String>` so the inner SeaORM Model never sees the
-        // ambiguous type. User-declared cast overrides still win, same
-        // pattern as the timestamps auto-inject above.
-        if soft_deletes && field_names.contains(&soft_deletes_column)
-            && !casts.iter().any(|(i, _)| i == &soft_deletes_column)
-        {
-            let ident: Ident = syn::parse_str(&soft_deletes_column).map_err(|e| {
-                syn::Error::new_spanned(
-                    &item.ident,
-                    format!(
-                        "soft_deletes column name `{}` is not a valid Rust identifier: {}",
-                        soft_deletes_column, e,
-                    ),
-                )
-            })?;
-            let ty: Type = syn::parse_str("::suprnova::AsOptionalDateTime").expect(
-                "::suprnova::AsOptionalDateTime parses — Suprnova lib re-exports this type",
-            );
-            casts.push((ident, ty));
         }
 
         Ok(Self {
@@ -229,6 +233,96 @@ impl ModelInput {
         self.casts.iter().find_map(|(ident, ty)| {
             if ident == name { Some(ty) } else { None }
         })
+    }
+}
+
+/// Outcome of [`classify_datetime`] — used to decide which datetime
+/// cast (if any) to auto-inject onto a field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DateTimeShape {
+    /// `DateTime<Utc>` (in any qualified form).
+    DateTime,
+    /// `Option<DateTime<Utc>>` (in any qualified form).
+    OptionalDateTime,
+    /// Anything else — no auto-injection.
+    Other,
+}
+
+/// Recognise `DateTime<Utc>` and `Option<DateTime<Utc>>` in their
+/// common qualified forms.
+///
+/// Conservative on purpose: only fires when the path ends in
+/// `DateTime` with a single generic argument whose last path segment
+/// is `Utc`, OR when the path ends in `Option` with a single generic
+/// argument that itself classifies as `DateTime`.
+///
+/// Forms handled:
+/// - `DateTime<Utc>`
+/// - `chrono::DateTime<Utc>` / `::chrono::DateTime<Utc>`
+/// - `DateTime<chrono::Utc>` / `chrono::DateTime<chrono::Utc>`
+/// - `Option<DateTime<Utc>>` (and qualified inner / outer paths)
+///
+/// Forms NOT handled (treated as `Other`):
+/// - `DateTime<Local>` / `DateTime<FixedOffset>` — Suprnova
+///   standardises on UTC at the storage boundary.
+/// - `Vec<DateTime<Utc>>` / `HashMap<_, DateTime<Utc>>` — collections
+///   need their own cast (e.g. `AsArray<DateTime<Utc>>` written
+///   explicitly by the user).
+/// - Type aliases (`type Stamp = DateTime<Utc>; pub foo: Stamp`) —
+///   syn can't resolve aliases at macro time; the user can declare
+///   the cast explicitly.
+fn classify_datetime(ty: &Type) -> DateTimeShape {
+    let Type::Path(path) = ty else {
+        return DateTimeShape::Other;
+    };
+    let Some(last) = path.path.segments.last() else {
+        return DateTimeShape::Other;
+    };
+    match last.ident.to_string().as_str() {
+        "DateTime" => {
+            // Must have exactly one generic argument whose last
+            // path segment is `Utc`.
+            let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                return DateTimeShape::Other;
+            };
+            if args.args.len() != 1 {
+                return DateTimeShape::Other;
+            }
+            let Some(syn::GenericArgument::Type(Type::Path(tz_path))) = args.args.first() else {
+                return DateTimeShape::Other;
+            };
+            let Some(tz_last) = tz_path.path.segments.last() else {
+                return DateTimeShape::Other;
+            };
+            if tz_last.ident == "Utc"
+                && matches!(tz_last.arguments, syn::PathArguments::None)
+            {
+                DateTimeShape::DateTime
+            } else {
+                DateTimeShape::Other
+            }
+        }
+        "Option" => {
+            let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                return DateTimeShape::Other;
+            };
+            if args.args.len() != 1 {
+                return DateTimeShape::Other;
+            }
+            let Some(syn::GenericArgument::Type(inner)) = args.args.first() else {
+                return DateTimeShape::Other;
+            };
+            // Promote `DateTime<Utc>` to `OptionalDateTime`; anything
+            // else (including nested `Option<Option<DateTime<Utc>>>`)
+            // falls through to `Other` — those shapes don't have a
+            // sensible default cast.
+            if classify_datetime(inner) == DateTimeShape::DateTime {
+                DateTimeShape::OptionalDateTime
+            } else {
+                DateTimeShape::Other
+            }
+        }
+        _ => DateTimeShape::Other,
     }
 }
 
@@ -518,10 +612,13 @@ mod tests {
     }
 
     #[test]
-    fn timestamps_false_disables_regardless_of_fields() {
-        // Explicit opt-out wins even when the struct has both
-        // columns. Used when a model has columns named created_at /
-        // updated_at for unrelated reasons.
+    fn timestamps_false_disables_auto_management_but_keeps_type_bridge() {
+        // `timestamps = false` disables the FRAMEWORK-MANAGED
+        // bump-on-save behaviour, but `DateTime<Utc>` fields still
+        // need the `AsDateTime` cast to bridge SeaORM's `NaiveDateTime`
+        // parser shadow. The auto-inject is per-field-type now, not
+        // per-column-name — so the casts still land, the runtime
+        // injection in `into_active_model_for_update` just doesn't.
         let input = ModelInput::parse(
             quote! { timestamps = false },
             quote! {
@@ -533,8 +630,17 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(!input.timestamps);
-        assert!(input.casts.is_empty(), "no auto-injected casts when timestamps = false");
+        assert!(!input.timestamps, "framework-managed timestamps disabled");
+        // Type-bridge casts still injected for both DateTime<Utc>
+        // fields — without these the inner Model wouldn't compile.
+        assert!(
+            input.casts.iter().any(|(i, _)| i == "created_at"),
+            "AsDateTime cast still injected for DateTime<Utc> field",
+        );
+        assert!(
+            input.casts.iter().any(|(i, _)| i == "updated_at"),
+            "AsDateTime cast still injected for DateTime<Utc> field",
+        );
     }
 
     #[test]
@@ -599,5 +705,171 @@ mod tests {
         )
         .unwrap();
         assert_eq!(input.touches, vec!["post".to_string(), "author".to_string()]);
+    }
+
+    // ---- Generalised DateTime auto-inject (Phase 10A polish) -------------
+    //
+    // The auto-inject fires per field type, not per column name. These
+    // tests exercise the variations of qualified path syntax users
+    // write in real code (`DateTime<Utc>` bare after `use chrono::{
+    // DateTime, Utc}`, vs `chrono::DateTime<Utc>` from a non-importing
+    // model, etc.) and verify the optional / collection / non-UTC
+    // edge cases.
+
+    #[test]
+    fn user_datetime_field_gets_auto_as_date_time() {
+        // Custom column named `last_seen_at` — not one of the
+        // framework's managed timestamp columns. The generalised
+        // auto-inject must still cover it because the field type
+        // is `DateTime<Utc>`.
+        let input = ModelInput::parse(
+            quote! { timestamps = false },
+            quote! {
+                pub struct User {
+                    pub id: i64,
+                    pub last_seen_at: DateTime<Utc>,
+                }
+            },
+        )
+        .unwrap();
+        let cast = input.casts.iter().find(|(i, _)| i == "last_seen_at").unwrap();
+        let ty_token = &cast.1;
+        let ty = quote!(#ty_token).to_string();
+        assert!(
+            ty.contains("AsDateTime"),
+            "expected AsDateTime auto-inject on DateTime<Utc> field, got: {ty}",
+        );
+    }
+
+    #[test]
+    fn user_optional_datetime_field_gets_auto_as_optional_date_time() {
+        let input = ModelInput::parse(
+            quote! { timestamps = false },
+            quote! {
+                pub struct User {
+                    pub id: i64,
+                    pub last_seen_at: Option<DateTime<Utc>>,
+                }
+            },
+        )
+        .unwrap();
+        let cast = input.casts.iter().find(|(i, _)| i == "last_seen_at").unwrap();
+        let ty_token = &cast.1;
+        let ty = quote!(#ty_token).to_string();
+        assert!(
+            ty.contains("AsOptionalDateTime"),
+            "expected AsOptionalDateTime auto-inject on Option<DateTime<Utc>>, got: {ty}",
+        );
+    }
+
+    #[test]
+    fn user_cast_override_on_arbitrary_datetime_field_preserved() {
+        // If the user explicitly declares a cast on a non-framework
+        // datetime field, the auto-inject must not overwrite it.
+        // Mirrors the timestamps_user_cast_override_preserved test
+        // but for an arbitrary column.
+        let input = ModelInput::parse(
+            quote! {
+                timestamps = false,
+                casts = { stamp = ::suprnova::AsImmutableDateTime },
+            },
+            quote! {
+                pub struct Audit {
+                    pub id: i64,
+                    pub stamp: DateTime<Utc>,
+                }
+            },
+        )
+        .unwrap();
+        let cast = input.casts.iter().find(|(i, _)| i == "stamp").unwrap();
+        let ty_token = &cast.1;
+        let ty = quote!(#ty_token).to_string();
+        assert!(
+            ty.contains("AsImmutableDateTime"),
+            "user-declared cast must win over auto-inject, got: {ty}",
+        );
+        // And the cast list must contain exactly one entry for `stamp`
+        // — no double-cast.
+        let count = input.casts.iter().filter(|(i, _)| i == "stamp").count();
+        assert_eq!(count, 1, "expected exactly one cast for `stamp`, got {count}");
+    }
+
+    #[test]
+    fn qualified_chrono_paths_match() {
+        // `chrono::DateTime<chrono::Utc>` and `::chrono::DateTime<Utc>`
+        // both classify as `DateTime` — the parser walks the last
+        // path segment, not the qualifier.
+        for ty_src in [
+            "chrono::DateTime<chrono::Utc>",
+            "::chrono::DateTime<Utc>",
+            "DateTime<chrono::Utc>",
+            "::chrono::DateTime<::chrono::Utc>",
+        ] {
+            let parsed: Type = syn::parse_str(ty_src).unwrap();
+            assert_eq!(
+                classify_datetime(&parsed),
+                DateTimeShape::DateTime,
+                "expected DateTime shape for `{ty_src}`",
+            );
+        }
+    }
+
+    #[test]
+    fn non_utc_datetime_left_alone() {
+        // `DateTime<Local>` / `DateTime<FixedOffset>` aren't auto-cast.
+        // Users with non-UTC stamps declare the cast explicitly.
+        for ty_src in [
+            "DateTime<Local>",
+            "DateTime<FixedOffset>",
+            "chrono::DateTime<chrono::FixedOffset>",
+        ] {
+            let parsed: Type = syn::parse_str(ty_src).unwrap();
+            assert_eq!(
+                classify_datetime(&parsed),
+                DateTimeShape::Other,
+                "non-UTC DateTime must not auto-inject for `{ty_src}`",
+            );
+        }
+    }
+
+    #[test]
+    fn collection_of_datetime_left_alone() {
+        // `Vec<DateTime<Utc>>` and `HashMap<_, DateTime<Utc>>` need
+        // their own cast — the auto-inject doesn't reach inside
+        // collections.
+        for ty_src in [
+            "Vec<DateTime<Utc>>",
+            "std::collections::HashMap<String, DateTime<Utc>>",
+            "[DateTime<Utc>; 3]",
+        ] {
+            let parsed: Type = syn::parse_str(ty_src).unwrap();
+            assert_eq!(
+                classify_datetime(&parsed),
+                DateTimeShape::Other,
+                "collection wrapper must not classify as DateTime: `{ty_src}`",
+            );
+        }
+    }
+
+    #[test]
+    fn primary_key_with_datetime_type_skipped() {
+        // A model with a DateTime PK is unusual but legal. The
+        // auto-inject must skip the PK column even when its type
+        // would otherwise match — PKs are not cast-routed
+        // (derive_seaorm.rs keeps PK fields in their declared type).
+        let input = ModelInput::parse(
+            quote! { primary_key = "stamp", key_type = "chrono::DateTime<chrono::Utc>", auto_increment = false, timestamps = false },
+            quote! {
+                pub struct Snapshot {
+                    pub stamp: DateTime<Utc>,
+                    pub data: String,
+                }
+            },
+        )
+        .unwrap();
+        assert!(
+            !input.casts.iter().any(|(i, _)| i == "stamp"),
+            "PK column must not receive auto-injected cast",
+        );
     }
 }
