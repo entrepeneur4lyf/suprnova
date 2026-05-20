@@ -1093,6 +1093,8 @@ The macro emits matching accessors on each model:
 
 ### Aggregate cache key — limitation
 
+> **v1 limitation: single aggregate per relation.** The aggregate cache key is the relation name only (e.g. `"posts"`), not `<rel>_<kind>_<col>`. Calling `with_sum(("posts", "id"))` then `with_avg(("posts", "id"))` silently overwrites the first aggregate — only the last `with_*` call's result is readable from the cache. Load one aggregate at a time per relation in v1. v2 will widen the cache key shape.
+
 The cache key for `with_sum` / `with_avg` / `with_min` / `with_max`
 is the relation name only (e.g. `"posts"`). Loading two aggregates
 on the same relation in a single query overwrites the cell:
@@ -1162,6 +1164,8 @@ users.load(["posts.comments"]).await?;
 in the collection already has `posts` cached. The v1 contract is
 collection-wide ("does any row have it? then skip"); Laravel's
 per-row skip is v2.
+
+> **v1 semantics:** `load_missing` is collection-wide, not per-row. It checks if ANY row in the collection has the relation cached, then skips the whole load. This differs from Laravel's per-row semantics where each row is checked independently. Laravel-style per-row skip is deferred to v2.
 
 ## Mass assignment
 
