@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use suprnova::eloquent::attrs::Attrs;
 use suprnova::eloquent::events::EventResult;
 use suprnova::eloquent::observers::Observer;
-use suprnova::{model, FrameworkError};
+use suprnova::{model, FrameworkError, Model as _};
 
 // ---- Model under test ---------------------------------------------------
 
@@ -176,4 +176,141 @@ async fn observer_types_reexport_at_crate_root() {
     fn _produces_future() -> Option<ObserverInstallFuture> {
         None
     }
+}
+
+// =========================================================================
+// T2b — `#[suprnova::observer(M)]` attribute macro
+// =========================================================================
+//
+// T2b ships the attribute macro that walks an `impl Observer<M>` block,
+// identifies which methods the user actually overrode, and emits one
+// adapter listener per overridden method. The adapter listeners are
+// registered through the same `EventFacade::listen` / `listen_cancellable`
+// paths users call by hand, so the macro is a DX layer on top of T1's
+// dispatch surface — nothing about the model's lifecycle path changes.
+//
+// The two observers below are the smallest fixture that exercises the
+// "registers what's overridden, ignores the rest" contract:
+//
+// - `CountingObserver` overrides `created` only → exactly one listener
+//   on `T2User::events::Created`.
+// - `OnlyUpdatesObserver` overrides `updated` only → exactly one
+//   listener on `T2User::events::Updated`. Creating a row must NOT
+//   fire it.
+//
+// Both tests live in a single function so they share one bootstrap
+// invocation. `bootstrap_observers()` is idempotent (the macro emits
+// an `AtomicBool` gate per-observer), but the EventDispatcher's
+// `OnceLock<EventDispatcher>` and the cancellable registry's
+// `OnceLock<RwLock<...>>` are process-wide, so listeners installed by
+// one test are visible to every later test in this binary. Combining
+// the two checks into a single test eliminates the cross-test race on
+// `T2User::create()` firing the `CountingObserver` adapter.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use suprnova::testing::TestDatabase;
+
+static CREATED_OBSERVER_FIRES: AtomicUsize = AtomicUsize::new(0);
+
+pub struct CountingObserver;
+
+#[suprnova::observer(T2User)]
+#[async_trait]
+impl Observer<T2User> for CountingObserver {
+    async fn created(&self, _user: &T2User) -> Result<(), FrameworkError> {
+        CREATED_OBSERVER_FIRES.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+static UPDATED_OBSERVER_FIRES: AtomicUsize = AtomicUsize::new(0);
+
+pub struct OnlyUpdatesObserver;
+
+#[suprnova::observer(T2User)]
+#[async_trait]
+impl Observer<T2User> for OnlyUpdatesObserver {
+    async fn updated(
+        &self,
+        _previous: &T2User,
+        _current: &T2User,
+    ) -> Result<(), FrameworkError> {
+        UPDATED_OBSERVER_FIRES.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+// All assertions touching `CREATED_OBSERVER_FIRES` /
+// `UPDATED_OBSERVER_FIRES` live in a single test because the binary's
+// `OnceLock<EventDispatcher>` and the cancellable registry are
+// process-global — once listeners install, ANY `T2User::create` call
+// anywhere in this test binary increments the counters. Two separate
+// `#[tokio::test]`s would race each other on the reset → create →
+// assert sequence. Combining them eliminates that race without
+// sacrificing coverage.
+
+#[tokio::test]
+async fn observer_macro_emits_only_overridden_method_adapters() {
+    // Set up the database for `T2User::create` to write to. The schema
+    // is the bare-minimum the `#[model(table = "t2_users")]` macro
+    // expects. `TestDatabase::sqlite_memory()` registers the connection
+    // with `TestContainer::singleton` so `T2User::create` resolves it
+    // via `DB::connection()` without us threading the handle through.
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t2_users (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT,\
+            email TEXT NOT NULL,\
+            created_at TEXT NOT NULL,\
+            updated_at TEXT NOT NULL\
+        )",
+    )
+    .await
+    .unwrap();
+
+    // Drain the observer inventory twice. The `AtomicBool` gate in
+    // each generated install fn means this is safe to call repeatedly;
+    // T2a's docs explicitly delegate this contract to T2b. If the gate
+    // were missing, the second bootstrap would double-register the
+    // adapter listener and the counter check below would see `2`.
+    suprnova::eloquent::observers::bootstrap_observers()
+        .await
+        .unwrap();
+    suprnova::eloquent::observers::bootstrap_observers()
+        .await
+        .unwrap();
+
+    // Reset counters AFTER bootstrap so listeners that installed at
+    // boot time (potentially from earlier tests in this binary) don't
+    // poison the assertions. Counters were never incremented by
+    // `bootstrap_observers` itself — only by `T2User::create` calls.
+    CREATED_OBSERVER_FIRES.store(0, Ordering::SeqCst);
+    UPDATED_OBSERVER_FIRES.store(0, Ordering::SeqCst);
+
+    // Creating a row fires `created` exactly once. The macro emits an
+    // adapter only for methods present in the impl block, so:
+    //
+    //   - `CountingObserver` (overrides `created` only) → 1 fire.
+    //   - `OnlyUpdatesObserver` (overrides `updated` only) → 0 fires
+    //     on a `create` path. This is the load-bearing negative case
+    //     that proves the macro filters by name match instead of
+    //     blindly registering all 16 default-no-op methods.
+    let _ = T2User::create(suprnova::attrs! { email: "alice@example.com" })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        CREATED_OBSERVER_FIRES.load(Ordering::SeqCst),
+        1,
+        "CountingObserver::created should fire exactly once per create; \
+         a count of 2 would mean the AtomicBool idempotency gate did \
+         not hold across the double `bootstrap_observers` call"
+    );
+    assert_eq!(
+        UPDATED_OBSERVER_FIRES.load(Ordering::SeqCst),
+        0,
+        "OnlyUpdatesObserver::updated must NOT fire on create — the \
+         macro should only register adapters for methods the user \
+         actually overrode"
+    );
 }
