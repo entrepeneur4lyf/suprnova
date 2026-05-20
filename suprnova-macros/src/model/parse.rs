@@ -177,6 +177,18 @@ pub enum RelationOpt {
     /// and the related-row IN-set filters on the wrong column, silently
     /// producing empty results or `no such column: id` errors.
     RelatedKey(String),
+    /// `target_morph_type = "post"` — explicit morph-type string for
+    /// the morph TARGET on a `MorphedByMany` declaration. Required
+    /// because the macro at the m2m-side declaration site (e.g. `Tag`)
+    /// can't introspect the morph target's `morph_type = "..."`
+    /// attribute (it lives in a separate `#[suprnova::model]`
+    /// invocation). Used to filter the pivot's `<morph_name>_type`
+    /// column to the declared family — so `Tag.posts()` declares
+    /// `target_morph_type = "post"` and returns only Post-typed
+    /// taggables, never Video-typed ones. Ignored on `MorphToMany`
+    /// (the morph-type string there comes from `Self`'s `morph_type`
+    /// attribute, which IS introspectable).
+    TargetMorphType(String),
 }
 
 /// The parsed `#[model(...)]` attribute plus the struct definition.
@@ -881,6 +893,29 @@ fn parse_one_relation(input: ParseStream) -> Result<RelationDecl> {
         }
     }
 
+    // `MorphedByMany` filters one specific target morph family per
+    // declaration. The macro at the m2m-side expansion site (e.g.
+    // `Tag`) can't introspect the morph target's `morph_type = "..."`
+    // attribute (it lives in a separate `#[suprnova::model]`
+    // invocation), so the type string MUST be declared explicitly via
+    // `target_morph_type = "..."`. Without it, the dispatcher would
+    // either fall through to a wrong default or silently return zero
+    // rows. Catch the omission here at the declaration site.
+    if kind == RelationKindAttr::MorphedByMany {
+        let has_target_morph_type = options
+            .iter()
+            .any(|o| matches!(o, RelationOpt::TargetMorphType(_)));
+        if !has_target_morph_type {
+            return Err(syn::Error::new(
+                kind_ident.span(),
+                "MorphedByMany relation requires `target_morph_type = \"...\"` — the morph-type \
+                 string of the target model (its `morph_type` attribute, e.g. \"post\" / \
+                 \"video\"). The macro at this declaration site can't introspect the target's \
+                 attribute, so it must be declared explicitly.",
+            ));
+        }
+    }
+
     Ok(RelationDecl {
         name,
         kind,
@@ -974,6 +1009,10 @@ fn parse_relation_options(input: ParseStream, kind: RelationKindAttr) -> Result<
                     let s: LitStr = content.parse()?;
                     out.push(RelationOpt::RelatedKey(s.value()));
                 }
+                "target_morph_type" => {
+                    let s: LitStr = content.parse()?;
+                    out.push(RelationOpt::TargetMorphType(s.value()));
+                }
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
@@ -981,7 +1020,8 @@ fn parse_relation_options(input: ParseStream, kind: RelationKindAttr) -> Result<
                             "unknown relation option `{other}`. Expected one of: fk, lk, \
                              with_pivot, with_timestamps, with_default, scope, name, targets, \
                              first_key, second_key, second_local_key, pivot_table, \
-                             pivot_foreign_key, pivot_related_key, related_key.",
+                             pivot_foreign_key, pivot_related_key, related_key, \
+                             target_morph_type.",
                         ),
                     ));
                 }

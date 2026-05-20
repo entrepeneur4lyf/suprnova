@@ -40,6 +40,7 @@ pub mod eager_cache;
 pub mod has_many;
 pub mod has_one;
 pub mod morph;
+pub mod morph_to_many;
 pub mod through;
 
 pub use belongs_to::BelongsTo;
@@ -48,6 +49,7 @@ pub use eager_cache::EagerLoadCache;
 pub use has_many::HasMany;
 pub use has_one::HasOne;
 pub use morph::{MorphMany, MorphOne, MorphTo};
+pub use morph_to_many::{MorphToMany, MorphedByMany};
 pub use through::{HasManyThrough, HasOneThrough};
 
 use std::any::{Any, TypeId};

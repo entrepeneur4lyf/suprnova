@@ -682,6 +682,19 @@ fn morph_name_or_default(rel: &RelationDecl) -> String {
         .unwrap_or_else(|| rel.name.to_string())
 }
 
+/// Look up the user-declared `target_morph_type = "..."` option on a
+/// `MorphedByMany` declaration. Returns the explicit morph-type string
+/// for the target model. The parser enforces that this option is
+/// present for `MorphedByMany` declarations (see
+/// `parse_one_relation`'s post-validation block), so `expect` callers
+/// are on the unreachable path.
+fn target_morph_type_override(rel: &RelationDecl) -> Option<&str> {
+    rel.options.iter().find_map(|o| match o {
+        RelationOpt::TargetMorphType(s) => Some(s.as_str()),
+        _ => None,
+    })
+}
+
 /// Look up the user-declared `targets = [...]` list on a `MorphTo`
 /// declaration. The parser guarantees this option is present for
 /// `MorphTo` declarations (see `parse_one_relation`); the `expect`
@@ -1364,9 +1377,171 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                 }
             })
         }
-        // T7 owns the remaining morph m2m kinds. We emit nothing for
-        // them so the macro still accepts the declaration.
-        _ => Ok(TokenStream::new()),
+        RelationKindAttr::MorphToMany => {
+            // Polymorphic m2m, parent side (`post.tags()`). The user
+            // wrote `MorphToMany<R, P>` where R is the m2m partner
+            // (Tag) and P is the polymorphic pivot model (Taggable).
+            //
+            // The parser stores the pivot in `rel.through`; the
+            // `expect` is unreachable on the happy path because
+            // `MorphToMany`'s `needs_through()` is true.
+            let pivot_ty = rel.through.as_ref().ok_or_else(|| {
+                syn::Error::new_spanned(
+                    method_ident,
+                    "MorphToMany requires a pivot type (see parse-time validation)",
+                )
+            })?;
+
+            let morph_name = morph_name_or_default(rel);
+            let parent_morph_type = morph_type_of(input);
+            // pivot_related_key default: <snake(target_struct)>_id.
+            let pivot_related = pivot_related_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    format!("{}_id", to_snake(&last_segment_name(target_ty)))
+                });
+            // pivot_table: user-supplied literal or `<P as
+            // EloquentModel>::TABLE` at runtime.
+            let pivot_table_expr: TokenStream = match pivot_table_override(rel) {
+                Some(t) => quote! { ::std::string::String::from(#t) },
+                None => quote! {
+                    <#pivot_ty as ::suprnova::eloquent::EloquentModel>::TABLE.to_string()
+                },
+            };
+            let lk = lk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| pk_name.clone());
+
+            let pivot_extras = with_pivot_cols(rel);
+            let with_pivot_chain = if pivot_extras.is_empty() {
+                quote! {}
+            } else {
+                let lits = pivot_extras
+                    .iter()
+                    .map(|c| quote! { #c })
+                    .collect::<Vec<_>>();
+                quote! { .with_pivot(::std::vec![#(#lits),*]) }
+            };
+            let with_timestamps_chain = if with_timestamps_flag(rel) {
+                quote! { .with_timestamps() }
+            } else {
+                quote! {}
+            };
+            let local_key_chain = if lk == "id" {
+                quote! {}
+            } else {
+                quote! { .local_key(#lk) }
+            };
+            let related_key_chain = match related_key_override(rel) {
+                Some(rk) if rk != "id" => quote! { .related_pk(#rk) },
+                _ => quote! {},
+            };
+
+            Ok(quote! {
+                impl #struct_ident {
+                    #[doc = "Construct a `MorphToMany` polymorphic m2m relation for this row."]
+                    #[doc = ""]
+                    #[doc = "Use `.attach(id)` / `.detach(id)` / `.sync([...])` to mutate \
+                             the pivot, `.get()` to load related rows with pivot context. \
+                             The pivot's `<morph_name>_type` column is filtered to \
+                             `Self`'s `morph_type` so children of other morph families are \
+                             excluded automatically."]
+                    pub fn #method_ident(&self)
+                        -> ::suprnova::MorphToMany<Self, #target_ty, #pivot_ty>
+                    {
+                        let parent_value = ::suprnova::serde_json::to_value(&self.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        ::suprnova::MorphToMany::<Self, #target_ty, #pivot_ty>::__new(
+                            parent_value,
+                            ::std::string::String::from(#parent_morph_type),
+                            ::std::string::String::from(#morph_name),
+                            #pivot_table_expr,
+                            ::std::string::String::from(#pivot_related),
+                        )
+                        #local_key_chain
+                        #related_key_chain
+                        #with_pivot_chain
+                        #with_timestamps_chain
+                    }
+                }
+            })
+        }
+        RelationKindAttr::MorphedByMany => {
+            // Polymorphic m2m, inverse side (`tag.posts()`). The user
+            // wrote `MorphedByMany<R, P>` where R is one specific
+            // morph target family (Post) and P is the polymorphic
+            // pivot model (Taggable). One declaration per target type.
+            //
+            // The parser enforces presence of `target_morph_type =
+            // "..."`; the macro at `Self`'s expansion site can't
+            // introspect R's `morph_type` attribute. Default the rest
+            // of the keys from Laravel conventions.
+            let pivot_ty = rel.through.as_ref().ok_or_else(|| {
+                syn::Error::new_spanned(
+                    method_ident,
+                    "MorphedByMany requires a pivot type (see parse-time validation)",
+                )
+            })?;
+
+            let morph_name = morph_name_or_default(rel);
+            let target_morph_type =
+                target_morph_type_override(rel).ok_or_else(|| {
+                    syn::Error::new_spanned(
+                        method_ident,
+                        "MorphedByMany requires `target_morph_type = \"...\"` \
+                         (parse-time validation should reject this earlier)",
+                    )
+                })?;
+            // pivot_foreign_key (pivot column → L=Tag): <snake(parent_struct)>_id.
+            let pivot_fk = pivot_fk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{}_id", to_snake(&parent_name)));
+            let pivot_table_expr: TokenStream = match pivot_table_override(rel) {
+                Some(t) => quote! { ::std::string::String::from(#t) },
+                None => quote! {
+                    <#pivot_ty as ::suprnova::eloquent::EloquentModel>::TABLE.to_string()
+                },
+            };
+            let lk = lk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| pk_name.clone());
+            let local_key_chain = if lk == "id" {
+                quote! {}
+            } else {
+                quote! { .local_key(#lk) }
+            };
+            let related_key_chain = match related_key_override(rel) {
+                Some(rk) if rk != "id" => quote! { .related_pk(#rk) },
+                _ => quote! {},
+            };
+
+            Ok(quote! {
+                impl #struct_ident {
+                    #[doc = "Construct a `MorphedByMany` inverse polymorphic m2m relation \
+                             for this row."]
+                    #[doc = ""]
+                    #[doc = "Filters to one specific morph target family per declaration \
+                             via `target_morph_type = \"...\"`. `.get()` returns rows of \
+                             that family only — never mixing target families in a single \
+                             collection."]
+                    pub fn #method_ident(&self)
+                        -> ::suprnova::MorphedByMany<Self, #target_ty, #pivot_ty>
+                    {
+                        let tag_value = ::suprnova::serde_json::to_value(&self.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        ::suprnova::MorphedByMany::<Self, #target_ty, #pivot_ty>::__new(
+                            tag_value,
+                            ::std::string::String::from(#target_morph_type),
+                            ::std::string::String::from(#morph_name),
+                            #pivot_table_expr,
+                            ::std::string::String::from(#pivot_fk),
+                        )
+                        #local_key_chain
+                        #related_key_chain
+                    }
+                }
+            })
+        }
     }
 }
 
@@ -2105,6 +2280,305 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 }
             }))
         }
+        RelationKindAttr::MorphToMany => {
+            // Polymorphic m2m eager load — same two-query strategy as
+            // BelongsToMany (T4), with the morph `<name>_type` filter
+            // layered on top so pivot rows pointing at other morph
+            // families are excluded.
+            //
+            //   1. SELECT pivot rows WHERE <name>_id IN (parent ids)
+            //                          AND <name>_type = '<self_morph_type>'.
+            //   2. SELECT related rows WHERE id IN (pivot.related_key).
+            //   3. Per pivot row, clone the matching related row, stamp
+            //      `__pivot`, append into the per-parent vec keyed by
+            //      pivot.<name>_id.
+            let pivot_ty = rel.through.as_ref().ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &rel.name,
+                    "MorphToMany requires a pivot type (parser bug if reached)",
+                )
+            })?;
+            let morph_name = morph_name_or_default(rel);
+            let parent_morph_type = morph_type_of(input);
+            let id_col = format!("{morph_name}_id");
+            let type_col = format!("{morph_name}_type");
+            let pivot_related = pivot_related_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    format!("{}_id", to_snake(&last_segment_name(target_ty)))
+                });
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+                    let pk_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null))
+                        .collect();
+
+                    // Type-string predicate. JSON-wrap so the inner
+                    // WhereTerm storage stays homogeneous with the
+                    // IN-list.
+                    let morph_type_predicate =
+                        ::suprnova::serde_json::Value::String(
+                            ::std::string::String::from(#parent_morph_type),
+                        );
+
+                    // Step 1: pivot rows where <name>_id ∈ pk_values
+                    //         AND <name>_type = '<self_morph_type>'.
+                    let pivots: ::std::vec::Vec<#pivot_ty> =
+                        <#pivot_ty as ::suprnova::eloquent::Model>::query()
+                            .filter_in(#id_col, pk_values.clone())
+                            .filter(#type_col, morph_type_predicate)
+                            .get()
+                            .await?;
+
+                    if pivots.is_empty() {
+                        for p in parents.iter_mut() {
+                            p.__eager.set_many::<#target_ty>(
+                                #name_str,
+                                ::std::vec::Vec::<#target_ty>::new(),
+                            );
+                        }
+                        return ::core::result::Result::Ok(());
+                    }
+
+                    use ::std::collections::HashMap;
+                    let mut related_ids: ::std::vec::Vec<::suprnova::serde_json::Value>
+                        = ::std::vec::Vec::with_capacity(pivots.len());
+                    let mut seen_rel: ::std::collections::HashSet<::std::string::String>
+                        = ::std::collections::HashSet::new();
+                    for pv in pivots.iter() {
+                        let pj = ::suprnova::serde_json::to_value(pv)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        if let ::core::option::Option::Some(v) = pj.get(#pivot_related) {
+                            let s = v.to_string();
+                            if seen_rel.insert(s) {
+                                related_ids.push(v.clone());
+                            }
+                        }
+                    }
+
+                    // Step 2: related rows by PK IN-set.
+                    let related_rows: ::std::vec::Vec<#target_ty> = if related_ids.is_empty() {
+                        ::std::vec::Vec::new()
+                    } else {
+                        <#target_ty as ::suprnova::eloquent::Model>::query()
+                            .filter_in("id", related_ids)
+                            .get()
+                            .await?
+                    };
+
+                    let mut by_related_id: HashMap<::std::string::String, #target_ty>
+                        = HashMap::new();
+                    for r in related_rows.into_iter() {
+                        let rj = ::suprnova::serde_json::to_value(&r)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        let key = rj
+                            .get("id")
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        by_related_id.insert(key, r);
+                    }
+
+                    // Step 3: per pivot row, clone matching related
+                    // row, stamp __pivot via the EagerLoadDispatch
+                    // hook, append into per-parent vec keyed by
+                    // pivot.<name>_id.
+                    let mut by_parent: HashMap<
+                        ::std::string::String,
+                        ::std::vec::Vec<#target_ty>,
+                    > = HashMap::new();
+                    for pv in pivots.into_iter() {
+                        let pj = ::suprnova::serde_json::to_value(&pv)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        let parent_key = pj
+                            .get(#id_col)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        let related_key = pj
+                            .get(#pivot_related)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        if let ::core::option::Option::Some(template)
+                            = by_related_id.get(&related_key)
+                        {
+                            let mut row: #target_ty = template.clone();
+                            <#target_ty as ::suprnova::eloquent::EagerLoadDispatch>::set_pivot_arc(
+                                &mut row,
+                                ::core::option::Option::Some(
+                                    ::std::sync::Arc::new(pv),
+                                ),
+                            );
+                            by_parent.entry(parent_key).or_default().push(row);
+                        }
+                    }
+
+                    for p in parents.iter_mut() {
+                        let key = ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        let group = by_parent.remove(&key).unwrap_or_default();
+                        p.__eager.set_many::<#target_ty>(#name_str, group);
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
+        RelationKindAttr::MorphedByMany => {
+            // Inverse polymorphic m2m eager load. Same two-query
+            // strategy as MorphToMany, but the pivot filter switches
+            // sides: filter on `pivot.<pivot_foreign_key> IN
+            // (tag_ids)` AND `pivot.<name>_type = '<target_morph_type>'`.
+            // The `<name>_id` column then holds R's primary-key values.
+            //
+            // Per-attachment cloning + `__pivot` stamping mirrors the
+            // BelongsToMany / MorphToMany contract — the inverse
+            // direction also surfaces pivot context via
+            // `tag.posts_loaded()[0].pivot::<Taggable>()`. Even though
+            // the UNIQUE constraint on (`<pfk>`, `<id_col>`,
+            // `<type_col>`) typically gives one pivot row per (tag,
+            // target) pair, the clone path covers the general case
+            // when a deployment doesn't enforce that constraint.
+            let pivot_ty = rel.through.as_ref().ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &rel.name,
+                    "MorphedByMany requires a pivot type (parser bug if reached)",
+                )
+            })?;
+            let morph_name = morph_name_or_default(rel);
+            let target_morph_type =
+                target_morph_type_override(rel).ok_or_else(|| {
+                    syn::Error::new_spanned(
+                        &rel.name,
+                        "MorphedByMany requires `target_morph_type = \"...\"` \
+                         (parse-time validation should reject this earlier)",
+                    )
+                })?;
+            let id_col = format!("{morph_name}_id");
+            let type_col = format!("{morph_name}_type");
+            let pivot_fk = pivot_fk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{}_id", to_snake(&parent_name)));
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+                    let pk_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null))
+                        .collect();
+
+                    let morph_type_predicate =
+                        ::suprnova::serde_json::Value::String(
+                            ::std::string::String::from(#target_morph_type),
+                        );
+
+                    // Step 1: pivot rows for these tags filtered by
+                    // the declared target morph type.
+                    let pivots: ::std::vec::Vec<#pivot_ty> =
+                        <#pivot_ty as ::suprnova::eloquent::Model>::query()
+                            .filter_in(#pivot_fk, pk_values.clone())
+                            .filter(#type_col, morph_type_predicate)
+                            .get()
+                            .await?;
+
+                    if pivots.is_empty() {
+                        for p in parents.iter_mut() {
+                            p.__eager.set_many::<#target_ty>(
+                                #name_str,
+                                ::std::vec::Vec::<#target_ty>::new(),
+                            );
+                        }
+                        return ::core::result::Result::Ok(());
+                    }
+
+                    use ::std::collections::HashMap;
+                    let mut target_ids: ::std::vec::Vec<::suprnova::serde_json::Value>
+                        = ::std::vec::Vec::with_capacity(pivots.len());
+                    let mut seen_target: ::std::collections::HashSet<::std::string::String>
+                        = ::std::collections::HashSet::new();
+                    for pv in pivots.iter() {
+                        let pj = ::suprnova::serde_json::to_value(pv)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        if let ::core::option::Option::Some(v) = pj.get(#id_col) {
+                            let s = v.to_string();
+                            if seen_target.insert(s) {
+                                target_ids.push(v.clone());
+                            }
+                        }
+                    }
+
+                    // Step 2: target rows by PK IN-set.
+                    let target_rows: ::std::vec::Vec<#target_ty> = if target_ids.is_empty() {
+                        ::std::vec::Vec::new()
+                    } else {
+                        <#target_ty as ::suprnova::eloquent::Model>::query()
+                            .filter_in("id", target_ids)
+                            .get()
+                            .await?
+                    };
+
+                    // Index targets by id (JSON-string).
+                    let mut by_target_id: HashMap<::std::string::String, #target_ty>
+                        = HashMap::new();
+                    for r in target_rows.into_iter() {
+                        let rj = ::suprnova::serde_json::to_value(&r)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        let key = rj
+                            .get("id")
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        by_target_id.insert(key, r);
+                    }
+
+                    // Group: per pivot row, look up the target by its
+                    // id, clone, stamp `__pivot` via the
+                    // EagerLoadDispatch hook, push into per-tag vec.
+                    // Mirrors the BelongsToMany / MorphToMany contract
+                    // so `tag.posts_loaded()[0].pivot::<Taggable>()`
+                    // works the same as the parent-side
+                    // `post.tags_loaded()[0].pivot::<Taggable>()`.
+                    let mut by_parent: HashMap<
+                        ::std::string::String,
+                        ::std::vec::Vec<#target_ty>,
+                    > = HashMap::new();
+                    for pv in pivots.into_iter() {
+                        let pj = ::suprnova::serde_json::to_value(&pv)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        let tag_key = pj
+                            .get(#pivot_fk)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        let target_key = pj
+                            .get(#id_col)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        if let ::core::option::Option::Some(template)
+                            = by_target_id.get(&target_key)
+                        {
+                            let mut row: #target_ty = template.clone();
+                            <#target_ty as ::suprnova::eloquent::EagerLoadDispatch>::set_pivot_arc(
+                                &mut row,
+                                ::core::option::Option::Some(
+                                    ::std::sync::Arc::new(pv),
+                                ),
+                            );
+                            by_parent.entry(tag_key).or_default().push(row);
+                        }
+                    }
+
+                    for p in parents.iter_mut() {
+                        let key = ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        let group = by_parent.remove(&key).unwrap_or_default();
+                        p.__eager.set_many::<#target_ty>(#name_str, group);
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
         _ => Ok(None),
     }
 }
@@ -2726,6 +3200,273 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             AND {type_col} = {type_ph} \
                           GROUP BY {id}",
                         id = #id_col,
+                        cast = __sn_cast_kw,
+                        table = __sn_table,
+                        type_col = #type_col,
+                        type_ph = type_ph,
+                        phs = placeholders.join(", "),
+                    );
+
+                    let stmt = ::suprnova::sea_orm::Statement::from_sql_and_values(
+                        db_backend,
+                        &__sn_sql,
+                        binds,
+                    );
+                    let rows = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                        .await
+                        .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+
+                    use ::std::collections::HashMap;
+                    let mut counts: HashMap<::std::string::String, u64> = HashMap::new();
+                    for r in rows.iter() {
+                        let key: ::std::string::String = r
+                            .try_get::<::std::string::String>("", "__sn_fk_key")
+                            .unwrap_or_default();
+                        let n: i64 = r.try_get::<i64>("", "__sn_count").unwrap_or(0);
+                        counts.insert(key, n.max(0) as u64);
+                    }
+
+                    for p in parents.iter_mut() {
+                        let key = __sn_parent_key_to_match_cast(
+                            ::suprnova::serde_json::to_value(&p.#pk_ident)
+                                .unwrap_or(::suprnova::serde_json::Value::Null),
+                        );
+                        p.__eager.set_count(#name_str, *counts.get(&key).unwrap_or(&0));
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
+        RelationKindAttr::MorphToMany => {
+            // Server-side GROUP BY count over the polymorphic pivot
+            // table — one round trip regardless of fan-out across the
+            // parent set. Same shape as BelongsToMany's count arm,
+            // with the extra `<name>_type = '<self_morph_type>'`
+            // predicate so children of OTHER morph families are
+            // excluded.
+            //
+            //   SELECT CAST(<id_col> AS TEXT|CHAR) AS __sn_fk_key,
+            //          COUNT(*)                   AS __sn_count
+            //     FROM <pivot_table>
+            //    WHERE <id_col> IN (?, ?, ...)
+            //      AND <type_col> = ?
+            //    GROUP BY <id_col>
+            let pivot_ty = rel.through.as_ref().ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &rel.name,
+                    "MorphToMany requires a pivot type (parser bug if reached)",
+                )
+            })?;
+            let morph_name = morph_name_or_default(rel);
+            let parent_morph_type = morph_type_of(input);
+            let id_col = format!("{morph_name}_id");
+            let type_col = format!("{morph_name}_type");
+            let pivot_table_expr: TokenStream = match pivot_table_override(rel) {
+                Some(t) => {
+                    let lit = syn::LitStr::new(t, proc_macro2::Span::call_site());
+                    quote! { #lit }
+                }
+                None => quote! {
+                    <#pivot_ty as ::suprnova::eloquent::EloquentModel>::TABLE
+                },
+            };
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+
+                    fn __sn_parent_key_to_match_cast(
+                        v: ::suprnova::serde_json::Value,
+                    ) -> ::std::string::String {
+                        match v {
+                            ::suprnova::serde_json::Value::String(s) => s,
+                            other => other.to_string(),
+                        }
+                    }
+
+                    let pk_json_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null))
+                        .collect();
+
+                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+
+                    let mut placeholders: ::std::vec::Vec<::std::string::String> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    let mut binds: ::std::vec::Vec<::suprnova::sea_orm::Value> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len() + 1);
+                    for (i, v) in pk_json_values.iter().enumerate() {
+                        let ph = match db_backend {
+                            ::suprnova::sea_orm::DatabaseBackend::Postgres => {
+                                ::std::format!("${}", i + 1)
+                            }
+                            _ => ::std::string::String::from("?"),
+                        };
+                        placeholders.push(ph);
+                        binds.push(
+                            ::suprnova::eloquent::model::json_value_to_sea_value(v),
+                        );
+                    }
+                    let type_ph = match db_backend {
+                        ::suprnova::sea_orm::DatabaseBackend::Postgres => {
+                            ::std::format!("${}", pk_json_values.len() + 1)
+                        }
+                        _ => ::std::string::String::from("?"),
+                    };
+                    binds.push(::suprnova::sea_orm::Value::from(#parent_morph_type));
+
+                    let __sn_cast_kw = match db_backend {
+                        ::suprnova::sea_orm::DatabaseBackend::MySql => "CHAR",
+                        _ => "TEXT",
+                    };
+                    let __sn_table = #pivot_table_expr;
+                    let __sn_sql = ::std::format!(
+                        "SELECT CAST({id} AS {cast}) AS __sn_fk_key, \
+                                COUNT(*) AS __sn_count \
+                           FROM {table} \
+                          WHERE {id} IN ({phs}) \
+                            AND {type_col} = {type_ph} \
+                          GROUP BY {id}",
+                        id = #id_col,
+                        cast = __sn_cast_kw,
+                        table = __sn_table,
+                        type_col = #type_col,
+                        type_ph = type_ph,
+                        phs = placeholders.join(", "),
+                    );
+
+                    let stmt = ::suprnova::sea_orm::Statement::from_sql_and_values(
+                        db_backend,
+                        &__sn_sql,
+                        binds,
+                    );
+                    let rows = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                        .await
+                        .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+
+                    use ::std::collections::HashMap;
+                    let mut counts: HashMap<::std::string::String, u64> = HashMap::new();
+                    for r in rows.iter() {
+                        let key: ::std::string::String = r
+                            .try_get::<::std::string::String>("", "__sn_fk_key")
+                            .unwrap_or_default();
+                        let n: i64 = r.try_get::<i64>("", "__sn_count").unwrap_or(0);
+                        counts.insert(key, n.max(0) as u64);
+                    }
+
+                    for p in parents.iter_mut() {
+                        let key = __sn_parent_key_to_match_cast(
+                            ::suprnova::serde_json::to_value(&p.#pk_ident)
+                                .unwrap_or(::suprnova::serde_json::Value::Null),
+                        );
+                        p.__eager.set_count(#name_str, *counts.get(&key).unwrap_or(&0));
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
+        RelationKindAttr::MorphedByMany => {
+            // Inverse-side server-side GROUP BY count. Same SQL
+            // shape as MorphToMany but the grouped column is the
+            // pivot's FK to the m2m side (tag_id) and the type
+            // predicate is the explicit `target_morph_type`.
+            //
+            //   SELECT CAST(<pivot_fk> AS TEXT|CHAR) AS __sn_fk_key,
+            //          COUNT(*) AS __sn_count
+            //     FROM <pivot_table>
+            //    WHERE <pivot_fk> IN (?, ?, ...)
+            //      AND <type_col> = ?
+            //    GROUP BY <pivot_fk>
+            let pivot_ty = rel.through.as_ref().ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &rel.name,
+                    "MorphedByMany requires a pivot type (parser bug if reached)",
+                )
+            })?;
+            let morph_name = morph_name_or_default(rel);
+            let target_morph_type =
+                target_morph_type_override(rel).ok_or_else(|| {
+                    syn::Error::new_spanned(
+                        &rel.name,
+                        "MorphedByMany requires `target_morph_type = \"...\"` \
+                         (parse-time validation should reject this earlier)",
+                    )
+                })?;
+            let type_col = format!("{morph_name}_type");
+            let pivot_fk = pivot_fk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{}_id", to_snake(&parent_name)));
+            let pivot_table_expr: TokenStream = match pivot_table_override(rel) {
+                Some(t) => {
+                    let lit = syn::LitStr::new(t, proc_macro2::Span::call_site());
+                    quote! { #lit }
+                }
+                None => quote! {
+                    <#pivot_ty as ::suprnova::eloquent::EloquentModel>::TABLE
+                },
+            };
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+
+                    fn __sn_parent_key_to_match_cast(
+                        v: ::suprnova::serde_json::Value,
+                    ) -> ::std::string::String {
+                        match v {
+                            ::suprnova::serde_json::Value::String(s) => s,
+                            other => other.to_string(),
+                        }
+                    }
+
+                    let pk_json_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null))
+                        .collect();
+
+                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+
+                    let mut placeholders: ::std::vec::Vec<::std::string::String> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    let mut binds: ::std::vec::Vec<::suprnova::sea_orm::Value> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len() + 1);
+                    for (i, v) in pk_json_values.iter().enumerate() {
+                        let ph = match db_backend {
+                            ::suprnova::sea_orm::DatabaseBackend::Postgres => {
+                                ::std::format!("${}", i + 1)
+                            }
+                            _ => ::std::string::String::from("?"),
+                        };
+                        placeholders.push(ph);
+                        binds.push(
+                            ::suprnova::eloquent::model::json_value_to_sea_value(v),
+                        );
+                    }
+                    let type_ph = match db_backend {
+                        ::suprnova::sea_orm::DatabaseBackend::Postgres => {
+                            ::std::format!("${}", pk_json_values.len() + 1)
+                        }
+                        _ => ::std::string::String::from("?"),
+                    };
+                    binds.push(::suprnova::sea_orm::Value::from(#target_morph_type));
+
+                    let __sn_cast_kw = match db_backend {
+                        ::suprnova::sea_orm::DatabaseBackend::MySql => "CHAR",
+                        _ => "TEXT",
+                    };
+                    let __sn_table = #pivot_table_expr;
+                    let __sn_sql = ::std::format!(
+                        "SELECT CAST({fk} AS {cast}) AS __sn_fk_key, \
+                                COUNT(*) AS __sn_count \
+                           FROM {table} \
+                          WHERE {fk} IN ({phs}) \
+                            AND {type_col} = {type_ph} \
+                          GROUP BY {fk}",
+                        fk = #pivot_fk,
                         cast = __sn_cast_kw,
                         table = __sn_table,
                         type_col = #type_col,
@@ -3657,6 +4398,400 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         cast = __sn_cast_kw,
                         agg = __sn_agg_expr,
                         table = __sn_table,
+                        type_col = #type_col,
+                        type_ph = type_ph,
+                        phs = placeholders.join(", "),
+                    );
+
+                    let stmt = ::suprnova::sea_orm::Statement::from_sql_and_values(
+                        db_backend,
+                        &__sn_sql,
+                        binds,
+                    );
+                    let rows = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                        .await
+                        .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+
+                    use ::std::collections::HashMap;
+                    let mut by_fk: HashMap<
+                        ::std::string::String,
+                        ::core::option::Option<f64>,
+                    > = HashMap::new();
+                    for r in rows.iter() {
+                        let key: ::std::string::String = r
+                            .try_get::<::std::string::String>("", "__sn_fk_key")
+                            .unwrap_or_default();
+                        let agg: ::core::option::Option<f64> = r
+                            .try_get::<::core::option::Option<f64>>("", "__sn_agg")
+                            .ok()
+                            .flatten()
+                            .or_else(|| {
+                                r.try_get::<::core::option::Option<i64>>("", "__sn_agg")
+                                    .ok()
+                                    .flatten()
+                                    .map(|n| n as f64)
+                            });
+                        by_fk.insert(key, agg);
+                    }
+
+                    for p in parents.iter_mut() {
+                        let key = __sn_parent_key_to_match_cast(
+                            ::suprnova::serde_json::to_value(&p.#pk_ident)
+                                .unwrap_or(::suprnova::serde_json::Value::Null),
+                        );
+                        let agg: ::core::option::Option<f64> = by_fk
+                            .get(&key)
+                            .copied()
+                            .unwrap_or(::core::option::Option::None);
+                        match kind {
+                            ::suprnova::AggregateKind::Sum
+                            | ::suprnova::AggregateKind::Avg => {
+                                p.__eager.set_aggregate::<f64>(
+                                    #name_str,
+                                    agg.unwrap_or(0.0),
+                                );
+                            }
+                            ::suprnova::AggregateKind::Min
+                            | ::suprnova::AggregateKind::Max => {
+                                p.__eager.set_aggregate::<::core::option::Option<f64>>(
+                                    #name_str,
+                                    agg,
+                                );
+                            }
+                        }
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
+        RelationKindAttr::MorphToMany => {
+            // Polymorphic m2m aggregate. Same JOIN-the-pivot-to-related
+            // shape as BelongsToMany's aggregate arm, with the extra
+            // `<name>_type = '<self_morph_type>'` predicate on the
+            // pivot side so pivot rows pointing at other morph families
+            // are excluded.
+            //
+            //   SELECT CAST(__sn_p.<id_col> AS TEXT|CHAR) AS __sn_fk_key,
+            //          AGG(__sn_r.<column>)              AS __sn_agg
+            //     FROM <pivot_table>   __sn_p
+            //     JOIN <related_table> __sn_r ON __sn_r.<related_pk>
+            //                                   = __sn_p.<pivot_related_key>
+            //    WHERE __sn_p.<id_col>  IN (?, ?, ...)
+            //      AND __sn_p.<type_col> = ?
+            //    GROUP BY __sn_p.<id_col>
+            //
+            // Sum/Avg → f64 with 0.0 empty default. Min/Max →
+            // Option<f64> with None empty default. Matches BelongsToMany.
+            let pivot_ty = rel.through.as_ref().ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &rel.name,
+                    "MorphToMany requires a pivot type (parser bug if reached)",
+                )
+            })?;
+            let morph_name = morph_name_or_default(rel);
+            let parent_morph_type = morph_type_of(input);
+            let id_col = format!("{morph_name}_id");
+            let type_col = format!("{morph_name}_type");
+            let pivot_related = pivot_related_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    format!("{}_id", to_snake(&last_segment_name(target_ty)))
+                });
+            let related_pk = related_key_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "id".to_string());
+            let pivot_table_expr: TokenStream = match pivot_table_override(rel) {
+                Some(t) => {
+                    let lit = syn::LitStr::new(t, proc_macro2::Span::call_site());
+                    quote! { #lit }
+                }
+                None => quote! {
+                    <#pivot_ty as ::suprnova::eloquent::EloquentModel>::TABLE
+                },
+            };
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+
+                    fn __sn_parent_key_to_match_cast(
+                        v: ::suprnova::serde_json::Value,
+                    ) -> ::std::string::String {
+                        match v {
+                            ::suprnova::serde_json::Value::String(s) => s,
+                            other => other.to_string(),
+                        }
+                    }
+
+                    let pk_json_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null))
+                        .collect();
+
+                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+
+                    let mut placeholders: ::std::vec::Vec<::std::string::String> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    let mut binds: ::std::vec::Vec<::suprnova::sea_orm::Value> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len() + 1);
+                    for (i, v) in pk_json_values.iter().enumerate() {
+                        let ph = match db_backend {
+                            ::suprnova::sea_orm::DatabaseBackend::Postgres => {
+                                ::std::format!("${}", i + 1)
+                            }
+                            _ => ::std::string::String::from("?"),
+                        };
+                        placeholders.push(ph);
+                        binds.push(
+                            ::suprnova::eloquent::model::json_value_to_sea_value(v),
+                        );
+                    }
+                    let type_ph = match db_backend {
+                        ::suprnova::sea_orm::DatabaseBackend::Postgres => {
+                            ::std::format!("${}", pk_json_values.len() + 1)
+                        }
+                        _ => ::std::string::String::from("?"),
+                    };
+                    binds.push(::suprnova::sea_orm::Value::from(#parent_morph_type));
+
+                    let __sn_cast_kw = match db_backend {
+                        ::suprnova::sea_orm::DatabaseBackend::MySql => "CHAR",
+                        _ => "TEXT",
+                    };
+                    let __sn_pivot = #pivot_table_expr;
+                    let __sn_related = <#target_ty as
+                        ::suprnova::eloquent::EloquentModel>::TABLE;
+
+                    let __sn_agg_expr: ::std::string::String = match kind {
+                        ::suprnova::AggregateKind::Sum => {
+                            ::std::format!("SUM(__sn_r.{})", column)
+                        }
+                        ::suprnova::AggregateKind::Avg => {
+                            ::std::format!("AVG(__sn_r.{})", column)
+                        }
+                        ::suprnova::AggregateKind::Min => {
+                            ::std::format!("MIN(__sn_r.{})", column)
+                        }
+                        ::suprnova::AggregateKind::Max => {
+                            ::std::format!("MAX(__sn_r.{})", column)
+                        }
+                    };
+
+                    let __sn_sql = ::std::format!(
+                        "SELECT CAST(__sn_p.{id} AS {cast}) AS __sn_fk_key, \
+                                {agg} AS __sn_agg \
+                           FROM {pivot} __sn_p \
+                           JOIN {related} __sn_r ON __sn_r.{related_pk} = __sn_p.{rk} \
+                          WHERE __sn_p.{id} IN ({phs}) \
+                            AND __sn_p.{type_col} = {type_ph} \
+                          GROUP BY __sn_p.{id}",
+                        id = #id_col,
+                        rk = #pivot_related,
+                        related_pk = #related_pk,
+                        cast = __sn_cast_kw,
+                        agg = __sn_agg_expr,
+                        pivot = __sn_pivot,
+                        related = __sn_related,
+                        type_col = #type_col,
+                        type_ph = type_ph,
+                        phs = placeholders.join(", "),
+                    );
+
+                    let stmt = ::suprnova::sea_orm::Statement::from_sql_and_values(
+                        db_backend,
+                        &__sn_sql,
+                        binds,
+                    );
+                    let rows = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                        .await
+                        .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+
+                    use ::std::collections::HashMap;
+                    let mut by_fk: HashMap<
+                        ::std::string::String,
+                        ::core::option::Option<f64>,
+                    > = HashMap::new();
+                    for r in rows.iter() {
+                        let key: ::std::string::String = r
+                            .try_get::<::std::string::String>("", "__sn_fk_key")
+                            .unwrap_or_default();
+                        let agg: ::core::option::Option<f64> = r
+                            .try_get::<::core::option::Option<f64>>("", "__sn_agg")
+                            .ok()
+                            .flatten()
+                            .or_else(|| {
+                                r.try_get::<::core::option::Option<i64>>("", "__sn_agg")
+                                    .ok()
+                                    .flatten()
+                                    .map(|n| n as f64)
+                            });
+                        by_fk.insert(key, agg);
+                    }
+
+                    for p in parents.iter_mut() {
+                        let key = __sn_parent_key_to_match_cast(
+                            ::suprnova::serde_json::to_value(&p.#pk_ident)
+                                .unwrap_or(::suprnova::serde_json::Value::Null),
+                        );
+                        let agg: ::core::option::Option<f64> = by_fk
+                            .get(&key)
+                            .copied()
+                            .unwrap_or(::core::option::Option::None);
+                        match kind {
+                            ::suprnova::AggregateKind::Sum
+                            | ::suprnova::AggregateKind::Avg => {
+                                p.__eager.set_aggregate::<f64>(
+                                    #name_str,
+                                    agg.unwrap_or(0.0),
+                                );
+                            }
+                            ::suprnova::AggregateKind::Min
+                            | ::suprnova::AggregateKind::Max => {
+                                p.__eager.set_aggregate::<::core::option::Option<f64>>(
+                                    #name_str,
+                                    agg,
+                                );
+                            }
+                        }
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
+        RelationKindAttr::MorphedByMany => {
+            // Inverse polymorphic m2m aggregate. Same JOIN shape as
+            // MorphToMany but the grouped column is the pivot's FK to
+            // the m2m side (tag_id), and the JOIN target is the morph
+            // target's own table (Post / Video). Type predicate uses
+            // the explicit `target_morph_type`.
+            //
+            //   SELECT CAST(__sn_p.<pivot_fk> AS TEXT|CHAR) AS __sn_fk_key,
+            //          AGG(__sn_r.<column>)               AS __sn_agg
+            //     FROM <pivot_table>   __sn_p
+            //     JOIN <related_table> __sn_r ON __sn_r.<related_pk>
+            //                                   = __sn_p.<id_col>
+            //    WHERE __sn_p.<pivot_fk> IN (?, ?, ...)
+            //      AND __sn_p.<type_col> = ?
+            //    GROUP BY __sn_p.<pivot_fk>
+            let pivot_ty = rel.through.as_ref().ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &rel.name,
+                    "MorphedByMany requires a pivot type (parser bug if reached)",
+                )
+            })?;
+            let morph_name = morph_name_or_default(rel);
+            let target_morph_type =
+                target_morph_type_override(rel).ok_or_else(|| {
+                    syn::Error::new_spanned(
+                        &rel.name,
+                        "MorphedByMany requires `target_morph_type = \"...\"` \
+                         (parse-time validation should reject this earlier)",
+                    )
+                })?;
+            let id_col = format!("{morph_name}_id");
+            let type_col = format!("{morph_name}_type");
+            let pivot_fk = pivot_fk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{}_id", to_snake(&parent_name)));
+            let related_pk = related_key_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "id".to_string());
+            let pivot_table_expr: TokenStream = match pivot_table_override(rel) {
+                Some(t) => {
+                    let lit = syn::LitStr::new(t, proc_macro2::Span::call_site());
+                    quote! { #lit }
+                }
+                None => quote! {
+                    <#pivot_ty as ::suprnova::eloquent::EloquentModel>::TABLE
+                },
+            };
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+
+                    fn __sn_parent_key_to_match_cast(
+                        v: ::suprnova::serde_json::Value,
+                    ) -> ::std::string::String {
+                        match v {
+                            ::suprnova::serde_json::Value::String(s) => s,
+                            other => other.to_string(),
+                        }
+                    }
+
+                    let pk_json_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null))
+                        .collect();
+
+                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+
+                    let mut placeholders: ::std::vec::Vec<::std::string::String> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    let mut binds: ::std::vec::Vec<::suprnova::sea_orm::Value> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len() + 1);
+                    for (i, v) in pk_json_values.iter().enumerate() {
+                        let ph = match db_backend {
+                            ::suprnova::sea_orm::DatabaseBackend::Postgres => {
+                                ::std::format!("${}", i + 1)
+                            }
+                            _ => ::std::string::String::from("?"),
+                        };
+                        placeholders.push(ph);
+                        binds.push(
+                            ::suprnova::eloquent::model::json_value_to_sea_value(v),
+                        );
+                    }
+                    let type_ph = match db_backend {
+                        ::suprnova::sea_orm::DatabaseBackend::Postgres => {
+                            ::std::format!("${}", pk_json_values.len() + 1)
+                        }
+                        _ => ::std::string::String::from("?"),
+                    };
+                    binds.push(::suprnova::sea_orm::Value::from(#target_morph_type));
+
+                    let __sn_cast_kw = match db_backend {
+                        ::suprnova::sea_orm::DatabaseBackend::MySql => "CHAR",
+                        _ => "TEXT",
+                    };
+                    let __sn_pivot = #pivot_table_expr;
+                    let __sn_related = <#target_ty as
+                        ::suprnova::eloquent::EloquentModel>::TABLE;
+
+                    let __sn_agg_expr: ::std::string::String = match kind {
+                        ::suprnova::AggregateKind::Sum => {
+                            ::std::format!("SUM(__sn_r.{})", column)
+                        }
+                        ::suprnova::AggregateKind::Avg => {
+                            ::std::format!("AVG(__sn_r.{})", column)
+                        }
+                        ::suprnova::AggregateKind::Min => {
+                            ::std::format!("MIN(__sn_r.{})", column)
+                        }
+                        ::suprnova::AggregateKind::Max => {
+                            ::std::format!("MAX(__sn_r.{})", column)
+                        }
+                    };
+
+                    let __sn_sql = ::std::format!(
+                        "SELECT CAST(__sn_p.{fk} AS {cast}) AS __sn_fk_key, \
+                                {agg} AS __sn_agg \
+                           FROM {pivot} __sn_p \
+                           JOIN {related} __sn_r ON __sn_r.{related_pk} = __sn_p.{id_col} \
+                          WHERE __sn_p.{fk} IN ({phs}) \
+                            AND __sn_p.{type_col} = {type_ph} \
+                          GROUP BY __sn_p.{fk}",
+                        fk = #pivot_fk,
+                        id_col = #id_col,
+                        related_pk = #related_pk,
+                        cast = __sn_cast_kw,
+                        agg = __sn_agg_expr,
+                        pivot = __sn_pivot,
+                        related = __sn_related,
                         type_col = #type_col,
                         type_ph = type_ph,
                         phs = placeholders.join(", "),
