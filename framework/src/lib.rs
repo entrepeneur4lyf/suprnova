@@ -255,6 +255,16 @@ pub use async_trait as __async_trait;
 #[doc(hidden)]
 pub use inventory;
 
+// Doc-hidden re-export of the Eloquent dispatcher seal. The
+// `#[suprnova::model]` macro emits
+// `impl ::suprnova::__private_eloquent::Sealed for <Model>`; user
+// crates cannot reach the same name without depending on the framework
+// `__private_eloquent` re-export deliberately, so user-written `impl
+// EagerLoadDispatch for X` fails to compile (`the trait bound `X:
+// __sealed::Sealed` is not satisfied`).
+#[doc(hidden)]
+pub use eloquent::relations::__sealed as __private_eloquent;
+
 // Re-export indexmap so consumers implementing InertiaSharedData
 // don't need to depend on it separately.
 pub use indexmap;

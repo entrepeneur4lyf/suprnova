@@ -178,18 +178,90 @@ pub fn find_relation<T: 'static>(name: &str) -> Option<&'static RelationEntry> {
 // changes never touch the trait surface, since the trait is just a
 // thin pass-through.
 
+/// Language-level seal for [`EagerLoadDispatch`].
+///
+/// The module is `pub` but doc-hidden — the macro-emitted impl in the
+/// user's crate needs a public path to reach [`Sealed`][__sealed::Sealed],
+/// but downstream code that finds it has gone out of its way to reach
+/// past the framework convention reserving leading-double-underscore
+/// names (`__eager`, `__pivot`, `__async_trait`) for framework-private
+/// machinery. The trait is empty: hand-rolling an `impl Sealed for X`
+/// alone doesn't get you a working `EagerLoadDispatch` — you'd also
+/// need to hand-roll every dispatcher method on `X`, which is exactly
+/// what `#[suprnova::model]` exists to emit.
+///
+/// To manually verify the seal blocks user impls of
+/// `EagerLoadDispatch`, attempt to implement the trait without the
+/// `Sealed` bound being satisfied:
+///
+/// ```compile_fail
+/// use std::any::Any;
+/// use std::future::Future;
+/// use std::pin::Pin;
+/// use suprnova::eloquent::{AggregateKind, EagerLoadDispatch};
+/// use suprnova::sea_orm::DatabaseConnection;
+/// use suprnova::FrameworkError;
+///
+/// struct NotAModel;
+///
+/// impl EagerLoadDispatch for NotAModel {
+///     fn eager_load<'a>(
+///         _r: &'a str,
+///         _p: &'a mut [&'a mut Self],
+///         _d: &'a DatabaseConnection,
+///         _x: Option<Box<dyn Any + Send + Sync>>,
+///     ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>> {
+///         unimplemented!()
+///     }
+///     fn count_relation<'a>(
+///         _r: &'a str,
+///         _p: &'a mut [&'a mut Self],
+///         _d: &'a DatabaseConnection,
+///     ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>> {
+///         unimplemented!()
+///     }
+///     fn aggregate_relation<'a>(
+///         _r: &'a str,
+///         _c: &'a str,
+///         _k: AggregateKind,
+///         _p: &'a mut [&'a mut Self],
+///         _d: &'a DatabaseConnection,
+///     ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>> {
+///         unimplemented!()
+///     }
+///     fn recurse_eager_load<'a>(
+///         &'a mut self,
+///         _r: &'a str,
+///         _rs: &'a str,
+///         _d: &'a DatabaseConnection,
+///     ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>> {
+///         unimplemented!()
+///     }
+/// }
+/// ```
+///
+/// The compiler rejects this with: *the trait bound `NotAModel:
+/// __sealed::Sealed` is not satisfied*.
+#[doc(hidden)]
+pub mod __sealed {
+    /// Sealed marker — only the `#[suprnova::model]` macro implements
+    /// this for user structs.
+    pub trait Sealed {}
+}
+
 /// Bridge from the eager-load orchestrator (`Builder<M>::get`) to the
 /// macro-emitted per-model `__eager_load` / `__count_relation` /
 /// `__aggregate_relation` / `__recurse_eager_load` inherent methods.
 ///
-/// Implemented automatically by `#[suprnova::model]`; user code never
-/// hand-writes an impl. Returning `Pin<Box<dyn Future>>` (rather than
+/// **Sealed.** Implemented automatically by `#[suprnova::model]`; user
+/// code cannot hand-write an impl — the [`__sealed::Sealed`]
+/// supertrait blocks it. Returning `Pin<Box<dyn Future>>` (rather than
 /// `async fn`) keeps the trait object-safety friendly — `async fn`
 /// trait methods would force `Builder<M>` to carry a Pin<Box<...>>
 /// state itself, complicating the type. For T2 we don't actually need
 /// `dyn EagerLoadDispatch`, but the boxed-future shape stays cleanest
 /// across the bound site.
-pub trait EagerLoadDispatch: Sized {
+pub trait EagerLoadDispatch: __sealed::Sealed + Sized {
     /// Delegate to the per-model `__eager_load` dispatcher.
     fn eager_load<'a>(
         relation: &'a str,
@@ -222,4 +294,31 @@ pub trait EagerLoadDispatch: Sized {
         rest: &'a str,
         db: &'a DatabaseConnection,
     ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>>;
+}
+
+#[cfg(test)]
+mod seal_tests {
+    //! Sanity-check the [`__sealed::Sealed`] trait is reachable from
+    //! the documented path. The strong negative ("user code cannot
+    //! impl `EagerLoadDispatch`") is pinned by the `compile_fail`
+    //! doctest on [`__sealed`]; this test only confirms the seal
+    //! module is wired and the supertrait bound holds.
+
+    use super::__sealed::Sealed;
+
+    /// A framework-side type that opts into the seal — the test
+    /// passes if this compiles, confirming `Sealed` is reachable and
+    /// implementable inside the framework crate. The type itself is
+    /// never constructed; its `impl Sealed` is the assertion.
+    #[allow(dead_code)]
+    struct InCrate;
+    impl Sealed for InCrate {}
+
+    /// Compile-time check: any `T: EagerLoadDispatch` is also
+    /// `T: Sealed`. If the supertrait gets accidentally dropped from
+    /// `EagerLoadDispatch`, this stops compiling.
+    fn _supertrait_bound_holds<T: super::EagerLoadDispatch>(_: &T) {
+        fn requires_sealed<S: Sealed>() {}
+        requires_sealed::<T>();
+    }
 }

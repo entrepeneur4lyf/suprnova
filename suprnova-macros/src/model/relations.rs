@@ -67,8 +67,17 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 /// method delegates straight to the matching inherent dispatcher
 /// (`__eager_load`, `__count_relation`, `__aggregate_relation`,
 /// `__recurse_eager_load`).
+///
+/// Also emits the `Sealed` supertrait impl. `EagerLoadDispatch` is
+/// language-sealed in the framework via a `__sealed::Sealed`
+/// supertrait — user code can't write `impl EagerLoadDispatch for X`
+/// because it can't write `impl Sealed for X` (the trait is reachable
+/// only through the doc-hidden `__private_eloquent` path; reaching it
+/// is the explicit "I know what I'm doing" gesture).
 fn emit_dispatch_impl(struct_ident: &syn::Ident) -> TokenStream {
     quote! {
+        impl ::suprnova::__private_eloquent::Sealed for #struct_ident {}
+
         impl ::suprnova::EagerLoadDispatch for #struct_ident {
             fn eager_load<'a>(
                 relation: &'a str,
@@ -1048,13 +1057,43 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         // — just record the column value.
                         by_fk.insert(key, col_val);
                     }
-                    let _ = kind; // every aggregate over <=1 row reduces to the value itself
+                    // T3-T7 aggregate arms must apply the same
+                    // Sum|Avg vs Min|Max branch — see the T2
+                    // quality-fix commit. Sum/Avg over an empty
+                    // group stores 0.0 (consistent with the
+                    // framework's COALESCE behaviour). Min/Max over
+                    // an empty group stores Option::<f64>::None
+                    // (matches SQL's NULL-on-empty semantics + the
+                    // existing Builder::min/max Option<T> return
+                    // type). Non-empty groups always store
+                    // Some(value) for Min/Max.
+                    //
+                    // Cache key is the relation name only; T9 widens
+                    // to <rel>_<kind>_<col> when the user-facing
+                    // Builder::with_<agg> surface ships so a single
+                    // builder can carry multiple aggregates on the
+                    // same relation without colliding on this cell.
                     for p in parents.iter_mut() {
                         let key = ::suprnova::serde_json::to_value(&p.#pk_ident)
                             .map(|v| v.to_string())
                             .unwrap_or_default();
-                        let v: f64 = *by_fk.get(&key).unwrap_or(&0.0);
-                        p.__eager.set_aggregate::<f64>(#name_str, v);
+                        let opt_v: ::core::option::Option<f64> = by_fk.get(&key).copied();
+                        match kind {
+                            ::suprnova::AggregateKind::Sum
+                            | ::suprnova::AggregateKind::Avg => {
+                                p.__eager.set_aggregate::<f64>(
+                                    #name_str,
+                                    opt_v.unwrap_or(0.0),
+                                );
+                            }
+                            ::suprnova::AggregateKind::Min
+                            | ::suprnova::AggregateKind::Max => {
+                                p.__eager.set_aggregate::<::core::option::Option<f64>>(
+                                    #name_str,
+                                    opt_v,
+                                );
+                            }
+                        }
                     }
                     return ::core::result::Result::Ok(());
                 }
@@ -1117,17 +1156,47 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             .unwrap_or(0.0);
                         by_pk.insert(key, col_val);
                     }
-                    let _ = kind;
+                    // T3-T7 aggregate arms must apply the same
+                    // Sum|Avg vs Min|Max branch — see the T2
+                    // quality-fix commit. Sum/Avg over an empty
+                    // group stores 0.0 (consistent with the
+                    // framework's COALESCE behaviour). Min/Max over
+                    // an empty group stores Option::<f64>::None
+                    // (matches SQL's NULL-on-empty semantics + the
+                    // existing Builder::min/max Option<T> return
+                    // type). Non-empty groups always store
+                    // Some(value) for Min/Max.
+                    //
+                    // Cache key is the relation name only; T9 widens
+                    // to <rel>_<kind>_<col> when the user-facing
+                    // Builder::with_<agg> surface ships so a single
+                    // builder can carry multiple aggregates on the
+                    // same relation without colliding on this cell.
                     for p in parents.iter_mut() {
                         let v: ::core::option::Option<::suprnova::serde_json::Value> =
                             #per_parent_key_expr;
-                        let agg: f64 = match &v {
+                        let opt_v: ::core::option::Option<f64> = match &v {
                             ::core::option::Option::Some(jv) => {
-                                *by_pk.get(&jv.to_string()).unwrap_or(&0.0)
+                                by_pk.get(&jv.to_string()).copied()
                             }
-                            ::core::option::Option::None => 0.0,
+                            ::core::option::Option::None => ::core::option::Option::None,
                         };
-                        p.__eager.set_aggregate::<f64>(#name_str, agg);
+                        match kind {
+                            ::suprnova::AggregateKind::Sum
+                            | ::suprnova::AggregateKind::Avg => {
+                                p.__eager.set_aggregate::<f64>(
+                                    #name_str,
+                                    opt_v.unwrap_or(0.0),
+                                );
+                            }
+                            ::suprnova::AggregateKind::Min
+                            | ::suprnova::AggregateKind::Max => {
+                                p.__eager.set_aggregate::<::core::option::Option<f64>>(
+                                    #name_str,
+                                    opt_v,
+                                );
+                            }
+                        }
                     }
                     return ::core::result::Result::Ok(());
                 }

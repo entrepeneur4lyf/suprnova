@@ -10,7 +10,7 @@
 //! through `Self::with([...])`.
 
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, model, Model};
+use suprnova::{attrs, model, AggregateKind, Model};
 
 #[model(table = "oto_users", relations = {
     profile: HasOne<OtoProfile>,
@@ -300,4 +300,285 @@ async fn belongs_to_eager_load_honours_with_default_for_null_fk() {
         let parent = p.user_loaded().expect("with_default fires in eager path too");
         assert_eq!(parent.name, "Guest");
     }
+}
+
+// ---- Aggregate cache semantics on empty + non-empty groups ----------
+//
+// The `__aggregate_relation` dispatcher branches on `AggregateKind`:
+// Sum/Avg store `f64` (0.0 on empty, matching the framework's COALESCE
+// behaviour); Min/Max store `Option<f64>` (None on empty, matching
+// SQL's NULL-on-empty + `Builder::min`/`Builder::max`'s `Option<T>`
+// return type). T2 wires the dispatcher arms for HasOne / BelongsTo;
+// the user-facing `with_sum` / `with_avg` / `with_min` / `with_max`
+// Builder surface lands in T9. The tests below call the dispatcher
+// directly to lock the cache-layer semantics regardless of the Builder
+// surface progress.
+
+#[tokio::test]
+async fn has_one_aggregate_sum_avg_zero_on_empty() {
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    let _u = OtoUser::create(attrs! { name: "lonely" }).await.unwrap();
+    // No profile created — empty aggregate group.
+
+    let mut users = OtoUser::query().get().await.unwrap();
+    assert_eq!(users.len(), 1);
+
+    {
+        let mut refs: Vec<&mut OtoUser> = users.iter_mut().collect();
+        OtoUser::__aggregate_relation(
+            "profile",
+            "id",
+            AggregateKind::Sum,
+            refs.as_mut_slice(),
+            _db.conn(),
+        )
+        .await
+        .unwrap();
+    }
+    let stored_sum: &f64 = users[0]
+        .__eager
+        .get_aggregate::<f64>("profile")
+        .expect("sum cache populated");
+    assert_eq!(*stored_sum, 0.0);
+
+    {
+        let mut refs: Vec<&mut OtoUser> = users.iter_mut().collect();
+        OtoUser::__aggregate_relation(
+            "profile",
+            "id",
+            AggregateKind::Avg,
+            refs.as_mut_slice(),
+            _db.conn(),
+        )
+        .await
+        .unwrap();
+    }
+    let stored_avg: &f64 = users[0]
+        .__eager
+        .get_aggregate::<f64>("profile")
+        .expect("avg cache populated");
+    assert_eq!(*stored_avg, 0.0);
+}
+
+#[tokio::test]
+async fn has_one_aggregate_min_max_none_on_empty() {
+    // Min/Max over zero rows must store Option::<f64>::None — the
+    // pre-fix behaviour stored `0.0_f64` which conflicts with SQL
+    // semantics and the existing Builder::min/max Option<T> return.
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    let _u = OtoUser::create(attrs! { name: "lonely" }).await.unwrap();
+
+    let mut users = OtoUser::query().get().await.unwrap();
+    assert_eq!(users.len(), 1);
+
+    {
+        let mut refs: Vec<&mut OtoUser> = users.iter_mut().collect();
+        OtoUser::__aggregate_relation(
+            "profile",
+            "id",
+            AggregateKind::Min,
+            refs.as_mut_slice(),
+            _db.conn(),
+        )
+        .await
+        .unwrap();
+    }
+    let min: &Option<f64> = users[0]
+        .__eager
+        .get_aggregate::<Option<f64>>("profile")
+        .expect("min cache populated as Option<f64>");
+    assert!(
+        min.is_none(),
+        "min over empty set should be None, got: {min:?}",
+    );
+
+    {
+        let mut refs: Vec<&mut OtoUser> = users.iter_mut().collect();
+        OtoUser::__aggregate_relation(
+            "profile",
+            "id",
+            AggregateKind::Max,
+            refs.as_mut_slice(),
+            _db.conn(),
+        )
+        .await
+        .unwrap();
+    }
+    let max: &Option<f64> = users[0]
+        .__eager
+        .get_aggregate::<Option<f64>>("profile")
+        .expect("max cache populated as Option<f64>");
+    assert!(max.is_none(), "max over empty set should be None, got: {max:?}");
+}
+
+#[tokio::test]
+async fn has_one_aggregate_min_max_some_on_nonempty() {
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    let u = OtoUser::create(attrs! { name: "Alice" }).await.unwrap();
+    let p = OtoProfile::create(attrs! { oto_user_id: u.id, bio: "..." })
+        .await
+        .unwrap();
+
+    let mut users = OtoUser::query().get().await.unwrap();
+
+    {
+        let mut refs: Vec<&mut OtoUser> = users.iter_mut().collect();
+        OtoUser::__aggregate_relation(
+            "profile",
+            "id",
+            AggregateKind::Min,
+            refs.as_mut_slice(),
+            _db.conn(),
+        )
+        .await
+        .unwrap();
+    }
+    let min: &Option<f64> = users[0]
+        .__eager
+        .get_aggregate::<Option<f64>>("profile")
+        .expect("min cache populated as Option<f64>");
+    assert!(min.is_some(), "min over non-empty must be Some, got: {min:?}");
+    assert_eq!(min.unwrap(), p.id as f64);
+
+    {
+        let mut refs: Vec<&mut OtoUser> = users.iter_mut().collect();
+        OtoUser::__aggregate_relation(
+            "profile",
+            "id",
+            AggregateKind::Max,
+            refs.as_mut_slice(),
+            _db.conn(),
+        )
+        .await
+        .unwrap();
+    }
+    let max: &Option<f64> = users[0]
+        .__eager
+        .get_aggregate::<Option<f64>>("profile")
+        .expect("max cache populated as Option<f64>");
+    assert!(max.is_some());
+    assert_eq!(max.unwrap(), p.id as f64);
+}
+
+#[tokio::test]
+async fn belongs_to_aggregate_sum_zero_min_none_when_parent_missing() {
+    // Mirror the HasOne semantics on the BelongsTo arm. Two child
+    // rows; both have null FK so there is no parent row to aggregate
+    // over. Sum stores 0.0; Min/Max store None.
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    _db.execute_unprepared(
+        "CREATE TABLE oto_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         oto_user_id INTEGER, title TEXT NOT NULL)",
+    )
+    .await
+    .unwrap();
+    let _ = OtoPost::create(attrs! { title: "Orphan1", oto_user_id: Option::<i64>::None })
+        .await
+        .unwrap();
+    let _ = OtoPost::create(attrs! { title: "Orphan2", oto_user_id: Option::<i64>::None })
+        .await
+        .unwrap();
+
+    let mut posts = OtoPost::query().get().await.unwrap();
+    assert_eq!(posts.len(), 2);
+
+    {
+        let mut refs: Vec<&mut OtoPost> = posts.iter_mut().collect();
+        OtoPost::__aggregate_relation(
+            "user",
+            "id",
+            AggregateKind::Sum,
+            refs.as_mut_slice(),
+            _db.conn(),
+        )
+        .await
+        .unwrap();
+    }
+    for p in posts.iter() {
+        let s: &f64 = p
+            .__eager
+            .get_aggregate::<f64>("user")
+            .expect("sum cache populated");
+        assert_eq!(*s, 0.0);
+    }
+
+    {
+        let mut refs: Vec<&mut OtoPost> = posts.iter_mut().collect();
+        OtoPost::__aggregate_relation(
+            "user",
+            "id",
+            AggregateKind::Min,
+            refs.as_mut_slice(),
+            _db.conn(),
+        )
+        .await
+        .unwrap();
+    }
+    for p in posts.iter() {
+        let min: &Option<f64> = p
+            .__eager
+            .get_aggregate::<Option<f64>>("user")
+            .expect("min cache populated as Option<f64>");
+        assert!(min.is_none(), "min over empty must be None, got: {min:?}");
+    }
+
+    {
+        let mut refs: Vec<&mut OtoPost> = posts.iter_mut().collect();
+        OtoPost::__aggregate_relation(
+            "user",
+            "id",
+            AggregateKind::Max,
+            refs.as_mut_slice(),
+            _db.conn(),
+        )
+        .await
+        .unwrap();
+    }
+    for p in posts.iter() {
+        let max: &Option<f64> = p
+            .__eager
+            .get_aggregate::<Option<f64>>("user")
+            .expect("max cache populated as Option<f64>");
+        assert!(max.is_none());
+    }
+}
+
+#[tokio::test]
+async fn belongs_to_aggregate_min_some_when_parent_present() {
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    _db.execute_unprepared(
+        "CREATE TABLE oto_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         oto_user_id INTEGER, title TEXT NOT NULL)",
+    )
+    .await
+    .unwrap();
+    let u = OtoUser::create(attrs! { name: "owner" }).await.unwrap();
+    let _ = OtoPost::create(attrs! { title: "P", oto_user_id: u.id })
+        .await
+        .unwrap();
+
+    let mut posts = OtoPost::query().get().await.unwrap();
+
+    {
+        let mut refs: Vec<&mut OtoPost> = posts.iter_mut().collect();
+        OtoPost::__aggregate_relation(
+            "user",
+            "id",
+            AggregateKind::Min,
+            refs.as_mut_slice(),
+            _db.conn(),
+        )
+        .await
+        .unwrap();
+    }
+    let min: &Option<f64> = posts[0]
+        .__eager
+        .get_aggregate::<Option<f64>>("user")
+        .expect("min cache populated as Option<f64>");
+    assert_eq!(min.unwrap(), u.id as f64);
 }
