@@ -683,3 +683,73 @@ async fn has_many_count_returns_zero_when_no_children() {
     let u_loaded = users.iter().find(|x| x.id == u.id).unwrap();
     assert_eq!(u_loaded.posts_count(), 0);
 }
+
+// ---- Aggregate dispatcher: server-side GROUP BY -----------------------
+//
+// Mirror of the count-arm fix at 53ee6ed for the aggregate path.
+// `__aggregate_relation` issues a single `SELECT fk, AGG(col) ... GROUP
+// BY fk` instead of fetching every child row and reducing client-side.
+// Sum/Avg over no rows still store 0.0; Min/Max over no rows still
+// store `None`. Cache key stays the bare relation name (T9 widens it).
+
+#[tokio::test]
+async fn has_many_aggregate_via_server_side_group_by() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&db).await;
+    let u = OtmUser::create(attrs! { name: "test" }).await.unwrap();
+    for _ in 0..10 {
+        let _ = OtmPost::create(attrs! { otm_user_id: u.id, title: "p" })
+            .await
+            .unwrap();
+    }
+
+    let mut parents = OtmUser::all().await.unwrap();
+    let mut parent_refs: Vec<&mut OtmUser> = parents.iter_mut().collect();
+    OtmUser::__aggregate_relation(
+        "posts",
+        "id",
+        suprnova::AggregateKind::Sum,
+        &mut parent_refs,
+        db.conn(),
+    )
+    .await
+    .unwrap();
+
+    let u_loaded = parents.iter().find(|x| x.id == u.id).unwrap();
+    let sum: &f64 = u_loaded
+        .__eager
+        .get_aggregate::<f64>("posts")
+        .expect("sum cache populated");
+    assert!(*sum > 0.0, "sum of post IDs should be positive, got {sum}");
+
+    // posts_loaded must still panic — aggregate-only path doesn't
+    // populate the `set_many` cell.
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = u_loaded.posts_loaded();
+    }));
+    assert!(res.is_err());
+}
+
+#[tokio::test]
+async fn has_many_aggregate_server_side_min_max_none_when_no_children() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&db).await;
+    let u = OtmUser::create(attrs! { name: "lonely" }).await.unwrap();
+    let mut parents = OtmUser::all().await.unwrap();
+    let mut parent_refs: Vec<&mut OtmUser> = parents.iter_mut().collect();
+    OtmUser::__aggregate_relation(
+        "posts",
+        "id",
+        suprnova::AggregateKind::Min,
+        &mut parent_refs,
+        db.conn(),
+    )
+    .await
+    .unwrap();
+    let u_loaded = parents.iter().find(|x| x.id == u.id).unwrap();
+    let min: &Option<f64> = u_loaded
+        .__eager
+        .get_aggregate::<Option<f64>>("posts")
+        .expect("min cache populated");
+    assert!(min.is_none());
+}

@@ -1436,21 +1436,26 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_has_fk(&parent_name));
 
-            // Real per-parent GROUP aggregate — distinct from T2's
-            // HasOne arm which records a single row's column value
-            // (HasOne has 0-or-1 rows per group). HasMany aggregates
-            // over the full per-parent slice:
+            // Server-side GROUP BY query, one round-trip per aggregate
+            // kind invocation. Mirrors the count arm's pattern: build
+            // a `SELECT CAST(<fk> AS TEXT|CHAR) AS __sn_fk_key,
+            // <AGG>(<col>) AS __sn_agg FROM <table> WHERE <fk> IN (...)
+            // GROUP BY <fk>` statement, then distribute per-FK results
+            // into each parent's `__eager.set_aggregate` cell.
             //
-            //   Sum:  Σ col_v
-            //   Avg:  Σ col_v / N  (N = group size, > 0)
-            //   Min:  min(col_v)
-            //   Max:  max(col_v)
+            // The aggregate expression is picked at runtime from the
+            // dispatcher's `kind` arg — Sum/Avg/Min/Max each map to the
+            // corresponding SQL function. Sum/Avg over an empty group
+            // store 0.0 (matches the framework's COALESCE behaviour);
+            // Min/Max over an empty group store `Option::None` (matches
+            // SQL's NULL-on-empty + the Builder::min/max Option<T>
+            // return type). Non-empty groups always produce Some(value)
+            // for Min/Max.
             //
-            // Per parent we accumulate a single `Vec<f64>` of column
-            // values keyed by the FK string. Empty groups fall
-            // through the existing Sum|Avg vs Min|Max branch (Sum/Avg
-            // → 0.0, Min/Max → Option::None). Non-empty groups always
-            // produce Some(value) for Min/Max.
+            // `__sn_agg` is read as `Option<f64>` because AVG over an
+            // empty group is NULL in SQL — and SUM is too, even though
+            // our user-facing default is 0.0; the None vs Some(v)
+            // branch below normalises that.
             //
             // Cache key is the relation name only — same caveat as
             // T2's HasOne arm. T9 will widen to
@@ -1460,87 +1465,170 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
             Ok(Some(quote! {
                 #name_str => {
                     if parents.is_empty() { return ::core::result::Result::Ok(()); }
-                    let pk_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+
+                    // Per-parent FK-key derivation — matches the SQL
+                    // CAST output below. `Value::String(s)` unwraps to
+                    // raw `s` rather than the JSON-quoted form so the
+                    // string FK case lines up with the raw CAST result.
+                    // Identical to the count arm's helper.
+                    fn __sn_parent_key_to_match_cast(
+                        v: ::suprnova::serde_json::Value,
+                    ) -> ::std::string::String {
+                        match v {
+                            ::suprnova::serde_json::Value::String(s) => s,
+                            other => other.to_string(),
+                        }
+                    }
+
+                    let pk_json_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
                         .iter()
                         .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
-                    let rows: ::std::vec::Vec<#target_ty> =
-                        <#target_ty as ::suprnova::eloquent::Model>::query()
-                            .filter_in(#fk, pk_values)
-                            .get()
-                            .await?;
-                    use ::std::collections::HashMap;
-                    // Per-FK accumulation of column values. We collect
-                    // the raw list and reduce on the per-parent pass
-                    // below; this keeps the per-row hot path branch-
-                    // free regardless of `kind`.
-                    let mut by_fk: HashMap<::std::string::String, ::std::vec::Vec<f64>>
-                        = HashMap::new();
-                    for r in rows.iter() {
-                        let row_json = ::suprnova::serde_json::to_value(r)
-                            .unwrap_or(::suprnova::serde_json::Value::Null);
-                        let key = row_json
-                            .get(#fk)
-                            .map(|v| v.to_string())
-                            .unwrap_or_default();
-                        let col_val = row_json
-                            .get(column)
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(0.0);
-                        by_fk.entry(key).or_default().push(col_val);
+
+                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+
+                    // Build the placeholder list. Per-backend dialect
+                    // matches the inner `Builder` renderer: Postgres
+                    // uses `$N`, others use `?`. `parents.is_empty()`
+                    // already short-circuited above so the bind list
+                    // is non-empty here.
+                    let mut placeholders: ::std::vec::Vec<::std::string::String> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    let mut binds: ::std::vec::Vec<::suprnova::sea_orm::Value> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    for (i, v) in pk_json_values.iter().enumerate() {
+                        let ph = match db_backend {
+                            ::suprnova::sea_orm::DatabaseBackend::Postgres => {
+                                ::std::format!("${}", i + 1)
+                            }
+                            _ => ::std::string::String::from("?"),
+                        };
+                        placeholders.push(ph);
+                        binds.push(
+                            ::suprnova::eloquent::model::json_value_to_sea_value(v),
+                        );
                     }
-                    for p in parents.iter_mut() {
-                        let key = ::suprnova::serde_json::to_value(&p.#pk_ident)
-                            .map(|v| v.to_string())
+
+                    // `CAST(... AS CHAR)` on MySQL, `CAST(... AS TEXT)`
+                    // elsewhere — both yield the raw stringified column
+                    // value the parent-side key derivation matches.
+                    let __sn_cast_kw = match db_backend {
+                        ::suprnova::sea_orm::DatabaseBackend::MySql => "CHAR",
+                        _ => "TEXT",
+                    };
+                    let __sn_table = <#target_ty as
+                        ::suprnova::eloquent::EloquentModel>::TABLE;
+
+                    // The aggregate expression is selected at runtime
+                    // from `kind`. The `column` arg flows untyped into
+                    // SQL — identical concern to `#fk` in the count
+                    // arm; T9's user-facing Builder surface owns column
+                    // validation, the dispatcher doesn't widen the
+                    // contract.
+                    let __sn_agg_expr: ::std::string::String = match kind {
+                        ::suprnova::AggregateKind::Sum => {
+                            ::std::format!("SUM({})", column)
+                        }
+                        ::suprnova::AggregateKind::Avg => {
+                            ::std::format!("AVG({})", column)
+                        }
+                        ::suprnova::AggregateKind::Min => {
+                            ::std::format!("MIN({})", column)
+                        }
+                        ::suprnova::AggregateKind::Max => {
+                            ::std::format!("MAX({})", column)
+                        }
+                    };
+
+                    let __sn_sql = ::std::format!(
+                        "SELECT CAST({fk} AS {cast}) AS __sn_fk_key, \
+                                {agg} AS __sn_agg \
+                           FROM {table} \
+                          WHERE {fk} IN ({phs}) \
+                          GROUP BY {fk}",
+                        fk = #fk,
+                        cast = __sn_cast_kw,
+                        agg = __sn_agg_expr,
+                        table = __sn_table,
+                        phs = placeholders.join(", "),
+                    );
+
+                    let stmt = ::suprnova::sea_orm::Statement::from_sql_and_values(
+                        db_backend,
+                        &__sn_sql,
+                        binds,
+                    );
+                    let rows = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                        .await
+                        .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+
+                    use ::std::collections::HashMap;
+                    // `Option<f64>` so AVG (and SUM) over zero rows —
+                    // which manifests as SQL NULL — survives the read
+                    // and falls through the Sum|Avg vs Min|Max branch
+                    // at distribution time. For HasMany the row map is
+                    // only populated for parents with at least one
+                    // child row, so empty groups never even appear as
+                    // a `Some(_)` here; the missing-key path on the
+                    // parent loop handles those.
+                    //
+                    // The `__sn_agg` column may come back as an integer
+                    // on SQLite when the source column is INTEGER
+                    // (e.g. SUM(views) on INTEGER yields INTEGER, not
+                    // REAL). `try_get::<Option<f64>>` would silently
+                    // fail that coercion and the dispatcher would
+                    // store 0.0 for every parent. Try `f64` first,
+                    // then `i64` widened to f64 as a fallback.
+                    let mut by_fk: HashMap<
+                        ::std::string::String,
+                        ::core::option::Option<f64>,
+                    > = HashMap::new();
+                    for r in rows.iter() {
+                        let key: ::std::string::String = r
+                            .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
-                        let vals: ::std::vec::Vec<f64> = by_fk.remove(&key).unwrap_or_default();
+                        let agg: ::core::option::Option<f64> = r
+                            .try_get::<::core::option::Option<f64>>("", "__sn_agg")
+                            .ok()
+                            .flatten()
+                            .or_else(|| {
+                                r.try_get::<::core::option::Option<i64>>("", "__sn_agg")
+                                    .ok()
+                                    .flatten()
+                                    .map(|n| n as f64)
+                            });
+                        by_fk.insert(key, agg);
+                    }
+
+                    for p in parents.iter_mut() {
+                        let key = __sn_parent_key_to_match_cast(
+                            ::suprnova::serde_json::to_value(&p.#pk_ident)
+                                .unwrap_or(::suprnova::serde_json::Value::Null),
+                        );
+                        // Missing-key (parent had no child rows) and
+                        // present-but-NULL collapse into the same
+                        // `None` branch for the per-kind distribution.
+                        let agg: ::core::option::Option<f64> = by_fk
+                            .get(&key)
+                            .copied()
+                            .unwrap_or(::core::option::Option::None);
                         match kind {
-                            ::suprnova::AggregateKind::Sum => {
-                                let sum: f64 = vals.iter().sum();
-                                p.__eager.set_aggregate::<f64>(#name_str, sum);
+                            ::suprnova::AggregateKind::Sum
+                            | ::suprnova::AggregateKind::Avg => {
+                                p.__eager.set_aggregate::<f64>(
+                                    #name_str,
+                                    agg.unwrap_or(0.0),
+                                );
                             }
-                            ::suprnova::AggregateKind::Avg => {
-                                let n = vals.len();
-                                let avg: f64 = if n == 0 {
-                                    0.0
-                                } else {
-                                    let sum: f64 = vals.iter().sum();
-                                    sum / (n as f64)
-                                };
-                                p.__eager.set_aggregate::<f64>(#name_str, avg);
-                            }
-                            ::suprnova::AggregateKind::Min => {
-                                let m: ::core::option::Option<f64> = if vals.is_empty() {
-                                    ::core::option::Option::None
-                                } else {
-                                    // f64 lacks Ord — use partial-cmp
-                                    // and fall back to f64::INFINITY
-                                    // as a guard for NaN. Production
-                                    // columns shouldn't contain NaN;
-                                    // a guarded fallback beats a
-                                    // panic in the dispatcher.
-                                    ::core::option::Option::Some(
-                                        vals.iter()
-                                            .copied()
-                                            .fold(f64::INFINITY, f64::min),
-                                    )
-                                };
-                                p.__eager
-                                    .set_aggregate::<::core::option::Option<f64>>(#name_str, m);
-                            }
-                            ::suprnova::AggregateKind::Max => {
-                                let m: ::core::option::Option<f64> = if vals.is_empty() {
-                                    ::core::option::Option::None
-                                } else {
-                                    ::core::option::Option::Some(
-                                        vals.iter()
-                                            .copied()
-                                            .fold(f64::NEG_INFINITY, f64::max),
-                                    )
-                                };
-                                p.__eager
-                                    .set_aggregate::<::core::option::Option<f64>>(#name_str, m);
+                            ::suprnova::AggregateKind::Min
+                            | ::suprnova::AggregateKind::Max => {
+                                p.__eager.set_aggregate::<::core::option::Option<f64>>(
+                                    #name_str,
+                                    agg,
+                                );
                             }
                         }
                     }
