@@ -5294,30 +5294,35 @@ fn emit_recurse_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Tok
                         ::core::option::Option::Some((h, t)) => (h, ::core::option::Option::Some(t)),
                         ::core::option::Option::None => (rest, ::core::option::Option::None),
                     };
-                    // `missing_only` skips the bulk-load if any cached
-                    // child already has the next segment populated.
-                    // This is how `Collection::load_missing` fills only
-                    // the missing tail of a dotted path whose head is
-                    // already cached.
-                    let already_loaded: bool = missing_only
-                        && children_vec.iter().any(|c| {
-                            <#target_ty as ::suprnova::EagerLoadDispatch>::has_eager(c, head)
-                        });
-                    if !already_loaded {
-                        // Build `&mut [&mut R]` for the child dispatcher
-                        // call. Scope this borrow so it ends before the
-                        // recursive walk below — the borrow checker
-                        // wouldn't otherwise let us re-borrow each child
-                        // for the per-row recursion.
-                        let mut refs: ::std::vec::Vec<&mut #target_ty> =
-                            children_vec.iter_mut().collect();
-                        <#target_ty as ::suprnova::EagerLoadDispatch>::eager_load(
-                            head,
-                            refs.as_mut_slice(),
-                            db,
-                            ::core::option::Option::None,
-                        )
-                        .await?;
+                    {
+                        // Per-row partition of the cached children. When
+                        // `missing_only` is true, only children without
+                        // `head` cached get bulk-loaded; the rest are
+                        // already-loaded and stay untouched. This is the
+                        // P3 contract for `Collection::load_missing` —
+                        // partition every level of a dotted path, not
+                        // just the top one. The borrow scope ends before
+                        // the recursive walk below so the parents slice
+                        // is free for the per-row recursion.
+                        let mut refs: ::std::vec::Vec<&mut #target_ty> = if missing_only {
+                            children_vec
+                                .iter_mut()
+                                .filter(|c| {
+                                    !<#target_ty as ::suprnova::EagerLoadDispatch>::has_eager(c, head)
+                                })
+                                .collect()
+                        } else {
+                            children_vec.iter_mut().collect()
+                        };
+                        if !refs.is_empty() {
+                            <#target_ty as ::suprnova::EagerLoadDispatch>::eager_load(
+                                head,
+                                refs.as_mut_slice(),
+                                db,
+                                ::core::option::Option::None,
+                            )
+                            .await?;
+                        }
                     }
                     if let ::core::option::Option::Some(more) = tail {
                         for c in children_vec.iter_mut() {

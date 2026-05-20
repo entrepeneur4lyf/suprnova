@@ -133,24 +133,24 @@ where
             .await
     }
 
-    /// Like [`Self::load`] but skip relations already populated on at
-    /// least one row of the collection. Useful when you've fetched
-    /// some users with `with(["posts"])` already and want to be sure
-    /// without re-running the query.
+    /// Like [`Self::load`] but evaluate the cache per row, not per
+    /// collection. Each row is partitioned independently: rows that
+    /// already have the relation cached stay untouched, rows that
+    /// don't get the relation loaded. Mirrors Laravel's
+    /// `$collection->loadMissing(...)` semantics.
     ///
-    /// Dotted paths are recursive: if the head segment is cached on
-    /// at least one row but the tail isn't (e.g. you previously
-    /// called `with(["posts"])` and now want `load_missing(["posts.comments"])`),
-    /// the orchestrator walks into each parent's cached children and
-    /// loads only the missing tail. Conversely, if the entire path is
-    /// already loaded on at least one row, the call is a no-op.
+    /// Dotted paths partition at every level. For
+    /// `load_missing(["posts.comments"])`:
     ///
-    /// Laravel's per-row semantics ("only load on the rows where the
-    /// relation isn't there yet") aren't replicated in v1 — at each
-    /// segment, v1 skips the whole relation if ANY row already has it
-    /// cached. This is fine for the common pattern (you want every
-    /// row to have it, don't pay twice if you already paid) and
-    /// saves a per-row branch.
+    /// - Rows without `posts` cached get the FULL path loaded
+    ///   (`posts` and their `comments`).
+    /// - Rows WITH `posts` already cached recurse into the cached
+    ///   posts and load `comments` only on the posts that don't
+    ///   already have comments cached.
+    ///
+    /// The same per-row partition repeats at every segment of a
+    /// longer dotted path (`"posts.comments.author"` etc.) — at each
+    /// step only the rows missing that segment get the bulk-load.
     pub async fn load_missing<I, S>(&mut self, relations: I) -> Result<(), FrameworkError>
     where
         I: IntoIterator<Item = S>,

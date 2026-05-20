@@ -1018,9 +1018,6 @@ its declaration site too — collected here for visibility:
   `i64`, so any model used as a `MorphTo` target must declare an `i64`
   primary key, and the child table's `<name>_id` column must also be
   `i64`. String / UUID-as-string morph FKs are v2.
-- **`load_missing` is collection-wide.** When any row in a collection
-  already has the relation cached, `load_missing` skips the eager-load
-  for the whole collection. Laravel's per-row skip is v2.
 - **No nested eager loading through `MorphTo`.** The per-family enum
   erases the child type, so a dotted path like
   `with(["commentable.user"])` can't tail-recurse — the dispatcher
@@ -1199,12 +1196,23 @@ let mut users: Collection<User> = User::all().await?.into();
 users.load(["posts.comments"]).await?;
 ```
 
-`load_missing(["posts"])` skips the eager-load when AT LEAST one row
-in the collection already has `posts` cached. The v1 contract is
-collection-wide ("does any row have it? then skip"); Laravel's
-per-row skip is v2.
+`load_missing` is per-row: each row in the collection is partitioned
+independently. Rows that already have the named relation cached stay
+untouched; rows that don't get the relation loaded. Mirrors Laravel's
+`$collection->loadMissing(...)` semantics.
 
-> **v1 semantics:** `load_missing` is collection-wide, not per-row. It checks if ANY row in the collection has the relation cached, then skips the whole load. This differs from Laravel's per-row semantics where each row is checked independently. Laravel-style per-row skip is deferred to v2.
+For nested paths the partition repeats at every level. Given
+`load_missing(["posts.comments"])`:
+
+- Rows without `posts` cached get the FULL path loaded — `posts` plus
+  their `comments`.
+- Rows WITH `posts` already cached recurse into the cached posts and
+  load `comments` only on the posts that don't already have comments
+  cached.
+
+The same per-row partition repeats at every further segment of a
+longer dotted path (`"posts.comments.author"` etc.) — at each step
+only the rows missing that segment get the bulk-load.
 
 ## Mass assignment
 

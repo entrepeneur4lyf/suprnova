@@ -93,20 +93,28 @@ where
 
 /// Drive a single `load_missing` path. The contract mirrors Laravel's
 /// `$collection->loadMissing(...)`: only fill the relations that
-/// aren't already cached.
+/// aren't already cached, evaluated per-row.
 ///
 /// Path semantics:
 ///
-/// - Flat name (`"posts"`): if ANY row has it cached, return silently.
-///   Otherwise call into `load_path` (the regular eager loader).
-/// - Dotted (`"posts.comments"`): if NO row has the head cached, the
-///   full path is loaded (`load_path`). If the head IS cached on any
-///   row, the head bulk-load is skipped and we recurse into each
-///   parent's cached children, passing `missing_only = true` so the
-///   tail segments themselves are skipped if already loaded.
+/// - Flat name (`"posts"`): partition the parents into rows that
+///   already have `posts` cached vs. rows that don't. The bulk-load
+///   runs only against the needs-load subset; already-loaded rows
+///   stay untouched.
+/// - Dotted (`"posts.comments"`): partition by `has_eager(head)` too.
+///     - Rows WITHOUT the head: load the FULL path against just that
+///       subset (head + tail) — nothing's cached on these so a normal
+///       eager-load drives the whole walk.
+///     - Rows WITH the head cached: recurse into each parent's cached
+///       children with `missing_only = true` so the per-child
+///       partitioning happens one level down (and again at every
+///       further level of a longer dotted path).
 ///
-/// This is the only path that needs the `missing_only` flag — flat
-/// `with(...)` always unconditionally bulk-loads each segment.
+/// The `missing_only` flag propagates through the macro-emitted
+/// `__recurse_eager_load` arms — each arm partitions its own
+/// children_vec the same way before bulk-loading the next segment.
+/// Flat `with(...)` always passes `missing_only = false`, so the
+/// partition is a no-op there (bulk-loads everything every time).
 pub(crate) async fn load_missing_path<M>(
     parents: &mut [M],
     path: &str,
@@ -120,27 +128,44 @@ where
         None => (path, None),
     };
 
-    let head_cached = parents.iter().any(|p| p.has_eager(head));
-
     match tail {
         None => {
-            // Flat path. Skip-if-any-row-has-it.
-            if head_cached {
+            // Flat path. Partition into rows that need `head` loaded
+            // vs. rows that already have it. Bulk-load only the needs
+            // subset; already-loaded rows are skipped.
+            let mut needs: Vec<&mut M> =
+                parents.iter_mut().filter(|p| !p.has_eager(head)).collect();
+            if needs.is_empty() {
                 return Ok(());
             }
-            let mut refs: Vec<&mut M> = parents.iter_mut().collect();
-            M::eager_load(head, refs.as_mut_slice(), db, None).await
+            M::eager_load(head, needs.as_mut_slice(), db, None).await
         }
         Some(rest) => {
-            if !head_cached {
-                // Nothing cached at the head level — load the full
-                // path normally (no per-segment skipping needed
-                // because nothing is there to skip).
-                return load_path(parents, path, db).await;
+            // Dotted path. Walk the parents once to learn which need
+            // the head loaded; bulk-load the head against just that
+            // subset, then recurse the tail on EVERY parent with
+            // `missing_only = true`. The per-child partition then
+            // happens one level down inside the macro-emitted
+            // `__recurse_eager_load` arm.
+            //
+            // The tail recursion runs on every row (needs-full and
+            // has-head alike) because freshly-loaded children have
+            // nothing cached at the tail level — the recursion's own
+            // partition trivially loads all of them, symmetric with
+            // the has-head branch where the partition filters out
+            // already-cached tails.
+            //
+            // We do the head bulk-load in a scope so the
+            // `Vec<&mut M>` borrow ends before the per-row recursion
+            // loop. Otherwise Rust holds the slice's borrow across
+            // the await and refuses the second `iter_mut()`.
+            {
+                let mut needs_head: Vec<&mut M> =
+                    parents.iter_mut().filter(|p| !p.has_eager(head)).collect();
+                if !needs_head.is_empty() {
+                    M::eager_load(head, needs_head.as_mut_slice(), db, None).await?;
+                }
             }
-            // Head cached: recurse into each parent's children with
-            // `missing_only = true` so the bulk load for each tail
-            // segment is skipped if already cached.
             for p in parents.iter_mut() {
                 p.recurse_eager_load(head, rest, db, true).await?;
             }

@@ -295,10 +295,10 @@ async fn load_after_fetch() {
 }
 
 #[tokio::test]
-async fn load_missing_skips_already_loaded() {
-    // First fetch with `with(["posts"])` populates the cache. The
-    // subsequent `load_missing(["posts"])` should be a no-op (the v1
-    // collection-wide skip — Laravel's per-row skip is v2).
+async fn load_missing_idempotent_when_all_have_relation() {
+    // First fetch with `with(["posts"])` populates the cache on every
+    // row. The subsequent `load_missing(["posts"])` should be a no-op
+    // (every row's partition lands in the already-loaded bucket).
     //
     // We can't intercept the SQL from this test, so the assertion is
     // semantic: calling twice doesn't break anything AND the loaded
@@ -309,6 +309,140 @@ async fn load_missing_skips_already_loaded() {
     users.load_missing(["posts"]).await.unwrap();
     let u1 = users.iter().find(|u| u.name == "u1").unwrap();
     assert_eq!(u1.posts_loaded().len(), 2);
+}
+
+#[tokio::test]
+async fn load_missing_per_row_loads_only_uncached_rows() {
+    // Mixed-state collection: u1 was fetched with `with(["posts"])`,
+    // u2 was fetched plain. After `load_missing(["posts"])`, BOTH
+    // rows must have posts cached — the per-row partition loads
+    // posts on u2 only, u1 stays untouched.
+    //
+    // Pre-P3 (collection-wide skip): the call would silently no-op
+    // because u1 already had posts cached, leaving u2's
+    // `posts_loaded()` panic-on-read.
+    let _db = fixture().await;
+    let u1_with = EgUser::query()
+        .filter("name", "u1")
+        .with(["posts"])
+        .get()
+        .await
+        .unwrap();
+    let u2_plain = EgUser::query()
+        .filter("name", "u2")
+        .get()
+        .await
+        .unwrap();
+    let mut combined: Vec<EgUser> = u1_with;
+    combined.extend(u2_plain);
+    let mut users: Collection<EgUser> = Collection::from(combined);
+
+    // Sanity: u2 currently lacks posts in its cache.
+    {
+        let u2 = users.iter().find(|u| u.name == "u2").unwrap();
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| u2.posts_loaded()));
+        assert!(res.is_err(), "u2 should not have posts cached yet");
+    }
+
+    users.load_missing(["posts"]).await.unwrap();
+
+    let u1 = users.iter().find(|u| u.name == "u1").unwrap();
+    assert_eq!(u1.posts_loaded().len(), 2, "u1 stays at 2 posts");
+    let u2 = users.iter().find(|u| u.name == "u2").unwrap();
+    assert_eq!(u2.posts_loaded().len(), 1, "u2 now has its 1 post");
+}
+
+#[tokio::test]
+async fn load_missing_nested_partitions_at_every_level() {
+    // Mixed-state nested partition: u1 has posts cached AND comments
+    // cached on p1 only; u2 has nothing. After
+    // `load_missing(["posts.comments"])`:
+    //   - u1: posts stay (already cached); comments fill on p2 only
+    //     (p1's are already cached, p2's are not).
+    //   - u2: full path loads (posts AND their comments).
+    //
+    // Pre-P3 (with the macro-arm any-row skip on children_vec): the
+    // recursion into u1's cached posts would notice p1 has comments
+    // cached and silently skip the bulk-load for p2 too.
+    let _db = fixture().await;
+
+    // u1 with posts only.
+    let u1_with_posts = EgUser::query()
+        .filter("name", "u1")
+        .with(["posts"])
+        .get()
+        .await
+        .unwrap();
+    assert_eq!(u1_with_posts.len(), 1);
+
+    // Now hand-cache comments on u1's first post only. We do this by
+    // querying u1 fresh through the relation chain — fetching with
+    // `posts.comments` then surgically clearing the comments cache on
+    // p2 isn't possible without poking internals. The cleanest
+    // route: fetch a separate u1 with `posts.comments` so we know the
+    // expected total (3), then assert on a different mixed-state
+    // collection. For the partition assertion proper we fetch u1
+    // again with posts-only and load p1's comments via __eager_load
+    // directly so p2's stays empty.
+    let mut combined: Vec<EgUser> = u1_with_posts;
+    // u2 plain (no posts).
+    let u2_plain = EgUser::query()
+        .filter("name", "u2")
+        .get()
+        .await
+        .unwrap();
+    combined.extend(u2_plain);
+
+    // Cache comments on u1's p1 specifically. Reach through the
+    // model's eager-load dispatcher: collect a Vec<&mut EgPost>
+    // pointing at p1 only and call EgPost::__eager_load("comments", ...).
+    let db = suprnova::DB::connection().unwrap();
+    {
+        let u1 = combined.iter_mut().find(|u| u.name == "u1").unwrap();
+        // SAFETY: get_many_mut returns the cached children vec; this
+        // is the cleanest read path the framework exposes.
+        let posts: &mut Vec<EgPost> = u1
+            .__eager
+            .get_many_mut::<EgPost>("posts")
+            .expect("posts cached on u1");
+        let p1_refs: Vec<&mut EgPost> = posts
+            .iter_mut()
+            .filter(|p| p.title == "p1")
+            .collect();
+        let mut p1_refs = p1_refs;
+        EgPost::__eager_load("comments", p1_refs.as_mut_slice(), db.inner(), None)
+            .await
+            .unwrap();
+    }
+
+    // Sanity: p2 has no comments cached, p1 does.
+    {
+        let u1 = combined.iter().find(|u| u.name == "u1").unwrap();
+        let posts = u1.posts_loaded();
+        let p1 = posts.iter().find(|p| p.title == "p1").unwrap();
+        let p2 = posts.iter().find(|p| p.title == "p2").unwrap();
+        assert_eq!(p1.comments_loaded().len(), 2);
+        let res =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p2.comments_loaded()));
+        assert!(res.is_err(), "p2 comments should not be cached yet");
+    }
+
+    let mut users: Collection<EgUser> = Collection::from(combined);
+    users.load_missing(["posts.comments"]).await.unwrap();
+
+    // u1: p1 still 2 comments, p2 now 1 comment.
+    let u1 = users.iter().find(|u| u.name == "u1").unwrap();
+    let u1_posts = u1.posts_loaded();
+    let p1 = u1_posts.iter().find(|p| p.title == "p1").unwrap();
+    let p2 = u1_posts.iter().find(|p| p.title == "p2").unwrap();
+    assert_eq!(p1.comments_loaded().len(), 2, "p1 untouched");
+    assert_eq!(p2.comments_loaded().len(), 1, "p2 filled by partition");
+
+    // u2: full path loaded. Has 1 post with 0 comments.
+    let u2 = users.iter().find(|u| u.name == "u2").unwrap();
+    let u2_posts = u2.posts_loaded();
+    assert_eq!(u2_posts.len(), 1);
+    assert_eq!(u2_posts[0].comments_loaded().len(), 0);
 }
 
 #[tokio::test]
