@@ -149,6 +149,10 @@ fn emit_dispatch_impl(struct_ident: &syn::Ident) -> TokenStream {
             ) {
                 self.__pivot = pivot;
             }
+
+            fn has_eager(&self, name: &str) -> bool {
+                self.__eager.has(name)
+            }
         }
     }
 }
@@ -206,8 +210,13 @@ fn emit_dispatchers(input: &ModelInput) -> Result<TokenStream> {
                     ::std::boxed::Box<dyn ::std::any::Any + ::core::marker::Send + ::core::marker::Sync>,
                 >,
             ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
-                // Predicate ignored in T2 — `with_where` lands in T9.
-                let _ = (db, predicate);
+                // `predicate` is consumed by the matching arm via
+                // downcast to the relation's typed
+                // `Box<dyn FnOnce(Builder<R>) -> Builder<R>>`. Each
+                // arm declares its own `mut predicate` shadow so the
+                // ones that don't use it don't warn.
+                let _ = db;
+                let mut predicate = predicate;
                 match relation {
                     #(#eager_arms)*
                     other => ::core::result::Result::Err(
@@ -1545,6 +1554,52 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
     }
 }
 
+/// Emit a `let mut __sn_pred = ...;` token stream that extracts an
+/// optional typed predicate closure from the dispatcher's
+/// `predicate: Option<Box<dyn Any>>` parameter.
+///
+/// The closure shape is
+/// `Box<dyn FnOnce(Builder<R>) -> Builder<R> + Send + Sync + 'static>`
+/// — exactly what `Builder::with_where` boxes up. The downcast cannot
+/// fail on a well-typed program: the only way to populate the slot
+/// with a different shape is to manually call `__eager_load` with a
+/// hand-rolled `Box<dyn Any>`, which is a framework-internal call.
+///
+/// Emits a let-binding `__sn_pred: Option<Box<dyn FnOnce(Builder<R>) ->
+/// Builder<R>>>`. The matching arm consumes the closure exactly once
+/// before issuing `.get()`. Other arms ignore the predicate entirely
+/// (the binding is shadowed by `_` later).
+fn emit_predicate_extractor(target_ty: &syn::Type) -> TokenStream {
+    quote! {
+        let mut __sn_pred: ::std::option::Option<
+            ::std::boxed::Box<
+                dyn ::core::ops::FnOnce(
+                        ::suprnova::Builder<#target_ty>,
+                    ) -> ::suprnova::Builder<#target_ty>
+                    + ::core::marker::Send
+                    + ::core::marker::Sync
+                    + 'static,
+            >,
+        > = predicate
+            .take()
+            .and_then(|p| {
+                p.downcast::<
+                    ::std::boxed::Box<
+                        dyn ::core::ops::FnOnce(
+                                ::suprnova::Builder<#target_ty>,
+                            )
+                                -> ::suprnova::Builder<#target_ty>
+                            + ::core::marker::Send
+                            + ::core::marker::Sync
+                            + 'static,
+                    >,
+                >()
+                .ok()
+                .map(|b| *b)
+            });
+    }
+}
+
 /// Emit a `<name> => { ... }` arm for `__eager_load`. T2 owns HasOne
 /// and BelongsTo; other kinds return `None` (no arm).
 fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<TokenStream>> {
@@ -1561,6 +1616,12 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             let fk = fk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_has_fk(&parent_name));
+
+            // Predicate extractor — see HasMany arm for the full
+            // contract. The `with_where(("profile", |q| ...))` user
+            // call lands here type-erased; the downcast targets the
+            // statically-known `#target_ty`.
+            let pred_extractor = emit_predicate_extractor(target_ty);
 
             // Build a JSON Vec of parent PK values, issue an
             // `IN (...)` against the child table, group by FK on each
@@ -1581,16 +1642,21 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             Ok(Some(quote! {
                 #name_str => {
                     if parents.is_empty() { return ::core::result::Result::Ok(()); }
+                    #pred_extractor
                     let pk_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
                         .iter()
                         .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
-                    let rows: ::std::vec::Vec<#target_ty> =
+                    let __sn_builder: ::suprnova::Builder<#target_ty> =
                         <#target_ty as ::suprnova::eloquent::Model>::query()
-                            .filter_in(#fk, pk_values)
-                            .get()
-                            .await?;
+                            .filter_in(#fk, pk_values);
+                    let __sn_builder = match __sn_pred.take() {
+                        ::core::option::Option::Some(f) => f(__sn_builder),
+                        ::core::option::Option::None => __sn_builder,
+                    };
+                    let rows: ::std::vec::Vec<#target_ty> =
+                        __sn_builder.get().await?;
                     use ::std::collections::HashMap;
                     let mut by_fk: HashMap<::std::string::String, #target_ty> = HashMap::new();
                     for r in rows.into_iter() {
@@ -1646,9 +1712,16 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 }
             };
 
+            // Predicate extractor — see HasMany arm for the full
+            // contract. The `with_where(("user", |q| ...))` user
+            // call lands here type-erased; downcast targets
+            // `#target_ty`.
+            let pred_extractor = emit_predicate_extractor(target_ty);
+
             Ok(Some(quote! {
                 #name_str => {
                     if parents.is_empty() { return ::core::result::Result::Ok(()); }
+                    #pred_extractor
                     // Distinct FK values to query (skip null FKs).
                     let fk_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
                         .iter()
@@ -1661,10 +1734,14 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     let parent_rows: ::std::vec::Vec<#target_ty> = if fk_values.is_empty() {
                         ::std::vec::Vec::new()
                     } else {
-                        <#target_ty as ::suprnova::eloquent::Model>::query()
-                            .filter_in(#owner_key, fk_values)
-                            .get()
-                            .await?
+                        let __sn_builder: ::suprnova::Builder<#target_ty> =
+                            <#target_ty as ::suprnova::eloquent::Model>::query()
+                                .filter_in(#owner_key, fk_values);
+                        let __sn_builder = match __sn_pred.take() {
+                            ::core::option::Option::Some(f) => f(__sn_builder),
+                            ::core::option::Option::None => __sn_builder,
+                        };
+                        __sn_builder.get().await?
                     };
                     use ::std::collections::HashMap;
                     // Group parents by their PK (which is matched by
@@ -1739,6 +1816,13 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_has_fk(&parent_name));
 
+            // Predicate extractor — downcasts the dispatcher's
+            // `predicate` parameter to a typed
+            // `FnOnce(Builder<R>) -> Builder<R>` and binds it as
+            // `__sn_pred`. The arm body applies it just before
+            // `.get()` on the inner builder.
+            let pred_extractor = emit_predicate_extractor(target_ty);
+
             // Same JSON-pluck FK-reading pattern as HasOne's eager
             // arm — see the long-form comment there for why we don't
             // do field-access on the target struct. The difference is
@@ -1750,16 +1834,21 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             Ok(Some(quote! {
                 #name_str => {
                     if parents.is_empty() { return ::core::result::Result::Ok(()); }
+                    #pred_extractor
                     let pk_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
                         .iter()
                         .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
-                    let rows: ::std::vec::Vec<#target_ty> =
+                    let __sn_builder: ::suprnova::Builder<#target_ty> =
                         <#target_ty as ::suprnova::eloquent::Model>::query()
-                            .filter_in(#fk, pk_values)
-                            .get()
-                            .await?;
+                            .filter_in(#fk, pk_values);
+                    let __sn_builder = match __sn_pred.take() {
+                        ::core::option::Option::Some(f) => f(__sn_builder),
+                        ::core::option::Option::None => __sn_builder,
+                    };
+                    let rows: ::std::vec::Vec<#target_ty> =
+                        __sn_builder.get().await?;
                     use ::std::collections::HashMap;
                     let mut by_fk: HashMap<::std::string::String, ::std::vec::Vec<#target_ty>>
                         = HashMap::new();
@@ -1817,9 +1906,15 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             // each L's copy must carry its OWN pivot context. The
             // `Model: Clone` supertrait makes this cheap (no new
             // bounds needed on this arm).
+            // Predicate extractor — `with_where(("roles", |q| ...))`
+            // applies its closure to the RELATED-table query (not the
+            // pivot scan). The downcast targets `#target_ty`.
+            let pred_extractor = emit_predicate_extractor(target_ty);
+
             Ok(Some(quote! {
                 #name_str => {
                     if parents.is_empty() { return ::core::result::Result::Ok(()); }
+                    #pred_extractor
                     let pk_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
                         .iter()
                         .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
@@ -1875,10 +1970,14 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     let related_rows: ::std::vec::Vec<#target_ty> = if related_ids.is_empty() {
                         ::std::vec::Vec::new()
                     } else {
-                        <#target_ty as ::suprnova::eloquent::Model>::query()
-                            .filter_in("id", related_ids)
-                            .get()
-                            .await?
+                        let __sn_builder: ::suprnova::Builder<#target_ty> =
+                            <#target_ty as ::suprnova::eloquent::Model>::query()
+                                .filter_in("id", related_ids);
+                        let __sn_builder = match __sn_pred.take() {
+                            ::core::option::Option::Some(f) => f(__sn_builder),
+                            ::core::option::Option::None => __sn_builder,
+                        };
+                        __sn_builder.get().await?
                     };
 
                     // Index related rows by their `id` field (JSON-
@@ -2022,9 +2121,14 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 }
             };
 
+            // Predicate extractor — `with_where(("posts", |q| ...))`
+            // applies its closure to the final-target `C` query.
+            let pred_extractor = emit_predicate_extractor(target_ty);
+
             Ok(Some(quote! {
                 #name_str => {
                     if parents.is_empty() { return ::core::result::Result::Ok(()); }
+                    #pred_extractor
 
                     // Per-parent FK-key derivation — matches the SQL
                     // CAST output of Query 1 below. `Value::String(s)`
@@ -2151,11 +2255,19 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     // Model::query() pipeline. `filter_in` runs the
                     // same bind / placeholder / typed-deserialisation
                     // path the rest of the framework uses.
-                    let c_rows: ::std::vec::Vec<#target_ty> =
+                    //
+                    // T9 with_where: predicate (if present) applies
+                    // to the final-target `C` query, downcast to
+                    // `Box<dyn FnOnce(Builder<C>) -> Builder<C>>` via
+                    // `__sn_pred` (extracted at the arm top).
+                    let __sn_builder: ::suprnova::Builder<#target_ty> =
                         <#target_ty as ::suprnova::eloquent::Model>::query()
-                            .filter_in(#second_key, b_ids)
-                            .get()
-                            .await?;
+                            .filter_in(#second_key, b_ids);
+                    let __sn_builder = match __sn_pred.take() {
+                        ::core::option::Option::Some(f) => f(__sn_builder),
+                        ::core::option::Option::None => __sn_builder,
+                    };
+                    let c_rows: ::std::vec::Vec<#target_ty> = __sn_builder.get().await?;
 
                     // Group C rows by parent_id, via the b->parent
                     // map. The per-row C.second_key is JSON-plucked
@@ -2234,9 +2346,14 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     }
                 }
             };
+            // Predicate extractor — applies to the child-table query
+            // before the IN + type filter are issued.
+            let pred_extractor = emit_predicate_extractor(target_ty);
+
             Ok(Some(quote! {
                 #name_str => {
                     if parents.is_empty() { return ::core::result::Result::Ok(()); }
+                    #pred_extractor
                     let pk_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
                         .iter()
                         .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
@@ -2252,12 +2369,15 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         ::suprnova::serde_json::Value::String(
                             ::std::string::String::from(#morph_type_value),
                         );
-                    let rows: ::std::vec::Vec<#target_ty> =
+                    let __sn_builder: ::suprnova::Builder<#target_ty> =
                         <#target_ty as ::suprnova::eloquent::Model>::query()
                             .filter_in(#id_col, pk_values)
-                            .filter(#type_col, morph_type_predicate)
-                            .get()
-                            .await?;
+                            .filter(#type_col, morph_type_predicate);
+                    let __sn_builder = match __sn_pred.take() {
+                        ::core::option::Option::Some(f) => f(__sn_builder),
+                        ::core::option::Option::None => __sn_builder,
+                    };
+                    let rows: ::std::vec::Vec<#target_ty> = __sn_builder.get().await?;
                     use ::std::collections::HashMap;
                     let mut by_fk: HashMap<::std::string::String, ::std::vec::Vec<#target_ty>>
                         = HashMap::new();
@@ -2307,9 +2427,13 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 .unwrap_or_else(|| {
                     format!("{}_id", to_snake(&last_segment_name(target_ty)))
                 });
+            // Predicate extractor — `with_where` applies to the
+            // RELATED-table query (Step 2), mirroring BelongsToMany.
+            let pred_extractor = emit_predicate_extractor(target_ty);
             Ok(Some(quote! {
                 #name_str => {
                     if parents.is_empty() { return ::core::result::Result::Ok(()); }
+                    #pred_extractor
                     let pk_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
                         .iter()
                         .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
@@ -2363,10 +2487,14 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     let related_rows: ::std::vec::Vec<#target_ty> = if related_ids.is_empty() {
                         ::std::vec::Vec::new()
                     } else {
-                        <#target_ty as ::suprnova::eloquent::Model>::query()
-                            .filter_in("id", related_ids)
-                            .get()
-                            .await?
+                        let __sn_builder: ::suprnova::Builder<#target_ty> =
+                            <#target_ty as ::suprnova::eloquent::Model>::query()
+                                .filter_in("id", related_ids);
+                        let __sn_builder = match __sn_pred.take() {
+                            ::core::option::Option::Some(f) => f(__sn_builder),
+                            ::core::option::Option::None => __sn_builder,
+                        };
+                        __sn_builder.get().await?
                     };
 
                     let mut by_related_id: HashMap<::std::string::String, #target_ty>
@@ -2460,9 +2588,13 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             let pivot_fk = pivot_fk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{}_id", to_snake(&parent_name)));
+            // Predicate extractor — `with_where` applies to the
+            // TARGET-table query (Step 2). Mirrors MorphToMany.
+            let pred_extractor = emit_predicate_extractor(target_ty);
             Ok(Some(quote! {
                 #name_str => {
                     if parents.is_empty() { return ::core::result::Result::Ok(()); }
+                    #pred_extractor
                     let pk_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
                         .iter()
                         .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
@@ -2513,10 +2645,14 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     let target_rows: ::std::vec::Vec<#target_ty> = if target_ids.is_empty() {
                         ::std::vec::Vec::new()
                     } else {
-                        <#target_ty as ::suprnova::eloquent::Model>::query()
-                            .filter_in("id", target_ids)
-                            .get()
-                            .await?
+                        let __sn_builder: ::suprnova::Builder<#target_ty> =
+                            <#target_ty as ::suprnova::eloquent::Model>::query()
+                                .filter_in("id", target_ids);
+                        let __sn_builder = match __sn_pred.take() {
+                            ::core::option::Option::Some(f) => f(__sn_builder),
+                            ::core::option::Option::None => __sn_builder,
+                        };
+                        __sn_builder.get().await?
                     };
 
                     // Index targets by id (JSON-string).
@@ -4863,12 +4999,161 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
     }
 }
 
-/// `__recurse_eager_load` arm — T2 doesn't ship nested eager loading
-/// (T9 owns the orchestrator). Returning `None` keeps the dispatcher
-/// quiet on the head segment; nested paths through HasOne / BelongsTo
-/// will land in T9 when the full nested-path resolver does.
-fn emit_recurse_arm(_input: &ModelInput, _rel: &RelationDecl) -> Result<Option<TokenStream>> {
-    Ok(None)
+/// `__recurse_eager_load` arm — T9 ships nested-path resolution.
+///
+/// Each arm walks the already-loaded child rows in `self.__eager`,
+/// peels one segment off `rest`, and recurses into the child type's
+/// `__eager_load` (head) plus per-row `__recurse_eager_load` (tail).
+///
+/// For collection kinds (HasMany / BelongsToMany / Through /
+/// MorphMany / MorphToMany / MorphedByMany): the cache holds
+/// `Vec<R>`; we take `&mut [R]` via `get_many_mut::<R>(name)` and
+/// call `R::__eager_load(rest_head, &mut refs, db, None)`. Then for
+/// each child, recurse with the remaining segments.
+///
+/// For single-value kinds (HasOne / BelongsTo / MorphOne /
+/// HasOneThrough): the cache holds `Option<R>`; we take `&mut R` via
+/// `get_one_mut::<R>(name)` if `Some`, build a one-element slice, and
+/// recurse the same way. `None` means "FK was null, nothing to walk
+/// into" — silently return Ok.
+///
+/// MorphTo's nested recursion isn't supported in v1 — the per-family
+/// enum type erases the concrete child rows, so the macro emits an
+/// error arm here. Document the restriction in `docs/core/eloquent.md`.
+fn emit_recurse_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<TokenStream>> {
+    let name_str = rel.name.to_string();
+    let target_ty: &syn::Type = match rel.kind {
+        // Through kinds: the user-facing target is the FINAL `C`, not
+        // the intermediate `B`. Same treatment as `emit_relation_accessors`.
+        RelationKindAttr::HasManyThrough | RelationKindAttr::HasOneThrough => {
+            rel.through.as_ref().ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &rel.name,
+                    "HasOneThrough / HasManyThrough require a final target type \
+                     (parser bug if reached)",
+                )
+            })?
+        }
+        _ => &rel.target,
+    };
+    let parent_name = &input.item.ident;
+
+    match rel.kind {
+        // Collection kinds — `__eager.get_many_mut::<R>(name)` returns
+        // `Option<&mut Vec<R>>`. None means "relation wasn't loaded";
+        // the orchestrator only calls `__recurse_eager_load` after a
+        // successful `__eager_load` on the same name, so the None
+        // branch is defensive (returns Ok silently).
+        RelationKindAttr::HasMany
+        | RelationKindAttr::BelongsToMany
+        | RelationKindAttr::HasManyThrough
+        | RelationKindAttr::MorphMany
+        | RelationKindAttr::MorphToMany
+        | RelationKindAttr::MorphedByMany => Ok(Some(quote! {
+            #name_str => {
+                let children: ::std::option::Option<&mut ::std::vec::Vec<#target_ty>> =
+                    self.__eager.get_many_mut::<#target_ty>(#name_str);
+                if let ::core::option::Option::Some(children_vec) = children {
+                    if children_vec.is_empty() {
+                        return ::core::result::Result::Ok(());
+                    }
+                    let (head, tail) = match rest.split_once('.') {
+                        ::core::option::Option::Some((h, t)) => (h, ::core::option::Option::Some(t)),
+                        ::core::option::Option::None => (rest, ::core::option::Option::None),
+                    };
+                    {
+                        // Build `&mut [&mut R]` for the child dispatcher
+                        // call. Scope this borrow so it ends before the
+                        // recursive walk below — the borrow checker
+                        // wouldn't otherwise let us re-borrow each child
+                        // for the per-row recursion.
+                        let mut refs: ::std::vec::Vec<&mut #target_ty> =
+                            children_vec.iter_mut().collect();
+                        <#target_ty as ::suprnova::EagerLoadDispatch>::eager_load(
+                            head,
+                            refs.as_mut_slice(),
+                            db,
+                            ::core::option::Option::None,
+                        )
+                        .await?;
+                    }
+                    if let ::core::option::Option::Some(more) = tail {
+                        for c in children_vec.iter_mut() {
+                            <#target_ty as ::suprnova::EagerLoadDispatch>::recurse_eager_load(
+                                c, head, more, db,
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                return ::core::result::Result::Ok(());
+            }
+        })),
+
+        // Single-value kinds — walk the loaded row through a
+        // one-element slice. None means the FK was null / no matching
+        // parent; nothing to recurse into, return Ok.
+        RelationKindAttr::HasOne
+        | RelationKindAttr::BelongsTo
+        | RelationKindAttr::HasOneThrough
+        | RelationKindAttr::MorphOne => Ok(Some(quote! {
+            #name_str => {
+                let child: ::std::option::Option<&mut #target_ty> =
+                    self.__eager.get_one_mut::<#target_ty>(#name_str);
+                if let ::core::option::Option::Some(child_row) = child {
+                    let (head, tail) = match rest.split_once('.') {
+                        ::core::option::Option::Some((h, t)) => (h, ::core::option::Option::Some(t)),
+                        ::core::option::Option::None => (rest, ::core::option::Option::None),
+                    };
+                    {
+                        let mut refs: ::std::vec::Vec<&mut #target_ty> =
+                            ::std::vec![child_row];
+                        <#target_ty as ::suprnova::EagerLoadDispatch>::eager_load(
+                            head,
+                            refs.as_mut_slice(),
+                            db,
+                            ::core::option::Option::None,
+                        )
+                        .await?;
+                    }
+                    if let ::core::option::Option::Some(more) = tail {
+                        // Re-fetch the mut borrow after the dispatcher
+                        // call dropped its slice — the dispatcher only
+                        // mutates the `__eager` cache on each row, the
+                        // row identity is unchanged.
+                        let again: ::std::option::Option<&mut #target_ty> =
+                            self.__eager.get_one_mut::<#target_ty>(#name_str);
+                        if let ::core::option::Option::Some(c) = again {
+                            <#target_ty as ::suprnova::EagerLoadDispatch>::recurse_eager_load(
+                                c, head, more, db,
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                return ::core::result::Result::Ok(());
+            }
+        })),
+
+        // MorphTo: per-family enum, nested recursion not supported in
+        // v1. The macro emits an explicit error so the user gets a
+        // clear message rather than silent success. See
+        // `docs/core/eloquent.md` for the limitation note.
+        RelationKindAttr::MorphTo => Ok(Some(quote! {
+            #name_str => {
+                return ::core::result::Result::Err(
+                    ::suprnova::FrameworkError::internal(::std::format!(
+                        "model `{}` has a MorphTo relation `{}`; nested eager loading \
+                         through MorphTo is not supported in v1 (the per-family enum \
+                         erases the child types). Load each polymorphic target \
+                         separately for now.",
+                        ::core::stringify!(#parent_name),
+                        #name_str,
+                    )),
+                );
+            }
+        })),
+    }
 }
 
 /// Emit `Self::with([...])` — the minimal eager-load entrypoint T2
@@ -4891,10 +5176,10 @@ fn emit_with_helper(struct_ident: &syn::Ident) -> TokenStream {
         impl #struct_ident {
             #[doc = "Open a `Builder<Self>` that eager-loads the listed relations."]
             #[doc = ""]
-            #[doc = "Each name is resolved against the model's `__eager_load` dispatcher \
-                     at fetch time. T9 extends this with `with_count` / `with_sum`-`max` \
-                     / `with_where` / nested-path (`\"posts.comments\"`) resolution; T2 \
-                     only ships the flat-list form."]
+            #[doc = "Names can be flat (`\"posts\"`) or dotted (`\"posts.comments\"`)."]
+            #[doc = "Dotted paths drive nested-path recursion at fetch time —"]
+            #[doc = "`User::with([\"posts.comments\"]).get()` runs three queries"]
+            #[doc = "(users, posts, comments) and zero N+1 SELECTs."]
             pub fn with<I, S>(relations: I) -> ::suprnova::Builder<Self>
             where
                 I: ::core::iter::IntoIterator<Item = S>,
@@ -4902,6 +5187,66 @@ fn emit_with_helper(struct_ident: &syn::Ident) -> TokenStream {
             {
                 <Self as ::suprnova::eloquent::Model>::query()
                     .with(relations)
+            }
+
+            #[doc = "Open a `Builder<Self>` that eager-loads each listed relation's row count."]
+            #[doc = ""]
+            #[doc = "Reads via the macro-emitted `<rel>_count()` accessor on each row."]
+            pub fn with_count<I, S>(relations: I) -> ::suprnova::Builder<Self>
+            where
+                I: ::core::iter::IntoIterator<Item = S>,
+                S: ::core::convert::Into<::std::string::String>,
+            {
+                <Self as ::suprnova::eloquent::Model>::query()
+                    .with_count(relations)
+            }
+
+            #[doc = "Open a `Builder<Self>` that eager-loads SUM(col) over a relation."]
+            #[doc = ""]
+            #[doc = "Reads via `parent.__eager.get_aggregate::<f64>(relation_name)`."]
+            pub fn with_sum<S1, S2>(t: (S1, S2)) -> ::suprnova::Builder<Self>
+            where
+                S1: ::core::convert::Into<::std::string::String>,
+                S2: ::core::convert::Into<::std::string::String>,
+            {
+                <Self as ::suprnova::eloquent::Model>::query()
+                    .with_sum(t)
+            }
+
+            #[doc = "Open a `Builder<Self>` that eager-loads AVG(col) over a relation."]
+            #[doc = ""]
+            #[doc = "Reads via `parent.__eager.get_aggregate::<f64>(relation_name)`."]
+            pub fn with_avg<S1, S2>(t: (S1, S2)) -> ::suprnova::Builder<Self>
+            where
+                S1: ::core::convert::Into<::std::string::String>,
+                S2: ::core::convert::Into<::std::string::String>,
+            {
+                <Self as ::suprnova::eloquent::Model>::query()
+                    .with_avg(t)
+            }
+
+            #[doc = "Open a `Builder<Self>` that eager-loads MIN(col) over a relation."]
+            #[doc = ""]
+            #[doc = "Reads via `parent.__eager.get_aggregate::<Option<f64>>(relation_name)`."]
+            pub fn with_min<S1, S2>(t: (S1, S2)) -> ::suprnova::Builder<Self>
+            where
+                S1: ::core::convert::Into<::std::string::String>,
+                S2: ::core::convert::Into<::std::string::String>,
+            {
+                <Self as ::suprnova::eloquent::Model>::query()
+                    .with_min(t)
+            }
+
+            #[doc = "Open a `Builder<Self>` that eager-loads MAX(col) over a relation."]
+            #[doc = ""]
+            #[doc = "Reads via `parent.__eager.get_aggregate::<Option<f64>>(relation_name)`."]
+            pub fn with_max<S1, S2>(t: (S1, S2)) -> ::suprnova::Builder<Self>
+            where
+                S1: ::core::convert::Into<::std::string::String>,
+                S2: ::core::convert::Into<::std::string::String>,
+            {
+                <Self as ::suprnova::eloquent::Model>::query()
+                    .with_max(t)
             }
         }
     }

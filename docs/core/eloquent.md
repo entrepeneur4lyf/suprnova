@@ -19,6 +19,7 @@ doesn't cover (see the [SeaORM escape hatches](#dropping-to-seaorm)).
 - [Creating and updating](#creating-and-updating)
 - [Deleting and soft deletes](#deleting-and-soft-deletes)
 - [Query builder — dual API](#query-builder--dual-api)
+- [Eager loading](#eager-loading)
 - [Mass assignment](#mass-assignment)
 - [Casts](#casts)
 - [Accessors and mutators](#accessors-and-mutators)
@@ -543,6 +544,150 @@ let second = User::filter("role", "admin");
 let users  = first.union(second).get().await?;
 let users  = first.union_all(second).get().await?;
 ```
+
+## Eager loading
+
+Eager loading avoids N+1 queries. Instead of `posts.len()` queries to
+fetch every user's posts, Suprnova issues ONE query per top-level
+relation regardless of how many parent rows are loaded.
+
+The full surface — flat list, nested paths, count, aggregates, and
+predicate-filtered eager loads — is reached through the
+`#[suprnova::model]`-emitted helpers on each model:
+
+```rust
+// Single relation:
+let users = User::with(["posts"]).get().await?;
+for u in &users {
+    for p in u.posts_loaded() { /* ... */ }
+}
+
+// Multiple relations:
+let users = User::with(["posts", "profile"]).get().await?;
+
+// Nested paths — three queries (users + posts + comments), no N+1:
+let users = User::with(["posts.comments"]).get().await?;
+let p1 = users[0].posts_loaded()[0];
+let comments = p1.comments_loaded();
+
+// Deeper nesting works as expected:
+let users = User::with(["posts.comments.author"]).get().await?;
+
+// Count alongside the parent rows:
+let users = User::with_count(["posts"]).get().await?;
+for u in &users {
+    println!("{} has {} posts", u.name, u.posts_count());
+}
+
+// Aggregates — Sum / Avg / Min / Max over a relation column:
+let users = User::with_sum(("posts", "views")).get().await?;
+let sum: f64 = *users[0].__eager
+    .get_aggregate::<f64>("posts")
+    .expect("with_sum populated the cache");
+
+// Filter the eager-loaded children:
+let users = User::query()
+    .with_where(("posts", |q: Builder<Post>| q.filter("published", true)))
+    .get()
+    .await?;
+// Each u.posts_loaded() contains only published posts.
+```
+
+### Cache layout — one cell per relation
+
+The per-row `__eager` cache is keyed by relation NAME (the value
+passed to `with` / `with_count` / etc.). Each call writes one cell:
+
+| Method                  | Cache cell type           | Empty-group value |
+|-------------------------|---------------------------|-------------------|
+| `with(["posts"])`       | `Vec<Post>`               | `Vec::new()`      |
+| `with(["profile"])`     | `Option<Profile>`         | `None`            |
+| `with_count(["posts"])` | `u64`                     | `0`               |
+| `with_sum / with_avg`   | `f64`                     | `0.0`             |
+| `with_min / with_max`   | `Option<f64>`             | `None`            |
+
+The macro emits matching accessors on each model:
+
+- `<rel>_loaded()` — for collection relations: `&[Post]` (panics if
+  the relation wasn't eager-loaded). For single-value relations:
+  `Option<&Profile>`.
+- `<rel>_count()` — `u64`. Panics if `with_count(["..."])` wasn't
+  called.
+- Aggregates read via
+  `parent.__eager.get_aggregate::<f64>("posts")` (or
+  `Option<f64>` for Min/Max).
+
+### Aggregate cache key — limitation
+
+The cache key for `with_sum` / `with_avg` / `with_min` / `with_max`
+is the relation name only (e.g. `"posts"`). Loading two aggregates
+on the same relation in a single query overwrites the cell:
+
+```rust
+// Last call wins — `with_avg` overwrites `with_sum`'s cell.
+let users = User::with_sum(("posts", "views"))
+    .with_avg(("posts", "views"))
+    .get()
+    .await?;
+// `users[0].__eager.get_aggregate::<f64>("posts")` returns the avg.
+```
+
+This is intentional in v1. If you need both `posts_sum` and
+`posts_avg` on the same row, issue separate queries:
+
+```rust
+let with_sum = User::with_sum(("posts", "views")).get().await?;
+let with_avg = User::with_avg(("posts", "views")).get().await?;
+```
+
+A future revision may widen the cache key to
+`<relation>_<aggregate>_<column>` and break this contract; for now,
+the single-key shape is documented and stable.
+
+### Aggregates and INTEGER columns
+
+SUM over an INTEGER column lands in the cache as `f64`. The
+dispatcher arms try `try_get::<Option<f64>>` first, then fall back to
+`try_get::<Option<i64>>().map(|n| n as f64)` so SQLite's INTEGER-
+preserving COUNT/SUM types don't silently coerce to `0.0`. Read via
+`get_aggregate::<f64>("posts")` regardless of the source column
+type.
+
+### `with_where` predicate routing
+
+`with_where(("posts", |q: Builder<Post>| q.filter("published", true)))`
+applies a closure to the inner `Builder<Post>` BEFORE the
+`filter_in(<fk>, parent_ids)` IN-query is issued, so only matching
+child rows reach the cache.
+
+The closure's signature must name the relation's target type
+explicitly (Rust can't infer it from the relation name alone). For
+the polymorphic kinds, the predicate runs against the related-table
+query — not the pivot scan.
+
+`with_where` is supported on every relation kind EXCEPT `MorphTo`.
+MorphTo's per-family enum erases the child type, so no single
+`Builder<R>` covers all variants. Nested eager loading through
+MorphTo is also not supported in v1 — `with(["commentable.user"])`
+where `commentable` is a `MorphTo` returns an error from the
+recurse-eager-load dispatcher.
+
+### `Collection::load` / `load_missing`
+
+When you've already fetched rows and want to eager-load relations
+after the fact:
+
+```rust
+use suprnova::Collection;
+
+let mut users: Collection<User> = User::all().await?.into();
+users.load(["posts.comments"]).await?;
+```
+
+`load_missing(["posts"])` skips the eager-load when AT LEAST one row
+in the collection already has `posts` cached. The v1 contract is
+collection-wide ("does any row have it? then skip"); Laravel's
+per-row skip is v2.
 
 ## Mass assignment
 

@@ -36,6 +36,7 @@
 
 pub mod belongs_to;
 pub mod belongs_to_many;
+pub(crate) mod eager;
 pub mod eager_cache;
 pub mod has_many;
 pub mod has_one;
@@ -327,6 +328,16 @@ pub trait EagerLoadDispatch: __sealed::Sealed + Sized {
         &mut self,
         pivot: Option<std::sync::Arc<dyn Any + Send + Sync>>,
     );
+
+    /// Whether the per-row `__eager` cache has a value for the named
+    /// relation. Used by
+    /// [`Collection<M>::load_missing`][crate::eloquent::Collection::load_missing]
+    /// to skip already-loaded relations.
+    ///
+    /// Implemented automatically by `#[suprnova::model]` as
+    /// `self.__eager.has(name)`. Not part of the user surface — the
+    /// `<rel>_loaded()` accessor is the user-side read path.
+    fn has_eager(&self, name: &str) -> bool;
 }
 
 #[cfg(test)]

@@ -25,6 +25,7 @@
 //! `union_postgres_placeholders_are_monotonic` in
 //! `framework/tests/eloquent_builder.rs` for the regression test.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::marker::PhantomData;
@@ -148,6 +149,74 @@ pub(crate) enum OrderTerm {
     Random,
 }
 
+// ---- Eager-load spec -----------------------------------------------------
+
+/// One entry in a [`Builder<M>`]'s eager-load plan. Built by the
+/// `with` / `with_count` / `with_sum/avg/min/max` / `with_where`
+/// methods and consumed at [`Builder::get`] time by the eager-load
+/// orchestrator in [`crate::eloquent::relations::eager`].
+///
+/// `WithWhere`'s closure is type-erased through `Box<dyn Any + Send +
+/// Sync>` because the relation's target type is only known at
+/// dispatch time. The per-relation `__eager_load` match arm downcasts
+/// to the concrete `Box<dyn FnOnce(Builder<R>) -> Builder<R>>` before
+/// applying.
+pub(crate) enum EagerSpec {
+    /// `with(["posts"])` or `with(["posts.comments"])`. The dotted form
+    /// drives nested-path recursion through `__recurse_eager_load`.
+    With(String),
+    /// `with_count(["posts"])` — emits a server-side `COUNT(*)
+    /// GROUP BY` for the relation.
+    WithCount(String),
+    /// `with_sum(("posts", "views"))` — server-side `SUM(col)
+    /// GROUP BY`.
+    WithSum(String, String),
+    /// `with_avg(("posts", "views"))` — server-side `AVG(col)
+    /// GROUP BY`.
+    WithAvg(String, String),
+    /// `with_min(("posts", "views"))` — server-side `MIN(col)
+    /// GROUP BY`.
+    WithMin(String, String),
+    /// `with_max(("posts", "views"))` — server-side `MAX(col)
+    /// GROUP BY`.
+    WithMax(String, String),
+    /// `with_where(("posts", |q: Builder<Post>| q.filter(...)))`.
+    ///
+    /// The closure is type-erased to `Box<dyn Any + Send + Sync>`
+    /// here. The per-relation `__eager_load` arm knows the concrete
+    /// target type and downcasts before applying. The user supplies a
+    /// monomorphic closure at the call site (the parameter type
+    /// `Builder<R>` is the relation target), so the downcast cannot
+    /// fail on a well-typed program.
+    WithWhere(String, Box<dyn Any + Send + Sync>),
+}
+
+impl std::fmt::Debug for EagerSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EagerSpec::With(name) => f.debug_tuple("With").field(name).finish(),
+            EagerSpec::WithCount(name) => f.debug_tuple("WithCount").field(name).finish(),
+            EagerSpec::WithSum(name, col) => {
+                f.debug_tuple("WithSum").field(name).field(col).finish()
+            }
+            EagerSpec::WithAvg(name, col) => {
+                f.debug_tuple("WithAvg").field(name).field(col).finish()
+            }
+            EagerSpec::WithMin(name, col) => {
+                f.debug_tuple("WithMin").field(name).field(col).finish()
+            }
+            EagerSpec::WithMax(name, col) => {
+                f.debug_tuple("WithMax").field(name).field(col).finish()
+            }
+            EagerSpec::WithWhere(name, _) => f
+                .debug_struct("WithWhere")
+                .field("relation", name)
+                .field("predicate", &"<closure>")
+                .finish(),
+        }
+    }
+}
+
 // ---- Builder -------------------------------------------------------------
 
 /// The chainable query type. Constructed via `Model::query()` or one of
@@ -167,15 +236,18 @@ pub struct Builder<M> {
     pub(crate) runtime_casts:
         HashMap<&'static str, std::sync::Arc<dyn crate::eloquent::casts::DynCast>>,
     pub(crate) global_scopes_disabled: Vec<&'static str>,
-    /// Eager-load spec list — populated by [`Builder::with`].
+    /// Eager-load plan — populated by [`Builder::with`] /
+    /// [`Builder::with_count`] / [`Builder::with_sum`] /
+    /// [`Builder::with_avg`] / [`Builder::with_min`] /
+    /// [`Builder::with_max`] / [`Builder::with_where`].
     ///
-    /// Each entry is a relation name (e.g. `"profile"`). At
-    /// [`Builder::get`] time, every entry triggers a call into the
-    /// model's `__eager_load` dispatcher (via [`EagerLoadDispatch`])
-    /// after the base SELECT lands. T2 ships the flat-list form;
-    /// T9 owns the full nested-path / `with_count` / `with_sum`-`max`
-    /// surface.
-    pub(crate) eager_specs: Vec<String>,
+    /// At [`Builder::get`] time the orchestrator in
+    /// [`crate::eloquent::relations::eager`] walks each entry and
+    /// dispatches into the per-model `__eager_load` /
+    /// `__count_relation` / `__aggregate_relation` methods. Dotted
+    /// `"posts.comments"` paths recurse through
+    /// `__recurse_eager_load`.
+    pub(crate) eager_specs: Vec<EagerSpec>,
     _phantom: PhantomData<M>,
 }
 
@@ -207,24 +279,146 @@ impl<M> Builder<M> {
         }
     }
 
-    /// Append relation names to the eager-load spec list. Called by
-    /// the macro-emitted `Self::with(...)` shortcut; user code can
-    /// also chain directly off a `Builder<Self>`.
+    /// Append relation names to the eager-load plan.
     ///
-    /// T2 ships the flat-list form. T9 will extend this with nested
-    /// paths (`"posts.comments"`), `with_count` / `with_sum` /
-    /// `with_avg` / `with_min` / `with_max`, and `with_where`
-    /// predicates. The fancy variants will live in T9-specific
-    /// methods on `Builder<M>` — `with(...)` keeps the simple flat
-    /// list shape.
+    /// Flat names (`"posts"`) load the relation directly. Dotted
+    /// names (`"posts.comments"`) drive nested-path recursion — the
+    /// loader runs `__eager_load("posts", ...)` then walks each
+    /// loaded post with `__recurse_eager_load("posts", "comments",
+    /// ...)`. Paths nest as deep as the user wants:
+    /// `"posts.comments.author"` runs three queries.
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// // Load every user's posts (one query) and every post's comments
+    /// // (one query), then the author of each comment (one query).
+    /// // Three queries total, zero N+1.
+    /// let users = User::with(["posts.comments.author"]).get().await?;
+    /// ```
     pub fn with<I, S>(mut self, relations: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
         for r in relations {
-            self.eager_specs.push(r.into());
+            self.eager_specs.push(EagerSpec::With(r.into()));
         }
+        self
+    }
+
+    /// Append relation names whose `COUNT(*)` aggregate should be
+    /// loaded alongside the parent rows. Reads from the cache via the
+    /// macro-emitted `<rel>_count()` accessor.
+    ///
+    /// One server-side `GROUP BY` query per relation — independent of
+    /// the parent row count.
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// let users = User::with_count(["posts"]).get().await?;
+    /// for u in &users {
+    ///     println!("{} has {} posts", u.name, u.posts_count());
+    /// }
+    /// ```
+    pub fn with_count<I, S>(mut self, relations: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for r in relations {
+            self.eager_specs.push(EagerSpec::WithCount(r.into()));
+        }
+        self
+    }
+
+    /// Append a `SUM(col) GROUP BY parent_fk` aggregate over a
+    /// relation's column. Reads back via
+    /// `parent.__eager.get_aggregate::<f64>(relation_name)` (a single
+    /// f64 per parent — Sum/Avg over zero rows lands as `0.0`,
+    /// matching the framework's COALESCE behaviour elsewhere).
+    ///
+    /// Note: the cache key is the relation NAME, not
+    /// `<name>_sum_<col>`. Loading multiple aggregates on the same
+    /// relation in one query overwrites the cell — issue separate
+    /// queries (or one terminal per aggregate) if you need both
+    /// `posts_sum` and `posts_avg` on the same row.
+    pub fn with_sum<S1: Into<String>, S2: Into<String>>(mut self, (rel, col): (S1, S2)) -> Self {
+        self.eager_specs
+            .push(EagerSpec::WithSum(rel.into(), col.into()));
+        self
+    }
+
+    /// Append an `AVG(col) GROUP BY parent_fk` aggregate over a
+    /// relation's column. Storage: `f64`, defaults to `0.0` on empty
+    /// groups.
+    pub fn with_avg<S1: Into<String>, S2: Into<String>>(mut self, (rel, col): (S1, S2)) -> Self {
+        self.eager_specs
+            .push(EagerSpec::WithAvg(rel.into(), col.into()));
+        self
+    }
+
+    /// Append a `MIN(col) GROUP BY parent_fk` aggregate over a
+    /// relation's column. Storage: `Option<f64>` (matches SQL's
+    /// `NULL`-on-empty + the [`Self::min`] terminal's shape).
+    pub fn with_min<S1: Into<String>, S2: Into<String>>(mut self, (rel, col): (S1, S2)) -> Self {
+        self.eager_specs
+            .push(EagerSpec::WithMin(rel.into(), col.into()));
+        self
+    }
+
+    /// Append a `MAX(col) GROUP BY parent_fk` aggregate over a
+    /// relation's column. Storage: `Option<f64>`.
+    pub fn with_max<S1: Into<String>, S2: Into<String>>(mut self, (rel, col): (S1, S2)) -> Self {
+        self.eager_specs
+            .push(EagerSpec::WithMax(rel.into(), col.into()));
+        self
+    }
+
+    /// Constrain an eager-loaded relation with a builder predicate.
+    /// The closure runs against the relation's inner `Builder<R>`
+    /// before the IN-query lands, so only matching child rows are
+    /// loaded into the eager cache.
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// let users = User::query()
+    ///     .with_where(("posts", |q: Builder<Post>| q.filter("published", true)))
+    ///     .get()
+    ///     .await?;
+    /// // Each u.posts_loaded() contains only published posts.
+    /// ```
+    ///
+    /// The closure is type-erased to `Box<dyn Any>` for routing; the
+    /// per-relation dispatcher arm downcasts back to
+    /// `Box<dyn FnOnce(Builder<R>) -> Builder<R>>` at the match arm.
+    /// User code writes a monomorphic closure (the parameter type is
+    /// the relation's target), so the cast cannot fail on a
+    /// well-typed program.
+    pub fn with_where<S, R, F>(mut self, (rel, predicate): (S, F)) -> Self
+    where
+        S: Into<String>,
+        // R only needs to be a static type for the type-erased Box,
+        // not a full `Model`. The user-side closure is monomorphic in
+        // the relation's target type — the bound only requires that
+        // the predicate is well-typed against `Builder<R>` at the
+        // call site. The dispatcher arm match for the relation knows
+        // R statically and downcasts safely.
+        R: 'static,
+        F: FnOnce(Builder<R>) -> Builder<R> + Send + Sync + 'static,
+    {
+        // Erase the typed closure into the `Box<dyn Any>` slot. The
+        // box stores a `Box<dyn FnOnce(Builder<R>) -> Builder<R>>` —
+        // a fully-typed payload. The dispatcher arm match against the
+        // relation name knows R statically and downcasts back to the
+        // same shape.
+        let boxed: Box<dyn FnOnce(Builder<R>) -> Builder<R> + Send + Sync + 'static> =
+            Box::new(predicate);
+        let erased: Box<dyn Any + Send + Sync> = Box::new(boxed);
+        self.eager_specs
+            .push(EagerSpec::WithWhere(rel.into(), erased));
         self
     }
 
@@ -1204,11 +1398,16 @@ where
     /// [`with_casts`]: Self::with_casts
     /// [`with`]: Self::with
     /// [`EagerLoadDispatch::eager_load`]: crate::eloquent::EagerLoadDispatch::eager_load
-    pub async fn get(self) -> Result<Vec<M>, FrameworkError> {
+    pub async fn get(mut self) -> Result<Vec<M>, FrameworkError> {
         let db = DB::connection()?;
         let backend = db.inner().get_database_backend();
         let runtime_casts = self.runtime_casts.clone();
-        let eager_specs = self.eager_specs.clone();
+        // Move the eager plan out of `self` — `EagerSpec::WithWhere`
+        // owns a `Box<dyn Any>` (the type-erased predicate) which is
+        // not `Clone`. The base SELECT consumes `self`'s WHERE / ORDER
+        // / LIMIT terms; afterwards we hand the plan to the eager
+        // orchestrator.
+        let eager_specs = std::mem::take(&mut self.eager_specs);
         let (sql, vals) = self.render_select_for(backend, M::TABLE, "*");
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
 
@@ -1254,30 +1453,21 @@ where
             buf
         };
 
-        // T2 — eager loading. After the base SELECT lands, walk the
-        // recorded eager specs and dispatch into the per-model
-        // `__eager_load` (via the `EagerLoadDispatch` trait the macro
-        // emits). Each call mutates every row's `__eager` cache
-        // in-place. T9 will extend this with nested-path / `with_count`
-        // / `with_sum`-`max` / `with_where`.
+        // T9 — eager loading. After the base SELECT lands, the
+        // orchestrator walks each recorded `EagerSpec` and dispatches
+        // into the per-model `__eager_load` /
+        // `__count_relation` / `__aggregate_relation` (via the
+        // `EagerLoadDispatch` trait the macro emits). Each call
+        // mutates every row's `__eager` cache in-place. Nested
+        // `"posts.comments"` paths recurse via
+        // `__recurse_eager_load`.
         if !eager_specs.is_empty() && !out.is_empty() {
-            for spec in &eager_specs {
-                // SAFETY-equivalent borrow plumbing: the dispatcher
-                // signature is `&mut [&mut Self]`, so we build a
-                // scratch vec of `&mut M` borrows from `out` for the
-                // duration of this call. Borrow checker hates a
-                // straight `iter_mut().collect::<Vec<&mut M>>()`
-                // bound to `'a`, so we scope each call so the borrow
-                // lifetime ends before the next iteration starts.
-                let mut refs: Vec<&mut M> = out.iter_mut().collect();
-                <M as crate::eloquent::EagerLoadDispatch>::eager_load(
-                    spec.as_str(),
-                    refs.as_mut_slice(),
-                    db.inner(),
-                    None,
-                )
-                .await?;
-            }
+            crate::eloquent::relations::eager::apply_eager_specs::<M>(
+                &mut out,
+                eager_specs,
+                db.inner(),
+            )
+            .await?;
         }
 
         Ok(out)

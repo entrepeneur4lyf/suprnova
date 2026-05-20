@@ -105,6 +105,40 @@ impl EagerLoadCache {
         }
     }
 
+    /// Mutably borrow the underlying `Vec<T>` for an eager-loaded
+    /// HasMany / BelongsToMany cell. Used by T9's nested eager-load
+    /// recursion: after the head segment populates `posts: Vec<Post>`
+    /// on every user, the tail segment needs `&mut [Post]` to call
+    /// `Post::__eager_load(...)` for the next path step.
+    ///
+    /// Returns `None` if the cell isn't populated, or if it stores a
+    /// kind other than `Many`. The caller (the macro-emitted
+    /// `__recurse_eager_load` arm) treats `None` as "nothing to
+    /// recurse into" and exits cleanly.
+    pub fn get_many_mut<T: Any + Send + Sync>(&mut self, name: &str) -> Option<&mut Vec<T>> {
+        match self.rows.get_mut(name) {
+            Some(RelationCell::Many(boxed)) => boxed.downcast_mut::<Vec<T>>(),
+            _ => None,
+        }
+    }
+
+    /// Mutably borrow the underlying `Option<T>` for an eager-loaded
+    /// HasOne / BelongsTo / MorphOne / HasOneThrough cell. Used by
+    /// T9's nested eager-load recursion to walk into a single-value
+    /// child relation.
+    ///
+    /// Returns `None` if the cell isn't populated, was stored as a
+    /// different kind, or contains a typed `None`. The caller treats
+    /// `None` as "nothing to recurse into".
+    pub fn get_one_mut<T: Any + Send + Sync>(&mut self, name: &str) -> Option<&mut T> {
+        match self.rows.get_mut(name) {
+            Some(RelationCell::One(boxed)) => {
+                boxed.downcast_mut::<Option<T>>().and_then(|o| o.as_mut())
+            }
+            _ => None,
+        }
+    }
+
     /// Store an eager-loaded HasOne / BelongsTo row.
     pub fn set_one<T: Any + Clone + Send + Sync>(&mut self, name: &'static str, row: Option<T>) {
         self.rows
@@ -239,6 +273,10 @@ impl ClonedBox {
     fn downcast_ref<T: Any + Send + Sync>(&self) -> Option<&T> {
         self.inner.downcast_ref::<T>()
     }
+
+    fn downcast_mut<T: Any + Send + Sync>(&mut self) -> Option<&mut T> {
+        self.inner.downcast_mut::<T>()
+    }
 }
 
 impl Clone for ClonedBox {
@@ -285,5 +323,36 @@ mod tests {
         let mut c = EagerLoadCache::new();
         c.set_aggregate::<f64>("sum_amount", 12.5);
         assert_eq!(c.get_aggregate::<f64>("sum_amount"), Some(&12.5));
+    }
+
+    #[test]
+    fn get_many_mut_allows_recursive_mutation() {
+        let mut c = EagerLoadCache::new();
+        c.set_many("xs", vec![Row { id: 1 }, Row { id: 2 }]);
+        let v: &mut Vec<Row> = c.get_many_mut::<Row>("xs").expect("vec is present");
+        v.push(Row { id: 3 });
+        assert_eq!(c.get_many::<Row>("xs").len(), 3);
+    }
+
+    #[test]
+    fn get_many_mut_returns_none_when_unset() {
+        let mut c = EagerLoadCache::new();
+        assert!(c.get_many_mut::<Row>("missing").is_none());
+    }
+
+    #[test]
+    fn get_one_mut_allows_recursive_mutation() {
+        let mut c = EagerLoadCache::new();
+        c.set_one("x", Some(Row { id: 7 }));
+        let r: &mut Row = c.get_one_mut::<Row>("x").expect("row is present");
+        r.id = 99;
+        assert_eq!(c.get_one::<Row>("x").unwrap().id, 99);
+    }
+
+    #[test]
+    fn get_one_mut_returns_none_when_loaded_as_none() {
+        let mut c = EagerLoadCache::new();
+        c.set_one::<Row>("x", None);
+        assert!(c.get_one_mut::<Row>("x").is_none());
     }
 }
