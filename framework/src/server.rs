@@ -67,11 +67,22 @@ impl Server {
     ///   other than local/development/testing) AND `APP_KEY` is unset
     ///   or empty. Production fails closed per codex review finding #1.
     /// - `APP_KEY` is set but malformed (wrong length, not base64).
+    /// - `APP_KEY_PREVIOUS` is set and any comma-separated entry is
+    ///   malformed. A half-rotated secret must fail at boot rather
+    ///   than silently dropping the fallback key and leaving columns
+    ///   undecryptable.
     ///
     /// Local, development, and testing environments generate a
     /// transient dev key when `APP_KEY` is unset, so `cargo run` stays
     /// zero-config. A loud `tracing::warn!` is emitted in that case so
     /// the operator notices sessions won't persist across restarts.
+    ///
+    /// `APP_KEY_PREVIOUS` (optional, comma-separated list of base64
+    /// keys) configures decrypt fallback for key rotation. Encryption
+    /// always uses the current `APP_KEY`; decryption tries current
+    /// first, then each previous key in order. A `tracing::warn!` is
+    /// emitted on every previous-key hit so the operator can schedule
+    /// a re-encrypt pass and then remove the env var.
     pub fn from_config(router: impl Into<Router>) -> Result<Self, crate::FrameworkError> {
         // Initialize the App container
         App::init();
@@ -79,26 +90,36 @@ impl Server {
         // Boot all auto-registered services from #[service(ConcreteType)]
         App::boot_services();
 
-        // Install the process-wide encryption key.
+        // Install the process-wide encryption key ring.
         //
         // Production / staging / custom envs fail closed when APP_KEY
-        // is missing — `resolve_boot_key` returns Err with an
+        // is missing — `resolve_boot_keyring` returns Err with an
         // actionable message that we propagate as the boot error.
         //
         // Local / development / testing fall through to a generated
-        // transient key. We log a loud warn so the operator notices.
+        // transient current key. We log a loud warn so the operator
+        // notices.
+        //
+        // `APP_KEY_PREVIOUS` is parsed alongside `APP_KEY` so a single
+        // boot decision covers the whole ring; malformed previous-key
+        // entries fail boot the same way a malformed `APP_KEY` does.
         //
         // The `is_initialized()` guard makes this idempotent in tests
         // (and embedders that call `from_config` more than once). On
-        // re-entry, we keep whatever key is already installed.
+        // re-entry, we keep whatever ring is already installed.
         if !crate::crypto::Crypt::is_initialized() {
             let environment = Config::get::<crate::config::AppConfig>()
                 .map(|c| c.environment)
                 .unwrap_or_else(crate::config::Environment::detect);
             let app_key = std::env::var("APP_KEY").ok();
-            let boot_key = crate::crypto::resolve_boot_key(&environment, app_key.as_deref())?;
+            let app_key_previous = std::env::var("APP_KEY_PREVIOUS").ok();
+            let boot_ring = crate::crypto::resolve_boot_keyring(
+                &environment,
+                app_key.as_deref(),
+                app_key_previous.as_deref(),
+            )?;
 
-            if boot_key.is_generated() {
+            if boot_ring.is_current_generated() {
                 tracing::warn!(
                     environment = %environment,
                     "APP_KEY is not set — generated a transient development key. \
@@ -107,7 +128,20 @@ impl Server {
                      local/development/testing; production fails closed."
                 );
             }
-            crate::crypto::Crypt::init(boot_key.into_key());
+            if !boot_ring.previous.is_empty() {
+                // Loud (info-level) confirmation that APP_KEY_PREVIOUS
+                // is being honoured. Operators rotating keys want to
+                // see this line in startup logs.
+                tracing::info!(
+                    previous_key_count = boot_ring.previous.len(),
+                    "APP_KEY_PREVIOUS active — decrypt will fall back to {n} previous \
+                     key(s). Run a re-encrypt pass (load + save every encrypted \
+                     column) and then remove APP_KEY_PREVIOUS once complete.",
+                    n = boot_ring.previous.len()
+                );
+            }
+            let (current, previous) = boot_ring.into_keys();
+            crate::crypto::Crypt::init_with_keyring(current, previous);
         }
 
         let config = Config::get::<ServerConfig>().unwrap_or_else(ServerConfig::from_env);

@@ -51,3 +51,23 @@ pub fn install_test_encryption_key() {
     // installation is the contract.
     let _ = crate::crypto::_test_install_key(key);
 }
+
+/// Install a key *ring* (current + previous fallback list) for tests
+/// that exercise `APP_KEY` rotation. Same one-shot `OnceLock` contract
+/// as [`install_test_encryption_key`] — the first installer in a test
+/// binary wins; subsequent calls are no-ops. Returns `true` iff this
+/// call actually installed the ring.
+///
+/// Test binaries that rotate keys at runtime cannot install twice;
+/// they must install the *final* ring once, then use
+/// [`crate::crypto::_test_encrypt_with`] to mint ciphertext under
+/// arbitrary keys (simulating data written when the old key was current).
+///
+/// **Test-only.** Production code must go through
+/// `Crypt::init_with_keyring` via `Server::from_config`.
+pub fn install_test_encryption_keyring(
+    current: EncryptionKey,
+    previous: Vec<EncryptionKey>,
+) -> bool {
+    crate::crypto::_test_install_keyring(current, previous)
+}

@@ -1462,6 +1462,84 @@ pub struct User { /* ... */ }
 `AsOptionalDateTime` (used by `soft_deletes`) is auto-injected by
 the macro when the soft-delete column is `Option<DateTime<Utc>>`.
 
+### Encrypted cast failure modes
+
+The four `AsEncrypted*` casts route every encrypt/decrypt through the
+`Crypt` facade (keyed by `APP_KEY`). When decryption fails — wrong
+key, truncated ciphertext, tampered bytes, AEAD tag mismatch — the
+cast surfaces a clear `FrameworkError::Internal` from
+`Cast::from_storage`. There is no silent fallback to garbage:
+
+- Loading a row through `Model::find` / `Model::query()` propagates
+  the decrypt error and (per the macro-generated `From<inner::Model>`)
+  panics with `cast from_storage failed — corrupt data in database
+  column`. Operators see the failure in logs immediately; the model
+  never carries plausible-but-wrong plaintext.
+- The `AsHashed` cast is one-way; it never decrypts so this failure
+  mode does not apply.
+
+This matches Laravel's `encrypted` cast: a wrong `APP_KEY` against an
+existing encrypted column is a hard error, never a quiet
+`null`/empty string.
+
+### Rotating `APP_KEY`
+
+Suprnova supports zero-downtime key rotation via a key *ring*: the
+current `APP_KEY` encrypts; an optional `APP_KEY_PREVIOUS` env var
+(comma-separated, oldest-to-newest) supplies decrypt fallbacks for
+data written under older keys. Encryption *always* uses the current
+key — previous keys participate only on decrypt.
+
+Each decrypt that falls through to a previous key emits a
+`tracing::warn!` line containing the previous-key index. The log
+payload deliberately excludes plaintext and ciphertext; just the
+fact-of-rotation plus an actionable re-encrypt hint.
+
+**Rotation procedure** (zero-downtime, safe for production):
+
+1. Mint a new key: `suprnova key:generate` (writes to stdout).
+2. Move the old key to `APP_KEY_PREVIOUS` and set `APP_KEY` to the
+   new value:
+   ```
+   APP_KEY_PREVIOUS=<old_key>
+   APP_KEY=<new_key>
+   ```
+3. Deploy. New writes use the new key; existing rows continue to
+   decrypt via the previous-key fallback. Warnings in logs identify
+   columns that still depend on `APP_KEY_PREVIOUS`.
+4. Run a re-encrypt pass. For each model with encrypted casts:
+   ```rust
+   for chunk in User::query().chunk(500).await? {
+       for user in chunk {
+           // Touch + save rewrites every cast column under the
+           // current key. `Cast::to_storage` always reaches for
+           // the current ring entry.
+           user.save().await?;
+       }
+   }
+   ```
+   This is idempotent — rows already on the new key just no-op.
+5. Once logs show no more `APP_KEY_PREVIOUS` warnings (give the
+   batch + any soft-deleted / archived data a generous window),
+   remove `APP_KEY_PREVIOUS` from the environment and redeploy.
+
+**Multi-step rotation.** If you rotate again before completing the
+previous pass, append: `APP_KEY_PREVIOUS=<oldest>,<previous>`. The
+ring tries every previous key in order. There is no upper bound, but
+each fallback adds a single AEAD trial-decrypt — keep the list short
+in steady state.
+
+**Constraints.**
+
+- A malformed entry in `APP_KEY_PREVIOUS` fails boot loudly (same as
+  a malformed `APP_KEY`) — a half-rotated secret should never
+  silently degrade.
+- Empty entries in the list (e.g. trailing commas from templated
+  config) are tolerated as "no key in this slot" — not an error.
+- The wire format is unchanged from the pre-rotation single-key
+  layout: no key identifier is embedded in the ciphertext. The ring
+  trial-decrypts each key in order until one succeeds.
+
 ### Runtime cast override — `with_casts`
 
 ```rust
