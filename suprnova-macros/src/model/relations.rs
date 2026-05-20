@@ -176,25 +176,45 @@ fn emit_dispatchers(struct_ident: &syn::Ident) -> TokenStream {
 /// `__pivot` on each row at load time; this accessor reads it back.
 /// Panics when the row has no pivot context, matching the spec's
 /// explicit "clear error message" requirement.
+///
+/// The accessor distinguishes the two failure modes:
+///
+/// - `__pivot` is `None` → the row was fetched without a m2m loader
+///   (typically via `find()` instead of `BelongsToMany::get()`). The
+///   panic message tells the caller to load through the m2m path.
+/// - `__pivot` is `Some(_)` but the downcast to `P` fails → the data
+///   is there but the caller asked for the wrong pivot type. The panic
+///   message names the actual struct and the requested type so the
+///   typo is obvious.
 fn emit_pivot_accessor(struct_ident: &syn::Ident) -> TokenStream {
     quote! {
         impl #struct_ident {
             /// Read pivot context attached by a `BelongsToMany` load.
             ///
-            /// Panics if the row has no pivot context — typically
-            /// because it was fetched via `find()` instead of through
-            /// the m2m loader. T4 wires the loader to fill
-            /// `__pivot`; T1 emits the accessor itself.
+            /// Panics with one of two distinct messages depending on
+            /// the failure mode:
+            ///
+            /// - If `__pivot` is empty, the row wasn't loaded through
+            ///   the m2m path — call `BelongsToMany::get()` instead of
+            ///   `find()`.
+            /// - If `__pivot` is populated but the requested `P` type
+            ///   doesn't match what was stored, the call site passed
+            ///   the wrong pivot type — fix the turbofish.
             pub fn pivot<P: ::std::any::Any + ::core::marker::Send + ::core::marker::Sync>(&self) -> &P {
-                self.__pivot
-                    .as_ref()
-                    .and_then(|arc| arc.downcast_ref::<P>())
-                    .unwrap_or_else(|| {
-                        ::std::panic!(
-                            "`{}` row has no pivot context; load via `BelongsToMany::get()`",
+                match self.__pivot.as_ref() {
+                    ::core::option::Option::None => ::std::panic!(
+                        "`{}` row has no pivot context; load via `BelongsToMany::get()`",
+                        ::std::any::type_name::<Self>(),
+                    ),
+                    ::core::option::Option::Some(arc) => match arc.downcast_ref::<P>() {
+                        ::core::option::Option::Some(p) => p,
+                        ::core::option::Option::None => ::std::panic!(
+                            "`{}` row's pivot is not of type `{}` — pass the correct pivot type to `pivot::<P>()`",
                             ::std::any::type_name::<Self>(),
-                        )
-                    })
+                            ::std::any::type_name::<P>(),
+                        ),
+                    },
+                }
             }
         }
     }
@@ -303,10 +323,13 @@ fn emit_relation_inventory(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
     // `RelationEntry::target_type_name` is `&'static str`, so we need
     // a string literal at macro expansion time — `type_name::<T>()`
     // isn't a `const fn` and can't be used in an `inventory::submit!`
-    // constant initialiser. `stringify!(#target_ty)` gives us the
-    // type as it was written at the declaration site, which is what
-    // tooling (Phase 8 admin) wants to show anyway.
-    let target_type_lit = quote::quote!(#target_ty).to_string();
+    // constant initialiser. We render the `syn::Type` via
+    // `TokenStream::to_string()` and strip the spaces that `quote`
+    // inserts between tokens, so `Vec<Post>` is stored as
+    // `"Vec<Post>"` (not `"Vec < Post >"`) and `Option<i64>` as
+    // `"Option<i64>"` — Phase 8 admin renders this in the UI and
+    // the padded form is visually wrong.
+    let target_type_lit = format_target_type(target_ty);
     let target_type_name = match rel.kind {
         // MorphTo has no single concrete target; T6 emits the
         // per-family enum and overrides this entry. T1 stores
@@ -345,5 +368,69 @@ fn kind_to_runtime(kind: RelationKindAttr) -> TokenStream {
         RelationKindAttr::MorphMany => quote! { ::suprnova::RelationKind::MorphMany },
         RelationKindAttr::MorphToMany => quote! { ::suprnova::RelationKind::MorphToMany },
         RelationKindAttr::MorphedByMany => quote! { ::suprnova::RelationKind::MorphedByMany },
+    }
+}
+
+/// Render a [`syn::Type`] back to its compact source form for the
+/// inventory's `target_type_name` literal.
+///
+/// `proc_macro2::TokenStream::to_string()` inserts spaces between
+/// every adjacent token pair, so a type written as `Vec<Post>` round
+/// trips through `quote!(#ty).to_string()` as `"Vec < Post >"`. Phase
+/// 8 admin renders this string in the relation listing UI — the
+/// padded form is visually wrong. Stripping every space yields the
+/// compact `"Vec<Post>"` / `"Option<i64>"` form users actually wrote.
+///
+/// This is correct for the common cases (single idents, generic
+/// applications, qualified paths). The rare case of a function-typed
+/// target (`Box<dyn Fn(i32) -> bool>`) would have its inner spaces
+/// stripped too — but relation targets are model structs, not closure
+/// types, so the trade-off is fine. If we ever need fancier formatting
+/// we can swap this for a `syn::Type` walker.
+fn format_target_type(ty: &syn::Type) -> String {
+    quote::quote!(#ty).to_string().replace(' ', "")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_target_type_strips_spaces_around_generics() {
+        // Bare ident — pass-through.
+        let ty: syn::Type = syn::parse_str("Post").unwrap();
+        assert_eq!(format_target_type(&ty), "Post");
+    }
+
+    #[test]
+    fn format_target_type_vec_target_round_trips_without_spaces() {
+        // `Vec<Post>` is the common collection-of-models shape — must
+        // never appear as `"Vec < Post >"` in the admin UI.
+        let ty: syn::Type = syn::parse_str("Vec<Post>").unwrap();
+        assert_eq!(format_target_type(&ty), "Vec<Post>");
+    }
+
+    #[test]
+    fn format_target_type_option_target_round_trips_without_spaces() {
+        // `Option<i64>` is what nullable FK fields would surface as if
+        // ever used as a target ident. Same no-padding rule.
+        let ty: syn::Type = syn::parse_str("Option<i64>").unwrap();
+        assert_eq!(format_target_type(&ty), "Option<i64>");
+    }
+
+    #[test]
+    fn format_target_type_qualified_path_round_trips_without_spaces() {
+        // Fully qualified `crate::models::Post` should keep its colons
+        // and lose any `quote!`-inserted padding.
+        let ty: syn::Type = syn::parse_str("crate::models::Post").unwrap();
+        assert_eq!(format_target_type(&ty), "crate::models::Post");
+    }
+
+    #[test]
+    fn format_target_type_nested_generics_round_trip_without_spaces() {
+        // Nested generic — pivot models that are themselves generic
+        // round-trip cleanly.
+        let ty: syn::Type = syn::parse_str("Vec<Option<Post>>").unwrap();
+        assert_eq!(format_target_type(&ty), "Vec<Option<Post>>");
     }
 }

@@ -103,3 +103,79 @@ fn pivot_is_arc_any_send_sync() {
     };
     assert!(u.__pivot.is_some());
 }
+
+// ---- pivot::<P>() panic-message diagnostics (T1 quality fix) -------
+//
+// The macro-emitted `pivot::<P>()` accessor must distinguish the two
+// failure modes loudly. A single "load via BelongsToMany::get()"
+// message conflated both into one bucket — these tests pin the
+// distinct messages so a future regression flips the assertion, not
+// the user's debugging experience.
+
+/// Concrete pivot type for the panic tests. Stand-in for what T4 will
+/// emit; here it just needs to be a `Send + Sync + 'static` value the
+/// `pivot::<P>()` downcast can succeed on (for the contrast case) and
+/// fail on (for the wrong-type case).
+#[derive(Debug)]
+struct BtmRoleUserPivot {
+    #[allow(dead_code)]
+    assigned_at: i64,
+}
+
+/// A different `'static` type — the wrong-type panic uses this to
+/// assert the downcast fails when the caller passes the wrong pivot
+/// type into `pivot::<P>()`.
+#[derive(Debug)]
+struct MmTaggable {
+    #[allow(dead_code)]
+    tag: &'static str,
+}
+
+#[test]
+#[should_panic(expected = "row has no pivot context; load via `BelongsToMany::get()`")]
+fn pivot_panics_when_no_pivot_context() {
+    // Row was built without a pivot (find() path, not the m2m loader).
+    let u = SmokeUser {
+        id: 10,
+        name: "Eve".into(),
+        __eager: EagerLoadCache::new(),
+        __pivot: None,
+    };
+    // Should panic with the no-context message, naming the row type.
+    let _: &BtmRoleUserPivot = u.pivot::<BtmRoleUserPivot>();
+}
+
+#[test]
+#[should_panic(expected = "pivot is not of type")]
+fn pivot_panics_with_distinct_message_on_wrong_type() {
+    // Row HAS a pivot context — but it's a `BtmRoleUserPivot`. The
+    // caller asks for `MmTaggable`. The accessor must NOT direct them
+    // to "load via BelongsToMany::get()" (the data is there); it must
+    // tell them the requested type is wrong.
+    let pivot: Arc<dyn std::any::Any + Send + Sync> =
+        Arc::new(BtmRoleUserPivot { assigned_at: 1 });
+    let u = SmokeUser {
+        id: 11,
+        name: "Frank".into(),
+        __eager: EagerLoadCache::new(),
+        __pivot: Some(pivot),
+    };
+    let _: &MmTaggable = u.pivot::<MmTaggable>();
+}
+
+#[test]
+fn pivot_returns_correctly_typed_value() {
+    // Positive control: when the type matches, no panic, returns the
+    // borrow. Pins the success path against future refactors of the
+    // match/downcast structure.
+    let pivot: Arc<dyn std::any::Any + Send + Sync> =
+        Arc::new(BtmRoleUserPivot { assigned_at: 42 });
+    let u = SmokeUser {
+        id: 12,
+        name: "Gwen".into(),
+        __eager: EagerLoadCache::new(),
+        __pivot: Some(pivot),
+    };
+    let p: &BtmRoleUserPivot = u.pivot::<BtmRoleUserPivot>();
+    assert_eq!(p.assigned_at, 42);
+}

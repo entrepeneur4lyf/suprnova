@@ -735,6 +735,24 @@ fn parse_one_relation(input: ParseStream) -> Result<RelationDecl> {
         Vec::new()
     };
 
+    // `MorphTo` is the one relation kind that has no concrete target
+    // type at the declaration site — the per-family enum is generated
+    // by T6 from the `targets = [...]` option. Without that option
+    // T6 has nothing to enumerate over, so the silent path would
+    // surface as a confusing downstream error when the admin or
+    // eager loader walks the morph family. Catch it here, at the
+    // declaration site, with a span pointing at the `MorphTo` ident.
+    if kind == RelationKindAttr::MorphTo
+        && !options
+            .iter()
+            .any(|o| matches!(o, RelationOpt::MorphTargets(_)))
+    {
+        return Err(syn::Error::new(
+            kind_ident.span(),
+            "MorphTo relation requires `targets = [...]` listing the concrete morph target types",
+        ));
+    }
+
     Ok(RelationDecl {
         name,
         kind,
@@ -1347,6 +1365,47 @@ mod tests {
             })
             .expect("MorphTargets must be parsed");
         assert_eq!(targets.len(), 2);
+    }
+
+    #[test]
+    fn parse_relations_morph_to_requires_targets() {
+        // MorphTo with no `targets = [...]` is a declaration-site bug —
+        // T6 has no targets to enumerate, and the downstream eager
+        // loader / admin walker would surface a cryptic error far from
+        // the source. The parser must catch this at the model
+        // declaration with a message pointing at the `MorphTo` ident.
+        let result = ModelInput::parse(
+            quote! { relations = { commentable: MorphTo } },
+            quote! { pub struct Comment { pub id: i64, pub commentable_id: i64, pub commentable_type: String } },
+        );
+        let err = match result {
+            Ok(_) => panic!("expected MorphTo-without-targets error, got Ok"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("MorphTo") && err.contains("targets"),
+            "expected MorphTo+targets in error message, got: {err}",
+        );
+    }
+
+    #[test]
+    fn parse_relations_morph_to_with_empty_options_block_still_requires_targets() {
+        // `MorphTo {}` (explicit empty options block) is the same
+        // failure mode — the empty block parses fine, then the
+        // post-options check kicks in. Pin this so a refactor of the
+        // options parser doesn't silently break the validation.
+        let result = ModelInput::parse(
+            quote! { relations = { commentable: MorphTo {} } },
+            quote! { pub struct Comment { pub id: i64, pub commentable_id: i64, pub commentable_type: String } },
+        );
+        let err = match result {
+            Ok(_) => panic!("expected MorphTo {{}}-without-targets error, got Ok"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("MorphTo") && err.contains("targets"),
+            "expected MorphTo+targets in error message, got: {err}",
+        );
     }
 
     #[test]
