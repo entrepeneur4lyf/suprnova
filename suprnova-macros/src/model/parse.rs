@@ -789,15 +789,96 @@ fn parse_one_relation(input: ParseStream) -> Result<RelationDecl> {
     // surface as a confusing downstream error when the admin or
     // eager loader walks the morph family. Catch it here, at the
     // declaration site, with a span pointing at the `MorphTo` ident.
-    if kind == RelationKindAttr::MorphTo
-        && !options
-            .iter()
-            .any(|o| matches!(o, RelationOpt::MorphTargets(_)))
-    {
-        return Err(syn::Error::new(
-            kind_ident.span(),
-            "MorphTo relation requires `targets = [...]` listing the concrete morph target types",
-        ));
+    if kind == RelationKindAttr::MorphTo {
+        let morph_targets = options.iter().find_map(|o| match o {
+            RelationOpt::MorphTargets(t) => Some(t),
+            _ => None,
+        });
+        match morph_targets {
+            None => {
+                return Err(syn::Error::new(
+                    kind_ident.span(),
+                    "MorphTo relation requires `targets = [...]` listing the concrete morph target types",
+                ));
+            }
+            Some(t) if t.is_empty() => {
+                // `MorphTo { targets = [] }` parses cleanly but the
+                // emitted fetch helper has only the `Unknown` variant —
+                // every call resolves to `Unknown` and the relation is
+                // silently inert. Catch the empty list here.
+                return Err(syn::Error::new(
+                    kind_ident.span(),
+                    "MorphTo `targets = [...]` must list at least one type",
+                ));
+            }
+            Some(targets) => {
+                // Detect overlapping dispatch keys across targets. The
+                // fetch helper emits a `match self.morph_type.as_str()`
+                // with one arm per target; each arm patterns every
+                // plausible morph-type key for its target
+                // (snake / no-underscore / Laravel-prefix-stripped).
+                // If two targets share a key, the second arm is
+                // unreachable and stored rows carrying that key
+                // silently dispatch to the first target. Rust emits
+                // `unreachable_patterns` only as a warning, so the
+                // mis-dispatch slips past CI.
+                //
+                // Example: `targets = [MorphPost, Post]` —
+                // `MorphPost` yields `["morph_post", "morphpost", "post"]`
+                // and `Post` yields `["post"]`. Stored `"post"`
+                // dispatches to `MorphPost`, not `Post`.
+                use std::collections::BTreeMap;
+                // Last path segment of the type, e.g. `MorphPost` from
+                // `crate::models::MorphPost`. Falls back to the full
+                // token stream when the type isn't a plain path
+                // (defensive; the parser only allows path types in
+                // `targets = [...]` today).
+                fn target_type_display(ty: &Type) -> String {
+                    match ty {
+                        Type::Path(p) => p
+                            .path
+                            .segments
+                            .last()
+                            .map(|seg| seg.ident.to_string())
+                            .unwrap_or_else(|| quote::quote!(#ty).to_string()),
+                        _ => quote::quote!(#ty).to_string(),
+                    }
+                }
+                let mut key_to_targets: BTreeMap<String, Vec<String>> = BTreeMap::new();
+                for ty in targets {
+                    let target_name = target_type_display(ty);
+                    for key in super::relations::morph_target_keys(ty) {
+                        key_to_targets
+                            .entry(key)
+                            .or_default()
+                            .push(target_name.clone());
+                    }
+                }
+                let overlaps: Vec<(String, Vec<String>)> = key_to_targets
+                    .into_iter()
+                    .filter(|(_, v)| v.len() > 1)
+                    .collect();
+                if !overlaps.is_empty() {
+                    let target_names: Vec<String> =
+                        targets.iter().map(target_type_display).collect();
+                    let detail = overlaps
+                        .iter()
+                        .map(|(k, ts)| format!("\"{}\" matches {}", k, ts.join(" and ")))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    return Err(syn::Error::new(
+                        kind_ident.span(),
+                        format!(
+                            "MorphTo targets [{}] produce overlapping dispatch keys: {}. \
+                             Rename one of the conflicting types or align their \
+                             `morph_type = \"...\"` attributes to disambiguate.",
+                            target_names.join(", "),
+                            detail,
+                        ),
+                    ));
+                }
+            }
+        }
     }
 
     Ok(RelationDecl {
@@ -1453,6 +1534,59 @@ mod tests {
         assert!(
             err.contains("MorphTo") && err.contains("targets"),
             "expected MorphTo+targets in error message, got: {err}",
+        );
+    }
+
+    #[test]
+    fn parse_relations_morph_to_rejects_empty_targets() {
+        // `MorphTo { targets = [] }` parses cleanly today but the
+        // emitted fetch helper has only the `Unknown` variant — every
+        // call to `<rel>().get().await?` resolves to `Unknown`,
+        // silently breaking the relation. Catch the empty list at
+        // declaration time, with the same span treatment as the
+        // missing-targets case.
+        let result = ModelInput::parse(
+            quote! { relations = { commentable: MorphTo { targets = [] } } },
+            quote! { pub struct Comment { pub id: i64, pub commentable_id: i64, pub commentable_type: String } },
+        );
+        let err = match result {
+            Ok(_) => panic!("expected empty MorphTo targets error, got Ok"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("targets") && err.contains("at least one type"),
+            "expected targets+at-least-one-type in error message, got: {err}",
+        );
+    }
+
+    #[test]
+    fn parse_relations_morph_to_rejects_overlapping_dispatch_keys() {
+        // `targets = [MorphPost, Post]` produces overlapping dispatch
+        // keys — `MorphPost`'s key list yields `["morph_post",
+        // "morphpost", "post"]` (snake / no-underscore / Laravel
+        // `Morph`-prefix-stripped) and `Post`'s yields `["post"]`.
+        // The two arms collide on `"post"`; without this check, the
+        // second arm is unreachable and stored `"post"` rows silently
+        // dispatch to `MorphPost` instead of `Post`.
+        let result = ModelInput::parse(
+            quote! { relations = { commentable: MorphTo { targets = [MorphPost, Post] } } },
+            quote! { pub struct Comment { pub id: i64, pub commentable_id: i64, pub commentable_type: String } },
+        );
+        let err = match result {
+            Ok(_) => panic!("expected overlapping dispatch keys error, got Ok"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("overlapping dispatch keys"),
+            "expected 'overlapping dispatch keys' in error message, got: {err}",
+        );
+        assert!(
+            err.contains("MorphPost") && err.contains("Post"),
+            "expected MorphPost + Post named in error message, got: {err}",
+        );
+        assert!(
+            err.contains("\"post\""),
+            "expected the conflicting key '\"post\"' in error message, got: {err}",
         );
     }
 

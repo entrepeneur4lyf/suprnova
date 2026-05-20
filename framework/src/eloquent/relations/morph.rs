@@ -392,6 +392,22 @@ where
 /// The per-family enum dispatch in `<Name>MorphFetch::get()` calls
 /// `Target::find(id)` for each branch directly; it does not flow
 /// through this struct.
+///
+/// # v1 restriction: `i64`-only morph IDs
+///
+/// `MorphTo::morph_id` is hardcoded to `i64`. Polymorphic targets
+/// must therefore use `i64` primary keys, and the morph table's
+/// `<name>_id` column must also be `i64`. Models whose primary key
+/// is `String` or a UUID-as-string cannot be `MorphTo` targets in
+/// v1 — the per-family fetch helper calls
+/// `<Target as Model>::find(self.morph_id)` with an `i64`, which
+/// will fail to type-check at the user's call site against a target
+/// whose `Model::Key` is anything other than `i64`.
+///
+/// v2 will parameterise `morph_id` on the FK column type so the
+/// morph machinery accepts the full PK shape lattice (`i64` /
+/// `String` / `Uuid`). Until then, declare polymorphic models with
+/// `i64` primary keys.
 pub struct MorphTo<C>
 where
     C: EloquentModel,

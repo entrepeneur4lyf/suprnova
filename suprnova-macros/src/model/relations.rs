@@ -731,7 +731,13 @@ fn morph_type_of(input: &ModelInput) -> String {
 ///
 /// T8's registry adds a runtime warn-log if a target's actual stored
 /// `morph_type` value doesn't match any of these candidates.
-fn morph_target_keys(ty: &syn::Type) -> Vec<String> {
+///
+/// Exposed to `parse.rs` so the parser can detect overlapping dispatch
+/// keys across a `MorphTo`'s declared targets at declaration time
+/// (e.g. `targets = [MorphPost, Post]` — both produce `"post"` and
+/// the second match arm would be unreachable, with stored `"post"`
+/// silently dispatching to `MorphPost`).
+pub(super) fn morph_target_keys(ty: &syn::Type) -> Vec<String> {
     let name = match ty {
         syn::Type::Path(p) => p
             .path
