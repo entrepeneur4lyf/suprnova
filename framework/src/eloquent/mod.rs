@@ -18,6 +18,7 @@ pub mod console;
 pub mod events;
 pub mod fillable;
 pub mod model;
+pub mod observers;
 pub mod prunable;
 pub mod registry;
 pub mod relations;

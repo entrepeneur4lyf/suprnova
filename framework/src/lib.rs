@@ -238,6 +238,14 @@ pub use eloquent::events::{
     dispatch_after, dispatch_cancellable, listen_cancellable, CancellableListener, EventResult,
     ModelEventHooks,
 };
+// Phase 10C T2a — lifecycle observers. Users implement `Observer<M>`
+// on their observer struct (zero-sized or `Arc`-clonable); the
+// `#[suprnova::observer(M)]` macro (T2b) walks the impl block and
+// registers per-method listeners through the `ObserverEntry` inventory.
+// `bootstrap_observers` drains the inventory at startup.
+pub use eloquent::observers::{
+    bootstrap_observers, Observer, ObserverEntry, ObserverInstallFuture,
+};
 // `casts!` macro is `#[macro_export]` in eloquent/casts/mod.rs — re-exported
 // at the crate root automatically. No `pub use` needed here.
 pub use notifications::{
