@@ -1803,6 +1803,50 @@ can run side-effects (cleaning up associated files, fanning out
 events, etc.). The default impl is empty. `MassPrunable` skips this
 hook by definition — bulk deletes don't enumerate rows.
 
+### Cascade behavior
+
+**Pruning does NOT auto-cascade to related rows.** A `Prunable` or
+`MassPrunable` impl on `User` deletes user rows; their `posts`,
+`role_user` pivot entries, polymorphic `comments`, etc. are LEFT
+ORPHANED with FK columns pointing at the now-deleted user.
+
+This matches Laravel's contract: relation cleanup is the user's job.
+Two clean ways to handle it:
+
+1. **Database-level FK cascade** — declare `ON DELETE CASCADE` (or
+   `ON DELETE SET NULL`) in the foreign-key constraint when you write
+   the migration. The DB engine handles cascade for free, with no
+   per-row Rust code.
+
+2. **Per-row hook** — implement `Prunable::pruning(&self)` to delete
+   children before the parent row is dropped. The hook fires inside
+   the same logical operation as the parent delete, so consistent
+   ordering is guaranteed:
+
+   ```rust
+   #[async_trait]
+   impl Prunable for User {
+       fn prunable() -> Builder<Self> {
+           Self::query().filter_op("deleted_at", "<", thirty_days_ago())
+       }
+
+       async fn pruning(&self) -> Result<(), FrameworkError> {
+           // Delete posts.
+           Post::query().filter("user_id", self.id).get().await?
+               .into_iter()
+               .map(|p| p.delete());
+           // Detach role pivots.
+           self.roles().sync(Vec::<i64>::new()).await?;
+           Ok(())
+       }
+   }
+   ```
+
+`MassPrunable` is set-based — `pruning()` does not fire. Use plain
+`Prunable` whenever you need cascade. The framework will not silently
+issue a per-row DELETE when you opt into `MassPrunable`; the trade-off
+is documented loudly.
+
 ### Registry mechanism
 
 Pruner registration uses the same inventory pattern as observers,
