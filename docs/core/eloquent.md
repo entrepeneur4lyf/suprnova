@@ -1023,10 +1023,6 @@ its declaration site too — collected here for visibility:
   `with(["commentable.user"])` can't tail-recurse — the dispatcher
   returns a typed error. Resolve per-family by matching on the enum
   and calling `with(["user"])` on each variant individually.
-- **`with_where`'s closure names the target type explicitly.** Rust
-  can't infer the relation's target from the relation name — write
-  `with_where(("posts", |q: Builder<Post>| q.filter(...)))`.
-
 ## Eager loading
 
 Eager loading avoids N+1 queries. Instead of `posts.len()` queries to
@@ -1082,7 +1078,21 @@ let avg = u.posts_avg_of("views").unwrap();   // Some(_)  — avg of views
 let min = u.posts_min_of("id").unwrap();      // Some(Some(_)) — non-empty group
 let max = u.posts_max_of("id");               // None  — with_max was not called
 
-// Filter the eager-loaded children:
+// Filter the eager-loaded children. The macro emits a typed
+// `with_where_<rel>(closure)` static helper per relation so the closure
+// parameter type is inferred — no need to spell out `Builder<Post>`:
+let users = User::with_where_posts(|q| q.filter("published", true))
+    .get()
+    .await?;
+// The returned `Builder<User>` chains with any other base-query
+// builder method:
+let users = User::with_where_posts(|q| q.filter("published", true))
+    .filter("active", true)
+    .get()
+    .await?;
+// The generic form is still available — useful when the relation name
+// is computed at runtime — but you'll need to name the target type on
+// the closure:
 let users = User::query()
     .with_where(("posts", |q: Builder<Post>| q.filter("published", true)))
     .get()
@@ -1167,14 +1177,25 @@ the macro-emitted accessors regardless of the source column type.
 
 ### `with_where` predicate routing
 
-`with_where(("posts", |q: Builder<Post>| q.filter("published", true)))`
-applies a closure to the inner `Builder<Post>` BEFORE the
+`User::with_where_posts(|q| q.filter("published", true))` applies a
+closure to the inner `Builder<Post>` BEFORE the
 `filter_in(<fk>, parent_ids)` IN-query is issued, so only matching
-child rows reach the cache.
+child rows reach the cache. The macro emits one typed
+`with_where_<rel>` static helper per declared relation, so the closure's
+parameter type is inferred from the method signature.
 
-The closure's signature must name the relation's target type
-explicitly (Rust can't infer it from the relation name alone). For
-the polymorphic kinds, the predicate runs against the related-table
+The generic
+`with_where(("posts", |q: Builder<Post>| q.filter("published", true)))`
+is still available — useful when the relation name is computed at
+runtime, or when you already hold a `Builder<User>` and want to attach
+a predicate. It requires naming the target type on the closure because
+the predicate goes through a `Box<dyn Any>` and Rust can't infer the
+type from the relation name alone. (Rust's orphan rules forbid the
+macro from adding a typed method directly on `Builder<User>`, so the
+typed shorthand is offered only on the model — `User::with_where_<rel>`
+— not as a builder-chain method.)
+
+For the polymorphic kinds, the predicate runs against the related-table
 query — not the pivot scan.
 
 `with_where` is supported on every relation kind EXCEPT `MorphTo`.

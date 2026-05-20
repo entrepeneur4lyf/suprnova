@@ -535,6 +535,42 @@ async fn with_where_on_belongs_to_filters_loaded_parent() {
 }
 
 #[tokio::test]
+async fn with_where_typed_method_infers_closure_target() {
+    // P4: the macro emits `<Self>::with_where_<rel>(closure)` so the
+    // closure's parameter type is inferred from the method signature —
+    // users no longer need to spell out `Builder<EgPost>` on the
+    // closure param.
+    let _db = fixture().await;
+    let users = EgUser::with_where_posts(|q| q.filter("views", 10i64))
+        .get()
+        .await
+        .unwrap();
+    let u1 = users.iter().find(|u| u.name == "u1").unwrap();
+    let posts = u1.posts_loaded();
+    assert_eq!(posts.len(), 1, "only views=10 posts should be loaded");
+    assert!(posts.iter().all(|p| p.views == 10));
+    let u2 = users.iter().find(|u| u.name == "u2").unwrap();
+    assert_eq!(u2.posts_loaded().len(), 0);
+}
+
+#[tokio::test]
+async fn with_where_typed_method_then_chain_filter() {
+    // P4: the static helper returns a `Builder<Self>` so users can
+    // chain further base-query filters/sorts after the eager-load
+    // predicate. The closure parameter type is still inferred.
+    let _db = fixture().await;
+    let users = EgUser::with_where_posts(|q| q.filter("views", 10i64))
+        .filter("name", "u1")
+        .get()
+        .await
+        .unwrap();
+    assert_eq!(users.len(), 1);
+    let u1 = &users[0];
+    assert_eq!(u1.name, "u1");
+    assert!(u1.posts_loaded().iter().all(|p| p.views == 10));
+}
+
+#[tokio::test]
 async fn static_helpers_match_query_chain() {
     // The macro emits static `Self::with_count` / `Self::with_sum`
     // helpers — they should be equivalent to `Self::query().with_count(...)`.

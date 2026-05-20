@@ -391,6 +391,7 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
     let avg_of_fn = quote::format_ident!("{}_avg_of", name);
     let min_of_fn = quote::format_ident!("{}_min_of", name);
     let max_of_fn = quote::format_ident!("{}_max_of", name);
+    let with_where_fn = quote::format_ident!("with_where_{}", name);
     // For Through kinds the parser stores generics left-to-right as
     // `(rel.target, rel.through)` where the first generic is the
     // intermediate B and the second is the final target C. The
@@ -453,6 +454,47 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
             }
         },
     };
+
+    // P4: typed `with_where_<rel>(closure)` method per relation. The
+    // generic `with_where((name, closure))` needs the caller to spell
+    // out `Builder<Target>` on the closure parameter because the
+    // predicate is type-erased through `Box<dyn Any>`. The macro knows
+    // the target type, so it can emit a typed wrapper that lets
+    // inference do the work. `MorphTo` is skipped — its target is `()`
+    // / a per-family enum at T1, not a single `Model`, so no
+    // `Builder<Target>` exists.
+    let with_where_block = match rel.kind {
+        RelationKindAttr::MorphTo => quote! {},
+        _ => quote! {
+            #[doc = "Eager-load this relation with a typed predicate applied to its builder."]
+            #[doc = ""]
+            #[doc = "Identical to `Self::with_where((\"<rel>\", |q| ...))` but with type \
+                     inference picking up the closure parameter type from the method \
+                     signature — users don't need to spell out `Builder<Target>`."]
+            pub fn #with_where_fn<F>(f: F) -> ::suprnova::Builder<Self>
+            where
+                F: ::core::ops::FnOnce(
+                        ::suprnova::Builder<#target_ty>,
+                    ) -> ::suprnova::Builder<#target_ty>
+                    + ::core::marker::Send
+                    + ::core::marker::Sync
+                    + 'static,
+            {
+                <Self as ::suprnova::eloquent::Model>::query()
+                    .with_where((#name_str, f))
+            }
+        },
+    };
+
+    // NOTE: we deliberately do NOT emit `impl Builder<#struct_ident>` —
+    // Rust's orphan rules forbid inherent impls on a foreign generic
+    // type even when its parameter is local, and threading a per-relation
+    // extension trait into scope would defeat the ergonomic win. Users
+    // chain on a builder via the existing generic
+    // `.with_where(("rel", |q: Builder<T>| ...))`; type inference works
+    // on the static `Self::with_where_<rel>(closure)` entrypoint, which
+    // is the path the typed shorthand is intended for.
+    let with_where_builder_impl = quote! {};
 
     quote! {
         impl #struct_ident {
@@ -542,7 +584,11 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
                     .get_aggregate::<::core::option::Option<f64>>(&key)
                     .copied()
             }
+
+            #with_where_block
         }
+
+        #with_where_builder_impl
     }
 }
 
