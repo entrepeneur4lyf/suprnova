@@ -33,12 +33,18 @@ pub struct OtmUser {
     pub name: String,
 }
 
+// `created_at` / `updated_at` are user-declared (not auto-injected by
+// the `timestamps` flag) so the `latest()` / `oldest()` aliases on
+// `HasMany` have a column to resolve against in tests. The macro
+// recognises both names and treats them as timestamp columns.
 #[model(table = "otm_posts")]
 pub struct OtmPost {
     pub id: i64,
     pub otm_user_id: i64,
     pub title: String,
     pub views: i64,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 async fn migrate(db: &TestDatabase) {
@@ -49,7 +55,8 @@ async fn migrate(db: &TestDatabase) {
     .unwrap();
     db.execute_unprepared(
         "CREATE TABLE otm_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, \
-         otm_user_id INTEGER NOT NULL, title TEXT NOT NULL, views INTEGER NOT NULL DEFAULT 0)",
+         otm_user_id INTEGER NOT NULL, title TEXT NOT NULL, views INTEGER NOT NULL DEFAULT 0, \
+         created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
     )
     .await
     .unwrap();
@@ -206,12 +213,59 @@ async fn has_many_custom_keys_resolve() {
 
 #[tokio::test]
 async fn has_many_latest_orders_desc_by_created_at() {
-    // No created_at column on otm_posts (T3's model is timeless to
-    // keep the schema minimal). Use `order_by("id", Desc)` semantics
-    // via the equivalent helper path on the inner builder to lock
-    // the wrapper's chaining shape. The `latest()` / `oldest()`
-    // alias is provided for `created_at`-ordered models; here we
-    // pin the chainable-order surface using a column we control.
+    // `latest()` is sugar for `order_by("created_at", Desc)`. Use raw
+    // SQL inserts with explicit timestamps so the test is
+    // deterministic without sleeping past chrono->TEXT's 1-second
+    // resolution; OtmPost::create's auto-managed timestamps would
+    // stamp NOW after applying attrs, defeating the override.
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    let u = OtmUser::create(attrs! { name: "G" }).await.unwrap();
+    _db.execute_unprepared(&format!(
+        "INSERT INTO otm_posts (otm_user_id, title, views, created_at, updated_at) VALUES \
+         ({uid}, 'first', 0, '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z'), \
+         ({uid}, 'middle', 0, '2021-01-01T00:00:00Z', '2021-01-01T00:00:00Z'), \
+         ({uid}, 'latest', 0, '2022-01-01T00:00:00Z', '2022-01-01T00:00:00Z')",
+        uid = u.id,
+    ))
+    .await
+    .unwrap();
+
+    let by_latest = u.posts().latest().get().await.unwrap();
+    assert_eq!(by_latest.len(), 3);
+    assert_eq!(by_latest[0].title, "latest", "latest() must put newest first");
+    assert_eq!(by_latest[1].title, "middle");
+    assert_eq!(by_latest[2].title, "first");
+}
+
+#[tokio::test]
+async fn has_many_oldest_orders_asc_by_created_at() {
+    // Mirror of `latest()`, asserting ascending order.
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    let u = OtmUser::create(attrs! { name: "H" }).await.unwrap();
+    _db.execute_unprepared(&format!(
+        "INSERT INTO otm_posts (otm_user_id, title, views, created_at, updated_at) VALUES \
+         ({uid}, 'oldest', 0, '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z'), \
+         ({uid}, 'middle', 0, '2021-01-01T00:00:00Z', '2021-01-01T00:00:00Z'), \
+         ({uid}, 'newest', 0, '2022-01-01T00:00:00Z', '2022-01-01T00:00:00Z')",
+        uid = u.id,
+    ))
+    .await
+    .unwrap();
+
+    let by_oldest = u.posts().oldest().get().await.unwrap();
+    assert_eq!(by_oldest.len(), 3);
+    assert_eq!(by_oldest[0].title, "oldest", "oldest() must put oldest first");
+    assert_eq!(by_oldest[1].title, "middle");
+    assert_eq!(by_oldest[2].title, "newest");
+}
+
+#[tokio::test]
+async fn has_many_order_by_desc_chains_through_wrapper() {
+    // Direct `order_by` exercise — separate from latest()/oldest()
+    // so a future regression in created_at handling doesn't mask a
+    // regression in the explicit `order_by` chain through the wrapper.
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
     let u = OtmUser::create(attrs! { name: "G" }).await.unwrap();
