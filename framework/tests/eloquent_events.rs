@@ -383,3 +383,141 @@ async fn deleting_cancel_aborts_delete_and_row_stays() {
     let still = T1DeleteVetoUser::find(id).await.unwrap();
     assert!(still.is_some(), "cancelled delete must leave the row");
 }
+
+// ---- Step 4: Retrieving + Retrieved from Builder -------------------------
+
+static RETRIEVED_COUNT: AtomicUsize = AtomicUsize::new(0);
+static RETRIEVING_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[suprnova::model(table = "t1_retrieved_users")]
+pub struct T1RetrievedUser {
+    pub id: i64,
+    pub email: String,
+}
+
+pub struct CountRetrievedT1;
+pub struct CountRetrievingT1;
+
+#[async_trait]
+impl Listener<t1_retrieved_user::events::Retrieved> for CountRetrievedT1 {
+    async fn handle(
+        &self,
+        _event: &t1_retrieved_user::events::Retrieved,
+    ) -> Result<(), FrameworkError> {
+        RETRIEVED_COUNT.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Listener<t1_retrieved_user::events::Retrieving> for CountRetrievingT1 {
+    async fn handle(
+        &self,
+        _event: &t1_retrieved_user::events::Retrieving,
+    ) -> Result<(), FrameworkError> {
+        RETRIEVING_COUNT.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn retrieving_fires_once_and_retrieved_fires_once_per_row_from_get() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t1_retrieved_users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL)",
+    )
+    .await
+    .unwrap();
+
+    EventFacade::listen::<t1_retrieved_user::events::Retrieved, _>(std::sync::Arc::new(
+        CountRetrievedT1,
+    ))
+    .await;
+    EventFacade::listen::<t1_retrieved_user::events::Retrieving, _>(std::sync::Arc::new(
+        CountRetrievingT1,
+    ))
+    .await;
+
+    // Three rows. Listener counters bumped by create() are reset
+    // before the query runs.
+    let _ = T1RetrievedUser::create(attrs! { email: "a@a.com" })
+        .await
+        .unwrap();
+    let _ = T1RetrievedUser::create(attrs! { email: "b@b.com" })
+        .await
+        .unwrap();
+    let _ = T1RetrievedUser::create(attrs! { email: "c@c.com" })
+        .await
+        .unwrap();
+
+    RETRIEVED_COUNT.store(0, Ordering::SeqCst);
+    RETRIEVING_COUNT.store(0, Ordering::SeqCst);
+
+    let rows = T1RetrievedUser::query().get().await.unwrap();
+    assert_eq!(rows.len(), 3);
+
+    // Retrieving fires once per query, Retrieved fires once per row.
+    assert_eq!(
+        RETRIEVING_COUNT.load(Ordering::SeqCst),
+        1,
+        "Retrieving must fire exactly once per query (not per row)"
+    );
+    assert_eq!(
+        RETRIEVED_COUNT.load(Ordering::SeqCst),
+        3,
+        "Retrieved must fire exactly once per row"
+    );
+}
+
+#[suprnova::model(table = "t1_first_users")]
+pub struct T1FirstUser {
+    pub id: i64,
+    pub email: String,
+}
+
+static FIRST_RETRIEVED: AtomicUsize = AtomicUsize::new(0);
+
+pub struct CountFirstT1;
+
+#[async_trait]
+impl Listener<t1_first_user::events::Retrieved> for CountFirstT1 {
+    async fn handle(
+        &self,
+        _event: &t1_first_user::events::Retrieved,
+    ) -> Result<(), FrameworkError> {
+        FIRST_RETRIEVED.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn first_dispatches_retrieved_only_when_a_row_was_hydrated() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t1_first_users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL)",
+    )
+    .await
+    .unwrap();
+
+    EventFacade::listen::<t1_first_user::events::Retrieved, _>(std::sync::Arc::new(CountFirstT1))
+        .await;
+
+    // Empty table → first() returns None → Retrieved must NOT fire.
+    FIRST_RETRIEVED.store(0, Ordering::SeqCst);
+    let none = T1FirstUser::query().first().await.unwrap();
+    assert!(none.is_none());
+    assert_eq!(
+        FIRST_RETRIEVED.load(Ordering::SeqCst),
+        0,
+        "Retrieved must not fire when first() returns None"
+    );
+
+    // Insert + query → Retrieved fires exactly once.
+    let _ = T1FirstUser::create(attrs! { email: "z@z.com" })
+        .await
+        .unwrap();
+    FIRST_RETRIEVED.store(0, Ordering::SeqCst);
+    let one = T1FirstUser::query().first().await.unwrap();
+    assert!(one.is_some());
+    assert_eq!(FIRST_RETRIEVED.load(Ordering::SeqCst), 1);
+}

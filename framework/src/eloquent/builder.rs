@@ -1402,6 +1402,12 @@ where
     /// [`with`]: Self::with
     /// [`EagerLoadDispatch::eager_load`]: crate::eloquent::EagerLoadDispatch::eager_load
     pub async fn get(mut self) -> Result<Vec<M>, FrameworkError> {
+        // Phase 10C T1 — Retrieving fires ONCE per query (not per
+        // row) before any SQL runs. Aligns with Laravel's
+        // `retrieving` hook, which fires "just before a model is
+        // hydrated from DB" once for the query as a whole.
+        M::__dispatch_retrieving().await?;
+
         let db = DB::connection()?;
         let backend = db.inner().get_database_backend();
         let runtime_casts = self.runtime_casts.clone();
@@ -1473,10 +1479,25 @@ where
             .await?;
         }
 
+        // Phase 10C T1 — Retrieved fires ONCE per hydrated row, AFTER
+        // eager loads land. Listeners observe the fully-populated
+        // model (relations cache + all hydrated columns), not the
+        // partial post-SELECT shape.
+        for row in &out {
+            M::__dispatch_retrieved(row).await?;
+        }
+
         Ok(out)
     }
 
     /// Execute the SELECT and return at most one row.
+    ///
+    /// Dispatches `Retrieving` once before the SELECT and
+    /// `Retrieved` once for the returned row (no dispatch when the
+    /// query matches zero rows). Internally delegates to
+    /// [`Self::get`] with `limit = 1`, which is where the event
+    /// hooks fire — so `first` shares the same per-row dispatch
+    /// contract.
     pub async fn first(mut self) -> Result<Option<M>, FrameworkError> {
         self.limit = Some(1);
         let mut rows = self.get().await?;
@@ -1485,6 +1506,7 @@ where
 
     /// Execute the SELECT and return one row. Errors with
     /// `FrameworkError::ModelNotFound` (HTTP 404) if no row matches.
+    /// Event-dispatch contract identical to [`Self::first`].
     pub async fn first_or_fail(self) -> Result<M, FrameworkError> {
         self.first()
             .await?
