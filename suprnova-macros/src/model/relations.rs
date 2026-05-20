@@ -676,10 +676,38 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                 }
             })
         }
-        // T3-T7 own the rest of the kinds. For T2 we emit nothing so
-        // the macro still accepts (e.g.) a `HasMany` declaration in a
-        // model file — the method just doesn't exist yet, which is
-        // fine because no test code calls it.
+        RelationKindAttr::HasMany => {
+            // FK on the child table = <snake(parent_struct)>_id by
+            // default — same default as HasOne. LK = parent's PK by
+            // default ("id"), configurable via `lk = "..."`.
+            let fk = fk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| default_has_fk(&parent_name));
+            let lk = lk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| pk_name.clone());
+
+            Ok(quote! {
+                impl #struct_ident {
+                    #[doc = "Construct a `HasMany` relation builder for this row."]
+                    #[doc = ""]
+                    #[doc = "Chainable — `user.posts().latest().take(5).get().await?`."]
+                    pub fn #method_ident(&self) -> ::suprnova::HasMany<Self, #target_ty> {
+                        let parent_value = ::suprnova::serde_json::to_value(&self.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        ::suprnova::HasMany::<Self, #target_ty>::__new(
+                            parent_value,
+                            ::std::string::String::from(#fk),
+                            ::std::string::String::from(#lk),
+                        )
+                    }
+                }
+            })
+        }
+        // T4-T7 own the rest of the kinds (BelongsToMany, Through,
+        // Morph*). For T3 we emit nothing for those so the macro
+        // still accepts the declaration — the method just doesn't
+        // exist yet, which is fine because no test code calls it.
         _ => Ok(TokenStream::new()),
     }
 }
@@ -872,6 +900,56 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 }
             }))
         }
+        RelationKindAttr::HasMany => {
+            // FK column on the child table — same default as HasOne.
+            let fk = fk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| default_has_fk(&parent_name));
+
+            // Same JSON-pluck FK-reading pattern as HasOne's eager
+            // arm — see the long-form comment there for why we don't
+            // do field-access on the target struct. The difference is
+            // we accumulate into `HashMap<key, Vec<R>>` rather than
+            // `HashMap<key, R>`, and stuff via `set_many` instead of
+            // `set_one`. Parents whose group is empty still get an
+            // explicit `set_many(name, Vec::new())` so the loaded
+            // accessor returns `&[]` (not a panic).
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+                    let pk_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null))
+                        .collect();
+                    let rows: ::std::vec::Vec<#target_ty> =
+                        <#target_ty as ::suprnova::eloquent::Model>::query()
+                            .filter_in(#fk, pk_values)
+                            .get()
+                            .await?;
+                    use ::std::collections::HashMap;
+                    let mut by_fk: HashMap<::std::string::String, ::std::vec::Vec<#target_ty>>
+                        = HashMap::new();
+                    for r in rows.into_iter() {
+                        let row_json = ::suprnova::serde_json::to_value(&r)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        let key = row_json
+                            .get(#fk)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        by_fk.entry(key).or_default().push(r);
+                    }
+                    for p in parents.iter_mut() {
+                        let key = ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        let group = by_fk.remove(&key).unwrap_or_default();
+                        p.__eager.set_many::<#target_ty>(#name_str, group);
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
         _ => Ok(None),
     }
 }
@@ -992,6 +1070,63 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             ::core::option::Option::None => 0,
                         };
                         p.__eager.set_count(#name_str, count);
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
+        RelationKindAttr::HasMany => {
+            let fk = fk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| default_has_fk(&parent_name));
+
+            // Same IN-query + JSON-pluck shape as HasOne, but with a
+            // real GROUP-BY-style accumulation: every child row in a
+            // parent's group contributes +1 to that parent's count.
+            // Parents with no children get 0 — set explicitly so the
+            // `<rel>_count()` accessor doesn't panic on "you forgot
+            // `with_count`".
+            //
+            // The implementation runs the equivalent of:
+            //   SELECT * FROM children WHERE fk IN (parent_pks)
+            // and counts client-side rather than `SELECT fk, COUNT(*)
+            // ... GROUP BY fk`. The full-row fetch is wasteful at
+            // large fan-out but matches T2's eager-arm shape; a more
+            // efficient COUNT(*) GROUP BY path can land later without
+            // changing the dispatcher signature. The current cost is
+            // bounded by the same IN query the eager arm already
+            // pays — for `with(["posts"]).with_count(["posts"])` the
+            // two queries would collapse together in a future
+            // optimisation pass.
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+                    let pk_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null))
+                        .collect();
+                    let rows: ::std::vec::Vec<#target_ty> =
+                        <#target_ty as ::suprnova::eloquent::Model>::query()
+                            .filter_in(#fk, pk_values)
+                            .get()
+                            .await?;
+                    use ::std::collections::HashMap;
+                    let mut counts: HashMap<::std::string::String, u64> = HashMap::new();
+                    for r in rows.iter() {
+                        let row_json = ::suprnova::serde_json::to_value(r)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        let key = row_json
+                            .get(#fk)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        *counts.entry(key).or_insert(0) += 1;
+                    }
+                    for p in parents.iter_mut() {
+                        let key = ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        p.__eager.set_count(#name_str, *counts.get(&key).unwrap_or(&0));
                     }
                     return ::core::result::Result::Ok(());
                 }
@@ -1195,6 +1330,123 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                                     #name_str,
                                     opt_v,
                                 );
+                            }
+                        }
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
+        RelationKindAttr::HasMany => {
+            let fk = fk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| default_has_fk(&parent_name));
+
+            // Real per-parent GROUP aggregate — distinct from T2's
+            // HasOne arm which records a single row's column value
+            // (HasOne has 0-or-1 rows per group). HasMany aggregates
+            // over the full per-parent slice:
+            //
+            //   Sum:  Σ col_v
+            //   Avg:  Σ col_v / N  (N = group size, > 0)
+            //   Min:  min(col_v)
+            //   Max:  max(col_v)
+            //
+            // Per parent we accumulate a single `Vec<f64>` of column
+            // values keyed by the FK string. Empty groups fall
+            // through the existing Sum|Avg vs Min|Max branch (Sum/Avg
+            // → 0.0, Min/Max → Option::None). Non-empty groups always
+            // produce Some(value) for Min/Max.
+            //
+            // Cache key is the relation name only — same caveat as
+            // T2's HasOne arm. T9 will widen to
+            // <rel>_<kind>_<col> when the `with_<agg>` Builder surface
+            // ships so multiple aggregates on the same relation can
+            // coexist on a single row without clobbering each other.
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+                    let pk_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null))
+                        .collect();
+                    let rows: ::std::vec::Vec<#target_ty> =
+                        <#target_ty as ::suprnova::eloquent::Model>::query()
+                            .filter_in(#fk, pk_values)
+                            .get()
+                            .await?;
+                    use ::std::collections::HashMap;
+                    // Per-FK accumulation of column values. We collect
+                    // the raw list and reduce on the per-parent pass
+                    // below; this keeps the per-row hot path branch-
+                    // free regardless of `kind`.
+                    let mut by_fk: HashMap<::std::string::String, ::std::vec::Vec<f64>>
+                        = HashMap::new();
+                    for r in rows.iter() {
+                        let row_json = ::suprnova::serde_json::to_value(r)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        let key = row_json
+                            .get(#fk)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        let col_val = row_json
+                            .get(column)
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0);
+                        by_fk.entry(key).or_default().push(col_val);
+                    }
+                    for p in parents.iter_mut() {
+                        let key = ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        let vals: ::std::vec::Vec<f64> = by_fk.remove(&key).unwrap_or_default();
+                        match kind {
+                            ::suprnova::AggregateKind::Sum => {
+                                let sum: f64 = vals.iter().sum();
+                                p.__eager.set_aggregate::<f64>(#name_str, sum);
+                            }
+                            ::suprnova::AggregateKind::Avg => {
+                                let n = vals.len();
+                                let avg: f64 = if n == 0 {
+                                    0.0
+                                } else {
+                                    let sum: f64 = vals.iter().sum();
+                                    sum / (n as f64)
+                                };
+                                p.__eager.set_aggregate::<f64>(#name_str, avg);
+                            }
+                            ::suprnova::AggregateKind::Min => {
+                                let m: ::core::option::Option<f64> = if vals.is_empty() {
+                                    ::core::option::Option::None
+                                } else {
+                                    // f64 lacks Ord — use partial-cmp
+                                    // and fall back to f64::INFINITY
+                                    // as a guard for NaN. Production
+                                    // columns shouldn't contain NaN;
+                                    // a guarded fallback beats a
+                                    // panic in the dispatcher.
+                                    ::core::option::Option::Some(
+                                        vals.iter()
+                                            .copied()
+                                            .fold(f64::INFINITY, f64::min),
+                                    )
+                                };
+                                p.__eager
+                                    .set_aggregate::<::core::option::Option<f64>>(#name_str, m);
+                            }
+                            ::suprnova::AggregateKind::Max => {
+                                let m: ::core::option::Option<f64> = if vals.is_empty() {
+                                    ::core::option::Option::None
+                                } else {
+                                    ::core::option::Option::Some(
+                                        vals.iter()
+                                            .copied()
+                                            .fold(f64::NEG_INFINITY, f64::max),
+                                    )
+                                };
+                                p.__eager
+                                    .set_aggregate::<::core::option::Option<f64>>(#name_str, m);
                             }
                         }
                     }

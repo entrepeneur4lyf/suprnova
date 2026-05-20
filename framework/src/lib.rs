@@ -223,7 +223,7 @@ pub use eloquent::{
     AsEncryptedObject, AsEnum, AsFloat, AsHashed, AsImmutableDate, AsImmutableDateTime, AsInt,
     AsJson, AsObject, AsOptionalDateTime, AsString, AsTimestamp, Attrs, BelongsTo, Builder, Cast,
     Collection, Direction, DynCast, EagerLoadCache, EagerLoadDispatch, EloquentModel, Fillable,
-    FirstOrCreate, HasOne, IntoColumn, IntoDynCast, IntoVal, MassPrunable, Model, ModelEntry,
+    FirstOrCreate, HasMany, HasOne, IntoColumn, IntoDynCast, IntoVal, MassPrunable, Model, ModelEntry,
     Prunable, PrunerEntry, Relation, RelationEntry, RelationKind, ReplicateExt, SoftDeletes,
     Touchable,
 };

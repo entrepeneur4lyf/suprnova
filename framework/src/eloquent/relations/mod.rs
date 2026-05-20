@@ -36,10 +36,12 @@
 
 pub mod belongs_to;
 pub mod eager_cache;
+pub mod has_many;
 pub mod has_one;
 
 pub use belongs_to::BelongsTo;
 pub use eager_cache::EagerLoadCache;
+pub use has_many::HasMany;
 pub use has_one::HasOne;
 
 use std::any::{Any, TypeId};
