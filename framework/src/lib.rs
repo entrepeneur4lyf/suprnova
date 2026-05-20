@@ -335,6 +335,7 @@ pub use suprnova_macros::observer;
 pub use suprnova_macros::prunable;
 pub use suprnova_macros::redirect;
 pub use suprnova_macros::request;
+pub use suprnova_macros::scopes;
 pub use suprnova_macros::service;
 pub use suprnova_macros::policy;
 pub use suprnova_macros::workflow;

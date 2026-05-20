@@ -24,6 +24,7 @@ mod model_attribute;
 mod multipart;
 mod notification_mail;
 mod observer;
+mod scopes;
 mod suprnova_test;
 mod redirect;
 mod request;
@@ -940,6 +941,74 @@ pub fn prunable(_attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn observer(attr: TokenStream, item: TokenStream) -> TokenStream {
     observer::expand(attr, item)
+}
+
+/// `#[suprnova::scopes(Model)]` — attribute macro that turns an
+/// `impl Model { ... }` block into a scope-aware impl.
+///
+/// Walks the impl block and, for every method whose signature matches
+/// `fn name(query: Builder<Self>[, args...]) -> Builder<Self>`, emits:
+///
+/// 1. **Static helper** on the model: `Model::active(args...)`.
+///    Starts from `Self::query()` and applies the scope.
+/// 2. **Builder extension** via a per-(scope, model) trait
+///    `HasScope_<scope>_<Model>`: `Builder<Model>::active(args...)` —
+///    chainable from any existing builder.
+///
+/// The original body is preserved as a renamed `__scope_<name>`
+/// inherent method on the model so both forms route through the same
+/// implementation.
+///
+/// Methods that don't match the scope signature (e.g.
+/// `fn display_name(&self) -> String`) pass through unchanged so
+/// scopes and ordinary inherent methods can share one impl block.
+///
+/// # Bringing the chainable form into scope
+///
+/// The emitted `HasScope_<scope>_<Model>` trait is `pub` and lives at
+/// module scope alongside the impl block. Inside the same module the
+/// `.<scope>()` call resolves automatically. From a different module
+/// the consumer must `use` the trait — the static helper does NOT
+/// require an extra `use`.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use suprnova::Builder;
+///
+/// #[suprnova::model(table = "users")]
+/// pub struct User {
+///     pub id: i64,
+///     pub name: String,
+///     pub active: bool,
+///     pub followers_count: i64,
+///     pub created_at: chrono::DateTime<chrono::Utc>,
+///     pub updated_at: chrono::DateTime<chrono::Utc>,
+/// }
+///
+/// #[suprnova::scopes(User)]
+/// impl User {
+///     pub fn active(query: Builder<Self>) -> Builder<Self> {
+///         query.filter("active", true)
+///     }
+///
+///     pub fn popular(query: Builder<Self>, threshold: i64) -> Builder<Self> {
+///         query.filter_op("followers_count", ">", threshold)
+///     }
+///
+///     // Not a scope — pass-through.
+///     pub fn display_name(&self) -> String {
+///         self.name.clone()
+///     }
+/// }
+///
+/// // Both call sites compile:
+/// // User::active().popular(500).get().await?;
+/// // User::query().filter_op("id", ">", 0).active().get().await?;
+/// ```
+#[proc_macro_attribute]
+pub fn scopes(attr: TokenStream, item: TokenStream) -> TokenStream {
+    scopes::expand(attr, item)
 }
 
 /// Derive macro for `Factory` — generates a sibling marker struct plus
