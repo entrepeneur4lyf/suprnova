@@ -146,7 +146,7 @@ pub async fn dispatch_cancellable<E: Event + Clone>(event: E) -> Result<(), Fram
 }
 
 /// Fire a non-cancellable event through the existing
-/// [`EventFacade`](crate::events::EventFacade). Thin wrapper so the
+/// [`crate::events::EventFacade`]. Thin wrapper so the
 /// macro-emitted dispatch sites read consistently with the
 /// cancellable counterpart.
 pub async fn dispatch_after<E: Event>(event: E) -> Result<(), FrameworkError> {
