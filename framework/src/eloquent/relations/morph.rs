@@ -210,6 +210,41 @@ where
     }
 }
 
+/// Soft-delete forwarding for `MorphMany<L, R>` when `R: SoftDeletes`.
+/// Mirrors [`HasMany`](super::HasMany)'s equivalent block — both wrap
+/// an inner `Builder<R>` and need only one-liner forwarding to the
+/// underlying `Builder::with_trashed` / `only_trashed`.
+impl<L, R> MorphMany<L, R>
+where
+    L: EloquentModel,
+    R: Model + crate::eloquent::SoftDeletes,
+    R: From<<R::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <R::Entity as sea_orm::EntityTrait>::Model: From<R>
+        + sea_orm::IntoActiveModel<<R::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <R::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<R::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    /// Widen the relation to include trashed children.
+    pub fn with_trashed(mut self) -> Self {
+        self.inner = self.inner.with_trashed();
+        self
+    }
+
+    /// Restrict the relation to *only* trashed children.
+    pub fn only_trashed(mut self) -> Self {
+        self.inner = self.inner.only_trashed();
+        self
+    }
+}
+
 impl<L, R> Relation for MorphMany<L, R>
 where
     L: EloquentModel,
@@ -335,6 +370,40 @@ where
     /// Execute and return the single matching child row (if any).
     pub async fn first(self) -> Result<Option<R>, FrameworkError> {
         self.inner.first().await
+    }
+}
+
+/// Soft-delete forwarding for `MorphOne<L, R>` when `R: SoftDeletes`.
+/// Same forwarding pattern as the [`MorphMany`] block above, applied
+/// through the inner `MorphMany`'s own `with_trashed` / `only_trashed`.
+impl<L, R> MorphOne<L, R>
+where
+    L: EloquentModel,
+    R: Model + crate::eloquent::SoftDeletes,
+    R: From<<R::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <R::Entity as sea_orm::EntityTrait>::Model: From<R>
+        + sea_orm::IntoActiveModel<<R::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <R::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<R::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    /// Widen the relation to include the trashed child if it exists.
+    pub fn with_trashed(mut self) -> Self {
+        self.inner = self.inner.with_trashed();
+        self
+    }
+
+    /// Restrict the relation to a trashed child.
+    pub fn only_trashed(mut self) -> Self {
+        self.inner = self.inner.only_trashed();
+        self
     }
 }
 

@@ -51,10 +51,18 @@ use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
 
 use crate::database::DB;
 use crate::eloquent::attrs::Attrs;
+use crate::eloquent::builder::Builder;
 use crate::eloquent::model::{json_value_to_sea_value, Model};
 use crate::eloquent::relations::{Relation, RelationKind};
 use crate::eloquent::EloquentModel;
 use crate::error::FrameworkError;
+
+/// Boxed builder-rewrite closure for [`BelongsToMany::with_trashed`] /
+/// [`BelongsToMany::only_trashed`]. Aliased so the field declaration
+/// satisfies clippy's `type_complexity` lint and reads as one type.
+/// Same shape as [`super::belongs_to::ScopeRewrite`][crate::eloquent::relations::belongs_to]
+/// — the soft-delete bound is captured at closure construction time.
+type ScopeRewrite<R> = Box<dyn FnOnce(Builder<R>) -> Builder<R> + Send>;
 
 /// Many-to-many relation from parent `L` to related `R` through pivot
 /// `P`. Constructed by the macro-emitted relation method
@@ -127,6 +135,13 @@ where
     /// on the pivot row and the loader surfaces both columns in the
     /// pivot context.
     with_timestamps: bool,
+    /// Deferred soft-delete scope rewrite applied to the related-row
+    /// query at [`Self::get`] / [`Self::first`] time. Only ever set
+    /// by [`Self::with_trashed`] / [`Self::only_trashed`], both gated
+    /// on `R: SoftDeletes`. See
+    /// [`BelongsTo::scope_rewrite`](super::belongs_to::BelongsTo) for
+    /// the matching closure-erasure pattern.
+    scope_rewrite: Option<ScopeRewrite<R>>,
     /// PhantomData carries `L`, `R`, `P` so the [`Relation`] impl can
     /// name `type Parent = L` / `type Target = R` without runtime
     /// fields. `fn() -> (L, R, P)` keeps the type covariant +
@@ -190,6 +205,7 @@ where
             related_key: "id".into(),
             pivot_columns: Vec::new(),
             with_timestamps: false,
+            scope_rewrite: None,
             _phantom: PhantomData,
         }
     }
@@ -502,11 +518,18 @@ where
             return Ok(Vec::new());
         }
 
-        // Fetch the related rows by IN-set on their PK column.
-        let related_rows: Vec<R> = R::query()
-            .filter_in(self.related_key.as_str(), related_ids.clone())
-            .get()
-            .await?;
+        // Fetch the related rows by IN-set on their PK column. Any
+        // pending scope rewrite (set by `with_trashed` / `only_trashed`
+        // on a soft-delete `R`) runs against the inner builder
+        // before `.get()`. Non-soft-delete `R`s never construct one,
+        // so this is a per-call indirection of a single `Option::map`.
+        let related_rows: Vec<R> = {
+            let mut q = R::query().filter_in(self.related_key.as_str(), related_ids.clone());
+            if let Some(rw) = self.scope_rewrite {
+                q = rw(q);
+            }
+            q.get().await?
+        };
 
         // Fetch the pivot rows attached to this parent.
         let pivot_rows: Vec<P> = P::query()
@@ -581,6 +604,59 @@ where
         Ok(row
             .and_then(|r| r.try_get::<i64>("", "__sn_count").ok())
             .unwrap_or(0))
+    }
+}
+
+/// Soft-delete scope modifiers for `BelongsToMany<L, R, P>` when the
+/// related (`R`) side is soft-deletable. The pivot table itself is
+/// never filtered for `deleted_at` — pivot rows are a join artefact,
+/// not a domain object that gets archived. Matches Laravel's
+/// `withTrashed()` shape: applies to the related table, not the
+/// intermediate. Future tasks can layer a separate
+/// `with_trashed_pivot` if a custom pivot model declares its own
+/// `soft_deletes`.
+impl<L, R, P> BelongsToMany<L, R, P>
+where
+    L: EloquentModel,
+    R: Model + crate::eloquent::SoftDeletes,
+    R: From<<R::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <R::Entity as sea_orm::EntityTrait>::Model: From<R>
+        + sea_orm::IntoActiveModel<<R::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <R::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<R::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+    P: Model + 'static,
+    P: From<<P::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <P::Entity as sea_orm::EntityTrait>::Model: From<P>
+        + sea_orm::IntoActiveModel<<P::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <P::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<P::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    /// Widen the related-row lookup to include trashed `R` rows.
+    pub fn with_trashed(mut self) -> Self {
+        self.scope_rewrite = Some(Box::new(|b: Builder<R>| b.with_trashed()));
+        self
+    }
+
+    /// Restrict the related-row lookup to *only* trashed `R` rows.
+    pub fn only_trashed(mut self) -> Self {
+        self.scope_rewrite = Some(Box::new(|b: Builder<R>| b.only_trashed()));
+        self
     }
 }
 

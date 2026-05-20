@@ -179,6 +179,44 @@ where
     }
 }
 
+/// Soft-delete scope modifiers for relations whose **target** model
+/// is soft-deletable. The forwarding methods route through the inner
+/// `Builder<R>`'s `with_trashed` / `only_trashed`, which themselves
+/// only exist when `R: SoftDeletes` — so this impl is the only place
+/// the soft-delete escape hatch is reachable from a `HasOne` chain.
+impl<L, R> HasOne<L, R>
+where
+    L: EloquentModel,
+    R: Model + crate::eloquent::SoftDeletes,
+    R: From<<R::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <R::Entity as sea_orm::EntityTrait>::Model: From<R>
+        + sea_orm::IntoActiveModel<<R::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <R::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<R::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    /// Widen the relation to include trashed children. Mirrors
+    /// `Builder<R>::with_trashed` on the inner builder.
+    pub fn with_trashed(mut self) -> Self {
+        self.inner = self.inner.with_trashed();
+        self
+    }
+
+    /// Restrict the relation to *only* trashed children. Mirrors
+    /// `Builder<R>::only_trashed` on the inner builder.
+    pub fn only_trashed(mut self) -> Self {
+        self.inner = self.inner.only_trashed();
+        self
+    }
+}
+
 impl<L, R> Relation for HasOne<L, R>
 where
     L: EloquentModel,

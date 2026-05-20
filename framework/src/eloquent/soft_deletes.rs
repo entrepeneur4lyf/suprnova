@@ -25,6 +25,8 @@
 use sea_orm::{EntityTrait, IntoActiveModel, PrimaryKeyTrait};
 use serde::Serialize;
 
+use crate::eloquent::builder::{Builder, WhereTerm};
+
 /// Marker trait emitted by `#[suprnova::model(soft_deletes)]`. Exposes
 /// the tombstone column name + a `is_trashed()` accessor. The
 /// inherent overrides (`delete` / `force_delete` / `restore`) live on
@@ -58,4 +60,74 @@ where
     /// NULL` at row materialisation time). Cheap accessor — does not
     /// touch the database.
     fn is_trashed(&self) -> bool;
+}
+
+/// Builder modifiers for soft-deleted models — `Self::with_trashed()`
+/// and `Self::only_trashed()` are *inherent* methods on the model
+/// struct (emitted by `#[suprnova::model(soft_deletes)]`) because
+/// they construct a fresh, unscoped builder. These two are the
+/// *chainable* variants that operate on an existing builder — they're
+/// what enables:
+///
+/// - `Model::query().with_trashed()` — equivalent to the static
+///   `Model::with_trashed()`, but discoverable from a builder
+///   you already have in hand.
+/// - `User::query().with_where(("posts", |q: Builder<Post>| q.with_trashed()))`
+///   — the only path through the eager-load closure surface for
+///   widening child scope, because the closure receives a
+///   `Builder<R>` not a `Post`-the-struct.
+/// - `user.posts().with_trashed()` — relation wrappers forward to
+///   these methods on their inner `Builder<R>`.
+///
+/// **Mutation strategy.** The soft-delete scope is installed by
+/// `Self::query()` as a direct `filter_null(deleted_at)` call (see
+/// the macro emission in
+/// `suprnova-macros/src/model/derive_eloquent.rs` for the
+/// `query_override`). The Vec<WhereTerm> is the canonical storage,
+/// so `with_trashed` retains every term that isn't the tombstone
+/// null-check; `only_trashed` swaps it for `NotNull(deleted_at)`.
+/// Both append the `without_global_scope("soft_deletes")` tag so
+/// future custom-scope machinery in 10C can layer on top without
+/// double-applying.
+impl<M> Builder<M>
+where
+    M: SoftDeletes,
+    M: From<<M::Entity as EntityTrait>::Model>,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    /// Widen the query to include trashed rows. Removes the
+    /// `deleted_at IS NULL` term the global scope installed via
+    /// `Self::query()`. Idempotent — calling it twice does nothing
+    /// the first call didn't already do.
+    pub fn with_trashed(mut self) -> Self {
+        let col = M::deleted_at_column();
+        self.where_terms.retain(|t| !matches!(t, WhereTerm::Null(c) if c == col));
+        self.global_scopes_disabled.push("soft_deletes");
+        self
+    }
+
+    /// Restrict the query to *only* trashed rows. Removes the
+    /// `deleted_at IS NULL` term and appends `deleted_at IS NOT NULL`.
+    /// Idempotent.
+    pub fn only_trashed(mut self) -> Self {
+        let col = M::deleted_at_column();
+        self.where_terms.retain(|t| !matches!(t, WhereTerm::Null(c) if c == col));
+        // Avoid double-stamping NotNull on repeated calls.
+        if !self
+            .where_terms
+            .iter()
+            .any(|t| matches!(t, WhereTerm::NotNull(c) if c == col))
+        {
+            self = self.filter_not_null(col);
+        }
+        self.global_scopes_disabled.push("soft_deletes");
+        self
+    }
 }

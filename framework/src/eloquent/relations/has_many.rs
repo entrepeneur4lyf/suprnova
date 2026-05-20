@@ -229,6 +229,42 @@ where
     }
 }
 
+/// Soft-delete scope modifiers for `HasMany<L, R>` where `R` is a
+/// soft-delete model. See [`HasOne`](super::HasOne)'s identical impl
+/// block for the rationale: forwards `with_trashed` / `only_trashed`
+/// to the inner `Builder<R>`. Without this, `user.posts().get()`
+/// would always be locked to alive children.
+impl<L, R> HasMany<L, R>
+where
+    L: EloquentModel,
+    R: Model + crate::eloquent::SoftDeletes,
+    R: From<<R::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <R::Entity as sea_orm::EntityTrait>::Model: From<R>
+        + sea_orm::IntoActiveModel<<R::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <R::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<R::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    /// Widen the relation to include trashed children.
+    pub fn with_trashed(mut self) -> Self {
+        self.inner = self.inner.with_trashed();
+        self
+    }
+
+    /// Restrict the relation to *only* trashed children.
+    pub fn only_trashed(mut self) -> Self {
+        self.inner = self.inner.only_trashed();
+        self
+    }
+}
+
 impl<L, R> Relation for HasMany<L, R>
 where
     L: EloquentModel,

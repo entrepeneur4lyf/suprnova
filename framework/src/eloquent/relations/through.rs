@@ -7,6 +7,38 @@
 //! model whose FK column points at `A`, and `C` is the final target
 //! whose FK column points at `B`.
 //!
+//! ## Soft-delete interaction (v1)
+//!
+//! Through relations use raw `INNER JOIN` SQL rather than the
+//! `Builder<C>` pipeline, so the global soft-delete scope that
+//! `C::query()` would install (`WHERE c.deleted_at IS NULL`) is
+//! **not** applied. Likewise for the intermediate `B`. This means:
+//!
+//! - A `HasManyThrough<Country, User, Post>` where `Post` is
+//!   soft-deletable will return trashed posts alongside alive ones.
+//! - If `User` (the intermediate) is soft-deletable, trashed users
+//!   still participate in the JOIN.
+//!
+//! This diverges from Laravel's `hasManyThrough` (which DOES filter
+//! the intermediate and the target by `deleted_at IS NULL` when those
+//! models declare `SoftDeletes`). Pinning the current behaviour in
+//! `eloquent_soft_deletes_relations.rs` keeps a regression-tracker on
+//! the gap; the proper fix lives in P12 (Through SQL stitches in the
+//! deleted_at filters when both `B` and `C` carry the trait bound, via
+//! a sealed `MaybeSoftDelete` blanket trait the macro implements for
+//! every model).
+//!
+//! Until then, callers needing scoped Through reads should fall back
+//! to chaining the two relations explicitly:
+//!
+//! ```ignore
+//! // Instead of `country.posts().get()`, do:
+//! let users: Vec<User> = country.users().get().await?;
+//! let user_ids: Vec<i64> = users.iter().map(|u| u.id).collect();
+//! let posts = Post::query().filter_in("user_id", user_ids).get().await?;
+//! // Both User and Post scopes apply to their respective query.
+//! ```
+//!
 //! Laravel example: `Country` has many `User`s and `User` has many
 //! `Post`s. `Country::posts()` is a HasManyThrough that returns every
 //! `Post` belonging to any `User` in that country — a two-hop traversal.

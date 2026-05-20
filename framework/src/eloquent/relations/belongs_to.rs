@@ -22,10 +22,18 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use crate::eloquent::builder::Builder;
 use crate::eloquent::model::Model;
 use crate::eloquent::relations::{Relation, RelationKind};
 use crate::eloquent::EloquentModel;
 use crate::error::FrameworkError;
+
+/// Boxed builder-rewrite closure used by [`BelongsTo::with_trashed`] /
+/// [`BelongsTo::only_trashed`] to defer the `P: SoftDeletes`-gated
+/// scope mutation past the `BelongsTo` struct's type erasure. Aliased
+/// for clippy's type-complexity rule; the field would otherwise read
+/// as a wall-of-bounds.
+type ScopeRewrite<P> = Box<dyn FnOnce(Builder<P>) -> Builder<P> + Send>;
 
 /// One-to-one inverse: child `C` carries the FK pointing at parent `P`.
 ///
@@ -64,6 +72,18 @@ where
     /// PK column name on the parent table (defaults to `"id"`,
     /// configurable via `lk = "..."` at the macro declaration site).
     owner_key: String,
+    /// Builder-rewrite hook applied at lookup time. `None` means the
+    /// parent's `query()` global scope decides what's visible (which,
+    /// for a soft-delete `P`, hides trashed rows).
+    ///
+    /// When set, the function is called on the lookup builder right
+    /// before `first().await`. The only callers are `with_trashed()`
+    /// and `only_trashed()`, both gated on `P: SoftDeletes` — which
+    /// is what makes the `Builder::<P>::with_trashed()` call inside
+    /// the boxed closure type-check. Erasing the `P: SoftDeletes`
+    /// bound into a `Box<dyn FnOnce>` is how we avoid threading the
+    /// bound through `BelongsTo::first` for non-soft-delete parents.
+    scope_rewrite: Option<ScopeRewrite<P>>,
     /// Optional default-row factory. Invoked by [`Self::first`] when
     /// the FK is null OR the parent lookup returns no row.
     ///
@@ -76,6 +96,7 @@ where
     /// PhantomData for the child type — see `HasOne::_phantom`.
     _phantom: PhantomData<fn() -> C>,
 }
+
 
 // The `P: Model` bound's where-clause is re-elaborated for the same
 // reason `Builder<M: Model>` and `HasOne<L, R>` do — `first()` calls
@@ -113,6 +134,7 @@ where
             parent_key_value,
             foreign_key,
             owner_key,
+            scope_rewrite: None,
             default_fn: None,
             _phantom: PhantomData,
         }
@@ -151,6 +173,13 @@ where
     /// - `Some(default_fn())` — FK null OR parent missing, AND
     ///   `with_default` was installed.
     /// - `None` — FK null OR parent missing, AND no `with_default`.
+    ///
+    /// When the relation has been chained with `with_trashed()` /
+    /// `only_trashed()` (only reachable for `P: SoftDeletes`), the
+    /// builder is rewritten before the lookup runs. The path is
+    /// implemented via the `__apply_soft_delete_scope` helper that's
+    /// only present in the `P: SoftDeletes` impl block — calls
+    /// monomorphise away to a no-op for non-soft-delete parents.
     pub async fn first(self) -> Result<Option<P>, FrameworkError> {
         let key_value = match &self.parent_key_value {
             None => {
@@ -159,10 +188,11 @@ where
             }
             Some(v) => v.clone(),
         };
-        let parent = P::query()
-            .filter(self.owner_key.as_str(), key_value)
-            .first()
-            .await?;
+        let mut builder = P::query().filter(self.owner_key.as_str(), key_value);
+        if let Some(rewrite) = self.scope_rewrite {
+            builder = rewrite(builder);
+        }
+        let parent = builder.first().await?;
         match parent {
             Some(p) => Ok(Some(p)),
             None => Ok(self.default_fn.as_ref().map(|f| f())),
@@ -177,6 +207,44 @@ where
     #[doc(hidden)]
     pub fn __default_fn(&self) -> Option<Arc<dyn Fn() -> P + Send + Sync>> {
         self.default_fn.clone()
+    }
+}
+
+/// Soft-delete scope modifiers for `BelongsTo<C, P>` where the parent
+/// `P` is soft-deletable. Mirrors the `HasMany` / `HasOne` impl
+/// blocks; the type-erased closure stored in `scope_rewrite` is the
+/// concession `BelongsTo` makes for not holding an eager
+/// `Builder<P>` field — the closure carries the `P: SoftDeletes` bound
+/// past the type-erasure boundary so `BelongsTo::first` can stay
+/// generic over plain `P: Model`.
+impl<C, P> BelongsTo<C, P>
+where
+    C: EloquentModel,
+    P: Model + crate::eloquent::SoftDeletes,
+    P: From<<P::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <P::Entity as sea_orm::EntityTrait>::Model: From<P>
+        + sea_orm::IntoActiveModel<<P::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <P::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<P::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    /// Widen the lookup to include trashed parents.
+    pub fn with_trashed(mut self) -> Self {
+        self.scope_rewrite = Some(Box::new(|b: Builder<P>| b.with_trashed()));
+        self
+    }
+
+    /// Restrict the lookup to *only* trashed parents.
+    pub fn only_trashed(mut self) -> Self {
+        self.scope_rewrite = Some(Box::new(|b: Builder<P>| b.only_trashed()));
+        self
     }
 }
 
