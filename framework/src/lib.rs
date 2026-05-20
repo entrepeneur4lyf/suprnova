@@ -228,6 +228,16 @@ pub use eloquent::{
     ModelEntry, MorphMany, MorphOne, MorphTo, MorphToMany, MorphTypeEntry, MorphedByMany, Prunable,
     PrunerEntry, Relation, RelationEntry, RelationKind, ReplicateExt, SoftDeletes, Touchable,
 };
+// Phase 10C T1 — model lifecycle events. The 16 per-type event
+// structs (`Created`, `Saving`, ...) are macro-emitted into each
+// model's `events::` submodule; the cross-model shared types
+// (`EventResult`, listener traits, dispatch helpers) re-export here
+// so user code reaches them as `suprnova::EventResult`,
+// `suprnova::CancellableListener`, etc.
+pub use eloquent::events::{
+    dispatch_after, dispatch_cancellable, listen_cancellable, CancellableListener, EventResult,
+    ModelEventHooks,
+};
 // `casts!` macro is `#[macro_export]` in eloquent/casts/mod.rs — re-exported
 // at the crate root automatically. No `pub use` needed here.
 pub use notifications::{

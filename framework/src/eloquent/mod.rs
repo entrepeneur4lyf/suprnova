@@ -15,6 +15,7 @@ pub mod builder;
 pub mod casts;
 pub mod collection;
 pub mod console;
+pub mod events;
 pub mod fillable;
 pub mod model;
 pub mod prunable;
