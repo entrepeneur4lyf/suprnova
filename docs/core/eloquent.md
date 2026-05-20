@@ -861,6 +861,20 @@ loader writes into the child's `<name>_type` column on insert and
 filters by on read. Without `morph_type`, the framework derives the
 type-string from `to_snake(struct_name)`.
 
+`MorphTo` dispatch — how the per-family enum picks the right variant
+— consults the runtime morph registry (the inventory populated by
+every `#[suprnova::model(morph_type = "...")]` declaration). For each
+declared target, the fetch helper looks up the target's `TypeId`,
+reads the registered `morph_type` string, and compares it against the
+stored `<name>_type` value on the child row. First match wins, in
+declaration order. Targets without an explicit `morph_type` attribute
+fall back to `to_snake(target_type_name)` — the same default the
+parent-side `MorphMany` / `MorphOne` uses to stamp the type-string at
+write time, so the two sides stay aligned. This means custom
+`morph_type` values (e.g. `morph_type = "blog_post"` on a struct
+named `Post`, or any non-conventional string) dispatch correctly
+without changes to the declaration site.
+
 ### `MorphOne<R>` and `MorphMany<R>` — parent side
 
 The inverse direction of `MorphTo`: a parent type declares the

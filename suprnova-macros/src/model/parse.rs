@@ -824,21 +824,31 @@ fn parse_one_relation(input: ParseStream) -> Result<RelationDecl> {
                 ));
             }
             Some(targets) => {
-                // Detect overlapping dispatch keys across targets. The
-                // fetch helper emits a `match self.morph_type.as_str()`
-                // with one arm per target; each arm patterns every
-                // plausible morph-type key for its target
-                // (snake / no-underscore / Laravel-prefix-stripped).
-                // If two targets share a key, the second arm is
-                // unreachable and stored rows carrying that key
-                // silently dispatch to the first target. Rust emits
-                // `unreachable_patterns` only as a warning, so the
-                // mis-dispatch slips past CI.
+                // Heuristic parse-time safety net for overlapping
+                // dispatch keys across targets. Phase 10B P2 moved
+                // the authoritative runtime dispatch onto the T8
+                // morph registry: each target's TypeId resolves to
+                // its registered `morph_type` string via
+                // `find_morph_type_by_id`, with a snake-cased
+                // type-name fallback for implicit defaults; the
+                // first target whose resolved string matches
+                // `self.morph_type` wins.
+                //
+                // The parser still can't see the registry — it's
+                // populated at link time, not at macro expansion —
+                // so we keep this heuristic check to catch the
+                // obvious structural collisions up front and give
+                // the user a clear compile error rather than a
+                // surprising first-match-wins outcome at runtime.
                 //
                 // Example: `targets = [MorphPost, Post]` —
-                // `MorphPost` yields `["morph_post", "morphpost", "post"]`
-                // and `Post` yields `["post"]`. Stored `"post"`
-                // dispatches to `MorphPost`, not `Post`.
+                // `MorphPost` yields `["morph_post", "morphpost",
+                // "post"]` and `Post` yields `["post"]`. Whether
+                // stored `"post"` dispatches to `MorphPost` or
+                // `Post` at runtime depends on which one carries
+                // `morph_type = "post"` (or, absent the attribute,
+                // is declared first). Failing fast at the
+                // declaration site is the safer ergonomic.
                 use std::collections::BTreeMap;
                 // Last path segment of the type, e.g. `MorphPost` from
                 // `crate::models::MorphPost`. Falls back to the full

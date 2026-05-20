@@ -823,13 +823,18 @@ fn morph_type_of(input: &ModelInput) -> String {
         .unwrap_or_else(|| to_snake(&input.item.ident.to_string()))
 }
 
-/// Generate the set of candidate morph-type match keys for one target
-/// in a `MorphTo`'s per-family fetch helper. Since the macro for the
-/// `MorphTo` declaration site can't introspect another struct's
-/// `morph_type = "..."` attribute (it lives in a separate macro
-/// expansion), we emit ALL plausible match keys so a target declared
-/// with the default OR with one of the obvious shortenings still
-/// dispatches.
+/// Heuristic set of structural morph-type match keys for one target,
+/// used ONLY by parse-time overlap detection. Phase 10B P2 moved the
+/// runtime fetch-helper dispatch onto the T8 `MorphTypeEntry`
+/// inventory (`find_morph_type_by_id`) — the heuristic match-key
+/// surface is no longer authoritative at runtime.
+///
+/// The macro expanding a `MorphTo` declaration can't see another
+/// struct's `morph_type = "..."` attribute (it lives in a separate
+/// macro invocation), so the parse-time check uses these structural
+/// shorthands to catch the obvious collision cases at declaration
+/// time. Runtime is authoritative; the parse-time check is a heuristic
+/// safety net.
 ///
 /// For a target named `MorphPost`, this yields:
 /// - `"morph_post"` — `to_snake(TargetTypeName)` (the macro default)
@@ -842,14 +847,13 @@ fn morph_type_of(input: &ModelInput) -> String {
 /// `["post"]` — `to_snake`, no-underscore, and the no-prefix branch
 /// all produce the same string.
 ///
-/// T8's registry adds a runtime warn-log if a target's actual stored
-/// `morph_type` value doesn't match any of these candidates.
-///
 /// Exposed to `parse.rs` so the parser can detect overlapping dispatch
 /// keys across a `MorphTo`'s declared targets at declaration time
 /// (e.g. `targets = [MorphPost, Post]` — both produce `"post"` and
-/// the second match arm would be unreachable, with stored `"post"`
-/// silently dispatching to `MorphPost`).
+/// were ambiguous under the old heuristic dispatch; even though P2
+/// now resolves the ambiguity at runtime via the registry, the
+/// parse-time check still catches the obvious cases up front so the
+/// user gets a clearer error than "first match wins").
 pub(super) fn morph_target_keys(ty: &syn::Type) -> Vec<String> {
     let name = match ty {
         syn::Type::Path(p) => p
@@ -1381,33 +1385,73 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                 })
                 .collect();
 
-            // Per-target match arms inside `<Name>MorphFetch::get()`.
-            // Each arm enumerates all plausible morph-type keys for
-            // the target (snake / no-underscore / Laravel short form)
-            // and on a hit, calls `Target::find(id)` through the
-            // standard Eloquent CRUD path. Misses (None) and unknown
-            // type-strings both fall through to the `Unknown` variant.
+            // Per-target if-branches inside `<Name>MorphFetch::get()`.
+            // Each branch consults the runtime morph registry (T8's
+            // `MorphTypeEntry` inventory) for the target's `TypeId`
+            // to get the canonical `morph_type` string the parent
+            // declared via `#[suprnova::model(morph_type = "...")]`.
+            // On a match, the branch calls `Target::find(id)` through
+            // the standard Eloquent CRUD path. Misses (None) and
+            // unknown type-strings fall through to the `Unknown`
+            // variant.
+            //
+            // Registry-first is what makes user-declared custom
+            // `morph_type` strings dispatch correctly (e.g. a target
+            // named `Post` carrying `morph_type = "blog_post"` —
+            // none of the structural heuristics on the type name
+            // would have matched the runtime `"blog_post"`).
+            //
+            // When the target struct DIDN'T declare an explicit
+            // `morph_type` attribute, it's absent from the registry
+            // (Phase 10B T8's `morph_type_not_registered_for_non_morph_models`
+            // pins this). In that case we fall back to comparing
+            // `self.morph_type` against `to_snake(TypeName)` — the
+            // same convention the parent's `MorphMany` / `MorphOne`
+            // uses to STAMP the type-string into the child column
+            // (see `morph_type_of` in this file). Preserves the
+            // documented implicit-default contract in
+            // `docs/core/eloquent.md#MorphTo`.
             let mut fetch_arms: Vec<TokenStream> = Vec::with_capacity(targets.len());
             for (ty, variant) in targets.iter().zip(variant_idents.iter()) {
-                let keys = morph_target_keys(ty);
-                let key_lits = keys
-                    .iter()
-                    .map(|k| quote! { #k })
-                    .collect::<Vec<_>>();
+                // The snake-form fallback string for the implicit-
+                // default path. Computed at macro-expansion time from
+                // the target type's last path segment.
+                let target_name = match ty {
+                    syn::Type::Path(p) => p
+                        .path
+                        .segments
+                        .last()
+                        .map(|seg| seg.ident.to_string())
+                        .unwrap_or_else(|| quote::quote!(#ty).to_string()),
+                    _ => quote::quote!(#ty).to_string(),
+                };
+                let snake_fallback = to_snake(&target_name);
                 fetch_arms.push(quote! {
-                    #( #key_lits )|* => {
-                        let row: ::core::option::Option<#ty> =
-                            <#ty as ::suprnova::eloquent::Model>::find(self.morph_id).await?;
-                        match row {
-                            ::core::option::Option::Some(r) => {
-                                ::core::result::Result::Ok(#enum_ident::#variant(r))
-                            }
-                            ::core::option::Option::None => {
-                                ::core::result::Result::Ok(#enum_ident::Unknown(
-                                    self.morph_type,
-                                    self.morph_id,
-                                ))
-                            }
+                    {
+                        // Look up the target's registered `morph_type`
+                        // string via the T8 inventory. When the target
+                        // didn't declare `morph_type = "..."`, the
+                        // registry returns None and we compare against
+                        // the snake-cased type name — the same default
+                        // the parent-side MorphMany / MorphOne uses to
+                        // write the type-string column.
+                        let registered: ::std::option::Option<&'static str> =
+                            ::suprnova::find_morph_type_by_id(
+                                ::std::any::TypeId::of::<#ty>(),
+                            )
+                            .map(|e| e.morph_type);
+                        let expected: &str = registered.unwrap_or(#snake_fallback);
+                        if expected == self.morph_type.as_str() {
+                            let row: ::core::option::Option<#ty> =
+                                <#ty as ::suprnova::eloquent::Model>::find(self.morph_id).await?;
+                            return ::core::result::Result::Ok(match row {
+                                ::core::option::Option::Some(r) => {
+                                    #enum_ident::#variant(r)
+                                }
+                                ::core::option::Option::None => {
+                                    #enum_ident::Unknown(self.morph_type, self.morph_id)
+                                }
+                            });
                         }
                     }
                 });
@@ -1448,16 +1492,22 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                     /// `<name>_type` column doesn't match any declared
                     /// target OR when the looked-up row is absent
                     /// (legacy / soft-deleted / renamed model).
+                    ///
+                    /// Each declared target is checked in declaration
+                    /// order via the T8 morph registry: the runtime
+                    /// `<name>_type` string is compared against the
+                    /// target's registered `morph_type` value, with a
+                    /// snake-cased type-name fallback for targets that
+                    /// didn't declare an explicit `morph_type`. First
+                    /// match wins.
                     pub async fn get(
                         self,
                     ) -> ::core::result::Result<#enum_ident, ::suprnova::FrameworkError> {
-                        match self.morph_type.as_str() {
-                            #(#fetch_arms)*
-                            _ => ::core::result::Result::Ok(#enum_ident::Unknown(
-                                self.morph_type,
-                                self.morph_id,
-                            )),
-                        }
+                        #(#fetch_arms)*
+                        ::core::result::Result::Ok(#enum_ident::Unknown(
+                            self.morph_type,
+                            self.morph_id,
+                        ))
                     }
                 }
 
