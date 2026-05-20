@@ -91,16 +91,24 @@ where
     /// `deleted_at IS NULL` filter); the inherent shadows the trait
     /// default for the soft-delete path. Callers that need to bypass
     /// the scope use `Self::with_trashed()` instead.
+    ///
+    /// Dispatches `Retrieving` before the SELECT and `Retrieved`
+    /// when a row is hydrated (no dispatch when the row is missing).
     async fn find<K>(id: K) -> Result<Option<Self>, FrameworkError>
     where
         K: Into<<<Self::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType> + Send,
     {
+        Self::__dispatch_retrieving().await?;
         let db = DB::connection()?;
         let row = Self::Entity::find_by_id(id)
             .one(db.inner())
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        Ok(row.map(Self::from))
+        let hydrated = row.map(Self::from);
+        if let Some(ref m) = hydrated {
+            Self::__dispatch_retrieved(m).await?;
+        }
+        Ok(hydrated)
     }
 
     /// Look up a row by primary key. Returns `FrameworkError::ModelNotFound`
@@ -126,6 +134,9 @@ where
     /// Fetch every row whose PK is in `ids`. Result preserves the
     /// order of `ids` (not the database's natural order). Unmatched
     /// IDs are silently dropped.
+    ///
+    /// Dispatches `Retrieving` once before the SELECT and
+    /// `Retrieved` once per hydrated row.
     async fn find_many<I, K>(ids: I) -> Result<Vec<Self>, FrameworkError>
     where
         I: IntoIterator<Item = K> + Send,
@@ -141,6 +152,7 @@ where
         if id_vec.is_empty() {
             return Ok(Vec::new());
         }
+        Self::__dispatch_retrieving().await?;
         let pk = <Self::Entity as EntityTrait>::PrimaryKey::iter()
             .next()
             .expect("model has at least one primary-key column");
@@ -157,21 +169,32 @@ where
                 (model.primary_key_value(), model)
             })
             .collect();
-        let ordered = id_vec
+        let ordered: Vec<Self> = id_vec
             .into_iter()
             .filter_map(|id| by_id.remove(&id))
             .collect();
+        for row in &ordered {
+            Self::__dispatch_retrieved(row).await?;
+        }
         Ok(ordered)
     }
 
     /// Fetch every row in the table.
+    ///
+    /// Dispatches `Retrieving` once before the SELECT and
+    /// `Retrieved` once per hydrated row.
     async fn all() -> Result<Vec<Self>, FrameworkError> {
+        Self::__dispatch_retrieving().await?;
         let db = DB::connection()?;
         let rows = Self::Entity::find()
             .all(db.inner())
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        Ok(rows.into_iter().map(Self::from).collect())
+        let out: Vec<Self> = rows.into_iter().map(Self::from).collect();
+        for row in &out {
+            Self::__dispatch_retrieved(row).await?;
+        }
+        Ok(out)
     }
 
     /// Start a new builder against this model. T4 ships a SQL-only

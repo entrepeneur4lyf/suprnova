@@ -1060,6 +1060,95 @@ pub struct T1NoListenersUser {
     pub email: String,
 }
 
+#[suprnova::model(table = "t1_saving_cancel_users")]
+pub struct T1SavingCancelUser {
+    pub id: i64,
+    pub email: String,
+}
+
+pub struct CancelSavingT1;
+
+#[async_trait]
+impl CancellableListener<t1_saving_cancel_user::events::Saving> for CancelSavingT1 {
+    async fn handle(&self, _event: &t1_saving_cancel_user::events::Saving) -> EventResult {
+        EventResult::cancel("saving vetoed")
+    }
+}
+
+#[tokio::test]
+async fn saving_cancel_aborts_both_create_and_update() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t1_saving_cancel_users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL)",
+    )
+    .await
+    .unwrap();
+
+    listen_cancellable::<t1_saving_cancel_user::events::Saving, _>(std::sync::Arc::new(
+        CancelSavingT1,
+    ))
+    .await;
+
+    // Saving cancels create (fires after Creating-which-passes).
+    let err = T1SavingCancelUser::create(attrs! { email: "x@x.com" })
+        .await
+        .unwrap_err();
+    assert!(format!("{err}").contains("saving vetoed"));
+
+    let rows = T1SavingCancelUser::all().await.unwrap();
+    assert!(
+        rows.is_empty(),
+        "Saving cancel must abort the INSERT — no row persisted"
+    );
+}
+
+#[suprnova::model(table = "t1_updating_cancel_users")]
+pub struct T1UpdatingCancelUser {
+    pub id: i64,
+    pub email: String,
+}
+
+pub struct CancelUpdatingT1;
+
+#[async_trait]
+impl CancellableListener<t1_updating_cancel_user::events::Updating> for CancelUpdatingT1 {
+    async fn handle(&self, _event: &t1_updating_cancel_user::events::Updating) -> EventResult {
+        EventResult::cancel("updating vetoed")
+    }
+}
+
+#[tokio::test]
+async fn updating_cancel_aborts_update_row_unchanged() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t1_updating_cancel_users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL)",
+    )
+    .await
+    .unwrap();
+
+    listen_cancellable::<t1_updating_cancel_user::events::Updating, _>(std::sync::Arc::new(
+        CancelUpdatingT1,
+    ))
+    .await;
+
+    let u = T1UpdatingCancelUser::create(attrs! { email: "before@x.com" })
+        .await
+        .unwrap();
+    let id = u.id;
+
+    let err = u
+        .update(attrs! { email: "after@x.com" })
+        .await
+        .unwrap_err();
+    assert!(format!("{err}").contains("updating vetoed"));
+
+    let unchanged = T1UpdatingCancelUser::find(id).await.unwrap().unwrap();
+    assert_eq!(
+        unchanged.email, "before@x.com",
+        "Updating cancel must leave the row at its pre-update value"
+    );
+}
+
 #[tokio::test]
 async fn no_listener_fast_path_succeeds_silently() {
     // Models without any registered listeners must complete their
