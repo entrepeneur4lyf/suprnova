@@ -26,48 +26,149 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::Result;
 
-use super::parse::{ModelInput, RelationDecl, RelationKindAttr};
+use super::parse::{to_snake, ModelInput, RelationDecl, RelationKindAttr, RelationOpt};
 
 /// Top-level entry point. Emits every relation-related artifact for
-/// the model (dispatchers + accessors + inventory submissions).
+/// the model (dispatchers + accessors + inventory submissions + the
+/// per-kind relation methods).
 pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     let struct_ident = &input.item.ident;
-    let dispatchers = emit_dispatchers(struct_ident);
+    let dispatchers = emit_dispatchers(input)?;
     let pivot_accessor = emit_pivot_accessor(struct_ident);
+    let with_helper = emit_with_helper(struct_ident);
+    let dispatch_impl = emit_dispatch_impl(struct_ident);
 
-    // Build per-relation accessors + inventory submissions. The
-    // accessors live in their own `impl Self { ... }` block, kept
-    // separate from the dispatchers so a subsequent
-    // `cargo expand` clearly shows which methods came from which
-    // relation declarations.
-    let (relation_accessors, relation_inventory): (Vec<_>, Vec<_>) = input
-        .relations
-        .as_deref()
-        .unwrap_or(&[])
-        .iter()
-        .map(|rel| {
-            (
-                emit_relation_accessors(struct_ident, rel),
-                emit_relation_inventory(struct_ident, rel),
-            )
-        })
-        .unzip();
+    // Build per-relation accessors + relation methods + inventory
+    // submissions. Each lives in its own `impl Self { ... }` block —
+    // a subsequent `cargo expand` clearly shows which methods came
+    // from which relation declarations.
+    let mut relation_methods: Vec<TokenStream> = Vec::new();
+    let mut relation_accessors: Vec<TokenStream> = Vec::new();
+    let mut relation_inventory: Vec<TokenStream> = Vec::new();
+    for rel in input.relations.as_deref().unwrap_or(&[]) {
+        relation_methods.push(emit_relation_method(input, rel)?);
+        relation_accessors.push(emit_relation_accessors(struct_ident, rel));
+        relation_inventory.push(emit_relation_inventory(struct_ident, rel));
+    }
 
     Ok(quote! {
         #dispatchers
         #pivot_accessor
+        #with_helper
+        #dispatch_impl
+        #( #relation_methods )*
         #( #relation_accessors )*
         #( #relation_inventory )*
     })
 }
 
-/// Emit the four dispatcher methods + skeleton matches. T1 ships them
-/// as no-relation error paths; T2-T7 add a `<name> => { ... }` arm
-/// each per concrete relation. The `predicate` parameter on
-/// `__eager_load` carries the user's optional `with_where` closure
-/// type-erased — concrete arms downcast it before applying.
-fn emit_dispatchers(struct_ident: &syn::Ident) -> TokenStream {
+/// Emit the `EagerLoadDispatch` impl that lets `Builder<M>::get` call
+/// `M::eager_load(...)` without needing inherent-method access. Each
+/// method delegates straight to the matching inherent dispatcher
+/// (`__eager_load`, `__count_relation`, `__aggregate_relation`,
+/// `__recurse_eager_load`).
+fn emit_dispatch_impl(struct_ident: &syn::Ident) -> TokenStream {
     quote! {
+        impl ::suprnova::EagerLoadDispatch for #struct_ident {
+            fn eager_load<'a>(
+                relation: &'a str,
+                parents: &'a mut [&'a mut Self],
+                db: &'a ::suprnova::sea_orm::DatabaseConnection,
+                predicate: ::core::option::Option<
+                    ::std::boxed::Box<dyn ::std::any::Any + ::core::marker::Send + ::core::marker::Sync>,
+                >,
+            ) -> ::core::pin::Pin<
+                ::std::boxed::Box<
+                    dyn ::core::future::Future<
+                            Output = ::core::result::Result<(), ::suprnova::FrameworkError>,
+                        > + ::core::marker::Send + 'a,
+                >,
+            > {
+                ::std::boxed::Box::pin(Self::__eager_load(relation, parents, db, predicate))
+            }
+
+            fn count_relation<'a>(
+                relation: &'a str,
+                parents: &'a mut [&'a mut Self],
+                db: &'a ::suprnova::sea_orm::DatabaseConnection,
+            ) -> ::core::pin::Pin<
+                ::std::boxed::Box<
+                    dyn ::core::future::Future<
+                            Output = ::core::result::Result<(), ::suprnova::FrameworkError>,
+                        > + ::core::marker::Send + 'a,
+                >,
+            > {
+                ::std::boxed::Box::pin(Self::__count_relation(relation, parents, db))
+            }
+
+            fn aggregate_relation<'a>(
+                relation: &'a str,
+                column: &'a str,
+                kind: ::suprnova::AggregateKind,
+                parents: &'a mut [&'a mut Self],
+                db: &'a ::suprnova::sea_orm::DatabaseConnection,
+            ) -> ::core::pin::Pin<
+                ::std::boxed::Box<
+                    dyn ::core::future::Future<
+                            Output = ::core::result::Result<(), ::suprnova::FrameworkError>,
+                        > + ::core::marker::Send + 'a,
+                >,
+            > {
+                ::std::boxed::Box::pin(Self::__aggregate_relation(relation, column, kind, parents, db))
+            }
+
+            fn recurse_eager_load<'a>(
+                &'a mut self,
+                relation: &'a str,
+                rest: &'a str,
+                db: &'a ::suprnova::sea_orm::DatabaseConnection,
+            ) -> ::core::pin::Pin<
+                ::std::boxed::Box<
+                    dyn ::core::future::Future<
+                            Output = ::core::result::Result<(), ::suprnova::FrameworkError>,
+                        > + ::core::marker::Send + 'a,
+                >,
+            > {
+                ::std::boxed::Box::pin(self.__recurse_eager_load(relation, rest, db))
+            }
+        }
+    }
+}
+
+/// Emit the four dispatcher methods + per-relation match arms.
+///
+/// T1 shipped the skeletons (no-relation error path only); T2 adds
+/// the `HasOne` and `BelongsTo` arms. T3-T7 will keep extending the
+/// per-relation arm lists as more relation kinds land. The
+/// `predicate` parameter on `__eager_load` carries the user's
+/// optional `with_where` closure type-erased — concrete arms downcast
+/// it before applying (T9 wires the closure plumbing; T2 only fills
+/// the `HasOne` / `BelongsTo` arms which ignore the predicate for
+/// now).
+fn emit_dispatchers(input: &ModelInput) -> Result<TokenStream> {
+    let struct_ident = &input.item.ident;
+
+    // Collect per-kind match arms for the four dispatchers.
+    let mut eager_arms: Vec<TokenStream> = Vec::new();
+    let mut count_arms: Vec<TokenStream> = Vec::new();
+    let mut aggregate_arms: Vec<TokenStream> = Vec::new();
+    let mut recurse_arms: Vec<TokenStream> = Vec::new();
+    for rel in input.relations.as_deref().unwrap_or(&[]) {
+        if let Some(arm) = emit_eager_arm(input, rel)? {
+            eager_arms.push(arm);
+        }
+        if let Some(arm) = emit_count_arm(input, rel)? {
+            count_arms.push(arm);
+        }
+        if let Some(arm) = emit_aggregate_arm(input, rel)? {
+            aggregate_arms.push(arm);
+        }
+        if let Some(arm) = emit_recurse_arm(input, rel)? {
+            recurse_arms.push(arm);
+        }
+    }
+
+    Ok(quote! {
         impl #struct_ident {
             /// Eager-load a relation by name. Called by `Builder::with`
             /// (T9) and `Collection::load_missing` (T9) to populate
@@ -87,8 +188,10 @@ fn emit_dispatchers(struct_ident: &syn::Ident) -> TokenStream {
                     ::std::boxed::Box<dyn ::std::any::Any + ::core::marker::Send + ::core::marker::Sync>,
                 >,
             ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
-                let _ = (parents, db, predicate);
+                // Predicate ignored in T2 — `with_where` lands in T9.
+                let _ = (db, predicate);
                 match relation {
+                    #(#eager_arms)*
                     other => ::core::result::Result::Err(
                         ::suprnova::FrameworkError::internal(::std::format!(
                             "model `{}` has no relation `{}`",
@@ -113,6 +216,7 @@ fn emit_dispatchers(struct_ident: &syn::Ident) -> TokenStream {
             ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
                 let _ = (rest, db);
                 match relation {
+                    #(#recurse_arms)*
                     other => ::core::result::Result::Err(
                         ::suprnova::FrameworkError::internal(::std::format!(
                             "model `{}` has no relation `{}` to recurse into",
@@ -132,8 +236,9 @@ fn emit_dispatchers(struct_ident: &syn::Ident) -> TokenStream {
                 parents: &mut [&mut Self],
                 db: &::suprnova::sea_orm::DatabaseConnection,
             ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
-                let _ = (parents, db);
+                let _ = db;
                 match relation {
+                    #(#count_arms)*
                     other => ::core::result::Result::Err(
                         ::suprnova::FrameworkError::internal(::std::format!(
                             "model `{}` has no relation `{}` for with_count",
@@ -157,8 +262,9 @@ fn emit_dispatchers(struct_ident: &syn::Ident) -> TokenStream {
                 parents: &mut [&mut Self],
                 db: &::suprnova::sea_orm::DatabaseConnection,
             ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
-                let _ = (column, kind, parents, db);
+                let _ = (column, kind, db);
                 match relation {
+                    #(#aggregate_arms)*
                     other => ::core::result::Result::Err(
                         ::suprnova::FrameworkError::internal(::std::format!(
                             "model `{}` has no relation `{}` for aggregate",
@@ -169,7 +275,7 @@ fn emit_dispatchers(struct_ident: &syn::Ident) -> TokenStream {
                 }
             }
         }
-    }
+    })
 }
 
 /// Emit the `pivot::<P>()` accessor. T4 (BelongsToMany) fills
@@ -368,6 +474,710 @@ fn kind_to_runtime(kind: RelationKindAttr) -> TokenStream {
         RelationKindAttr::MorphMany => quote! { ::suprnova::RelationKind::MorphMany },
         RelationKindAttr::MorphToMany => quote! { ::suprnova::RelationKind::MorphToMany },
         RelationKindAttr::MorphedByMany => quote! { ::suprnova::RelationKind::MorphedByMany },
+    }
+}
+
+// ---- T2: HasOne / BelongsTo emission helpers ----------------------------
+//
+// Each helper takes the model `input` plus the parsed `RelationDecl`
+// and emits one chunk of code: the relation method, the
+// `__eager_load` match arm, or the (currently empty) count /
+// aggregate / recurse stubs. T3-T7 extend these with their own kinds;
+// the dispatch is `match rel.kind { ... }` so each kind owns its
+// own emission branch.
+
+/// Default FK column name for a HasOne / HasMany relation on
+/// parent `<P>`. Laravel convention: `<snake(P)>_id`. Override via
+/// the inline `fk = "..."` option on the relation declaration.
+fn default_has_fk(parent_struct_name: &str) -> String {
+    format!("{}_id", to_snake(parent_struct_name))
+}
+
+/// Default FK column name for a BelongsTo on child `<C>` pointing at
+/// parent `<P>`. Laravel convention: `<snake(target_type)>_id`. The
+/// `target_type` is the `<P>` in `BelongsTo<P>`. Override via inline
+/// `fk = "..."`.
+fn default_belongs_to_fk(target_ty: &syn::Type) -> String {
+    // Extract the last path segment as a string — covers
+    // `Post`, `crate::models::Post`, `super::Post`. Falls back to
+    // formatting the whole type if the path is empty.
+    let target_name = match target_ty {
+        syn::Type::Path(p) => p
+            .path
+            .segments
+            .last()
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_else(|| quote::quote!(#target_ty).to_string()),
+        _ => quote::quote!(#target_ty).to_string(),
+    };
+    format!("{}_id", to_snake(&target_name))
+}
+
+/// Look up the user-declared `fk = "..."` override on a relation
+/// declaration. `None` when the user didn't override.
+fn fk_override(rel: &RelationDecl) -> Option<&str> {
+    rel.options.iter().find_map(|o| match o {
+        RelationOpt::ForeignKey(s) => Some(s.as_str()),
+        _ => None,
+    })
+}
+
+/// Look up the user-declared `lk = "..."` override.
+fn lk_override(rel: &RelationDecl) -> Option<&str> {
+    rel.options.iter().find_map(|o| match o {
+        RelationOpt::LocalKey(s) => Some(s.as_str()),
+        _ => None,
+    })
+}
+
+/// Look up the user-declared `with_default = || ...` closure on a
+/// BelongsTo relation. Returns the parsed expression; emission wraps
+/// it in `.with_default(<expr>)` at the call site.
+fn with_default_expr(rel: &RelationDecl) -> Option<&syn::Expr> {
+    rel.options.iter().find_map(|o| match o {
+        RelationOpt::WithDefault(e) => Some(e),
+        _ => None,
+    })
+}
+
+/// Whether the named field on the user struct has type `Option<T>`.
+/// Used by BelongsTo emission to decide between
+/// `Some(serde_json::to_value(&self.<fk>).ok()?)` (non-Option) and
+/// `self.<fk>.as_ref().map(|v| serde_json::to_value(v).ok()).flatten()`
+/// (Option). Looks at the last path segment of the field type — same
+/// shape as `classify_datetime` in `parse.rs`.
+fn field_is_optional(input: &ModelInput, field_name: &str) -> bool {
+    let fields = match &input.item.fields {
+        syn::Fields::Named(named) => &named.named,
+        _ => return false,
+    };
+    for f in fields {
+        let ident = match f.ident.as_ref() {
+            Some(i) => i,
+            None => continue,
+        };
+        if ident == field_name {
+            return matches!(
+                &f.ty,
+                syn::Type::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "Option")
+            );
+        }
+    }
+    false
+}
+
+/// Emit the relation method (`fn profile(&self) -> HasOne<Self, Profile>`)
+/// per declared HasOne / BelongsTo. Other kinds will land in T3-T7;
+/// T2 returns an empty stream for them so the macro compiles for
+/// users who declared a kind T2 doesn't own yet (e.g. T1's smoke
+/// tests with `relations = {}`).
+fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenStream> {
+    let struct_ident = &input.item.ident;
+    let parent_name = struct_ident.to_string();
+    let pk_name = &input.primary_key;
+    let pk_ident = quote::format_ident!("{pk_name}");
+    let method_ident = &rel.name;
+    let target_ty = &rel.target;
+
+    match rel.kind {
+        RelationKindAttr::HasOne => {
+            // FK on the child = <snake(parent_struct)>_id by default.
+            // LK on the parent = the parent's PK by default ("id").
+            let fk = fk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| default_has_fk(&parent_name));
+            let lk = lk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| pk_name.clone());
+
+            Ok(quote! {
+                impl #struct_ident {
+                    #[doc = "Construct a `HasOne` relation builder for this row."]
+                    #[doc = ""]
+                    #[doc = "Chainable — `user.profile().filter(...).first().await?`."]
+                    pub fn #method_ident(&self) -> ::suprnova::HasOne<Self, #target_ty> {
+                        let parent_value = ::suprnova::serde_json::to_value(&self.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        ::suprnova::HasOne::<Self, #target_ty>::__new(
+                            parent_value,
+                            ::std::string::String::from(#fk),
+                            ::std::string::String::from(#lk),
+                        )
+                    }
+                }
+            })
+        }
+        RelationKindAttr::BelongsTo => {
+            // FK on this child row = <snake(target)>_id by default.
+            // The child's FK column on `self` is what the macro reads
+            // to build the lookup; the resulting field access is
+            // `self.<fk_ident>` (e.g. `self.user_id`).
+            let fk = fk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| default_belongs_to_fk(target_ty));
+            // owner key on parent = parent's PK by default ("id").
+            // T2: BelongsTo's parent PK isn't introspectable from this
+            // macro (the parent struct lives in a different `#[model]`
+            // invocation), so we default to "id" + honour an explicit
+            // `lk = "..."` override.
+            let owner_key = lk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "id".to_string());
+
+            let fk_ident = quote::format_ident!("{}", fk);
+            // Inspect the FK field type on the child struct. If
+            // `Option<T>`, emit a flat_map over `.as_ref()`; otherwise
+            // emit `Some(serde_json::to_value(&self.<fk>)...)`.
+            let parent_value_expr = if field_is_optional(input, &fk) {
+                quote! {
+                    self.#fk_ident
+                        .as_ref()
+                        .and_then(|v| ::suprnova::serde_json::to_value(v).ok())
+                }
+            } else {
+                quote! {
+                    ::core::option::Option::Some(
+                        ::suprnova::serde_json::to_value(&self.#fk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null)
+                    )
+                }
+            };
+
+            let with_default_chain = match with_default_expr(rel) {
+                Some(expr) => quote! { .with_default(#expr) },
+                None => quote! {},
+            };
+
+            Ok(quote! {
+                impl #struct_ident {
+                    #[doc = "Construct a `BelongsTo` relation lookup for this row."]
+                    #[doc = ""]
+                    #[doc = "Looks up the parent identified by this row's foreign-key \
+                             column. Honours `with_default(closure)` declared inline \
+                             on the relation."]
+                    pub fn #method_ident(&self) -> ::suprnova::BelongsTo<Self, #target_ty> {
+                        let parent_value: ::core::option::Option<::suprnova::serde_json::Value>
+                            = #parent_value_expr;
+                        ::suprnova::BelongsTo::<Self, #target_ty>::__new(
+                            parent_value,
+                            ::std::string::String::from(#fk),
+                            ::std::string::String::from(#owner_key),
+                        )#with_default_chain
+                    }
+                }
+            })
+        }
+        // T3-T7 own the rest of the kinds. For T2 we emit nothing so
+        // the macro still accepts (e.g.) a `HasMany` declaration in a
+        // model file — the method just doesn't exist yet, which is
+        // fine because no test code calls it.
+        _ => Ok(TokenStream::new()),
+    }
+}
+
+/// Emit a `<name> => { ... }` arm for `__eager_load`. T2 owns HasOne
+/// and BelongsTo; other kinds return `None` (no arm).
+fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<TokenStream>> {
+    let struct_ident = &input.item.ident;
+    let name_str = rel.name.to_string();
+    let pk_name = &input.primary_key;
+    let pk_ident = quote::format_ident!("{pk_name}");
+    let target_ty = &rel.target;
+    let parent_name = struct_ident.to_string();
+
+    match rel.kind {
+        RelationKindAttr::HasOne => {
+            // FK column on the child table.
+            let fk = fk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| default_has_fk(&parent_name));
+
+            // Build a JSON Vec of parent PK values, issue an
+            // `IN (...)` against the child table, group by FK on each
+            // returned row, and stuff into each parent's `__eager`.
+            //
+            // The FK is read off the target row via
+            // `serde_json::to_value(&r).get(#fk)` rather than
+            // `r.<fk_ident>` field access. The field-access form
+            // would force the macro to assume the target struct
+            // declared a field by exactly that ident, which it can't
+            // verify (the target's `#[model]` invocation is a
+            // separate macro expansion). JSON-pluck works uniformly
+            // for any field name the user wrote on the target.
+            //
+            // PK values use `serde_json::to_value(&p.<pk>)`
+            // serialisation as `HashMap` keys so the lookup is total
+            // across PK shapes (i64 / String / Uuid-via-string).
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+                    let pk_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null))
+                        .collect();
+                    let rows: ::std::vec::Vec<#target_ty> =
+                        <#target_ty as ::suprnova::eloquent::Model>::query()
+                            .filter_in(#fk, pk_values)
+                            .get()
+                            .await?;
+                    use ::std::collections::HashMap;
+                    let mut by_fk: HashMap<::std::string::String, #target_ty> = HashMap::new();
+                    for r in rows.into_iter() {
+                        let row_json = ::suprnova::serde_json::to_value(&r)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        let key = row_json
+                            .get(#fk)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        by_fk.insert(key, r);
+                    }
+                    for p in parents.iter_mut() {
+                        let key = ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        let row = by_fk.remove(&key);
+                        p.__eager.set_one::<#target_ty>(#name_str, row);
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
+        RelationKindAttr::BelongsTo => {
+            // FK on the child = <snake(target)>_id by default.
+            let fk = fk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| default_belongs_to_fk(target_ty));
+            let fk_ident = quote::format_ident!("{}", fk);
+            // Owner key on the parent.
+            let owner_key = lk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "id".to_string());
+            let fk_is_optional = field_is_optional(input, &fk);
+            let with_default_chain = match with_default_expr(rel) {
+                Some(expr) => quote! { .with_default(#expr) },
+                None => quote! {},
+            };
+
+            // For Option<T> FKs the per-row JSON extraction unwraps
+            // the inner value; for non-Option FKs it's always present.
+            let per_parent_key_expr = if fk_is_optional {
+                quote! {
+                    p.#fk_ident
+                        .as_ref()
+                        .and_then(|v| ::suprnova::serde_json::to_value(v).ok())
+                }
+            } else {
+                quote! {
+                    ::core::option::Option::Some(
+                        ::suprnova::serde_json::to_value(&p.#fk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null),
+                    )
+                }
+            };
+
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+                    // Distinct FK values to query (skip null FKs).
+                    let fk_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .filter_map(|p| {
+                            let v: ::core::option::Option<::suprnova::serde_json::Value> =
+                                #per_parent_key_expr;
+                            v
+                        })
+                        .collect();
+                    let parent_rows: ::std::vec::Vec<#target_ty> = if fk_values.is_empty() {
+                        ::std::vec::Vec::new()
+                    } else {
+                        <#target_ty as ::suprnova::eloquent::Model>::query()
+                            .filter_in(#owner_key, fk_values)
+                            .get()
+                            .await?
+                    };
+                    use ::std::collections::HashMap;
+                    // Group parents by their PK (which is matched by
+                    // the BelongsTo's owner_key) as JSON-encoded string.
+                    // The target's owner-key column resolution at
+                    // emission time uses the primary_key field name
+                    // unless the user overrode `lk = "..."`. T2 names
+                    // the parent's PK field via `<owner_key>` directly
+                    // as an ident, which assumes the parent struct
+                    // declared a field by that name. Models with a
+                    // non-`id` PK can use `lk = "<pk>"` to align.
+                    let mut by_pk: HashMap<::std::string::String, #target_ty> = HashMap::new();
+                    for row in parent_rows.into_iter() {
+                        // The owner-key column is read out of the parent
+                        // target by serialising the whole row to JSON
+                        // and plucking the key — works uniformly for
+                        // any field name the user wrote, without
+                        // requiring the macro here to know the parent
+                        // struct's field layout.
+                        let row_json = ::suprnova::serde_json::to_value(&row)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        let key = row_json
+                            .get(#owner_key)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        by_pk.insert(key, row);
+                    }
+                    // Per parent row: look up the parent by FK; if
+                    // missing OR FK was null, invoke the
+                    // `with_default` closure (if installed). The
+                    // lookup is `.get().cloned()` rather than
+                    // `.remove()` because multiple children can share
+                    // the same FK and each needs its own copy.
+                    for p in parents.iter_mut() {
+                        let p_fk_json: ::core::option::Option<::suprnova::serde_json::Value> =
+                            #per_parent_key_expr;
+                        let parent_row: ::core::option::Option<#target_ty> = match &p_fk_json {
+                            ::core::option::Option::Some(v) => {
+                                by_pk.get(&v.to_string()).cloned().or_else(|| {
+                                    // Parent missing — invoke
+                                    // `with_default` closure if
+                                    // installed.
+                                    let tmpl: ::suprnova::BelongsTo<Self, #target_ty> =
+                                        ::suprnova::BelongsTo::<Self, #target_ty>::__new(
+                                            ::core::option::Option::None,
+                                            ::std::string::String::from(#fk),
+                                            ::std::string::String::from(#owner_key),
+                                        )#with_default_chain;
+                                    tmpl.__default_fn().map(|f| f())
+                                })
+                            }
+                            ::core::option::Option::None => {
+                                // FK is null — same `with_default` path.
+                                let tmpl: ::suprnova::BelongsTo<Self, #target_ty> =
+                                    ::suprnova::BelongsTo::<Self, #target_ty>::__new(
+                                        ::core::option::Option::None,
+                                        ::std::string::String::from(#fk),
+                                        ::std::string::String::from(#owner_key),
+                                    )#with_default_chain;
+                                tmpl.__default_fn().map(|f| f())
+                            }
+                        };
+                        p.__eager.set_one::<#target_ty>(#name_str, parent_row);
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// `__count_relation` arm for one relation. HasOne / BelongsTo both
+/// produce 0-or-1 row counts; T2 wires both to keep the API uniform
+/// (the spec lets `with_count(["profile"])` return 0 or 1). T3+ will
+/// extend this for HasMany / BelongsToMany where COUNT actually
+/// branches into real GROUP BY queries.
+fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<TokenStream>> {
+    let struct_ident = &input.item.ident;
+    let name_str = rel.name.to_string();
+    let pk_name = &input.primary_key;
+    let pk_ident = quote::format_ident!("{pk_name}");
+    let target_ty = &rel.target;
+    let parent_name = struct_ident.to_string();
+
+    match rel.kind {
+        RelationKindAttr::HasOne => {
+            let fk = fk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| default_has_fk(&parent_name));
+            // Same shape as `__eager_load`: run an IN query, group by
+            // FK (via JSON-pluck — see eager arm for why), store the
+            // per-parent count via `set_count`.
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+                    let pk_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null))
+                        .collect();
+                    let rows: ::std::vec::Vec<#target_ty> =
+                        <#target_ty as ::suprnova::eloquent::Model>::query()
+                            .filter_in(#fk, pk_values)
+                            .get()
+                            .await?;
+                    use ::std::collections::HashMap;
+                    let mut counts: HashMap<::std::string::String, u64> = HashMap::new();
+                    for r in rows.iter() {
+                        let row_json = ::suprnova::serde_json::to_value(r)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        let key = row_json
+                            .get(#fk)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        *counts.entry(key).or_insert(0) += 1;
+                    }
+                    for p in parents.iter_mut() {
+                        let key = ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        p.__eager.set_count(#name_str, *counts.get(&key).unwrap_or(&0));
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
+        RelationKindAttr::BelongsTo => {
+            let fk = fk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| default_belongs_to_fk(target_ty));
+            let owner_key = lk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "id".to_string());
+            let fk_ident = quote::format_ident!("{}", fk);
+            let fk_is_optional = field_is_optional(input, &fk);
+            let per_parent_key_expr = if fk_is_optional {
+                quote! {
+                    p.#fk_ident
+                        .as_ref()
+                        .and_then(|v| ::suprnova::serde_json::to_value(v).ok())
+                }
+            } else {
+                quote! {
+                    ::core::option::Option::Some(
+                        ::suprnova::serde_json::to_value(&p.#fk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null),
+                    )
+                }
+            };
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+                    let fk_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .filter_map(|p| {
+                            let v: ::core::option::Option<::suprnova::serde_json::Value> =
+                                #per_parent_key_expr;
+                            v
+                        })
+                        .collect();
+                    let parent_rows: ::std::vec::Vec<#target_ty> = if fk_values.is_empty() {
+                        ::std::vec::Vec::new()
+                    } else {
+                        <#target_ty as ::suprnova::eloquent::Model>::query()
+                            .filter_in(#owner_key, fk_values)
+                            .get()
+                            .await?
+                    };
+                    use ::std::collections::HashSet;
+                    let mut existing_keys: HashSet<::std::string::String> = HashSet::new();
+                    for r in parent_rows.iter() {
+                        let row_json = ::suprnova::serde_json::to_value(r)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        if let ::core::option::Option::Some(v) = row_json.get(#owner_key) {
+                            existing_keys.insert(v.to_string());
+                        }
+                    }
+                    for p in parents.iter_mut() {
+                        let v: ::core::option::Option<::suprnova::serde_json::Value> =
+                            #per_parent_key_expr;
+                        let count: u64 = match &v {
+                            ::core::option::Option::Some(jv) => {
+                                if existing_keys.contains(&jv.to_string()) { 1 } else { 0 }
+                            }
+                            ::core::option::Option::None => 0,
+                        };
+                        p.__eager.set_count(#name_str, count);
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// `__aggregate_relation` arm for HasOne / BelongsTo. Same shape as
+/// count — we run the IN query, then per parent pick a single row (or
+/// none) and apply the SUM/AVG/MIN/MAX, which over 0-or-1 row is
+/// either the column value itself or 0 / null. For T2 the column is
+/// stored as `f64` for SUM/AVG (matching `with_sum`'s usual signature)
+/// and we honour the same for MIN/MAX. T9 may extend the shape for
+/// non-numeric MIN/MAX once the eager loading orchestrator lands.
+///
+/// NB: HasOne / BelongsTo `with_sum`/`avg`/`min`/`max` rarely make
+/// sense in practice (the result is over at most one row), but the
+/// spec lets users call them, so we wire the path here for parity.
+/// Users querying real aggregates use HasMany (T3).
+fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<TokenStream>> {
+    let struct_ident = &input.item.ident;
+    let name_str = rel.name.to_string();
+    let pk_name = &input.primary_key;
+    let pk_ident = quote::format_ident!("{pk_name}");
+    let target_ty = &rel.target;
+    let parent_name = struct_ident.to_string();
+
+    match rel.kind {
+        RelationKindAttr::HasOne => {
+            let fk = fk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| default_has_fk(&parent_name));
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+                    let pk_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null))
+                        .collect();
+                    let rows: ::std::vec::Vec<#target_ty> =
+                        <#target_ty as ::suprnova::eloquent::Model>::query()
+                            .filter_in(#fk, pk_values)
+                            .get()
+                            .await?;
+                    use ::std::collections::HashMap;
+                    let mut by_fk: HashMap<::std::string::String, f64> = HashMap::new();
+                    for r in rows.iter() {
+                        let row_json = ::suprnova::serde_json::to_value(r)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        let key = row_json
+                            .get(#fk)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        let col_val = row_json
+                            .get(column)
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0);
+                        // Each parent's group has 0-or-1 row, so the
+                        // aggregate function is the same on every kind
+                        // — just record the column value.
+                        by_fk.insert(key, col_val);
+                    }
+                    let _ = kind; // every aggregate over <=1 row reduces to the value itself
+                    for p in parents.iter_mut() {
+                        let key = ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        let v: f64 = *by_fk.get(&key).unwrap_or(&0.0);
+                        p.__eager.set_aggregate::<f64>(#name_str, v);
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
+        RelationKindAttr::BelongsTo => {
+            let fk = fk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| default_belongs_to_fk(target_ty));
+            let owner_key = lk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "id".to_string());
+            let fk_ident = quote::format_ident!("{}", fk);
+            let fk_is_optional = field_is_optional(input, &fk);
+            let per_parent_key_expr = if fk_is_optional {
+                quote! {
+                    p.#fk_ident
+                        .as_ref()
+                        .and_then(|v| ::suprnova::serde_json::to_value(v).ok())
+                }
+            } else {
+                quote! {
+                    ::core::option::Option::Some(
+                        ::suprnova::serde_json::to_value(&p.#fk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null),
+                    )
+                }
+            };
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+                    let fk_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .filter_map(|p| {
+                            let v: ::core::option::Option<::suprnova::serde_json::Value> =
+                                #per_parent_key_expr;
+                            v
+                        })
+                        .collect();
+                    let parent_rows: ::std::vec::Vec<#target_ty> = if fk_values.is_empty() {
+                        ::std::vec::Vec::new()
+                    } else {
+                        <#target_ty as ::suprnova::eloquent::Model>::query()
+                            .filter_in(#owner_key, fk_values)
+                            .get()
+                            .await?
+                    };
+                    use ::std::collections::HashMap;
+                    let mut by_pk: HashMap<::std::string::String, f64> = HashMap::new();
+                    for r in parent_rows.iter() {
+                        let row_json = ::suprnova::serde_json::to_value(r)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        let key = row_json
+                            .get(#owner_key)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        let col_val = row_json
+                            .get(column)
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0);
+                        by_pk.insert(key, col_val);
+                    }
+                    let _ = kind;
+                    for p in parents.iter_mut() {
+                        let v: ::core::option::Option<::suprnova::serde_json::Value> =
+                            #per_parent_key_expr;
+                        let agg: f64 = match &v {
+                            ::core::option::Option::Some(jv) => {
+                                *by_pk.get(&jv.to_string()).unwrap_or(&0.0)
+                            }
+                            ::core::option::Option::None => 0.0,
+                        };
+                        p.__eager.set_aggregate::<f64>(#name_str, agg);
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// `__recurse_eager_load` arm — T2 doesn't ship nested eager loading
+/// (T9 owns the orchestrator). Returning `None` keeps the dispatcher
+/// quiet on the head segment; nested paths through HasOne / BelongsTo
+/// will land in T9 when the full nested-path resolver does.
+fn emit_recurse_arm(_input: &ModelInput, _rel: &RelationDecl) -> Result<Option<TokenStream>> {
+    Ok(None)
+}
+
+/// Emit `Self::with([...])` — the minimal eager-load entrypoint T2
+/// ships so the eager-load test in `eloquent_relations_one_to_one.rs`
+/// can run. T9 will expand this with `with_count` / `with_sum`-`max`
+/// / `with_where` / nested-path resolution. For T2 we only need the
+/// flat list of relation names + a `Builder<Self>` that invokes the
+/// per-model `__eager_load` dispatcher for each name at fetch time.
+///
+/// The wired path:
+///
+/// 1. `Self::with(["profile"])` returns a `Builder<Self>` with an
+///    eager spec list attached.
+/// 2. `Builder::get` (on a builder carrying eager specs) issues the
+///    base SELECT, calls `M::__eager_load(name, &mut [&mut row, ...], db, None)`
+///    for each spec, and returns the rows with their `__eager` cache
+///    populated.
+fn emit_with_helper(struct_ident: &syn::Ident) -> TokenStream {
+    quote! {
+        impl #struct_ident {
+            #[doc = "Open a `Builder<Self>` that eager-loads the listed relations."]
+            #[doc = ""]
+            #[doc = "Each name is resolved against the model's `__eager_load` dispatcher \
+                     at fetch time. T9 extends this with `with_count` / `with_sum`-`max` \
+                     / `with_where` / nested-path (`\"posts.comments\"`) resolution; T2 \
+                     only ships the flat-list form."]
+            pub fn with<I, S>(relations: I) -> ::suprnova::Builder<Self>
+            where
+                I: ::core::iter::IntoIterator<Item = S>,
+                S: ::core::convert::Into<::std::string::String>,
+            {
+                <Self as ::suprnova::eloquent::Model>::query()
+                    .with(relations)
+            }
+        }
     }
 }
 

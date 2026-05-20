@@ -34,11 +34,21 @@
 //!   `pivot::<P>()` accessor. Those live on the user struct via
 //!   `#[suprnova::model]` and are exercised by the integration tests.
 
+pub mod belongs_to;
 pub mod eager_cache;
+pub mod has_one;
 
+pub use belongs_to::BelongsTo;
 pub use eager_cache::EagerLoadCache;
+pub use has_one::HasOne;
 
-use std::any::TypeId;
+use std::any::{Any, TypeId};
+use std::future::Future;
+use std::pin::Pin;
+
+use sea_orm::DatabaseConnection;
+
+use crate::error::FrameworkError;
 
 /// The exhaustive list of Eloquent relation flavours Suprnova ships.
 ///
@@ -150,4 +160,66 @@ pub fn relations_of<T: 'static>() -> impl Iterator<Item = &'static RelationEntry
 pub fn find_relation<T: 'static>(name: &str) -> Option<&'static RelationEntry> {
     let want = TypeId::of::<T>();
     relations().find(|e| (e.parent_type)() == want && e.name == name)
+}
+
+// ---- T2: EagerLoadDispatch trait ----------------------------------------
+//
+// `Builder<M>::with([...])` records relation names; `Builder<M>::get`
+// must call `M::__eager_load(name, &mut [&mut row, ...], db, predicate)`
+// for each one. The four dispatcher methods land on the user struct
+// as inherent methods (emitted by `#[suprnova::model]`); a generic
+// `Builder<M>` can't reach them without a trait. T2 introduces this
+// sealed trait so the macro can emit a delegating impl per model.
+//
+// The trait carries one method per dispatcher kind (`eager_load`,
+// `count_relation`, `aggregate_relation`, `recurse_eager_load`); T2
+// only uses `eager_load` from `Builder::get`. T3-T7 keep adding
+// per-kind match arms inside the inherent dispatcher methods — those
+// changes never touch the trait surface, since the trait is just a
+// thin pass-through.
+
+/// Bridge from the eager-load orchestrator (`Builder<M>::get`) to the
+/// macro-emitted per-model `__eager_load` / `__count_relation` /
+/// `__aggregate_relation` / `__recurse_eager_load` inherent methods.
+///
+/// Implemented automatically by `#[suprnova::model]`; user code never
+/// hand-writes an impl. Returning `Pin<Box<dyn Future>>` (rather than
+/// `async fn`) keeps the trait object-safety friendly — `async fn`
+/// trait methods would force `Builder<M>` to carry a Pin<Box<...>>
+/// state itself, complicating the type. For T2 we don't actually need
+/// `dyn EagerLoadDispatch`, but the boxed-future shape stays cleanest
+/// across the bound site.
+pub trait EagerLoadDispatch: Sized {
+    /// Delegate to the per-model `__eager_load` dispatcher.
+    fn eager_load<'a>(
+        relation: &'a str,
+        parents: &'a mut [&'a mut Self],
+        db: &'a DatabaseConnection,
+        predicate: Option<Box<dyn Any + Send + Sync>>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>>;
+
+    /// Delegate to `__count_relation`.
+    fn count_relation<'a>(
+        relation: &'a str,
+        parents: &'a mut [&'a mut Self],
+        db: &'a DatabaseConnection,
+    ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>>;
+
+    /// Delegate to `__aggregate_relation`.
+    fn aggregate_relation<'a>(
+        relation: &'a str,
+        column: &'a str,
+        kind: AggregateKind,
+        parents: &'a mut [&'a mut Self],
+        db: &'a DatabaseConnection,
+    ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>>;
+
+    /// Delegate to `__recurse_eager_load`. Used by T9's nested-path
+    /// resolver; T2 doesn't call this from `Builder::get`.
+    fn recurse_eager_load<'a>(
+        &'a mut self,
+        relation: &'a str,
+        rest: &'a str,
+        db: &'a DatabaseConnection,
+    ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>>;
 }

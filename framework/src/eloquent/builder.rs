@@ -167,6 +167,15 @@ pub struct Builder<M> {
     pub(crate) runtime_casts:
         HashMap<&'static str, std::sync::Arc<dyn crate::eloquent::casts::DynCast>>,
     pub(crate) global_scopes_disabled: Vec<&'static str>,
+    /// Eager-load spec list — populated by [`Builder::with`].
+    ///
+    /// Each entry is a relation name (e.g. `"profile"`). At
+    /// [`Builder::get`] time, every entry triggers a call into the
+    /// model's `__eager_load` dispatcher (via [`EagerLoadDispatch`])
+    /// after the base SELECT lands. T2 ships the flat-list form;
+    /// T9 owns the full nested-path / `with_count` / `with_sum`-`max`
+    /// surface.
+    pub(crate) eager_specs: Vec<String>,
     _phantom: PhantomData<M>,
 }
 
@@ -193,8 +202,30 @@ impl<M> Builder<M> {
             unions: Vec::new(),
             runtime_casts: HashMap::new(),
             global_scopes_disabled: Vec::new(),
+            eager_specs: Vec::new(),
             _phantom: PhantomData,
         }
+    }
+
+    /// Append relation names to the eager-load spec list. Called by
+    /// the macro-emitted `Self::with(...)` shortcut; user code can
+    /// also chain directly off a `Builder<Self>`.
+    ///
+    /// T2 ships the flat-list form. T9 will extend this with nested
+    /// paths (`"posts.comments"`), `with_count` / `with_sum` /
+    /// `with_avg` / `with_min` / `with_max`, and `with_where`
+    /// predicates. The fancy variants will live in T9-specific
+    /// methods on `Builder<M>` — `with(...)` keeps the simple flat
+    /// list shape.
+    pub fn with<I, S>(mut self, relations: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for r in relations {
+            self.eager_specs.push(r.into());
+        }
+        self
     }
 
     /// Append the `(column, value)` pairs from an `Attrs` map onto the
@@ -1127,7 +1158,8 @@ impl<M: Model> Builder<M>
 where
     M: From<<M::Entity as sea_orm::EntityTrait>::Model>
         + serde::Serialize
-        + serde::de::DeserializeOwned,
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
     <M::Entity as sea_orm::EntityTrait>::Model: From<M>
         + sea_orm::IntoActiveModel<<M::Entity as sea_orm::EntityTrait>::ActiveModel>
         + FromQueryResult
@@ -1158,11 +1190,25 @@ where
     /// `M` in their raw storage shape — so a runtime override is
     /// expected to specify every column that needs coercion.
     ///
+    /// ## Eager loading
+    ///
+    /// When [`with`] entries are present in the builder, the base
+    /// SELECT runs first; each eager spec then triggers a call into
+    /// the model's `__eager_load` dispatcher (via
+    /// [`EagerLoadDispatch::eager_load`]) which issues per-relation
+    /// IN-queries and populates each row's `__eager` cache. The
+    /// `<rel>_loaded()` accessor emitted per relation then reads from
+    /// that cache. T9 will extend this with `with_count` /
+    /// `with_sum`-`max` / nested-path resolution.
+    ///
     /// [`with_casts`]: Self::with_casts
+    /// [`with`]: Self::with
+    /// [`EagerLoadDispatch::eager_load`]: crate::eloquent::EagerLoadDispatch::eager_load
     pub async fn get(self) -> Result<Vec<M>, FrameworkError> {
         let db = DB::connection()?;
         let backend = db.inner().get_database_backend();
         let runtime_casts = self.runtime_casts.clone();
+        let eager_specs = self.eager_specs.clone();
         let (sql, vals) = self.render_select_for(backend, M::TABLE, "*");
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
 
@@ -1175,34 +1221,65 @@ where
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
 
-        if runtime_casts.is_empty() {
+        let mut out: Vec<M> = if runtime_casts.is_empty() {
             // Fast path — convert each row directly via the
             // macro-emitted `From<inner::Model> for M`.
-            return Ok(raw_rows.into_iter().map(M::from).collect());
-        }
-
-        // Slow path (override mode) — serialise the storage-shape row
-        // to JSON, apply each runtime cast in place, then deserialise
-        // into M. Static casts on M are NOT applied; the runtime cast
-        // map is treated as a full replacement for this query.
-        let mut out = Vec::with_capacity(raw_rows.len());
-        for row in raw_rows {
-            let mut as_json = serde_json::to_value(&row).map_err(|e| {
-                FrameworkError::database(format!("serialise inner Model for runtime cast: {e}"))
-            })?;
-            if let serde_json::Value::Object(ref mut map) = as_json {
-                for (col, cast) in &runtime_casts {
-                    if let Some(v) = map.get(*col).cloned() {
-                        let coerced = cast.from_storage_json(&v)?;
-                        map.insert((*col).to_string(), coerced);
+            raw_rows.into_iter().map(M::from).collect()
+        } else {
+            // Slow path (override mode) — serialise the storage-shape
+            // row to JSON, apply each runtime cast in place, then
+            // deserialise into M. Static casts on M are NOT applied;
+            // the runtime cast map is treated as a full replacement
+            // for this query.
+            let mut buf = Vec::with_capacity(raw_rows.len());
+            for row in raw_rows {
+                let mut as_json = serde_json::to_value(&row).map_err(|e| {
+                    FrameworkError::database(format!(
+                        "serialise inner Model for runtime cast: {e}"
+                    ))
+                })?;
+                if let serde_json::Value::Object(ref mut map) = as_json {
+                    for (col, cast) in &runtime_casts {
+                        if let Some(v) = map.get(*col).cloned() {
+                            let coerced = cast.from_storage_json(&v)?;
+                            map.insert((*col).to_string(), coerced);
+                        }
                     }
                 }
+                let coerced_model: M = serde_json::from_value(as_json).map_err(|e| {
+                    FrameworkError::database(format!("rehydrate model after runtime cast: {e}"))
+                })?;
+                buf.push(coerced_model);
             }
-            let coerced_model: M = serde_json::from_value(as_json).map_err(|e| {
-                FrameworkError::database(format!("rehydrate model after runtime cast: {e}"))
-            })?;
-            out.push(coerced_model);
+            buf
+        };
+
+        // T2 — eager loading. After the base SELECT lands, walk the
+        // recorded eager specs and dispatch into the per-model
+        // `__eager_load` (via the `EagerLoadDispatch` trait the macro
+        // emits). Each call mutates every row's `__eager` cache
+        // in-place. T9 will extend this with nested-path / `with_count`
+        // / `with_sum`-`max` / `with_where`.
+        if !eager_specs.is_empty() && !out.is_empty() {
+            for spec in &eager_specs {
+                // SAFETY-equivalent borrow plumbing: the dispatcher
+                // signature is `&mut [&mut Self]`, so we build a
+                // scratch vec of `&mut M` borrows from `out` for the
+                // duration of this call. Borrow checker hates a
+                // straight `iter_mut().collect::<Vec<&mut M>>()`
+                // bound to `'a`, so we scope each call so the borrow
+                // lifetime ends before the next iteration starts.
+                let mut refs: Vec<&mut M> = out.iter_mut().collect();
+                <M as crate::eloquent::EagerLoadDispatch>::eager_load(
+                    spec.as_str(),
+                    refs.as_mut_slice(),
+                    db.inner(),
+                    None,
+                )
+                .await?;
+            }
         }
+
         Ok(out)
     }
 

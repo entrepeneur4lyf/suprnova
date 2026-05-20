@@ -427,9 +427,11 @@ pub trait ReplicateExt: Sized {
 #[async_trait]
 pub trait FirstOrCreate: Model + Send + Sync
 where
-    Self: From<<Self::Entity as EntityTrait>::Model>,
+    Self: From<<Self::Entity as EntityTrait>::Model>
+        + crate::eloquent::EagerLoadDispatch,
     <Self::Entity as EntityTrait>::Model: From<Self>
         + IntoActiveModel<<Self::Entity as EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
         + Serialize
         + Send
         + Sync,
