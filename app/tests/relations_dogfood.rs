@@ -36,7 +36,7 @@ use app::models::tags::Tag;
 use app::models::users::User;
 use app::models::videos::Video;
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, Model};
+use suprnova::{attrs, model, Model};
 
 /// Helper: a user named after the test. The user-side surface goes
 /// through the framework's `User::create` → `DB::connection()` path, so
@@ -484,4 +484,200 @@ async fn with_count_posts_returns_server_side_count() {
         .expect("bob must surface");
     assert_eq!(alice.posts_count(), 3);
     assert_eq!(bob.posts_count(), 1);
+}
+
+// ---- `with_sum` / `with_min` aggregates over User.posts ----------------
+//
+// Closes the Phase 10B "exercise every relation kind end-to-end" gap on
+// the aggregate eager-load surface (`with_sum` / `with_avg` / `with_min` /
+// `with_max`). Framework tests already cover the four kinds and the
+// Sum/Avg-vs-Min/Max storage-type split; here we just prove the static
+// `User::with_sum` / `User::with_min` entry points work against the live
+// app schema and that `__eager.get_aggregate::<T>(rel)` reads back the
+// right type per kind (`f64` for Sum, `Option<f64>` for Min).
+
+#[tokio::test]
+async fn with_sum_posts_id_returns_sum_of_ids() {
+    let _db = TestDatabase::fresh::<Migrator>().await.unwrap();
+    let u = make_user("agg_sum").await;
+    let p1 = Post::create(attrs! {
+        title: "p1",
+        body: "...",
+        is_public: true,
+        author_id: u.id,
+    })
+    .await
+    .unwrap();
+    let p2 = Post::create(attrs! {
+        title: "p2",
+        body: "...",
+        is_public: true,
+        author_id: u.id,
+    })
+    .await
+    .unwrap();
+
+    let users = User::with_sum(("posts", "id")).get().await.unwrap();
+    let loaded = users
+        .iter()
+        .find(|x| x.id == u.id)
+        .expect("user must surface");
+    let sum: &f64 = loaded
+        .__eager
+        .get_aggregate::<f64>("posts")
+        .expect("sum cache populated under the relation name");
+    let expected = (p1.id + p2.id) as f64;
+    assert!(
+        (sum - expected).abs() < 0.001,
+        "sum(posts.id) must equal p1.id + p2.id, got {sum} vs {expected}",
+    );
+}
+
+#[tokio::test]
+async fn with_min_posts_id_returns_smallest() {
+    let _db = TestDatabase::fresh::<Migrator>().await.unwrap();
+    let u = make_user("agg_min").await;
+    let p1 = Post::create(attrs! {
+        title: "p1",
+        body: "...",
+        is_public: true,
+        author_id: u.id,
+    })
+    .await
+    .unwrap();
+    let _ = Post::create(attrs! {
+        title: "p2",
+        body: "...",
+        is_public: true,
+        author_id: u.id,
+    })
+    .await
+    .unwrap();
+
+    let users = User::with_min(("posts", "id")).get().await.unwrap();
+    let loaded = users
+        .iter()
+        .find(|x| x.id == u.id)
+        .expect("user must surface");
+    // Min stores as Option<f64> — None on empty group; here the group
+    // is non-empty so the smallest of {p1.id, p2.id} must round-trip.
+    let min: &Option<f64> = loaded
+        .__eager
+        .get_aggregate::<Option<f64>>("posts")
+        .expect("min cache populated under the relation name");
+    assert_eq!(*min, Some(p1.id as f64), "min(posts.id) == p1.id");
+}
+
+// ---- HasManyThrough: country -> users -> posts ------------------------
+//
+// Closes the Phase 10B "every relation kind end-to-end" gap on Through
+// relations. The app's real schema has no natural three-table chain
+// (User -> Post is two tables; Comment is polymorphic), so we declare
+// an inline test-only schema the same way the framework's Through
+// tests do — `TestDatabase::sqlite_memory()` + raw `execute_unprepared`
+// table creation. This is just a smoke test against the macro-emitted
+// dispatcher arms in an app-binary context. Exhaustive semantics
+// (custom keys, GROUP BY aggregates, eager distribution, String-PK
+// regression) live in `framework/tests/eloquent_relations_through.rs`.
+
+#[model(table = "dogfood_th_countries", relations = {
+    posts: HasManyThrough<DogfoodThUser, DogfoodThPost>,
+})]
+pub struct DogfoodThCountry {
+    pub id: i64,
+    pub name: String,
+}
+
+#[model(table = "dogfood_th_users")]
+pub struct DogfoodThUser {
+    pub id: i64,
+    pub dogfood_th_country_id: i64,
+    pub name: String,
+}
+
+#[model(table = "dogfood_th_posts")]
+pub struct DogfoodThPost {
+    pub id: i64,
+    pub dogfood_th_user_id: i64,
+    pub title: String,
+}
+
+#[tokio::test]
+async fn has_many_through_dogfood_smoke() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE dogfood_th_countries (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            name TEXT NOT NULL\
+         )",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE dogfood_th_users (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            dogfood_th_country_id INTEGER NOT NULL, \
+            name TEXT NOT NULL\
+         )",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE dogfood_th_posts (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            dogfood_th_user_id INTEGER NOT NULL, \
+            title TEXT NOT NULL\
+         )",
+    )
+    .await
+    .unwrap();
+
+    let c = DogfoodThCountry::create(attrs! { name: "USA" })
+        .await
+        .unwrap();
+    let u1 = DogfoodThUser::create(attrs! { dogfood_th_country_id: c.id, name: "u1" })
+        .await
+        .unwrap();
+    let u2 = DogfoodThUser::create(attrs! { dogfood_th_country_id: c.id, name: "u2" })
+        .await
+        .unwrap();
+    let _ = DogfoodThPost::create(attrs! { dogfood_th_user_id: u1.id, title: "p1" })
+        .await
+        .unwrap();
+    let _ = DogfoodThPost::create(attrs! { dogfood_th_user_id: u2.id, title: "p2" })
+        .await
+        .unwrap();
+    let _ = DogfoodThPost::create(attrs! { dogfood_th_user_id: u2.id, title: "p3" })
+        .await
+        .unwrap();
+
+    // Isolation: a second country with its own user + post must not
+    // leak into c's grandchildren.
+    let c2 = DogfoodThCountry::create(attrs! { name: "CAN" })
+        .await
+        .unwrap();
+    let u3 = DogfoodThUser::create(attrs! { dogfood_th_country_id: c2.id, name: "u3" })
+        .await
+        .unwrap();
+    let _ = DogfoodThPost::create(attrs! { dogfood_th_user_id: u3.id, title: "ca-p" })
+        .await
+        .unwrap();
+
+    let posts = c.posts().get().await.unwrap();
+    assert_eq!(
+        posts.len(),
+        3,
+        "country must see exactly its 3 grandchild posts via JOIN",
+    );
+    let titles: Vec<&str> = posts.iter().map(|p| p.title.as_str()).collect();
+    assert!(titles.contains(&"p1"));
+    assert!(titles.contains(&"p2"));
+    assert!(titles.contains(&"p3"));
+    assert!(
+        !titles.contains(&"ca-p"),
+        "WHERE first_key = ? must isolate parents",
+    );
+
+    let n = c.posts().count().await.unwrap();
+    assert_eq!(n, 3);
 }
