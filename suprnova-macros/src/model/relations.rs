@@ -360,7 +360,19 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
     let name_str = name.to_string();
     let loaded_fn = quote::format_ident!("{}_loaded", name);
     let count_fn = quote::format_ident!("{}_count", name);
-    let target_ty = &rel.target;
+    // For Through kinds the parser stores generics left-to-right as
+    // `(rel.target, rel.through)` where the first generic is the
+    // intermediate B and the second is the final target C. The
+    // accessor must surface the FINAL target so user code reads
+    // `country.posts_loaded()` as `&[Post]` (not `&[User]`). For all
+    // other kinds the parser-side `rel.target` IS the user-facing
+    // target.
+    let target_ty: &syn::Type = match rel.kind {
+        RelationKindAttr::HasManyThrough | RelationKindAttr::HasOneThrough => {
+            rel.through.as_ref().unwrap_or(&rel.target)
+        }
+        _ => &rel.target,
+    };
 
     // The "loaded" accessor — kind-dependent return type.
     let loaded = match rel.kind {
@@ -442,7 +454,15 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
 fn emit_relation_inventory(struct_ident: &syn::Ident, rel: &RelationDecl) -> TokenStream {
     let name_str = rel.name.to_string();
     let parent_type_name = struct_ident.to_string();
-    let target_ty = &rel.target;
+    // Mirror `emit_relation_accessors`' kind-aware target choice so
+    // Phase 8 admin renders the FINAL target (Post) for Through
+    // relations rather than the intermediate (User).
+    let target_ty: &syn::Type = match rel.kind {
+        RelationKindAttr::HasManyThrough | RelationKindAttr::HasOneThrough => {
+            rel.through.as_ref().unwrap_or(&rel.target)
+        }
+        _ => &rel.target,
+    };
     let kind_variant = kind_to_runtime(rel.kind);
     // `RelationEntry::target_type_name` is `&'static str`, so we need
     // a string literal at macro expansion time — `type_name::<T>()`
@@ -604,6 +624,40 @@ fn with_pivot_cols(rel: &RelationDecl) -> &[String] {
         }
     }
     &[]
+}
+
+/// Look up the user-declared `first_key = "..."` override for
+/// `HasOneThrough` / `HasManyThrough` — the column on the intermediate
+/// `B` table that points at the parent `A`. Default:
+/// `<snake(parent_struct)>_id`.
+fn first_key_override(rel: &RelationDecl) -> Option<&str> {
+    rel.options.iter().find_map(|o| match o {
+        RelationOpt::FirstKey(s) => Some(s.as_str()),
+        _ => None,
+    })
+}
+
+/// Look up the user-declared `second_key = "..."` override for
+/// `HasOneThrough` / `HasManyThrough` — the column on the target `C`
+/// table that points at the intermediate `B`. Default:
+/// `<snake(through_type)>_id`.
+fn second_key_override(rel: &RelationDecl) -> Option<&str> {
+    rel.options.iter().find_map(|o| match o {
+        RelationOpt::SecondKey(s) => Some(s.as_str()),
+        _ => None,
+    })
+}
+
+/// Look up the user-declared `second_local_key = "..."` override for
+/// `HasOneThrough` / `HasManyThrough` — the column on the intermediate
+/// `B` matched by `second_key`. Defaults to `"id"`. Required when the
+/// intermediate model declares `#[model(primary_key = "...")]` with a
+/// non-`id` PK.
+fn second_local_key_override(rel: &RelationDecl) -> Option<&str> {
+    rel.options.iter().find_map(|o| match o {
+        RelationOpt::SecondLocalKey(s) => Some(s.as_str()),
+        _ => None,
+    })
 }
 
 /// True when `with_timestamps` (bare flag or `= true`) is declared.
@@ -877,10 +931,106 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                 }
             })
         }
-        // T5-T7 own the rest of the kinds (Through, Morph*). For
-        // T4 we emit nothing for those so the macro still accepts the
-        // declaration — the method just doesn't exist yet, which is
-        // fine because no test code calls it.
+        RelationKindAttr::HasManyThrough | RelationKindAttr::HasOneThrough => {
+            // The user wrote `HasManyThrough<B, C>` where `B` is the
+            // intermediate model and `C` is the final target. The
+            // parser stores generics left-to-right as
+            // `(rel.target, rel.through)` — so for Through kinds, the
+            // semantic mapping is:
+            //
+            //   rel.target  = first generic = B (intermediate)
+            //   rel.through = second generic = C (final target)
+            //
+            // This is intentionally different from `BelongsToMany<R, P>`
+            // where `rel.target = R` (final) and `rel.through = P`
+            // (pivot). Through relations declare the chain in traversal
+            // order; m2m declares target-then-pivot. The macro absorbs
+            // the inconsistency so user code reads naturally for each
+            // kind.
+            let through_ty = &rel.target; // intermediate B
+            let final_target_ty = rel.through.as_ref().ok_or_else(|| {
+                syn::Error::new_spanned(
+                    method_ident,
+                    "HasOneThrough / HasManyThrough require a final target type, e.g. \
+                     `HasManyThrough<Intermediate, Target>` (parser bug if reached)",
+                )
+            })?; // final target C
+
+            // first_key default: <snake(parent_struct)>_id.
+            let first_key = first_key_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{}_id", to_snake(&parent_name)));
+            // second_key default: <snake(last_segment(through_ty))>_id
+            // — column on the FINAL target table pointing at the
+            // intermediate.
+            let second_key = second_key_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    format!("{}_id", to_snake(&last_segment_name(through_ty)))
+                });
+            // Local key (parent's PK column name). Defaults to the
+            // model's declared primary_key. Honoured via the runtime
+            // `.local_key(...)` setter so the metadata stays on the
+            // Relation impl.
+            let lk = lk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| pk_name.clone());
+            let local_key_chain = if lk == "id" {
+                quote! {}
+            } else {
+                quote! { .local_key(#lk) }
+            };
+            // Second local key — column on the intermediate `B`
+            // matched by `second_key`. Defaults to `"id"`. Chained as
+            // `.second_local_key(...)` so the runtime JOIN reads the
+            // right column for intermediates declaring a non-`id` PK.
+            let second_local_key = second_local_key_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "id".to_string());
+            let second_local_key_chain = if second_local_key == "id" {
+                quote! {}
+            } else {
+                quote! { .second_local_key(#second_local_key) }
+            };
+
+            // Pick the runtime struct name based on the kind. Both
+            // wrappers share the same `__new` shape.
+            let wrapper = match rel.kind {
+                RelationKindAttr::HasManyThrough => quote! { HasManyThrough },
+                RelationKindAttr::HasOneThrough => quote! { HasOneThrough },
+                _ => unreachable!("guarded by outer match arm"),
+            };
+            let doc_kind = match rel.kind {
+                RelationKindAttr::HasManyThrough => "HasManyThrough",
+                RelationKindAttr::HasOneThrough => "HasOneThrough",
+                _ => unreachable!("guarded by outer match arm"),
+            };
+            let doc_str = format!("Construct a `{doc_kind}` relation for this row.");
+
+            Ok(quote! {
+                impl #struct_ident {
+                    #[doc = #doc_str]
+                    #[doc = ""]
+                    #[doc = "Two-hop traversal via the intermediate model — \
+                             `.get()` issues a single `INNER JOIN` query."]
+                    pub fn #method_ident(&self) -> ::suprnova::#wrapper<Self, #through_ty, #final_target_ty> {
+                        let parent_value = ::suprnova::serde_json::to_value(&self.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        ::suprnova::#wrapper::<Self, #through_ty, #final_target_ty>::__new(
+                            parent_value,
+                            ::std::string::String::from(#first_key),
+                            ::std::string::String::from(#second_key),
+                        )
+                        #local_key_chain
+                        #second_local_key_chain
+                    }
+                }
+            })
+        }
+        // T6-T7 own the remaining kinds (Morph*). We emit nothing for
+        // those so the macro still accepts the declaration — the
+        // method just doesn't exist yet, which is fine because no
+        // test code in T5 calls it.
         _ => Ok(TokenStream::new()),
     }
 }
@@ -1277,6 +1427,230 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 }
             }))
         }
+        RelationKindAttr::HasManyThrough | RelationKindAttr::HasOneThrough => {
+            // Two-query eager-load strategy (cleaner than a single
+            // JOIN-with-extra-column because we get to reuse the
+            // existing `Builder<C>` SeaORM deserialisation path):
+            //
+            // 1. Raw SQL: `SELECT id, {first_key} FROM B WHERE
+            //    {first_key} IN (parent_ids)` — build a map
+            //    `b_id -> parent_id`.
+            // 2. `<C as Model>::query().filter_in({second_key}, b_ids)
+            //    .get()` — uses the existing model pipeline so C
+            //    deserialises correctly even with casts / accessors.
+            // 3. Group C by `row.{second_key}` (which is a B.id) →
+            //    look up the parent_id via the map → distribute via
+            //    `set_many` (HasManyThrough) or `set_one`
+            //    (HasOneThrough — first row wins per parent).
+            //
+            // Type rebinding: for Through kinds the parser stores
+            // `(rel.target, rel.through)` as `(B, C)` — same swap as
+            // `emit_relation_accessors`. We shadow the function-scope
+            // `target_ty` (which would be `B`) with the final target
+            // `C` taken from `rel.through`.
+            let through_ty = &rel.target; // intermediate B
+            let target_ty = rel.through.as_ref().ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &rel.name,
+                    "HasOneThrough / HasManyThrough require a final target type \
+                     (parser bug if reached)",
+                )
+            })?; // final target C
+            let first_key = first_key_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{}_id", to_snake(&parent_name)));
+            let second_key = second_key_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    format!("{}_id", to_snake(&last_segment_name(through_ty)))
+                });
+            // Column on B matched by `second_key`. Defaults to "id";
+            // overridable for intermediates declaring a non-`id` PK
+            // via `second_local_key = "..."`. Query 1 below `SELECT`s
+            // this column as `__sn_b_id` so the b->parent map keys
+            // off the correct join target.
+            let second_local_key = second_local_key_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "id".to_string());
+            let is_one = matches!(rel.kind, RelationKindAttr::HasOneThrough);
+            // Distribute branch: HasOneThrough stores `set_one`
+            // (None if no row); HasManyThrough stores `set_many`
+            // (empty Vec if no rows). Per-parent group reduction
+            // happens client-side over the already-grouped HashMap.
+            let distribute = if is_one {
+                quote! {
+                    for p in parents.iter_mut() {
+                        let pk_str = ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        let row: ::core::option::Option<#target_ty> =
+                            by_parent.remove(&pk_str).and_then(|mut g| g.pop());
+                        p.__eager.set_one::<#target_ty>(#name_str, row);
+                    }
+                }
+            } else {
+                quote! {
+                    for p in parents.iter_mut() {
+                        let pk_str = ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        let group = by_parent.remove(&pk_str).unwrap_or_default();
+                        p.__eager.set_many::<#target_ty>(#name_str, group);
+                    }
+                }
+            };
+
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+
+                    let pk_json_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null))
+                        .collect();
+
+                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+
+                    // Backend-aware placeholder rendering for the
+                    // IN-list on the intermediate table query.
+                    let mut placeholders: ::std::vec::Vec<::std::string::String> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    let mut binds: ::std::vec::Vec<::suprnova::sea_orm::Value> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    for (i, v) in pk_json_values.iter().enumerate() {
+                        let ph = match db_backend {
+                            ::suprnova::sea_orm::DatabaseBackend::Postgres => {
+                                ::std::format!("${}", i + 1)
+                            }
+                            _ => ::std::string::String::from("?"),
+                        };
+                        placeholders.push(ph);
+                        binds.push(
+                            ::suprnova::eloquent::model::json_value_to_sea_value(v),
+                        );
+                    }
+
+                    let __sn_b_table = <#through_ty as
+                        ::suprnova::eloquent::EloquentModel>::TABLE;
+
+                    // Query 1 — pull (b_id, parent_id) mapping. We
+                    // CAST both columns to TEXT/CHAR so the
+                    // HashMap key shape lines up regardless of the
+                    // underlying integer vs string column type. The
+                    // `Value::String(s) => s` normalisation on the
+                    // parent side matches what HasMany's count arm
+                    // does.
+                    let __sn_cast_kw = match db_backend {
+                        ::suprnova::sea_orm::DatabaseBackend::MySql => "CHAR",
+                        _ => "TEXT",
+                    };
+                    let __sn_map_sql = ::std::format!(
+                        "SELECT CAST({slk} AS {cast}) AS __sn_b_id, \
+                                CAST({fk} AS {cast}) AS __sn_parent_id \
+                           FROM {table} \
+                          WHERE {fk} IN ({phs})",
+                        cast = __sn_cast_kw,
+                        fk = #first_key,
+                        slk = #second_local_key,
+                        table = __sn_b_table,
+                        phs = placeholders.join(", "),
+                    );
+                    let __sn_map_stmt = ::suprnova::sea_orm::Statement::from_sql_and_values(
+                        db_backend,
+                        &__sn_map_sql,
+                        binds,
+                    );
+                    let __sn_map_rows = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, __sn_map_stmt)
+                        .await
+                        .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+
+                    use ::std::collections::HashMap;
+                    // b_id -> parent_id (both as string keys).
+                    let mut b_to_parent: HashMap<::std::string::String, ::std::string::String>
+                        = HashMap::new();
+                    // The IN-set of B's `id`s — we re-issue Query 2 on
+                    // C with these, keeping the existing model-level
+                    // typed deserialisation.
+                    let mut b_ids: ::std::vec::Vec<::suprnova::serde_json::Value>
+                        = ::std::vec::Vec::with_capacity(__sn_map_rows.len());
+                    for r in __sn_map_rows.iter() {
+                        let b_id = r
+                            .try_get::<::std::string::String>("", "__sn_b_id")
+                            .unwrap_or_default();
+                        let parent_id = r
+                            .try_get::<::std::string::String>("", "__sn_parent_id")
+                            .unwrap_or_default();
+                        if b_id.is_empty() { continue; }
+                        b_ids.push(::suprnova::serde_json::Value::from(b_id.clone()));
+                        b_to_parent.insert(b_id, parent_id);
+                    }
+
+                    // Group container declared up-front so the
+                    // `#distribute` block (which `.remove()`s per
+                    // parent key) compiles for both the empty-set
+                    // short-circuit AND the populated path. Empty
+                    // `b_ids` means no rows go in; per-parent
+                    // distribution still runs so every parent gets
+                    // an explicit empty cache entry (not a panic).
+                    let mut by_parent: HashMap<
+                        ::std::string::String,
+                        ::std::vec::Vec<#target_ty>,
+                    > = HashMap::new();
+
+                    // Short-circuit when no intermediate rows match —
+                    // every parent gets an empty / None entry so the
+                    // loaded accessor doesn't panic on "you forgot
+                    // `with([\"...\"])`".
+                    if b_ids.is_empty() {
+                        #distribute
+                        return ::core::result::Result::Ok(());
+                    }
+
+                    // Query 2 — pull C rows via the existing
+                    // Model::query() pipeline. `filter_in` runs the
+                    // same bind / placeholder / typed-deserialisation
+                    // path the rest of the framework uses.
+                    let c_rows: ::std::vec::Vec<#target_ty> =
+                        <#target_ty as ::suprnova::eloquent::Model>::query()
+                            .filter_in(#second_key, b_ids)
+                            .get()
+                            .await?;
+
+                    // Group C rows by parent_id, via the b->parent
+                    // map. The per-row C.second_key is JSON-plucked
+                    // (same pattern as HasMany's eager arm) and
+                    // normalised to the raw string form so it lines
+                    // up with the CAST-as-TEXT keys in `b_to_parent`.
+                    for r in c_rows.into_iter() {
+                        let row_json = ::suprnova::serde_json::to_value(&r)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        let b_id_key = match row_json.get(#second_key) {
+                            ::core::option::Option::Some(
+                                ::suprnova::serde_json::Value::String(s),
+                            ) => s.clone(),
+                            ::core::option::Option::Some(other) => other.to_string(),
+                            ::core::option::Option::None => ::std::string::String::new(),
+                        };
+                        if let ::core::option::Option::Some(parent_id)
+                            = b_to_parent.get(&b_id_key)
+                        {
+                            by_parent
+                                .entry(parent_id.clone())
+                                .or_default()
+                                .push(r);
+                        }
+                    }
+
+                    // Distribute — branches on HasOne vs HasMany
+                    // through the `#distribute` token block above.
+                    #distribute
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
         _ => Ok(None),
     }
 }
@@ -1632,6 +2006,150 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         fk = #pivot_fk,
                         cast = __sn_cast_kw,
                         table = __sn_table,
+                        phs = placeholders.join(", "),
+                    );
+
+                    let stmt = ::suprnova::sea_orm::Statement::from_sql_and_values(
+                        db_backend,
+                        &__sn_sql,
+                        binds,
+                    );
+                    let rows = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                        .await
+                        .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+
+                    use ::std::collections::HashMap;
+                    let mut counts: HashMap<::std::string::String, u64> = HashMap::new();
+                    for r in rows.iter() {
+                        let key: ::std::string::String = r
+                            .try_get::<::std::string::String>("", "__sn_fk_key")
+                            .unwrap_or_default();
+                        let n: i64 = r.try_get::<i64>("", "__sn_count").unwrap_or(0);
+                        counts.insert(key, n.max(0) as u64);
+                    }
+
+                    for p in parents.iter_mut() {
+                        let key = __sn_parent_key_to_match_cast(
+                            ::suprnova::serde_json::to_value(&p.#pk_ident)
+                                .unwrap_or(::suprnova::serde_json::Value::Null),
+                        );
+                        p.__eager.set_count(#name_str, *counts.get(&key).unwrap_or(&0));
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
+        RelationKindAttr::HasManyThrough | RelationKindAttr::HasOneThrough => {
+            // Server-side GROUP BY count via the two-hop JOIN. One
+            // round trip regardless of fan-out across the C table.
+            // Mirrors HasMany's count arm but the COUNT source is
+            // `<C> INNER JOIN <B>` and we group by `B.<first_key>`
+            // (which is the parent's PK value, normalised via
+            // CAST AS TEXT/CHAR).
+            //
+            //   SELECT CAST(b.<first_key> AS TEXT|CHAR) AS __sn_fk_key,
+            //          COUNT(*) AS __sn_count
+            //     FROM <C> c
+            //     JOIN <B> b ON c.<second_key> = b.<second_local_key>
+            //    WHERE b.<first_key> IN (?, ?, ...)
+            //    GROUP BY b.<first_key>
+            //
+            // HasOneThrough caps the count at 1 client-side after
+            // distribution — the JOIN itself can return multiple C
+            // rows per parent if the HasOne contract is violated, and
+            // we'd rather report the real count + let the test catch
+            // a malformed dataset than silently truncate at the SQL
+            // layer.
+            //
+            // Type rebinding: same swap as the eager arm — for
+            // Through kinds the parser stores `(B, C)` as
+            // `(rel.target, rel.through)`. Shadow the function-scope
+            // `target_ty` with the final target `C`.
+            let through_ty = &rel.target; // intermediate B
+            let target_ty = rel.through.as_ref().ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &rel.name,
+                    "HasOneThrough / HasManyThrough require a final target type \
+                     (parser bug if reached)",
+                )
+            })?; // final target C
+            let first_key = first_key_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{}_id", to_snake(&parent_name)));
+            let second_key = second_key_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    format!("{}_id", to_snake(&last_segment_name(through_ty)))
+                });
+            // JOIN-target column on B. Defaults to `"id"`; overridable
+            // via `second_local_key = "..."` for intermediates with a
+            // non-`id` PK.
+            let second_local_key = second_local_key_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "id".to_string());
+
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+
+                    fn __sn_parent_key_to_match_cast(
+                        v: ::suprnova::serde_json::Value,
+                    ) -> ::std::string::String {
+                        match v {
+                            ::suprnova::serde_json::Value::String(s) => s,
+                            other => other.to_string(),
+                        }
+                    }
+
+                    let pk_json_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null))
+                        .collect();
+
+                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+
+                    let mut placeholders: ::std::vec::Vec<::std::string::String> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    let mut binds: ::std::vec::Vec<::suprnova::sea_orm::Value> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    for (i, v) in pk_json_values.iter().enumerate() {
+                        let ph = match db_backend {
+                            ::suprnova::sea_orm::DatabaseBackend::Postgres => {
+                                ::std::format!("${}", i + 1)
+                            }
+                            _ => ::std::string::String::from("?"),
+                        };
+                        placeholders.push(ph);
+                        binds.push(
+                            ::suprnova::eloquent::model::json_value_to_sea_value(v),
+                        );
+                    }
+
+                    let __sn_cast_kw = match db_backend {
+                        ::suprnova::sea_orm::DatabaseBackend::MySql => "CHAR",
+                        _ => "TEXT",
+                    };
+                    let __sn_b_table = <#through_ty as
+                        ::suprnova::eloquent::EloquentModel>::TABLE;
+                    let __sn_c_table = <#target_ty as
+                        ::suprnova::eloquent::EloquentModel>::TABLE;
+                    let __sn_sql = ::std::format!(
+                        "SELECT CAST(__sn_b.{fk} AS {cast}) AS __sn_fk_key, \
+                                COUNT(*) AS __sn_count \
+                           FROM {c_table} __sn_c \
+                           JOIN {b_table} __sn_b \
+                             ON __sn_c.{second_key} = __sn_b.{slk} \
+                          WHERE __sn_b.{fk} IN ({phs}) \
+                          GROUP BY __sn_b.{fk}",
+                        fk = #first_key,
+                        second_key = #second_key,
+                        slk = #second_local_key,
+                        cast = __sn_cast_kw,
+                        c_table = __sn_c_table,
+                        b_table = __sn_b_table,
                         phs = placeholders.join(", "),
                     );
 
@@ -2200,6 +2718,194 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         agg = __sn_agg_expr,
                         pivot = __sn_pivot,
                         related = __sn_related,
+                        phs = placeholders.join(", "),
+                    );
+
+                    let stmt = ::suprnova::sea_orm::Statement::from_sql_and_values(
+                        db_backend,
+                        &__sn_sql,
+                        binds,
+                    );
+                    let rows = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                        .await
+                        .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+
+                    use ::std::collections::HashMap;
+                    let mut by_fk: HashMap<
+                        ::std::string::String,
+                        ::core::option::Option<f64>,
+                    > = HashMap::new();
+                    for r in rows.iter() {
+                        let key: ::std::string::String = r
+                            .try_get::<::std::string::String>("", "__sn_fk_key")
+                            .unwrap_or_default();
+                        let agg: ::core::option::Option<f64> = r
+                            .try_get::<::core::option::Option<f64>>("", "__sn_agg")
+                            .ok()
+                            .flatten()
+                            .or_else(|| {
+                                r.try_get::<::core::option::Option<i64>>("", "__sn_agg")
+                                    .ok()
+                                    .flatten()
+                                    .map(|n| n as f64)
+                            });
+                        by_fk.insert(key, agg);
+                    }
+
+                    for p in parents.iter_mut() {
+                        let key = __sn_parent_key_to_match_cast(
+                            ::suprnova::serde_json::to_value(&p.#pk_ident)
+                                .unwrap_or(::suprnova::serde_json::Value::Null),
+                        );
+                        let agg: ::core::option::Option<f64> = by_fk
+                            .get(&key)
+                            .copied()
+                            .unwrap_or(::core::option::Option::None);
+                        match kind {
+                            ::suprnova::AggregateKind::Sum
+                            | ::suprnova::AggregateKind::Avg => {
+                                p.__eager.set_aggregate::<f64>(
+                                    #name_str,
+                                    agg.unwrap_or(0.0),
+                                );
+                            }
+                            ::suprnova::AggregateKind::Min
+                            | ::suprnova::AggregateKind::Max => {
+                                p.__eager.set_aggregate::<::core::option::Option<f64>>(
+                                    #name_str,
+                                    agg,
+                                );
+                            }
+                        }
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
+        RelationKindAttr::HasManyThrough | RelationKindAttr::HasOneThrough => {
+            // Through aggregate is over the TARGET (C) table's
+            // columns. The dispatcher JOINs C to B and groups by the
+            // intermediate's first_key column. Same SQL skeleton as
+            // BelongsToMany's aggregate, except the JOIN connects
+            // C.{second_key} to B.id (not a pivot table's two FKs).
+            //
+            //   SELECT CAST(b.<first_key> AS TEXT|CHAR) AS __sn_fk_key,
+            //          AGG(c.<col>)                     AS __sn_agg
+            //     FROM <C> __sn_c
+            //     JOIN <B> __sn_b ON __sn_c.<second_key> = __sn_b.id
+            //    WHERE __sn_b.<first_key> IN (...)
+            //    GROUP BY __sn_b.<first_key>
+            //
+            // Sum/Avg → f64 with 0.0 empty default. Min/Max →
+            // Option<f64> with None empty default. Matches the
+            // HasMany / BelongsToMany contract.
+            //
+            // Type rebinding: same swap as the eager + count arms —
+            // for Through kinds `(rel.target, rel.through)` is
+            // `(B, C)`. Shadow the function-scope `target_ty` with
+            // the final target `C`.
+            let through_ty = &rel.target; // intermediate B
+            let target_ty = rel.through.as_ref().ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &rel.name,
+                    "HasOneThrough / HasManyThrough require a final target type \
+                     (parser bug if reached)",
+                )
+            })?; // final target C
+            let first_key = first_key_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{}_id", to_snake(&parent_name)));
+            let second_key = second_key_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    format!("{}_id", to_snake(&last_segment_name(through_ty)))
+                });
+            // JOIN-target column on B. Defaults to `"id"`; overridable
+            // via `second_local_key = "..."` for intermediates with a
+            // non-`id` PK.
+            let second_local_key = second_local_key_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "id".to_string());
+
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+
+                    fn __sn_parent_key_to_match_cast(
+                        v: ::suprnova::serde_json::Value,
+                    ) -> ::std::string::String {
+                        match v {
+                            ::suprnova::serde_json::Value::String(s) => s,
+                            other => other.to_string(),
+                        }
+                    }
+
+                    let pk_json_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null))
+                        .collect();
+
+                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+
+                    let mut placeholders: ::std::vec::Vec<::std::string::String> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    let mut binds: ::std::vec::Vec<::suprnova::sea_orm::Value> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    for (i, v) in pk_json_values.iter().enumerate() {
+                        let ph = match db_backend {
+                            ::suprnova::sea_orm::DatabaseBackend::Postgres => {
+                                ::std::format!("${}", i + 1)
+                            }
+                            _ => ::std::string::String::from("?"),
+                        };
+                        placeholders.push(ph);
+                        binds.push(
+                            ::suprnova::eloquent::model::json_value_to_sea_value(v),
+                        );
+                    }
+
+                    let __sn_cast_kw = match db_backend {
+                        ::suprnova::sea_orm::DatabaseBackend::MySql => "CHAR",
+                        _ => "TEXT",
+                    };
+                    let __sn_b_table = <#through_ty as
+                        ::suprnova::eloquent::EloquentModel>::TABLE;
+                    let __sn_c_table = <#target_ty as
+                        ::suprnova::eloquent::EloquentModel>::TABLE;
+
+                    let __sn_agg_expr: ::std::string::String = match kind {
+                        ::suprnova::AggregateKind::Sum => {
+                            ::std::format!("SUM(__sn_c.{})", column)
+                        }
+                        ::suprnova::AggregateKind::Avg => {
+                            ::std::format!("AVG(__sn_c.{})", column)
+                        }
+                        ::suprnova::AggregateKind::Min => {
+                            ::std::format!("MIN(__sn_c.{})", column)
+                        }
+                        ::suprnova::AggregateKind::Max => {
+                            ::std::format!("MAX(__sn_c.{})", column)
+                        }
+                    };
+
+                    let __sn_sql = ::std::format!(
+                        "SELECT CAST(__sn_b.{fk} AS {cast}) AS __sn_fk_key, \
+                                {agg} AS __sn_agg \
+                           FROM {c_table} __sn_c \
+                           JOIN {b_table} __sn_b \
+                             ON __sn_c.{second_key} = __sn_b.{slk} \
+                          WHERE __sn_b.{fk} IN ({phs}) \
+                          GROUP BY __sn_b.{fk}",
+                        fk = #first_key,
+                        second_key = #second_key,
+                        slk = #second_local_key,
+                        cast = __sn_cast_kw,
+                        agg = __sn_agg_expr,
+                        c_table = __sn_c_table,
+                        b_table = __sn_b_table,
                         phs = placeholders.join(", "),
                     );
 

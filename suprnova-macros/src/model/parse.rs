@@ -142,10 +142,23 @@ pub enum RelationOpt {
     /// for `MorphTo` declarations. Used by T6 to emit the per-family
     /// `<Name>Morph` enum.
     MorphTargets(Vec<Type>),
-    /// `first_key = "country_id"` — `HasManyThrough` override.
+    /// `first_key = "country_id"` — `HasManyThrough` / `HasOneThrough`
+    /// override for the column on the intermediate `B` table that
+    /// points at the parent `A`. Default: `<snake(parent_struct)>_id`.
     FirstKey(String),
-    /// `second_key = "user_id"` — `HasManyThrough` override.
+    /// `second_key = "user_id"` — `HasManyThrough` / `HasOneThrough`
+    /// override for the column on the final target `C` table that
+    /// points at the intermediate `B`. Default:
+    /// `<snake(intermediate_struct)>_id`.
     SecondKey(String),
+    /// `second_local_key = "uuid"` — `HasManyThrough` / `HasOneThrough`
+    /// override for the column on the intermediate `B` matched by
+    /// `second_key`. Defaults to `"id"`. Required when the
+    /// intermediate model declares `#[model(primary_key = "...")]`
+    /// with a non-`id` PK — without this option the dispatcher's JOIN
+    /// reads `__sn_b.id` and silently produces empty / broken results
+    /// for intermediates keyed on a different column.
+    SecondLocalKey(String),
     /// `pivot_table = "role_user"` — explicit pivot table name for
     /// `BelongsToMany`. Defaults to the pivot type's
     /// `<P as EloquentModel>::TABLE` const when omitted.
@@ -844,6 +857,10 @@ fn parse_relation_options(input: ParseStream, kind: RelationKindAttr) -> Result<
                     let s: LitStr = content.parse()?;
                     out.push(RelationOpt::SecondKey(s.value()));
                 }
+                "second_local_key" => {
+                    let s: LitStr = content.parse()?;
+                    out.push(RelationOpt::SecondLocalKey(s.value()));
+                }
                 "pivot_table" => {
                     let s: LitStr = content.parse()?;
                     out.push(RelationOpt::PivotTable(s.value()));
@@ -866,8 +883,8 @@ fn parse_relation_options(input: ParseStream, kind: RelationKindAttr) -> Result<
                         format!(
                             "unknown relation option `{other}`. Expected one of: fk, lk, \
                              with_pivot, with_timestamps, with_default, scope, name, targets, \
-                             first_key, second_key, pivot_table, pivot_foreign_key, \
-                             pivot_related_key, related_key.",
+                             first_key, second_key, second_local_key, pivot_table, \
+                             pivot_foreign_key, pivot_related_key, related_key.",
                         ),
                     ));
                 }

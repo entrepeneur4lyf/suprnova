@@ -39,12 +39,14 @@ pub mod belongs_to_many;
 pub mod eager_cache;
 pub mod has_many;
 pub mod has_one;
+pub mod through;
 
 pub use belongs_to::BelongsTo;
 pub use belongs_to_many::BelongsToMany;
 pub use eager_cache::EagerLoadCache;
 pub use has_many::HasMany;
 pub use has_one::HasOne;
+pub use through::{HasManyThrough, HasOneThrough};
 
 use std::any::{Any, TypeId};
 use std::future::Future;

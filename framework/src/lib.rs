@@ -223,9 +223,9 @@ pub use eloquent::{
     AsEncryptedObject, AsEnum, AsFloat, AsHashed, AsImmutableDate, AsImmutableDateTime, AsInt,
     AsJson, AsObject, AsOptionalDateTime, AsString, AsTimestamp, Attrs, BelongsTo, BelongsToMany,
     Builder, Cast, Collection, Direction, DynCast, EagerLoadCache, EagerLoadDispatch, EloquentModel,
-    Fillable, FirstOrCreate, HasMany, HasOne, IntoColumn, IntoDynCast, IntoVal, MassPrunable, Model,
-    ModelEntry, Prunable, PrunerEntry, Relation, RelationEntry, RelationKind, ReplicateExt,
-    SoftDeletes, Touchable,
+    Fillable, FirstOrCreate, HasMany, HasManyThrough, HasOne, HasOneThrough, IntoColumn,
+    IntoDynCast, IntoVal, MassPrunable, Model, ModelEntry, Prunable, PrunerEntry, Relation,
+    RelationEntry, RelationKind, ReplicateExt, SoftDeletes, Touchable,
 };
 // `casts!` macro is `#[macro_export]` in eloquent/casts/mod.rs — re-exported
 // at the crate root automatically. No `pub use` needed here.
