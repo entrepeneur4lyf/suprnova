@@ -806,6 +806,284 @@ impl Listener<t1_force_article::events::Deleted> for WatchDeletedIsForceT1 {
     }
 }
 
+// ---- Extra coverage: update events, mutation-through-Arc<Mutex>, ordering -
+
+#[suprnova::model(table = "t1_update_users")]
+pub struct T1UpdateUser {
+    pub id: i64,
+    pub email: String,
+}
+
+static UPDATING_FIRED: AtomicUsize = AtomicUsize::new(0);
+static UPDATED_PREV_EMAIL: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
+static UPDATED_CUR_EMAIL: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
+
+pub struct CountUpdatingT1;
+pub struct RecordUpdatedT1;
+
+#[async_trait]
+impl CancellableListener<t1_update_user::events::Updating> for CountUpdatingT1 {
+    async fn handle(&self, _event: &t1_update_user::events::Updating) -> EventResult {
+        UPDATING_FIRED.fetch_add(1, Ordering::SeqCst);
+        EventResult::Ok
+    }
+}
+
+#[async_trait]
+impl Listener<t1_update_user::events::Updated> for RecordUpdatedT1 {
+    async fn handle(
+        &self,
+        event: &t1_update_user::events::Updated,
+    ) -> Result<(), FrameworkError> {
+        // OnceCell stores the FIRST update only — the static is reset
+        // implicitly via the test ordering (one update per test).
+        let _ = UPDATED_PREV_EMAIL.set(event.previous.email.clone());
+        let _ = UPDATED_CUR_EMAIL.set(event.current.email.clone());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn update_fires_updating_and_updated_with_previous_and_current() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t1_update_users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL)",
+    )
+    .await
+    .unwrap();
+
+    listen_cancellable::<t1_update_user::events::Updating, _>(std::sync::Arc::new(CountUpdatingT1))
+        .await;
+    EventFacade::listen::<t1_update_user::events::Updated, _>(std::sync::Arc::new(RecordUpdatedT1))
+        .await;
+
+    let u = T1UpdateUser::create(attrs! { email: "before@x.com" })
+        .await
+        .unwrap();
+    UPDATING_FIRED.store(0, Ordering::SeqCst);
+
+    let _ = u.update(attrs! { email: "after@x.com" }).await.unwrap();
+
+    assert_eq!(UPDATING_FIRED.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        UPDATED_PREV_EMAIL.get().map(|s| s.as_str()),
+        Some("before@x.com"),
+        "Updated.previous carries the row state from BEFORE the update"
+    );
+    assert_eq!(
+        UPDATED_CUR_EMAIL.get().map(|s| s.as_str()),
+        Some("after@x.com"),
+        "Updated.current carries the row state AFTER the update lands"
+    );
+}
+
+#[suprnova::model(table = "t1_mutate_users")]
+pub struct T1MutateUser {
+    pub id: i64,
+    pub email: String,
+}
+
+pub struct MutateOnCreateT1;
+
+#[async_trait]
+impl CancellableListener<t1_mutate_user::events::Creating> for MutateOnCreateT1 {
+    async fn handle(&self, event: &t1_mutate_user::events::Creating) -> EventResult {
+        let mut attrs = event.attrs.lock().await;
+        // Mutate the in-flight attrs — the resulting INSERT should
+        // pick up the new value.
+        attrs.insert("email", "mutated@x.com");
+        EventResult::Ok
+    }
+}
+
+#[tokio::test]
+async fn creating_listener_can_mutate_attrs_before_insert_lands() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t1_mutate_users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL)",
+    )
+    .await
+    .unwrap();
+
+    listen_cancellable::<t1_mutate_user::events::Creating, _>(std::sync::Arc::new(
+        MutateOnCreateT1,
+    ))
+    .await;
+
+    let u = T1MutateUser::create(attrs! { email: "original@x.com" })
+        .await
+        .unwrap();
+    assert_eq!(
+        u.email, "mutated@x.com",
+        "listener mutation must propagate to the persisted row"
+    );
+
+    // Verify it landed in the database, not just the returned struct.
+    let from_db = T1MutateUser::find(u.id).await.unwrap().unwrap();
+    assert_eq!(from_db.email, "mutated@x.com");
+}
+
+#[suprnova::model(table = "t1_order_users")]
+pub struct T1OrderUser {
+    pub id: i64,
+    pub email: String,
+}
+
+static ORDER_LOG: tokio::sync::OnceCell<std::sync::Arc<tokio::sync::Mutex<Vec<u8>>>> =
+    tokio::sync::OnceCell::const_new();
+
+async fn order_log() -> std::sync::Arc<tokio::sync::Mutex<Vec<u8>>> {
+    ORDER_LOG
+        .get_or_init(|| async {
+            std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()))
+        })
+        .await
+        .clone()
+}
+
+pub struct OrderListenerA;
+pub struct OrderListenerB;
+
+#[async_trait]
+impl Listener<t1_order_user::events::Created> for OrderListenerA {
+    async fn handle(
+        &self,
+        _event: &t1_order_user::events::Created,
+    ) -> Result<(), FrameworkError> {
+        let log = order_log().await;
+        log.lock().await.push(b'A');
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Listener<t1_order_user::events::Created> for OrderListenerB {
+    async fn handle(
+        &self,
+        _event: &t1_order_user::events::Created,
+    ) -> Result<(), FrameworkError> {
+        let log = order_log().await;
+        log.lock().await.push(b'B');
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn listeners_fire_in_registration_order() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t1_order_users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL)",
+    )
+    .await
+    .unwrap();
+
+    EventFacade::listen::<t1_order_user::events::Created, _>(std::sync::Arc::new(OrderListenerA))
+        .await;
+    EventFacade::listen::<t1_order_user::events::Created, _>(std::sync::Arc::new(OrderListenerB))
+        .await;
+
+    let log = order_log().await;
+    log.lock().await.clear();
+
+    let _ = T1OrderUser::create(attrs! { email: "o@o.com" })
+        .await
+        .unwrap();
+
+    let recorded = log.lock().await.clone();
+    assert_eq!(
+        recorded,
+        b"AB",
+        "listeners must fire in the order they were registered"
+    );
+}
+
+#[suprnova::model(table = "t1_first_cancel_users")]
+pub struct T1FirstCancelUser {
+    pub id: i64,
+    pub email: String,
+}
+
+static SECOND_LISTENER_CALLED: AtomicUsize = AtomicUsize::new(0);
+
+pub struct FirstCancels;
+pub struct SecondAfterCancel;
+
+#[async_trait]
+impl CancellableListener<t1_first_cancel_user::events::Creating> for FirstCancels {
+    async fn handle(&self, _event: &t1_first_cancel_user::events::Creating) -> EventResult {
+        EventResult::cancel("first vetoed")
+    }
+}
+
+#[async_trait]
+impl CancellableListener<t1_first_cancel_user::events::Creating> for SecondAfterCancel {
+    async fn handle(&self, _event: &t1_first_cancel_user::events::Creating) -> EventResult {
+        SECOND_LISTENER_CALLED.fetch_add(1, Ordering::SeqCst);
+        EventResult::Ok
+    }
+}
+
+#[tokio::test]
+async fn first_cancel_wins_later_cancellable_listeners_are_not_called() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t1_first_cancel_users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL)",
+    )
+    .await
+    .unwrap();
+
+    listen_cancellable::<t1_first_cancel_user::events::Creating, _>(std::sync::Arc::new(
+        FirstCancels,
+    ))
+    .await;
+    listen_cancellable::<t1_first_cancel_user::events::Creating, _>(std::sync::Arc::new(
+        SecondAfterCancel,
+    ))
+    .await;
+
+    SECOND_LISTENER_CALLED.store(0, Ordering::SeqCst);
+
+    let err = T1FirstCancelUser::create(attrs! { email: "x@x.com" })
+        .await
+        .unwrap_err();
+    assert!(format!("{err}").contains("first vetoed"));
+    assert_eq!(
+        SECOND_LISTENER_CALLED.load(Ordering::SeqCst),
+        0,
+        "second cancellable listener must not be called when the first cancelled"
+    );
+}
+
+#[suprnova::model(table = "t1_no_listeners_users")]
+pub struct T1NoListenersUser {
+    pub id: i64,
+    pub email: String,
+}
+
+#[tokio::test]
+async fn no_listener_fast_path_succeeds_silently() {
+    // Models without any registered listeners must complete their
+    // CRUD operations cleanly — dispatch_cancellable's empty-list
+    // fast path returns Ok immediately.
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t1_no_listeners_users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL)",
+    )
+    .await
+    .unwrap();
+
+    let u = T1NoListenersUser::create(attrs! { email: "quiet@x.com" })
+        .await
+        .unwrap();
+    assert_eq!(u.email, "quiet@x.com");
+
+    let u = u.update(attrs! { email: "still-quiet@x.com" }).await.unwrap();
+    assert_eq!(u.email, "still-quiet@x.com");
+
+    u.delete().await.unwrap();
+    assert!(T1NoListenersUser::all().await.unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn force_delete_fires_force_deleted_and_deleted_with_is_force_true_but_not_trashed() {
     let db = TestDatabase::sqlite_memory().await.unwrap();
