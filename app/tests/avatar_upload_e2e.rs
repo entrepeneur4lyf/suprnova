@@ -37,8 +37,8 @@ use suprnova::http::cookie::Cookie;
 use suprnova::session::driver::database::DatabaseSessionDriver;
 use suprnova::session::{generate_csrf_token, generate_session_id, SessionData, SessionStore};
 use suprnova::{
-    bind, group, handle_request, post, AuthMiddleware, EncryptionKey, MiddlewareRegistry, Router,
-    SessionConfig, SessionMiddleware, Storage, UserProvider,
+    attrs, bind, group, handle_request, post, AuthMiddleware, EncryptionKey, MiddlewareRegistry,
+    Model, Router, SessionConfig, SessionMiddleware, Storage, UserProvider,
 };
 use tokio::sync::Mutex;
 
@@ -199,10 +199,16 @@ async fn setup_app() -> TestApp {
 /// the test seeded in `setup_app`); the plaintext fallback was
 /// removed in codex review finding #1.
 async fn seed_session_for_new_user(app: &TestApp) -> (User, String) {
-    let user = User::create()
-        .insert()
-        .await
-        .expect("insert seed user");
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let user = User::create(attrs! {
+        name: "Avatar Test User",
+        email: format!("avatar-{seq}@example.suprnova.app"),
+        password: "hashed-by-test",
+    })
+    .await
+    .expect("insert seed user");
     let session_id = generate_session_id();
     let mut session = SessionData::new(session_id.clone(), generate_csrf_token());
     session.user_id = Some(user.id.to_string());

@@ -32,9 +32,9 @@ pub async fn show_user(req: Request) -> Response {
 
 async fn show_user_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
     let raw_id = req.param("id")?;
-    let user_id: i32 = raw_id
+    let user_id: i64 = raw_id
         .parse()
-        .map_err(|_| FrameworkError::param_parse("id", "i32"))?;
+        .map_err(|_| FrameworkError::param_parse("id", "i64"))?;
 
     let user = User::find_by_id(user_id)
         .await?
@@ -76,9 +76,9 @@ pub async fn delete_post(req: Request) -> Response {
 
 async fn delete_post_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
     let raw_id = req.param("id")?;
-    let post_id: i32 = raw_id
+    let post_id: i64 = raw_id
         .parse()
-        .map_err(|_| FrameworkError::param_parse("id", "i32"))?;
+        .map_err(|_| FrameworkError::param_parse("id", "i64"))?;
 
     let current_user = Auth::user_as::<User>()
         .await?
@@ -89,7 +89,7 @@ async fn delete_post_inner(req: Request) -> Result<HttpResponse, FrameworkError>
         .ok_or_else(|| FrameworkError::not_found("post"))?;
 
     Gate::authorize("delete-post", &current_user, &post)?;
-    post.delete().await?;
+    <Post as suprnova::eloquent::Model>::delete(post).await?;
 
     Ok(HttpResponse::json(suprnova::serde_json::json!({ "deleted": true })))
 }

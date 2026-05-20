@@ -29,8 +29,9 @@ use suprnova::http::cookie::Cookie;
 use suprnova::session::driver::database::DatabaseSessionDriver;
 use suprnova::session::{generate_csrf_token, generate_session_id, SessionData, SessionStore};
 use suprnova::{
-    bind, delete, get, group, handle_request, post, AuthMiddleware as SessionAuthMiddleware,
-    EncryptionKey, MiddlewareRegistry, Router, SessionConfig, SessionMiddleware, UserProvider,
+    attrs, bind, delete, get, group, handle_request, post,
+    AuthMiddleware as SessionAuthMiddleware, EncryptionKey, MiddlewareRegistry, Model, Router,
+    SessionConfig, SessionMiddleware, UserProvider,
 };
 use tokio::sync::Mutex;
 
@@ -155,10 +156,16 @@ async fn setup_app() -> TestApp {
 /// the encrypted cookie value the test drops into a
 /// `suprnova_session=<value>` Cookie header.
 async fn seed_session_for_new_user(app: &TestApp) -> (User, String) {
-    let user = User::create()
-        .insert()
-        .await
-        .expect("insert seed user");
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let user = User::create(attrs! {
+        name: "Posts E2E User",
+        email: format!("posts-{seq}@example.suprnova.app"),
+        password: "hashed-by-test",
+    })
+    .await
+    .expect("insert seed user");
     let session_id = generate_session_id();
     let mut session = SessionData::new(session_id.clone(), generate_csrf_token());
     session.user_id = Some(user.id.to_string());
@@ -254,7 +261,7 @@ async fn create_post_inserts_real_row_owned_by_session_user() {
     assert!(json["id"].as_i64().unwrap() > 0, "id assigned by SQL");
     assert_eq!(
         json["author_id"].as_i64().unwrap(),
-        user.id as i64,
+        user.id,
         "author_id comes from the session, not the request body"
     );
     assert_eq!(json["title"], "Hello, Suprnova!");
@@ -263,7 +270,7 @@ async fn create_post_inserts_real_row_owned_by_session_user() {
     // Verify the row really is in the DB (not just echoed from the
     // response). `Post::find_by_id` round-trips through the real
     // model code path we shipped in finding #17.
-    let id = json["id"].as_i64().unwrap() as i32;
+    let id = json["id"].as_i64().unwrap();
     let persisted = Post::find_by_id(id).await.unwrap().expect("row exists");
     assert_eq!(persisted.author_id, user.id);
     assert_eq!(persisted.title, "Hello, Suprnova!");
@@ -422,6 +429,6 @@ async fn delete_post_runs_delete_gate_and_removes_row() {
     assert_eq!(s_del.as_u16(), 200, "owner can delete their post");
 
     // Verify the row really vanished from the DB.
-    let after = Post::find_by_id(id as i32).await.unwrap();
+    let after = Post::find_by_id(id).await.unwrap();
     assert!(after.is_none(), "post row must be deleted from DB");
 }

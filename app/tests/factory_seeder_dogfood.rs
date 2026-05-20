@@ -55,7 +55,7 @@ async fn base_seeder_creates_50_users_and_200_posts() {
         "UserFactory.count(50).create_many() produced 50 rows"
     );
 
-    let post_count = app::models::entities::posts::Entity::find()
+    let post_count = app::models::posts::Entity::find()
         .count(&conn)
         .await
         .unwrap();
@@ -66,7 +66,7 @@ async fn base_seeder_creates_50_users_and_200_posts() {
 
     // A post sample carries non-empty title/body — the fake
     // generators populated them.
-    let sample = app::models::entities::posts::Entity::find()
+    let sample = app::models::posts::Entity::find()
         .one(&conn)
         .await
         .unwrap()

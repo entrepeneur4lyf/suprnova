@@ -1,7 +1,7 @@
-//! SeaORM entity for the framework-owned `features` table.
+//! Suprnova model for the framework-owned `features` table.
 //!
-//! Schema lives in [`crate::features::migrations::CreateFeaturesTable`].
-//! The shape mirrors the migration column-for-column:
+//! Phase 10A T11 migrated this entity to `#[suprnova::model]`, the same
+//! macro consumers use. The shape mirrors the migration column-for-column:
 //!
 //! * `name` + `scope_key` form a UNIQUE composite key. `scope_key = ""`
 //!   represents a global flag; other values like `"user:42"` or
@@ -12,26 +12,36 @@
 //!   toggled the flag (NULL for system-initiated changes). String-typed
 //!   to carry torii's opaque (UUID / ULID) user ids — numeric-keyed apps
 //!   round-trip via `Option<String>` without loss.
+//!
+//! Schema lives in [`crate::features::migrations::CreateFeaturesTable`].
+//! Other code in the `features` module reaches the SeaORM types via the
+//! re-exports below (`Entity`, `Column`, `ActiveModel`) so existing
+//! call sites in `admin.rs` / `evaluators/database.rs` keep working
+//! unchanged.
 
-use sea_orm::entity::prelude::*;
-use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Utc};
 
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
-#[sea_orm(table_name = "features")]
-pub struct Model {
-    #[sea_orm(primary_key)]
+#[suprnova::model(
+    table = "features",
+    timestamps,
+)]
+pub struct Feature {
     pub id: i64,
     pub name: String,
     pub scope_key: String,
     pub enabled: bool,
-    #[sea_orm(column_type = "Text", nullable)]
     pub description: Option<String>,
     pub updated_by: Option<String>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {}
-
-impl ActiveModelBehavior for ActiveModel {}
+// Re-export the SeaORM types the macro emits inside the per-struct
+// inner module so the rest of the `features` module (admin.rs,
+// evaluators/database.rs) keeps reaching `entity::Entity`,
+// `entity::Column`, `entity::ActiveModel` exactly the way it did
+// before T11. The user-facing `Feature` struct is also re-exported as
+// `Model` for backwards-compatibility with any code that referenced
+// `entity::Model` (the old hand-rolled name).
+pub use feature::{ActiveModel, Column, Entity};
+pub use feature::Model;

@@ -17,7 +17,7 @@
 //! `app/src/policies/post_policy.rs`.
 
 use serde::Deserialize;
-use suprnova::{Auth, FrameworkError, Gate, HttpResponse, Request, Response};
+use suprnova::{attrs, Auth, FrameworkError, Gate, HttpResponse, Model, Request, Response};
 
 use crate::models::posts::Post;
 use crate::models::users::User;
@@ -55,13 +55,13 @@ async fn store_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
         return Err(FrameworkError::bad_request("body must not be empty"));
     }
 
-    let post = Post::create()
-        .set_author_id(current_user.id)
-        .set_title(payload.title)
-        .set_body(payload.body)
-        .set_is_public(payload.is_public)
-        .insert()
-        .await?;
+    let post = Post::create(attrs! {
+        author_id: current_user.id,
+        title: payload.title,
+        body: payload.body,
+        is_public: payload.is_public,
+    })
+    .await?;
 
     Ok(HttpResponse::json(suprnova::serde_json::json!({
         "id": post.id,
@@ -110,9 +110,9 @@ pub async fn show(req: Request) -> Response {
 
 async fn show_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
     let raw_id = req.param("id")?;
-    let post_id: i32 = raw_id
+    let post_id: i64 = raw_id
         .parse()
-        .map_err(|_| FrameworkError::param_parse("id", "i32"))?;
+        .map_err(|_| FrameworkError::param_parse("id", "i64"))?;
 
     let current_user = Auth::user_as::<User>()
         .await?

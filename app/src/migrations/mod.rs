@@ -5,6 +5,7 @@ mod m20251208_200000_create_todos_table;
 mod m20251208_220000_create_sessions_table;
 mod m20251208_230000_create_remember_tokens_table;
 mod m20251208_240000_create_posts_table;
+mod m_2026_05_19_phase_10a_user_columns;
 
 pub struct Migrator;
 
@@ -32,6 +33,11 @@ impl MigratorTrait for Migrator {
             // includes it so `suprnova migrate` provisions the table
             // alongside this project's own schema.
             Box::new(suprnova::features::migrations::CreateFeaturesTable),
+            // Phase 10A T11 — adds the columns the migrated dogfood
+            // models (User, Todo) declare on top of the original
+            // bare-bones schema. See the migration's module doc for
+            // the per-column rationale.
+            Box::new(m_2026_05_19_phase_10a_user_columns::Migration),
         ]
     }
 }

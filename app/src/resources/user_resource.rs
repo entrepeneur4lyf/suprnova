@@ -2,11 +2,10 @@
 //!
 //! Exercises the Phase 3 `#[derive(Data)] #[json_resource("users")]` pipeline.
 //!
-//! **Schema note:** The dogfood `users` table has only `id`, `created_at`,
-//! and `updated_at`. There is no `email` column.  `email` is synthesised
-//! from the user's id so the JSON:API attributes object has a non-trivial
-//! field without requiring a migration. `password` is an input-only field —
-//! it is excluded from serialised output by `#[data(input_only)]`.
+//! Phase 10A T11 — `User` now carries real identity columns (name,
+//! email, …) since the dogfood migrated to `#[suprnova::model]`. The
+//! resource projects only the fields safe for serialisation; the
+//! `password` column stays input-only.
 
 use crate::models::users::User;
 use suprnova::Data;
@@ -33,15 +32,17 @@ use validator::Validate;
 #[derive(Debug, Clone, Data, Validate)]
 #[json_resource("users")]
 pub struct UserResource {
-    /// Primary key.  JSON:API emits this as the `id` member (string).
-    pub id: i32,
+    /// Primary key. JSON:API emits this as the `id` member (string).
+    pub id: i64,
 
-    /// Synthesised e-mail address. The dogfood entity has no email column;
-    /// this is derived at conversion time so the attributes object is
-    /// non-trivial.
+    /// E-mail address. Populated from the `User::email` column after
+    /// Phase 10A T11's migration; the previous shim that synthesised
+    /// the value from the user id is no longer needed.
     pub email: String,
 
-    /// ISO-8601 timestamp sourced from the entity's `created_at` string.
+    /// ISO-8601 timestamp string. Stringified at conversion time from
+    /// the underlying `DateTime<Utc>` so the JSON:API envelope keeps
+    /// its existing string-typed `created_at` shape.
     pub created_at: String,
 
     /// Raw password — accepted on input, never serialised to output.
@@ -53,8 +54,8 @@ impl From<User> for UserResource {
     fn from(u: User) -> Self {
         Self {
             id: u.id,
-            email: format!("user-{}@example.suprnova.app", u.id),
-            created_at: u.created_at.clone(),
+            email: u.email,
+            created_at: u.created_at.to_rfc3339(),
             password: String::new(),
         }
     }

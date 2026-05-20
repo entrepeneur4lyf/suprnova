@@ -3,12 +3,11 @@
 //! This provider implements the `UserProvider` trait to fetch users from the database.
 
 use async_trait::async_trait;
+use std::sync::Arc;
 use suprnova::auth::{Authenticatable, UserProvider};
 use suprnova::FrameworkError;
-use sea_orm::ColumnTrait;
-use std::sync::Arc;
 
-use crate::models::users::{Column, Model as User};
+use crate::models::users::User;
 
 /// Database-backed user provider for authentication
 ///
@@ -35,10 +34,7 @@ impl UserProvider for DatabaseUserProvider {
             .parse()
             .map_err(|_| FrameworkError::bad_request("user id must be numeric"))?;
 
-        let user = User::query()
-            .filter(Column::Id.eq(numeric_id as i32))
-            .first()
-            .await?;
+        let user = User::find_by_id(numeric_id).await?;
 
         Ok(user.map(|u| Arc::new(u) as Arc<dyn Authenticatable>))
     }

@@ -195,14 +195,19 @@ impl DatabaseEvaluator {
         scope_key: &str,
         enabled: bool,
     ) -> Result<(), FrameworkError> {
-        let now = Utc::now();
+        // Phase 10A T11 — the inner SeaORM `Model` carries the storage
+        // shape (RFC-3339 string for `created_at` / `updated_at` since
+        // `#[model(timestamps)]` auto-injects the `AsDateTime` cast).
+        // Build the ActiveModel by routing through the macro's
+        // cast pipeline rather than handing chrono types directly.
+        let now = Utc::now().to_rfc3339();
         let model = FeatureActive {
             name: Set(name.to_string()),
             scope_key: Set(scope_key.to_string()),
             enabled: Set(enabled),
             description: Set(None),
             updated_by: Set(None),
-            created_at: Set(now),
+            created_at: Set(now.clone()),
             updated_at: Set(now),
             ..Default::default()
         };
