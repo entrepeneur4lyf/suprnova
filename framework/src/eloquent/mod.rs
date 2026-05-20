@@ -39,9 +39,10 @@ pub use prunable::{
 };
 pub use registry::{find_model_by_table, models, ModelEntry};
 pub use relations::{
-    find_relation, relations, relations_of, AggregateKind, BelongsTo, BelongsToMany,
-    EagerLoadCache, EagerLoadDispatch, HasMany, HasManyThrough, HasOne, HasOneThrough, MorphMany,
-    MorphOne, MorphTo, MorphToMany, MorphedByMany, Relation, RelationEntry, RelationKind,
+    find_morph_type, find_morph_type_by_id, find_relation, morph_types, relations, relations_of,
+    AggregateKind, BelongsTo, BelongsToMany, EagerLoadCache, EagerLoadDispatch, HasMany,
+    HasManyThrough, HasOne, HasOneThrough, MorphMany, MorphOne, MorphTo, MorphToMany,
+    MorphTypeEntry, MorphedByMany, Relation, RelationEntry, RelationKind,
 };
 pub use soft_deletes::SoftDeletes;
 pub use timestamps::Touchable;

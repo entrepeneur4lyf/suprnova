@@ -217,16 +217,16 @@ pub use featureflag::{feature, is_enabled};
 // time by `#[suprnova::model]` (Task 3) and walked at boot by Phase 8
 // (Admin), `model:prune`, and future tooling.
 pub use eloquent::{
-    find_model_by_table, find_relation, models, prune_all, prune_all_dry, prune_one, relations,
-    relations_of, unguarded, AggregateKind, AsArray, AsArrayObject, AsBool, AsCollection, AsDate,
-    AsDateTime, AsDecimal, AsEncrypted, AsEncryptedArray, AsEncryptedCollection,
-    AsEncryptedObject, AsEnum, AsFloat, AsHashed, AsImmutableDate, AsImmutableDateTime, AsInt,
-    AsJson, AsObject, AsOptionalDateTime, AsString, AsTimestamp, Attrs, BelongsTo, BelongsToMany,
-    Builder, Cast, Collection, Direction, DynCast, EagerLoadCache, EagerLoadDispatch, EloquentModel,
-    Fillable, FirstOrCreate, HasMany, HasManyThrough, HasOne, HasOneThrough, IntoColumn,
-    IntoDynCast, IntoVal, MassPrunable, Model, ModelEntry, MorphMany, MorphOne, MorphTo,
-    MorphToMany, MorphedByMany, Prunable, PrunerEntry, Relation, RelationEntry, RelationKind,
-    ReplicateExt, SoftDeletes, Touchable,
+    find_model_by_table, find_morph_type, find_morph_type_by_id, find_relation, models,
+    morph_types, prune_all, prune_all_dry, prune_one, relations, relations_of, unguarded,
+    AggregateKind, AsArray, AsArrayObject, AsBool, AsCollection, AsDate, AsDateTime, AsDecimal,
+    AsEncrypted, AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject, AsEnum, AsFloat,
+    AsHashed, AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsObject, AsOptionalDateTime,
+    AsString, AsTimestamp, Attrs, BelongsTo, BelongsToMany, Builder, Cast, Collection, Direction,
+    DynCast, EagerLoadCache, EagerLoadDispatch, EloquentModel, Fillable, FirstOrCreate, HasMany,
+    HasManyThrough, HasOne, HasOneThrough, IntoColumn, IntoDynCast, IntoVal, MassPrunable, Model,
+    ModelEntry, MorphMany, MorphOne, MorphTo, MorphToMany, MorphTypeEntry, MorphedByMany, Prunable,
+    PrunerEntry, Relation, RelationEntry, RelationKind, ReplicateExt, SoftDeletes, Touchable,
 };
 // `casts!` macro is `#[macro_export]` in eloquent/casts/mod.rs — re-exported
 // at the crate root automatically. No `pub use` needed here.

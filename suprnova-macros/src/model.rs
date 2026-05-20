@@ -71,6 +71,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let eloquent = derive_eloquent::emit(&input)?;
     let relations_tokens = relations::emit(&input)?;
     let registry = emit_registry(&input);
+    let morph_registry = emit_morph_registry(&input);
 
     let module_name = input.module_name();
     let struct_def = input.struct_def();
@@ -96,6 +97,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         #eloquent
         #relations_tokens
         #registry
+        #morph_registry
     })
 }
 
@@ -182,6 +184,36 @@ fn emit_registry(input: &ModelInput) -> TokenStream {
                 table: #table,
                 module_path: module_path!(),
                 primary_key: #primary_key,
+            }
+        }
+    }
+}
+
+/// Phase 10B T8 — emit one `inventory::submit!(MorphTypeEntry { ... })`
+/// per `#[suprnova::model(morph_type = "...")]` struct. Models without
+/// the attribute return an empty token stream and never enter the
+/// registry (pinned by the
+/// `morph_type_not_registered_for_non_morph_models` integration test).
+///
+/// `TypeId::of::<T>` is `const fn` so it's stored as a `fn() -> TypeId`
+/// thunk; the `MorphTypeEntry` itself stays `Copy` and works inside
+/// `inventory::submit!`'s const-initialiser slot.
+fn emit_morph_registry(input: &ModelInput) -> TokenStream {
+    let morph_type = match input.morph_type.as_ref() {
+        Some(s) => s,
+        None => return TokenStream::new(),
+    };
+    let type_name = input.struct_name_str();
+    let table = &input.table;
+    let struct_ident = &input.item.ident;
+
+    quote! {
+        ::suprnova::inventory::submit! {
+            ::suprnova::MorphTypeEntry {
+                morph_type: #morph_type,
+                type_name: #type_name,
+                table: #table,
+                type_id: ::std::any::TypeId::of::<#struct_ident>,
             }
         }
     }
