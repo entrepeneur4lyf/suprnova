@@ -7,6 +7,7 @@ mod m20251208_230000_create_remember_tokens_table;
 mod m20251208_240000_create_posts_table;
 mod m_2026_05_19_phase_10a_user_columns;
 mod m_2026_05_19_phase_10b_relations_schema;
+mod m_2026_05_20_phase_10b_profiles;
 
 pub struct Migrator;
 
@@ -45,6 +46,12 @@ impl MigratorTrait for Migrator {
             // re-runs against existing dev databases pick it up as a
             // new pending migration.
             Box::new(m_2026_05_19_phase_10b_relations_schema::Migration),
+            // Phase 10B P5 — `profiles` table for the HasOne dogfood
+            // (User.profile: HasOne<Profile>). Closes the relation-kind
+            // coverage gap from the Phase 10B closeout self-audit.
+            // Listed last so re-runs against existing dev databases
+            // pick it up as a new pending migration.
+            Box::new(m_2026_05_20_phase_10b_profiles::Migration),
         ]
     }
 }

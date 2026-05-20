@@ -1,5 +1,6 @@
 pub mod comments;
 pub mod posts;
+pub mod profiles;
 pub mod role_user;
 pub mod roles;
 pub mod taggables;

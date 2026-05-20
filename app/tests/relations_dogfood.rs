@@ -30,6 +30,7 @@
 use app::migrations::Migrator;
 use app::models::comments::{Comment, CommentableMorph};
 use app::models::posts::Post;
+use app::models::profiles::Profile;
 use app::models::role_user::RoleUser;
 use app::models::roles::Role;
 use app::models::tags::Tag;
@@ -86,6 +87,91 @@ async fn has_many_user_posts_count_and_get() {
     let posts = u.posts().get().await.unwrap();
     assert_eq!(posts.len(), 3);
     assert!(posts.iter().all(|p| p.author_id == u.id));
+}
+
+// ---- HasOne: User.profile() -------------------------------------------
+//
+// Phase 10B P5 — closes the closeout self-audit gap. The Phase 10B T10
+// dogfood exercised every relation kind EXCEPT HasOne; the existing
+// models had no natural one-to-one shape. The Profile model
+// (`app/src/models/profiles.rs`) + `m_2026_05_20_phase_10b_profiles`
+// migration add one, and `User.profile: HasOne<Profile>` ties it
+// together. These three tests cover the read paths the spec calls out:
+//
+//   1. `.first()` returns Some(_) when the row exists
+//   2. `.first()` returns None when the row is absent
+//   3. `User::with(["profile"]).get()` populates `profile_loaded()`
+//      with the right Some/None per parent (single-value cache reads
+//      via `__eager.get_one`, not `get_many`)
+
+#[tokio::test]
+async fn has_one_user_profile_returns_some_when_present() {
+    let _db = TestDatabase::fresh::<Migrator>().await.unwrap();
+    let u = make_user("ho_alice").await;
+    Profile::create(attrs! {
+        user_id: u.id,
+        bio: "loves rust",
+    })
+    .await
+    .unwrap();
+
+    let p = u
+        .profile()
+        .first()
+        .await
+        .unwrap()
+        .expect("profile present");
+    assert_eq!(p.user_id, u.id, "profile.user_id must match parent.id");
+    assert_eq!(p.bio, "loves rust", "fillable bio must round-trip");
+}
+
+#[tokio::test]
+async fn has_one_user_profile_returns_none_when_absent() {
+    let _db = TestDatabase::fresh::<Migrator>().await.unwrap();
+    let u = make_user("ho_lonely").await;
+    // No `Profile::create` — the FK row simply doesn't exist. HasOne's
+    // `.first()` is `Option<T>` (NOT `Result<Option<T>, _>` unwrap-then-
+    // unwrap), and the bare connection must return `Ok(None)` rather
+    // than erroring on the empty scan.
+
+    let p = u.profile().first().await.unwrap();
+    assert!(p.is_none(), "no profile created, .first() must be None");
+}
+
+#[tokio::test]
+async fn has_one_user_profile_eager_load_populates_loaded_accessor() {
+    let _db = TestDatabase::fresh::<Migrator>().await.unwrap();
+    let u1 = make_user("ho_eager_1").await;
+    let u2 = make_user("ho_eager_2").await;
+    Profile::create(attrs! {
+        user_id: u1.id,
+        bio: "u1 bio",
+    })
+    .await
+    .unwrap();
+    // u2 has no profile — the per-parent cache must distinguish
+    // "present" from "absent" rather than collapsing both to None.
+
+    let users = User::with(["profile"]).get().await.unwrap();
+    let u1_loaded = users
+        .iter()
+        .find(|x| x.id == u1.id)
+        .expect("u1 must surface in User::with([\"profile\"])");
+    let u2_loaded = users
+        .iter()
+        .find(|x| x.id == u2.id)
+        .expect("u2 must surface");
+
+    let u1_profile = u1_loaded
+        .profile_loaded()
+        .expect("u1's profile must be in the eager cache");
+    assert_eq!(u1_profile.user_id, u1.id);
+    assert_eq!(u1_profile.bio, "u1 bio");
+    assert!(
+        u2_loaded.profile_loaded().is_none(),
+        "u2 had no profile row — eager-load must surface None on the parent, \
+         NOT borrow another user's profile",
+    );
 }
 
 // ---- BelongsToMany + Pivot accessor: User.roles() ----------------------

@@ -37,6 +37,11 @@ use suprnova::{model, Authenticatable};
     //   `with_pivot = ["assigned_at"]` directive includes the
     //   pivot's extra column in the join so `role.pivot::<RoleUser>()`
     //   surfaces it on the loaded rows.
+    // - `profile` is a HasOne (Phase 10B P5) — exactly one Profile
+    //   per User, FK defaults to `user_id` on the child table. The
+    //   `profiles.user_id` column carries a UNIQUE constraint at the
+    //   schema level so the "at most one" invariant is enforced even
+    //   if direct SQL bypasses the model.
     relations = {
         posts: HasMany<crate::models::posts::Post> {
             fk = "author_id",
@@ -45,6 +50,7 @@ use suprnova::{model, Authenticatable};
             with_pivot = ["assigned_at"],
             with_timestamps,
         },
+        profile: HasOne<crate::models::profiles::Profile>,
     },
 )]
 pub struct User {
