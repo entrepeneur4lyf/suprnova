@@ -533,3 +533,75 @@ async fn multiple_observers_all_fire_for_same_event() {
          confirms EventFacade dispatch fan-out covers Observer registration"
     );
 }
+
+// =========================================================================
+// T2c — cancel-from-observer propagates as FrameworkError::bad_request
+// =========================================================================
+//
+// An observer that returns `EventResult::cancel("reason")` from its
+// `creating` hook aborts the create with the cancel reason surfaced as
+// the error message. Pins the cancellable listener path's cancel
+// propagation contract from T1 (`EventResult::Cancel` →
+// `FrameworkError::bad_request(reason)`).
+//
+// Uses a dedicated `T2Subscription` model + `SubCancellingObserver`
+// type name (the unqualified `CancellingObserver` is already used by
+// T2a for the trait-default override smoke test at line 100).
+
+pub struct SubCancellingObserver;
+
+#[suprnova::observer(T2Subscription)]
+#[async_trait]
+impl Observer<T2Subscription> for SubCancellingObserver {
+    async fn creating(&self, _attrs: &mut Attrs) -> EventResult {
+        EventResult::cancel("observer denies create")
+    }
+}
+
+#[suprnova::model(table = "t2_subscriptions")]
+pub struct T2Subscription {
+    pub id: i64,
+    pub plan: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[tokio::test]
+async fn observer_cancel_aborts_create_with_reason() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t2_subscriptions (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT,\
+            plan TEXT NOT NULL,\
+            created_at TEXT NOT NULL,\
+            updated_at TEXT NOT NULL\
+        )",
+    )
+    .await
+    .unwrap();
+
+    suprnova::eloquent::observers::bootstrap_observers()
+        .await
+        .unwrap();
+
+    let result = T2Subscription::create(suprnova::attrs! { plan: "premium" }).await;
+    assert!(
+        result.is_err(),
+        "create should fail when the observer's creating() returns Cancel"
+    );
+    let msg = format!("{}", result.err().unwrap());
+    assert!(
+        msg.contains("observer denies create"),
+        "cancel reason should surface verbatim in the FrameworkError message; got: {msg}",
+    );
+
+    // The row never landed in the database — cancel from the observer
+    // is a true abort, not a "delete after the fact". `T2Subscription::all`
+    // should return an empty Vec.
+    let rows = T2Subscription::all().await.unwrap();
+    assert!(
+        rows.is_empty(),
+        "no row should land when the creating-observer cancels; got {} rows",
+        rows.len(),
+    );
+}
