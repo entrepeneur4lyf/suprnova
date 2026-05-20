@@ -40,17 +40,7 @@ const FORBIDDEN_MARKERS: &[&str] = &[
 /// fair game for stub markers. We deliberately do *not* audit binary
 /// blobs or lockfiles.
 const AUDITED_EXTENSIONS: &[&str] = &[
-    "rs",
-    "toml",
-    "ts",
-    "tsx",
-    "svelte",
-    "vue",
-    "json",
-    "html",
-    "css",
-    "yml",
-    "yaml",
+    "rs", "toml", "ts", "tsx", "svelte", "vue", "json", "html", "css", "yml", "yaml",
 ];
 
 /// Paths whose substrings indicate generated / external content we
@@ -95,7 +85,10 @@ fn collect_marker_hits(root: &Path) -> Vec<(PathBuf, &'static str, usize, String
     {
         let path = entry.path();
         let path_str = path.to_string_lossy();
-        if SKIP_PATH_FRAGMENTS.iter().any(|frag| path_str.contains(frag)) {
+        if SKIP_PATH_FRAGMENTS
+            .iter()
+            .any(|frag| path_str.contains(frag))
+        {
             continue;
         }
         let Some(ext) = path.extension().and_then(|e| e.to_str()) else {

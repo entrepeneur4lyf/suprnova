@@ -21,26 +21,26 @@ doctest = false
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-dialoguer = "0.11"
-console = "0.15"
+dialoguer = "0.12"
+console = "0.16"
 ctrlc = "3.5"
 syn = { version = "2", features = ["full", "parsing", "visit"] }
 walkdir = "2"
-notify = "6"
-notify-debouncer-mini = "0.4"
+notify = "8.2"
+notify-debouncer-mini = "0.7"
 dotenvy = "0.15"
 tokio = { version = "1", features = ["full"] }
 sea-orm-migration = { version = "1.1", features = ["sqlx-sqlite", "sqlx-mysql", "sqlx-postgres", "runtime-tokio-rustls"] }
 sea-orm = { version = "1.1", features = ["sqlx-sqlite", "sqlx-mysql", "sqlx-postgres", "runtime-tokio-rustls"] }
 chrono = "0.4"
-toml = "0.8"
+toml = "1.1.2"
 regex = "1"
 # `key:generate` mints a 32-byte AES-256 key encoded URL-safe-no-pad
 # base64 — same wire format as `suprnova::EncryptionKey::to_base64`.
 # We duplicate the six primitives instead of pulling `suprnova` into
 # the CLI binary, which would drag every framework transitive dep
 # along (`tokio`-full + `reqwest` + SeaORM, etc).
-rand = "0.9"
+rand = "0.10.1"
 base64 = "0.22"
 getrandom = "0.4.2"
 

@@ -128,9 +128,10 @@ fn update_mod_file(mod_file: &Path, module_name: &str) -> Result<(), String> {
 
         if !has_mod
             && let Some(idx) = last_mod_idx
-                && i == idx {
-                    new_lines.push(mod_decl.clone());
-                }
+            && i == idx
+        {
+            new_lines.push(mod_decl.clone());
+        }
 
         if !has_entry {
             if let Some(idx) = last_entry_idx {
@@ -138,9 +139,10 @@ fn update_mod_file(mod_file: &Path, module_name: &str) -> Result<(), String> {
                     new_lines.push(entry_line.clone());
                 }
             } else if let Some(idx) = vec_idx
-                && i == idx {
-                    new_lines.push(entry_line.clone());
-                }
+                && i == idx
+            {
+                new_lines.push(entry_line.clone());
+            }
         }
     }
 

@@ -1,7 +1,7 @@
 //! schedule:work command - Run the scheduler daemon
 
-use std::process::Command;
 use crate::ui;
+use std::process::Command;
 
 pub fn run() {
     ui::info("Starting scheduler daemon...");
@@ -15,10 +15,14 @@ pub fn run() {
 
     if !status.success()
         && let Some(code) = status.code()
-            && code != 130 {
-                ui::error(&format!("Scheduler daemon exited with error (code: {})", code));
-                std::process::exit(1);
-            }
+        && code != 130
+    {
+        ui::error(&format!(
+            "Scheduler daemon exited with error (code: {})",
+            code
+        ));
+        std::process::exit(1);
+    }
 
     ui::br();
     ui::info("Scheduler daemon stopped.");

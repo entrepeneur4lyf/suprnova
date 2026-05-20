@@ -17,8 +17,7 @@ use tempfile::TempDir;
 const EXPECTED_KEY_LEN: usize = 43;
 
 fn read_env(project_dir: &std::path::Path) -> String {
-    std::fs::read_to_string(project_dir.join(".env"))
-        .expect("scaffolder must write a .env file")
+    std::fs::read_to_string(project_dir.join(".env")).expect("scaffolder must write a .env file")
 }
 
 fn extract_app_key(env_contents: &str) -> &str {

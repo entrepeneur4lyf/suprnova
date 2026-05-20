@@ -3,9 +3,9 @@ use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -243,18 +243,16 @@ pub fn run(
     }
 
     // Ensure cargo-watch is installed (only if running backend)
-    if !frontend_only
-        && let Err(e) = ensure_cargo_watch() {
-            ui::error(&e);
-            std::process::exit(1);
-        }
+    if !frontend_only && let Err(e) = ensure_cargo_watch() {
+        ui::error(&e);
+        std::process::exit(1);
+    }
 
     // Ensure npm dependencies are installed (only if running frontend)
-    if !backend_only
-        && let Err(e) = ensure_npm_dependencies() {
-            ui::error(&e);
-            std::process::exit(1);
-        }
+    if !backend_only && let Err(e) = ensure_npm_dependencies() {
+        ui::error(&e);
+        std::process::exit(1);
+    }
 
     let mut manager = ProcessManager::new();
     let shutdown = manager.shutdown.clone();

@@ -16,7 +16,10 @@ fn run_make_command(cwd: &std::path::Path, name: &str) {
         .current_dir(cwd)
         .status()
         .expect("suprnova binary spawnable");
-    assert!(status.success(), "`suprnova make:command {name}` should succeed");
+    assert!(
+        status.success(),
+        "`suprnova make:command {name}` should succeed"
+    );
 }
 
 fn read(p: impl AsRef<std::path::Path>) -> String {

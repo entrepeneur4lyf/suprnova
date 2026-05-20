@@ -1,7 +1,7 @@
 //! schedule:list command - Display all registered scheduled tasks
 
-use std::process::Command;
 use crate::ui;
+use std::process::Command;
 
 pub fn run() {
     let status = Command::new("cargo")

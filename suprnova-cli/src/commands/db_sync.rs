@@ -144,8 +144,14 @@ async fn discover_and_generate(database_url: &str, regenerate_models: bool) {
     ui::success("Entity files generated!");
     ui::br();
     for table in &tables {
-        ui::hint(&format!("src/models/entities/{}.rs (auto-generated)", table.name));
-        ui::hint(&format!("src/models/{}.rs (user customizations)", table.name));
+        ui::hint(&format!(
+            "src/models/entities/{}.rs (auto-generated)",
+            table.name
+        ));
+        ui::hint(&format!(
+            "src/models/{}.rs (user customizations)",
+            table.name
+        ));
     }
 }
 
@@ -289,7 +295,10 @@ fn generate_user_file_if_not_exists(table: &TableInfo, models_dir: &Path) {
 
     // Only create if it doesn't exist
     if user_file.exists() {
-        ui::hint(&format!("Skipped src/models/{}.rs (already exists)", table.name));
+        ui::hint(&format!(
+            "Skipped src/models/{}.rs (already exists)",
+            table.name
+        ));
         return;
     }
 

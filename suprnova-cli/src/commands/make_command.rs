@@ -125,7 +125,9 @@ pub fn run(name: String) {
                 "src/lib.rs does not declare `pub mod commands;` — the new command \
                  will NOT be linked into the console binary until you add this line.",
             );
-            ui::hint("Add `pub mod commands;` to src/lib.rs (alongside the other `pub mod` declarations).");
+            ui::hint(
+                "Add `pub mod commands;` to src/lib.rs (alongside the other `pub mod` declarations).",
+            );
         }
     }
 
@@ -264,8 +266,14 @@ mod tests {
     #[test]
     fn pick_command_name_preserves_namespacing_else_kebabs() {
         assert_eq!(pick_command_name("greet", "greet"), "greet");
-        assert_eq!(pick_command_name("CleanCache", "clean_cache"), "clean-cache");
-        assert_eq!(pick_command_name("clean-cache", "clean_cache"), "clean-cache");
+        assert_eq!(
+            pick_command_name("CleanCache", "clean_cache"),
+            "clean-cache"
+        );
+        assert_eq!(
+            pick_command_name("clean-cache", "clean_cache"),
+            "clean-cache"
+        );
         assert_eq!(pick_command_name("mail:send", "mail_send"), "mail:send");
         assert_eq!(pick_command_name("db:seed", "db_seed"), "db:seed");
     }

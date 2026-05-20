@@ -15,7 +15,7 @@ tokio = { version = "1", features = ["full"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
-http = "1"
+http = "1.4"
 matchit = "0.9"
 async-trait = "0.1"
 bytes = "1"

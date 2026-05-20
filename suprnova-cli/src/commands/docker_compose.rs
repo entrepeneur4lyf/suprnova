@@ -1,6 +1,6 @@
 //! docker:compose command - Generate docker-compose.yml for local development
 
-use dialoguer::{theme::ColorfulTheme, Confirm};
+use dialoguer::{Confirm, theme::ColorfulTheme};
 use std::fs;
 use std::path::Path;
 use toml::Value;

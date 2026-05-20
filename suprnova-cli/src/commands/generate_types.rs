@@ -68,21 +68,22 @@ impl InertiaPropsVisitor {
             if attr.path().is_ident("derive")
                 && let Ok(nested) = attr.parse_args_with(
                     syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
-                ) {
-                    for path in nested {
-                        if path.is_ident("InertiaProps") {
+                )
+            {
+                for path in nested {
+                    if path.is_ident("InertiaProps") {
+                        return true;
+                    }
+                    // Also check for suprnova::InertiaProps
+                    if path.segments.len() == 2 {
+                        let first = &path.segments[0].ident;
+                        let second = &path.segments[1].ident;
+                        if first == "suprnova" && second == "InertiaProps" {
                             return true;
-                        }
-                        // Also check for suprnova::InertiaProps
-                        if path.segments.len() == 2 {
-                            let first = &path.segments[0].ident;
-                            let second = &path.segments[1].ident;
-                            if first == "suprnova" && second == "InertiaProps" {
-                                return true;
-                            }
                         }
                     }
                 }
+            }
         }
         false
     }
@@ -92,21 +93,22 @@ impl InertiaPropsVisitor {
             if attr.path().is_ident("derive")
                 && let Ok(nested) = attr.parse_args_with(
                     syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
-                ) {
-                    for path in nested {
-                        if path.is_ident("Data") {
+                )
+            {
+                for path in nested {
+                    if path.is_ident("Data") {
+                        return true;
+                    }
+                    // Also check for suprnova::Data
+                    if path.segments.len() == 2 {
+                        let first = &path.segments[0].ident;
+                        let second = &path.segments[1].ident;
+                        if first == "suprnova" && second == "Data" {
                             return true;
-                        }
-                        // Also check for suprnova::Data
-                        if path.segments.len() == 2 {
-                            let first = &path.segments[0].ident;
-                            let second = &path.segments[1].ident;
-                            if first == "suprnova" && second == "Data" {
-                                return true;
-                            }
                         }
                     }
                 }
+            }
         }
         false
     }
@@ -124,16 +126,18 @@ impl InertiaPropsVisitor {
                     "bool" => RustType::Bool,
                     "Option" => {
                         if let PathArguments::AngleBracketed(args) = &segment.arguments
-                            && let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
-                                return RustType::Option(Box::new(self.parse_type(inner_ty)));
-                            }
+                            && let Some(GenericArgument::Type(inner_ty)) = args.args.first()
+                        {
+                            return RustType::Option(Box::new(self.parse_type(inner_ty)));
+                        }
                         RustType::Option(Box::new(RustType::Custom("unknown".to_string())))
                     }
                     "Vec" => {
                         if let PathArguments::AngleBracketed(args) = &segment.arguments
-                            && let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
-                                return RustType::Vec(Box::new(self.parse_type(inner_ty)));
-                            }
+                            && let Some(GenericArgument::Type(inner_ty)) = args.args.first()
+                        {
+                            return RustType::Vec(Box::new(self.parse_type(inner_ty)));
+                        }
                         RustType::Vec(Box::new(RustType::Custom("unknown".to_string())))
                     }
                     "HashMap" | "BTreeMap" => {
@@ -157,16 +161,18 @@ impl InertiaPropsVisitor {
                     }
                     "Field" => {
                         if let PathArguments::AngleBracketed(args) = &segment.arguments
-                            && let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
-                                return RustType::Field(Box::new(self.parse_type(inner_ty)));
-                            }
+                            && let Some(GenericArgument::Type(inner_ty)) = args.args.first()
+                        {
+                            return RustType::Field(Box::new(self.parse_type(inner_ty)));
+                        }
                         RustType::Field(Box::new(RustType::Custom("unknown".to_string())))
                     }
                     "Prop" => {
                         if let PathArguments::AngleBracketed(args) = &segment.arguments
-                            && let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
-                                return RustType::Prop(Box::new(self.parse_type(inner_ty)));
-                            }
+                            && let Some(GenericArgument::Type(inner_ty)) = args.args.first()
+                        {
+                            return RustType::Prop(Box::new(self.parse_type(inner_ty)));
+                        }
                         RustType::Prop(Box::new(RustType::Custom("unknown".to_string())))
                     }
                     other => RustType::Custom(other.to_string()),
@@ -181,9 +187,9 @@ impl InertiaPropsVisitor {
                         .last()
                         .map(|s| s.ident == "str")
                         .unwrap_or(false)
-                    {
-                        return RustType::String;
-                    }
+                {
+                    return RustType::String;
+                }
                 self.parse_type(&type_ref.elem)
             }
             _ => RustType::Custom("unknown".to_string()),
@@ -240,7 +246,11 @@ impl<'ast> Visit<'ast> for InertiaPropsVisitor {
                 _ => Vec::new(),
             };
 
-            self.structs.push(InertiaPropsStruct { name, type_params, fields });
+            self.structs.push(InertiaPropsStruct {
+                name,
+                type_params,
+                fields,
+            });
         }
 
         // Continue visiting nested items
@@ -264,11 +274,12 @@ fn visit_path_into(root: &Path, out: &mut Vec<InertiaPropsStruct>) {
         .filter(|e| e.path().extension().map(|ext| ext == "rs").unwrap_or(false))
     {
         if let Ok(content) = fs::read_to_string(entry.path())
-            && let Ok(syntax) = syn::parse_file(&content) {
-                let mut visitor = InertiaPropsVisitor::new();
-                visitor.visit_file(&syntax);
-                out.extend(visitor.structs);
-            }
+            && let Ok(syntax) = syn::parse_file(&content)
+        {
+            let mut visitor = InertiaPropsVisitor::new();
+            visitor.visit_file(&syntax);
+            out.extend(visitor.structs);
+        }
     }
 }
 
@@ -375,9 +386,10 @@ fn collect_type_deps(ty: &RustType, deps: &mut HashSet<String>, known: &HashSet<
 /// `input_only`, `output_only`, or `lazy` flag — i.e. whenever the input and
 /// output shapes differ.
 fn emit_ts_for_struct(s: &InertiaPropsStruct) -> String {
-    let has_flags = s.fields.iter().any(|f| {
-        f.data_flags.input_only || f.data_flags.output_only || f.data_flags.lazy
-    });
+    let has_flags = s
+        .fields
+        .iter()
+        .any(|f| f.data_flags.input_only || f.data_flags.output_only || f.data_flags.lazy);
 
     // Build generic type parameter suffix, e.g. "<T>" or "<A, B>" or "".
     let generics = if s.type_params.is_empty() {
@@ -402,7 +414,10 @@ fn emit_ts_for_struct(s: &InertiaPropsStruct) -> String {
 
     // Input interface — what the frontend SENDS (only when shapes differ)
     if has_flags {
-        out.push_str(&format!("export interface {}Input{} {{\n", s.name, generics));
+        out.push_str(&format!(
+            "export interface {}Input{} {{\n",
+            s.name, generics
+        ));
         // Exclude output_only AND lazy fields (lazy props are output-only in nature)
         for f in s
             .fields

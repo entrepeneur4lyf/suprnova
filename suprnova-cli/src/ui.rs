@@ -1,4 +1,4 @@
-use console::{style, Style, Term};
+use console::{Style, Term, style};
 
 // ─── Brand colors ───────────────────────────────────────────
 // Suprnova's palette: warm explosion (yellow/orange core) with cool edges (cyan/blue)
@@ -21,16 +21,18 @@ pub fn banner() {
     let _ = term.clear_line();
 
     for (i, line) in BANNER.lines().enumerate() {
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         match i {
-            1     => println!("{}", style(line).color256(220).bold()), // bright yellow
-            2     => println!("{}", style(line).color256(214).bold()), // yellow-orange
-            3     => println!("{}", style(line).color256(214).bold()), // orange
-            4     => println!("{}", style(line).color256(208).bold()), // deeper orange
-            5     => println!("{}", style(line).color256(203).bold()), // red-orange
-            6     => println!("{}", style(line).color256(197).bold()), // red
+            1 => println!("{}", style(line).color256(220).bold()), // bright yellow
+            2 => println!("{}", style(line).color256(214).bold()), // yellow-orange
+            3 => println!("{}", style(line).color256(214).bold()), // orange
+            4 => println!("{}", style(line).color256(208).bold()), // deeper orange
+            5 => println!("{}", style(line).color256(203).bold()), // red-orange
+            6 => println!("{}", style(line).color256(197).bold()), // red
             7 | 8 => println!("{}", style(line).color256(161).bold()), // deep magenta tail
-            _     => println!("{}", style(line).cyan()),
+            _ => println!("{}", style(line).cyan()),
         }
     }
     println!(
@@ -95,7 +97,11 @@ pub fn label_value(label: &str, value: &str) {
 
 /// Print a boxed summary panel
 pub fn panel(title: &str, lines: &[&str]) {
-    let max_len = lines.iter().map(|l| console::measure_text_width(l)).max().unwrap_or(40);
+    let max_len = lines
+        .iter()
+        .map(|l| console::measure_text_width(l))
+        .max()
+        .unwrap_or(40);
     let width = max_len.max(console::measure_text_width(title) + 4) + 4;
 
     let border = Style::new().dim();

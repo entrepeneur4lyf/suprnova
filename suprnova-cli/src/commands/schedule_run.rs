@@ -1,7 +1,7 @@
 //! schedule:run command - Run all due scheduled tasks once
 
-use std::process::Command;
 use crate::ui;
+use std::process::Command;
 
 pub fn run() {
     ui::info("Running due scheduled tasks...");

@@ -41,9 +41,7 @@ pub(crate) fn parse_host_port(url: &str) -> Result<(String, u16), String> {
     }
     let (host, port) = match host_port.rsplit_once(':') {
         Some((h, p)) => {
-            let port: u16 = p
-                .parse()
-                .map_err(|_| format!("invalid port: {p}"))?;
+            let port: u16 = p.parse().map_err(|_| format!("invalid port: {p}"))?;
             (h.to_string(), port)
         }
         None => (

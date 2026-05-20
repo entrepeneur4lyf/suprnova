@@ -1,5 +1,5 @@
 use console::style;
-use dialoguer::{theme::ColorfulTheme, Input, Select};
+use dialoguer::{Input, Select, theme::ColorfulTheme};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -42,11 +42,14 @@ pub fn run(
         ui::success("Ready to go!");
 
         ui::br();
-        ui::panel("Next Steps", &[
-            &format!("cd {}", project_name),
-            "suprnova migrate",
-            "suprnova serve",
-        ]);
+        ui::panel(
+            "Next Steps",
+            &[
+                &format!("cd {}", project_name),
+                "suprnova migrate",
+                "suprnova serve",
+            ],
+        );
         ui::br();
         ui::label_value("API", "http://localhost:8080/api");
         ui::br();
@@ -86,10 +89,10 @@ pub fn run(
     ui::success("Ready to go!");
 
     ui::br();
-    ui::panel("Next Steps", &[
-        &format!("cd {}", project_name),
-        "suprnova serve",
-    ]);
+    ui::panel(
+        "Next Steps",
+        &[&format!("cd {}", project_name), "suprnova serve"],
+    );
     ui::br();
     ui::label_value("Backend", "http://localhost:8000");
     ui::label_value("Frontend", "http://localhost:5173");
@@ -142,7 +145,7 @@ fn get_frontend(choice: Option<String>, no_interaction: bool) -> Frontend {
     let options = ["Svelte (recommended)", "React", "Vue"];
     let idx = Select::with_theme(&ColorfulTheme::default())
         .with_prompt("Frontend framework")
-        .items(&options)
+        .items(options)
         .default(0)
         .interact()
         .unwrap();
@@ -206,11 +209,7 @@ fn to_title_case(s: &str) -> String {
         .join(" ")
 }
 
-fn create_api_project(
-    project_name: &str,
-    package_name: &str,
-    no_git: bool,
-) -> Result<(), String> {
+fn create_api_project(project_name: &str, package_name: &str, no_git: bool) -> Result<(), String> {
     let project_path = Path::new(project_name);
 
     if project_path.exists() {
@@ -458,7 +457,12 @@ fn create_project(
         project_path.join("src/migrations/m20240101_000003_create_remember_tokens_table.rs"),
         templates::create_remember_tokens_migration(),
     )
-    .map_err(|e| format!("Failed to write create_remember_tokens_table migration: {}", e))?;
+    .map_err(|e| {
+        format!(
+            "Failed to write create_remember_tokens_table migration: {}",
+            e
+        )
+    })?;
 
     // Note: migrations are now integrated into the main binary
     // Run with: ./app migrate

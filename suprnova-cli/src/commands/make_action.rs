@@ -38,7 +38,11 @@ pub fn run(name: String) {
 
     // Check if action file already exists
     if action_file.exists() {
-        ui::warning(&format!("Action '{}' already exists at {}", struct_name, action_file.display()));
+        ui::warning(&format!(
+            "Action '{}' already exists at {}",
+            struct_name,
+            action_file.display()
+        ));
         std::process::exit(0);
     }
 
@@ -48,7 +52,10 @@ pub fn run(name: String) {
         let mod_decl = format!("mod {};", file_name);
         let pub_mod_decl = format!("pub mod {};", file_name);
         if mod_content.contains(&mod_decl) || mod_content.contains(&pub_mod_decl) {
-            ui::warning(&format!("Module '{}' is already declared in src/actions/mod.rs", file_name));
+            ui::warning(&format!(
+                "Module '{}' is already declared in src/actions/mod.rs",
+                file_name
+            ));
             std::process::exit(0);
         }
     }
@@ -80,10 +87,16 @@ pub fn run(name: String) {
     }
 
     ui::br();
-    ui::info(&format!("Action {} created", style(&struct_name).cyan().bold()));
+    ui::info(&format!(
+        "Action {} created",
+        style(&struct_name).cyan().bold()
+    ));
     ui::br();
     ui::hint("Resolve from container in your controller:");
-    ui::command(&format!("let action: {} = App::get().unwrap();", struct_name));
+    ui::command(&format!(
+        "let action: {} = App::get().unwrap();",
+        struct_name
+    ));
     ui::command("action.execute();");
     ui::br();
 }

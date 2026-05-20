@@ -47,10 +47,11 @@ fn run_data_struct(name: String) {
 
     // Create the props directory if it doesn't exist.
     if !props_dir.exists()
-        && let Err(e) = fs::create_dir_all(props_dir) {
-            ui::error(&format!("Failed to create directory app/src/props: {}", e));
-            std::process::exit(1);
-        }
+        && let Err(e) = fs::create_dir_all(props_dir)
+    {
+        ui::error(&format!("Failed to create directory app/src/props: {}", e));
+        std::process::exit(1);
+    }
 
     if props_file.exists() {
         ui::warning(&format!(
@@ -77,7 +78,10 @@ fn run_data_struct(name: String) {
     ));
     ui::br();
     ui::hint("Use in a controller with automatic serde + validation:");
-    ui::command(&format!("let dto: {} = req.validate_json().await?;", struct_name));
+    ui::command(&format!(
+        "let dto: {} = req.validate_json().await?;",
+        struct_name
+    ));
     ui::br();
 }
 
@@ -127,7 +131,10 @@ fn run_inertia_page(name: String) {
     ));
     ui::br();
     ui::hint("Use the page in a controller:");
-    ui::command(&format!("inertia_response!(&req, \"{}\", props)", page_name));
+    ui::command(&format!(
+        "inertia_response!(&req, \"{}\", props)",
+        page_name
+    ));
     ui::br();
 }
 

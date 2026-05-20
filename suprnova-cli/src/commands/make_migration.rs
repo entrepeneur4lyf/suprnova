@@ -38,7 +38,11 @@ pub fn run(name: String) {
 
     // Check if migration file already exists (unlikely with timestamp)
     if migration_file.exists() {
-        ui::warning(&format!("Migration '{}' already exists at {}", migration_file_name, migration_file.display()));
+        ui::warning(&format!(
+            "Migration '{}' already exists at {}",
+            migration_file_name,
+            migration_file.display()
+        ));
         std::process::exit(0);
     }
 
@@ -69,7 +73,10 @@ pub fn run(name: String) {
     }
 
     ui::br();
-    ui::info(&format!("Migration {} created", style(&migration_file_name).cyan().bold()));
+    ui::info(&format!(
+        "Migration {} created",
+        style(&migration_file_name).cyan().bold()
+    ));
     ui::br();
     ui::hint("Edit the migration file to define your schema, then:");
     ui::command("suprnova migrate");

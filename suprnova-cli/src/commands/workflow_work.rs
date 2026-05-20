@@ -1,7 +1,7 @@
 //! workflow:work command - Run the workflow worker daemon
 
-use std::process::Command;
 use crate::ui;
+use std::process::Command;
 
 pub fn run() {
     ui::info("Starting workflow worker...");
@@ -15,10 +15,14 @@ pub fn run() {
 
     if !status.success()
         && let Some(code) = status.code()
-            && code != 130 {
-                ui::error(&format!("Workflow worker exited with error (code: {})", code));
-                std::process::exit(1);
-            }
+        && code != 130
+    {
+        ui::error(&format!(
+            "Workflow worker exited with error (code: {})",
+            code
+        ));
+        std::process::exit(1);
+    }
 
     ui::br();
     ui::info("Workflow worker stopped.");

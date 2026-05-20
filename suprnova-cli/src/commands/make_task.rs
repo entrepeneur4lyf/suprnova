@@ -70,7 +70,11 @@ pub fn run(name: String) {
 
     // Check if task file already exists
     if task_file.exists() {
-        ui::warning(&format!("Task '{}' already exists at {}", struct_name, task_file.display()));
+        ui::warning(&format!(
+            "Task '{}' already exists at {}",
+            struct_name,
+            task_file.display()
+        ));
         std::process::exit(0);
     }
 
@@ -80,7 +84,10 @@ pub fn run(name: String) {
         let mod_decl = format!("mod {};", file_name);
         let pub_mod_decl = format!("pub mod {};", file_name);
         if mod_content.contains(&mod_decl) || mod_content.contains(&pub_mod_decl) {
-            ui::warning(&format!("Module '{}' is already declared in src/tasks/mod.rs", file_name));
+            ui::warning(&format!(
+                "Module '{}' is already declared in src/tasks/mod.rs",
+                file_name
+            ));
             std::process::exit(0);
         }
     }
@@ -103,9 +110,15 @@ pub fn run(name: String) {
     ui::success("Updated src/tasks/mod.rs");
 
     ui::br();
-    ui::info(&format!("Task {} created", style(&struct_name).cyan().bold()));
+    ui::info(&format!(
+        "Task {} created",
+        style(&struct_name).cyan().bold()
+    ));
     ui::br();
-    ui::hint(&format!("Implement your task logic in {}", task_file.display()));
+    ui::hint(&format!(
+        "Implement your task logic in {}",
+        task_file.display()
+    ));
     ui::hint("Register the task in src/schedule.rs:");
     ui::command(&format!("use crate::tasks::{};", file_name));
     ui::command(&format!("schedule.task({}::new());", struct_name));

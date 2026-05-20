@@ -42,10 +42,16 @@ pub fn run() {
     }
 
     ui::br();
-    ui::panel("Docker", &[
-        &format!("docker build -t {} .", package_name),
-        &format!("docker run -p 8080:8080 --env-file .env.production {}", package_name),
-    ]);
+    ui::panel(
+        "Docker",
+        &[
+            &format!("docker build -t {} .", package_name),
+            &format!(
+                "docker run -p 8080:8080 --env-file .env.production {}",
+                package_name
+            ),
+        ],
+    );
     ui::br();
     ui::hint("Create a .env.production file with your production environment variables.");
     ui::br();

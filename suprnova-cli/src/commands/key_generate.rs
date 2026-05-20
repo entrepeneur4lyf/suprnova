@@ -8,7 +8,7 @@
 //! `suprnova` into the CLI binary, which would drag tokio-full,
 //! reqwest, and SeaORM into the scaffolder.
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 /// Generate a random 32-byte key, encoded URL-safe base64 (no padding).
 pub fn generate_app_key() -> String {

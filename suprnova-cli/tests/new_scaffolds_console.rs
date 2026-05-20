@@ -21,7 +21,10 @@ use tempfile::TempDir;
 
 fn run_new(cwd: &std::path::Path, name: &str, args: &[&str]) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_suprnova"));
-    cmd.arg("new").arg(name).arg("--no-interaction").arg("--no-git");
+    cmd.arg("new")
+        .arg(name)
+        .arg("--no-interaction")
+        .arg("--no-git");
     for a in args {
         cmd.arg(a);
     }
