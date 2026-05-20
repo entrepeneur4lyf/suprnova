@@ -15,6 +15,7 @@ doesn't cover (see the [SeaORM escape hatches](#dropping-to-seaorm)).
 
 - [Quick start](#quick-start)
 - [The `#[suprnova::model]` attribute](#the-suprnovamodel-attribute)
+- [Model module layout](#model-module-layout)
 - [Finding rows](#finding-rows)
 - [Creating and updating](#creating-and-updating)
 - [Deleting and soft deletes](#deleting-and-soft-deletes)
@@ -152,6 +153,105 @@ Function-level macros work alongside the struct attribute:
 - `#[global_scope]` (Phase 10C) registers a global scope.
 - `#[prunable]` on `impl Prunable for T { ... }` registers the
   pruner via inventory so `model:prune` finds it.
+
+## Model module layout
+
+`#[suprnova::model]` keeps your user-facing struct (e.g. `Post`) at
+parent scope and emits a sibling `pub mod` named after the struct in
+snake_case (`post`). That inner module is where the SeaORM types live.
+
+For a model declared at `app/src/models/posts.rs`:
+
+```rust
+use chrono::{DateTime, Utc};
+use suprnova::model;
+
+#[model(table = "posts", fillable = ["title", "body"], timestamps)]
+pub struct Post {
+    pub id: i64,
+    pub title: String,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+// Convention: re-export the SeaORM types the macro emits inside the
+// inner module so call sites can use the unprefixed names. Suprnova's
+// own dogfood models all carry this line (see `app/src/models/users.rs`,
+// `app/src/models/posts.rs`, etc.).
+pub use post::{ActiveModel, Column, Entity};
+```
+
+You now have these items reachable from `crate::models::posts`:
+
+| Path | What it is |
+|------|-----------|
+| `crate::models::posts::Post` | Your user-facing struct — the Eloquent model |
+| `crate::models::posts::post::Entity` | SeaORM `EntityTrait` impl for the `posts` table |
+| `crate::models::posts::post::Column` | SeaORM `Column` enum (one variant per column) |
+| `crate::models::posts::post::ActiveModel` | SeaORM `ActiveModel` for insert/update |
+| `crate::models::posts::post::Model` | SeaORM-shape row (storage-typed columns) |
+| `crate::models::posts::{Entity, Column, ActiveModel}` | The `pub use` convention above; not auto-emitted |
+
+Two things to know about the inner module's `Model`:
+
+1. It is the **SeaORM-shape** row, not your `Post` struct. Cast columns
+   carry their `Storage` type here (e.g. `bool` becomes the underlying
+   integer), and the `__eager` / `__pivot` runtime slots from your
+   struct are absent.
+2. `From<post::Model> for Post` and `From<Post> for post::Model` bridge
+   the two shapes. See [Dropping to SeaORM](#dropping-to-seaorm) for the
+   round-trip pattern.
+
+`Model` is intentionally **not** part of the conventional parent
+re-export — the user-facing `Post` already occupies the `Post` name at
+parent scope, and `post::Model` is a separate type that callers reach
+through `post::Model` (or `From` conversion) when they need the inner
+shape.
+
+### When to reach into the inner module
+
+The Eloquent surface (`Model` trait + `Builder<M>`) covers the vast
+majority of queries. Reach into `post::*` when you need SeaORM-only
+features:
+
+- **Raw query construction** with SeaORM's `EntityTrait::find()` chain
+  when Eloquent doesn't expose the helper you want.
+- **Custom join logic** — building `JoinType::*` joins explicitly via
+  `QuerySelect::join()` for a relation Eloquent's `with(...)` doesn't
+  model.
+- **SeaORM-native subqueries** through `Entity::find().select_only()`.
+- **Plain `ActiveModel` mutation** for the rare case you want to bypass
+  the Eloquent lifecycle (no observers, no auto-timestamps).
+
+```rust
+// Common case — Column re-exported at parent module level via the
+// `pub use post::{...}` convention above.
+use crate::models::posts::Column;
+
+let drafts = Post::query()
+    .db_where(Column::Status, "draft")
+    .get()
+    .await?;
+
+// Power-user case — reach into the inner module for the SeaORM Entity
+// directly. This is what the parent `pub use` does not surface.
+use crate::models::posts::post;
+use suprnova::sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+let db = suprnova::DB::connection()?;
+let rows: Vec<post::Model> = post::Entity::find()
+    .filter(post::Column::Status.eq("published"))
+    .all(db.inner())
+    .await?;
+
+// Bridge back to the Eloquent shape when the caller wants it.
+let posts: Vec<Post> = rows.into_iter().map(Post::from).collect();
+```
+
+If you find yourself reaching into the inner module routinely for the
+same operation, that's a signal Eloquent is missing a helper — open an
+issue, or add the helper to the `Model` / `Builder` surface.
 
 ## Finding rows
 
@@ -1722,8 +1822,10 @@ Three escape hatches keep SeaORM reachable from inside the Eloquent
 layer:
 
 1. **The inner module** — `user::Entity`, `user::Column`,
-   `user::ActiveModel`. The macro emits these for every model;
-   they're SeaORM types you can use directly.
+   `user::ActiveModel`, `user::Model`. The macro emits these for every
+   model; they're SeaORM types you can use directly. See
+   [Model module layout](#model-module-layout) for the full layout and
+   when to reach in.
 2. **`From` conversions** — `From<user::Model> for User` and
    `From<User> for user::Model` bridge between SeaORM-shape rows
    (storage-typed columns) and Eloquent-shape rows (runtime-typed
