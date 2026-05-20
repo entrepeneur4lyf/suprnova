@@ -1,0 +1,153 @@
+//! Relations — Laravel-shape one-to-one / one-to-many / many-to-many
+//! and polymorphic relations layered over SeaORM JOINs and `IN` queries.
+//!
+//! Phase 10B foundation (T1). Each concrete relation type (`HasOne`,
+//! `BelongsTo`, `HasMany`, `BelongsToMany`, `HasOneThrough`,
+//! `HasManyThrough`, `MorphTo`, `MorphOne`, `MorphMany`, `MorphToMany`,
+//! `MorphedByMany`) implements [`Relation`] and is dispatched from a
+//! per-model `__eager_load` match arm. The
+//! `#[suprnova::model(relations = { ... })]` macro emits, per declared
+//! relation:
+//!
+//! 1. A relation method (`fn posts(&self) -> HasMany<Self, Post>`) —
+//!    bodies land in T2-T7 (this task ships placeholder skeletons only
+//!    if the kind is supported).
+//! 2. A loaded-accessor (`posts_loaded() -> &[Post]`).
+//! 3. A count-accessor (`posts_count() -> u64`).
+//! 4. A `match` arm in the model's `__eager_load` dispatcher (skeleton
+//!    here; arms land in T2-T7).
+//! 5. An `inventory::submit!(RelationEntry { ... })` for Phase 8
+//!    enumeration.
+//!
+//! T1 ships:
+//! - The [`Relation`] sealed trait.
+//! - The [`RelationKind`] enum enumerating every flavour up-front.
+//! - The [`AggregateKind`] enum for `with_sum` / `with_avg` /
+//!   `with_min` / `with_max`.
+//! - The [`RelationEntry`] inventory type + helpers
+//!   ([`relations`], [`relations_of`], [`find_relation`]).
+//! - The [`EagerLoadCache`] storage type (in
+//!   [`eager_cache`][crate::eloquent::relations::eager_cache]).
+//! - The macro-emitted `__eager` / `__pivot` field auto-injection, the
+//!   four dispatcher skeletons (`__eager_load`, `__recurse_eager_load`,
+//!   `__count_relation`, `__aggregate_relation`), and the
+//!   `pivot::<P>()` accessor. Those live on the user struct via
+//!   `#[suprnova::model]` and are exercised by the integration tests.
+
+pub mod eager_cache;
+
+pub use eager_cache::EagerLoadCache;
+
+use std::any::TypeId;
+
+/// The exhaustive list of Eloquent relation flavours Suprnova ships.
+///
+/// New flavours can NOT be added by user code — the macro pattern-
+/// matches on this enum exhaustively. v2 ask for plugin-loader-
+/// registered relation types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelationKind {
+    HasOne,
+    BelongsTo,
+    HasMany,
+    BelongsToMany,
+    HasOneThrough,
+    HasManyThrough,
+    MorphTo,
+    MorphOne,
+    MorphMany,
+    MorphToMany,
+    MorphedByMany,
+}
+
+/// Aggregate flavour for `with_sum` / `with_avg` / `with_min` /
+/// `with_max`. Passed into the per-model `__aggregate_relation`
+/// dispatcher so a single dispatcher per model covers all four
+/// aggregates without exploding into per-kind methods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregateKind {
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+/// Sealed trait every concrete relation type implements.
+///
+/// "Sealed" in the sense that all impl sites live inside the framework
+/// crate — user code never hand-writes a `Relation` impl. The macro
+/// emits all impls from `#[model(relations = { ... })]` declarations.
+///
+/// The trait carries the metadata an eager loader needs without
+/// knowing the concrete relation type — `KIND` for dispatch,
+/// `parent_key` + `foreign_key` for the `IN` query, and the associated
+/// `Parent` / `Target` types for compile-time wiring.
+pub trait Relation {
+    /// The owning model (the side that calls `self.has_many::<R>()`).
+    type Parent;
+    /// The related model.
+    type Target;
+    /// Compile-time relation kind. Drives the dispatcher's branch.
+    const KIND: RelationKind;
+    /// Column name on the parent table used as the join key.
+    /// Defaults to `"id"` in concrete impls; customisable per-relation
+    /// via the macro's `lk = "..."` option.
+    fn parent_key(&self) -> &str;
+    /// Column name on the target table that points at the parent.
+    ///
+    /// For `BelongsTo`: column on the CHILD that points at the PARENT.
+    /// For polymorphic relations this is the `*_id` column (with a
+    /// sibling `*_type` discriminator handled inside the dispatcher).
+    fn foreign_key(&self) -> &str;
+}
+
+/// Compile-time entry per relation. Submitted via `inventory::submit!`
+/// by the `#[suprnova::model]` macro for every relation declared in
+/// `relations = { ... }`.
+///
+/// Phase 8 (Admin) walks this registry to enumerate every relation in
+/// the binary; the eager loader does NOT use it (each model has a
+/// typed per-relation match arm in its `__eager_load` dispatcher
+/// instead). The type-erased `fn() -> TypeId` shape keeps the entry
+/// `Copy` so `inventory::submit!` accepts it as a const initialiser.
+#[derive(Debug, Clone, Copy)]
+pub struct RelationEntry {
+    /// `TypeId::of::<L>` — the owning model.
+    pub parent_type: fn() -> TypeId,
+    /// `TypeId::of::<R>` — the related model. For `MorphTo` this is
+    /// `TypeId::of::<()>` because the target is a per-family enum
+    /// generated by T6, not a single concrete type.
+    pub target_type: fn() -> TypeId,
+    /// Relation name as declared (`"posts"`, `"commentable"`, ...).
+    pub name: &'static str,
+    /// Relation kind.
+    pub kind: RelationKind,
+    /// Owning model's type name (`"User"`).
+    pub parent_type_name: &'static str,
+    /// Related model's type name (`"Post"`). For `MorphTo` this is
+    /// `"<morph>"` — the per-family enum type name lives in the
+    /// generated code, not in the entry.
+    pub target_type_name: &'static str,
+}
+
+inventory::collect!(RelationEntry);
+
+/// Iterator over every relation declared anywhere in the binary.
+///
+/// Order is link-time; do not depend on it.
+pub fn relations() -> impl Iterator<Item = &'static RelationEntry> {
+    inventory::iter::<RelationEntry>()
+}
+
+/// Find every relation declared on a specific parent type.
+pub fn relations_of<T: 'static>() -> impl Iterator<Item = &'static RelationEntry> {
+    let want = TypeId::of::<T>();
+    relations().filter(move |e| (e.parent_type)() == want)
+}
+
+/// Find one relation by parent type + relation name. Returns `None`
+/// if the model has no relation by that name registered.
+pub fn find_relation<T: 'static>(name: &str) -> Option<&'static RelationEntry> {
+    let want = TypeId::of::<T>();
+    relations().find(|e| (e.parent_type)() == want && e.name == name)
+}

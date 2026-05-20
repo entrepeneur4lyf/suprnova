@@ -76,11 +76,37 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         _ => unreachable!("validated in derive_seaorm"),
     };
 
+    // Phase 10B T1 — exclude the auto-injected `__eager` / `__pivot`
+    // fields from every per-column code path. They're runtime scratch
+    // state, not database columns, and the inner SeaORM Model doesn't
+    // have them — so `From<Model> for User`, `From<User> for Model`,
+    // `apply_attrs_to_active_model`, `replicate_with`, and `fill` all
+    // need to step around them. The two reverse paths
+    // (`From<Model> for User`, `Default for User`, `replicate_with`)
+    // that *construct* a `User` value initialise the two fields via
+    // `Default::default()` — `EagerLoadCache::default()` returns the
+    // empty cache and `Option::None` is the pivot default.
     let field_idents: Vec<_> = fields
         .iter()
         .map(|f| f.ident.as_ref().expect("named").clone())
+        .filter(|i| {
+            let s = i.to_string();
+            s != "__eager" && s != "__pivot"
+        })
         .collect();
     let field_strs: Vec<String> = field_idents.iter().map(|i| i.to_string()).collect();
+
+    // Phase 10B T1 — every Self { ... } constructor that materialises
+    // a user struct (From<inner::Model>, Default, replicate_with) must
+    // initialise the auto-injected `__eager` / `__pivot` slots so the
+    // struct literal stays exhaustive. `EagerLoadCache::default()`
+    // returns the empty cache; `Option::<...>::None` is the pivot
+    // default. This token stream is appended after the per-column
+    // initialisers in every reverse path.
+    let relations_fields_init = quote! {
+        __eager: ::core::default::Default::default(),
+        __pivot: ::core::default::Default::default(),
+    };
 
     // T7a — route per-field through `casts::apply_arm`. Fields with a
     // declared cast (in `input.casts`) decode JSON → Runtime →
@@ -602,7 +628,10 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         // stores a different Storage type (e.g. INTEGER for bool).
         impl ::core::convert::From<#module_name::Model> for #struct_ident {
             fn from(row: #module_name::Model) -> Self {
-                Self { #( #from_storage_arms ),* }
+                Self {
+                    #( #from_storage_arms, )*
+                    #relations_fields_init
+                }
             }
         }
 
@@ -617,7 +646,10 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         // impl `Default`; we don't try to be clever here.
         impl ::core::default::Default for #struct_ident {
             fn default() -> Self {
-                Self { #( #field_idents: ::core::default::Default::default(), )* }
+                Self {
+                    #( #field_idents: ::core::default::Default::default(), )*
+                    #relations_fields_init
+                }
             }
         }
 
@@ -734,7 +766,10 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
         impl ::suprnova::eloquent::ReplicateExt for #struct_ident {
             fn replicate_with(&self, except: ::std::vec::Vec<::std::string::String>) -> Self {
-                Self { #( #replicate_arms, )* }
+                Self {
+                    #( #replicate_arms, )*
+                    #relations_fields_init
+                }
             }
         }
 

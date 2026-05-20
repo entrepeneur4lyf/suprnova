@@ -43,6 +43,13 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     for f in fields {
         let ident = f.ident.as_ref().expect("named");
         let snake = ident.to_string();
+        // Phase 10B T1 — exclude the eager/pivot fields the relations
+        // emitter auto-injects. They're not database columns; emitting
+        // them as `Column::Eager` / `Column::Pivot` would let users
+        // accidentally filter on them via `filter(Column::Eager, ...)`.
+        if snake == "__eager" || snake == "__pivot" {
+            continue;
+        }
         let camel = to_camel(&snake);
         variant_idents.push(format_ident!("{camel}"));
         variant_strs.push(snake);

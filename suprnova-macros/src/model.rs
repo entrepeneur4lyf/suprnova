@@ -22,6 +22,7 @@ mod derive_eloquent;
 mod derive_seaorm;
 mod parse;
 pub mod prunable;
+mod relations;
 
 use parse::ModelInput;
 
@@ -46,9 +47,29 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     };
     input.item.attrs.push(injected);
 
+    // Phase 10B T1 — auto-inject `__eager: EagerLoadCache` and
+    // `__pivot: Option<Arc<dyn Any + Send + Sync>>` on every model.
+    //
+    // These are runtime scratch state: the eager cache stores rows
+    // loaded by `with([...])`, and the pivot slot stores the pivot
+    // row attached by a `BelongsToMany` loader (T4). Both are
+    // `#[serde(skip)]` so they don't surface in JSON, and they're
+    // filtered out of `derive_seaorm` + `columns` + the per-column
+    // `From<inner::Model>` / `Default` / `replicate_with` paths in
+    // `derive_eloquent` (which materialise the user struct).
+    //
+    // The fields are `pub` not because users should touch them
+    // directly, but because the test smoke (`framework/tests/eloquent_macro_smoke_relations.rs`)
+    // constructs the struct literal explicitly to verify the fields
+    // exist. Real model construction goes through
+    // `From<inner::Model>` or `Self::default()`, which initialise
+    // the slots via `Default::default()`.
+    inject_eager_pivot_fields(&mut input.item)?;
+
     let seaorm = derive_seaorm::emit(&input)?;
     let columns = columns::emit(&input)?;
     let eloquent = derive_eloquent::emit(&input)?;
+    let relations_tokens = relations::emit(&input)?;
     let registry = emit_registry(&input);
 
     let module_name = input.module_name();
@@ -73,9 +94,81 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         }
 
         #eloquent
+        #relations_tokens
         #registry
     })
 }
+
+/// Append `__eager: EagerLoadCache` and
+/// `__pivot: Option<Arc<dyn Any + Send + Sync>>` to the user's struct
+/// definition. Both fields carry `#[serde(skip)]` so they're not part
+/// of JSON serialization, and they're filtered out of the inner
+/// SeaORM Model + the per-column macro code paths.
+///
+/// Errors only if the input struct isn't `Fields::Named` — which
+/// `derive_seaorm` already rejects with a clear message earlier, so
+/// in practice this is unreachable on the happy path.
+fn inject_eager_pivot_fields(item: &mut syn::ItemStruct) -> Result<()> {
+    let named = match &mut item.fields {
+        syn::Fields::Named(named) => named,
+        _ => {
+            return Err(syn::Error::new_spanned(
+                &item.ident,
+                "#[model] only supports structs with named fields",
+            ));
+        }
+    };
+
+    // Idempotency guard. The macro shouldn't run twice on the same
+    // struct, but if a future refactor reorders the pipeline, double-
+    // injecting would produce a duplicate-field rustc error that
+    // doesn't point at the underlying cause. Skip when the slots are
+    // already present.
+    let has_eager = named
+        .named
+        .iter()
+        .any(|f| f.ident.as_ref().is_some_and(|i| i == "__eager"));
+    let has_pivot = named
+        .named
+        .iter()
+        .any(|f| f.ident.as_ref().is_some_and(|i| i == "__pivot"));
+
+    if !has_eager {
+        let f: syn::Field = syn::Field::parse_named.parse2(quote! {
+            /// Eager-load cache. Populated by `Builder::with([...])`
+            /// and read by the macro-emitted `<rel>_loaded()` /
+            /// `<rel>_count()` accessors. Empty by default.
+            #[serde(skip)]
+            #[allow(non_snake_case)]
+            #[doc(hidden)]
+            pub __eager: ::suprnova::EagerLoadCache
+        })?;
+        named.named.push(f);
+    }
+
+    if !has_pivot {
+        let f: syn::Field = syn::Field::parse_named.parse2(quote! {
+            /// Per-row pivot context. Filled by
+            /// [`BelongsToMany`](::suprnova::eloquent::relations) loaders
+            /// (T4) and read via [`pivot::<P>()`](Self::pivot). `None`
+            /// by default.
+            #[serde(skip)]
+            #[allow(non_snake_case)]
+            #[doc(hidden)]
+            pub __pivot: ::core::option::Option<
+                ::std::sync::Arc<dyn ::std::any::Any + ::core::marker::Send + ::core::marker::Sync>,
+            >
+        })?;
+        named.named.push(f);
+    }
+
+    Ok(())
+}
+
+// Import the syn parser trait used by `inject_eager_pivot_fields`.
+// Kept scoped to this module so it doesn't shadow `syn::parse` calls
+// elsewhere.
+use syn::parse::Parser as _;
 
 fn emit_registry(input: &ModelInput) -> TokenStream {
     let type_name = input.struct_name_str();

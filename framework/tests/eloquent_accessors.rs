@@ -160,6 +160,7 @@ async fn accessor_callable_directly() {
         first_name: "Alice".into(),
         last_name: "X".into(),
         password: "".into(),
+        ..Default::default()
     };
     assert_eq!(u.full_name(), "Alice X");
 }
@@ -171,6 +172,7 @@ async fn accessor_appended_in_to_json() {
         first_name: "Alice".into(),
         last_name: "X".into(),
         password: "".into(),
+        ..Default::default()
     };
     let v = u.to_json();
     assert_eq!(v["full_name"], "Alice X");
@@ -199,6 +201,7 @@ async fn direct_field_assignment_skips_mutator() {
         first_name: "A".into(),
         last_name: "B".into(),
         password: "".into(),
+        ..Default::default()
     };
     u.password = "raw".into();
     assert_eq!(u.password, "raw");
@@ -210,6 +213,7 @@ async fn hidden_fields_excluded_from_to_json() {
         id: 1,
         name: "Alice".into(),
         secret: "shh".into(),
+        ..Default::default()
     };
     let v = u.to_json();
     assert_eq!(v["name"], "Alice");
@@ -227,6 +231,7 @@ async fn visible_allowlist_drops_non_listed_fields() {
         id: 7,
         name: "Alice".into(),
         secret: "shh".into(),
+        ..Default::default()
     };
     let v = u.to_json();
     assert_eq!(v["id"], 7);
@@ -304,6 +309,7 @@ async fn appends_coexist_with_hidden_filter() {
         first_name: "Alice".into(),
         last_name: "X".into(),
         password: "secret".into(),
+        ..Default::default()
     };
     let v = u.to_json();
     assert_eq!(v["first_name"], "Alice");

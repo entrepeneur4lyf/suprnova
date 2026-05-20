@@ -38,6 +38,11 @@ impl Dummy<Faker> for Post {
             // boundary.
             created_at: now,
             updated_at: now,
+            // Phase 10B T1 — relations scratch state. Empty by
+            // default; populated by `Builder::with([...])` (eager
+            // loader) and `BelongsToMany::get()` (m2m pivot).
+            __eager: Default::default(),
+            __pivot: None,
         }
     }
 }

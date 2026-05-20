@@ -40,6 +40,16 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
     for f in fields {
         let ident = f.ident.as_ref().expect("named field");
+        // Phase 10B T1 — skip the eager/pivot fields the relations
+        // emitter auto-injects onto the user struct. They're runtime
+        // scratch space (an `EagerLoadCache` + an opaque pivot box),
+        // not database columns; the inner SeaORM Model must not see
+        // them, and `From<Model> for UserStruct` constructs them via
+        // `Default::default()` (derive_eloquent.rs).
+        let ident_str = ident.to_string();
+        if ident_str == "__eager" || ident_str == "__pivot" {
+            continue;
+        }
         let user_ty = &f.ty;
         let is_pk = ident == primary_key;
 

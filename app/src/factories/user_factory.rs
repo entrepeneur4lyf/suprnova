@@ -47,6 +47,12 @@ impl Factory for UserFactory {
             // Soft-delete tombstone; the AsOptionalDateTime cast
             // routes `None` → NULL.
             deleted_at: None,
+            // Phase 10B T1 — relations scratch state. Always starts
+            // empty; the eager loader fills the cache when the row
+            // came from a `with([...])` query and the BelongsToMany
+            // loader fills `__pivot` when it came from an m2m chain.
+            __eager: Default::default(),
+            __pivot: None,
         }
     }
 }

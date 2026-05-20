@@ -146,6 +146,7 @@ async fn hidden_fields_dropped_from_user_to_json() {
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
         deleted_at: None,
+        ..Default::default()
     };
     let v = u.to_json();
     assert_eq!(v["name"], "Alice");

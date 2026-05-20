@@ -19,6 +19,7 @@ pub mod fillable;
 pub mod model;
 pub mod prunable;
 pub mod registry;
+pub mod relations;
 pub mod soft_deletes;
 pub mod timestamps;
 
@@ -37,6 +38,10 @@ pub use prunable::{
     prune_all, prune_all_dry, prune_one, pruners, MassPrunable, Prunable, PrunerEntry, PrunerFn,
 };
 pub use registry::{find_model_by_table, models, ModelEntry};
+pub use relations::{
+    find_relation, relations, relations_of, AggregateKind, EagerLoadCache, Relation,
+    RelationEntry, RelationKind,
+};
 pub use soft_deletes::SoftDeletes;
 pub use timestamps::Touchable;
 

@@ -61,6 +61,7 @@ impl Factory for FactoryUserFactory {
             last_seen_at: Some(Utc::now()),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            ..Default::default()
         }
     }
 }
@@ -137,6 +138,7 @@ async fn direct_persistable_call_on_eloquent_struct_works() {
         last_seen_at: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        ..Default::default()
     };
 
     // Direct `.persist()` call — the per-struct impl is what makes
