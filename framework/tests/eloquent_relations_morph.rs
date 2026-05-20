@@ -475,12 +475,13 @@ async fn morph_many_aggregate_via_server_side_group_by() {
         .unwrap();
     }
     let p_loaded = posts.iter().find(|p| p.id == p1.id).unwrap();
-    // The aggregate result lands in `__eager` keyed by relation name;
-    // the `<rel>_count()` accessor reads from `set_count`, so we read
-    // the raw aggregate cell directly. SUM stored as f64.
+    // The aggregate result lands in `__eager` keyed by the wide
+    // `<rel>_<kind>_<col>` form (P1 fix). The `<rel>_count()` accessor
+    // reads from `set_count`, so we read the raw aggregate cell
+    // directly. SUM stored as f64.
     let sum: f64 = p_loaded
         .__eager
-        .get_aggregate::<f64>("comments")
+        .get_aggregate::<f64>("comments_sum_views")
         .copied()
         .unwrap_or(0.0);
     assert_eq!(sum, 15.0, "video's comment must be excluded from the sum");

@@ -425,14 +425,14 @@ async fn has_many_sum_aggregates_correctly() {
         .find(|u| u.id == u1.id)
         .unwrap()
         .__eager
-        .get_aggregate::<f64>("posts")
+        .get_aggregate::<f64>("posts_sum_views")
         .expect("sum cache populated");
     let u2_sum = *users
         .iter()
         .find(|u| u.id == u2.id)
         .unwrap()
         .__eager
-        .get_aggregate::<f64>("posts")
+        .get_aggregate::<f64>("posts_sum_views")
         .expect("sum cache populated");
     assert_eq!(u1_sum, 15.0);
     assert_eq!(u2_sum, 7.0);
@@ -468,7 +468,7 @@ async fn has_many_avg_returns_correct_mean() {
     }
     let avg = *users[0]
         .__eager
-        .get_aggregate::<f64>("posts")
+        .get_aggregate::<f64>("posts_avg_views")
         .expect("avg cache populated");
     assert_eq!(avg, 6.0);
 }
@@ -503,7 +503,7 @@ async fn has_many_min_max_some_on_nonempty() {
     }
     let min = users[0]
         .__eager
-        .get_aggregate::<Option<f64>>("posts")
+        .get_aggregate::<Option<f64>>("posts_min_views")
         .expect("min cache populated")
         .expect("min over non-empty group is Some");
     assert_eq!(min, 3.0);
@@ -522,7 +522,7 @@ async fn has_many_min_max_some_on_nonempty() {
     }
     let max = users[0]
         .__eager
-        .get_aggregate::<Option<f64>>("posts")
+        .get_aggregate::<Option<f64>>("posts_max_views")
         .expect("max cache populated")
         .expect("max over non-empty group is Some");
     assert_eq!(max, 11.0);
@@ -553,7 +553,7 @@ async fn has_many_min_max_none_on_empty_group() {
     }
     let min: &Option<f64> = users[0]
         .__eager
-        .get_aggregate::<Option<f64>>("posts")
+        .get_aggregate::<Option<f64>>("posts_min_views")
         .expect("min cache populated as Option<f64>");
     assert!(min.is_none(), "min over empty group must be None, got: {min:?}");
 
@@ -571,7 +571,7 @@ async fn has_many_min_max_none_on_empty_group() {
     }
     let max: &Option<f64> = users[0]
         .__eager
-        .get_aggregate::<Option<f64>>("posts")
+        .get_aggregate::<Option<f64>>("posts_max_views")
         .expect("max cache populated as Option<f64>");
     assert!(max.is_none());
 }
@@ -598,7 +598,7 @@ async fn has_many_sum_avg_zero_on_empty_group() {
     }
     let sum: f64 = *users[0]
         .__eager
-        .get_aggregate::<f64>("posts")
+        .get_aggregate::<f64>("posts_sum_views")
         .expect("sum cache populated");
     assert_eq!(sum, 0.0);
 
@@ -616,7 +616,7 @@ async fn has_many_sum_avg_zero_on_empty_group() {
     }
     let avg: f64 = *users[0]
         .__eager
-        .get_aggregate::<f64>("posts")
+        .get_aggregate::<f64>("posts_avg_views")
         .expect("avg cache populated");
     assert_eq!(avg, 0.0);
 }
@@ -718,7 +718,7 @@ async fn has_many_aggregate_via_server_side_group_by() {
     let u_loaded = parents.iter().find(|x| x.id == u.id).unwrap();
     let sum: &f64 = u_loaded
         .__eager
-        .get_aggregate::<f64>("posts")
+        .get_aggregate::<f64>("posts_sum_id")
         .expect("sum cache populated");
     assert!(*sum > 0.0, "sum of post IDs should be positive, got {sum}");
 
@@ -749,7 +749,7 @@ async fn has_many_aggregate_server_side_min_max_none_when_no_children() {
     let u_loaded = parents.iter().find(|x| x.id == u.id).unwrap();
     let min: &Option<f64> = u_loaded
         .__eager
-        .get_aggregate::<Option<f64>>("posts")
+        .get_aggregate::<Option<f64>>("posts_min_id")
         .expect("min cache populated");
     assert!(min.is_none());
 }

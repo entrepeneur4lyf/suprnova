@@ -515,7 +515,7 @@ async fn morph_to_many_aggregate_via_server_side_group_by() {
             (
                 p.id,
                 p.__eager
-                    .get_aggregate::<f64>("tags")
+                    .get_aggregate::<f64>("tags_sum_id")
                     .copied()
                     .unwrap_or(0.0),
             )
@@ -543,7 +543,11 @@ async fn morph_to_many_aggregate_min_max_returns_option() {
     let empty_min: Option<f64> = posts_no_tags
         .iter()
         .find(|x| x.id == p.id)
-        .and_then(|x| x.__eager.get_aggregate::<Option<f64>>("tags").copied())
+        .and_then(|x| {
+            x.__eager
+                .get_aggregate::<Option<f64>>("tags_min_id")
+                .copied()
+        })
         .unwrap_or(None);
     assert!(empty_min.is_none(), "empty min must be None, got {empty_min:?}");
 
@@ -565,7 +569,11 @@ async fn morph_to_many_aggregate_min_max_returns_option() {
     let max: Option<f64> = posts_with_tags
         .iter()
         .find(|x| x.id == p.id)
-        .and_then(|x| x.__eager.get_aggregate::<Option<f64>>("tags").copied())
+        .and_then(|x| {
+            x.__eager
+                .get_aggregate::<Option<f64>>("tags_max_id")
+                .copied()
+        })
         .unwrap_or(None);
     assert_eq!(max, Some(t2.id.max(t1.id) as f64));
 }

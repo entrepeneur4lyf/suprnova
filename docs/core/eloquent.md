@@ -1004,9 +1004,6 @@ its declaration site too — collected here for visibility:
   `i64`, so any model used as a `MorphTo` target must declare an `i64`
   primary key, and the child table's `<name>_id` column must also be
   `i64`. String / UUID-as-string morph FKs are v2.
-- **Aggregate cache key is the relation name only.** Loading two
-  aggregates on the same relation overwrites the cell — see
-  [Aggregate cache key — limitation](#aggregate-cache-key--limitation).
 - **`load_missing` is collection-wide.** When any row in a collection
   already has the relation cached, `load_missing` skips the eager-load
   for the whole collection. Laravel's per-row skip is v2.
@@ -1053,11 +1050,26 @@ for u in &users {
     println!("{} has {} posts", u.name, u.posts_count());
 }
 
-// Aggregates — Sum / Avg / Min / Max over a relation column:
+// Aggregates — Sum / Avg / Min / Max over a relation column. The
+// ergonomic read is the macro-emitted `<rel>_sum_of(col)` accessor.
 let users = User::with_sum(("posts", "views")).get().await?;
-let sum: f64 = *users[0].__eager
-    .get_aggregate::<f64>("posts")
+let sum: f64 = users[0]
+    .posts_sum_of("views")
     .expect("with_sum populated the cache");
+
+// Multiple aggregates on the same relation compose — the cache key
+// is the wide `<rel>_<kind>_<col>` form, so distinct kinds and
+// distinct columns don't collide:
+let users = User::with_sum(("posts", "views"))
+    .with_avg(("posts", "views"))
+    .with_min(("posts", "id"))
+    .get()
+    .await?;
+let u = &users[0];
+let sum = u.posts_sum_of("views").unwrap();   // Some(_)  — sum of views
+let avg = u.posts_avg_of("views").unwrap();   // Some(_)  — avg of views
+let min = u.posts_min_of("id").unwrap();      // Some(Some(_)) — non-empty group
+let max = u.posts_max_of("id");               // None  — with_max was not called
 
 // Filter the eager-loaded children:
 let users = User::query()
@@ -1067,18 +1079,25 @@ let users = User::query()
 // Each u.posts_loaded() contains only published posts.
 ```
 
-### Cache layout — one cell per relation
+### Cache layout
 
-The per-row `__eager` cache is keyed by relation NAME (the value
-passed to `with` / `with_count` / etc.). Each call writes one cell:
+The per-row `__eager` cache cells are keyed by:
 
-| Method                  | Cache cell type           | Empty-group value |
-|-------------------------|---------------------------|-------------------|
-| `with(["posts"])`       | `Vec<Post>`               | `Vec::new()`      |
-| `with(["profile"])`     | `Option<Profile>`         | `None`            |
-| `with_count(["posts"])` | `u64`                     | `0`               |
-| `with_sum / with_avg`   | `f64`                     | `0.0`             |
-| `with_min / with_max`   | `Option<f64>`             | `None`            |
+- `<rel>` (relation NAME alone) for `with` and `with_count`.
+- `<rel>_<kind>_<col>` (e.g. `posts_sum_views`) for the four
+  aggregate kinds — `with_sum` / `with_avg` / `with_min` / `with_max`.
+  This wide key lets multiple aggregates on the same relation coexist
+  on the same row without overwriting each other.
+
+| Method                              | Cache key            | Cache cell type   | Empty-group value |
+|-------------------------------------|----------------------|-------------------|-------------------|
+| `with(["posts"])`                   | `posts`              | `Vec<Post>`       | `Vec::new()`      |
+| `with(["profile"])`                 | `profile`            | `Option<Profile>` | `None`            |
+| `with_count(["posts"])`             | `posts`              | `u64`             | `0`               |
+| `with_sum(("posts","views"))`       | `posts_sum_views`    | `f64`             | `0.0`             |
+| `with_avg(("posts","views"))`       | `posts_avg_views`    | `f64`             | `0.0`             |
+| `with_min(("posts","id"))`          | `posts_min_id`       | `Option<f64>`     | `None`            |
+| `with_max(("posts","id"))`          | `posts_max_id`       | `Option<f64>`     | `None`            |
 
 The macro emits matching accessors on each model:
 
@@ -1087,38 +1106,45 @@ The macro emits matching accessors on each model:
   `Option<&Profile>`.
 - `<rel>_count()` — `u64`. Panics if `with_count(["..."])` wasn't
   called.
-- Aggregates read via
-  `parent.__eager.get_aggregate::<f64>("posts")` (or
-  `Option<f64>` for Min/Max).
+- `<rel>_sum_of(col)` / `<rel>_avg_of(col)` — return `Option<f64>`
+  (`None` if the matching `with_sum` / `with_avg` was not called).
+- `<rel>_min_of(col)` / `<rel>_max_of(col)` — return
+  `Option<Option<f64>>`: outer `Option` is "was `with_min` /
+  `with_max` called?", inner `Option` is "did SQL return NULL because
+  the group was empty?".
 
-### Aggregate cache key — limitation
+The accessors are the ergonomic surface — read through them rather
+than reaching into `__eager.get_aggregate::<T>(...)` directly. They
+build the same cache key under the hood via
+`eloquent::relations::aggregate_cache_key`.
 
-> **v1 limitation: single aggregate per relation.** The aggregate cache key is the relation name only (e.g. `"posts"`), not `<rel>_<kind>_<col>`. Calling `with_sum(("posts", "id"))` then `with_avg(("posts", "id"))` silently overwrites the first aggregate — only the last `with_*` call's result is readable from the cache. Load one aggregate at a time per relation in v1. v2 will widen the cache key shape.
+### Composing aggregates on the same relation
 
-The cache key for `with_sum` / `with_avg` / `with_min` / `with_max`
-is the relation name only (e.g. `"posts"`). Loading two aggregates
-on the same relation in a single query overwrites the cell:
+The wide cache key means you can stack as many `with_*` calls on the
+same relation in one query as you want — no collisions:
 
 ```rust
-// Last call wins — `with_avg` overwrites `with_sum`'s cell.
 let users = User::with_sum(("posts", "views"))
     .with_avg(("posts", "views"))
+    .with_min(("posts", "id"))
+    .with_max(("posts", "id"))
     .get()
     .await?;
-// `users[0].__eager.get_aggregate::<f64>("posts")` returns the avg.
+
+let u = &users[0];
+let total_views: f64 = u.posts_sum_of("views").unwrap();
+let avg_views:   f64 = u.posts_avg_of("views").unwrap();
+
+// Min/Max are double-Option because SQL min/max NULLs on empty:
+match u.posts_min_of("id") {
+    None              => panic!("with_min not called"),
+    Some(None)        => println!("no posts yet"),
+    Some(Some(min))   => println!("smallest post id: {min}"),
+}
+
+// Accessor returns `None` when the matching `with_*` was skipped:
+assert!(u.posts_avg_of("score").is_none()); // never called with col="score"
 ```
-
-This is intentional in v1. If you need both `posts_sum` and
-`posts_avg` on the same row, issue separate queries:
-
-```rust
-let with_sum = User::with_sum(("posts", "views")).get().await?;
-let with_avg = User::with_avg(("posts", "views")).get().await?;
-```
-
-A future revision may widen the cache key to
-`<relation>_<aggregate>_<column>` and break this contract; for now,
-the single-key shape is documented and stable.
 
 ### Aggregates and INTEGER columns
 
@@ -1126,8 +1152,7 @@ SUM over an INTEGER column lands in the cache as `f64`. The
 dispatcher arms try `try_get::<Option<f64>>` first, then fall back to
 `try_get::<Option<i64>>().map(|n| n as f64)` so SQLite's INTEGER-
 preserving COUNT/SUM types don't silently coerce to `0.0`. Read via
-`get_aggregate::<f64>("posts")` regardless of the source column
-type.
+the macro-emitted accessors regardless of the source column type.
 
 ### `with_where` predicate routing
 

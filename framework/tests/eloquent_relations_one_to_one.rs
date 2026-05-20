@@ -338,7 +338,7 @@ async fn has_one_aggregate_sum_avg_zero_on_empty() {
     }
     let stored_sum: &f64 = users[0]
         .__eager
-        .get_aggregate::<f64>("profile")
+        .get_aggregate::<f64>("profile_sum_id")
         .expect("sum cache populated");
     assert_eq!(*stored_sum, 0.0);
 
@@ -356,7 +356,7 @@ async fn has_one_aggregate_sum_avg_zero_on_empty() {
     }
     let stored_avg: &f64 = users[0]
         .__eager
-        .get_aggregate::<f64>("profile")
+        .get_aggregate::<f64>("profile_avg_id")
         .expect("avg cache populated");
     assert_eq!(*stored_avg, 0.0);
 }
@@ -387,7 +387,7 @@ async fn has_one_aggregate_min_max_none_on_empty() {
     }
     let min: &Option<f64> = users[0]
         .__eager
-        .get_aggregate::<Option<f64>>("profile")
+        .get_aggregate::<Option<f64>>("profile_min_id")
         .expect("min cache populated as Option<f64>");
     assert!(
         min.is_none(),
@@ -408,7 +408,7 @@ async fn has_one_aggregate_min_max_none_on_empty() {
     }
     let max: &Option<f64> = users[0]
         .__eager
-        .get_aggregate::<Option<f64>>("profile")
+        .get_aggregate::<Option<f64>>("profile_max_id")
         .expect("max cache populated as Option<f64>");
     assert!(max.is_none(), "max over empty set should be None, got: {max:?}");
 }
@@ -438,7 +438,7 @@ async fn has_one_aggregate_min_max_some_on_nonempty() {
     }
     let min: &Option<f64> = users[0]
         .__eager
-        .get_aggregate::<Option<f64>>("profile")
+        .get_aggregate::<Option<f64>>("profile_min_id")
         .expect("min cache populated as Option<f64>");
     assert!(min.is_some(), "min over non-empty must be Some, got: {min:?}");
     assert_eq!(min.unwrap(), p.id as f64);
@@ -457,7 +457,7 @@ async fn has_one_aggregate_min_max_some_on_nonempty() {
     }
     let max: &Option<f64> = users[0]
         .__eager
-        .get_aggregate::<Option<f64>>("profile")
+        .get_aggregate::<Option<f64>>("profile_max_id")
         .expect("max cache populated as Option<f64>");
     assert!(max.is_some());
     assert_eq!(max.unwrap(), p.id as f64);
@@ -501,7 +501,7 @@ async fn belongs_to_aggregate_sum_zero_min_none_when_parent_missing() {
     for p in posts.iter() {
         let s: &f64 = p
             .__eager
-            .get_aggregate::<f64>("user")
+            .get_aggregate::<f64>("user_sum_id")
             .expect("sum cache populated");
         assert_eq!(*s, 0.0);
     }
@@ -521,7 +521,7 @@ async fn belongs_to_aggregate_sum_zero_min_none_when_parent_missing() {
     for p in posts.iter() {
         let min: &Option<f64> = p
             .__eager
-            .get_aggregate::<Option<f64>>("user")
+            .get_aggregate::<Option<f64>>("user_min_id")
             .expect("min cache populated as Option<f64>");
         assert!(min.is_none(), "min over empty must be None, got: {min:?}");
     }
@@ -541,7 +541,7 @@ async fn belongs_to_aggregate_sum_zero_min_none_when_parent_missing() {
     for p in posts.iter() {
         let max: &Option<f64> = p
             .__eager
-            .get_aggregate::<Option<f64>>("user")
+            .get_aggregate::<Option<f64>>("user_max_id")
             .expect("max cache populated as Option<f64>");
         assert!(max.is_none());
     }
@@ -578,7 +578,7 @@ async fn belongs_to_aggregate_min_some_when_parent_present() {
     }
     let min: &Option<f64> = posts[0]
         .__eager
-        .get_aggregate::<Option<f64>>("user")
+        .get_aggregate::<Option<f64>>("user_min_id")
         .expect("min cache populated as Option<f64>");
     assert_eq!(min.unwrap(), u.id as f64);
 }

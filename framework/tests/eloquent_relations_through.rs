@@ -448,7 +448,7 @@ async fn has_many_through_aggregate_via_server_side_group_by() {
         .find(|x| x.id == c.id)
         .unwrap()
         .__eager
-        .get_aggregate::<f64>("posts")
+        .get_aggregate::<f64>("posts_sum_views")
         .expect("sum cache populated for populated parent");
     assert_eq!(sum_c, 30.0);
     let sum_empty = *countries
@@ -456,7 +456,7 @@ async fn has_many_through_aggregate_via_server_side_group_by() {
         .find(|x| x.id == c_empty.id)
         .unwrap()
         .__eager
-        .get_aggregate::<f64>("posts")
+        .get_aggregate::<f64>("posts_sum_views")
         .expect("sum cache populated for empty parent");
     assert_eq!(sum_empty, 0.0, "Sum over empty group => 0.0");
 
@@ -479,7 +479,7 @@ async fn has_many_through_aggregate_via_server_side_group_by() {
         .find(|x| x.id == c.id)
         .unwrap()
         .__eager
-        .get_aggregate::<f64>("posts")
+        .get_aggregate::<f64>("posts_avg_views")
         .expect("avg cache populated");
     assert_eq!(avg_c, 10.0);
 
@@ -502,7 +502,7 @@ async fn has_many_through_aggregate_via_server_side_group_by() {
         .find(|x| x.id == c.id)
         .unwrap()
         .__eager
-        .get_aggregate::<Option<f64>>("posts")
+        .get_aggregate::<Option<f64>>("posts_min_views")
         .expect("min cache populated");
     assert_eq!(min_c, Some(5.0));
     let min_empty = *countries
@@ -510,7 +510,7 @@ async fn has_many_through_aggregate_via_server_side_group_by() {
         .find(|x| x.id == c_empty.id)
         .unwrap()
         .__eager
-        .get_aggregate::<Option<f64>>("posts")
+        .get_aggregate::<Option<f64>>("posts_min_views")
         .expect("min cache populated for empty parent");
     assert_eq!(min_empty, None, "Min over empty group => None");
 
@@ -533,7 +533,7 @@ async fn has_many_through_aggregate_via_server_side_group_by() {
         .find(|x| x.id == c.id)
         .unwrap()
         .__eager
-        .get_aggregate::<Option<f64>>("posts")
+        .get_aggregate::<Option<f64>>("posts_max_views")
         .expect("max cache populated");
     assert_eq!(max_c, Some(15.0));
 }
@@ -713,7 +713,7 @@ async fn has_many_through_honours_second_local_key() {
         .find(|x| x.id == co.id)
         .unwrap()
         .__eager
-        .get_aggregate::<f64>("devices")
+        .get_aggregate::<f64>("devices_sum_watts")
         .expect("aggregate cache populated");
     assert_eq!(sum, 30.0, "sum(watts) over the JOIN = 10 + 20");
 

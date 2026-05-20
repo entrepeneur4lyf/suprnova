@@ -181,7 +181,15 @@ impl EagerLoadCache {
     }
 
     /// Store a `with_sum` / `with_avg` / `with_min` / `with_max` value.
-    pub fn set_aggregate<T: Any + Clone + Send + Sync>(&mut self, name: &'static str, value: T) {
+    ///
+    /// The cache key is the wide `<rel>_<kind>_<col>` form built by
+    /// [`aggregate_cache_key`][crate::eloquent::relations::aggregate_cache_key]
+    /// — runtime-formatted, hence the `&str` (not `&'static str`)
+    /// parameter. Multiple aggregates on the same relation (e.g.
+    /// `with_sum(("posts","id"))` then `with_avg(("posts","id"))`)
+    /// coexist without collision because the key encodes both the
+    /// aggregate kind and the source column.
+    pub fn set_aggregate<T: Any + Clone + Send + Sync>(&mut self, name: &str, value: T) {
         self.rows.insert(
             name.to_string(),
             RelationCell::Aggregate(ClonedBox::new(value)),

@@ -334,16 +334,19 @@ impl<M> Builder<M> {
     }
 
     /// Append a `SUM(col) GROUP BY parent_fk` aggregate over a
-    /// relation's column. Reads back via
-    /// `parent.__eager.get_aggregate::<f64>(relation_name)` (a single
-    /// f64 per parent — Sum/Avg over zero rows lands as `0.0`,
-    /// matching the framework's COALESCE behaviour elsewhere).
+    /// relation's column. Reads back via the wide `<rel>_<kind>_<col>`
+    /// cache key — i.e.
+    /// `parent.__eager.get_aggregate::<f64>("posts_sum_views")` for
+    /// `with_sum(("posts", "views"))`. Sum/Avg over zero rows lands
+    /// as `0.0`, matching the framework's COALESCE behaviour
+    /// elsewhere.
     ///
-    /// Note: the cache key is the relation NAME, not
-    /// `<name>_sum_<col>`. Loading multiple aggregates on the same
-    /// relation in one query overwrites the cell — issue separate
-    /// queries (or one terminal per aggregate) if you need both
-    /// `posts_sum` and `posts_avg` on the same row.
+    /// The ergonomic read is the macro-emitted accessor:
+    /// `parent.posts_sum_of("views")` returning `Option<f64>` (`None`
+    /// when `with_sum` was not called for that relation/column pair).
+    /// Multiple aggregates on the same relation compose cleanly —
+    /// `with_sum(("posts","views"))` and `with_avg(("posts","views"))`
+    /// on the same query write distinct cells and both read back.
     pub fn with_sum<S1: Into<String>, S2: Into<String>>(mut self, (rel, col): (S1, S2)) -> Self {
         self.eager_specs
             .push(EagerSpec::WithSum(rel.into(), col.into()));

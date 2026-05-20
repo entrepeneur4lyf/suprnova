@@ -7,21 +7,25 @@
 //! - `with_where` (typed predicate against the relation builder)
 //! - `Collection::load` / `Collection::load_missing`
 //!
-//! Storage contract (cache key = relation NAME):
+//! Storage contract:
 //!
-//! - `with_count`: read via `<rel>_count() -> u64`
+//! - `with_count`: read via `<rel>_count() -> u64` (cache key =
+//!   relation NAME).
 //! - `with_sum` / `with_avg`: read via
-//!   `__eager.get_aggregate::<f64>(name)` (Sum/Avg over zero rows
-//!   land as `0.0`)
+//!   `__eager.get_aggregate::<f64>("<rel>_<kind>_<col>")` (Sum/Avg
+//!   over zero rows land as `0.0`).
 //! - `with_min` / `with_max`: read via
-//!   `__eager.get_aggregate::<Option<f64>>(name)` (None on empty group)
+//!   `__eager.get_aggregate::<Option<f64>>("<rel>_<kind>_<col>")`
+//!   (None on empty group).
 //!
-//! The cache key is the relation name (`"posts"`), NOT
-//! `"posts_sum_views"`. Loading multiple aggregates on the same
-//! relation overwrites the cell — issue separate queries if you need
-//! both `posts_sum` and `posts_avg` on the same row. This matches the
-//! contract laid down in the dispatcher arm comments (eg.
-//! `__aggregate_relation` HasMany arm).
+//! Aggregate cache keys are the wide `<rel>_<kind>_<col>` form (e.g.
+//! `"posts_sum_views"`) — built by
+//! `eloquent::relations::aggregate_cache_key`. Multiple aggregates on
+//! the same relation (e.g. `with_sum` then `with_avg` over the same
+//! column) coexist on the same row without colliding on the cache
+//! cell. The macro also emits per-kind-per-col accessors —
+//! `<rel>_sum_of(col)` / `_avg_of` / `_min_of` / `_max_of` — which
+//! read using the same helper.
 
 use suprnova::testing::TestDatabase;
 use suprnova::{attrs, model, Builder, Collection, Model};
@@ -216,8 +220,8 @@ async fn with_sum_aggregate() {
     let u1 = users.iter().find(|u| u.name == "u1").unwrap();
     let sum: f64 = *u1
         .__eager
-        .get_aggregate::<f64>("posts")
-        .expect("sum cache populated under the relation name");
+        .get_aggregate::<f64>("posts_sum_views")
+        .expect("sum cache populated under <rel>_<kind>_<col>");
     assert!((sum - 15.0).abs() < 0.001, "got sum = {sum}");
 }
 
@@ -229,7 +233,7 @@ async fn with_avg_aggregate() {
     let u1 = users.iter().find(|u| u.name == "u1").unwrap();
     let avg: f64 = *u1
         .__eager
-        .get_aggregate::<f64>("posts")
+        .get_aggregate::<f64>("posts_avg_views")
         .expect("avg cache populated");
     assert!((avg - 7.5).abs() < 0.01, "got avg = {avg}");
 }
@@ -242,7 +246,7 @@ async fn with_min_max() {
     let u1 = users.iter().find(|u| u.name == "u1").unwrap();
     let min_opt: Option<f64> = *u1
         .__eager
-        .get_aggregate::<Option<f64>>("posts")
+        .get_aggregate::<Option<f64>>("posts_min_views")
         .expect("min cache populated");
     assert!((min_opt.unwrap() - 5.0).abs() < 0.001);
 
@@ -253,7 +257,7 @@ async fn with_min_max() {
     let u1_max = users_max.iter().find(|u| u.name == "u1").unwrap();
     let max_opt: Option<f64> = *u1_max
         .__eager
-        .get_aggregate::<Option<f64>>("posts")
+        .get_aggregate::<Option<f64>>("posts_max_views")
         .expect("max cache populated");
     assert!((max_opt.unwrap() - 10.0).abs() < 0.001);
 }

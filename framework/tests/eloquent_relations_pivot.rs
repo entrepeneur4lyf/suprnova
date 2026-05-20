@@ -445,14 +445,14 @@ async fn belongs_to_many_aggregate_sum_over_related_column() {
         .find(|u| u.id == u1.id)
         .unwrap()
         .__eager
-        .get_aggregate::<f64>("roles")
+        .get_aggregate::<f64>("roles_sum_weight")
         .expect("sum cache populated");
     let u2_sum = *users
         .iter()
         .find(|u| u.id == u2.id)
         .unwrap()
         .__eager
-        .get_aggregate::<f64>("roles")
+        .get_aggregate::<f64>("roles_sum_weight")
         .expect("sum cache populated");
     assert_eq!(u1_sum, 15.0);
     assert_eq!(u2_sum, 5.0);
@@ -489,14 +489,14 @@ async fn belongs_to_many_aggregate_min_max_branches_to_option() {
         .find(|u| u.id == u_with.id)
         .unwrap()
         .__eager
-        .get_aggregate::<Option<f64>>("roles")
+        .get_aggregate::<Option<f64>>("roles_min_weight")
         .expect("min cache populated");
     let empty_min = users
         .iter()
         .find(|u| u.id == u_empty.id)
         .unwrap()
         .__eager
-        .get_aggregate::<Option<f64>>("roles")
+        .get_aggregate::<Option<f64>>("roles_min_weight")
         .expect("min cache populated for empty parent too");
     assert_eq!(*with_min, Some(42.0));
     assert!(empty_min.is_none(), "min over empty group must be None");
@@ -803,6 +803,9 @@ async fn belongs_to_many_respects_custom_related_pk() {
         .unwrap();
     }
     let u_loaded = parents.iter().find(|p| p.id == u.id).unwrap();
-    let sum: &f64 = u_loaded.__eager.get_aggregate::<f64>("things").unwrap();
+    let sum: &f64 = u_loaded
+        .__eager
+        .get_aggregate::<f64>("things_sum_weight")
+        .unwrap();
     assert_eq!(*sum, 35.0);
 }

@@ -95,6 +95,46 @@ pub enum AggregateKind {
     Max,
 }
 
+impl AggregateKind {
+    /// Lower-case spelling used inside aggregate cache keys
+    /// (`"sum"` / `"avg"` / `"min"` / `"max"`). Stable wire-style
+    /// representation — do not change without bumping the cache-key
+    /// contract.
+    pub fn as_key_str(self) -> &'static str {
+        match self {
+            AggregateKind::Sum => "sum",
+            AggregateKind::Avg => "avg",
+            AggregateKind::Min => "min",
+            AggregateKind::Max => "max",
+        }
+    }
+}
+
+/// Build the wide cache key the aggregate dispatcher arms write into
+/// `EagerLoadCache::set_aggregate`. The shape is `<rel>_<kind>_<col>`
+/// — `with_sum(("posts","id"))` lands under `"posts_sum_id"`,
+/// `with_avg(("posts","id"))` under `"posts_avg_id"`, etc. — so a
+/// single eager-load plan can stack multiple aggregates on the same
+/// relation without colliding on the cache cell.
+///
+/// Count keys keep the unadorned `<rel>` form (separate
+/// `RelationCell::Count(u64)` variant; zero collision risk with the
+/// aggregate cell).
+///
+/// This helper is the single source of truth for the key format. The
+/// macro's aggregate arms call it on write; the per-relation
+/// `<rel>_sum_of(col)` / `_avg_of` / `_min_of` / `_max_of` accessors
+/// it emits call it on read. Don't hand-format the key elsewhere.
+pub fn aggregate_cache_key(name: &str, kind: AggregateKind, column: &str) -> String {
+    let mut s = String::with_capacity(name.len() + 5 + column.len());
+    s.push_str(name);
+    s.push('_');
+    s.push_str(kind.as_key_str());
+    s.push('_');
+    s.push_str(column);
+    s
+}
+
 /// Sealed trait every concrete relation type implements.
 ///
 /// "Sealed" in the sense that all impl sites live inside the framework

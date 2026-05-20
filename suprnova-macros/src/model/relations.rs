@@ -361,9 +361,9 @@ fn emit_pivot_accessor(struct_ident: &syn::Ident) -> TokenStream {
     }
 }
 
-/// Emit `<rel>_loaded()` and `<rel>_count()` accessors for one
-/// relation. The return type of `<rel>_loaded()` depends on the
-/// relation's kind:
+/// Emit `<rel>_loaded()`, `<rel>_count()`, and the four per-kind
+/// aggregate accessors for one relation. The return type of
+/// `<rel>_loaded()` depends on the relation's kind:
 ///
 /// - HasOne / BelongsTo / MorphTo / MorphOne / HasOneThrough →
 ///   `Option<&Target>` (the cache stores `Option<T>`)
@@ -372,11 +372,25 @@ fn emit_pivot_accessor(struct_ident: &syn::Ident) -> TokenStream {
 ///
 /// `<rel>_count()` always returns `u64` and panics with a clear
 /// message when `with_count(["..."])` wasn't called.
+///
+/// The four aggregate accessors —
+/// `<rel>_sum_of(col)` / `<rel>_avg_of(col)` returning `Option<f64>`
+/// and `<rel>_min_of(col)` / `<rel>_max_of(col)` returning
+/// `Option<Option<f64>>` (outer `Option` = "was `with_min`/`with_max`
+/// called?", inner `Option` = "is the result NULL because the group
+/// was empty?") — read the wide `<rel>_<kind>_<col>` cache cells.
+/// They return `None` when the matching `with_*` call was not made
+/// against the column; reading after the corresponding `with_*` call
+/// returns `Some(value)`.
 fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> TokenStream {
     let name = &rel.name;
     let name_str = name.to_string();
     let loaded_fn = quote::format_ident!("{}_loaded", name);
     let count_fn = quote::format_ident!("{}_count", name);
+    let sum_of_fn = quote::format_ident!("{}_sum_of", name);
+    let avg_of_fn = quote::format_ident!("{}_avg_of", name);
+    let min_of_fn = quote::format_ident!("{}_min_of", name);
+    let max_of_fn = quote::format_ident!("{}_max_of", name);
     // For Through kinds the parser stores generics left-to-right as
     // `(rel.target, rel.through)` where the first generic is the
     // intermediate B and the second is the final target C. The
@@ -458,6 +472,75 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
                         ::core::stringify!(#count_fn),
                         #name_str,
                     ))
+            }
+
+            #[doc = "Read the `with_sum((\"...\", col))` aggregate for this \
+                     relation and the given column."]
+            #[doc = ""]
+            #[doc = "Returns `None` if `with_sum` was not called for \
+                     this relation/column pair (silent miss — multiple \
+                     aggregates can compose on the same relation, so we \
+                     don't panic on absent reads)."]
+            pub fn #sum_of_fn(&self, col: &str) -> ::core::option::Option<f64> {
+                let key = ::suprnova::eloquent::relations::aggregate_cache_key(
+                    #name_str,
+                    ::suprnova::AggregateKind::Sum,
+                    col,
+                );
+                self.__eager.get_aggregate::<f64>(&key).copied()
+            }
+
+            #[doc = "Read the `with_avg((\"...\", col))` aggregate for this \
+                     relation and the given column."]
+            #[doc = ""]
+            #[doc = "Returns `None` if `with_avg` was not called for \
+                     this relation/column pair."]
+            pub fn #avg_of_fn(&self, col: &str) -> ::core::option::Option<f64> {
+                let key = ::suprnova::eloquent::relations::aggregate_cache_key(
+                    #name_str,
+                    ::suprnova::AggregateKind::Avg,
+                    col,
+                );
+                self.__eager.get_aggregate::<f64>(&key).copied()
+            }
+
+            #[doc = "Read the `with_min((\"...\", col))` aggregate for this \
+                     relation and the given column."]
+            #[doc = ""]
+            #[doc = "Outer `Option` is \"did `with_min` populate this cell?\" \
+                     — `None` means the call was not made. Inner `Option` is \
+                     \"is the result NULL?\" — `Some(None)` means `with_min` \
+                     was called but the group was empty (SQL's NULL-on-empty). \
+                     `Some(Some(value))` is the populated, non-empty case."]
+            pub fn #min_of_fn(
+                &self,
+                col: &str,
+            ) -> ::core::option::Option<::core::option::Option<f64>> {
+                let key = ::suprnova::eloquent::relations::aggregate_cache_key(
+                    #name_str,
+                    ::suprnova::AggregateKind::Min,
+                    col,
+                );
+                self.__eager
+                    .get_aggregate::<::core::option::Option<f64>>(&key)
+                    .copied()
+            }
+
+            #[doc = "Read the `with_max((\"...\", col))` aggregate for this \
+                     relation and the given column. See `<rel>_min_of` for \
+                     the double-`Option` shape rationale."]
+            pub fn #max_of_fn(
+                &self,
+                col: &str,
+            ) -> ::core::option::Option<::core::option::Option<f64>> {
+                let key = ::suprnova::eloquent::relations::aggregate_cache_key(
+                    #name_str,
+                    ::suprnova::AggregateKind::Max,
+                    col,
+                );
+                self.__eager
+                    .get_aggregate::<::core::option::Option<f64>>(&key)
+                    .copied()
             }
         }
     }
@@ -3747,22 +3830,24 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         // — just record the column value.
                         by_fk.insert(key, col_val);
                     }
-                    // T3-T7 aggregate arms must apply the same
-                    // Sum|Avg vs Min|Max branch — see the T2
-                    // quality-fix commit. Sum/Avg over an empty
-                    // group stores 0.0 (consistent with the
-                    // framework's COALESCE behaviour). Min/Max over
-                    // an empty group stores Option::<f64>::None
-                    // (matches SQL's NULL-on-empty semantics + the
-                    // existing Builder::min/max Option<T> return
-                    // type). Non-empty groups always store
-                    // Some(value) for Min/Max.
+                    // Sum/Avg over an empty group stores 0.0
+                    // (consistent with the framework's COALESCE
+                    // behaviour). Min/Max over an empty group stores
+                    // Option::<f64>::None (matches SQL's NULL-on-empty
+                    // semantics + the existing Builder::min/max
+                    // Option<T> return type). Non-empty groups always
+                    // store Some(value) for Min/Max.
                     //
-                    // Cache key is the relation name only; T9 widens
-                    // to <rel>_<kind>_<col> when the user-facing
-                    // Builder::with_<agg> surface ships so a single
-                    // builder can carry multiple aggregates on the
-                    // same relation without colliding on this cell.
+                    // Cache key is the wide `<rel>_<kind>_<col>` form
+                    // (P1 fix). Multiple aggregates on the same
+                    // relation coexist on the same row without
+                    // overwriting; the per-relation
+                    // `<rel>_sum_of(col)` / `_avg_of` / `_min_of` /
+                    // `_max_of` accessors read using the same helper.
+                    let __sn_agg_key: ::std::string::String =
+                        ::suprnova::eloquent::relations::aggregate_cache_key(
+                            #name_str, kind, column,
+                        );
                     for p in parents.iter_mut() {
                         let key = ::suprnova::serde_json::to_value(&p.#pk_ident)
                             .map(|v| v.to_string())
@@ -3772,14 +3857,14 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             ::suprnova::AggregateKind::Sum
                             | ::suprnova::AggregateKind::Avg => {
                                 p.__eager.set_aggregate::<f64>(
-                                    #name_str,
+                                    &__sn_agg_key,
                                     opt_v.unwrap_or(0.0),
                                 );
                             }
                             ::suprnova::AggregateKind::Min
                             | ::suprnova::AggregateKind::Max => {
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
-                                    #name_str,
+                                    &__sn_agg_key,
                                     opt_v,
                                 );
                             }
@@ -3846,22 +3931,19 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             .unwrap_or(0.0);
                         by_pk.insert(key, col_val);
                     }
-                    // T3-T7 aggregate arms must apply the same
-                    // Sum|Avg vs Min|Max branch — see the T2
-                    // quality-fix commit. Sum/Avg over an empty
-                    // group stores 0.0 (consistent with the
-                    // framework's COALESCE behaviour). Min/Max over
-                    // an empty group stores Option::<f64>::None
-                    // (matches SQL's NULL-on-empty semantics + the
-                    // existing Builder::min/max Option<T> return
-                    // type). Non-empty groups always store
+                    // Sum/Avg over an empty group stores 0.0
+                    // (framework COALESCE behaviour). Min/Max over an
+                    // empty group stores Option::<f64>::None (SQL's
+                    // NULL-on-empty + Builder::min/max Option<T>
+                    // return type). Non-empty groups always store
                     // Some(value) for Min/Max.
                     //
-                    // Cache key is the relation name only; T9 widens
-                    // to <rel>_<kind>_<col> when the user-facing
-                    // Builder::with_<agg> surface ships so a single
-                    // builder can carry multiple aggregates on the
-                    // same relation without colliding on this cell.
+                    // Cache key is the wide `<rel>_<kind>_<col>` form
+                    // (P1 fix) — see the HasOne arm above.
+                    let __sn_agg_key: ::std::string::String =
+                        ::suprnova::eloquent::relations::aggregate_cache_key(
+                            #name_str, kind, column,
+                        );
                     for p in parents.iter_mut() {
                         let v: ::core::option::Option<::suprnova::serde_json::Value> =
                             #per_parent_key_expr;
@@ -3875,14 +3957,14 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             ::suprnova::AggregateKind::Sum
                             | ::suprnova::AggregateKind::Avg => {
                                 p.__eager.set_aggregate::<f64>(
-                                    #name_str,
+                                    &__sn_agg_key,
                                     opt_v.unwrap_or(0.0),
                                 );
                             }
                             ::suprnova::AggregateKind::Min
                             | ::suprnova::AggregateKind::Max => {
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
-                                    #name_str,
+                                    &__sn_agg_key,
                                     opt_v,
                                 );
                             }
@@ -3918,11 +4000,10 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
             // our user-facing default is 0.0; the None vs Some(v)
             // branch below normalises that.
             //
-            // Cache key is the relation name only — same caveat as
-            // T2's HasOne arm. T9 will widen to
-            // <rel>_<kind>_<col> when the `with_<agg>` Builder surface
-            // ships so multiple aggregates on the same relation can
-            // coexist on a single row without clobbering each other.
+            // Cache key is the wide `<rel>_<kind>_<col>` form built
+            // by `aggregate_cache_key()`. Multiple aggregates on the
+            // same relation (e.g. `with_sum` then `with_avg`) coexist
+            // without clobbering each other.
             Ok(Some(quote! {
                 #name_str => {
                     if parents.is_empty() { return ::core::result::Result::Ok(()); }
@@ -4064,6 +4145,10 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         by_fk.insert(key, agg);
                     }
 
+                    let __sn_agg_key: ::std::string::String =
+                        ::suprnova::eloquent::relations::aggregate_cache_key(
+                            #name_str, kind, column,
+                        );
                     for p in parents.iter_mut() {
                         let key = __sn_parent_key_to_match_cast(
                             ::suprnova::serde_json::to_value(&p.#pk_ident)
@@ -4080,14 +4165,14 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             ::suprnova::AggregateKind::Sum
                             | ::suprnova::AggregateKind::Avg => {
                                 p.__eager.set_aggregate::<f64>(
-                                    #name_str,
+                                    &__sn_agg_key,
                                     agg.unwrap_or(0.0),
                                 );
                             }
                             ::suprnova::AggregateKind::Min
                             | ::suprnova::AggregateKind::Max => {
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
-                                    #name_str,
+                                    &__sn_agg_key,
                                     agg,
                                 );
                             }
@@ -4256,6 +4341,13 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         by_fk.insert(key, agg);
                     }
 
+                    // Cache key is the wide `<rel>_<kind>_<col>` form
+                    // (P1 fix) so `with_sum` + `with_avg` over the
+                    // same pivot relation coexist on the same row.
+                    let __sn_agg_key: ::std::string::String =
+                        ::suprnova::eloquent::relations::aggregate_cache_key(
+                            #name_str, kind, column,
+                        );
                     for p in parents.iter_mut() {
                         let key = __sn_parent_key_to_match_cast(
                             ::suprnova::serde_json::to_value(&p.#pk_ident)
@@ -4269,14 +4361,14 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             ::suprnova::AggregateKind::Sum
                             | ::suprnova::AggregateKind::Avg => {
                                 p.__eager.set_aggregate::<f64>(
-                                    #name_str,
+                                    &__sn_agg_key,
                                     agg.unwrap_or(0.0),
                                 );
                             }
                             ::suprnova::AggregateKind::Min
                             | ::suprnova::AggregateKind::Max => {
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
-                                    #name_str,
+                                    &__sn_agg_key,
                                     agg,
                                 );
                             }
@@ -4444,6 +4536,13 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         by_fk.insert(key, agg);
                     }
 
+                    // Cache key is the wide `<rel>_<kind>_<col>` form
+                    // (P1 fix) so `with_sum` + `with_avg` etc. coexist
+                    // on the same row without overwriting.
+                    let __sn_agg_key: ::std::string::String =
+                        ::suprnova::eloquent::relations::aggregate_cache_key(
+                            #name_str, kind, column,
+                        );
                     for p in parents.iter_mut() {
                         let key = __sn_parent_key_to_match_cast(
                             ::suprnova::serde_json::to_value(&p.#pk_ident)
@@ -4457,14 +4556,14 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             ::suprnova::AggregateKind::Sum
                             | ::suprnova::AggregateKind::Avg => {
                                 p.__eager.set_aggregate::<f64>(
-                                    #name_str,
+                                    &__sn_agg_key,
                                     agg.unwrap_or(0.0),
                                 );
                             }
                             ::suprnova::AggregateKind::Min
                             | ::suprnova::AggregateKind::Max => {
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
-                                    #name_str,
+                                    &__sn_agg_key,
                                     agg,
                                 );
                             }
@@ -4617,6 +4716,13 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         by_fk.insert(key, agg);
                     }
 
+                    // Cache key is the wide `<rel>_<kind>_<col>` form
+                    // (P1 fix) so `with_sum` + `with_avg` etc. coexist
+                    // on the same row without overwriting.
+                    let __sn_agg_key: ::std::string::String =
+                        ::suprnova::eloquent::relations::aggregate_cache_key(
+                            #name_str, kind, column,
+                        );
                     for p in parents.iter_mut() {
                         let key = __sn_parent_key_to_match_cast(
                             ::suprnova::serde_json::to_value(&p.#pk_ident)
@@ -4630,14 +4736,14 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             ::suprnova::AggregateKind::Sum
                             | ::suprnova::AggregateKind::Avg => {
                                 p.__eager.set_aggregate::<f64>(
-                                    #name_str,
+                                    &__sn_agg_key,
                                     agg.unwrap_or(0.0),
                                 );
                             }
                             ::suprnova::AggregateKind::Min
                             | ::suprnova::AggregateKind::Max => {
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
-                                    #name_str,
+                                    &__sn_agg_key,
                                     agg,
                                 );
                             }
@@ -4813,6 +4919,13 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         by_fk.insert(key, agg);
                     }
 
+                    // Cache key is the wide `<rel>_<kind>_<col>` form
+                    // (P1 fix) so `with_sum` + `with_avg` etc. coexist
+                    // on the same row without overwriting.
+                    let __sn_agg_key: ::std::string::String =
+                        ::suprnova::eloquent::relations::aggregate_cache_key(
+                            #name_str, kind, column,
+                        );
                     for p in parents.iter_mut() {
                         let key = __sn_parent_key_to_match_cast(
                             ::suprnova::serde_json::to_value(&p.#pk_ident)
@@ -4826,14 +4939,14 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             ::suprnova::AggregateKind::Sum
                             | ::suprnova::AggregateKind::Avg => {
                                 p.__eager.set_aggregate::<f64>(
-                                    #name_str,
+                                    &__sn_agg_key,
                                     agg.unwrap_or(0.0),
                                 );
                             }
                             ::suprnova::AggregateKind::Min
                             | ::suprnova::AggregateKind::Max => {
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
-                                    #name_str,
+                                    &__sn_agg_key,
                                     agg,
                                 );
                             }
@@ -5011,6 +5124,13 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         by_fk.insert(key, agg);
                     }
 
+                    // Cache key is the wide `<rel>_<kind>_<col>` form
+                    // (P1 fix) so `with_sum` + `with_avg` etc. coexist
+                    // on the same row without overwriting.
+                    let __sn_agg_key: ::std::string::String =
+                        ::suprnova::eloquent::relations::aggregate_cache_key(
+                            #name_str, kind, column,
+                        );
                     for p in parents.iter_mut() {
                         let key = __sn_parent_key_to_match_cast(
                             ::suprnova::serde_json::to_value(&p.#pk_ident)
@@ -5024,14 +5144,14 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             ::suprnova::AggregateKind::Sum
                             | ::suprnova::AggregateKind::Avg => {
                                 p.__eager.set_aggregate::<f64>(
-                                    #name_str,
+                                    &__sn_agg_key,
                                     agg.unwrap_or(0.0),
                                 );
                             }
                             ::suprnova::AggregateKind::Min
                             | ::suprnova::AggregateKind::Max => {
                                 p.__eager.set_aggregate::<::core::option::Option<f64>>(
-                                    #name_str,
+                                    &__sn_agg_key,
                                     agg,
                                 );
                             }

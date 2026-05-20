@@ -493,7 +493,7 @@ async fn with_count_posts_returns_server_side_count() {
 // `with_max`). Framework tests already cover the four kinds and the
 // Sum/Avg-vs-Min/Max storage-type split; here we just prove the static
 // `User::with_sum` / `User::with_min` entry points work against the live
-// app schema and that `__eager.get_aggregate::<T>(rel)` reads back the
+// app schema and that `__eager.get_aggregate::<T>("<rel>_<kind>_<col>")` reads back the
 // right type per kind (`f64` for Sum, `Option<f64>` for Min).
 
 #[tokio::test]
@@ -524,8 +524,8 @@ async fn with_sum_posts_id_returns_sum_of_ids() {
         .expect("user must surface");
     let sum: &f64 = loaded
         .__eager
-        .get_aggregate::<f64>("posts")
-        .expect("sum cache populated under the relation name");
+        .get_aggregate::<f64>("posts_sum_id")
+        .expect("sum cache populated under <rel>_<kind>_<col>");
     let expected = (p1.id + p2.id) as f64;
     assert!(
         (sum - expected).abs() < 0.001,
@@ -563,8 +563,8 @@ async fn with_min_posts_id_returns_smallest() {
     // is non-empty so the smallest of {p1.id, p2.id} must round-trip.
     let min: &Option<f64> = loaded
         .__eager
-        .get_aggregate::<Option<f64>>("posts")
-        .expect("min cache populated under the relation name");
+        .get_aggregate::<Option<f64>>("posts_min_id")
+        .expect("min cache populated under <rel>_<kind>_<col>");
     assert_eq!(*min, Some(p1.id as f64), "min(posts.id) == p1.id");
 }
 
