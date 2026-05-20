@@ -247,6 +247,7 @@ pub fn find_relation<T: 'static>(name: &str) -> Option<&'static RelationEntry> {
 ///         _r: &'a str,
 ///         _rs: &'a str,
 ///         _d: &'a DatabaseConnection,
+///         _missing_only: bool,
 ///     ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>> {
 ///         unimplemented!()
 ///     }
@@ -307,11 +308,23 @@ pub trait EagerLoadDispatch: __sealed::Sealed + Sized {
 
     /// Delegate to `__recurse_eager_load`. Used by T9's nested-path
     /// resolver; T2 doesn't call this from `Builder::get`.
+    ///
+    /// `missing_only` switches per-relation arm behaviour: when
+    /// `false` (the default, used by [`Builder::with`]) the arm
+    /// unconditionally bulk-loads the next segment on the cached
+    /// children. When `true` (used by
+    /// [`Collection::load_missing`][crate::eloquent::Collection::load_missing])
+    /// the arm first checks whether any cached child already has the
+    /// next segment loaded, and skips the bulk-load if so. The flag
+    /// propagates through the tail recursion so a dotted path like
+    /// `"posts.comments.author"` keeps the "skip already cached" rule
+    /// at every level.
     fn recurse_eager_load<'a>(
         &'a mut self,
         relation: &'a str,
         rest: &'a str,
         db: &'a DatabaseConnection,
+        missing_only: bool,
     ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>>;
 
     /// Stamp the per-row `__pivot` field with a type-erased pivot row.

@@ -131,6 +131,7 @@ fn emit_dispatch_impl(struct_ident: &syn::Ident) -> TokenStream {
                 relation: &'a str,
                 rest: &'a str,
                 db: &'a ::suprnova::sea_orm::DatabaseConnection,
+                missing_only: bool,
             ) -> ::core::pin::Pin<
                 ::std::boxed::Box<
                     dyn ::core::future::Future<
@@ -138,7 +139,7 @@ fn emit_dispatch_impl(struct_ident: &syn::Ident) -> TokenStream {
                         > + ::core::marker::Send + 'a,
                 >,
             > {
-                ::std::boxed::Box::pin(self.__recurse_eager_load(relation, rest, db))
+                ::std::boxed::Box::pin(self.__recurse_eager_load(relation, rest, db, missing_only))
             }
 
             fn set_pivot_arc(
@@ -234,14 +235,21 @@ fn emit_dispatchers(input: &ModelInput) -> Result<TokenStream> {
             /// (`with(["posts.comments"])`). T1 emits the skeleton;
             /// T2-T7 add arms; T9's orchestrator calls this after
             /// `__eager_load` for the head segment of a dotted path.
+            ///
+            /// `missing_only`: when `true`, per-relation arms skip the
+            /// bulk eager-load step for the next path segment if any
+            /// cached child already has it. Used by
+            /// `Collection::load_missing` to fill only the missing
+            /// tail of a dotted path whose head is already cached.
             #[doc(hidden)]
             pub async fn __recurse_eager_load(
                 &mut self,
                 relation: &str,
                 rest: &str,
                 db: &::suprnova::sea_orm::DatabaseConnection,
+                missing_only: bool,
             ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
-                let _ = (rest, db);
+                let _ = (rest, db, missing_only);
                 match relation {
                     #(#recurse_arms)*
                     other => ::core::result::Result::Err(
@@ -2715,7 +2723,28 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 }
             }))
         }
-        _ => Ok(None),
+        // MorphTo: flat eager loading through the orchestrator isn't
+        // supported in v1 — the per-family enum surface erases the
+        // concrete child types, so `with(["commentable"])` has nowhere
+        // to store the polymorphic children. The user-facing fetch
+        // path is the per-relation helper (`comment.<rel>().get()`)
+        // which returns the per-family enum directly. Emitting an
+        // explicit arm here surfaces a clear "use the per-family
+        // helper" error instead of the misleading "no such relation"
+        // the dispatcher catch-all would otherwise return.
+        RelationKindAttr::MorphTo => Ok(Some(quote! {
+            #name_str => {
+                return ::core::result::Result::Err(
+                    ::suprnova::FrameworkError::internal(::std::format!(
+                        "flat eager loading on MorphTo relation `{}` is not supported in v1; \
+                         use the per-family fetch helper (`{}.<rel>().get().await?`) which \
+                         returns a per-family enum instead",
+                        #name_str,
+                        #parent_name,
+                    )),
+                );
+            }
+        })),
     }
 }
 
@@ -3641,7 +3670,24 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 }
             }))
         }
-        _ => Ok(None),
+        // MorphTo: same story as `emit_eager_arm` — the per-family
+        // enum surface erases the concrete child types, so a single
+        // `with_count(["commentable"])` has no canonical SQL shape.
+        // Emit an explicit error rather than falling through to the
+        // dispatcher catch-all ("no relation X").
+        RelationKindAttr::MorphTo => Ok(Some(quote! {
+            #name_str => {
+                return ::core::result::Result::Err(
+                    ::suprnova::FrameworkError::internal(::std::format!(
+                        "flat eager loading on MorphTo relation `{}` is not supported in v1; \
+                         use the per-family fetch helper (`{}.<rel>().get().await?`) which \
+                         returns a per-family enum instead",
+                        #name_str,
+                        #parent_name,
+                    )),
+                );
+            }
+        })),
     }
 }
 
@@ -4995,7 +5041,24 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                 }
             }))
         }
-        _ => Ok(None),
+        // MorphTo: same story as `emit_eager_arm` / `emit_count_arm` —
+        // the per-family enum surface erases the concrete child types,
+        // so there's no single SQL shape for a polymorphic aggregate.
+        // Emit an explicit error rather than falling through to the
+        // dispatcher catch-all.
+        RelationKindAttr::MorphTo => Ok(Some(quote! {
+            #name_str => {
+                return ::core::result::Result::Err(
+                    ::suprnova::FrameworkError::internal(::std::format!(
+                        "flat eager loading on MorphTo relation `{}` is not supported in v1; \
+                         use the per-family fetch helper (`{}.<rel>().get().await?`) which \
+                         returns a per-family enum instead",
+                        #name_str,
+                        #parent_name,
+                    )),
+                );
+            }
+        })),
     }
 }
 
@@ -5061,7 +5124,16 @@ fn emit_recurse_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Tok
                         ::core::option::Option::Some((h, t)) => (h, ::core::option::Option::Some(t)),
                         ::core::option::Option::None => (rest, ::core::option::Option::None),
                     };
-                    {
+                    // `missing_only` skips the bulk-load if any cached
+                    // child already has the next segment populated.
+                    // This is how `Collection::load_missing` fills only
+                    // the missing tail of a dotted path whose head is
+                    // already cached.
+                    let already_loaded: bool = missing_only
+                        && children_vec.iter().any(|c| {
+                            <#target_ty as ::suprnova::EagerLoadDispatch>::has_eager(c, head)
+                        });
+                    if !already_loaded {
                         // Build `&mut [&mut R]` for the child dispatcher
                         // call. Scope this borrow so it ends before the
                         // recursive walk below — the borrow checker
@@ -5080,7 +5152,7 @@ fn emit_recurse_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Tok
                     if let ::core::option::Option::Some(more) = tail {
                         for c in children_vec.iter_mut() {
                             <#target_ty as ::suprnova::EagerLoadDispatch>::recurse_eager_load(
-                                c, head, more, db,
+                                c, head, more, db, missing_only,
                             )
                             .await?;
                         }
@@ -5105,7 +5177,14 @@ fn emit_recurse_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Tok
                         ::core::option::Option::Some((h, t)) => (h, ::core::option::Option::Some(t)),
                         ::core::option::Option::None => (rest, ::core::option::Option::None),
                     };
-                    {
+                    // `missing_only` skips the bulk-load if the
+                    // single cached child already has the next
+                    // segment populated. Same contract as the
+                    // collection-kind arm: load_missing only fills
+                    // the missing tail.
+                    let already_loaded: bool = missing_only
+                        && <#target_ty as ::suprnova::EagerLoadDispatch>::has_eager(child_row, head);
+                    if !already_loaded {
                         let mut refs: ::std::vec::Vec<&mut #target_ty> =
                             ::std::vec![child_row];
                         <#target_ty as ::suprnova::EagerLoadDispatch>::eager_load(
@@ -5125,7 +5204,7 @@ fn emit_recurse_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Tok
                             self.__eager.get_one_mut::<#target_ty>(#name_str);
                         if let ::core::option::Option::Some(c) = again {
                             <#target_ty as ::suprnova::EagerLoadDispatch>::recurse_eager_load(
-                                c, head, more, db,
+                                c, head, more, db, missing_only,
                             )
                             .await?;
                         }

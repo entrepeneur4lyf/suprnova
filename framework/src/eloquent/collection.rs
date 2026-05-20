@@ -26,6 +26,7 @@ use std::ops::Deref;
 use serde::{Deserialize, Serialize};
 
 use crate::eloquent::builder::EagerSpec;
+use crate::eloquent::relations::eager::load_missing_path;
 use crate::eloquent::relations::EagerLoadDispatch;
 use crate::error::FrameworkError;
 
@@ -137,63 +138,34 @@ where
     /// some users with `with(["posts"])` already and want to be sure
     /// without re-running the query.
     ///
+    /// Dotted paths are recursive: if the head segment is cached on
+    /// at least one row but the tail isn't (e.g. you previously
+    /// called `with(["posts"])` and now want `load_missing(["posts.comments"])`),
+    /// the orchestrator walks into each parent's cached children and
+    /// loads only the missing tail. Conversely, if the entire path is
+    /// already loaded on at least one row, the call is a no-op.
+    ///
     /// Laravel's per-row semantics ("only load on the rows where the
-    /// relation isn't there yet") aren't replicated in v1 — v1 skips
-    /// the whole relation if ANY row already has it cached. This is
-    /// fine for the common pattern (you want every row to have it,
-    /// don't pay twice if you already paid) and saves a per-row
-    /// branch.
+    /// relation isn't there yet") aren't replicated in v1 — at each
+    /// segment, v1 skips the whole relation if ANY row already has it
+    /// cached. This is fine for the common pattern (you want every
+    /// row to have it, don't pay twice if you already paid) and
+    /// saves a per-row branch.
     pub async fn load_missing<I, S>(&mut self, relations: I) -> Result<(), FrameworkError>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let mut specs: Vec<EagerSpec> = Vec::new();
-        for rel in relations {
-            let name = rel.into();
-            // For nested paths, check the head segment only — that's
-            // the cache cell `load(...)` populates at this level.
-            let head = name.split_once('.').map(|(h, _)| h).unwrap_or(name.as_str());
-            // Use `__eager.has(head)` via a free-standing helper on
-            // each model. Models all share the same `__eager` field
-            // shape so we walk every row and ask. If ANY row has the
-            // cell populated, skip — Laravel's per-row mode is v2.
-            let any_loaded = self.0.iter().any(|m| eager_has(m, head));
-            if any_loaded {
-                continue;
-            }
-            specs.push(EagerSpec::With(name));
-        }
-        if specs.is_empty() || self.0.is_empty() {
+        let paths: Vec<String> = relations.into_iter().map(|s| s.into()).collect();
+        if paths.is_empty() || self.0.is_empty() {
             return Ok(());
         }
         let db = crate::database::DB::connection()?;
-        crate::eloquent::relations::eager::apply_eager_specs::<M>(&mut self.0, specs, db.inner())
-            .await
+        for path in paths {
+            load_missing_path::<M>(&mut self.0, &path, db.inner()).await?;
+        }
+        Ok(())
     }
-}
-
-/// Probe a model's `__eager` cache for a given relation name without
-/// going through the macro-emitted accessors (which panic on missing
-/// relations). The macro auto-injects an `__eager: EagerLoadCache`
-/// field on every model; this function reads that field via a
-/// type-erased serialize path that avoids requiring `M: Model`.
-///
-/// Implementation: we serialize the model to JSON. The `__eager` cell
-/// itself is skipped during serialization (the macro emits
-/// `#[serde(skip)]` on `__eager`), so we can't ask it that way.
-/// Instead we route through a hidden helper trait
-/// [`crate::data::IsRelationLoaded`] that the macro implements per
-/// model — but that's per-relation. The cheapest route is a
-/// per-collection method bound to `EagerLoadDispatch`; since the
-/// trait is sealed and the macro emits the impl, we add a
-/// `has_eager(&self, name)` method via a new trait method.
-///
-/// For v1 we route through a dedicated trait method
-/// [`EagerLoadDispatch::has_eager`] which the macro emits as a
-/// one-liner against `self.__eager.has(name)`.
-fn eager_has<M: EagerLoadDispatch>(m: &M, name: &str) -> bool {
-    M::has_eager(m, name)
 }
 
 #[cfg(test)]

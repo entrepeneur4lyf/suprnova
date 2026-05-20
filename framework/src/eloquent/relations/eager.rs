@@ -91,6 +91,64 @@ where
     Ok(())
 }
 
+/// Drive a single `load_missing` path. The contract mirrors Laravel's
+/// `$collection->loadMissing(...)`: only fill the relations that
+/// aren't already cached.
+///
+/// Path semantics:
+///
+/// - Flat name (`"posts"`): if ANY row has it cached, return silently.
+///   Otherwise call into `load_path` (the regular eager loader).
+/// - Dotted (`"posts.comments"`): if NO row has the head cached, the
+///   full path is loaded (`load_path`). If the head IS cached on any
+///   row, the head bulk-load is skipped and we recurse into each
+///   parent's cached children, passing `missing_only = true` so the
+///   tail segments themselves are skipped if already loaded.
+///
+/// This is the only path that needs the `missing_only` flag — flat
+/// `with(...)` always unconditionally bulk-loads each segment.
+pub(crate) async fn load_missing_path<M>(
+    parents: &mut [M],
+    path: &str,
+    db: &DatabaseConnection,
+) -> Result<(), FrameworkError>
+where
+    M: EagerLoadDispatch + Send + Sync,
+{
+    let (head, tail) = match path.split_once('.') {
+        Some((h, t)) => (h, Some(t)),
+        None => (path, None),
+    };
+
+    let head_cached = parents.iter().any(|p| p.has_eager(head));
+
+    match tail {
+        None => {
+            // Flat path. Skip-if-any-row-has-it.
+            if head_cached {
+                return Ok(());
+            }
+            let mut refs: Vec<&mut M> = parents.iter_mut().collect();
+            M::eager_load(head, refs.as_mut_slice(), db, None).await
+        }
+        Some(rest) => {
+            if !head_cached {
+                // Nothing cached at the head level — load the full
+                // path normally (no per-segment skipping needed
+                // because nothing is there to skip).
+                return load_path(parents, path, db).await;
+            }
+            // Head cached: recurse into each parent's children with
+            // `missing_only = true` so the bulk load for each tail
+            // segment is skipped if already cached.
+            for p in parents.iter_mut() {
+                p.recurse_eager_load(head, rest, db, true).await?;
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Drive `__eager_load` for a single relation. Dotted paths
 /// (`"posts.comments"`) load the head segment, then recurse into each
 /// parent's loaded children via `__recurse_eager_load`.
@@ -118,12 +176,15 @@ where
 
     if let Some(rest) = tail {
         // Recurse into each parent's loaded children. The macro-
-        // emitted `__recurse_eager_load(head, rest, db)` looks up the
-        // cached child rows on `self.__eager`, gets a `&mut [Child]`,
-        // and recursively calls `Child::__eager_load(rest_head, ...)`
-        // — peeling one segment per step.
+        // emitted `__recurse_eager_load(head, rest, db, missing_only)`
+        // looks up the cached child rows on `self.__eager`, gets a
+        // `&mut [Child]`, and recursively calls
+        // `Child::__eager_load(rest_head, ...)` — peeling one segment
+        // per step. The `false` here means "always bulk-load each
+        // segment"; the `load_missing` orchestrator passes `true` to
+        // skip already-cached segments.
         for p in parents.iter_mut() {
-            p.recurse_eager_load(head, rest, db).await?;
+            p.recurse_eager_load(head, rest, db, false).await?;
         }
     }
     Ok(())

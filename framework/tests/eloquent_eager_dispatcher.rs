@@ -106,7 +106,7 @@ async fn unknown_recurse_relation_returns_error() {
         __pivot: None,
     };
     let err = u
-        .__recurse_eager_load("nope", "more.path", db.conn())
+        .__recurse_eager_load("nope", "more.path", db.conn(), false)
         .await
         .expect_err("should fail for unknown relation");
     assert!(

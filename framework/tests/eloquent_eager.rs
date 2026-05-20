@@ -321,6 +321,58 @@ async fn load_loads_when_no_row_has_it() {
 }
 
 #[tokio::test]
+async fn load_missing_recurses_into_loaded_head_to_fill_tail() {
+    // After `with(["posts"])`, calling `load_missing(["posts.comments"])`
+    // must skip the (cached) head bulk-load but still drive the tail
+    // load on each cached post — the previous flat-skip behaviour
+    // silently dropped the comments load and left `comments_loaded()`
+    // panic-on-read.
+    let _db = fixture().await;
+    let users_vec = EgUser::with(["posts"]).get().await.unwrap();
+    let mut users: Collection<EgUser> = Collection::from(users_vec);
+
+    // Posts are loaded but comments aren't — calling
+    // `comments_loaded()` on any loaded post must panic.
+    {
+        let u1 = users.iter().find(|u| u.name == "u1").unwrap();
+        let p = u1.posts_loaded().first().expect("posts loaded");
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            p.comments_loaded()
+        }));
+        assert!(res.is_err(), "comments should not be loaded yet");
+    }
+
+    users.load_missing(["posts.comments"]).await.unwrap();
+
+    let u1 = users.iter().find(|u| u.name == "u1").unwrap();
+    let total: usize = u1
+        .posts_loaded()
+        .iter()
+        .map(|p| p.comments_loaded().len())
+        .sum();
+    // u1 has p1 (2 comments) + p2 (1 comment) = 3.
+    assert_eq!(total, 3, "tail loaded via recursion into cached head");
+}
+
+#[tokio::test]
+async fn load_missing_dotted_no_head_loads_full_path() {
+    // Counterpart to the recursion test: when nothing is cached yet,
+    // `load_missing(["posts.comments"])` falls through to the regular
+    // full-path eager loader.
+    let _db = fixture().await;
+    let users_vec = EgUser::all().await.unwrap();
+    let mut users: Collection<EgUser> = Collection::from(users_vec);
+    users.load_missing(["posts.comments"]).await.unwrap();
+    let u1 = users.iter().find(|u| u.name == "u1").unwrap();
+    let total: usize = u1
+        .posts_loaded()
+        .iter()
+        .map(|p| p.comments_loaded().len())
+        .sum();
+    assert_eq!(total, 3);
+}
+
+#[tokio::test]
 async fn with_where_on_belongs_to_filters_loaded_parent() {
     // The closure runs against `Builder<EgUser>` because `user` is a
     // BelongsTo<EgUser> on EgPost. Predicate matches `name = "u1"` —
