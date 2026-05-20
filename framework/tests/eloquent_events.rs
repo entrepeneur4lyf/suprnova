@@ -521,3 +521,346 @@ async fn first_dispatches_retrieved_only_when_a_row_was_hydrated() {
     assert!(one.is_some());
     assert_eq!(FIRST_RETRIEVED.load(Ordering::SeqCst), 1);
 }
+
+// ---- Step 5: soft-delete Trashed + Restoring/Restored --------------------
+
+#[suprnova::model(table = "t1_trashed_articles", soft_deletes)]
+pub struct T1TrashedArticle {
+    pub id: i64,
+    pub title: String,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+static TRASHED_FIRED: AtomicUsize = AtomicUsize::new(0);
+static DELETED_SOFT_FIRED: AtomicUsize = AtomicUsize::new(0);
+static DELETED_SOFT_IS_FORCE_FALSE: AtomicUsize = AtomicUsize::new(0);
+
+pub struct CountTrashedT1;
+pub struct CountDeletedSoftT1;
+
+#[async_trait]
+impl Listener<t1_trashed_article::events::Trashed> for CountTrashedT1 {
+    async fn handle(
+        &self,
+        _event: &t1_trashed_article::events::Trashed,
+    ) -> Result<(), FrameworkError> {
+        TRASHED_FIRED.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Listener<t1_trashed_article::events::Deleted> for CountDeletedSoftT1 {
+    async fn handle(
+        &self,
+        event: &t1_trashed_article::events::Deleted,
+    ) -> Result<(), FrameworkError> {
+        DELETED_SOFT_FIRED.fetch_add(1, Ordering::SeqCst);
+        if !event.is_force {
+            DELETED_SOFT_IS_FORCE_FALSE.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn soft_delete_fires_trashed_and_deleted_with_is_force_false() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t1_trashed_articles (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, deleted_at TEXT)",
+    )
+    .await
+    .unwrap();
+
+    EventFacade::listen::<t1_trashed_article::events::Trashed, _>(std::sync::Arc::new(
+        CountTrashedT1,
+    ))
+    .await;
+    EventFacade::listen::<t1_trashed_article::events::Deleted, _>(std::sync::Arc::new(
+        CountDeletedSoftT1,
+    ))
+    .await;
+
+    let a = T1TrashedArticle::create(attrs! { title: "hello" })
+        .await
+        .unwrap();
+
+    TRASHED_FIRED.store(0, Ordering::SeqCst);
+    DELETED_SOFT_FIRED.store(0, Ordering::SeqCst);
+    DELETED_SOFT_IS_FORCE_FALSE.store(0, Ordering::SeqCst);
+
+    a.delete().await.unwrap();
+
+    assert_eq!(
+        TRASHED_FIRED.load(Ordering::SeqCst),
+        1,
+        "soft delete must fire Trashed exactly once"
+    );
+    assert_eq!(
+        DELETED_SOFT_FIRED.load(Ordering::SeqCst),
+        1,
+        "soft delete must also fire Deleted exactly once"
+    );
+    assert_eq!(
+        DELETED_SOFT_IS_FORCE_FALSE.load(Ordering::SeqCst),
+        1,
+        "soft delete must dispatch Deleted with is_force=false"
+    );
+}
+
+#[suprnova::model(table = "t1_restore_articles", soft_deletes)]
+pub struct T1RestoreArticle {
+    pub id: i64,
+    pub title: String,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+static RESTORING_FIRED: AtomicUsize = AtomicUsize::new(0);
+static RESTORED_FIRED: AtomicUsize = AtomicUsize::new(0);
+
+pub struct CountRestoringT1;
+pub struct CountRestoredT1;
+
+#[async_trait]
+impl CancellableListener<t1_restore_article::events::Restoring> for CountRestoringT1 {
+    async fn handle(&self, _event: &t1_restore_article::events::Restoring) -> EventResult {
+        RESTORING_FIRED.fetch_add(1, Ordering::SeqCst);
+        EventResult::Ok
+    }
+}
+
+#[async_trait]
+impl Listener<t1_restore_article::events::Restored> for CountRestoredT1 {
+    async fn handle(
+        &self,
+        _event: &t1_restore_article::events::Restored,
+    ) -> Result<(), FrameworkError> {
+        RESTORED_FIRED.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn restore_fires_restoring_then_restored() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t1_restore_articles (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, deleted_at TEXT)",
+    )
+    .await
+    .unwrap();
+
+    listen_cancellable::<t1_restore_article::events::Restoring, _>(std::sync::Arc::new(
+        CountRestoringT1,
+    ))
+    .await;
+    EventFacade::listen::<t1_restore_article::events::Restored, _>(std::sync::Arc::new(
+        CountRestoredT1,
+    ))
+    .await;
+
+    let a = T1RestoreArticle::create(attrs! { title: "hi" })
+        .await
+        .unwrap();
+    a.delete().await.unwrap();
+
+    let trashed = T1RestoreArticle::with_trashed()
+        .first()
+        .await
+        .unwrap()
+        .unwrap();
+
+    RESTORING_FIRED.store(0, Ordering::SeqCst);
+    RESTORED_FIRED.store(0, Ordering::SeqCst);
+
+    trashed.restore().await.unwrap();
+    assert_eq!(
+        RESTORING_FIRED.load(Ordering::SeqCst),
+        1,
+        "restore() must fire Restoring before the UPDATE"
+    );
+    assert_eq!(
+        RESTORED_FIRED.load(Ordering::SeqCst),
+        1,
+        "restore() must fire Restored after the UPDATE"
+    );
+}
+
+#[suprnova::model(table = "t1_restore_veto_articles", soft_deletes)]
+pub struct T1RestoreVetoArticle {
+    pub id: i64,
+    pub title: String,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+pub struct VetoRestoreT1;
+
+#[async_trait]
+impl CancellableListener<t1_restore_veto_article::events::Restoring> for VetoRestoreT1 {
+    async fn handle(&self, _event: &t1_restore_veto_article::events::Restoring) -> EventResult {
+        EventResult::cancel("restore vetoed")
+    }
+}
+
+#[tokio::test]
+async fn restoring_cancel_aborts_restore_row_stays_trashed() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t1_restore_veto_articles (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, deleted_at TEXT)",
+    )
+    .await
+    .unwrap();
+
+    listen_cancellable::<t1_restore_veto_article::events::Restoring, _>(std::sync::Arc::new(
+        VetoRestoreT1,
+    ))
+    .await;
+
+    let a = T1RestoreVetoArticle::create(attrs! { title: "stay-trashed" })
+        .await
+        .unwrap();
+    a.delete().await.unwrap();
+    let trashed = T1RestoreVetoArticle::with_trashed()
+        .first()
+        .await
+        .unwrap()
+        .unwrap();
+    let id = trashed.id;
+
+    let err = trashed.restore().await.unwrap_err();
+    assert!(format!("{err}").contains("restore vetoed"));
+
+    // Row should still be trashed.
+    let still_trashed = T1RestoreVetoArticle::with_trashed()
+        .filter("id", id)
+        .first()
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        still_trashed.deleted_at.is_some(),
+        "cancelled restore must leave deleted_at intact"
+    );
+}
+
+#[suprnova::model(table = "t1_force_articles", soft_deletes)]
+pub struct T1ForceArticle {
+    pub id: i64,
+    pub title: String,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+static FORCE_DELETING_FIRED: AtomicUsize = AtomicUsize::new(0);
+static FORCE_DELETED_FIRED: AtomicUsize = AtomicUsize::new(0);
+static FORCE_TRASHED_FIRED: AtomicUsize = AtomicUsize::new(0);
+static FORCE_DELETED_IS_FORCE_TRUE: AtomicUsize = AtomicUsize::new(0);
+
+pub struct CountForceDeletingT1;
+pub struct CountForceDeletedT1;
+pub struct CountForceTrashedT1;
+
+#[async_trait]
+impl Listener<t1_force_article::events::ForceDeleting> for CountForceDeletingT1 {
+    async fn handle(
+        &self,
+        _event: &t1_force_article::events::ForceDeleting,
+    ) -> Result<(), FrameworkError> {
+        FORCE_DELETING_FIRED.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Listener<t1_force_article::events::ForceDeleted> for CountForceDeletedT1 {
+    async fn handle(
+        &self,
+        _event: &t1_force_article::events::ForceDeleted,
+    ) -> Result<(), FrameworkError> {
+        FORCE_DELETED_FIRED.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Listener<t1_force_article::events::Trashed> for CountForceTrashedT1 {
+    async fn handle(
+        &self,
+        _event: &t1_force_article::events::Trashed,
+    ) -> Result<(), FrameworkError> {
+        FORCE_TRASHED_FIRED.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+pub struct WatchDeletedIsForceT1;
+
+#[async_trait]
+impl Listener<t1_force_article::events::Deleted> for WatchDeletedIsForceT1 {
+    async fn handle(
+        &self,
+        event: &t1_force_article::events::Deleted,
+    ) -> Result<(), FrameworkError> {
+        if event.is_force {
+            FORCE_DELETED_IS_FORCE_TRUE.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn force_delete_fires_force_deleted_and_deleted_with_is_force_true_but_not_trashed() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t1_force_articles (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, deleted_at TEXT)",
+    )
+    .await
+    .unwrap();
+
+    EventFacade::listen::<t1_force_article::events::ForceDeleting, _>(std::sync::Arc::new(
+        CountForceDeletingT1,
+    ))
+    .await;
+    EventFacade::listen::<t1_force_article::events::ForceDeleted, _>(std::sync::Arc::new(
+        CountForceDeletedT1,
+    ))
+    .await;
+    EventFacade::listen::<t1_force_article::events::Trashed, _>(std::sync::Arc::new(
+        CountForceTrashedT1,
+    ))
+    .await;
+    EventFacade::listen::<t1_force_article::events::Deleted, _>(std::sync::Arc::new(
+        WatchDeletedIsForceT1,
+    ))
+    .await;
+
+    let a = T1ForceArticle::create(attrs! { title: "go-away" })
+        .await
+        .unwrap();
+
+    FORCE_DELETING_FIRED.store(0, Ordering::SeqCst);
+    FORCE_DELETED_FIRED.store(0, Ordering::SeqCst);
+    FORCE_TRASHED_FIRED.store(0, Ordering::SeqCst);
+    FORCE_DELETED_IS_FORCE_TRUE.store(0, Ordering::SeqCst);
+
+    a.force_delete().await.unwrap();
+
+    assert_eq!(
+        FORCE_DELETING_FIRED.load(Ordering::SeqCst),
+        1,
+        "force_delete must fire ForceDeleting"
+    );
+    assert_eq!(
+        FORCE_DELETED_FIRED.load(Ordering::SeqCst),
+        1,
+        "force_delete must fire ForceDeleted"
+    );
+    assert_eq!(
+        FORCE_DELETED_IS_FORCE_TRUE.load(Ordering::SeqCst),
+        1,
+        "force_delete must also fire Deleted with is_force=true"
+    );
+    assert_eq!(
+        FORCE_TRASHED_FIRED.load(Ordering::SeqCst),
+        0,
+        "force_delete must NOT fire Trashed (the row is gone, not tombstoned)"
+    );
+}

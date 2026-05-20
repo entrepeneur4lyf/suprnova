@@ -459,7 +459,21 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 /// value to override `Model::delete(self)` cleanly —
                 /// a `&self` inherent override would lose to the
                 /// trait default through auto-ref resolution.
+                ///
+                /// ## Lifecycle events (Phase 10C T1)
+                ///
+                /// 1. `Deleting { is_force: false }` — cancellable
+                /// 2. *UPDATE deleted_at lands*
+                /// 3. `Trashed`
+                /// 4. `Deleted { is_force: false }`
+                ///
+                /// Cancellation at step 1 aborts the UPDATE — the row
+                /// stays alive. The `Trashed` event distinguishes
+                /// soft-deletes from hard-deletes for listeners that
+                /// only care about the tombstone case.
                 pub async fn delete(self) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
+                    <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_deleting(&self, false).await?;
+
                     let now = ::suprnova::chrono::Utc::now().to_rfc3339();
                     let table = <Self as ::suprnova::eloquent::EloquentModel>::TABLE;
                     let pk_name = <Self as ::suprnova::eloquent::Model>::primary_key_name();
@@ -486,13 +500,27 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     )
                     .await
                     .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+
+                    <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_trashed(&self).await?;
+                    <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_deleted(&self, false).await?;
                     ::core::result::Result::Ok(())
                 }
 
                 /// Restore from soft delete: `UPDATE table SET
                 /// deleted_at = NULL WHERE pk = ?`. Takes `self` for
                 /// signature parity with the other lifecycle methods.
+                ///
+                /// ## Lifecycle events (Phase 10C T1)
+                ///
+                /// 1. `Restoring` — cancellable
+                /// 2. *UPDATE deleted_at = NULL lands*
+                /// 3. `Restored`
+                ///
+                /// Cancellation at step 1 aborts the UPDATE — the row
+                /// stays trashed with `deleted_at` intact.
                 pub async fn restore(self) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
+                    <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_restoring(&self).await?;
+
                     let table = <Self as ::suprnova::eloquent::EloquentModel>::TABLE;
                     let pk_name = <Self as ::suprnova::eloquent::Model>::primary_key_name();
                     let sql = ::std::format!(
@@ -515,6 +543,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     )
                     .await
                     .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+
+                    <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_restored(&self).await?;
                     ::core::result::Result::Ok(())
                 }
 
@@ -540,10 +570,38 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 }
 
                 /// Hard-delete this row, bypassing the soft-delete
-                /// override. Fully qualifies to `Model::delete(self)`
-                /// (which performs the actual `DELETE FROM ...`).
+                /// override. Runs an actual `DELETE FROM table WHERE
+                /// pk = ?` regardless of whether the row was already
+                /// trashed.
+                ///
+                /// ## Lifecycle events (Phase 10C T1)
+                ///
+                /// 1. `Deleting { is_force: true }` — cancellable
+                /// 2. `ForceDeleting`
+                /// 3. *DELETE FROM lands*
+                /// 4. `ForceDeleted`
+                /// 5. `Deleted { is_force: true }`
+                ///
+                /// `Trashed` is NOT fired — the row is gone, not
+                /// tombstoned. Listeners on `Deleted` can branch on
+                /// `is_force` to disambiguate from the soft-delete
+                /// path.
                 pub async fn force_delete(self) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
-                    <Self as ::suprnova::eloquent::Model>::delete(self).await
+                    <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_deleting(&self, true).await?;
+                    <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_force_deleting(&self).await?;
+
+                    let snapshot = ::core::clone::Clone::clone(&self);
+                    let row: <<Self as ::suprnova::eloquent::EloquentModel>::Entity as ::suprnova::sea_orm::EntityTrait>::Model = self.into();
+                    let am = <_ as ::suprnova::sea_orm::IntoActiveModel<_>>::into_active_model(row);
+                    let db = ::suprnova::DB::connection()?;
+                    <<<Self as ::suprnova::eloquent::EloquentModel>::Entity as ::suprnova::sea_orm::EntityTrait>::ActiveModel
+                        as ::suprnova::sea_orm::ActiveModelTrait>::delete(am, db.inner())
+                        .await
+                        .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+
+                    <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_force_deleted(&snapshot).await?;
+                    <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_deleted(&snapshot, true).await?;
+                    ::core::result::Result::Ok(())
                 }
 
                 /// Look up a row by primary key, honouring the
