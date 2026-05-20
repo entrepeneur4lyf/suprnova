@@ -375,3 +375,80 @@ async fn model_attribute_observers_auto_register() {
         .unwrap();
     assert_eq!(MODEL_ATTR_OBS_FIRES.load(Ordering::SeqCst), 1);
 }
+
+// =========================================================================
+// T2c — `Model::observe()` manual registration shim
+// =========================================================================
+//
+// Every `#[suprnova::model]` struct gets a per-model `observe<O>(...)`
+// shim that registers all 16 lifecycle listener adapters at runtime.
+// This is the analogue of Laravel's `User::observe(MyObserver::class)`
+// for users who can't or don't want the `#[observer(M)]` inventory
+// pathway (e.g. dynamic registration based on config).
+//
+// The shim is independent of the `observers = [...]` attribute — every
+// model has it whether or not it declared any observers. Idempotency
+// is the caller's concern: calling `User::observe(MyObserver)` twice
+// registers two adapter sets, matching Laravel's manual semantics.
+//
+// We use a dedicated `T2ManualUser` model so the manual `observe()`
+// call doesn't interfere with T2b's `T2User`-scoped assertions. Process-
+// global listener registries make cross-test bleed real; per-scenario
+// model types are the established isolation pattern (see T2User /
+// T2Comment / T2Subscription elsewhere in this file).
+
+static MANUAL_OBS_FIRES: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone)]
+pub struct ManualRegisterObs;
+
+#[async_trait]
+impl Observer<T2ManualUser> for ManualRegisterObs {
+    async fn created(&self, _u: &T2ManualUser) -> Result<(), FrameworkError> {
+        MANUAL_OBS_FIRES.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[suprnova::model(table = "t2_manual_users")]
+pub struct T2ManualUser {
+    pub id: i64,
+    pub email: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[tokio::test]
+async fn manual_observe_registration_works_without_attribute_macro() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t2_manual_users (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT,\
+            email TEXT NOT NULL,\
+            created_at TEXT NOT NULL,\
+            updated_at TEXT NOT NULL\
+        )",
+    )
+    .await
+    .unwrap();
+
+    // Manual registration — no `#[suprnova::observer]` on
+    // `ManualRegisterObs`, so this is the ONLY path by which it can
+    // fire. If the shim didn't exist, this line would fail to compile.
+    T2ManualUser::observe(ManualRegisterObs).await;
+
+    // Reset AFTER registration so any earlier `T2ManualUser` work
+    // (none expected, but defensive) doesn't pre-poison the counter.
+    MANUAL_OBS_FIRES.store(0, Ordering::SeqCst);
+
+    let _ = T2ManualUser::create(suprnova::attrs! { email: "manual@example.com" })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        MANUAL_OBS_FIRES.load(Ordering::SeqCst),
+        1,
+        "manual `T2ManualUser::observe(ManualRegisterObs)` should install a \
+         created-listener that fires exactly once per row created"
+    );
+}
