@@ -35,11 +35,13 @@
 //!   `#[suprnova::model]` and are exercised by the integration tests.
 
 pub mod belongs_to;
+pub mod belongs_to_many;
 pub mod eager_cache;
 pub mod has_many;
 pub mod has_one;
 
 pub use belongs_to::BelongsTo;
+pub use belongs_to_many::BelongsToMany;
 pub use eager_cache::EagerLoadCache;
 pub use has_many::HasMany;
 pub use has_one::HasOne;
@@ -239,6 +241,12 @@ pub fn find_relation<T: 'static>(name: &str) -> Option<&'static RelationEntry> {
 ///     ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>> {
 ///         unimplemented!()
 ///     }
+///     fn set_pivot_arc(
+///         &mut self,
+///         _p: Option<std::sync::Arc<dyn Any + Send + Sync>>,
+///     ) {
+///         unimplemented!()
+///     }
 /// }
 /// ```
 ///
@@ -296,6 +304,21 @@ pub trait EagerLoadDispatch: __sealed::Sealed + Sized {
         rest: &'a str,
         db: &'a DatabaseConnection,
     ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>>;
+
+    /// Stamp the per-row `__pivot` field with a type-erased pivot row.
+    /// Used by [`BelongsToMany::get`](super::belongs_to_many::BelongsToMany::get)
+    /// to attach pivot context to each related row at load time, when
+    /// the related type is generic and can't reach `self.__pivot`
+    /// directly through field access.
+    ///
+    /// Implemented automatically by `#[suprnova::model]` as
+    /// `self.__pivot = pivot;`. Not part of the user surface; the
+    /// macro-emitted `pivot::<P>()` accessor is the read path users
+    /// call.
+    fn set_pivot_arc(
+        &mut self,
+        pivot: Option<std::sync::Arc<dyn Any + Send + Sync>>,
+    );
 }
 
 #[cfg(test)]

@@ -146,6 +146,16 @@ pub enum RelationOpt {
     FirstKey(String),
     /// `second_key = "user_id"` — `HasManyThrough` override.
     SecondKey(String),
+    /// `pivot_table = "role_user"` — explicit pivot table name for
+    /// `BelongsToMany`. Defaults to the pivot type's
+    /// `<P as EloquentModel>::TABLE` const when omitted.
+    PivotTable(String),
+    /// `pivot_foreign_key = "user_id"` — pivot column pointing at the
+    /// parent (`L`). Defaults to `<snake(parent_struct)>_id`.
+    PivotForeignKey(String),
+    /// `pivot_related_key = "role_id"` — pivot column pointing at the
+    /// related row (`R`). Defaults to `<snake(target_struct)>_id`.
+    PivotRelatedKey(String),
 }
 
 /// The parsed `#[model(...)]` attribute plus the struct definition.
@@ -826,13 +836,26 @@ fn parse_relation_options(input: ParseStream, kind: RelationKindAttr) -> Result<
                     let s: LitStr = content.parse()?;
                     out.push(RelationOpt::SecondKey(s.value()));
                 }
+                "pivot_table" => {
+                    let s: LitStr = content.parse()?;
+                    out.push(RelationOpt::PivotTable(s.value()));
+                }
+                "pivot_foreign_key" => {
+                    let s: LitStr = content.parse()?;
+                    out.push(RelationOpt::PivotForeignKey(s.value()));
+                }
+                "pivot_related_key" => {
+                    let s: LitStr = content.parse()?;
+                    out.push(RelationOpt::PivotRelatedKey(s.value()));
+                }
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
                         format!(
                             "unknown relation option `{other}`. Expected one of: fk, lk, \
                              with_pivot, with_timestamps, with_default, scope, name, targets, \
-                             first_key, second_key.",
+                             first_key, second_key, pivot_table, pivot_foreign_key, \
+                             pivot_related_key.",
                         ),
                     ));
                 }
@@ -1521,6 +1544,37 @@ mod tests {
             .options
             .iter()
             .any(|o| matches!(o, RelationOpt::SecondKey(k) if k == "user_id")));
+    }
+
+    #[test]
+    fn parse_relations_belongs_to_many_with_custom_pivot_columns() {
+        // T4 — verify the three new pivot-customisation options parse:
+        // `pivot_table` (override default `<P>::TABLE`),
+        // `pivot_foreign_key` (override default `<snake(parent)>_id`),
+        // `pivot_related_key` (override default `<snake(target)>_id`).
+        let input = ModelInput::parse(
+            quote! {
+                relations = {
+                    roles: BelongsToMany<Role, RolePivot> {
+                        pivot_table = "role_user",
+                        pivot_foreign_key = "owner_id",
+                        pivot_related_key = "perm_id",
+                    },
+                }
+            },
+            quote! { pub struct User { pub id: i64 } },
+        )
+        .unwrap();
+        let opts = &input.relations.as_ref().unwrap()[0].options;
+        assert!(opts
+            .iter()
+            .any(|o| matches!(o, RelationOpt::PivotTable(k) if k == "role_user")));
+        assert!(opts
+            .iter()
+            .any(|o| matches!(o, RelationOpt::PivotForeignKey(k) if k == "owner_id")));
+        assert!(opts
+            .iter()
+            .any(|o| matches!(o, RelationOpt::PivotRelatedKey(k) if k == "perm_id")));
     }
 
     #[test]

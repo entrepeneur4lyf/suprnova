@@ -140,6 +140,15 @@ fn emit_dispatch_impl(struct_ident: &syn::Ident) -> TokenStream {
             > {
                 ::std::boxed::Box::pin(self.__recurse_eager_load(relation, rest, db))
             }
+
+            fn set_pivot_arc(
+                &mut self,
+                pivot: ::core::option::Option<
+                    ::std::sync::Arc<dyn ::std::any::Any + ::core::marker::Send + ::core::marker::Sync>,
+                >,
+            ) {
+                self.__pivot = pivot;
+            }
         }
     }
 }
@@ -549,6 +558,67 @@ fn with_default_expr(rel: &RelationDecl) -> Option<&syn::Expr> {
     })
 }
 
+/// Look up the user-declared `pivot_table = "..."` override.
+/// Returns `None` when the user relies on the pivot type's own
+/// `EloquentModel::TABLE` const (the recommended path).
+fn pivot_table_override(rel: &RelationDecl) -> Option<&str> {
+    rel.options.iter().find_map(|o| match o {
+        RelationOpt::PivotTable(s) => Some(s.as_str()),
+        _ => None,
+    })
+}
+
+/// Look up the user-declared `pivot_foreign_key = "..."` override.
+fn pivot_fk_override(rel: &RelationDecl) -> Option<&str> {
+    rel.options.iter().find_map(|o| match o {
+        RelationOpt::PivotForeignKey(s) => Some(s.as_str()),
+        _ => None,
+    })
+}
+
+/// Look up the user-declared `pivot_related_key = "..."` override.
+fn pivot_related_override(rel: &RelationDecl) -> Option<&str> {
+    rel.options.iter().find_map(|o| match o {
+        RelationOpt::PivotRelatedKey(s) => Some(s.as_str()),
+        _ => None,
+    })
+}
+
+/// Look up `with_pivot = ["col1", ...]` extra columns. Returns an
+/// empty slice when omitted.
+fn with_pivot_cols(rel: &RelationDecl) -> &[String] {
+    for o in &rel.options {
+        if let RelationOpt::WithPivot(cols) = o {
+            return cols.as_slice();
+        }
+    }
+    &[]
+}
+
+/// True when `with_timestamps` (bare flag or `= true`) is declared.
+fn with_timestamps_flag(rel: &RelationDecl) -> bool {
+    rel.options
+        .iter()
+        .any(|o| matches!(o, RelationOpt::WithTimestamps))
+}
+
+/// Extract the last path segment of a type ident, e.g. `Post` from
+/// `crate::models::Post`. Used for default pivot-key derivation
+/// (`<snake(name)>_id`) when the user omits `pivot_foreign_key`
+/// / `pivot_related_key`. Falls back to the full token stream
+/// rendering when the type isn't a path (rare; mostly defensive).
+fn last_segment_name(ty: &syn::Type) -> String {
+    match ty {
+        syn::Type::Path(p) => p
+            .path
+            .segments
+            .last()
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_else(|| quote::quote!(#ty).to_string()),
+        _ => quote::quote!(#ty).to_string(),
+    }
+}
+
 /// Whether the named field on the user struct has type `Option<T>`.
 /// Used by BelongsTo emission to decide between
 /// `Some(serde_json::to_value(&self.<fk>).ok()?)` (non-Option) and
@@ -704,10 +774,93 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                 }
             })
         }
-        // T4-T7 own the rest of the kinds (BelongsToMany, Through,
-        // Morph*). For T3 we emit nothing for those so the macro
-        // still accepts the declaration — the method just doesn't
-        // exist yet, which is fine because no test code calls it.
+        RelationKindAttr::BelongsToMany => {
+            // Pivot model — the user wrote `BelongsToMany<R, P>`,
+            // parsed into `rel.through`. The parser already validates
+            // that BelongsToMany requires a second generic argument,
+            // so the `expect` is unreachable on the happy path.
+            let pivot_ty = rel.through.as_ref().ok_or_else(|| {
+                syn::Error::new_spanned(
+                    method_ident,
+                    "BelongsToMany requires a pivot type (see parse-time validation)",
+                )
+            })?;
+
+            // pivot_foreign_key default: <snake(parent_struct)>_id.
+            let pivot_fk = pivot_fk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{}_id", to_snake(&parent_name)));
+            // pivot_related_key default: <snake(target_struct_name)>_id.
+            let pivot_related = pivot_related_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    format!("{}_id", to_snake(&last_segment_name(target_ty)))
+                });
+            // pivot_table: either the user-supplied literal, or — at
+            // runtime — `<P as EloquentModel>::TABLE` so the pivot
+            // struct's own `#[suprnova::model(table = "...")]` declaration
+            // is the single source of truth.
+            let pivot_table_expr: TokenStream = match pivot_table_override(rel) {
+                Some(t) => quote! { ::std::string::String::from(#t) },
+                None => quote! {
+                    <#pivot_ty as ::suprnova::eloquent::EloquentModel>::TABLE.to_string()
+                },
+            };
+            // Local key (parent's PK column name). Defaults to the
+            // model's declared primary_key.
+            let lk = lk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| pk_name.clone());
+
+            // `with_pivot([...])` and `.with_timestamps()` chain calls.
+            let pivot_extras = with_pivot_cols(rel);
+            let with_pivot_chain = if pivot_extras.is_empty() {
+                quote! {}
+            } else {
+                let lits = pivot_extras
+                    .iter()
+                    .map(|c| quote! { #c })
+                    .collect::<Vec<_>>();
+                quote! { .with_pivot(::std::vec![#(#lits),*]) }
+            };
+            let with_timestamps_chain = if with_timestamps_flag(rel) {
+                quote! { .with_timestamps() }
+            } else {
+                quote! {}
+            };
+            let local_key_chain = if lk == "id" {
+                quote! {}
+            } else {
+                quote! { .local_key(#lk) }
+            };
+
+            Ok(quote! {
+                impl #struct_ident {
+                    #[doc = "Construct a `BelongsToMany` relation for this row."]
+                    #[doc = ""]
+                    #[doc = "Use `.attach(id)` / `.detach(id)` / `.sync([...])` to \
+                             mutate the pivot, `.get()` to load related rows with \
+                             pivot context."]
+                    pub fn #method_ident(&self) -> ::suprnova::BelongsToMany<Self, #target_ty, #pivot_ty> {
+                        let parent_value = ::suprnova::serde_json::to_value(&self.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        ::suprnova::BelongsToMany::<Self, #target_ty, #pivot_ty>::__new(
+                            parent_value,
+                            #pivot_table_expr,
+                            ::std::string::String::from(#pivot_fk),
+                            ::std::string::String::from(#pivot_related),
+                        )
+                        #local_key_chain
+                        #with_pivot_chain
+                        #with_timestamps_chain
+                    }
+                }
+            })
+        }
+        // T5-T7 own the rest of the kinds (Through, Morph*). For
+        // T4 we emit nothing for those so the macro still accepts the
+        // declaration — the method just doesn't exist yet, which is
+        // fine because no test code calls it.
         _ => Ok(TokenStream::new()),
     }
 }
@@ -944,6 +1097,160 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .map(|v| v.to_string())
                             .unwrap_or_default();
                         let group = by_fk.remove(&key).unwrap_or_default();
+                        p.__eager.set_many::<#target_ty>(#name_str, group);
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
+        RelationKindAttr::BelongsToMany => {
+            // Pivot model + key names. The parser already validates a
+            // pivot type exists for BelongsToMany; the `expect` is
+            // unreachable on the happy path but defensive.
+            let pivot_ty = rel.through.as_ref().ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &rel.name,
+                    "BelongsToMany requires a pivot type (parser bug if reached)",
+                )
+            })?;
+            let pivot_fk = pivot_fk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{}_id", to_snake(&parent_name)));
+            let pivot_related = pivot_related_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    format!("{}_id", to_snake(&last_segment_name(target_ty)))
+                });
+            // Two-query strategy:
+            //
+            // 1. Fetch all pivot rows whose FK points at any of the
+            //    parent PKs in this batch.
+            // 2. Fetch all related rows whose PK is in the set of
+            //    pivot.related_key values.
+            // 3. Walk each pivot row, look up the matching related
+            //    row, clone it, stamp `__pivot = Some(Arc::new(pivot))`
+            //    onto the clone, and push into the per-parent vec keyed
+            //    by pivot.foreign_key.
+            //
+            // The clone-per-attachment is load-bearing: when a single
+            // R is attached to multiple Ls via different pivot rows,
+            // each L's copy must carry its OWN pivot context. The
+            // `Model: Clone` supertrait makes this cheap (no new
+            // bounds needed on this arm).
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+                    let pk_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null))
+                        .collect();
+
+                    // Step 1: pivot rows where FK ∈ pk_values.
+                    let pivots: ::std::vec::Vec<#pivot_ty> =
+                        <#pivot_ty as ::suprnova::eloquent::Model>::query()
+                            .filter_in(#pivot_fk, pk_values.clone())
+                            .get()
+                            .await?;
+
+                    if pivots.is_empty() {
+                        // Every parent gets an empty slice so the
+                        // loaded accessor returns `&[]` instead of
+                        // panicking.
+                        for p in parents.iter_mut() {
+                            p.__eager.set_many::<#target_ty>(
+                                #name_str,
+                                ::std::vec::Vec::<#target_ty>::new(),
+                            );
+                        }
+                        return ::core::result::Result::Ok(());
+                    }
+
+                    // Collect the distinct related-key values for the
+                    // IN query.
+                    use ::std::collections::HashMap;
+                    let mut related_ids: ::std::vec::Vec<::suprnova::serde_json::Value>
+                        = ::std::vec::Vec::with_capacity(pivots.len());
+                    let mut seen_rel: ::std::collections::HashSet<::std::string::String>
+                        = ::std::collections::HashSet::new();
+                    for pv in pivots.iter() {
+                        let pj = ::suprnova::serde_json::to_value(pv)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        if let ::core::option::Option::Some(v) = pj.get(#pivot_related) {
+                            let s = v.to_string();
+                            if seen_rel.insert(s) {
+                                related_ids.push(v.clone());
+                            }
+                        }
+                    }
+
+                    // Step 2: related rows where PK ∈ related_ids.
+                    // `id` is the default related-key column; the
+                    // `.local_key()` override on the relation surface
+                    // is not currently honoured here because the
+                    // eager dispatcher uses Model::query() which keys
+                    // off the model's declared primary key. T9's
+                    // with_where surface can extend this if non-default
+                    // related keys land in practice.
+                    let related_rows: ::std::vec::Vec<#target_ty> = if related_ids.is_empty() {
+                        ::std::vec::Vec::new()
+                    } else {
+                        <#target_ty as ::suprnova::eloquent::Model>::query()
+                            .filter_in("id", related_ids)
+                            .get()
+                            .await?
+                    };
+
+                    // Index related rows by their `id` field (JSON-
+                    // string form) for fast lookup.
+                    let mut by_related_id: HashMap<::std::string::String, #target_ty>
+                        = HashMap::new();
+                    for r in related_rows.into_iter() {
+                        let rj = ::suprnova::serde_json::to_value(&r)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        let key = rj
+                            .get("id")
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        by_related_id.insert(key, r);
+                    }
+
+                    // Step 3: per pivot row, clone the matching
+                    // related row, stamp __pivot, and append to the
+                    // per-parent vec.
+                    let mut by_parent: HashMap<
+                        ::std::string::String,
+                        ::std::vec::Vec<#target_ty>,
+                    > = HashMap::new();
+                    for pv in pivots.into_iter() {
+                        let pj = ::suprnova::serde_json::to_value(&pv)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        let parent_key = pj
+                            .get(#pivot_fk)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        let related_key = pj
+                            .get(#pivot_related)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        if let ::core::option::Option::Some(template)
+                            = by_related_id.get(&related_key)
+                        {
+                            let mut row: #target_ty = template.clone();
+                            row.__pivot = ::core::option::Option::Some(
+                                ::std::sync::Arc::new(pv),
+                            );
+                            by_parent.entry(parent_key).or_default().push(row);
+                        }
+                    }
+
+                    // Distribute per parent. Parents with no
+                    // attachments get an explicit empty slice.
+                    for p in parents.iter_mut() {
+                        let key = ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        let group = by_parent.remove(&key).unwrap_or_default();
                         p.__eager.set_many::<#target_ty>(#name_str, group);
                     }
                     return ::core::result::Result::Ok(());
@@ -1212,6 +1519,119 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         // backends, but the saturating cast guards
                         // against pathological drivers without
                         // panicking the dispatcher.
+                        counts.insert(key, n.max(0) as u64);
+                    }
+
+                    for p in parents.iter_mut() {
+                        let key = __sn_parent_key_to_match_cast(
+                            ::suprnova::serde_json::to_value(&p.#pk_ident)
+                                .unwrap_or(::suprnova::serde_json::Value::Null),
+                        );
+                        p.__eager.set_count(#name_str, *counts.get(&key).unwrap_or(&0));
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
+        RelationKindAttr::BelongsToMany => {
+            let pivot_ty = rel.through.as_ref().ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &rel.name,
+                    "BelongsToMany requires a pivot type (parser bug if reached)",
+                )
+            })?;
+            let pivot_fk = pivot_fk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{}_id", to_snake(&parent_name)));
+            let pivot_table_expr: TokenStream = match pivot_table_override(rel) {
+                Some(t) => {
+                    let lit = syn::LitStr::new(t, proc_macro2::Span::call_site());
+                    quote! { #lit }
+                }
+                None => quote! {
+                    <#pivot_ty as ::suprnova::eloquent::EloquentModel>::TABLE
+                },
+            };
+
+            // Server-side GROUP BY count over the pivot table — one
+            // round trip regardless of fan-out. Identical pattern to
+            // the HasMany count arm, except the GROUP-BY target is the
+            // pivot's FK column and the source table is the pivot.
+            // See the HasMany arm's long-form comment for the
+            // CAST-as-text key-matching contract.
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+
+                    fn __sn_parent_key_to_match_cast(
+                        v: ::suprnova::serde_json::Value,
+                    ) -> ::std::string::String {
+                        match v {
+                            ::suprnova::serde_json::Value::String(s) => s,
+                            other => other.to_string(),
+                        }
+                    }
+
+                    let pk_json_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null))
+                        .collect();
+
+                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+
+                    let mut placeholders: ::std::vec::Vec<::std::string::String> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    let mut binds: ::std::vec::Vec<::suprnova::sea_orm::Value> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    for (i, v) in pk_json_values.iter().enumerate() {
+                        let ph = match db_backend {
+                            ::suprnova::sea_orm::DatabaseBackend::Postgres => {
+                                ::std::format!("${}", i + 1)
+                            }
+                            _ => ::std::string::String::from("?"),
+                        };
+                        placeholders.push(ph);
+                        binds.push(
+                            ::suprnova::eloquent::model::json_value_to_sea_value(v),
+                        );
+                    }
+
+                    let __sn_cast_kw = match db_backend {
+                        ::suprnova::sea_orm::DatabaseBackend::MySql => "CHAR",
+                        _ => "TEXT",
+                    };
+                    let __sn_table = #pivot_table_expr;
+                    let __sn_sql = ::std::format!(
+                        "SELECT CAST({fk} AS {cast}) AS __sn_fk_key, \
+                                COUNT(*) AS __sn_count \
+                           FROM {table} \
+                          WHERE {fk} IN ({phs}) \
+                          GROUP BY {fk}",
+                        fk = #pivot_fk,
+                        cast = __sn_cast_kw,
+                        table = __sn_table,
+                        phs = placeholders.join(", "),
+                    );
+
+                    let stmt = ::suprnova::sea_orm::Statement::from_sql_and_values(
+                        db_backend,
+                        &__sn_sql,
+                        binds,
+                    );
+                    let rows = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                        .await
+                        .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+
+                    use ::std::collections::HashMap;
+                    let mut counts: HashMap<::std::string::String, u64> = HashMap::new();
+                    for r in rows.iter() {
+                        let key: ::std::string::String = r
+                            .try_get::<::std::string::String>("", "__sn_fk_key")
+                            .unwrap_or_default();
+                        let n: i64 = r.try_get::<i64>("", "__sn_count").unwrap_or(0);
                         counts.insert(key, n.max(0) as u64);
                     }
 
@@ -1611,6 +2031,187 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         // Missing-key (parent had no child rows) and
                         // present-but-NULL collapse into the same
                         // `None` branch for the per-kind distribution.
+                        let agg: ::core::option::Option<f64> = by_fk
+                            .get(&key)
+                            .copied()
+                            .unwrap_or(::core::option::Option::None);
+                        match kind {
+                            ::suprnova::AggregateKind::Sum
+                            | ::suprnova::AggregateKind::Avg => {
+                                p.__eager.set_aggregate::<f64>(
+                                    #name_str,
+                                    agg.unwrap_or(0.0),
+                                );
+                            }
+                            ::suprnova::AggregateKind::Min
+                            | ::suprnova::AggregateKind::Max => {
+                                p.__eager.set_aggregate::<::core::option::Option<f64>>(
+                                    #name_str,
+                                    agg,
+                                );
+                            }
+                        }
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
+        RelationKindAttr::BelongsToMany => {
+            // BelongsToMany aggregate is over the RELATED table's
+            // columns (Laravel parity — users typically aggregate over
+            // role.weight, not pivot.assigned_at). The dispatcher JOINs
+            // the pivot to the related table and groups by the pivot's
+            // FK column.
+            //
+            //   SELECT CAST(p.fk AS TEXT|CHAR) AS __sn_fk_key,
+            //          AGG(r.col)              AS __sn_agg
+            //     FROM <pivot_table> p
+            //     JOIN <related_table> r ON r.id = p.<related_key>
+            //    WHERE p.<fk> IN (...)
+            //    GROUP BY p.<fk>
+            //
+            // Sum/Avg → f64 with 0.0 empty default. Min/Max →
+            // Option<f64> with None empty default. Matches HasMany's
+            // contract.
+            let pivot_ty = rel.through.as_ref().ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &rel.name,
+                    "BelongsToMany requires a pivot type (parser bug if reached)",
+                )
+            })?;
+            let pivot_fk = pivot_fk_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{}_id", to_snake(&parent_name)));
+            let pivot_related = pivot_related_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    format!("{}_id", to_snake(&last_segment_name(target_ty)))
+                });
+            let pivot_table_expr: TokenStream = match pivot_table_override(rel) {
+                Some(t) => {
+                    let lit = syn::LitStr::new(t, proc_macro2::Span::call_site());
+                    quote! { #lit }
+                }
+                None => quote! {
+                    <#pivot_ty as ::suprnova::eloquent::EloquentModel>::TABLE
+                },
+            };
+
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+
+                    fn __sn_parent_key_to_match_cast(
+                        v: ::suprnova::serde_json::Value,
+                    ) -> ::std::string::String {
+                        match v {
+                            ::suprnova::serde_json::Value::String(s) => s,
+                            other => other.to_string(),
+                        }
+                    }
+
+                    let pk_json_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null))
+                        .collect();
+
+                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+
+                    let mut placeholders: ::std::vec::Vec<::std::string::String> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    let mut binds: ::std::vec::Vec<::suprnova::sea_orm::Value> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    for (i, v) in pk_json_values.iter().enumerate() {
+                        let ph = match db_backend {
+                            ::suprnova::sea_orm::DatabaseBackend::Postgres => {
+                                ::std::format!("${}", i + 1)
+                            }
+                            _ => ::std::string::String::from("?"),
+                        };
+                        placeholders.push(ph);
+                        binds.push(
+                            ::suprnova::eloquent::model::json_value_to_sea_value(v),
+                        );
+                    }
+
+                    let __sn_cast_kw = match db_backend {
+                        ::suprnova::sea_orm::DatabaseBackend::MySql => "CHAR",
+                        _ => "TEXT",
+                    };
+                    let __sn_pivot = #pivot_table_expr;
+                    let __sn_related = <#target_ty as
+                        ::suprnova::eloquent::EloquentModel>::TABLE;
+
+                    let __sn_agg_expr: ::std::string::String = match kind {
+                        ::suprnova::AggregateKind::Sum => {
+                            ::std::format!("SUM(__sn_r.{})", column)
+                        }
+                        ::suprnova::AggregateKind::Avg => {
+                            ::std::format!("AVG(__sn_r.{})", column)
+                        }
+                        ::suprnova::AggregateKind::Min => {
+                            ::std::format!("MIN(__sn_r.{})", column)
+                        }
+                        ::suprnova::AggregateKind::Max => {
+                            ::std::format!("MAX(__sn_r.{})", column)
+                        }
+                    };
+
+                    let __sn_sql = ::std::format!(
+                        "SELECT CAST(__sn_p.{fk} AS {cast}) AS __sn_fk_key, \
+                                {agg} AS __sn_agg \
+                           FROM {pivot} __sn_p \
+                           JOIN {related} __sn_r ON __sn_r.id = __sn_p.{rk} \
+                          WHERE __sn_p.{fk} IN ({phs}) \
+                          GROUP BY __sn_p.{fk}",
+                        fk = #pivot_fk,
+                        rk = #pivot_related,
+                        cast = __sn_cast_kw,
+                        agg = __sn_agg_expr,
+                        pivot = __sn_pivot,
+                        related = __sn_related,
+                        phs = placeholders.join(", "),
+                    );
+
+                    let stmt = ::suprnova::sea_orm::Statement::from_sql_and_values(
+                        db_backend,
+                        &__sn_sql,
+                        binds,
+                    );
+                    let rows = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                        .await
+                        .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+
+                    use ::std::collections::HashMap;
+                    let mut by_fk: HashMap<
+                        ::std::string::String,
+                        ::core::option::Option<f64>,
+                    > = HashMap::new();
+                    for r in rows.iter() {
+                        let key: ::std::string::String = r
+                            .try_get::<::std::string::String>("", "__sn_fk_key")
+                            .unwrap_or_default();
+                        let agg: ::core::option::Option<f64> = r
+                            .try_get::<::core::option::Option<f64>>("", "__sn_agg")
+                            .ok()
+                            .flatten()
+                            .or_else(|| {
+                                r.try_get::<::core::option::Option<i64>>("", "__sn_agg")
+                                    .ok()
+                                    .flatten()
+                                    .map(|n| n as f64)
+                            });
+                        by_fk.insert(key, agg);
+                    }
+
+                    for p in parents.iter_mut() {
+                        let key = __sn_parent_key_to_match_cast(
+                            ::suprnova::serde_json::to_value(&p.#pk_ident)
+                                .unwrap_or(::suprnova::serde_json::Value::Null),
+                        );
                         let agg: ::core::option::Option<f64> = by_fk
                             .get(&key)
                             .copied()
