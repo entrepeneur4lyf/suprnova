@@ -452,3 +452,84 @@ async fn manual_observe_registration_works_without_attribute_macro() {
          created-listener that fires exactly once per row created"
     );
 }
+
+// =========================================================================
+// T2c — multi-observer fan-out
+// =========================================================================
+//
+// Multiple `Observer<M>` impls registered against the same model all
+// fire for the same event. Pins the EventFacade dispatch fan-out
+// semantics for the Observer pathway.
+//
+// Uses a dedicated `T2Comment` model so the registrations don't bleed
+// into the T2User-scoped assertions in T2b / the T2Article-scoped
+// assertions in the model-attribute test.
+
+static OBS_A_FIRES: AtomicUsize = AtomicUsize::new(0);
+static OBS_B_FIRES: AtomicUsize = AtomicUsize::new(0);
+
+pub struct ObsA;
+pub struct ObsB;
+
+#[suprnova::observer(T2Comment)]
+#[async_trait]
+impl Observer<T2Comment> for ObsA {
+    async fn created(&self, _c: &T2Comment) -> Result<(), FrameworkError> {
+        OBS_A_FIRES.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[suprnova::observer(T2Comment)]
+#[async_trait]
+impl Observer<T2Comment> for ObsB {
+    async fn created(&self, _c: &T2Comment) -> Result<(), FrameworkError> {
+        OBS_B_FIRES.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[suprnova::model(table = "t2_comments")]
+pub struct T2Comment {
+    pub id: i64,
+    pub body: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[tokio::test]
+async fn multiple_observers_all_fire_for_same_event() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t2_comments (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT,\
+            body TEXT NOT NULL,\
+            created_at TEXT NOT NULL,\
+            updated_at TEXT NOT NULL\
+        )",
+    )
+    .await
+    .unwrap();
+
+    suprnova::eloquent::observers::bootstrap_observers()
+        .await
+        .unwrap();
+    OBS_A_FIRES.store(0, Ordering::SeqCst);
+    OBS_B_FIRES.store(0, Ordering::SeqCst);
+
+    let _ = T2Comment::create(suprnova::attrs! { body: "hello" })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        OBS_A_FIRES.load(Ordering::SeqCst),
+        1,
+        "ObsA::created should fire exactly once per T2Comment::create"
+    );
+    assert_eq!(
+        OBS_B_FIRES.load(Ordering::SeqCst),
+        1,
+        "ObsB::created should fire exactly once per T2Comment::create — \
+         confirms EventFacade dispatch fan-out covers Observer registration"
+    );
+}
