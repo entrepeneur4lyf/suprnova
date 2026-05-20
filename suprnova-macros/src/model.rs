@@ -21,6 +21,7 @@ mod columns;
 mod derive_eloquent;
 mod derive_seaorm;
 mod events;
+mod observers;
 mod parse;
 pub mod prunable;
 mod relations;
@@ -85,6 +86,19 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let events_module = events::emit_events_module(struct_ident);
     let events_dispatch_impl = events::emit_event_dispatch_impl(struct_ident);
 
+    // Phase 10C T2c — `observers = [...]` compile-time validation +
+    // per-model `Self::observe()` runtime registration shim. The
+    // validation block is empty for models that omit the attribute;
+    // the shim emits unconditionally so every model has a manual
+    // registration path regardless of whether it declared any
+    // observers.
+    let observers_attestation = input
+        .observers
+        .as_ref()
+        .map(observers::emit_observers_attestation)
+        .unwrap_or_default();
+    let observe_shim = observers::emit_per_model_observe_shim(struct_ident);
+
     Ok(quote! {
         #struct_def
 
@@ -110,6 +124,8 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         #registry
         #morph_registry
         #events_dispatch_impl
+        #observers_attestation
+        #observe_shim
     })
 }
 

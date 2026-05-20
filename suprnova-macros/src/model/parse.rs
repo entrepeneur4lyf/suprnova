@@ -3,9 +3,11 @@
 
 use proc_macro2::{Ident, Span, TokenStream};
 use syn::{
-    parse2, parse::Parse, parse::ParseStream, Expr, ItemStruct, LitBool, LitStr, Result, Token,
-    Type,
+    parse2, parse::Parse, parse::ParseStream, punctuated::Punctuated, token::Comma, Expr,
+    ItemStruct, LitBool, LitStr, Result, Token, Type,
 };
+
+use super::observers::ObserversAttr;
 
 // ---- Relation declarations (Phase 10B T1) ---------------------------------
 //
@@ -247,6 +249,18 @@ pub struct ModelInput {
     /// fallback themselves; nothing else on `ModelInput` references this.
     #[allow(dead_code)]
     pub morph_type: Option<String>,
+    /// Phase 10C T2c — parsed `observers = [Type1, Type2, ...]` list.
+    /// `None` when the attribute is omitted entirely. The list drives
+    /// [`super::observers::emit_observers_attestation`] which emits a
+    /// `const _: fn() = || { ... type_name::<T> ... };` block that
+    /// references each listed type so rustc surfaces a clear error for
+    /// typos at the model declaration site.
+    ///
+    /// The attribute is compile-time validation + documentation only —
+    /// actual listener registration is through the inventory pathway
+    /// in [`crate::observer`] (T2b) or the per-model `Self::observe()`
+    /// shim. The attribute does NOT auto-call `observe()`.
+    pub observers: Option<ObserversAttr>,
 }
 
 impl ModelInput {
@@ -425,6 +439,7 @@ impl ModelInput {
             touches: attrs.touches.unwrap_or_default(),
             relations: attrs.relations,
             morph_type: attrs.morph_type,
+            observers: attrs.observers,
         })
     }
 
@@ -595,6 +610,7 @@ struct ModelAttrs {
     touches: Option<Vec<String>>,
     relations: Option<Vec<RelationDecl>>,
     morph_type: Option<String>,
+    observers: Option<ObserversAttr>,
 }
 
 impl Parse for ModelAttrs {
@@ -642,6 +658,18 @@ impl Parse for ModelAttrs {
                     "touches" => out.touches = Some(parse_str_array(input)?),
                     "relations" => out.relations = Some(parse_relations_map(input)?),
                     "morph_type" => out.morph_type = Some(input.parse::<LitStr>()?.value()),
+                    "observers" => {
+                        // observers = [Type1, Type2] — bracketed
+                        // expression list. Each entry is parsed as a
+                        // full `syn::Expr` so qualified paths like
+                        // `crate::observers::AuditObserver` round-trip.
+                        // The compile-time validation downstream just
+                        // names each one through
+                        // `::std::any::type_name::<T>`.
+                        let content;
+                        syn::bracketed!(content in input);
+                        out.observers = Some(Punctuated::<Expr, Comma>::parse_terminated(&content)?);
+                    }
                     other => {
                         return Err(syn::Error::new(
                             key.span(),

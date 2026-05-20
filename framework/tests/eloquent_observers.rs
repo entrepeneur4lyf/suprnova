@@ -314,3 +314,64 @@ async fn observer_macro_emits_only_overridden_method_adapters() {
          actually overrode"
     );
 }
+
+// =========================================================================
+// T2c — `#[model(observers = [...])]` compile-time validation
+// =========================================================================
+//
+// The model-side attribute serves two purposes:
+//   1. Compile-time validation that each listed observer type exists
+//      (catches typos at the model declaration site).
+//   2. Documentation marker: readers of the model declaration can see
+//      which observers attach to it.
+//
+// The actual listener registration is via T2b's inventory pathway — the
+// `#[observer(T2Article)]` attribute on `ModelAttrObserver` is what
+// registers the listener at bootstrap. The `observers = [...]` attribute
+// is independent of the listener install.
+
+static MODEL_ATTR_OBS_FIRES: AtomicUsize = AtomicUsize::new(0);
+
+pub struct ModelAttrObserver;
+
+#[suprnova::observer(T2Article)]
+#[async_trait]
+impl Observer<T2Article> for ModelAttrObserver {
+    async fn created(&self, _a: &T2Article) -> Result<(), FrameworkError> {
+        MODEL_ATTR_OBS_FIRES.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[suprnova::model(table = "t2_articles", observers = [ModelAttrObserver])]
+pub struct T2Article {
+    pub id: i64,
+    pub title: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[tokio::test]
+async fn model_attribute_observers_auto_register() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t2_articles (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT,\
+            title TEXT NOT NULL,\
+            created_at TEXT NOT NULL,\
+            updated_at TEXT NOT NULL\
+        )",
+    )
+    .await
+    .unwrap();
+
+    suprnova::eloquent::observers::bootstrap_observers()
+        .await
+        .unwrap();
+    MODEL_ATTR_OBS_FIRES.store(0, Ordering::SeqCst);
+
+    let _ = T2Article::create(suprnova::attrs! { title: "hello" })
+        .await
+        .unwrap();
+    assert_eq!(MODEL_ATTR_OBS_FIRES.load(Ordering::SeqCst), 1);
+}
