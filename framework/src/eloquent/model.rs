@@ -39,6 +39,7 @@ use serde::Serialize;
 use crate::database::DB;
 use crate::eloquent::attrs::Attrs;
 use crate::eloquent::builder::Builder;
+use crate::eloquent::events::ModelEventHooks;
 use crate::eloquent::fillable::Fillable;
 use crate::eloquent::EloquentModel;
 use crate::error::FrameworkError;
@@ -50,7 +51,15 @@ use crate::error::FrameworkError;
 /// where possible. Divergences are flagged in the rustdoc and in
 /// `docs/superpowers/specs/phase-10/phase-10a/01-crud.md`.
 #[async_trait]
-pub trait Model: EloquentModel + Send + Sync + Sized + Clone + Serialize + DeserializeOwned
+pub trait Model:
+    EloquentModel
+    + Send
+    + Sync
+    + Sized
+    + Clone
+    + Serialize
+    + DeserializeOwned
+    + ModelEventHooks
 where
     Self: From<<Self::Entity as EntityTrait>::Model>,
     <Self::Entity as EntityTrait>::Model: From<Self>
@@ -174,9 +183,35 @@ where
     /// Mass-create a row from the given attributes. Attributes are
     /// filtered through [`Self::fillable_filter`] before the SeaORM
     /// ActiveModel is built.
+    ///
+    /// ## Lifecycle events (Phase 10C T1)
+    ///
+    /// Dispatched in this order:
+    ///
+    /// 1. `Creating { attrs }` — cancellable
+    /// 2. `Saving { attrs, is_creating: true }` — cancellable
+    /// 3. *INSERT lands*
+    /// 4. `Created { model }`
+    /// 5. `Saved { model }`
+    ///
+    /// A listener that cancels at (1) or (2) aborts the operation
+    /// with `FrameworkError::bad_request(reason)`; the INSERT never
+    /// runs. Listeners on (1) / (2) may mutate the in-flight `Attrs`
+    /// through the `Arc<tokio::sync::Mutex<Attrs>>` they receive.
     async fn create(attrs: Attrs) -> Result<Self, FrameworkError> {
         let filtered = Self::fillable_filter().apply(attrs);
-        let am = Self::active_model_from_attrs(filtered)?;
+        // Wrap the filtered attrs in an Arc<Mutex<_>> so cancellable
+        // listeners (Creating, Saving) can mutate the in-flight
+        // values before the INSERT runs.
+        let shared = std::sync::Arc::new(tokio::sync::Mutex::new(filtered));
+        Self::__dispatch_creating(shared.clone()).await?;
+        Self::__dispatch_saving(shared.clone(), true).await?;
+
+        // Read the (possibly mutated) attrs back out of the mutex
+        // before consuming them to build the ActiveModel. The
+        // Arc<Mutex<_>> handle is dropped once we leave this scope.
+        let final_attrs = shared.lock().await.clone();
+        let am = Self::active_model_from_attrs(final_attrs)?;
         let db = DB::connection()?;
         let inserted = <<Self::Entity as EntityTrait>::ActiveModel as ActiveModelTrait>::insert(
             am,
@@ -184,54 +219,137 @@ where
         )
         .await
         .map_err(|e| FrameworkError::database(e.to_string()))?;
-        Ok(Self::from(inserted))
+        let row = Self::from(inserted);
+
+        Self::__dispatch_created(&row).await?;
+        Self::__dispatch_saved(&row).await?;
+        Ok(row)
     }
 
     /// Persist any field changes on this row. The full row is sent to
-    /// the database — T4 doesn't track per-field dirty state. Returns
-    /// the row as the database has it after the update (auto-managed
-    /// columns like `updated_at` will land in T9).
+    /// the database — T4 doesn't track per-field dirty state.
+    ///
+    /// ## Lifecycle events (Phase 10C T1)
+    ///
+    /// 1. `Updating { previous, attrs }` — cancellable
+    /// 2. `Saving { attrs, is_creating: false }` — cancellable
+    /// 3. *UPDATE lands*
+    /// 4. `Updated { previous, current }`
+    /// 5. `Saved { model: current }`
+    ///
+    /// The `previous` snapshot is `self` at call time; `current` is
+    /// the row as the database has it after the UPDATE. A listener
+    /// that cancels at (1) or (2) aborts with
+    /// `FrameworkError::bad_request(reason)`.
     async fn save(&self) -> Result<(), FrameworkError> {
+        // Serialize the in-memory model to an Attrs map so listeners
+        // see the "what's about to be written" payload through the
+        // same Arc<Mutex<Attrs>> shape they see on create.
+        let attrs_value = serde_json::to_value(self).map_err(|e| {
+            FrameworkError::internal(format!("save: serialize self for Saving event: {e}"))
+        })?;
+        let attrs = Attrs::from(attrs_value);
+        let shared = std::sync::Arc::new(tokio::sync::Mutex::new(attrs));
+
+        Self::__dispatch_updating(self, shared.clone()).await?;
+        Self::__dispatch_saving(shared.clone(), false).await?;
+
         let am = self.clone().into_active_model_for_update()?;
         let db = DB::connection()?;
-        <<Self::Entity as EntityTrait>::ActiveModel as ActiveModelTrait>::update(am, db.inner())
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let updated = <<Self::Entity as EntityTrait>::ActiveModel as ActiveModelTrait>::update(
+            am,
+            db.inner(),
+        )
+        .await
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let current = Self::from(updated);
+
+        Self::__dispatch_updated(self, &current).await?;
+        Self::__dispatch_saved(&current).await?;
         Ok(())
     }
 
     /// Apply a partial attribute set and persist. Attributes are
-    /// filtered through [`Self::fillable_filter`] first. Returns the
-    /// row as the database has it after the update.
+    /// filtered through [`Self::fillable_filter`] first.
+    ///
+    /// ## Lifecycle events (Phase 10C T1)
+    ///
+    /// Same event sequence as [`Self::save`] — `Updating` /
+    /// `Saving { is_creating: false }` before the UPDATE, then
+    /// `Updated` / `Saved` after.
     async fn update(self, attrs: Attrs) -> Result<Self, FrameworkError> {
+        let previous = self.clone();
         let filtered = Self::fillable_filter().apply(attrs);
+        let shared = std::sync::Arc::new(tokio::sync::Mutex::new(filtered));
+
+        Self::__dispatch_updating(&previous, shared.clone()).await?;
+        Self::__dispatch_saving(shared.clone(), false).await?;
+
+        let final_attrs = shared.lock().await.clone();
         let row: <Self::Entity as EntityTrait>::Model = self.into();
         let mut am = row.into_active_model();
-        Self::apply_attrs_to_active_model(&mut am, filtered)?;
+        Self::apply_attrs_to_active_model(&mut am, final_attrs)?;
         let db = DB::connection()?;
         let updated =
             <<Self::Entity as EntityTrait>::ActiveModel as ActiveModelTrait>::update(am, db.inner())
                 .await
                 .map_err(|e| FrameworkError::database(e.to_string()))?;
-        Ok(Self::from(updated))
+        let current = Self::from(updated);
+
+        Self::__dispatch_updated(&previous, &current).await?;
+        Self::__dispatch_saved(&current).await?;
+        Ok(current)
     }
 
-    /// Delete this row. T4 ships hard-delete only; T10 wraps this
-    /// method when the model declares `soft_deletes`.
+    /// Delete this row. The trait default performs a hard DELETE.
+    /// Models annotated `#[suprnova::model(soft_deletes)]` get an
+    /// inherent override that flips this to an UPDATE SET deleted_at
+    /// (see `suprnova-macros/src/model/derive_eloquent.rs`).
+    ///
+    /// ## Lifecycle events (Phase 10C T1)
+    ///
+    /// 1. `Deleting { model, is_force: false }` — cancellable
+    /// 2. *DELETE lands*
+    /// 3. `Deleted { model, is_force: false }`
+    ///
+    /// Soft-delete models override the inherent `delete` to also
+    /// dispatch `Trashed { model }` after step 2.
     async fn delete(self) -> Result<(), FrameworkError> {
+        Self::__dispatch_deleting(&self, false).await?;
+
+        let snapshot = self.clone();
         let row: <Self::Entity as EntityTrait>::Model = self.into();
         let am = row.into_active_model();
         let db = DB::connection()?;
         <<Self::Entity as EntityTrait>::ActiveModel as ActiveModelTrait>::delete(am, db.inner())
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
+
+        Self::__dispatch_deleted(&snapshot, false).await?;
         Ok(())
     }
 
-    /// Hard-delete this row, bypassing soft-delete behaviour. Identical
-    /// to `delete` until T10 lands soft-deletes.
+    /// Hard-delete this row, bypassing any soft-delete override. For
+    /// non-soft-delete models this is identical to `delete`. Models
+    /// annotated `#[suprnova::model(soft_deletes)]` get an inherent
+    /// override that ALSO fires `ForceDeleting` / `ForceDeleted` and
+    /// `Deleting { is_force: true }` / `Deleted { is_force: true }`
+    /// (Trashed is NOT fired — the row is gone, not tombstoned).
     async fn force_delete(self) -> Result<(), FrameworkError> {
-        self.delete().await
+        Self::__dispatch_deleting(&self, true).await?;
+        Self::__dispatch_force_deleting(&self).await?;
+
+        let snapshot = self.clone();
+        let row: <Self::Entity as EntityTrait>::Model = self.into();
+        let am = row.into_active_model();
+        let db = DB::connection()?;
+        <<Self::Entity as EntityTrait>::ActiveModel as ActiveModelTrait>::delete(am, db.inner())
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+
+        Self::__dispatch_force_deleted(&snapshot).await?;
+        Self::__dispatch_deleted(&snapshot, true).await?;
+        Ok(())
     }
 
     /// Reload this row from the database, mutating self in place. The
