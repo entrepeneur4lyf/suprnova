@@ -172,6 +172,73 @@ impl IntoDynCast for AsImmutableDateTime {
     }
 }
 
+// ---- AsOptionalDateTime ---------------------------------------------------
+
+/// Cast `Option<DateTime<Utc>>` ↔ `Option<String>` (RFC-3339 / ISO-8601).
+///
+/// Auto-injected by the `#[suprnova::model(soft_deletes)]` flag for the
+/// nullable tombstone column (`deleted_at` by default). The wrapped
+/// option keeps the storage column nullable — soft-deleted vs alive
+/// rows discriminate on `IS NULL` / `IS NOT NULL` without forcing a
+/// sentinel value.
+///
+/// Hand-declare via `#[model(casts = { col = AsOptionalDateTime })]`
+/// for any other nullable datetime column that should round-trip as
+/// RFC-3339 text.
+pub struct AsOptionalDateTime;
+
+impl Cast for AsOptionalDateTime {
+    type Runtime = Option<DateTime<Utc>>;
+    type Storage = Option<String>;
+
+    fn to_storage(v: &Option<DateTime<Utc>>) -> Result<Option<String>, FrameworkError> {
+        Ok(v.as_ref().map(|dt| dt.to_rfc3339()))
+    }
+
+    fn from_storage(s: &Option<String>) -> Result<Option<DateTime<Utc>>, FrameworkError> {
+        match s.as_deref() {
+            None => Ok(None),
+            Some(raw) => DateTime::parse_from_rfc3339(raw)
+                .map(|dt| Some(dt.with_timezone(&Utc)))
+                .map_err(|e| FrameworkError::validation("AsOptionalDateTime", format!("{e}"))),
+        }
+    }
+}
+
+struct AsOptionalDateTimeDyn;
+
+impl DynCast for AsOptionalDateTimeDyn {
+    fn from_storage_json(
+        &self,
+        v: &serde_json::Value,
+    ) -> Result<serde_json::Value, FrameworkError> {
+        match v {
+            serde_json::Value::Null => Ok(serde_json::Value::Null),
+            serde_json::Value::String(s) => {
+                let dt = AsDateTime::from_storage(s)?;
+                Ok(serde_json::to_value(dt).expect("DateTime<Utc> serialises"))
+            }
+            other => Err(FrameworkError::validation(
+                "AsOptionalDateTime",
+                format!("expected null or string, got {other:?}"),
+            )),
+        }
+    }
+
+    fn to_storage_json(
+        &self,
+        v: &serde_json::Value,
+    ) -> Result<serde_json::Value, FrameworkError> {
+        Ok(v.clone())
+    }
+}
+
+impl IntoDynCast for AsOptionalDateTime {
+    fn into_dyn() -> Box<dyn DynCast> {
+        Box::new(AsOptionalDateTimeDyn)
+    }
+}
+
 // ---- AsTimestamp ----------------------------------------------------------
 
 /// Cast Unix-epoch `i64` ↔ `INTEGER`. Use when you want numeric

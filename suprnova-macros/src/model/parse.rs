@@ -159,6 +159,33 @@ impl ModelInput {
             }
         }
 
+        // T10 — soft_deletes auto-injects `AsOptionalDateTime` on the
+        // tombstone column. The user types the field as
+        // `Option<DateTime<Utc>>` (Laravel-shape) but SeaORM's
+        // `DeriveEntityModel` parses field types in a prelude scope
+        // that shadows `chrono::DateTime` with `NaiveDateTime`; the
+        // cast routes through `<AsOptionalDateTime as Cast>::Storage =
+        // Option<String>` so the inner SeaORM Model never sees the
+        // ambiguous type. User-declared cast overrides still win, same
+        // pattern as the timestamps auto-inject above.
+        if soft_deletes && field_names.contains(&soft_deletes_column)
+            && !casts.iter().any(|(i, _)| i == &soft_deletes_column)
+        {
+            let ident: Ident = syn::parse_str(&soft_deletes_column).map_err(|e| {
+                syn::Error::new_spanned(
+                    &item.ident,
+                    format!(
+                        "soft_deletes column name `{}` is not a valid Rust identifier: {}",
+                        soft_deletes_column, e,
+                    ),
+                )
+            })?;
+            let ty: Type = syn::parse_str("::suprnova::AsOptionalDateTime").expect(
+                "::suprnova::AsOptionalDateTime parses — Suprnova lib re-exports this type",
+            );
+            casts.push((ident, ty));
+        }
+
         Ok(Self {
             item,
             table,

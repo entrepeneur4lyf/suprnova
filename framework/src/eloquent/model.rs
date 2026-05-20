@@ -74,6 +74,14 @@ where
     fn fillable_filter() -> Fillable;
 
     /// Look up a row by primary key. `None` if no row matches.
+    ///
+    /// The trait default uses SeaORM's `find_by_id` directly — no
+    /// global scopes apply. Models that declare `#[model(soft_deletes)]`
+    /// receive an inherent `find` override emitted by the macro that
+    /// routes through [`Self::query`] (which applies the
+    /// `deleted_at IS NULL` filter); the inherent shadows the trait
+    /// default for the soft-delete path. Callers that need to bypass
+    /// the scope use `Self::with_trashed()` instead.
     async fn find<K>(id: K) -> Result<Option<Self>, FrameworkError>
     where
         K: Into<<<Self::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType> + Send,

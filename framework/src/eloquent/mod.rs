@@ -14,9 +14,12 @@ pub mod attrs;
 pub mod builder;
 pub mod casts;
 pub mod collection;
+pub mod console;
 pub mod fillable;
 pub mod model;
+pub mod prunable;
 pub mod registry;
+pub mod soft_deletes;
 pub mod timestamps;
 
 pub use attrs::Attrs;
@@ -24,13 +27,17 @@ pub use builder::{Builder, Direction, IntoColumn, IntoVal};
 pub use casts::{
     AsArray, AsArrayObject, AsBool, AsCollection, AsDate, AsDateTime, AsDecimal, AsEncrypted,
     AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject, AsEnum, AsFloat, AsHashed,
-    AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsObject, AsString, AsTimestamp, Cast,
-    DynCast, IntoDynCast,
+    AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsObject, AsOptionalDateTime, AsString,
+    AsTimestamp, Cast, DynCast, IntoDynCast,
 };
 pub use collection::Collection;
 pub use fillable::{unguarded, Fillable};
 pub use model::{FirstOrCreate, Model, ReplicateExt};
+pub use prunable::{
+    prune_all, prune_all_dry, prune_one, pruners, MassPrunable, Prunable, PrunerEntry, PrunerFn,
+};
 pub use registry::{find_model_by_table, models, ModelEntry};
+pub use soft_deletes::SoftDeletes;
 pub use timestamps::Touchable;
 
 /// Marker trait emitted by `#[suprnova::model]`. Indicates the struct

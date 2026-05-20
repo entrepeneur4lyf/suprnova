@@ -382,6 +382,209 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         quote! {}
     };
 
+    // T10 — soft deletes. When `#[model(soft_deletes)]` is set:
+    //
+    // - `Model::query()` overrides to auto-apply `filter_null("deleted_at")`
+    //   so default reads skip trashed rows. `with_trashed()` /
+    //   `only_trashed()` construct their own unscoped Builder so they
+    //   don't need to undo the scope.
+    // - `impl SoftDeletes for #struct` exposes the column name + the
+    //   `is_trashed()` accessor.
+    // - Inherent `delete(self)` / `restore(self)` / `force_delete(self)`
+    //   / `trashed(&self)` / `with_trashed()` / `only_trashed()` swap in
+    //   the tombstone semantics. The lifecycle methods take `self` by
+    //   value to match `Model::delete(self)`'s signature — Rust's
+    //   method-resolution prefers an inherent method over a trait
+    //   default only when they share auto-ref level, so an inherent
+    //   `delete(&self)` override would silently lose to the trait's
+    //   `delete(self)`.
+    let soft_deletes_enabled = input.soft_deletes;
+    let soft_delete_col = &input.soft_deletes_column;
+    let soft_delete_col_ident = quote::format_ident!("{}", soft_delete_col);
+    let key_type = &input.key_type;
+
+    let query_override = if soft_deletes_enabled {
+        quote! {
+            fn query() -> ::suprnova::Builder<Self> {
+                // Auto-apply the soft_deletes scope so default reads
+                // skip trashed rows. with_trashed() / only_trashed()
+                // build their own unscoped Builder directly — they
+                // don't go through query() — so we don't need a
+                // runtime check here. The
+                // `without_global_scope("soft_deletes")` tag remains
+                // informational for Phase 10C's custom-scope machinery.
+                ::suprnova::Builder::<Self>::new().filter_null(#soft_delete_col)
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let soft_deletes_impl = if soft_deletes_enabled {
+        quote! {
+            impl ::suprnova::eloquent::SoftDeletes for #struct_ident {
+                fn deleted_at_column() -> &'static str { #soft_delete_col }
+                fn is_trashed(&self) -> bool { self.#soft_delete_col_ident.is_some() }
+            }
+
+            impl #struct_ident {
+                /// Soft-delete: `UPDATE table SET deleted_at = NOW()
+                /// WHERE pk = ?` instead of DELETE. Takes `self` by
+                /// value to override `Model::delete(self)` cleanly —
+                /// a `&self` inherent override would lose to the
+                /// trait default through auto-ref resolution.
+                pub async fn delete(self) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
+                    let now = ::suprnova::chrono::Utc::now().to_rfc3339();
+                    let table = <Self as ::suprnova::eloquent::EloquentModel>::TABLE;
+                    let pk_name = <Self as ::suprnova::eloquent::Model>::primary_key_name();
+                    let sql = ::std::format!(
+                        "UPDATE {table} SET {} = ? WHERE {pk_name} = ?",
+                        #soft_delete_col,
+                    );
+                    let db = ::suprnova::DB::connection()?;
+                    let backend = <_ as ::suprnova::ConnectionTrait>::get_database_backend(db.inner());
+                    <_ as ::suprnova::ConnectionTrait>::execute(
+                        db.inner(),
+                        ::suprnova::sea_orm::Statement::from_sql_and_values(
+                            backend,
+                            &sql,
+                            ::std::vec![
+                                ::suprnova::sea_orm::Value::String(
+                                    ::core::option::Option::Some(::std::boxed::Box::new(now)),
+                                ),
+                                ::suprnova::eloquent::model::json_value_to_sea_value(
+                                    &<Self as ::suprnova::eloquent::Model>::primary_key_value_json(&self),
+                                ),
+                            ],
+                        ),
+                    )
+                    .await
+                    .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+                    ::core::result::Result::Ok(())
+                }
+
+                /// Restore from soft delete: `UPDATE table SET
+                /// deleted_at = NULL WHERE pk = ?`. Takes `self` for
+                /// signature parity with the other lifecycle methods.
+                pub async fn restore(self) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
+                    let table = <Self as ::suprnova::eloquent::EloquentModel>::TABLE;
+                    let pk_name = <Self as ::suprnova::eloquent::Model>::primary_key_name();
+                    let sql = ::std::format!(
+                        "UPDATE {table} SET {} = NULL WHERE {pk_name} = ?",
+                        #soft_delete_col,
+                    );
+                    let db = ::suprnova::DB::connection()?;
+                    let backend = <_ as ::suprnova::ConnectionTrait>::get_database_backend(db.inner());
+                    <_ as ::suprnova::ConnectionTrait>::execute(
+                        db.inner(),
+                        ::suprnova::sea_orm::Statement::from_sql_and_values(
+                            backend,
+                            &sql,
+                            ::std::vec![
+                                ::suprnova::eloquent::model::json_value_to_sea_value(
+                                    &<Self as ::suprnova::eloquent::Model>::primary_key_value_json(&self),
+                                ),
+                            ],
+                        ),
+                    )
+                    .await
+                    .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+                    ::core::result::Result::Ok(())
+                }
+
+                /// Cheap accessor: `deleted_at IS NOT NULL` at row
+                /// materialisation time. Does not touch the database.
+                pub fn trashed(&self) -> bool {
+                    self.#soft_delete_col_ident.is_some()
+                }
+
+                /// View including soft-deleted rows. Builds an
+                /// unscoped Builder directly so we don't have to
+                /// undo the scope `query()` would have applied.
+                pub fn with_trashed() -> ::suprnova::Builder<Self> {
+                    ::suprnova::Builder::<Self>::new()
+                        .without_global_scope("soft_deletes")
+                }
+
+                /// View showing only soft-deleted rows.
+                pub fn only_trashed() -> ::suprnova::Builder<Self> {
+                    ::suprnova::Builder::<Self>::new()
+                        .without_global_scope("soft_deletes")
+                        .filter_not_null(#soft_delete_col)
+                }
+
+                /// Hard-delete this row, bypassing the soft-delete
+                /// override. Fully qualifies to `Model::delete(self)`
+                /// (which performs the actual `DELETE FROM ...`).
+                pub async fn force_delete(self) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
+                    <Self as ::suprnova::eloquent::Model>::delete(self).await
+                }
+
+                /// Look up a row by primary key, honouring the
+                /// soft-delete scope. Inherent override of the trait
+                /// default — non-soft-delete models still use the
+                /// SeaORM `find_by_id` path. Bypass the scope via
+                /// `Self::with_trashed().filter(Self::primary_key_name(), id).first()`.
+                pub async fn find(
+                    id: #key_type,
+                ) -> ::core::result::Result<::core::option::Option<Self>, ::suprnova::FrameworkError> {
+                    <Self as ::suprnova::eloquent::Model>::query()
+                        .filter(<Self as ::suprnova::eloquent::Model>::primary_key_name(), id)
+                        .first()
+                        .await
+                }
+
+                /// Look up a row by primary key, honouring the
+                /// soft-delete scope. Returns
+                /// `FrameworkError::ModelNotFound` (HTTP 404) when no
+                /// row matches (or when the row is trashed).
+                pub async fn find_or_fail(
+                    id: #key_type,
+                ) -> ::core::result::Result<Self, ::suprnova::FrameworkError>
+                where
+                    #key_type: ::std::fmt::Debug + ::core::marker::Copy,
+                {
+                    match <Self>::find(id).await? {
+                        ::core::option::Option::Some(m) => ::core::result::Result::Ok(m),
+                        ::core::option::Option::None => ::core::result::Result::Err(
+                            ::suprnova::FrameworkError::not_found(::std::format!(
+                                "{} with {} = {:?} not found",
+                                ::core::any::type_name::<Self>(),
+                                <Self as ::suprnova::eloquent::Model>::primary_key_name(),
+                                id,
+                            )),
+                        ),
+                    }
+                }
+
+                /// Fetch every alive row (skips trashed). Inherent
+                /// override of the trait default.
+                pub async fn all() -> ::core::result::Result<::std::vec::Vec<Self>, ::suprnova::FrameworkError> {
+                    <Self as ::suprnova::eloquent::Model>::query().get().await
+                }
+
+                /// Fetch every alive row whose PK is in `ids` (skips
+                /// trashed). Result order is the database's natural
+                /// order — does not preserve `ids` order. Use
+                /// `Self::with_trashed().where_in(pk, ids).get()` to
+                /// include trashed rows.
+                pub async fn find_many<I>(
+                    ids: I,
+                ) -> ::core::result::Result<::std::vec::Vec<Self>, ::suprnova::FrameworkError>
+                where
+                    I: ::core::iter::IntoIterator<Item = #key_type> + ::core::marker::Send,
+                {
+                    <Self as ::suprnova::eloquent::Model>::query()
+                        .where_in(<Self as ::suprnova::eloquent::Model>::primary_key_name(), ids)
+                        .get()
+                        .await
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     Ok(quote! {
         impl ::suprnova::eloquent::EloquentModel for #struct_ident {
             type Entity = #module_name::Entity;
@@ -423,6 +626,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             fn primary_key_name() -> &'static str { #pk_name }
 
             #fillable_impl
+
+            #query_override
 
             fn primary_key_value(
                 &self,
@@ -490,6 +695,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
         #touchable_impl
         #touches_marker
+        #soft_deletes_impl
 
         impl ::suprnova::eloquent::ReplicateExt for #struct_ident {
             fn replicate_with(&self, except: ::std::vec::Vec<::std::string::String>) -> Self {

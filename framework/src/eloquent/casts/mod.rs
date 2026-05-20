@@ -94,7 +94,9 @@ pub use encrypted::{
 pub use enum_cast::AsEnum;
 pub use primitive::{AsBool, AsDecimal, AsFloat, AsInt, AsString};
 pub use structured::{AsArray, AsArrayObject, AsCollection, AsJson, AsObject};
-pub use temporal::{AsDate, AsDateTime, AsImmutableDate, AsImmutableDateTime, AsTimestamp};
+pub use temporal::{
+    AsDate, AsDateTime, AsImmutableDate, AsImmutableDateTime, AsOptionalDateTime, AsTimestamp,
+};
 
 /// Construct a `HashMap<&'static str, Arc<dyn DynCast>>` for use with
 /// `Builder::with_casts(...)`. Each entry is `field_name = CastType`;

@@ -820,6 +820,46 @@ pub fn mutator(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
+/// `#[suprnova::prunable]` — register a `Prunable` / `MassPrunable`
+/// impl with the `model:prune` runtime.
+///
+/// Wraps the user's `impl Prunable for T` (or `impl MassPrunable for T`)
+/// block and submits a `PrunerEntry` into the inventory-backed
+/// registry. At runtime, `suprnova::eloquent::prune_all` /
+/// `prune_all_dry` / `prune_one` walk the registry; the `model:prune`
+/// console command exposes the same surface on the CLI.
+///
+/// The macro detects which trait is being implemented via the trait
+/// path's last segment — accepts both `Prunable` / `MassPrunable` and
+/// fully qualified `suprnova::eloquent::Prunable` /
+/// `suprnova::eloquent::MassPrunable`.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use async_trait::async_trait;
+/// use chrono::{Duration, Utc};
+/// use suprnova::eloquent::Prunable;
+///
+/// #[suprnova::prunable]
+/// #[async_trait]
+/// impl Prunable for Session {
+///     fn prunable() -> suprnova::Builder<Self> {
+///         Self::query().filter_op(
+///             "expires_at",
+///             "<",
+///             (Utc::now() - Duration::days(30)).to_rfc3339(),
+///         )
+///     }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn prunable(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    model::prunable::expand(item.into())
+        .unwrap_or_else(|e| e.to_compile_error())
+        .into()
+}
+
 /// Derive macro for `Factory` — generates a sibling marker struct plus
 /// the `Factory` impl from a struct that implements `fake::Dummy`.
 ///

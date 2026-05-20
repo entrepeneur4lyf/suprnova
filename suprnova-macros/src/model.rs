@@ -21,6 +21,7 @@ mod columns;
 mod derive_eloquent;
 mod derive_seaorm;
 mod parse;
+pub mod prunable;
 
 use parse::ModelInput;
 

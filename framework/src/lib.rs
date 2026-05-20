@@ -217,12 +217,13 @@ pub use featureflag::{feature, is_enabled};
 // time by `#[suprnova::model]` (Task 3) and walked at boot by Phase 8
 // (Admin), `model:prune`, and future tooling.
 pub use eloquent::{
-    find_model_by_table, models, unguarded, AsArray, AsArrayObject, AsBool, AsCollection, AsDate,
-    AsDateTime, AsDecimal, AsEncrypted, AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject,
-    AsEnum, AsFloat, AsHashed, AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsObject,
-    AsString, AsTimestamp, Attrs, Builder, Cast, Collection, Direction, DynCast, EloquentModel,
-    Fillable, FirstOrCreate, IntoColumn, IntoDynCast, IntoVal, Model, ModelEntry, ReplicateExt,
-    Touchable,
+    find_model_by_table, models, prune_all, prune_all_dry, prune_one, unguarded, AsArray,
+    AsArrayObject, AsBool, AsCollection, AsDate, AsDateTime, AsDecimal, AsEncrypted,
+    AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject, AsEnum, AsFloat, AsHashed,
+    AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsObject, AsOptionalDateTime, AsString,
+    AsTimestamp, Attrs, Builder, Cast, Collection, Direction, DynCast, EloquentModel, Fillable,
+    FirstOrCreate, IntoColumn, IntoDynCast, IntoVal, MassPrunable, Model, ModelEntry, Prunable,
+    PrunerEntry, ReplicateExt, SoftDeletes, Touchable,
 };
 // `casts!` macro is `#[macro_export]` in eloquent/casts/mod.rs — re-exported
 // at the crate root automatically. No `pub use` needed here.
@@ -299,6 +300,7 @@ pub use suprnova_macros::inertia_response;
 pub use suprnova_macros::injectable;
 pub use suprnova_macros::model;
 pub use suprnova_macros::mutator;
+pub use suprnova_macros::prunable;
 pub use suprnova_macros::redirect;
 pub use suprnova_macros::request;
 pub use suprnova_macros::service;
