@@ -620,3 +620,66 @@ async fn has_many_sum_avg_zero_on_empty_group() {
         .expect("avg cache populated");
     assert_eq!(avg, 0.0);
 }
+
+// ---- T3 quality fix: HasMany count uses server-side GROUP BY ----------
+//
+// Regression coverage for the dispatcher's server-side `SELECT fk,
+// COUNT(*) ... GROUP BY fk` shape. Two cases:
+//
+// 1. Large fan-out: the count is loaded correctly AND the `set_many`
+//    slot remains empty (the dispatcher must NOT populate the eager
+//    rows cell as a side effect — `posts_loaded()` is for `with()`,
+//    `posts_count()` is for `with_count()`).
+// 2. Parent with zero children: count is explicitly 0 (not "missing"),
+//    so `posts_count()` returns 0 instead of panicking.
+
+#[tokio::test]
+async fn has_many_count_loads_count_without_populating_set_many() {
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    let u = OtmUser::create(attrs! { name: "test" }).await.unwrap();
+    for i in 0..50 {
+        let _ = OtmPost::create(attrs! { otm_user_id: u.id, title: format!("p{i}") })
+            .await
+            .unwrap();
+    }
+
+    let mut users = OtmUser::query().get().await.unwrap();
+    {
+        let mut refs: Vec<&mut OtmUser> = users.iter_mut().collect();
+        OtmUser::__count_relation("posts", refs.as_mut_slice(), _db.conn())
+            .await
+            .unwrap();
+    }
+    let u_loaded = users.iter().find(|x| x.id == u.id).unwrap();
+    assert_eq!(u_loaded.posts_count(), 50);
+
+    // `__count_relation` must NOT populate the `set_many` cell;
+    // `posts_loaded()` is only valid after `with(["posts"])`. The
+    // accessor panics with the "was not eager-loaded" message — any
+    // panic is sufficient for `catch_unwind`'s `is_err()` check.
+    let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = u_loaded.posts_loaded();
+    }));
+    assert!(
+        panic_result.is_err(),
+        "posts_loaded must panic since __count_relation only populates the count cell",
+    );
+}
+
+#[tokio::test]
+async fn has_many_count_returns_zero_when_no_children() {
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    let u = OtmUser::create(attrs! { name: "lonely" }).await.unwrap();
+
+    let mut users = OtmUser::query().get().await.unwrap();
+    {
+        let mut refs: Vec<&mut OtmUser> = users.iter_mut().collect();
+        OtmUser::__count_relation("posts", refs.as_mut_slice(), _db.conn())
+            .await
+            .unwrap();
+    }
+    let u_loaded = users.iter().find(|x| x.id == u.id).unwrap();
+    assert_eq!(u_loaded.posts_count(), 0);
+}

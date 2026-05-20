@@ -1080,52 +1080,146 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_has_fk(&parent_name));
 
-            // Same IN-query + JSON-pluck shape as HasOne, but with a
-            // real GROUP-BY-style accumulation: every child row in a
-            // parent's group contributes +1 to that parent's count.
-            // Parents with no children get 0 — set explicitly so the
+            // Server-side `GROUP BY` count — one round trip regardless
+            // of fan-out. The previous implementation fetched every
+            // child row into memory and counted client-side via a
+            // HashMap; at 10K children per parent that's 10K rows over
+            // the wire just to learn the count. This arm issues:
+            //
+            //   SELECT CAST(<fk> AS TEXT) AS __sn_fk_key,
+            //          COUNT(*)           AS __sn_count
+            //     FROM <child_table>
+            //    WHERE <fk> IN (?, ?, ...)
+            //    GROUP BY <fk>
+            //
+            // and distributes the per-FK counts into each parent's
+            // `__eager.set_count(name, n)`. Parents whose PK didn't
+            // appear in any child row get 0 — set explicitly so the
             // `<rel>_count()` accessor doesn't panic on "you forgot
             // `with_count`".
             //
-            // The implementation runs the equivalent of:
-            //   SELECT * FROM children WHERE fk IN (parent_pks)
-            // and counts client-side rather than `SELECT fk, COUNT(*)
-            // ... GROUP BY fk`. The full-row fetch is wasteful at
-            // large fan-out but matches T2's eager-arm shape; a more
-            // efficient COUNT(*) GROUP BY path can land later without
-            // changing the dispatcher signature. The current cost is
-            // bounded by the same IN query the eager arm already
-            // pays — for `with(["posts"]).with_count(["posts"])` the
-            // two queries would collapse together in a future
-            // optimisation pass.
+            // ## FK key matching
+            //
+            // The SQL `CAST(... AS TEXT)` form produces the raw
+            // stringified column value for both integer FKs (`"42"`)
+            // and string FKs (`"abc"`) on SQLite + Postgres; MySQL's
+            // `CAST(... AS CHAR)` produces the same shape and the
+            // backend branch below picks the right form. The
+            // parent-side key is derived to MATCH that raw form: a
+            // `serde_json::Value::String("abc")` is unwrapped to its
+            // inner `String` rather than rendered as `"\"abc\""` via
+            // `Value::to_string()`. This is internal to the dispatcher
+            // — the cache key for `set_count` is the relation name,
+            // not the FK key, so internal consistency is all that
+            // matters.
+            //
+            // T4-T7's count arms should follow the same server-side
+            // pattern. The HasMany aggregate arm above still reduces
+            // client-side; converting it lands under its own task
+            // because the aggregate dispatcher signature carries the
+            // `kind` branch and a different SQL shape per aggregate.
             Ok(Some(quote! {
                 #name_str => {
                     if parents.is_empty() { return ::core::result::Result::Ok(()); }
-                    let pk_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+
+                    // Per-parent FK-key derivation — matches the SQL
+                    // CAST output below. `Value::String(s)` unwraps to
+                    // raw `s` rather than the JSON-quoted form so the
+                    // string FK case lines up with the raw CAST result.
+                    fn __sn_parent_key_to_match_cast(
+                        v: ::suprnova::serde_json::Value,
+                    ) -> ::std::string::String {
+                        match v {
+                            ::suprnova::serde_json::Value::String(s) => s,
+                            other => other.to_string(),
+                        }
+                    }
+
+                    let pk_json_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
                         .iter()
                         .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
-                    let rows: ::std::vec::Vec<#target_ty> =
-                        <#target_ty as ::suprnova::eloquent::Model>::query()
-                            .filter_in(#fk, pk_values)
-                            .get()
-                            .await?;
+
+                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+
+                    // Build the placeholder list. Per-backend dialect
+                    // matches the inner `Builder` renderer: Postgres
+                    // uses `$N`, others use `?`. `parents.is_empty()`
+                    // already short-circuited above so the bind list
+                    // is non-empty here.
+                    let mut placeholders: ::std::vec::Vec<::std::string::String> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    let mut binds: ::std::vec::Vec<::suprnova::sea_orm::Value> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    for (i, v) in pk_json_values.iter().enumerate() {
+                        let ph = match db_backend {
+                            ::suprnova::sea_orm::DatabaseBackend::Postgres => {
+                                ::std::format!("${}", i + 1)
+                            }
+                            _ => ::std::string::String::from("?"),
+                        };
+                        placeholders.push(ph);
+                        binds.push(
+                            ::suprnova::eloquent::model::json_value_to_sea_value(v),
+                        );
+                    }
+
+                    // `CAST(... AS CHAR)` on MySQL, `CAST(... AS TEXT)`
+                    // elsewhere — both yield the raw stringified column
+                    // value the parent-side key derivation matches.
+                    let __sn_cast_kw = match db_backend {
+                        ::suprnova::sea_orm::DatabaseBackend::MySql => "CHAR",
+                        _ => "TEXT",
+                    };
+                    let __sn_table = <#target_ty as
+                        ::suprnova::eloquent::EloquentModel>::TABLE;
+                    let __sn_sql = ::std::format!(
+                        "SELECT CAST({fk} AS {cast}) AS __sn_fk_key, \
+                                COUNT(*) AS __sn_count \
+                           FROM {table} \
+                          WHERE {fk} IN ({phs}) \
+                          GROUP BY {fk}",
+                        fk = #fk,
+                        cast = __sn_cast_kw,
+                        table = __sn_table,
+                        phs = placeholders.join(", "),
+                    );
+
+                    let stmt = ::suprnova::sea_orm::Statement::from_sql_and_values(
+                        db_backend,
+                        &__sn_sql,
+                        binds,
+                    );
+                    let rows = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                        .await
+                        .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+
                     use ::std::collections::HashMap;
                     let mut counts: HashMap<::std::string::String, u64> = HashMap::new();
                     for r in rows.iter() {
-                        let row_json = ::suprnova::serde_json::to_value(r)
-                            .unwrap_or(::suprnova::serde_json::Value::Null);
-                        let key = row_json
-                            .get(#fk)
-                            .map(|v| v.to_string())
+                        // Both columns come back via `try_get` against
+                        // their declared aliases. COUNT(*) is a 64-bit
+                        // signed integer on every backend SeaORM
+                        // supports here.
+                        let key: ::std::string::String = r
+                            .try_get::<::std::string::String>("", "__sn_fk_key")
                             .unwrap_or_default();
-                        *counts.entry(key).or_insert(0) += 1;
+                        let n: i64 = r.try_get::<i64>("", "__sn_count").unwrap_or(0);
+                        // Negative COUNT shouldn't happen on real
+                        // backends, but the saturating cast guards
+                        // against pathological drivers without
+                        // panicking the dispatcher.
+                        counts.insert(key, n.max(0) as u64);
                     }
+
                     for p in parents.iter_mut() {
-                        let key = ::suprnova::serde_json::to_value(&p.#pk_ident)
-                            .map(|v| v.to_string())
-                            .unwrap_or_default();
+                        let key = __sn_parent_key_to_match_cast(
+                            ::suprnova::serde_json::to_value(&p.#pk_ident)
+                                .unwrap_or(::suprnova::serde_json::Value::Null),
+                        );
                         p.__eager.set_count(#name_str, *counts.get(&key).unwrap_or(&0));
                     }
                     return ::core::result::Result::Ok(());
