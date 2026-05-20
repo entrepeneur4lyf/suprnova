@@ -238,6 +238,22 @@ where
         self
     }
 
+    /// Override the related-side primary-key COLUMN name used by
+    /// [`Self::get`]'s IN-set filter and the macro-emitted aggregate
+    /// JOIN (`__sn_r.<col> = __sn_p.<pivot_related_key>`). Defaults to
+    /// `"id"`. Set this when the related model declares a non-`id`
+    /// primary key via `#[model(primary_key = "uuid")]` (or similar) —
+    /// without it, `.get()` filters on the wrong column and the
+    /// aggregate JOIN errors with "no such column: __sn_r.id".
+    ///
+    /// Named `related_pk` (not `related_key`) so it doesn't collide
+    /// with the existing [`Self::related_key`] builder, which sets the
+    /// pivot-side related FK column.
+    pub fn related_pk(mut self, key: impl Into<String>) -> Self {
+        self.related_key = key.into();
+        self
+    }
+
     /// Insert a pivot row linking the parent to `related_id`.
     /// Equivalent to `attach_with(related_id, Attrs::new())`.
     ///

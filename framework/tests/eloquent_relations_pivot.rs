@@ -196,9 +196,20 @@ async fn belongs_to_many_attach_idempotent_or_explicit() {
     let result1 = u.roles().attach(r.id).await;
     let result2 = u.roles().attach(r.id).await;
     assert!(result1.is_ok(), "first attach must succeed");
-    assert!(
-        result2.is_err(),
+    let err = result2.expect_err(
         "second attach must violate UNIQUE(btm_user_id, btm_role_id)",
+    );
+    // Pin the error MESSAGE — a generic "table not found" would
+    // satisfy `is_err()` but wouldn't prove the contract that the
+    // UNIQUE constraint is what rejected the duplicate. SQLite's
+    // exact wording is "UNIQUE constraint failed: btm_role_user...",
+    // but the check is permissive enough to survive Postgres/MySQL
+    // ("duplicate key value violates unique constraint" / "Duplicate
+    // entry ... for key").
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("unique") || msg.contains("constraint") || msg.contains("duplicate"),
+        "expected UNIQUE-related error, got: {msg}",
     );
 }
 
@@ -675,4 +686,123 @@ async fn belongs_to_many_custom_pivot_keys_resolve() {
     assert!(names.contains(&"write".to_string()));
 
     assert_eq!(u.perms().count().await.unwrap(), 2);
+}
+
+// ---- Custom related-PK column (`related_key = "..."`) -------------------
+//
+// The T4 review caught that `.get()`'s IN-filter and the aggregate-JOIN
+// arm hardcoded `"id"` as the related-side PK column. For any related
+// model declared with `#[model(primary_key = "uuid")]` (or similar),
+// that produced `no such column: __sn_r.id` errors at runtime. The fix
+// threads `related_key = "uuid"` from the macro options through to the
+// runtime via `.related_pk(...)`. This test pins that wiring
+// end-to-end.
+
+#[suprnova::model(table = "btm_uuid_things", primary_key = "uuid", key_type = "String", auto_increment = false)]
+pub struct BtmUuidThing {
+    pub uuid: String,
+    pub weight: i64,
+}
+
+#[suprnova::model(table = "btm_uuid_pivot", primary_key = "id")]
+pub struct BtmUuidPivot {
+    pub id: i64,
+    pub btm_uuid_user_id: i64,
+    pub btm_uuid_thing_uuid: String,
+}
+
+#[suprnova::model(table = "btm_uuid_users", relations = {
+    things: BelongsToMany<BtmUuidThing, BtmUuidPivot> {
+        related_key = "uuid",
+        pivot_related_key = "btm_uuid_thing_uuid",
+    },
+})]
+pub struct BtmUuidUser {
+    pub id: i64,
+    pub name: String,
+}
+
+async fn migrate_uuid(db: &TestDatabase) {
+    db.execute_unprepared(
+        "CREATE TABLE btm_uuid_users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE btm_uuid_things (uuid TEXT PRIMARY KEY, weight INTEGER NOT NULL)",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE btm_uuid_pivot (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            btm_uuid_user_id INTEGER NOT NULL, \
+            btm_uuid_thing_uuid TEXT NOT NULL, \
+            UNIQUE(btm_uuid_user_id, btm_uuid_thing_uuid)\
+         )",
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn belongs_to_many_respects_custom_related_pk() {
+    // Raw-SQL inserts for the UUID model bypass `create()` — the
+    // `key_type = "String", auto_increment = false` round-trip is
+    // orthogonal to T4, so we don't gate this test on it.
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate_uuid(&db).await;
+    let u = BtmUuidUser::create(attrs! { name: "alice" }).await.unwrap();
+    db.execute_unprepared(
+        "INSERT INTO btm_uuid_things (uuid, weight) VALUES ('thing-1', 10)",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(
+        "INSERT INTO btm_uuid_things (uuid, weight) VALUES ('thing-2', 25)",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(&format!(
+        "INSERT INTO btm_uuid_pivot (btm_uuid_user_id, btm_uuid_thing_uuid) \
+         VALUES ({}, 'thing-1')",
+        u.id,
+    ))
+    .await
+    .unwrap();
+    db.execute_unprepared(&format!(
+        "INSERT INTO btm_uuid_pivot (btm_uuid_user_id, btm_uuid_thing_uuid) \
+         VALUES ({}, 'thing-2')",
+        u.id,
+    ))
+    .await
+    .unwrap();
+
+    // `.get()` must JOIN on btm_uuid_things.uuid (NOT the hardcoded
+    // "id") — without the fix this errors with "no such column: id".
+    let things = u
+        .things()
+        .get()
+        .await
+        .expect("get() must honour related_key when related PK is non-`id`");
+    assert_eq!(things.len(), 2);
+
+    // The aggregate dispatcher must use the same JOIN column. If the
+    // hardcoded `"id"` slipped back in this errors at SQL prepare time.
+    let mut parents = BtmUuidUser::all().await.unwrap();
+    {
+        let mut refs: Vec<&mut BtmUuidUser> = parents.iter_mut().collect();
+        BtmUuidUser::__aggregate_relation(
+            "things",
+            "weight",
+            AggregateKind::Sum,
+            refs.as_mut_slice(),
+            db.conn(),
+        )
+        .await
+        .unwrap();
+    }
+    let u_loaded = parents.iter().find(|p| p.id == u.id).unwrap();
+    let sum: &f64 = u_loaded.__eager.get_aggregate::<f64>("things").unwrap();
+    assert_eq!(*sum, 35.0);
 }

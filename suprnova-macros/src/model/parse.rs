@@ -156,6 +156,14 @@ pub enum RelationOpt {
     /// `pivot_related_key = "role_id"` — pivot column pointing at the
     /// related row (`R`). Defaults to `<snake(target_struct)>_id`.
     PivotRelatedKey(String),
+    /// `related_key = "uuid"` — the related-side primary-key COLUMN name
+    /// used by `BelongsToMany`'s `.get()` JOIN and aggregate JOIN.
+    /// Defaults to `"id"`. Required when the related model declares
+    /// `#[model(primary_key = "..."]` with a non-`id` PK — without
+    /// this option the aggregate SQL writes `__sn_r.id = __sn_p.{rk}`
+    /// and the related-row IN-set filters on the wrong column, silently
+    /// producing empty results or `no such column: id` errors.
+    RelatedKey(String),
 }
 
 /// The parsed `#[model(...)]` attribute plus the struct definition.
@@ -848,6 +856,10 @@ fn parse_relation_options(input: ParseStream, kind: RelationKindAttr) -> Result<
                     let s: LitStr = content.parse()?;
                     out.push(RelationOpt::PivotRelatedKey(s.value()));
                 }
+                "related_key" => {
+                    let s: LitStr = content.parse()?;
+                    out.push(RelationOpt::RelatedKey(s.value()));
+                }
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
@@ -855,7 +867,7 @@ fn parse_relation_options(input: ParseStream, kind: RelationKindAttr) -> Result<
                             "unknown relation option `{other}`. Expected one of: fk, lk, \
                              with_pivot, with_timestamps, with_default, scope, name, targets, \
                              first_key, second_key, pivot_table, pivot_foreign_key, \
-                             pivot_related_key.",
+                             pivot_related_key, related_key.",
                         ),
                     ));
                 }

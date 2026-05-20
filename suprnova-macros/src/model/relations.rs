@@ -584,6 +584,17 @@ fn pivot_related_override(rel: &RelationDecl) -> Option<&str> {
     })
 }
 
+/// Look up the user-declared `related_key = "..."` override — the
+/// related-side primary-key COLUMN name used by `BelongsToMany`'s
+/// `.get()` IN-filter and the aggregate JOIN. Defaults to `"id"` when
+/// omitted (matches SeaORM convention).
+fn related_key_override(rel: &RelationDecl) -> Option<&str> {
+    rel.options.iter().find_map(|o| match o {
+        RelationOpt::RelatedKey(s) => Some(s.as_str()),
+        _ => None,
+    })
+}
+
 /// Look up `with_pivot = ["col1", ...]` extra columns. Returns an
 /// empty slice when omitted.
 fn with_pivot_cols(rel: &RelationDecl) -> &[String] {
@@ -833,6 +844,14 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             } else {
                 quote! { .local_key(#lk) }
             };
+            // Related-side PK column. Defaults to `"id"`. Chained as
+            // `.related_pk(#rk)` so the runtime IN-filter (`.get()`)
+            // and aggregate JOIN read the correct column when the
+            // related model declares a non-`id` primary key.
+            let related_key_chain = match related_key_override(rel) {
+                Some(rk) if rk != "id" => quote! { .related_pk(#rk) },
+                _ => quote! {},
+            };
 
             Ok(quote! {
                 impl #struct_ident {
@@ -851,6 +870,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                             ::std::string::String::from(#pivot_related),
                         )
                         #local_key_chain
+                        #related_key_chain
                         #with_pivot_chain
                         #with_timestamps_chain
                     }
@@ -2087,6 +2107,13 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                 .unwrap_or_else(|| {
                     format!("{}_id", to_snake(&last_segment_name(target_ty)))
                 });
+            // Related-side PK column. Defaults to `"id"`. When the user
+            // declares `related_key = "uuid"` on the relation, the JOIN
+            // reads `__sn_r.uuid = __sn_p.{rk}` instead of the broken
+            // `__sn_r.id = ...` form.
+            let related_pk = related_key_override(rel)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "id".to_string());
             let pivot_table_expr: TokenStream = match pivot_table_override(rel) {
                 Some(t) => {
                     let lit = syn::LitStr::new(t, proc_macro2::Span::call_site());
@@ -2163,11 +2190,12 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         "SELECT CAST(__sn_p.{fk} AS {cast}) AS __sn_fk_key, \
                                 {agg} AS __sn_agg \
                            FROM {pivot} __sn_p \
-                           JOIN {related} __sn_r ON __sn_r.id = __sn_p.{rk} \
+                           JOIN {related} __sn_r ON __sn_r.{related_pk} = __sn_p.{rk} \
                           WHERE __sn_p.{fk} IN ({phs}) \
                           GROUP BY __sn_p.{fk}",
                         fk = #pivot_fk,
                         rk = #pivot_related,
+                        related_pk = #related_pk,
                         cast = __sn_cast_kw,
                         agg = __sn_agg_expr,
                         pivot = __sn_pivot,
