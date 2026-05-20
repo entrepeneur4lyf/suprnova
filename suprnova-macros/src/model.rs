@@ -20,6 +20,7 @@ mod casts;
 mod columns;
 mod derive_eloquent;
 mod derive_seaorm;
+mod events;
 mod parse;
 pub mod prunable;
 mod relations;
@@ -75,6 +76,14 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
 
     let module_name = input.module_name();
     let struct_def = input.struct_def();
+    let struct_ident = &input.item.ident;
+
+    // Phase 10C T1 — per-model lifecycle events. The inner submodule
+    // ships the 16 event structs (`Created`, `Saving`, ...); the
+    // outer impl wires `Model::create` / `save` / `delete` / ... to
+    // dispatch them through the global event dispatcher.
+    let events_module = events::emit_events_module(struct_ident);
+    let events_dispatch_impl = events::emit_event_dispatch_impl(struct_ident);
 
     Ok(quote! {
         #struct_def
@@ -92,12 +101,15 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
 
             #seaorm
             #columns
+
+            #events_module
         }
 
         #eloquent
         #relations_tokens
         #registry
         #morph_registry
+        #events_dispatch_impl
     })
 }
 
