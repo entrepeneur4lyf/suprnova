@@ -779,14 +779,13 @@ where
     /// by IN-set on those `<morph_name>_id` values. Zip via the pivot's
     /// `<morph_name>_id` column to stamp `__pivot` per R.
     pub async fn get(self) -> Result<Vec<R>, FrameworkError> {
-        let conn = DB::connection()?;
-        let backend = conn.inner().get_database_backend();
-
         let id_col = format!("{}_id", self.morph_name);
         let type_col = format!("{}_type", self.morph_name);
 
         // Query 1: pivot rows, full row (we need the morph-id column
-        // to zip + the rest for `__pivot` context).
+        // to zip + the rest for `__pivot` context). Goes through the
+        // typed `Builder<P>` path so casts on P's columns flow through
+        // SeaORM's deserialiser correctly.
         let pivot_rows: Vec<P> = P::query()
             .filter(
                 self.pivot_foreign_key.as_str(),
@@ -799,11 +798,6 @@ where
             .get()
             .await?;
         if pivot_rows.is_empty() {
-            // Belt-and-braces: short-circuit before issuing the second
-            // query when there are no attachments at all.
-            // (Suppress the unused `backend` warning by referencing it
-            // — used below in the lazy path when pivots are populated.)
-            let _ = backend;
             return Ok(Vec::new());
         }
 
