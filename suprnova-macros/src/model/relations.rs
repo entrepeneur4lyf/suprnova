@@ -1477,12 +1477,23 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             // (None if no row); HasManyThrough stores `set_many`
             // (empty Vec if no rows). Per-parent group reduction
             // happens client-side over the already-grouped HashMap.
+            //
+            // Key shape: `__sn_parent_key_to_match_cast` (declared in
+            // the outer arm body below) unwraps `Value::String(s)` to
+            // raw `s` rather than the JSON-quoted form, so String PKs
+            // line up with the `CAST(... AS TEXT)` column on the
+            // `b_to_parent` lookup. The count and aggregate arms use
+            // the same helper for the same reason — the eager arm
+            // previously used `to_value(...).to_string()` directly,
+            // which produced `"\"abc\""` for String PKs and silently
+            // missed the lookup.
             let distribute = if is_one {
                 quote! {
                     for p in parents.iter_mut() {
-                        let pk_str = ::suprnova::serde_json::to_value(&p.#pk_ident)
-                            .map(|v| v.to_string())
-                            .unwrap_or_default();
+                        let pk_str = __sn_parent_key_to_match_cast(
+                            ::suprnova::serde_json::to_value(&p.#pk_ident)
+                                .unwrap_or(::suprnova::serde_json::Value::Null),
+                        );
                         let row: ::core::option::Option<#target_ty> =
                             by_parent.remove(&pk_str).and_then(|mut g| g.pop());
                         p.__eager.set_one::<#target_ty>(#name_str, row);
@@ -1491,9 +1502,10 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             } else {
                 quote! {
                     for p in parents.iter_mut() {
-                        let pk_str = ::suprnova::serde_json::to_value(&p.#pk_ident)
-                            .map(|v| v.to_string())
-                            .unwrap_or_default();
+                        let pk_str = __sn_parent_key_to_match_cast(
+                            ::suprnova::serde_json::to_value(&p.#pk_ident)
+                                .unwrap_or(::suprnova::serde_json::Value::Null),
+                        );
                         let group = by_parent.remove(&pk_str).unwrap_or_default();
                         p.__eager.set_many::<#target_ty>(#name_str, group);
                     }
@@ -1503,6 +1515,22 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             Ok(Some(quote! {
                 #name_str => {
                     if parents.is_empty() { return ::core::result::Result::Ok(()); }
+
+                    // Per-parent FK-key derivation — matches the SQL
+                    // CAST output of Query 1 below. `Value::String(s)`
+                    // unwraps to raw `s` rather than the JSON-quoted
+                    // form so the String PK case lines up with the raw
+                    // `CAST(... AS TEXT)` result on the b->parent map.
+                    // Mirrors the helper in the count and aggregate
+                    // arms; spliced into both `#distribute` branches.
+                    fn __sn_parent_key_to_match_cast(
+                        v: ::suprnova::serde_json::Value,
+                    ) -> ::std::string::String {
+                        match v {
+                            ::suprnova::serde_json::Value::String(s) => s,
+                            other => other.to_string(),
+                        }
+                    }
 
                     let pk_json_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
                         .iter()

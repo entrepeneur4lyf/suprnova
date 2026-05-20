@@ -780,3 +780,146 @@ async fn has_one_through_eager_load_distributes_single_row() {
         "u2 has no membership row => profile is None",
     );
 }
+
+// ---- String-PK parent through eager load (T5 audit fix) -----------------
+//
+// Regression: the Through `__eager_load` distribute block previously built
+// the per-parent lookup key as `serde_json::to_value(&p.pk).to_string()`.
+// For `i64` PKs that produces `"42"` — matches the `CAST(parent_id AS TEXT)`
+// result on the b->parent map. For `String` PKs like `"A1"` it produced the
+// JSON-quoted `"\"A1\""` while the SQL CAST result was the raw `"A1"`. The
+// HashMap lookup missed → every parent silently received an empty
+// `posts_loaded()` slice. The fix routes the key through the existing
+// `__sn_parent_key_to_match_cast` helper (already used by the count and
+// aggregate arms). This test pins that wiring.
+
+#[suprnova::model(
+    table = "th_str_owners",
+    primary_key = "code",
+    key_type = "String",
+    auto_increment = false,
+    timestamps = false,
+    relations = {
+        posts: HasManyThrough<ThStrIntermediate, ThStrPost> {
+            first_key = "th_str_owner_code",
+        },
+    },
+)]
+pub struct ThStrOwner {
+    pub code: String,
+    pub name: String,
+}
+
+#[suprnova::model(table = "th_str_intermediates", timestamps = false)]
+pub struct ThStrIntermediate {
+    pub id: i64,
+    pub th_str_owner_code: String,
+}
+
+#[suprnova::model(table = "th_str_posts", timestamps = false)]
+pub struct ThStrPost {
+    pub id: i64,
+    pub th_str_intermediate_id: i64,
+    pub title: String,
+}
+
+async fn migrate_str_through(db: &TestDatabase) {
+    db.execute_unprepared(
+        "CREATE TABLE th_str_owners (code TEXT PRIMARY KEY, name TEXT NOT NULL)",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE th_str_intermediates (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            th_str_owner_code TEXT NOT NULL\
+         )",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE th_str_posts (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            th_str_intermediate_id INTEGER NOT NULL, \
+            title TEXT NOT NULL\
+         )",
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn has_many_through_eager_load_with_string_parent_pk() {
+    // Raw-SQL setup — the String-PK `create()` path is orthogonal to the
+    // bug under test; `ThStrOwner::all()` then `query().with(...).get()`
+    // exercise the Builder + `__eager_load` path that does the lookup.
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate_str_through(&db).await;
+
+    db.execute_unprepared(
+        "INSERT INTO th_str_owners (code, name) VALUES ('A1', 'owner-A1')",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(
+        "INSERT INTO th_str_owners (code, name) VALUES ('B2', 'owner-B2')",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(
+        "INSERT INTO th_str_intermediates (id, th_str_owner_code) VALUES (1, 'A1')",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(
+        "INSERT INTO th_str_intermediates (id, th_str_owner_code) VALUES (2, 'B2')",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(
+        "INSERT INTO th_str_posts (th_str_intermediate_id, title) \
+         VALUES (1, 'A1-post1')",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(
+        "INSERT INTO th_str_posts (th_str_intermediate_id, title) \
+         VALUES (1, 'A1-post2')",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(
+        "INSERT INTO th_str_posts (th_str_intermediate_id, title) \
+         VALUES (2, 'B2-post1')",
+    )
+    .await
+    .unwrap();
+
+    let loaded: Vec<ThStrOwner> = ThStrOwner::query()
+        .with(["posts"])
+        .get()
+        .await
+        .unwrap();
+    let by_code: std::collections::HashMap<&str, &ThStrOwner> = loaded
+        .iter()
+        .map(|r| (r.code.as_str(), r))
+        .collect();
+
+    let a1 = by_code.get("A1").expect("A1 round-trips through query");
+    let a1_posts = a1.posts_loaded();
+    assert_eq!(
+        a1_posts.len(),
+        2,
+        "String-PK parent must receive its grandchildren — \
+         if this regresses to 0, the distribute-key shape no longer \
+         matches the b_to_parent CAST output (bug pre-T5-audit-fix)"
+    );
+    let mut a1_titles: Vec<&str> = a1_posts.iter().map(|p| p.title.as_str()).collect();
+    a1_titles.sort();
+    assert_eq!(a1_titles, vec!["A1-post1", "A1-post2"]);
+
+    let b2 = by_code.get("B2").expect("B2 round-trips through query");
+    let b2_posts = b2.posts_loaded();
+    assert_eq!(b2_posts.len(), 1);
+    assert_eq!(b2_posts[0].title, "B2-post1");
+}
