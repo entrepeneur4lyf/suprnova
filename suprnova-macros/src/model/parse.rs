@@ -222,6 +222,19 @@ pub struct ModelInput {
     /// `relations = {}` (legal — still wires the four dispatcher
     /// skeletons).
     pub relations: Option<Vec<RelationDecl>>,
+    /// Phase 10B T6 — `morph_type = "post"` attribute. The string this
+    /// model registers under in a `MorphTo`'s `*_type` discriminator
+    /// column. Defaults to `to_snake(struct_name)` at use sites when
+    /// omitted, matching Laravel's convention.
+    ///
+    /// Read by the `MorphOne` / `MorphMany` relation method emitter
+    /// (the parent side of a polymorphic relation needs to know what
+    /// string to filter the child's `*_type` column by) and by T8's
+    /// `MorphTypeEntry` inventory (for the runtime
+    /// `type_string -> TypeId` reverse lookup). Both readers honour the
+    /// fallback themselves; nothing else on `ModelInput` references this.
+    #[allow(dead_code)]
+    pub morph_type: Option<String>,
 }
 
 impl ModelInput {
@@ -399,6 +412,7 @@ impl ModelInput {
             mutators: attrs.mutators.unwrap_or_default(),
             touches: attrs.touches.unwrap_or_default(),
             relations: attrs.relations,
+            morph_type: attrs.morph_type,
         })
     }
 
@@ -568,6 +582,7 @@ struct ModelAttrs {
     mutators: Option<Vec<String>>,
     touches: Option<Vec<String>>,
     relations: Option<Vec<RelationDecl>>,
+    morph_type: Option<String>,
 }
 
 impl Parse for ModelAttrs {
@@ -614,6 +629,7 @@ impl Parse for ModelAttrs {
                     "mutators" => out.mutators = Some(parse_str_array(input)?),
                     "touches" => out.touches = Some(parse_str_array(input)?),
                     "relations" => out.relations = Some(parse_relations_map(input)?),
+                    "morph_type" => out.morph_type = Some(input.parse::<LitStr>()?.value()),
                     other => {
                         return Err(syn::Error::new(
                             key.span(),

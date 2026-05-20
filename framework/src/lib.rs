@@ -224,8 +224,8 @@ pub use eloquent::{
     AsJson, AsObject, AsOptionalDateTime, AsString, AsTimestamp, Attrs, BelongsTo, BelongsToMany,
     Builder, Cast, Collection, Direction, DynCast, EagerLoadCache, EagerLoadDispatch, EloquentModel,
     Fillable, FirstOrCreate, HasMany, HasManyThrough, HasOne, HasOneThrough, IntoColumn,
-    IntoDynCast, IntoVal, MassPrunable, Model, ModelEntry, Prunable, PrunerEntry, Relation,
-    RelationEntry, RelationKind, ReplicateExt, SoftDeletes, Touchable,
+    IntoDynCast, IntoVal, MassPrunable, Model, ModelEntry, MorphMany, MorphOne, MorphTo, Prunable,
+    PrunerEntry, Relation, RelationEntry, RelationKind, ReplicateExt, SoftDeletes, Touchable,
 };
 // `casts!` macro is `#[macro_export]` in eloquent/casts/mod.rs — re-exported
 // at the crate root automatically. No `pub use` needed here.

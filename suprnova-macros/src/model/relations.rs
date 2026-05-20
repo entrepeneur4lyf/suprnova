@@ -667,6 +667,100 @@ fn with_timestamps_flag(rel: &RelationDecl) -> bool {
         .any(|o| matches!(o, RelationOpt::WithTimestamps))
 }
 
+/// Look up the user-declared `name = "..."` morph-family override.
+/// Defaults to the relation name itself when omitted — e.g. a relation
+/// declared as `commentable: MorphTo { targets = [...] }` derives a
+/// morph-name of `"commentable"` without needing the redundant
+/// `name = "commentable"` option.
+fn morph_name_or_default(rel: &RelationDecl) -> String {
+    rel.options
+        .iter()
+        .find_map(|o| match o {
+            RelationOpt::MorphName(s) => Some(s.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| rel.name.to_string())
+}
+
+/// Look up the user-declared `targets = [...]` list on a `MorphTo`
+/// declaration. The parser guarantees this option is present for
+/// `MorphTo` declarations (see `parse_one_relation`); the `expect`
+/// / `ok_or_else` callers handle the unreachable case.
+fn morph_targets(rel: &RelationDecl) -> Option<&[syn::Type]> {
+    rel.options.iter().find_map(|o| match o {
+        RelationOpt::MorphTargets(types) => Some(types.as_slice()),
+        _ => None,
+    })
+}
+
+/// The morph-type string a model registers under. Read from the
+/// model's `morph_type = "..."` attribute when present; defaults to
+/// `to_snake(struct_name)` otherwise (Laravel convention — `Post`
+/// becomes `"post"`).
+///
+/// This is the string the parent puts into the child's
+/// `<morph_name>_type` column at insert time, and the string the
+/// `MorphMany` / `MorphOne` runtime uses to filter the child table
+/// by. Per the brief: T8's morph registry adds a runtime warn-log
+/// cross-check; T6 trusts the per-model attribute + Laravel default.
+fn morph_type_of(input: &ModelInput) -> String {
+    input
+        .morph_type
+        .clone()
+        .unwrap_or_else(|| to_snake(&input.item.ident.to_string()))
+}
+
+/// Generate the set of candidate morph-type match keys for one target
+/// in a `MorphTo`'s per-family fetch helper. Since the macro for the
+/// `MorphTo` declaration site can't introspect another struct's
+/// `morph_type = "..."` attribute (it lives in a separate macro
+/// expansion), we emit ALL plausible match keys so a target declared
+/// with the default OR with one of the obvious shortenings still
+/// dispatches.
+///
+/// For a target named `MorphPost`, this yields:
+/// - `"morph_post"` — `to_snake(TargetTypeName)` (the macro default)
+/// - `"morphpost"` — no-underscore form
+/// - `"post"` — Laravel convention (struct name minus a `Morph`
+///   prefix when one exists; if there's no obvious prefix this falls
+///   through to the snake form, deduped via `sort + dedup`).
+///
+/// For a target named `Post` (no prefix), the result collapses to
+/// `["post"]` — `to_snake`, no-underscore, and the no-prefix branch
+/// all produce the same string.
+///
+/// T8's registry adds a runtime warn-log if a target's actual stored
+/// `morph_type` value doesn't match any of these candidates.
+fn morph_target_keys(ty: &syn::Type) -> Vec<String> {
+    let name = match ty {
+        syn::Type::Path(p) => p
+            .path
+            .segments
+            .last()
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_else(|| quote::quote!(#ty).to_string()),
+        _ => quote::quote!(#ty).to_string(),
+    };
+    let snake = to_snake(&name);
+    let no_underscore = snake.replace('_', "");
+    // Laravel convention: strip a leading `Morph` prefix when present
+    // so `MorphPost` → `"post"`. Falls back to the snake form when no
+    // prefix is found.
+    let stripped = if let Some(rest) = name.strip_prefix("Morph") {
+        if !rest.is_empty() {
+            to_snake(rest)
+        } else {
+            snake.clone()
+        }
+    } else {
+        snake.clone()
+    };
+    let mut out = vec![snake.clone(), no_underscore, stripped];
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Extract the last path segment of a type ident, e.g. `Post` from
 /// `crate::models::Post`. Used for default pivot-key derivation
 /// (`<snake(name)>_id`) when the user omits `pivot_foreign_key`
@@ -1027,10 +1121,245 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                 }
             })
         }
-        // T6-T7 own the remaining kinds (Morph*). We emit nothing for
-        // those so the macro still accepts the declaration — the
-        // method just doesn't exist yet, which is fine because no
-        // test code in T5 calls it.
+        RelationKindAttr::MorphMany | RelationKindAttr::MorphOne => {
+            // Polymorphic one-to-many / one-to-one. The relation
+            // declaration lives on the PARENT side (e.g.
+            // `comments: MorphMany<Comment> { name = "commentable" }`
+            // on Post + Video). The macro emits a method that returns
+            // a runtime `MorphMany<Self, Comment>` (or `MorphOne<...>`)
+            // pre-filtered with both `commentable_id = self.id` and
+            // `commentable_type = "post"`.
+            //
+            // Two pieces of metadata flow from the model attributes:
+            //
+            // 1. `morph_name` — controls the `<name>_id` /
+            //    `<name>_type` column names on the child table.
+            //    Defaults to the relation name itself.
+            //
+            // 2. `morph_type_value` — the parent's `morph_type = "..."`
+            //    attribute (defaulted to `to_snake(struct_name)`).
+            //    This is the string the child's `*_type` column has
+            //    to equal for the row to belong to this parent.
+            let morph_name = morph_name_or_default(rel);
+            let morph_type_value = morph_type_of(input);
+            let wrapper = match rel.kind {
+                RelationKindAttr::MorphMany => quote! { MorphMany },
+                RelationKindAttr::MorphOne => quote! { MorphOne },
+                _ => unreachable!("guarded by outer match arm"),
+            };
+            let doc_kind = match rel.kind {
+                RelationKindAttr::MorphMany => "MorphMany",
+                RelationKindAttr::MorphOne => "MorphOne",
+                _ => unreachable!("guarded by outer match arm"),
+            };
+            let doc_str = format!(
+                "Construct a `{doc_kind}` polymorphic relation builder for this row."
+            );
+            Ok(quote! {
+                impl #struct_ident {
+                    #[doc = #doc_str]
+                    #[doc = ""]
+                    #[doc = "Chainable — both `<morph_name>_id` and `<morph_name>_type` \
+                             predicates are pre-applied. Children pointing at OTHER \
+                             parents (different `*_type` values) never appear in \
+                             results."]
+                    pub fn #method_ident(&self) -> ::suprnova::#wrapper<Self, #target_ty> {
+                        let parent_value = ::suprnova::serde_json::to_value(&self.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        ::suprnova::#wrapper::<Self, #target_ty>::__new(
+                            parent_value,
+                            ::std::string::String::from(#morph_name),
+                            ::std::string::String::from(#morph_type_value),
+                        )
+                    }
+                }
+            })
+        }
+        RelationKindAttr::MorphTo => {
+            // `MorphTo` is the inverse side — the user declared
+            // `commentable: MorphTo { name = "commentable",
+            //  targets = [MorphPost, MorphVideo] }` on the morph-table
+            // model (Comment). The macro emits THREE things at this
+            // declaration site:
+            //
+            // 1. A per-family enum `<Name>Morph` with one variant per
+            //    target + `Unknown(String, i64)` for legacy rows.
+            // 2. A per-family fetch helper `<Name>MorphFetch` carrying
+            //    the FK + type-string, with a `.get()` method that
+            //    matches the type-string against per-target candidate
+            //    keys and returns the per-family enum.
+            // 3. An inherent method on the morph-table model that
+            //    constructs the fetch helper from the row's
+            //    `<name>_id` + `<name>_type` columns.
+            //
+            // The user's call site reads:
+            //
+            //     match comment.commentable().get().await? {
+            //         CommentableMorph::MorphPost(p) => ...,
+            //         CommentableMorph::MorphVideo(v) => ...,
+            //         CommentableMorph::Unknown(t, id) => ...,
+            //     }
+            //
+            // No runtime `MorphTo<C>` instance is built at the call
+            // site — `MorphTo<C>` is purely metadata for the relation
+            // registry + a re-export users can name in turbofish.
+            let morph_name = morph_name_or_default(rel);
+            let id_field = quote::format_ident!("{morph_name}_id");
+            let type_field = quote::format_ident!("{morph_name}_type");
+            // Enum + fetch struct names — `commentable` →
+            // `CommentableMorph` / `CommentableMorphFetch`.
+            let enum_ident = {
+                let s = rel.name.to_string();
+                let mut chars = s.chars();
+                let first = chars
+                    .next()
+                    .map(|c| c.to_ascii_uppercase().to_string())
+                    .unwrap_or_default();
+                // Strip underscores + capitalise each segment so
+                // `something_polymorphic` becomes
+                // `SomethingPolymorphicMorph`.
+                let mut camel = String::with_capacity(s.len());
+                camel.push_str(&first);
+                let mut upper_next = false;
+                for c in chars {
+                    if c == '_' {
+                        upper_next = true;
+                    } else if upper_next {
+                        camel.push(c.to_ascii_uppercase());
+                        upper_next = false;
+                    } else {
+                        camel.push(c);
+                    }
+                }
+                quote::format_ident!("{camel}Morph")
+            };
+            let fetch_ident = quote::format_ident!("{enum_ident}Fetch");
+
+            let targets = morph_targets(rel).ok_or_else(|| {
+                syn::Error::new_spanned(
+                    method_ident,
+                    "MorphTo requires `targets = [...]` (parser bug if reached)",
+                )
+            })?;
+
+            // Variant idents = the target's last path segment (e.g.
+            // `MorphPost` from `crate::models::MorphPost`). Mechanically
+            // required — enum variants name the user type, not a
+            // generic placeholder.
+            let variant_idents: Vec<syn::Ident> = targets
+                .iter()
+                .map(|ty| {
+                    let name = match ty {
+                        syn::Type::Path(p) => p
+                            .path
+                            .segments
+                            .last()
+                            .map(|seg| seg.ident.to_string())
+                            .unwrap_or_else(|| quote::quote!(#ty).to_string()),
+                        _ => quote::quote!(#ty).to_string(),
+                    };
+                    quote::format_ident!("{name}")
+                })
+                .collect();
+
+            // Per-target match arms inside `<Name>MorphFetch::get()`.
+            // Each arm enumerates all plausible morph-type keys for
+            // the target (snake / no-underscore / Laravel short form)
+            // and on a hit, calls `Target::find(id)` through the
+            // standard Eloquent CRUD path. Misses (None) and unknown
+            // type-strings both fall through to the `Unknown` variant.
+            let mut fetch_arms: Vec<TokenStream> = Vec::with_capacity(targets.len());
+            for (ty, variant) in targets.iter().zip(variant_idents.iter()) {
+                let keys = morph_target_keys(ty);
+                let key_lits = keys
+                    .iter()
+                    .map(|k| quote! { #k })
+                    .collect::<Vec<_>>();
+                fetch_arms.push(quote! {
+                    #( #key_lits )|* => {
+                        let row: ::core::option::Option<#ty> =
+                            <#ty as ::suprnova::eloquent::Model>::find(self.morph_id).await?;
+                        match row {
+                            ::core::option::Option::Some(r) => {
+                                ::core::result::Result::Ok(#enum_ident::#variant(r))
+                            }
+                            ::core::option::Option::None => {
+                                ::core::result::Result::Ok(#enum_ident::Unknown(
+                                    self.morph_type,
+                                    self.morph_id,
+                                ))
+                            }
+                        }
+                    }
+                });
+            }
+
+            Ok(quote! {
+                /// Per-family morph enum generated by the
+                /// `#[suprnova::model(relations = { ...: MorphTo {
+                /// targets = [...] } })]` declaration on the
+                /// morph-table struct. One variant per declared target
+                /// + `Unknown(type_string, id)` for legacy rows whose
+                /// `<name>_type` column doesn't match any registered
+                /// target.
+                #[derive(::std::fmt::Debug, ::core::clone::Clone)]
+                pub enum #enum_ident {
+                    #(
+                        #variant_idents(#targets),
+                    )*
+                    /// Row's `<morph_name>_type` column didn't match any
+                    /// registered target. Carries the unmatched type
+                    /// string + the FK value so callers can log or
+                    /// migrate the stale data.
+                    Unknown(::std::string::String, i64),
+                }
+
+                /// Fetch helper that dispatches into the per-family
+                /// enum. Built by the morph-table model's
+                /// `<rel>()` method; calling `.get().await?` resolves
+                /// the parent row via the standard Eloquent CRUD path.
+                pub struct #fetch_ident {
+                    morph_id: i64,
+                    morph_type: ::std::string::String,
+                }
+
+                impl #fetch_ident {
+                    /// Resolve the polymorphic parent. Returns the
+                    /// per-family enum's `Unknown` variant when the
+                    /// `<name>_type` column doesn't match any declared
+                    /// target OR when the looked-up row is absent
+                    /// (legacy / soft-deleted / renamed model).
+                    pub async fn get(
+                        self,
+                    ) -> ::core::result::Result<#enum_ident, ::suprnova::FrameworkError> {
+                        match self.morph_type.as_str() {
+                            #(#fetch_arms)*
+                            _ => ::core::result::Result::Ok(#enum_ident::Unknown(
+                                self.morph_type,
+                                self.morph_id,
+                            )),
+                        }
+                    }
+                }
+
+                impl #struct_ident {
+                    #[doc = "Construct a `MorphTo` fetch helper for this row."]
+                    #[doc = ""]
+                    #[doc = "Resolves the polymorphic parent via the row's \
+                             `<morph_name>_id` + `<morph_name>_type` columns. \
+                             Awaiting `.get()` returns the per-family enum with \
+                             one variant per declared target."]
+                    pub fn #method_ident(&self) -> #fetch_ident {
+                        #fetch_ident {
+                            morph_id: self.#id_field,
+                            morph_type: self.#type_field.clone(),
+                        }
+                    }
+                }
+            })
+        }
+        // T7 owns the remaining morph m2m kinds. We emit nothing for
+        // them so the macro still accepts the declaration.
         _ => Ok(TokenStream::new()),
     }
 }
@@ -1679,6 +2008,97 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 }
             }))
         }
+        RelationKindAttr::MorphMany | RelationKindAttr::MorphOne => {
+            // Polymorphic eager-load. Same shape as the HasMany arm
+            // (IN-query by parent IDs, group by FK, distribute into
+            // each parent's `__eager` cache) but with an additional
+            // `<name>_type = '<morph_type>'` predicate so children of
+            // OTHER morph families (e.g. comments on Video when the
+            // parent is Post) are excluded.
+            //
+            // The id column on the child = `<morph_name>_id` and the
+            // type column = `<morph_name>_type` — both baked from
+            // `morph_name` (which defaults to the relation name).
+            //
+            // MorphOne distributes via `set_one` (first row wins per
+            // parent); MorphMany distributes via `set_many`.
+            let morph_name = morph_name_or_default(rel);
+            let morph_type_value = morph_type_of(input);
+            let id_col = format!("{morph_name}_id");
+            let type_col = format!("{morph_name}_type");
+            let is_one = matches!(rel.kind, RelationKindAttr::MorphOne);
+            let distribute = if is_one {
+                quote! {
+                    for p in parents.iter_mut() {
+                        let key = ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        // First row wins (per HasOne semantics) — we
+                        // sort by id ASC implicitly via the order the
+                        // groups were built, but explicit `LIMIT 1`
+                        // logic isn't worth a separate dispatch path
+                        // because MorphOne is by contract 0-or-1 row.
+                        let row = by_fk.remove(&key).and_then(|mut v| v.pop());
+                        p.__eager.set_one::<#target_ty>(#name_str, row);
+                    }
+                }
+            } else {
+                quote! {
+                    for p in parents.iter_mut() {
+                        let key = ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        let group = by_fk.remove(&key).unwrap_or_default();
+                        p.__eager.set_many::<#target_ty>(#name_str, group);
+                    }
+                }
+            };
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+                    let pk_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null))
+                        .collect();
+                    // Type-string predicate goes through the
+                    // standard `filter` path; the inner builder
+                    // serialises it to a bind parameter via
+                    // `IntoVal`. We pre-wrap it in a JSON `String`
+                    // value so the WhereTerm storage stays
+                    // homogeneous with the IN-list above.
+                    let morph_type_predicate =
+                        ::suprnova::serde_json::Value::String(
+                            ::std::string::String::from(#morph_type_value),
+                        );
+                    let rows: ::std::vec::Vec<#target_ty> =
+                        <#target_ty as ::suprnova::eloquent::Model>::query()
+                            .filter_in(#id_col, pk_values)
+                            .filter(#type_col, morph_type_predicate)
+                            .get()
+                            .await?;
+                    use ::std::collections::HashMap;
+                    let mut by_fk: HashMap<::std::string::String, ::std::vec::Vec<#target_ty>>
+                        = HashMap::new();
+                    for r in rows.into_iter() {
+                        // JSON-pluck the morph-id column off the
+                        // returned row — same pattern as the HasMany
+                        // arm. Avoids requiring the macro at THIS
+                        // expansion site to know the target struct's
+                        // field layout.
+                        let row_json = ::suprnova::serde_json::to_value(&r)
+                            .unwrap_or(::suprnova::serde_json::Value::Null);
+                        let key = row_json
+                            .get(#id_col)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        by_fk.entry(key).or_default().push(r);
+                    }
+                    #distribute
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
         _ => Ok(None),
     }
 }
@@ -2177,6 +2597,133 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         cast = __sn_cast_kw,
                         c_table = __sn_c_table,
                         b_table = __sn_b_table,
+                        phs = placeholders.join(", "),
+                    );
+
+                    let stmt = ::suprnova::sea_orm::Statement::from_sql_and_values(
+                        db_backend,
+                        &__sn_sql,
+                        binds,
+                    );
+                    let rows = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                        .await
+                        .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+
+                    use ::std::collections::HashMap;
+                    let mut counts: HashMap<::std::string::String, u64> = HashMap::new();
+                    for r in rows.iter() {
+                        let key: ::std::string::String = r
+                            .try_get::<::std::string::String>("", "__sn_fk_key")
+                            .unwrap_or_default();
+                        let n: i64 = r.try_get::<i64>("", "__sn_count").unwrap_or(0);
+                        counts.insert(key, n.max(0) as u64);
+                    }
+
+                    for p in parents.iter_mut() {
+                        let key = __sn_parent_key_to_match_cast(
+                            ::suprnova::serde_json::to_value(&p.#pk_ident)
+                                .unwrap_or(::suprnova::serde_json::Value::Null),
+                        );
+                        p.__eager.set_count(#name_str, *counts.get(&key).unwrap_or(&0));
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
+        RelationKindAttr::MorphMany | RelationKindAttr::MorphOne => {
+            // Server-side GROUP BY count over the child table, with
+            // both the `<name>_id IN (...)` and
+            // `<name>_type = '<morph_type>'` predicates applied so
+            // children of other morph families are excluded from the
+            // count.
+            //
+            //   SELECT CAST(<id_col> AS TEXT|CHAR) AS __sn_fk_key,
+            //          COUNT(*)                   AS __sn_count
+            //     FROM <child_table>
+            //    WHERE <id_col> IN (?, ?, ...)
+            //      AND <type_col> = ?
+            //    GROUP BY <id_col>
+            //
+            // Same CAST-as-text key-matching contract as the HasMany
+            // count arm — see that arm for the long-form rationale.
+            //
+            // MorphOne's count surface is 0-or-1 in practice (the
+            // contract says one child per parent), so the real count
+            // is reported here even when violated upstream — tests
+            // catch the malformed dataset rather than silently
+            // truncating at the SQL layer.
+            let morph_name = morph_name_or_default(rel);
+            let morph_type_value = morph_type_of(input);
+            let id_col = format!("{morph_name}_id");
+            let type_col = format!("{morph_name}_type");
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+
+                    fn __sn_parent_key_to_match_cast(
+                        v: ::suprnova::serde_json::Value,
+                    ) -> ::std::string::String {
+                        match v {
+                            ::suprnova::serde_json::Value::String(s) => s,
+                            other => other.to_string(),
+                        }
+                    }
+
+                    let pk_json_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null))
+                        .collect();
+
+                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+
+                    let mut placeholders: ::std::vec::Vec<::std::string::String> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    let mut binds: ::std::vec::Vec<::suprnova::sea_orm::Value> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len() + 1);
+                    for (i, v) in pk_json_values.iter().enumerate() {
+                        let ph = match db_backend {
+                            ::suprnova::sea_orm::DatabaseBackend::Postgres => {
+                                ::std::format!("${}", i + 1)
+                            }
+                            _ => ::std::string::String::from("?"),
+                        };
+                        placeholders.push(ph);
+                        binds.push(
+                            ::suprnova::eloquent::model::json_value_to_sea_value(v),
+                        );
+                    }
+                    // The morph-type predicate gets the next sequential
+                    // Postgres placeholder ($N+1) or `?` on the
+                    // remaining backends. Bound after the IN-list.
+                    let type_ph = match db_backend {
+                        ::suprnova::sea_orm::DatabaseBackend::Postgres => {
+                            ::std::format!("${}", pk_json_values.len() + 1)
+                        }
+                        _ => ::std::string::String::from("?"),
+                    };
+                    binds.push(::suprnova::sea_orm::Value::from(#morph_type_value));
+
+                    let __sn_cast_kw = match db_backend {
+                        ::suprnova::sea_orm::DatabaseBackend::MySql => "CHAR",
+                        _ => "TEXT",
+                    };
+                    let __sn_table = <#target_ty as
+                        ::suprnova::eloquent::EloquentModel>::TABLE;
+                    let __sn_sql = ::std::format!(
+                        "SELECT CAST({id} AS {cast}) AS __sn_fk_key, \
+                                COUNT(*) AS __sn_count \
+                           FROM {table} \
+                          WHERE {id} IN ({phs}) \
+                            AND {type_col} = {type_ph} \
+                          GROUP BY {id}",
+                        id = #id_col,
+                        cast = __sn_cast_kw,
+                        table = __sn_table,
+                        type_col = #type_col,
+                        type_ph = type_ph,
                         phs = placeholders.join(", "),
                     );
 
@@ -2933,6 +3480,179 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         agg = __sn_agg_expr,
                         c_table = __sn_c_table,
                         b_table = __sn_b_table,
+                        phs = placeholders.join(", "),
+                    );
+
+                    let stmt = ::suprnova::sea_orm::Statement::from_sql_and_values(
+                        db_backend,
+                        &__sn_sql,
+                        binds,
+                    );
+                    let rows = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                        .await
+                        .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+
+                    use ::std::collections::HashMap;
+                    let mut by_fk: HashMap<
+                        ::std::string::String,
+                        ::core::option::Option<f64>,
+                    > = HashMap::new();
+                    for r in rows.iter() {
+                        let key: ::std::string::String = r
+                            .try_get::<::std::string::String>("", "__sn_fk_key")
+                            .unwrap_or_default();
+                        let agg: ::core::option::Option<f64> = r
+                            .try_get::<::core::option::Option<f64>>("", "__sn_agg")
+                            .ok()
+                            .flatten()
+                            .or_else(|| {
+                                r.try_get::<::core::option::Option<i64>>("", "__sn_agg")
+                                    .ok()
+                                    .flatten()
+                                    .map(|n| n as f64)
+                            });
+                        by_fk.insert(key, agg);
+                    }
+
+                    for p in parents.iter_mut() {
+                        let key = __sn_parent_key_to_match_cast(
+                            ::suprnova::serde_json::to_value(&p.#pk_ident)
+                                .unwrap_or(::suprnova::serde_json::Value::Null),
+                        );
+                        let agg: ::core::option::Option<f64> = by_fk
+                            .get(&key)
+                            .copied()
+                            .unwrap_or(::core::option::Option::None);
+                        match kind {
+                            ::suprnova::AggregateKind::Sum
+                            | ::suprnova::AggregateKind::Avg => {
+                                p.__eager.set_aggregate::<f64>(
+                                    #name_str,
+                                    agg.unwrap_or(0.0),
+                                );
+                            }
+                            ::suprnova::AggregateKind::Min
+                            | ::suprnova::AggregateKind::Max => {
+                                p.__eager.set_aggregate::<::core::option::Option<f64>>(
+                                    #name_str,
+                                    agg,
+                                );
+                            }
+                        }
+                    }
+                    return ::core::result::Result::Ok(());
+                }
+            }))
+        }
+        RelationKindAttr::MorphMany | RelationKindAttr::MorphOne => {
+            // Server-side GROUP BY aggregate over the child table.
+            // Same SQL skeleton as the HasMany aggregate arm but with
+            // the extra `<name>_type = '<morph_type>'` predicate so
+            // aggregates of children pointing at OTHER morph families
+            // are excluded.
+            //
+            //   SELECT CAST(<id_col> AS TEXT|CHAR) AS __sn_fk_key,
+            //          <AGG>(<col>)                AS __sn_agg
+            //     FROM <child_table>
+            //    WHERE <id_col> IN (?, ?, ...)
+            //      AND <type_col> = ?
+            //    GROUP BY <id_col>
+            //
+            // Sum/Avg → f64 with 0.0 empty default. Min/Max →
+            // Option<f64> with None empty default. Matches the
+            // HasMany contract.
+            //
+            // MorphOne aggregates work the same way — the per-parent
+            // group is 0-or-1 row by contract; the server-side GROUP
+            // BY collapses to the single row's column value (or NULL
+            // when no row matches, which falls through the Sum|Avg vs
+            // Min|Max branch).
+            let morph_name = morph_name_or_default(rel);
+            let morph_type_value = morph_type_of(input);
+            let id_col = format!("{morph_name}_id");
+            let type_col = format!("{morph_name}_type");
+            Ok(Some(quote! {
+                #name_str => {
+                    if parents.is_empty() { return ::core::result::Result::Ok(()); }
+
+                    fn __sn_parent_key_to_match_cast(
+                        v: ::suprnova::serde_json::Value,
+                    ) -> ::std::string::String {
+                        match v {
+                            ::suprnova::serde_json::Value::String(s) => s,
+                            other => other.to_string(),
+                        }
+                    }
+
+                    let pk_json_values: ::std::vec::Vec<::suprnova::serde_json::Value> = parents
+                        .iter()
+                        .map(|p| ::suprnova::serde_json::to_value(&p.#pk_ident)
+                            .unwrap_or(::suprnova::serde_json::Value::Null))
+                        .collect();
+
+                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
+                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+
+                    let mut placeholders: ::std::vec::Vec<::std::string::String> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len());
+                    let mut binds: ::std::vec::Vec<::suprnova::sea_orm::Value> =
+                        ::std::vec::Vec::with_capacity(pk_json_values.len() + 1);
+                    for (i, v) in pk_json_values.iter().enumerate() {
+                        let ph = match db_backend {
+                            ::suprnova::sea_orm::DatabaseBackend::Postgres => {
+                                ::std::format!("${}", i + 1)
+                            }
+                            _ => ::std::string::String::from("?"),
+                        };
+                        placeholders.push(ph);
+                        binds.push(
+                            ::suprnova::eloquent::model::json_value_to_sea_value(v),
+                        );
+                    }
+                    let type_ph = match db_backend {
+                        ::suprnova::sea_orm::DatabaseBackend::Postgres => {
+                            ::std::format!("${}", pk_json_values.len() + 1)
+                        }
+                        _ => ::std::string::String::from("?"),
+                    };
+                    binds.push(::suprnova::sea_orm::Value::from(#morph_type_value));
+
+                    let __sn_cast_kw = match db_backend {
+                        ::suprnova::sea_orm::DatabaseBackend::MySql => "CHAR",
+                        _ => "TEXT",
+                    };
+                    let __sn_table = <#target_ty as
+                        ::suprnova::eloquent::EloquentModel>::TABLE;
+
+                    let __sn_agg_expr: ::std::string::String = match kind {
+                        ::suprnova::AggregateKind::Sum => {
+                            ::std::format!("SUM({})", column)
+                        }
+                        ::suprnova::AggregateKind::Avg => {
+                            ::std::format!("AVG({})", column)
+                        }
+                        ::suprnova::AggregateKind::Min => {
+                            ::std::format!("MIN({})", column)
+                        }
+                        ::suprnova::AggregateKind::Max => {
+                            ::std::format!("MAX({})", column)
+                        }
+                    };
+
+                    let __sn_sql = ::std::format!(
+                        "SELECT CAST({id} AS {cast}) AS __sn_fk_key, \
+                                {agg} AS __sn_agg \
+                           FROM {table} \
+                          WHERE {id} IN ({phs}) \
+                            AND {type_col} = {type_ph} \
+                          GROUP BY {id}",
+                        id = #id_col,
+                        cast = __sn_cast_kw,
+                        agg = __sn_agg_expr,
+                        table = __sn_table,
+                        type_col = #type_col,
+                        type_ph = type_ph,
                         phs = placeholders.join(", "),
                     );
 

@@ -40,8 +40,8 @@ pub use prunable::{
 pub use registry::{find_model_by_table, models, ModelEntry};
 pub use relations::{
     find_relation, relations, relations_of, AggregateKind, BelongsTo, BelongsToMany,
-    EagerLoadCache, EagerLoadDispatch, HasMany, HasManyThrough, HasOne, HasOneThrough, Relation,
-    RelationEntry, RelationKind,
+    EagerLoadCache, EagerLoadDispatch, HasMany, HasManyThrough, HasOne, HasOneThrough, MorphMany,
+    MorphOne, MorphTo, Relation, RelationEntry, RelationKind,
 };
 pub use soft_deletes::SoftDeletes;
 pub use timestamps::Touchable;
