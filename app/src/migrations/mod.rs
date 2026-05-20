@@ -6,6 +6,7 @@ mod m20251208_220000_create_sessions_table;
 mod m20251208_230000_create_remember_tokens_table;
 mod m20251208_240000_create_posts_table;
 mod m_2026_05_19_phase_10a_user_columns;
+mod m_2026_05_19_phase_10b_relations_schema;
 
 pub struct Migrator;
 
@@ -38,6 +39,12 @@ impl MigratorTrait for Migrator {
             // bare-bones schema. See the migration's module doc for
             // the per-column rationale.
             Box::new(m_2026_05_19_phase_10a_user_columns::Migration),
+            // Phase 10B T10 — schema for the relations dogfood
+            // (roles + role_user pivot, comments polymorphic, videos,
+            // tags + taggables polymorphic m2m pivot). Listed last so
+            // re-runs against existing dev databases pick it up as a
+            // new pending migration.
+            Box::new(m_2026_05_19_phase_10b_relations_schema::Migration),
         ]
     }
 }

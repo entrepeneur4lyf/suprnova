@@ -25,6 +25,27 @@ use suprnova::{model, Authenticatable};
     },
     soft_deletes,
     timestamps,
+    // Phase 10B T10 — relations declarations drive `posts()` /
+    // `roles()` accessors + the eager-load dispatcher arms.
+    //
+    // - `posts` is a HasMany over the `author_id` FK. The default
+    //   convention would be `user_id`, but the legacy posts schema
+    //   uses `author_id` (the column was named for the policy gate
+    //   in Phase 3) — `fk = "author_id"` keeps the dogfood honest
+    //   without backfilling the schema.
+    // - `roles` is a BelongsToMany via the `RoleUser` pivot. The
+    //   `with_pivot = ["assigned_at"]` directive includes the
+    //   pivot's extra column in the join so `role.pivot::<RoleUser>()`
+    //   surfaces it on the loaded rows.
+    relations = {
+        posts: HasMany<crate::models::posts::Post> {
+            fk = "author_id",
+        },
+        roles: BelongsToMany<crate::models::roles::Role, crate::models::role_user::RoleUser> {
+            with_pivot = ["assigned_at"],
+            with_timestamps,
+        },
+    },
 )]
 pub struct User {
     pub id: i64,

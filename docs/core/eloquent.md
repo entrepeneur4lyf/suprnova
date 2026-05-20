@@ -19,6 +19,7 @@ doesn't cover (see the [SeaORM escape hatches](#dropping-to-seaorm)).
 - [Creating and updating](#creating-and-updating)
 - [Deleting and soft deletes](#deleting-and-soft-deletes)
 - [Query builder — dual API](#query-builder--dual-api)
+- [Relationships](#relationships)
 - [Eager loading](#eager-loading)
 - [Mass assignment](#mass-assignment)
 - [Casts](#casts)
@@ -544,6 +545,479 @@ let second = User::filter("role", "admin");
 let users  = first.union(second).get().await?;
 let users  = first.union_all(second).get().await?;
 ```
+
+## Relationships
+
+Suprnova ships every Eloquent relation flavour. They're declared in
+the `relations = { ... }` block on `#[suprnova::model]`, and the
+macro emits — per declared relation — a method on the struct, a
+loaded-accessor (`<name>_loaded()`), a count-accessor
+(`<name>_count()`), and the dispatcher arm the eager loader calls
+into. The relation kinds shipped today:
+
+| Kind                | One/many | Across families | Backed by |
+|---------------------|----------|-----------------|-----------|
+| `HasOne<R>`         | one      | no              | `IN` query on `<parent>_id` |
+| `BelongsTo<R>`      | one      | no              | `IN` query on FK on this row |
+| `HasMany<R>`        | many     | no              | same as `HasOne`, returns `Vec<R>` |
+| `BelongsToMany<R, P>` | many   | no              | pivot table `P`, INNER JOIN + `pivot::<P>()` |
+| `HasOneThrough<B, R>`  | one   | no              | two-query JOIN `parent → B → R` |
+| `HasManyThrough<B, R>` | many  | no              | same as above, returns `Vec<R>` |
+| `MorphOne<R>`       | one      | yes             | `IN` + `<name>_type = "<self>"` filter |
+| `MorphMany<R>`      | many     | yes             | same as `MorphOne`, returns `Vec<R>` |
+| `MorphTo`           | one      | yes (children → many families) | per-family enum emitted at the declaration site |
+| `MorphToMany<R, P>` | many     | yes             | polymorphic m2m pivot `P` |
+| `MorphedByMany<R, P>` | many   | yes (inverse)   | same pivot, scanned the other way |
+
+### `relations = { ... }` syntax
+
+Every relation declaration carries the same outer shape: the relation
+name, the kind, the related type (and pivot/intermediate types where
+applicable), and a `{ ... }` block of options.
+
+```rust
+use suprnova::model;
+
+#[model(
+    table = "users",
+    relations = {
+        // HasMany<R>
+        posts: HasMany<crate::models::Post> {
+            fk = "author_id",         // override default `user_id`
+        },
+        // BelongsToMany<R, Pivot>
+        roles: BelongsToMany<crate::models::Role, crate::models::RoleUser> {
+            with_pivot = ["assigned_at"],
+            with_timestamps,
+        },
+    },
+)]
+pub struct User {
+    pub id: i64,
+    pub name: String,
+    pub email: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+```
+
+Common options:
+
+| Option                     | Relation kinds                | Purpose |
+|----------------------------|-------------------------------|---------|
+| `fk = "..."`               | every kind with a child FK    | Column on the CHILD pointing at the parent. Default = `<snake(parent_struct)>_id`. |
+| `lk = "..."`               | one/many kinds                | Column on the PARENT used as the join key. Default = `"id"`. |
+| `related_key = "..."`      | `BelongsToMany`, `MorphToMany` | The related-side PK COLUMN name. Default = `"id"`. Required when the related model uses a non-`id` PK. |
+| `with_pivot = ["...", ...]` | `BelongsToMany`, `MorphToMany` | Extra columns on the pivot to surface in the join. |
+| `with_timestamps`          | `BelongsToMany`, `MorphToMany` | Stamp `created_at` / `updated_at` on attach/sync. |
+| `with_default = \|\| { ... }` | `BelongsTo`                 | Closure producing a default when the FK is null OR the parent is missing. |
+| `first_key`, `second_key`, `local_key`, `second_local_key` | `HasOneThrough`, `HasManyThrough` | JOIN key overrides — see the Through section below. |
+| `name = "..."`             | every morph kind              | Morph family name (e.g. `"commentable"`, `"taggable"`). Drives the `<name>_id` / `<name>_type` columns on the child/pivot. |
+| `targets = [T1, T2, ...]`  | `MorphTo`                     | The list of concrete morph targets. The macro emits a `<Name>Morph` enum at the declaration site with one variant per target plus `Unknown(String, i64)`. |
+| `target_morph_type = "..."` | `MorphedByMany`              | The morph-type string identifying the target family on the pivot. |
+| `pivot_table`, `pivot_foreign_key`, `pivot_related_key` | `BelongsToMany`, `MorphToMany` | Pivot-side column / table overrides when the defaults don't fit. |
+
+### `HasOne<R>` and `BelongsTo<R>`
+
+One-to-one in both directions. `HasOne` lives on the parent side and
+calls `R::query().filter(<fk>, <self.id>).first()`. `BelongsTo` lives
+on the child side and reads the FK off `self`, then calls
+`R::query().filter(<owner_key>, <fk_value>).first()`.
+
+```rust
+#[model(table = "users", relations = {
+    profile: HasOne<crate::models::Profile>,
+})]
+pub struct User { /* ... */ }
+
+#[model(table = "profiles", relations = {
+    user: BelongsTo<crate::models::User>,
+})]
+pub struct Profile {
+    pub id: i64,
+    pub user_id: i64,
+    pub bio: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+let user = User::find(1).await?.unwrap();
+let profile: Option<Profile> = user.profile().first().await?;
+
+let profile = Profile::find(42).await?.unwrap();
+let owner: Option<User> = profile.user().first().await?;
+```
+
+`BelongsTo` supports `with_default = || R { ... }`, which fires
+either when the FK is null OR when the parent row is missing. The
+default closure runs per call (and per eager-loaded row) — perfect
+for an empty stand-in when a deleted user still has comments:
+
+```rust
+#[model(table = "comments", relations = {
+    author: BelongsTo<crate::models::User> {
+        with_default = || User {
+            name: "[deleted]".into(),
+            ..Default::default()
+        },
+    },
+})]
+pub struct Comment { /* ... */ }
+
+let c = Comment::find(99).await?.unwrap();
+// Always Some — the default fires when the user row is missing.
+let author = c.author().first().await?.unwrap();
+```
+
+### `HasMany<R>`
+
+One-to-many on the parent side. Returns a fluent builder; chain
+filter / order / latest / take / get / count and terminate.
+
+```rust
+#[model(table = "users", relations = {
+    posts: HasMany<crate::models::Post> {
+        fk = "author_id",
+    },
+})]
+pub struct User { /* ... */ }
+
+let u = User::find(1).await?.unwrap();
+
+// Every post by this user, default ordering:
+let posts: Vec<Post> = u.posts().get().await?;
+
+// Filtered + ordered + paged:
+let recent = u.posts()
+    .filter("published", true)
+    .latest()                          // ORDER BY created_at DESC
+    .take(10)
+    .get()
+    .await?;
+
+// COUNT alone — no row fetching:
+let total: i64 = u.posts().count().await?;
+```
+
+Available terminal methods: `.first()`, `.get()`, `.count()`. Available
+chainable filters: `.filter` / `.db_where`, `.filter_in` / `.where_in`,
+`.order_by`, `.latest`, `.oldest`, `.limit`, `.take`.
+
+### `BelongsToMany<R, P>` — first-class Pivot
+
+Many-to-many through a `#[suprnova::model]`-declared pivot. The pivot
+is a first-class model with its own row identity — not a tuple, not a
+hidden hash map. Two key benefits over Laravel's anonymous-pivot
+shape:
+
+1. The pivot row is type-safe. Read `with_pivot` columns via
+   `r.pivot::<P>().<column>`, never via `r.pivot.get("...")`.
+2. The pivot model is reachable from the rest of the framework
+   (factories, scopes, casts, hooks) the same way every model is.
+
+```rust
+#[model(table = "role_user", fillable = ["user_id", "role_id", "assigned_at"])]
+pub struct RoleUser {
+    pub id: i64,
+    pub user_id: i64,
+    pub role_id: i64,
+    pub assigned_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[model(table = "users", relations = {
+    roles: BelongsToMany<crate::models::Role, RoleUser> {
+        with_pivot = ["assigned_at"],
+        with_timestamps,
+    },
+})]
+pub struct User { /* ... */ }
+
+let u = User::find(1).await?.unwrap();
+let admin = Role::create(attrs! { name: "admin" }).await?;
+
+// Attach + sync mutators
+u.roles().attach(admin.id).await?;
+u.roles().attach_with(admin.id, attrs! { assigned_at: chrono::Utc::now() }).await?;
+u.roles().sync([role_a.id, role_b.id, role_c.id]).await?;
+u.roles().detach(admin.id).await?;
+
+// Read pivot data through the per-row downcast accessor:
+let roles = u.roles().get().await?;
+for r in &roles {
+    let p: &RoleUser = r.pivot::<RoleUser>();
+    println!("user {} got role {} at {:?}", p.user_id, p.role_id, p.assigned_at);
+}
+```
+
+- `.attach(id)` — INSERT a single pivot row. Errors on duplicate
+  unless your pivot allows it (the framework doesn't dedupe at the
+  Rust layer; use `.sync` for idempotency).
+- `.attach_with(id, attrs! { ... })` — INSERT with extra pivot
+  columns. Stamps timestamps when `with_timestamps` is on.
+- `.detach(id)` — DELETE the pivot row(s) linking parent → id.
+- `.sync([ids...])` — diff-and-apply: attach what's new, detach what's
+  missing, leave the intersection alone. Wrapped in a transaction.
+
+`.get()` returns `Vec<R>` with the pivot stamped on each row's
+internal `__pivot` field. The `.pivot::<P>()` accessor downcasts the
+`Arc<dyn Any>` to the pivot type you declared. Calling it with the
+wrong type panics — match the type to the declared pivot.
+
+### `HasOneThrough<B, R>` and `HasManyThrough<B, R>`
+
+Reach a final target `R` through an intermediate `B`. Useful when the
+relation traverses two tables but you don't need to expose the
+intermediate (`A → B → R`).
+
+```rust
+#[model(table = "countries", relations = {
+    posts: HasManyThrough<crate::models::User, crate::models::Post>,
+})]
+pub struct Country {
+    pub id: i64,
+    pub name: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+let c = Country::find(1).await?.unwrap();
+let posts: Vec<Post> = c.posts().get().await?;
+```
+
+The dispatcher infers JOIN keys from struct names. Overrides:
+
+| Option              | Default                          | Description |
+|---------------------|----------------------------------|-------------|
+| `first_key`         | `<snake(parent_struct)>_id`      | Column on intermediate `B` pointing at parent `A`. |
+| `second_key`        | `<snake(intermediate_struct)>_id` | Column on final `R` pointing at intermediate `B`. |
+| `local_key`         | `"id"`                           | Column on parent `A` matched by `first_key`. |
+| `second_local_key`  | `"id"`                           | Column on intermediate `B` matched by `second_key`. Required when `B` uses a non-`id` PK. |
+
+```rust
+#[model(table = "countries", relations = {
+    posts: HasManyThrough<crate::models::User, crate::models::Post> {
+        first_key = "country_uuid",
+        second_key = "author_id",
+        local_key = "uuid",
+    },
+})]
+pub struct Country { /* ... */ }
+```
+
+### `MorphTo` with `targets = [...]` and per-family enum
+
+Polymorphic relations point a child row at one of several parent
+families. The child carries a `(<name>_id, <name>_type)` pair; the
+`*_type` column holds the morph-type string each parent declares.
+
+`MorphTo` lives on the child. Its declaration lists every parent
+family it can point at via `targets = [...]`. The macro emits a
+per-family enum named `<RelationName>Morph` (matching the relation
+name's PascalCase form, suffixed with `Morph`) with one variant per
+target type plus `Unknown(String, i64)` for legacy rows whose
+`<name>_type` value doesn't match any registered target.
+
+```rust
+#[model(table = "posts", morph_type = "post")]
+pub struct Post { /* ... */ }
+
+#[model(table = "videos", morph_type = "video")]
+pub struct Video { /* ... */ }
+
+#[model(table = "comments", relations = {
+    commentable: MorphTo {
+        name = "commentable",
+        targets = [
+            crate::models::Post,
+            crate::models::Video,
+        ],
+    },
+})]
+pub struct Comment {
+    pub id: i64,
+    pub commentable_id: i64,
+    pub commentable_type: String,
+    pub body: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+let c = Comment::find(1).await?.unwrap();
+match c.commentable().get().await? {
+    CommentableMorph::Post(post)   => println!("comment on post {}", post.title),
+    CommentableMorph::Video(video) => println!("comment on video {}", video.url),
+    // Legacy / dangling rows — `<name>_type` doesn't match any target,
+    // OR the morph_type matched but the row at `<name>_id` is gone.
+    CommentableMorph::Unknown(ty, id) => {
+        eprintln!("comment {} points at unknown {ty}#{id}", c.id);
+    }
+}
+```
+
+The `morph_type = "..."` attribute on each target struct is what the
+loader writes into the child's `<name>_type` column on insert and
+filters by on read. Without `morph_type`, the framework derives the
+type-string from `to_snake(struct_name)`.
+
+### `MorphOne<R>` and `MorphMany<R>` — parent side
+
+The inverse direction of `MorphTo`: a parent type declares the
+polymorphic one-or-many it owns. `MorphOne` returns `Option<R>` from
+`.first()`; `MorphMany` returns `Vec<R>` from `.get()`. Both filter
+the child's `(<name>_id, <name>_type)` pair by `self.id` and the
+parent's `morph_type`.
+
+```rust
+#[model(table = "posts", morph_type = "post", relations = {
+    comments: MorphMany<crate::models::Comment> {
+        name = "commentable",
+    },
+    cover: MorphOne<crate::models::Image> {
+        name = "imageable",
+    },
+})]
+pub struct Post { /* ... */ }
+
+#[model(table = "videos", morph_type = "video", relations = {
+    comments: MorphMany<crate::models::Comment> {
+        name = "commentable",
+    },
+})]
+pub struct Video { /* ... */ }
+
+let post = Post::find(1).await?.unwrap();
+let post_comments: Vec<Comment> = post.comments().get().await?;
+let post_cover:    Option<Image> = post.cover().first().await?;
+
+let video = Video::find(1).await?.unwrap();
+let video_comments: Vec<Comment> = video.comments().get().await?;
+// post.comments() returns only `commentable_type = "post"` rows;
+// video.comments() returns only `commentable_type = "video"`.
+```
+
+The same chainable surface as `HasMany` / `HasOne`: `.filter` /
+`.db_where`, `.order_by` / `.latest` / `.oldest`, `.limit` / `.take`,
+`.first` / `.get` / `.count`.
+
+### `MorphToMany<R, P>` and `MorphedByMany<R, P>`
+
+Polymorphic many-to-many. The shared pivot `P` carries the FK pair
+PLUS a `<name>_type` discriminator column. One end declares
+`MorphToMany` (e.g. `Post.tags()`, `Video.tags()`), the other end
+declares one `MorphedByMany` per target family (e.g. `Tag.posts()`,
+`Tag.videos()`).
+
+```rust
+#[model(table = "taggables", fillable = ["tag_id", "taggable_id", "taggable_type"])]
+pub struct Taggable {
+    pub id: i64,
+    pub tag_id: i64,
+    pub taggable_id: i64,
+    pub taggable_type: String,
+}
+
+#[model(table = "posts", morph_type = "post", relations = {
+    tags: MorphToMany<crate::models::Tag, Taggable> {
+        name = "taggable",
+    },
+})]
+pub struct Post { /* ... */ }
+
+#[model(table = "videos", morph_type = "video", relations = {
+    tags: MorphToMany<crate::models::Tag, Taggable> {
+        name = "taggable",
+    },
+})]
+pub struct Video { /* ... */ }
+
+// Inverse: Tag declares one MorphedByMany per target family.
+#[model(table = "tags", relations = {
+    posts: MorphedByMany<crate::models::Post, Taggable> {
+        name = "taggable",
+        target_morph_type = "post",
+    },
+    videos: MorphedByMany<crate::models::Video, Taggable> {
+        name = "taggable",
+        target_morph_type = "video",
+    },
+})]
+pub struct Tag { /* ... */ }
+
+let post  = Post::find(1).await?.unwrap();
+let video = Video::find(1).await?.unwrap();
+let tag   = Tag::create(attrs! { name: "rust" }).await?;
+
+// `attach` / `attach_with` / `detach` / `sync` work the same way as
+// BelongsToMany. The `<name>_type` column lands automatically from
+// the calling parent's `morph_type`.
+post.tags().attach(tag.id).await?;
+video.tags().attach(tag.id).await?;          // independent attachment
+post.tags().sync([tag_a.id, tag_b.id]).await?;
+
+// Inverse direction — Tag splits by family:
+let posts_with_tag:  Vec<Post>  = tag.posts().get().await?;   // typed "post"
+let videos_with_tag: Vec<Video> = tag.videos().get().await?;  // typed "video"
+```
+
+`MorphedByMany`'s `target_morph_type` is required because the macro
+at `Tag`'s declaration site can't introspect the target's
+`morph_type = "..."` attribute (it lives in a separate
+`#[suprnova::model]` invocation). Setting it explicitly keeps each
+`MorphedByMany` arm honest about which family it scans.
+
+### Escape hatch: hand-written relation methods
+
+The relations declared in `relations = { ... }` are the only ones the
+eager-load dispatcher (and `with`, `with_count`, etc.) knows about.
+If a relation is too unusual for the macro shape — for example a
+query that aggregates across two pivots, or a typed view of a
+denormalised cache table — you can omit it from `relations = { ... }`
+and write a plain inherent impl:
+
+```rust
+impl User {
+    /// Posts this user authored OR is tagged in. Crosses two relations
+    /// and is therefore not expressible as a single `relations = { ... }`
+    /// declaration — written by hand.
+    pub async fn posts_touched(&self) -> Result<Vec<Post>, FrameworkError> {
+        let authored: Vec<Post> = self.posts().get().await?;
+        let tagged:   Vec<Post> = /* ...custom query... */;
+        // ...merge + dedupe...
+        Ok(/* ... */)
+    }
+}
+```
+
+Such methods lose eager-load support — `User::with(["posts_touched"])`
+will error because the dispatcher has no arm for `posts_touched`. The
+in-macro declarations remain the path the framework knows how to
+eager-load, count, aggregate, and predicate-filter.
+
+### v1 restrictions
+
+A handful of things the v1 surface holds off on. Each is documented at
+its declaration site too — collected here for visibility:
+
+- **Morph IDs are `i64`-only.** `MorphTo::morph_id` is hardcoded to
+  `i64`, so any model used as a `MorphTo` target must declare an `i64`
+  primary key, and the child table's `<name>_id` column must also be
+  `i64`. String / UUID-as-string morph FKs are v2.
+- **Aggregate cache key is the relation name only.** Loading two
+  aggregates on the same relation overwrites the cell — see
+  [Aggregate cache key — limitation](#aggregate-cache-key--limitation).
+- **`load_missing` is collection-wide.** When any row in a collection
+  already has the relation cached, `load_missing` skips the eager-load
+  for the whole collection. Laravel's per-row skip is v2.
+- **No nested eager loading through `MorphTo`.** The per-family enum
+  erases the child type, so a dotted path like
+  `with(["commentable.user"])` can't tail-recurse — the dispatcher
+  returns a typed error. Resolve per-family by matching on the enum
+  and calling `with(["user"])` on each variant individually.
+- **`with_where`'s closure names the target type explicitly.** Rust
+  can't infer the relation's target from the relation name — write
+  `with_where(("posts", |q: Builder<Post>| q.filter(...)))`.
 
 ## Eager loading
 

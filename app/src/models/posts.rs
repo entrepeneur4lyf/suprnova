@@ -12,6 +12,38 @@ use suprnova::model;
     table = "posts",
     fillable = ["title", "body", "is_public", "author_id"],
     timestamps,
+    // Phase 10B T10 — Post is the first branch of the polymorphic
+    // Comment family. `morph_type = "post"` registers the type with
+    // the framework's morph registry so `MorphTo` targets that name
+    // Post resolve via the type-string column on the polymorphic
+    // child table (`comments.commentable_type = "post"`).
+    morph_type = "post",
+    // The relations declaration drives the macro-emitted
+    // `user()` / `comments()` / `tags()` accessors plus the
+    // eager-load dispatcher arms.
+    //
+    // - `user` is a `BelongsTo` over the `author_id` FK (the schema
+    //   was named that way in Phase 3 for the PostPolicy gate).
+    //   `fk = "author_id"` overrides the default convention
+    //   (`<target_snake>_id` = `user_id`).
+    // - `comments` is the polymorphic one-to-many counterpart to
+    //   `Comment::commentable`. Same morph name (`"commentable"`),
+    //   filter applied automatically via Post's `morph_type = "post"`.
+    // - `tags` is the polymorphic many-to-many via the shared
+    //   `taggables` pivot. Posts and Videos both reach Tags through
+    //   this surface; Tag's `MorphedByMany` declarations close the
+    //   loop in the other direction.
+    relations = {
+        user: BelongsTo<crate::models::users::User> {
+            fk = "author_id",
+        },
+        comments: MorphMany<crate::models::comments::Comment> {
+            name = "commentable",
+        },
+        tags: MorphToMany<crate::models::tags::Tag, crate::models::taggables::Taggable> {
+            name = "taggable",
+        },
+    },
 )]
 pub struct Post {
     pub id: i64,
