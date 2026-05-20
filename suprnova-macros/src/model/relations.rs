@@ -2083,12 +2083,11 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             //    WHERE b.<first_key> IN (?, ?, ...)
             //    GROUP BY b.<first_key>
             //
-            // HasOneThrough caps the count at 1 client-side after
-            // distribution — the JOIN itself can return multiple C
-            // rows per parent if the HasOne contract is violated, and
-            // we'd rather report the real count + let the test catch
-            // a malformed dataset than silently truncate at the SQL
-            // layer.
+            // HasOneThrough reports the real COUNT(*) here — the JOIN
+            // itself can return multiple C rows per parent if the HasOne
+            // contract is violated, and we'd rather surface the real
+            // count + let tests catch a malformed dataset than silently
+            // truncate at the SQL layer.
             //
             // Type rebinding: same swap as the eager arm — for
             // Through kinds the parser stores `(B, C)` as
