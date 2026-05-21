@@ -22,6 +22,7 @@ pub mod observers;
 pub mod prunable;
 pub mod registry;
 pub mod relations;
+pub mod scopes;
 pub mod soft_deletes;
 pub mod timestamps;
 
@@ -46,6 +47,7 @@ pub use relations::{
     EagerLoadDispatch, HasMany, HasManyThrough, HasOne, HasOneThrough, MorphMany, MorphOne,
     MorphTo, MorphToMany, MorphTypeEntry, MorphedByMany, Relation, RelationEntry, RelationKind,
 };
+pub use scopes::{GlobalScope, ScopeRegistry};
 pub use soft_deletes::SoftDeletes;
 pub use timestamps::Touchable;
 

@@ -86,9 +86,9 @@ where
 /// `query_override`). The Vec<WhereTerm> is the canonical storage,
 /// so `with_trashed` retains every term that isn't the tombstone
 /// null-check; `only_trashed` swaps it for `NotNull(deleted_at)`.
-/// Both append the `without_global_scope("soft_deletes")` tag so
-/// future custom-scope machinery in 10C can layer on top without
-/// double-applying.
+/// Both append the `"soft_deletes"` tag via the framework-internal
+/// `__disable_named_scope` so the typed Phase 10C T4 scope registry
+/// can layer on top without double-applying.
 impl<M> Builder<M>
 where
     M: SoftDeletes,

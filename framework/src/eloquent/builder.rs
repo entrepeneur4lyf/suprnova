@@ -236,6 +236,16 @@ pub struct Builder<M> {
     pub(crate) runtime_casts:
         HashMap<&'static str, std::sync::Arc<dyn crate::eloquent::casts::DynCast>>,
     pub(crate) global_scopes_disabled: Vec<&'static str>,
+    /// Phase 10C T4 — typed global-scope opt-out mask. Each entry is
+    /// the `TypeId` of a scope struct registered via
+    /// [`ScopeRegistry::register`]; the registry skips any scope whose
+    /// id appears here.
+    ///
+    /// [`ScopeRegistry::register`]: crate::eloquent::ScopeRegistry::register
+    pub(crate) excluded_scopes: Vec<std::any::TypeId>,
+    /// Phase 10C T4 — if true, the registered global scopes for this
+    /// model are bypassed entirely on this query.
+    pub(crate) skip_all_scopes: bool,
     /// Eager-load plan — populated by [`Builder::with`] /
     /// [`Builder::with_count`] / [`Builder::with_sum`] /
     /// [`Builder::with_avg`] / [`Builder::with_min`] /
@@ -274,6 +284,8 @@ impl<M> Builder<M> {
             unions: Vec::new(),
             runtime_casts: HashMap::new(),
             global_scopes_disabled: Vec::new(),
+            excluded_scopes: Vec::new(),
+            skip_all_scopes: false,
             eager_specs: Vec::new(),
             _phantom: PhantomData,
         }
@@ -959,10 +971,85 @@ impl<M> Builder<M> {
         self
     }
 
-    /// Skip a named global scope on this query. T10 consumes this; T5
-    /// just plumbs it through.
-    pub fn without_global_scope(mut self, name: &'static str) -> Self {
+    /// Skip a named global scope on this query (framework-internal
+    /// soft-delete bypass tag). Phase 10C T4's typed
+    /// [`Self::without_global_scope`] is the canonical surface for
+    /// user-defined global scopes; this method exists only for the
+    /// framework's own `with_trashed` / `only_trashed` machinery,
+    /// which predates the typed registry and uses a string tag
+    /// instead.
+    ///
+    /// **Not part of the public API.** End users go through the typed
+    /// `without_global_scope::<S>()`. This is `pub` only because the
+    /// `#[suprnova::model(soft_deletes)]` macro expands into user
+    /// crates and needs to call it; the `__` prefix flags it as
+    /// internal.
+    #[doc(hidden)]
+    pub fn __disable_named_scope(mut self, name: &'static str) -> Self {
         self.global_scopes_disabled.push(name);
+        self
+    }
+
+    /// Phase 10C T4 — exclude one global scope (by type) from this
+    /// query. The scope's `TypeId` is appended to the builder's
+    /// `excluded_scopes` mask; when
+    /// [`ScopeRegistry::apply_to`][reg_apply_to] walks the per-model
+    /// registry it skips any entry whose `TypeId` matches.
+    ///
+    /// ## Entry-point matters
+    ///
+    /// `Model::query()` applies registered scopes EAGERLY at
+    /// construction time. Chaining `.without_global_scope::<S>()` onto
+    /// the resulting builder sets the mask AFTER the scope already
+    /// mutated the `where_terms` — the call has no effect on that
+    /// already-applied scope (other scopes that haven't run yet do
+    /// honour the mask, but Suprnova's `query()` applies them all in
+    /// a single shot, so the mask sees nothing remaining).
+    ///
+    /// Prefer the per-model static helper:
+    ///
+    /// ```ignore
+    /// // Correct: macro-emitted helper constructs the builder, sets
+    /// // the mask, THEN runs the registry.
+    /// let everything = User::without_global_scope::<TenantScope>()
+    ///     .get()
+    ///     .await?;
+    /// ```
+    ///
+    /// The chained-on-builder form remains for advanced use — e.g.
+    /// excluding a scope inside a closure that receives a
+    /// `Builder<R>` without access to `R`'s static helpers — but the
+    /// scope you exclude must not have been registered yet on the
+    /// builder for it to take effect.
+    ///
+    /// [reg_apply_to]: crate::eloquent::ScopeRegistry
+    pub fn without_global_scope<S: 'static>(mut self) -> Self {
+        self.excluded_scopes.push(std::any::TypeId::of::<S>());
+        self
+    }
+
+    /// Phase 10C T4 — bypass every registered global scope for this
+    /// query. Sets `skip_all_scopes = true`; the registry returns the
+    /// builder unchanged.
+    ///
+    /// ## Entry-point matters
+    ///
+    /// Same caveat as [`Self::without_global_scope`]: chaining onto a
+    /// builder returned by `Model::query()` is too late — scopes
+    /// already ran. Use the static helper `Model::without_global_scopes()`
+    /// emitted by `#[suprnova::model]` for the call-site that bypasses
+    /// the registry from the start.
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// // Admin tooling: read every row.
+    /// let everything = User::without_global_scopes()
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn without_global_scopes(mut self) -> Self {
+        self.skip_all_scopes = true;
         self
     }
 }

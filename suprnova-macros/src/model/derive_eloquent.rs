@@ -436,14 +436,33 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 // skip trashed rows. with_trashed() / only_trashed()
                 // build their own unscoped Builder directly — they
                 // don't go through query() — so we don't need a
-                // runtime check here. The
-                // `without_global_scope("soft_deletes")` tag remains
-                // informational for Phase 10C's custom-scope machinery.
-                ::suprnova::Builder::<Self>::new().filter_null(#soft_delete_col)
+                // runtime check here. The `"soft_deletes"` tag (set
+                // via `__disable_named_scope`) remains informational
+                // for Phase 10C's typed scope registry.
+                //
+                // Phase 10C T4: also apply registered user-defined
+                // global scopes on top of the soft-delete filter so
+                // both systems compose cleanly.
+                let b = ::suprnova::Builder::<Self>::new().filter_null(#soft_delete_col);
+                ::suprnova::eloquent::scopes::ScopeRegistry::apply_to::<Self>(b)
             }
         }
     } else {
         quote! {}
+    };
+
+    // Phase 10C T4 — seed builder used by the global-scope opt-out
+    // helpers. Soft-delete models include the `deleted_at IS NULL`
+    // filter so opt-out doesn't accidentally surface trashed rows;
+    // soft-deletes is a separate path from the typed scope registry.
+    let t4_fresh_builder = if soft_deletes_enabled {
+        quote! {
+            ::suprnova::Builder::<Self>::new().filter_null(#soft_delete_col)
+        }
+    } else {
+        quote! {
+            ::suprnova::Builder::<Self>::new()
+        }
     };
 
     let soft_deletes_impl = if soft_deletes_enabled {
@@ -559,13 +578,13 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 /// undo the scope `query()` would have applied.
                 pub fn with_trashed() -> ::suprnova::Builder<Self> {
                     ::suprnova::Builder::<Self>::new()
-                        .without_global_scope("soft_deletes")
+                        .__disable_named_scope("soft_deletes")
                 }
 
                 /// View showing only soft-deleted rows.
                 pub fn only_trashed() -> ::suprnova::Builder<Self> {
                     ::suprnova::Builder::<Self>::new()
-                        .without_global_scope("soft_deletes")
+                        .__disable_named_scope("soft_deletes")
                         .filter_not_null(#soft_delete_col)
                 }
 
@@ -911,6 +930,59 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     }
                 }
                 ::core::result::Result::Ok(())
+            }
+        }
+
+        // Phase 10C T4 — global-scope opt-out static helpers.
+        //
+        // The tricky bit: `Model::query()` applies registered scopes
+        // EAGERLY (so every read path is auto-scoped). Calling
+        // `Model::query().without_global_scopes()` would set the mask
+        // AFTER scopes have already mutated the builder — too late.
+        //
+        // The fix: build a fresh `Builder` directly, stamp the mask
+        // BEFORE running the registry, then dispatch into
+        // `ScopeRegistry::apply_to` which honours the mask. For
+        // soft-delete models we also layer the `deleted_at IS NULL`
+        // filter on top, matching `Model::query()`'s soft-delete
+        // override — opt-out targets user-defined scopes only.
+        impl #struct_ident {
+            /// Phase 10C T4 — start a query that bypasses one global
+            /// scope by type. Other registered scopes still apply.
+            /// Soft-delete filter (when `#[model(soft_deletes)]`) is
+            /// preserved.
+            ///
+            /// ## Example
+            ///
+            /// ```ignore
+            /// // TenantScope normally applies to every User read; this
+            /// // call drops it for one query.
+            /// let everyone = User::without_global_scope::<TenantScope>()
+            ///     .get()
+            ///     .await?;
+            /// ```
+            pub fn without_global_scope<__Scope: 'static>() -> ::suprnova::Builder<Self> {
+                let b = #t4_fresh_builder
+                    .without_global_scope::<__Scope>();
+                ::suprnova::eloquent::scopes::ScopeRegistry::apply_to::<Self>(b)
+            }
+
+            /// Phase 10C T4 — start a query that bypasses every
+            /// registered global scope. Soft-delete filter (when
+            /// `#[model(soft_deletes)]`) is preserved — soft-deletes
+            /// don't route through the typed registry.
+            ///
+            /// ## Example
+            ///
+            /// ```ignore
+            /// // Admin tooling reads every row regardless of scoping.
+            /// let everything = User::without_global_scopes()
+            ///     .get()
+            ///     .await?;
+            /// ```
+            pub fn without_global_scopes() -> ::suprnova::Builder<Self> {
+                #t4_fresh_builder
+                    .without_global_scopes()
             }
         }
 

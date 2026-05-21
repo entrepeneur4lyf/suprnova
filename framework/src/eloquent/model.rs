@@ -60,6 +60,7 @@ pub trait Model:
     + Serialize
     + DeserializeOwned
     + ModelEventHooks
+    + 'static
 where
     Self: From<<Self::Entity as EntityTrait>::Model>,
     <Self::Entity as EntityTrait>::Model: From<Self>
@@ -197,10 +198,20 @@ where
         Ok(out)
     }
 
-    /// Start a new builder against this model. T4 ships a SQL-only
-    /// stub; T5 swaps in the full dual-API builder.
+    /// Start a new builder against this model. Phase 10C T4 layers
+    /// registered global scopes onto the fresh builder so every read
+    /// path is scoped by default; callers opt out per-type with
+    /// [`Builder::without_global_scope::<S>`] or all-at-once with
+    /// [`Builder::without_global_scopes`].
+    ///
+    /// The scope registry is keyed by `TypeId::of::<Self>()`. The
+    /// `Model: 'static` supertrait bound makes that lookup well-defined
+    /// for every concrete `#[suprnova::model]` struct.
+    ///
+    /// [`Builder::without_global_scope::<S>`]: crate::eloquent::Builder::without_global_scope
+    /// [`Builder::without_global_scopes`]: crate::eloquent::Builder::without_global_scopes
     fn query() -> Builder<Self> {
-        Builder::new()
+        crate::eloquent::scopes::ScopeRegistry::apply_to::<Self>(Builder::new())
     }
 
     /// Mass-create a row from the given attributes. Attributes are
