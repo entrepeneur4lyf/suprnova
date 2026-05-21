@@ -342,6 +342,29 @@ async fn chunk_with_eager_load_returns_error() {
 }
 
 #[tokio::test]
+async fn chunk_by_id_with_eager_load_returns_error() {
+    // `chunk_by_id` shares the same per-batch builder.clone() loop as
+    // `chunk` and the same eager-spec drop hazard. The rejection has
+    // been in place since Phase 10C T8 but had no regression test —
+    // surfaced by the AF3 audit, pinned here so the guard at
+    // `framework/src/eloquent/builder.rs:2419-2423` doesn't silently
+    // disappear in a future refactor.
+    let _db = fixture(5).await;
+
+    let err = T8Order::query()
+        .with(["nonexistent"])
+        .chunk_by_id(2, |_batch: Collection<T8Order>| async move { Ok(()) })
+        .await
+        .expect_err("chunk_by_id must reject eager loads");
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("eager loading"),
+        "expected eager-loading error, got: {msg}"
+    );
+}
+
+#[tokio::test]
 async fn lazy_with_eager_load_yields_error() {
     // `lazy()` builds the stream lazily, so the eager-load
     // rejection lands as the first item the consumer pulls. That's
