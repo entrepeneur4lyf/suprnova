@@ -126,5 +126,11 @@ impl Drop for TestContainerGuard {
         TEST_CONTAINER.with(|c| {
             *c.borrow_mut() = None;
         });
+        // Phase 10C T12 — the named-connection registry is process-
+        // global (OnceLock<RwLock<HashMap>>), so it survives the
+        // thread-local container reset. Wipe it on guard drop so the
+        // next test in the same process starts with no `__read_replica__`
+        // or other named connection registered.
+        crate::database::ConnectionRegistry::clear();
     }
 }

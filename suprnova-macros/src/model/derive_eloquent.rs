@@ -38,6 +38,24 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     let pk_name = &input.primary_key;
     let pk_ident = quote::format_ident!("{pk_name}");
 
+    // Phase 10C T12 — emit a `default_connection_name` override when
+    // the user declared `#[model(connection = "name")]`. The trait
+    // default returns `None` (i.e. "fall through to the routing
+    // chain"); the override returns `Some(<literal>)` so the
+    // `ExecutorChoice::resolve_{read,write}` steps 4 picks it up.
+    //
+    // `__primary__` is legal here — it pins reads to the default
+    // pool even when a `__read_replica__` is registered. Any other
+    // literal goes through `DB::named(name)` at resolve time.
+    let default_connection_impl = match input.connection.as_deref() {
+        Some(name) => quote! {
+            fn default_connection_name() -> ::core::option::Option<&'static str> {
+                ::core::option::Option::Some(#name)
+            }
+        },
+        None => quote! {},
+    };
+
     // T6 — wire the parsed `fillable = [...]` / `guarded = [...]`
     // attributes into the per-model `fillable_filter()` impl. Mutual
     // exclusion was already enforced at parse time (parse.rs:67-72), so
@@ -722,6 +740,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         impl ::suprnova::eloquent::Model for #struct_ident {
             fn primary_key_name() -> &'static str { #pk_name }
 
+            #default_connection_impl
+
             #fillable_impl
 
             #query_override
@@ -958,6 +978,30 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             pub fn without_global_scopes() -> ::suprnova::Builder<Self> {
                 #t4_fresh_builder
                     .without_global_scopes()
+            }
+        }
+
+        // Phase 10C T12 — per-model connection-routing entry points.
+        // The trait-level [`Builder::on`] / [`Builder::on_write_connection`]
+        // already exist; these inherent shortcuts let users write
+        // `User::on("analytics")` instead of
+        // `User::query().on("analytics")`, matching the Laravel shape.
+        impl #struct_ident {
+            /// Phase 10C T12 — start a query routed through the named
+            /// connection. Equivalent to
+            /// `<Self as Model>::query().on(name)`. Inside a
+            /// `DB::transaction` closure the override is silently
+            /// ignored — every op runs through the tx connection.
+            pub fn on(name: impl ::core::convert::Into<::std::string::String>) -> ::suprnova::Builder<Self> {
+                <Self as ::suprnova::eloquent::Model>::query().on(name)
+            }
+
+            /// Phase 10C T12 — start a query routed through the
+            /// primary pool, even when `__read_replica__` is
+            /// registered. Use for read-your-writes scenarios where
+            /// the replica might not have caught up.
+            pub fn on_write_connection() -> ::suprnova::Builder<Self> {
+                <Self as ::suprnova::eloquent::Model>::query().on_write_connection()
             }
         }
 

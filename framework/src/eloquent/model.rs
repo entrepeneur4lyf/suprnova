@@ -81,6 +81,23 @@ where
         "id"
     }
 
+    /// Phase 10C T12 — the per-model default connection name. Returns
+    /// `None` for models that don't declare `#[model(connection =
+    /// "...")]`; the macro overrides this when the attribute is set,
+    /// returning `Some(<literal>)`.
+    ///
+    /// Consulted by [`crate::database::transaction::ExecutorChoice::resolve_read`]
+    /// / [`resolve_write`](crate::database::transaction::ExecutorChoice::resolve_write)
+    /// as step 4 of the routing chain — after the per-builder
+    /// `on(name)` override but before `__read_replica__` auto-routing.
+    /// `Some("__primary__")` short-circuits to
+    /// [`crate::DB::connection`] without consulting the registry; any
+    /// other name routes through
+    /// [`crate::database::ConnectionRegistry::get`].
+    fn default_connection_name() -> ::core::option::Option<&'static str> {
+        ::core::option::Option::None
+    }
+
     /// Per-model mass-assignment guard. The macro's Task 4 emission
     /// returns `Fillable::guarded(vec![PRIMARY_KEY])`; Task 6 wires
     /// `fillable = [...]` / `guarded = [...]` attributes.
@@ -167,9 +184,17 @@ where
         K: Into<<<Self::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType> + Send,
     {
         Self::__dispatch_retrieving().await?;
-        // T11: route through ExecutorChoice so the read honours any
-        // ambient `DB::transaction` closure scope.
-        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        // T11/T12: route through resolve_read so the read honours any
+        // ambient `DB::transaction` closure scope, per-model
+        // `connection = "..."` default, and `__read_replica__`
+        // auto-routing. No builder-level overrides at this layer —
+        // `Model::find` doesn't take a Builder.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
+            None,
+            None,
+            Self::default_connection_name(),
+        )
+        .await?;
         let row = match &exec {
             crate::database::transaction::ExecutorChoice::Tx(t) => {
                 Self::Entity::find_by_id(id).one(t.as_ref()).await
@@ -230,8 +255,13 @@ where
         let pk = <Self::Entity as EntityTrait>::PrimaryKey::iter()
             .next()
             .expect("model has at least one primary-key column");
-        // T11: route through ExecutorChoice.
-        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        // T11/T12: route through resolve_read.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
+            None,
+            None,
+            Self::default_connection_name(),
+        )
+        .await?;
         let rows = match &exec {
             crate::database::transaction::ExecutorChoice::Tx(t) => {
                 Self::Entity::find()
@@ -279,8 +309,13 @@ where
     /// via `Deref<Target = [Self]>`.
     async fn all() -> Result<Collection<Self>, FrameworkError> {
         Self::__dispatch_retrieving().await?;
-        // T11: route through ExecutorChoice.
-        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        // T11/T12: route through resolve_read.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
+            None,
+            None,
+            Self::default_connection_name(),
+        )
+        .await?;
         let rows = match &exec {
             crate::database::transaction::ExecutorChoice::Tx(t) => {
                 Self::Entity::find().all(t.as_ref()).await
@@ -345,9 +380,17 @@ where
         // Arc<Mutex<_>> handle is dropped once we leave this scope.
         let final_attrs = shared.lock().await.clone();
         let am = Self::active_model_from_attrs(final_attrs)?;
-        // T11: route through ExecutorChoice — insert lands in the
-        // active transaction when called inside `DB::transaction`.
-        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        // T11/T12: route through resolve_write — insert lands in the
+        // active transaction when called inside `DB::transaction`,
+        // honours per-model `connection = "..."`, and skips
+        // `__read_replica__` (writes always go to primary unless the
+        // model explicitly opts elsewhere).
+        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+            None,
+            None,
+            Self::default_connection_name(),
+        )
+        .await?;
         let inserted = exec
             .insert_active(am)
             .await
@@ -388,8 +431,13 @@ where
         Self::__dispatch_saving(shared.clone(), false).await?;
 
         let am = self.clone().into_active_model_for_update()?;
-        // T11: route through ExecutorChoice.
-        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        // T11/T12: route through resolve_write.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+            None,
+            None,
+            Self::default_connection_name(),
+        )
+        .await?;
         let updated = exec
             .update_active(am)
             .await
@@ -421,8 +469,13 @@ where
         let row: <Self::Entity as EntityTrait>::Model = self.into();
         let mut am = row.into_active_model();
         Self::apply_attrs_to_active_model(&mut am, final_attrs)?;
-        // T11: route through ExecutorChoice.
-        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        // T11/T12: route through resolve_write.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+            None,
+            None,
+            Self::default_connection_name(),
+        )
+        .await?;
         let updated = exec
             .update_active(am)
             .await
@@ -453,8 +506,13 @@ where
         let snapshot = self.clone();
         let row: <Self::Entity as EntityTrait>::Model = self.into();
         let am = row.into_active_model();
-        // T11: route through ExecutorChoice.
-        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        // T11/T12: route through resolve_write.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+            None,
+            None,
+            Self::default_connection_name(),
+        )
+        .await?;
         exec.delete_active(am)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
@@ -476,8 +534,13 @@ where
         let snapshot = self.clone();
         let row: <Self::Entity as EntityTrait>::Model = self.into();
         let am = row.into_active_model();
-        // T11: route through ExecutorChoice.
-        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        // T11/T12: route through resolve_write.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+            None,
+            None,
+            Self::default_connection_name(),
+        )
+        .await?;
         exec.delete_active(am)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
@@ -706,8 +769,13 @@ where
         let pk_name = Self::primary_key_name();
         let pk_value = self.primary_key_value_json();
         let sql = format!("UPDATE {table} SET {column} = {column} + ? WHERE {pk_name} = ?");
-        // T11: route through ExecutorChoice.
-        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        // T11/T12: route through resolve_write.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+            None,
+            None,
+            Self::default_connection_name(),
+        )
+        .await?;
         let backend = exec.backend();
         exec.run(sea_orm::Statement::from_sql_and_values(
             backend,

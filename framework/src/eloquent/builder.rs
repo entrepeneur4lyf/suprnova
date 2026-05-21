@@ -295,6 +295,13 @@ pub struct Builder<M> {
     /// task-local or falling back to [`DB::connection()`]. Installed
     /// by [`Builder::with_tx`].
     pub(crate) tx_override: Option<crate::database::TxHandle>,
+    /// Phase 10C T12 — per-builder connection override. When set,
+    /// terminal methods route through the named connection in the
+    /// [`ConnectionRegistry`](crate::database::ConnectionRegistry).
+    /// Installed by [`Builder::on`] / [`Builder::on_write_connection`].
+    /// Bypassed by an active transaction (closure form CURRENT_TX or
+    /// explicit `with_tx`) — transactions take precedence absolutely.
+    pub(crate) connection_override: Option<String>,
     _phantom: PhantomData<M>,
 }
 
@@ -345,6 +352,10 @@ impl<M> Clone for Builder<M> {
             // T11: transaction override is a cheap `Arc` clone — every
             // clone of the builder targets the same underlying tx.
             tx_override: self.tx_override.clone(),
+            // T12: per-builder connection override carries through
+            // clones (chunk / lazy / clone-to-modify patterns) so the
+            // routing stays consistent across the cloned query family.
+            connection_override: self.connection_override.clone(),
             _phantom: PhantomData,
         }
     }
@@ -372,8 +383,65 @@ impl<M> Builder<M> {
             eager_specs: Vec::new(),
             lock_mode: LockMode::None,
             tx_override: None,
+            connection_override: None,
             _phantom: PhantomData,
         }
+    }
+
+    /// Phase 10C T12 — route every terminal method on this builder
+    /// through the connection registered under `name` (via
+    /// [`DB::register_named`](crate::DB::register_named) or
+    /// [`ConnectionRegistry::register_existing`](crate::database::ConnectionRegistry::register_existing)).
+    ///
+    /// Precedence: active transaction > builder `with_tx` >
+    /// `on(name)` > per-model `#[model(connection = "...")]` >
+    /// `__read_replica__` auto-routing > default pool. Inside a
+    /// [`DB::transaction`](crate::DB::transaction) closure the
+    /// transaction's connection wins — `on(name)` is silently ignored,
+    /// because every operation inside the closure must commit / roll
+    /// back atomically through the same physical connection.
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// // Register an analytics replica at boot.
+    /// DB::register_named("analytics_read", analytics_config).await?;
+    ///
+    /// // Per-query routing — read sales totals from the analytics replica.
+    /// let totals = Order::query()
+    ///     .filter_op("created_at", ">=", start)
+    ///     .on("analytics_read")
+    ///     .sum::<f64>("total")
+    ///     .await?;
+    /// ```
+    pub fn on(mut self, name: impl Into<String>) -> Self {
+        self.connection_override = Some(name.into());
+        self
+    }
+
+    /// Phase 10C T12 — opt this builder back to the primary pool, even
+    /// when a `__read_replica__` is registered and would normally take
+    /// reads. Use this for read-your-writes scenarios where the replica
+    /// might not have caught up yet.
+    ///
+    /// Equivalent to `.on("__primary__")`. The framework recognises the
+    /// `__primary__` sentinel and short-circuits to
+    /// [`DB::connection`](crate::DB::connection) without consulting the
+    /// registry.
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// // Just inserted a user; read it back from primary so we see the row.
+    /// User::create(suprnova::attrs! { email: "a@b.com" }).await?;
+    /// let same = User::on_write_connection()
+    ///     .filter("email", "a@b.com")
+    ///     .first()
+    ///     .await?;
+    /// ```
+    pub fn on_write_connection(mut self) -> Self {
+        self.connection_override = Some(crate::database::PRIMARY_CONNECTION_NAME.to_string());
+        self
     }
 
     /// Scope every terminal method on this builder through `tx`'s
@@ -1799,11 +1867,16 @@ where
         // hydrated from DB" once for the query as a whole.
         M::__dispatch_retrieving().await?;
 
-        // Phase 10C T11 — resolve executor with three-way precedence:
-        // explicit `with_tx` override > ambient `CURRENT_TX` > pool.
-        let exec = crate::database::transaction::ExecutorChoice::resolve_with_override(
+        // Phase 10C T11/T12 — resolve executor with five-step precedence:
+        // explicit `with_tx` override > ambient `CURRENT_TX` >
+        // builder `on(name)` > per-model default conn >
+        // `__read_replica__` auto-routing > default pool.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
             self.tx_override.as_ref(),
-        )?;
+            self.connection_override.as_deref(),
+            M::default_connection_name(),
+        )
+        .await?;
         let backend = exec.backend();
         let runtime_casts = self.runtime_casts.clone();
         // Move the eager plan out of `self` — `EagerSpec::WithWhere`
@@ -2012,11 +2085,15 @@ where
         let offset = page.saturating_sub(1).saturating_mul(per_page);
 
         // Count phase — borrows `self`, doesn't consume it.
-        // T11: route through ExecutorChoice (with override) so the
-        // COUNT runs against the same transaction as the page query.
-        let exec = crate::database::transaction::ExecutorChoice::resolve_with_override(
+        // T11/T12: route through ExecutorChoice (with tx override +
+        // connection override) so the COUNT runs against the same
+        // executor as the page query.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
             self.tx_override.as_ref(),
-        )?;
+            self.connection_override.as_deref(),
+            M::default_connection_name(),
+        )
+        .await?;
         let backend = exec.backend();
         let (count_sql, count_vals) = self.render_count_select_for(backend, M::TABLE);
         let count_stmt = Statement::from_sql_and_values(backend, &count_sql, count_vals);
@@ -2566,10 +2643,14 @@ where
         self,
         col: impl IntoColumn,
     ) -> Result<Option<T>, FrameworkError> {
-        // T11: respect `with_tx` override + ambient CURRENT_TX.
-        let exec = crate::database::transaction::ExecutorChoice::resolve_with_override(
+        // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
+        // + per-model default + `__read_replica__`.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
             self.tx_override.as_ref(),
-        )?;
+            self.connection_override.as_deref(),
+            M::default_connection_name(),
+        )
+        .await?;
         let backend = exec.backend();
         let mut s = self;
         s.limit = Some(1);
@@ -2588,10 +2669,14 @@ where
         self,
         col: impl IntoColumn,
     ) -> Result<Vec<T>, FrameworkError> {
-        // T11: respect `with_tx` override + ambient CURRENT_TX.
-        let exec = crate::database::transaction::ExecutorChoice::resolve_with_override(
+        // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
+        // + per-model default + `__read_replica__`.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
             self.tx_override.as_ref(),
-        )?;
+            self.connection_override.as_deref(),
+            M::default_connection_name(),
+        )
+        .await?;
         let backend = exec.backend();
         let col_name = col.col_name();
         let (sql, vals) = self.render_select_for(backend, M::TABLE, &col_name);
@@ -2612,10 +2697,14 @@ where
         key_col: impl IntoColumn,
         val_col: impl IntoColumn,
     ) -> Result<HashMap<K, V>, FrameworkError> {
-        // T11: respect `with_tx` override + ambient CURRENT_TX.
-        let exec = crate::database::transaction::ExecutorChoice::resolve_with_override(
+        // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
+        // + per-model default + `__read_replica__`.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
             self.tx_override.as_ref(),
-        )?;
+            self.connection_override.as_deref(),
+            M::default_connection_name(),
+        )
+        .await?;
         let backend = exec.backend();
         let kn = key_col.col_name();
         let vn = val_col.col_name();
@@ -2638,10 +2727,14 @@ where
         self,
         expr: &str,
     ) -> Result<T, FrameworkError> {
-        // T11: respect `with_tx` override + ambient CURRENT_TX.
-        let exec = crate::database::transaction::ExecutorChoice::resolve_with_override(
+        // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
+        // + per-model default + `__read_replica__`.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
             self.tx_override.as_ref(),
-        )?;
+            self.connection_override.as_deref(),
+            M::default_connection_name(),
+        )
+        .await?;
         let backend = exec.backend();
         let (sql, vals) = self.render_select_for(backend, M::TABLE, expr);
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
@@ -2658,10 +2751,14 @@ where
         self,
         expr: &str,
     ) -> Result<Option<T>, FrameworkError> {
-        // T11: respect `with_tx` override + ambient CURRENT_TX.
-        let exec = crate::database::transaction::ExecutorChoice::resolve_with_override(
+        // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
+        // + per-model default + `__read_replica__`.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
             self.tx_override.as_ref(),
-        )?;
+            self.connection_override.as_deref(),
+            M::default_connection_name(),
+        )
+        .await?;
         let backend = exec.backend();
         let (sql, vals) = self.render_select_for(backend, M::TABLE, expr);
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);

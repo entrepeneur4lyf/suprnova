@@ -53,6 +53,12 @@ pub struct DbTableBuilder {
     limit_value: Option<u64>,
     offset_value: Option<u64>,
     select_columns: Vec<String>,
+    /// Phase 10C T12 — per-builder connection override. Set via
+    /// [`Self::on`] or constructed pre-set via
+    /// [`DB::table_on`](crate::DB::table_on). Routes terminal methods
+    /// through the named connection in the
+    /// [`ConnectionRegistry`](crate::database::ConnectionRegistry).
+    connection_override: Option<String>,
 }
 
 impl DbTableBuilder {
@@ -67,7 +73,17 @@ impl DbTableBuilder {
             limit_value: None,
             offset_value: None,
             select_columns: Vec::new(),
+            connection_override: None,
         }
+    }
+
+    /// Phase 10C T12 — route every terminal method on this builder
+    /// through the connection registered under `name`. Inside an
+    /// active transaction (`DB::transaction` closure) the override is
+    /// silently ignored — every op runs through the tx connection.
+    pub fn on(mut self, name: impl Into<String>) -> Self {
+        self.connection_override = Some(name.into());
+        self
     }
 
     /// Restrict the SELECT to a specific column list. Empty means `*`.
@@ -133,9 +149,15 @@ impl DbTableBuilder {
     /// [`sea_orm::JsonValue::find_by_statement`] under the hood so
     /// column shape is discovered at runtime.
     pub async fn get(self) -> Result<Collection<DynamicRow>, FrameworkError> {
-        // T11: route through ExecutorChoice so `DB::table` reads honour
-        // the ambient `DB::transaction` scope.
-        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        // T11/T12: route through resolve_read so `DB::table` reads
+        // honour the ambient `DB::transaction` scope, the per-builder
+        // `.on(name)` override, and `__read_replica__` auto-routing.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
+            None,
+            self.connection_override.as_deref(),
+            None,
+        )
+        .await?;
         let backend = exec.backend();
         let (sql, values) = self.render_select(backend);
         let stmt = Statement::from_sql_and_values(backend, &sql, values);
@@ -179,8 +201,13 @@ impl DbTableBuilder {
     /// `FromQueryResult` impl — on SQLite the typed accessor is the
     /// reliable path.
     pub async fn count(self) -> Result<u64, FrameworkError> {
-        // T11: route through ExecutorChoice.
-        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        // T11/T12: route through resolve_read.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
+            None,
+            self.connection_override.as_deref(),
+            None,
+        )
+        .await?;
         let backend = exec.backend();
         let mut copy = self;
         copy.select_columns = vec!["COUNT(*) as count".into()];
@@ -208,8 +235,14 @@ impl DbTableBuilder {
     /// split: Postgres + SQLite use `RETURNING id`; MySQL runs the
     /// INSERT then issues `SELECT LAST_INSERT_ID()`.
     pub async fn insert(self, attrs: Attrs) -> Result<i64, FrameworkError> {
-        // T11: route through ExecutorChoice.
-        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        // T11/T12: route through resolve_write — writes never go to
+        // `__read_replica__`.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+            None,
+            self.connection_override.as_deref(),
+            None,
+        )
+        .await?;
         let backend = exec.backend();
 
         let cols: Vec<String> = attrs.keys().map(String::from).collect();
@@ -288,8 +321,13 @@ impl DbTableBuilder {
                 self.table
             )));
         }
-        // T11: route through ExecutorChoice.
-        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        // T11/T12: route through resolve_write.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+            None,
+            self.connection_override.as_deref(),
+            None,
+        )
+        .await?;
         let backend = exec.backend();
         let (sql, values) = self.render_update(&attrs, backend);
         let stmt = Statement::from_sql_and_values(backend, &sql, values);
@@ -307,8 +345,13 @@ impl DbTableBuilder {
     /// removes every row by design — add a `filter` if you don't mean
     /// that.
     pub async fn delete(self) -> Result<u64, FrameworkError> {
-        // T11: route through ExecutorChoice.
-        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        // T11/T12: route through resolve_write.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+            None,
+            self.connection_override.as_deref(),
+            None,
+        )
+        .await?;
         let backend = exec.backend();
         let (sql, values) = self.render_delete(backend);
         let stmt = Statement::from_sql_and_values(backend, &sql, values);
@@ -478,9 +521,12 @@ impl DB {
         sql: &str,
         values: impl IntoIterator<Item = SeaValue>,
     ) -> Result<Vec<DynamicRow>, FrameworkError> {
-        // T11: route through ExecutorChoice so raw selects honour the
-        // ambient `DB::transaction` scope.
-        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        // T11/T12: route through resolve_read so raw selects honour
+        // the ambient `DB::transaction` scope AND `__read_replica__`
+        // auto-routing. Use `DB::select_on(name, ...)` to pin to a
+        // specific named connection.
+        let exec =
+            crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?;
         let backend = exec.backend();
         let stmt =
             Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());
@@ -524,11 +570,13 @@ impl DB {
     /// Discards the result — use this for `CREATE INDEX`, `ALTER
     /// TABLE`, `VACUUM`, etc.
     pub async fn statement(sql: &str) -> Result<(), FrameworkError> {
-        // T11: route through ExecutorChoice. DDL inside `DB::transaction`
-        // is unusual but supported on backends that allow it (Postgres);
-        // SQLite/MySQL accept some DDL inside transactions too.
+        // T11/T12: route through resolve_write — DDL is a write-shape
+        // op and should never land on `__read_replica__`. Inside
+        // `DB::transaction`, the tx connection wins (transactions
+        // bypass replica auto-routing absolutely).
         use sea_orm::ConnectionTrait;
-        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        let exec =
+            crate::database::transaction::ExecutorChoice::resolve_write(None, None, None).await?;
         match &exec {
             crate::database::transaction::ExecutorChoice::Tx(t) => {
                 t.execute_unprepared(sql).await
@@ -549,8 +597,109 @@ impl DB {
         sql: &str,
         values: impl IntoIterator<Item = SeaValue>,
     ) -> Result<u64, FrameworkError> {
-        // T11: route through ExecutorChoice.
-        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        // T11/T12: route through resolve_write — affecting statements
+        // (INSERT/UPDATE/DELETE/UPSERT) never go to the replica.
+        let exec =
+            crate::database::transaction::ExecutorChoice::resolve_write(None, None, None).await?;
+        let backend = exec.backend();
+        let stmt =
+            Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());
+        let result = exec
+            .run(stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        Ok(result.rows_affected())
+    }
+
+    // ---- Phase 10C T12 — connection-pinned raw escapes ------------------
+
+    /// Phase 10C T12 — `DB::table(name)` variant that pins the returned
+    /// builder to the connection registered under `conn_name`. Equivalent
+    /// to `DB::table(table).on(conn_name)`. Inside a `DB::transaction`
+    /// the override is silently ignored — every op runs through the tx.
+    pub fn table_on(conn_name: impl Into<String>, table: impl Into<String>) -> DbTableBuilder {
+        DbTableBuilder::new(table).on(conn_name)
+    }
+
+    /// Phase 10C T12 — `DB::select` variant that runs against the
+    /// named connection instead of consulting the default routing
+    /// chain. Errors if `conn_name` isn't registered.
+    pub async fn select_on(
+        conn_name: &str,
+        sql: &str,
+        values: impl IntoIterator<Item = SeaValue>,
+    ) -> Result<Vec<DynamicRow>, FrameworkError> {
+        // Inside a transaction the tx connection wins absolutely —
+        // even an explicit `_on` call cannot route around it because
+        // it would split the atomicity contract. Resolve_read with the
+        // override expresses exactly that precedence.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
+            None,
+            Some(conn_name),
+            None,
+        )
+        .await?;
+        let backend = exec.backend();
+        let stmt =
+            Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());
+        let rows = match &exec {
+            crate::database::transaction::ExecutorChoice::Tx(t) => {
+                JsonValue::find_by_statement(stmt).all(t.as_ref()).await
+            }
+            crate::database::transaction::ExecutorChoice::Pool(c) => {
+                JsonValue::find_by_statement(stmt).all(c.inner()).await
+            }
+        }
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|v| match v {
+                serde_json::Value::Object(map) => Some(DynamicRow::from_map(map)),
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// Phase 10C T12 — `DB::statement` variant that runs against the
+    /// named connection. Useful for backend-specific DDL on a read
+    /// replica (e.g. `CREATE INDEX` on a follower that's been promoted
+    /// to standalone).
+    pub async fn statement_on(conn_name: &str, sql: &str) -> Result<(), FrameworkError> {
+        use sea_orm::ConnectionTrait;
+        // resolve_write — DDL is write-shape; the override pins it to
+        // the named connection but in-tx semantics still win.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+            None,
+            Some(conn_name),
+            None,
+        )
+        .await?;
+        match &exec {
+            crate::database::transaction::ExecutorChoice::Tx(t) => {
+                t.execute_unprepared(sql).await
+            }
+            crate::database::transaction::ExecutorChoice::Pool(c) => {
+                c.inner().execute_unprepared(sql).await
+            }
+        }
+        .map(|_| ())
+        .map_err(|e| FrameworkError::database(e.to_string()))
+    }
+
+    /// Phase 10C T12 — `DB::affecting_statement` variant pinned to the
+    /// named connection. INSERT / UPDATE / DELETE / UPSERT on a
+    /// non-primary write target.
+    pub async fn affecting_statement_on(
+        conn_name: &str,
+        sql: &str,
+        values: impl IntoIterator<Item = SeaValue>,
+    ) -> Result<u64, FrameworkError> {
+        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+            None,
+            Some(conn_name),
+            None,
+        )
+        .await?;
         let backend = exec.backend();
         let stmt =
             Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());

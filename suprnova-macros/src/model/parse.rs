@@ -201,8 +201,13 @@ pub struct ModelInput {
     #[allow(dead_code)] // T4+ — used when typed CRUD lifecycle wires through.
     pub key_type: Type,
     pub auto_increment: bool,
-    #[allow(dead_code)] // T4+ — multi-connection routing in derive_eloquent.
-    pub connection: String,
+    /// Phase 10C T12 — per-model default connection name. `None` means
+    /// "use the default routing chain" (tx → on(name) → replica →
+    /// primary). When `Some("warehouse")`, every read/write on this
+    /// model routes through `DB::named("warehouse")` by default.
+    /// `Some("__primary__")` is legal but unusual — it pins reads to
+    /// the primary pool even when a `__read_replica__` is registered.
+    pub connection: Option<String>,
     // Slots filled by later tasks (Phase 10A T6/T7a/T9/T10):
     #[allow(dead_code)]
     pub fillable: Option<Vec<String>>,
@@ -275,7 +280,12 @@ impl ModelInput {
             .key_type
             .unwrap_or_else(|| syn::parse_str("i64").expect("i64 parses"));
         let auto_increment = attrs.auto_increment.unwrap_or(true);
-        let connection = attrs.connection.unwrap_or_else(|| "default".to_string());
+        // T12 — `connection = "..."` is optional. `None` means "fall
+        // through to the default routing chain". We do NOT default to
+        // `Some("default")` because that would force every untagged
+        // model to try `DB::named("default")` and fail (no connection
+        // is ever registered under that name).
+        let connection = attrs.connection;
         let timestamps_default = attrs.timestamps.unwrap_or(true);
         let created_at = attrs.created_at.unwrap_or_else(|| "created_at".to_string());
         let updated_at = attrs.updated_at.unwrap_or_else(|| "updated_at".to_string());
@@ -1106,7 +1116,10 @@ mod tests {
         assert_eq!(input.table, "users");
         assert_eq!(input.primary_key, "id");
         assert!(input.auto_increment);
-        assert_eq!(input.connection, "default");
+        // T12 — connection is now Option<String>; an unset attribute
+        // means "use the default routing chain", not the literal
+        // string "default".
+        assert_eq!(input.connection, None);
     }
 
     #[test]

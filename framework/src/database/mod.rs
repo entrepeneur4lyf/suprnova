@@ -38,6 +38,7 @@
 
 pub mod config;
 pub mod connection;
+pub mod connection_registry;
 pub mod db_facade;
 pub mod dynamic_row;
 pub mod model;
@@ -48,6 +49,9 @@ pub mod transaction;
 
 pub use config::{DatabaseConfig, DatabaseConfigBuilder, DatabaseType};
 pub use connection::DbConnection;
+pub use connection_registry::{
+    ConnectionRegistry, PRIMARY_CONNECTION_NAME, READ_REPLICA_CONNECTION_NAME,
+};
 pub use db_facade::DbTableBuilder;
 pub use dynamic_row::DynamicRow;
 pub use model::{EntityExt, EntityExtMut};
@@ -215,6 +219,34 @@ impl DB {
     /// ```
     pub fn get() -> Result<DbConnection, FrameworkError> {
         Self::connection()
+    }
+
+    /// Phase 10C T12 — register an auxiliary database connection under
+    /// `name`. The primary pool is registered through [`Self::init`] /
+    /// [`Self::init_with`]; this method is for read replicas, sharded
+    /// shards, and per-model "warehouse" pools.
+    ///
+    /// Per-query routing: chain [`Builder::on(name)`] or
+    /// [`Model::on(name)`]. Per-model default: tag the model with
+    /// `#[model(connection = "name")]`.
+    ///
+    /// `__primary__` is reserved — registering under that name fails.
+    /// `__read_replica__` is the well-known read-replica name; when
+    /// registered, every read-shape terminal method on
+    /// [`Builder<M>`](crate::eloquent::Builder) auto-routes through it.
+    /// Writes (`create` / `save` / `delete`) ignore the replica.
+    ///
+    /// [`Builder::on(name)`]: crate::eloquent::Builder::on
+    /// [`Model::on(name)`]: crate::eloquent::Model
+    pub async fn register_named(name: &str, config: DatabaseConfig) -> Result<(), FrameworkError> {
+        ConnectionRegistry::register(name, config).await
+    }
+
+    /// Look up the connection registered under `name`. Errors when no
+    /// connection is registered — no automatic fallback to the primary
+    /// (would mask misconfiguration).
+    pub async fn named(name: &str) -> Result<DbConnection, FrameworkError> {
+        ConnectionRegistry::get(name).await
     }
 }
 

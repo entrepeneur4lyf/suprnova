@@ -165,6 +165,104 @@ impl ExecutorChoice {
         Self::resolve()
     }
 
+    /// Phase 10C T12 — pick the executor for a READ-shape operation.
+    /// Five-step precedence:
+    ///
+    /// 1. **Builder-level transaction override** (`Builder::with_tx`).
+    ///    Explicit beats every other consideration.
+    /// 2. **Ambient `CURRENT_TX`** installed by [`DB::transaction`] /
+    ///    [`DB::transaction_with_attempts`]. Inside a closure-form
+    ///    transaction every read uses the tx connection — `on(name)`
+    ///    routing is silently ignored.
+    /// 3. **Per-builder `connection_override`** (`Builder::on(name)`).
+    ///    The `__primary__` sentinel short-circuits to
+    ///    [`DB::connection`] without consulting the registry.
+    /// 4. **Per-model default** (`#[model(connection = "...")]`).
+    /// 5. **`__read_replica__`** if registered.
+    /// 6. **Default pool** (`DB::connection`).
+    ///
+    /// Step 1 fires when the closure form's task-local is `Some(_)`;
+    /// step 2 is the same lookup but with a builder-attached
+    /// [`TxHandle`]. Steps 3-6 are the new T12 routing chain.
+    #[doc(hidden)]
+    pub async fn resolve_read(
+        tx_override: Option<&TxHandle>,
+        connection_override: Option<&str>,
+        model_default_conn: Option<&'static str>,
+    ) -> Result<Self, FrameworkError> {
+        // Step 1: explicit builder-level tx override.
+        if let Some(h) = tx_override {
+            return Ok(ExecutorChoice::Tx(h.inner.clone()));
+        }
+        // Step 2: ambient closure-form transaction.
+        if let Ok(Some(tx)) = CURRENT_TX.try_with(|t| t.clone()) {
+            return Ok(ExecutorChoice::Tx(tx));
+        }
+        // Step 3: per-builder connection override.
+        if let Some(name) = connection_override {
+            if name == crate::database::PRIMARY_CONNECTION_NAME {
+                return Ok(ExecutorChoice::Pool(DB::connection()?));
+            }
+            return Ok(ExecutorChoice::Pool(DB::named(name).await?));
+        }
+        // Step 4: per-model default connection.
+        if let Some(name) = model_default_conn {
+            if name == crate::database::PRIMARY_CONNECTION_NAME {
+                return Ok(ExecutorChoice::Pool(DB::connection()?));
+            }
+            return Ok(ExecutorChoice::Pool(DB::named(name).await?));
+        }
+        // Step 5: read replica if registered.
+        if crate::database::ConnectionRegistry::has(
+            crate::database::READ_REPLICA_CONNECTION_NAME,
+        )
+        .await
+        {
+            return Ok(ExecutorChoice::Pool(
+                DB::named(crate::database::READ_REPLICA_CONNECTION_NAME).await?,
+            ));
+        }
+        // Step 6: default pool.
+        Ok(ExecutorChoice::Pool(DB::connection()?))
+    }
+
+    /// Phase 10C T12 — pick the executor for a WRITE-shape operation
+    /// (`Model::create`, `Model::save`, `Model::update`, `Model::delete`,
+    /// `DbTableBuilder::insert/update/delete`).
+    ///
+    /// Same precedence as [`Self::resolve_read`] EXCEPT step 5 is
+    /// skipped — writes never auto-route to `__read_replica__`. If the
+    /// caller wants a write against a non-primary connection they must
+    /// chain `Builder::on(name)` (step 3) or tag the model with
+    /// `#[model(connection = "...")]` (step 4) explicitly.
+    #[doc(hidden)]
+    pub async fn resolve_write(
+        tx_override: Option<&TxHandle>,
+        connection_override: Option<&str>,
+        model_default_conn: Option<&'static str>,
+    ) -> Result<Self, FrameworkError> {
+        if let Some(h) = tx_override {
+            return Ok(ExecutorChoice::Tx(h.inner.clone()));
+        }
+        if let Ok(Some(tx)) = CURRENT_TX.try_with(|t| t.clone()) {
+            return Ok(ExecutorChoice::Tx(tx));
+        }
+        if let Some(name) = connection_override {
+            if name == crate::database::PRIMARY_CONNECTION_NAME {
+                return Ok(ExecutorChoice::Pool(DB::connection()?));
+            }
+            return Ok(ExecutorChoice::Pool(DB::named(name).await?));
+        }
+        if let Some(name) = model_default_conn {
+            if name == crate::database::PRIMARY_CONNECTION_NAME {
+                return Ok(ExecutorChoice::Pool(DB::connection()?));
+            }
+            return Ok(ExecutorChoice::Pool(DB::named(name).await?));
+        }
+        // No read-replica auto-routing on writes.
+        Ok(ExecutorChoice::Pool(DB::connection()?))
+    }
+
     /// Build an executor that routes through a specific transaction.
     /// Used by the `Model::*_with_tx` shims, which bypass both the
     /// builder override and the ambient `CURRENT_TX` because the
