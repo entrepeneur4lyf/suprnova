@@ -345,6 +345,62 @@ is what makes Rust frameworks reach 80% production-ready and stall.
   declarations route correctly. `with_trashed` / `only_trashed`
   forwarding on all 10 relation types. Prunable does NOT cascade
   (correct Laravel default); cascade via DB FK or `pruning()` hook.
+- **Eloquent Lifecycle + Collections + Querying Power** (Phase 10C)
+  — Model events: 16 lifecycle structs in a per-model `events::*`
+  submodule (`Retrieving` / `Retrieved` / `Saving` / `Creating` /
+  `Updating` / `Deleting` / `Restoring` / `Created` / `Updated` /
+  `Saved` / `Deleted` / `Trashed` / `Restored` / `Replicating` /
+  `ForceDeleting` / `ForceDeleted`) + `EventResult::Ok | Cancel(String)`
+  for the cancellable family + cancel-propagates-as-`bad_request`.
+  `Observer<M>` trait with 16 default no-op methods +
+  `#[suprnova::observer(M)]` attribute that walks the impl block
+  and emits adapter listeners only for overridden methods +
+  `#[model(observers = [...])]` declarative + `Model::observe()`
+  manual + `bootstrap_observers()` inventory drain at boot.
+  Local scopes via `#[suprnova::scopes(Model)]` impl-block
+  attribute — emits both a static `Model::active()` helper and a
+  `Builder<Model>::active()` chainable extension via a per-(scope,
+  model) trait. Global scopes via `GlobalScope<M>` trait +
+  `ScopeRegistry::register` + `without_global_scope::<T>()` /
+  `without_global_scopes()` opt-out (per-type and all-at-once).
+  `Collection<T>` Laravel surface (~25 generic methods) +
+  `Collection<M>` model-aware methods (string-keyed pluck /
+  group_by / sort_by / sum / avg / min / max routed through
+  macro-emitted `field_value`) + `Builder::get → Collection<M>`
+  return-type change (deref preserves Vec compat). Serialization:
+  `Model::to_array() -> Value` + `Model::to_json() -> String`
+  honouring `hidden = [...]` / `visible = [...]` / `appends = [...]`,
+  with `__eager` / `__pivot` always stripped. Three paginators —
+  `LengthAwarePaginator` (offset + COUNT(*)) + `Paginator` (simple,
+  no COUNT) + `CursorPaginator` (keyset) — all Serialize, with
+  `paginate_using("page_param", n)` query-param override.
+  Chunking — `chunk(n)` (OFFSET) + `chunk_by_id(n)` (PK-cursor,
+  concurrent-safe) + `chunk_map(n)` + `each` + `lazy()` /
+  `lazy_by_id(n)` / `cursor()` returning a `LazyCollection<M>`
+  stream wrapper. Row locking — `lock_for_update()` /
+  `shared_lock()` with backend-aware SQL (`FOR UPDATE` / `LOCK IN
+  SHARE MODE` / `FOR SHARE`); SQLite no-op with `warn!`-once.
+  DB facade — `DB::table(name)` raw query builder returning
+  `Collection<DynamicRow>` + `DB::select` / `update` / `delete` /
+  `statement` / `affecting_statement` raw escapes + `DynamicRow`
+  newtype with typed accessors. Transactions — `DB::transaction(closure)`
+  HRTB closure form (auto-detects via `tokio::task_local` so
+  Builder<M> / Model ops inside compose) + `DB::begin_transaction()`
+  manual form + `tx.savepoint(name)` / `tx.rollback_to(name)` +
+  `DB::transaction_with_attempts(n, closure)` retry-on-deadlock +
+  `Builder::with_tx(&tx)` / `Model::save_with_tx(&tx)` explicit
+  scope. Multi-connection — `DB::register_named(name, config)` at
+  boot + `Model::on(name)` per-query + `#[model(connection = "...")]`
+  per-model default + read-write split via reserved
+  `__read_replica__` connection name + `Model::on_write_connection()`
+  opt-out from replica. Active tx ignores `on(name)` — every op
+  uses tx connection. Replication — `Model::replicate()` is async
+  + fires `Replicating` event (listeners mutate via
+  `Arc<Mutex<Self>>`) + `replicate_except([...])` drops named
+  fields + `replicate_into::<T>()` cross-type bridge via
+  `serde_json`. Debugging — `Builder::dump()` (chainable, logs at
+  `tracing::info!`) + `Builder::dd()` (returns `!`, logs at
+  `tracing::error!` then panics with `eloquent dd: <sql>`).
 - **Auth Flows** (Phase 11) — `EmailVerification::send` / `verify` /
   `resend` over signed URLs. `PasswordReset::start` / `verify` /
   `complete` with token expiry + session-revocation on completion +
@@ -375,20 +431,6 @@ is what makes Rust frameworks reach 80% production-ready and stall.
   exposing `suprnova::schema::*` and `suprnova::query::*` as thin
   re-export facades is free leverage. Covers MySQL/Postgres/SQLite
   with the same DSL.
-- **Eloquent Lifecycle + Collections + Querying Power** (Phase 10C —
-  next up). Model events (16 lifecycle), `Observer<M>` trait + auto-registration,
-  local scopes (`#[scope]` macro), global scopes + `without_global_scope`,
-  `Collection<M>` full Laravel surface (~40 methods), serialization
-  (`to_array` / `to_json` + hidden/visible/appends — partial, see 10A),
-  pagination (LengthAware + Simple + Cursor — already shipped at the
-  HTTP layer; needs Model trait method integration), chunking + lazy
-  (`chunk` / `chunk_by_id` / `each` / `lazy` / `cursor`), locking
-  (`lock_for_update` / `shared_lock`), DB facade (`DB::table` raw
-  query builder), transactions (closure + manual + savepoints +
-  retry-on-deadlock), multi-connection (`User::on(name)` +
-  `#[model(connection=...)]` + read-write split), `replicate` /
-  `replicate_except` / `replicate_into`.
-
 **Missing - the rest of this document.**
 
 Major missing tracks beyond Phase 10C:
