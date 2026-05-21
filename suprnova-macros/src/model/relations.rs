@@ -2340,8 +2340,16 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // raw eager-load SQL honors any ambient CURRENT_TX. Without
+                    // this every leaf would run on `DB::connection()` (the pool)
+                    // and miss in-tx state under a `DB::transaction` closure.
+                    let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                    ).await?;
+                    let db_backend = __sn_exec.backend();
 
                     // Backend-aware placeholder rendering for the
                     // IN-list on the intermediate table query.
@@ -2392,8 +2400,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         &__sn_map_sql,
                         binds,
                     );
-                    let __sn_map_rows = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, __sn_map_stmt)
+                    let __sn_map_rows = __sn_exec.query_all(__sn_map_stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
 
@@ -3119,8 +3126,16 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // raw eager-load SQL honors any ambient CURRENT_TX. Without
+                    // this every leaf would run on `DB::connection()` (the pool)
+                    // and miss in-tx state under a `DB::transaction` closure.
+                    let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                    ).await?;
+                    let db_backend = __sn_exec.backend();
 
                     // Build the placeholder list. Per-backend dialect
                     // matches the inner `Builder` renderer: Postgres
@@ -3170,8 +3185,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         &__sn_sql,
                         binds,
                     );
-                    let rows = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                    let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
 
@@ -3249,8 +3263,16 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // raw eager-load SQL honors any ambient CURRENT_TX. Without
+                    // this every leaf would run on `DB::connection()` (the pool)
+                    // and miss in-tx state under a `DB::transaction` closure.
+                    let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                    ).await?;
+                    let db_backend = __sn_exec.backend();
 
                     let mut placeholders: ::std::vec::Vec<::std::string::String> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
@@ -3291,8 +3313,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         &__sn_sql,
                         binds,
                     );
-                    let rows = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                    let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
 
@@ -3384,8 +3405,16 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // raw eager-load SQL honors any ambient CURRENT_TX. Without
+                    // this every leaf would run on `DB::connection()` (the pool)
+                    // and miss in-tx state under a `DB::transaction` closure.
+                    let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                    ).await?;
+                    let db_backend = __sn_exec.backend();
 
                     let mut placeholders: ::std::vec::Vec<::std::string::String> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
@@ -3434,8 +3463,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         &__sn_sql,
                         binds,
                     );
-                    let rows = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                    let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
 
@@ -3505,8 +3533,16 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // raw eager-load SQL honors any ambient CURRENT_TX. Without
+                    // this every leaf would run on `DB::connection()` (the pool)
+                    // and miss in-tx state under a `DB::transaction` closure.
+                    let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                    ).await?;
+                    let db_backend = __sn_exec.backend();
 
                     let mut placeholders: ::std::vec::Vec<::std::string::String> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
@@ -3561,8 +3597,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         &__sn_sql,
                         binds,
                     );
-                    let rows = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                    let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
 
@@ -3639,8 +3674,16 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // raw eager-load SQL honors any ambient CURRENT_TX. Without
+                    // this every leaf would run on `DB::connection()` (the pool)
+                    // and miss in-tx state under a `DB::transaction` closure.
+                    let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                    ).await?;
+                    let db_backend = __sn_exec.backend();
 
                     let mut placeholders: ::std::vec::Vec<::std::string::String> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
@@ -3691,8 +3734,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         &__sn_sql,
                         binds,
                     );
-                    let rows = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                    let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
 
@@ -3776,8 +3818,16 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // raw eager-load SQL honors any ambient CURRENT_TX. Without
+                    // this every leaf would run on `DB::connection()` (the pool)
+                    // and miss in-tx state under a `DB::transaction` closure.
+                    let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                    ).await?;
+                    let db_backend = __sn_exec.backend();
 
                     let mut placeholders: ::std::vec::Vec<::std::string::String> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
@@ -3828,8 +3878,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         &__sn_sql,
                         binds,
                     );
-                    let rows = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                    let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
 
@@ -4131,8 +4180,16 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // raw eager-load SQL honors any ambient CURRENT_TX. Without
+                    // this every leaf would run on `DB::connection()` (the pool)
+                    // and miss in-tx state under a `DB::transaction` closure.
+                    let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                    ).await?;
+                    let db_backend = __sn_exec.backend();
 
                     // Build the placeholder list. Per-backend dialect
                     // matches the inner `Builder` renderer: Postgres
@@ -4205,8 +4262,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         &__sn_sql,
                         binds,
                     );
-                    let rows = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                    let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
 
@@ -4352,8 +4408,16 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // raw eager-load SQL honors any ambient CURRENT_TX. Without
+                    // this every leaf would run on `DB::connection()` (the pool)
+                    // and miss in-tx state under a `DB::transaction` closure.
+                    let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                    ).await?;
+                    let db_backend = __sn_exec.backend();
 
                     let mut placeholders: ::std::vec::Vec<::std::string::String> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
@@ -4417,8 +4481,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         &__sn_sql,
                         binds,
                     );
-                    let rows = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                    let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
 
@@ -4545,8 +4608,16 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // raw eager-load SQL honors any ambient CURRENT_TX. Without
+                    // this every leaf would run on `DB::connection()` (the pool)
+                    // and miss in-tx state under a `DB::transaction` closure.
+                    let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                    ).await?;
+                    let db_backend = __sn_exec.backend();
 
                     let mut placeholders: ::std::vec::Vec<::std::string::String> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
@@ -4612,8 +4683,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         &__sn_sql,
                         binds,
                     );
-                    let rows = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                    let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
 
@@ -4722,8 +4792,16 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // raw eager-load SQL honors any ambient CURRENT_TX. Without
+                    // this every leaf would run on `DB::connection()` (the pool)
+                    // and miss in-tx state under a `DB::transaction` closure.
+                    let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                    ).await?;
+                    let db_backend = __sn_exec.backend();
 
                     let mut placeholders: ::std::vec::Vec<::std::string::String> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
@@ -4792,8 +4870,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         &__sn_sql,
                         binds,
                     );
-                    let rows = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                    let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
 
@@ -4920,8 +4997,16 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // raw eager-load SQL honors any ambient CURRENT_TX. Without
+                    // this every leaf would run on `DB::connection()` (the pool)
+                    // and miss in-tx state under a `DB::transaction` closure.
+                    let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                    ).await?;
+                    let db_backend = __sn_exec.backend();
 
                     let mut placeholders: ::std::vec::Vec<::std::string::String> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
@@ -4995,8 +5080,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         &__sn_sql,
                         binds,
                     );
-                    let rows = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                    let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
 
@@ -5125,8 +5209,16 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    let db_backend = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::get_database_backend(db);
+                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // raw eager-load SQL honors any ambient CURRENT_TX. Without
+                    // this every leaf would run on `DB::connection()` (the pool)
+                    // and miss in-tx state under a `DB::transaction` closure.
+                    let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                    ).await?;
+                    let db_backend = __sn_exec.backend();
 
                     let mut placeholders: ::std::vec::Vec<::std::string::String> =
                         ::std::vec::Vec::with_capacity(pk_json_values.len());
@@ -5200,8 +5292,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         &__sn_sql,
                         binds,
                     );
-                    let rows = <::suprnova::sea_orm::DatabaseConnection as
-                        ::suprnova::sea_orm::ConnectionTrait>::query_all(db, stmt)
+                    let rows = __sn_exec.query_all(stmt)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
 
