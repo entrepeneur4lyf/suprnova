@@ -38,6 +38,8 @@
 
 pub mod config;
 pub mod connection;
+pub mod db_facade;
+pub mod dynamic_row;
 pub mod model;
 pub mod query_builder;
 pub mod route_binding;
@@ -45,6 +47,8 @@ pub mod testing;
 
 pub use config::{DatabaseConfig, DatabaseConfigBuilder, DatabaseType};
 pub use connection::DbConnection;
+pub use db_facade::DbTableBuilder;
+pub use dynamic_row::DynamicRow;
 pub use model::{EntityExt, EntityExtMut};
 pub use query_builder::QueryBuilder;
 pub use route_binding::{AutoRouteBinding, RouteBinding};

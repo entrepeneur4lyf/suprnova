@@ -2757,3 +2757,148 @@ where you want to keep the old SeaORM-Entity-extension shape, the
 `EntityExt` / `EntityExtMut` trait names are still available under
 `suprnova::database::*`. They behave exactly like the old
 `database::Model` did.
+
+## DB facade — model-less queries
+
+Some tables don't belong on a `#[suprnova::model]` struct: short-lived
+audit logs, ad-hoc reporting joins, dashboard aggregates. For those,
+reach for the `DB` facade. Two surfaces sit under it:
+
+### `DB::table(name)` — chainable query builder
+
+`DbTableBuilder` mirrors the where / order / limit shape of
+`Builder<M>` but returns rows as `DynamicRow` (a typed-accessor
+newtype over `serde_json::Map<String, Value>`):
+
+```rust
+use suprnova::DB;
+
+let rows = DB::table("audit_log")
+    .filter("actor_id", 42)
+    .filter_op("created_at", ">=", "2026-01-01")
+    .order_by_desc("id")
+    .limit(50)
+    .get()
+    .await?;
+
+for row in rows.iter() {
+    let event: String = row.get_string("event")?;
+    let actor_id: i64 = row.get_int("actor_id")?;
+    println!("{actor_id}: {event}");
+}
+```
+
+The full surface:
+
+| Method | Returns | Purpose |
+|--------|---------|---------|
+| `.select(["id", "event"])` | `DbTableBuilder` | Restrict columns (default `*`) |
+| `.filter(col, val)` | `DbTableBuilder` | `WHERE col = ?` |
+| `.filter_op(col, op, val)` | `DbTableBuilder` | `WHERE col <op> ?` |
+| `.order_by_asc(col) / _desc(col)` | `DbTableBuilder` | Ordering |
+| `.limit(n) / .offset(n)` | `DbTableBuilder` | Window |
+| `.get()` | `Collection<DynamicRow>` | All matching rows |
+| `.first()` | `Option<DynamicRow>` | First row or `None` |
+| `.count()` | `u64` | `SELECT COUNT(*) ...` |
+| `.insert(attrs)` | `i64` | New row's `id` |
+| `.update(attrs)` | `u64` | Rows affected |
+| `.delete()` | `u64` | Rows affected |
+
+**Identifier trust boundary.** Table names, column names, SQL
+operators, and ORDER BY directions are interpolated into the SQL
+string verbatim — they are NOT bound as parameters. Pass only
+trusted, compile-time literals to these arguments. Values (the
+right-hand side of `filter` / `filter_op`) ARE bound and safe to pass
+through from request data.
+
+**Empty WHERE on `update` / `delete` operates on every row.**
+`DB::table("audit_log").delete().await?` truncates the table by
+design — add a `filter` if you don't mean that.
+
+**Insert backend split.** `RETURNING id` is used on Postgres and
+SQLite; MySQL runs the INSERT then issues
+`SELECT LAST_INSERT_ID() as id` to recover the auto-increment.
+
+### `DynamicRow` — typed accessors over JSON map
+
+`DynamicRow` wraps a `serde_json::Map<String, Value>` and exposes
+typed getters. Each returns `Result<T, FrameworkError>` with a clear
+error message on missing key or type mismatch:
+
+```rust
+let event: String     = row.get_string("event")?;
+let actor_id: i64     = row.get_int("actor_id")?;
+let active: bool      = row.get_bool("active")?;
+let prefs: Prefs      = row.get_as("prefs")?;  // any DeserializeOwned
+let raw: serde_json::Value = row.get_value("meta")?;
+```
+
+Nullable columns: use `get_optional_*`. These distinguish "column
+missing" (error — schema mismatch) from "column present, value null"
+(`Ok(None)`):
+
+```rust
+let score: Option<i64>      = row.get_optional_int("score")?;
+let title: Option<String>   = row.get_optional_string("title")?;
+```
+
+`DynamicRow` derefs to `Map<String, Value>`, so iteration and
+key-existence checks work naturally:
+
+```rust
+for (key, value) in row.iter() {
+    println!("{key} = {value}");
+}
+```
+
+### Raw-SQL escapes
+
+When the builder isn't enough — window functions, recursive CTEs,
+backend-specific DDL — drop to a raw string. Placeholders match the
+active backend (`$1, $2, ...` for Postgres, `?` for MySQL + SQLite):
+
+```rust
+// Raw SELECT, materialised as DynamicRow.
+let rows = DB::select(
+    "SELECT u.name, COUNT(p.id) as post_count
+     FROM users u LEFT JOIN posts p ON p.user_id = u.id
+     GROUP BY u.id
+     HAVING post_count > ?",
+    vec![5i64.into()],
+).await?;
+
+// Raw UPDATE / DELETE — return rows-affected.
+let updated = DB::update(
+    "UPDATE users SET verified_at = NOW() WHERE id = ANY($1)",
+    vec![ids.into()],
+).await?;
+
+let deleted = DB::delete(
+    "DELETE FROM stale_sessions WHERE expires_at < ?",
+    vec![now.into()],
+).await?;
+
+// Raw DDL or no-binding statements.
+DB::statement("CREATE INDEX CONCURRENTLY idx_users_email ON users(email)")
+    .await?;
+
+// Generic affecting statement — for INSERT ... ON CONFLICT etc.
+let rows = DB::affecting_statement(
+    "INSERT INTO counters (k, n) VALUES ($1, 1) ON CONFLICT (k) DO UPDATE SET n = counters.n + 1",
+    vec!["page_views".into()],
+).await?;
+```
+
+Use these escape hatches sparingly — the typed builder catches more
+errors at compile time and reads cleaner in business logic. But when
+you need them, they're here.
+
+**Aggregate-column gotcha.** Untyped aggregates like
+`SELECT COUNT(*) AS n FROM t` work through the builder's `.count()`
+helper but may be silently dropped from raw `DB::select` rows on
+SQLite — the underlying `JsonValue::from_query_result` walks sqlx's
+per-column type info, and a bare aggregate carries none. If you need
+the raw select path with aggregates, give the expression a typed
+context: either use a `CAST(... AS BIGINT)` wrapper or read the
+column with a typed `DB::table(...).count()` / `.max(...)` helper
+that uses `query_one` + `try_get` under the hood.
