@@ -68,7 +68,7 @@ Once declared, you can write:
 - `user.update(attrs!{ name: "Alice B" }).await?` — partial update.
 - `user.save().await?` — persist in-memory changes.
 - `user.delete().await?` — remove the row.
-- `user.refresh().await?` / `user.fresh().await?` / `user.replicate()` —
+- `user.refresh().await?` / `user.fresh().await?` / `user.replicate().await?` —
   the rest of the Laravel lifecycle.
 
 The user-facing struct (here `User`) IS the type your handlers and
@@ -402,23 +402,61 @@ $replica = $user->replicate(['email']);    // skip a field
 // Suprnova
 user.refresh().await?;
 let copy: User = user.fresh().await?;
-let replica: User = user.replicate();
-let replica: User = user.replicate_except(["email"]);
+let replica: User = user.replicate().await?;
+let replica: User = user.replicate_except(["email"]).await?;
 ```
 
 `refresh` mutates in place; `fresh` returns a separately-fetched
 copy. `replicate` builds an in-memory clone with the PK reset
 (`Default::default()` for the key type). Caller saves explicitly.
 
+### Replicating event
+
+`replicate` and `replicate_except` fire the per-model
+`Replicating { source, replica }` event after constructing the
+in-memory clone and BEFORE returning it. The `replica` field is an
+`Arc<tokio::sync::Mutex<Self>>` so listeners can mutate the replica
+before the caller sees it — useful for prefixing titles with
+`(copy)`, clearing flags, resetting derived columns, etc.
+
+```rust
+use suprnova::events::{EventFacade, Listener};
+use async_trait::async_trait;
+
+pub struct PrefixTitle;
+
+#[async_trait]
+impl Listener<post::events::Replicating> for PrefixTitle {
+    async fn handle(&self, e: &post::events::Replicating)
+        -> Result<(), FrameworkError>
+    {
+        let mut replica = e.replica.lock().await;
+        replica.title = format!("(copy) {}", replica.title);
+        Ok(())
+    }
+}
+
+// Wire it up once at boot:
+EventFacade::listen::<post::events::Replicating, _>(
+    std::sync::Arc::new(PrefixTitle)
+).await;
+```
+
 ### Cross-type replication
 
 ```rust
-let replica: UserDraft = user.replicate_into()?;  // cross-type clone
+let replica: UserDraft = user.replicate_into().await?;  // cross-type clone
 ```
 
 A Suprnova divergence — Laravel can't do this because PHP doesn't
 have types. Useful when promoting a draft model into a final one
 or vice-versa.
+
+`replicate_into<T>` does NOT fire `Replicating` (the event carries
+`Arc<Mutex<Self>>`, so a listener on the source type couldn't mutate
+the cross-type replica anyway). Callers wanting per-T setup should
+run it on the returned `T` before calling `T::save` — the normal
+`Saving` / `Created` chain still fires inside `save`.
 
 ## Deleting and soft deletes
 
@@ -2570,7 +2608,7 @@ propagate but cannot stop a write that already landed.
 | `Deleted`       | After successful `delete`                         | Model + `is_force: bool`         |
 | `Trashed`       | After soft-delete (NOT force-delete)              | Model                            |
 | `Restored`      | After successful `restore`                        | Model                            |
-| `Replicating`   | During `replicate` / `replicate_into`, before return | Source + `Arc<Mutex<replica>>` (mutable) |
+| `Replicating`   | During `replicate` / `replicate_except`, before return (NOT `replicate_into` — per-source-type) | Source + `Arc<Mutex<replica>>` (mutable) |
 | `ForceDeleting` | Before `force_delete` on soft-delete model        | Model                            |
 | `ForceDeleted`  | After successful `force_delete`                   | Model                            |
 

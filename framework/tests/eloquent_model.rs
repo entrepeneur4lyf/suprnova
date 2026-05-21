@@ -251,7 +251,7 @@ async fn replicate_clones_with_reset_pk() {
     let alice = T4User::create(attrs! { name: "Alice", email: "a@x.com" })
         .await
         .unwrap();
-    let replica = alice.replicate_except(["email"]);
+    let replica = alice.replicate_except(["email"]).await.unwrap();
     assert_eq!(replica.id, 0); // PK reset
     assert_eq!(replica.name, "Alice");
     assert_eq!(replica.email, ""); // dropped via except
@@ -265,7 +265,7 @@ async fn replicate_clones_full_row_with_reset_pk() {
     let alice = T4User::create(attrs! { name: "Alice", email: "a@x.com" })
         .await
         .unwrap();
-    let replica = alice.replicate();
+    let replica = alice.replicate().await.unwrap();
     assert_eq!(replica.id, 0);
     assert_eq!(replica.name, "Alice");
     assert_eq!(replica.email, "a@x.com");
@@ -302,7 +302,10 @@ async fn replicate_into_other_model_resets_pk() {
         .await
         .unwrap();
 
-    let draft: T4UserDraft = alice.replicate_into().expect("replicate_into");
+    let draft: T4UserDraft = alice
+        .replicate_into()
+        .await
+        .expect("replicate_into");
 
     // PK reset on the replica even though the source had id > 0.
     assert_eq!(draft.id, 0);

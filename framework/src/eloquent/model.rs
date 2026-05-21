@@ -693,30 +693,48 @@ where
 
     /// Build an unsaved clone with the PK reset and any auto-managed
     /// columns cleared. Caller saves explicitly.
-    fn replicate(&self) -> Self
+    ///
+    /// ## Lifecycle events (Phase 10C T13)
+    ///
+    /// Fires `Replicating { source, replica }` AFTER the in-memory
+    /// clone is constructed and BEFORE this method returns. The
+    /// `replica` field is an `Arc<tokio::sync::Mutex<Self>>` so
+    /// listeners can mutate the replica (clear timestamps, reset
+    /// flags, append a `(copy)` prefix to the title, etc.) before
+    /// the caller sees it.
+    async fn replicate(&self) -> Result<Self, FrameworkError>
     where
         Self: ReplicateExt,
     {
         // ReplicateExt::replicate_with takes Vec<String>; match the
         // element type. `Vec::<&str>::new()` would compile-error here
         // even though the vec is empty.
-        self.replicate_with(Vec::<String>::new())
+        let copy = self.replicate_with(Vec::<String>::new());
+        let shared = std::sync::Arc::new(tokio::sync::Mutex::new(copy));
+        Self::__dispatch_replicating(self, shared.clone()).await?;
+        Ok(shared.lock().await.clone())
     }
 
     /// Like [`Self::replicate`] but also clears every column whose
     /// name appears in `except`.
-    fn replicate_except<I, S>(&self, except: I) -> Self
+    ///
+    /// Fires `Replicating` with the same `Arc<Mutex<Self>>` contract
+    /// as [`Self::replicate`].
+    async fn replicate_except<I, S>(&self, except: I) -> Result<Self, FrameworkError>
     where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
+        I: IntoIterator<Item = S> + Send,
+        S: AsRef<str> + Send,
         Self: ReplicateExt,
     {
-        self.replicate_with(
+        let copy = self.replicate_with(
             except
                 .into_iter()
                 .map(|s| s.as_ref().to_string())
                 .collect::<Vec<_>>(),
-        )
+        );
+        let shared = std::sync::Arc::new(tokio::sync::Mutex::new(copy));
+        Self::__dispatch_replicating(self, shared.clone()).await?;
+        Ok(shared.lock().await.clone())
     }
 
     /// Replicate this row into a different model type. Suprnova
@@ -735,7 +753,18 @@ where
     /// present on `Self` but absent from `T` are silently dropped.
     /// For the same-shape case (e.g. `User` -> `UserDraft` where both
     /// carry the same columns), no extra annotations are needed.
-    fn replicate_into<T>(&self) -> Result<T, FrameworkError>
+    ///
+    /// ## No `Replicating` event for cross-type replication
+    ///
+    /// `Replicating` is per-source-type (the event struct holds an
+    /// `Arc<Mutex<Self>>`). For cross-type replication the source's
+    /// `Replicating` listener would receive an `Arc<Mutex<Self>>`,
+    /// not `Arc<Mutex<T>>` — which can't mutate the cross-type
+    /// replica that's about to be returned. We deliberately skip the
+    /// dispatch: callers wanting per-T setup should run it on the
+    /// returned `T` value before calling `T::save`. Inside `T::save`
+    /// the normal `Saving` / `Created` chain still fires.
+    async fn replicate_into<T>(&self) -> Result<T, FrameworkError>
     where
         T: Model + DeserializeOwned + Serialize,
         T: From<<T::Entity as EntityTrait>::Model>,
