@@ -1761,6 +1761,70 @@ where
         self.render_select_for(backend, M::TABLE, "*")
     }
 
+    /// Phase 10C T14 — log the rendered SQL via `tracing` and return
+    /// `self` so the call is chainable inside an existing builder
+    /// pipeline. Interactive debugging aid only — never bake into
+    /// production paths.
+    ///
+    /// Uses the live DB connection's backend if one is initialised
+    /// (the dialect the actual query will run against), otherwise
+    /// falls back to SQLite so tests without a live connection still
+    /// emit deterministic output. Matches the dispatch logic of
+    /// [`Self::to_sql_with_bindings`].
+    ///
+    /// Mirrors Laravel's `Builder::dump()`.
+    ///
+    /// ```rust,ignore
+    /// User::query()
+    ///     .filter("active", true)
+    ///     .dump()              // logs: SELECT * FROM users WHERE ...
+    ///     .order_by_desc("id")
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn dump(self) -> Self {
+        let backend = DB::connection()
+            .ok()
+            .map(|db| db.inner().get_database_backend())
+            .unwrap_or(DbBackend::Sqlite);
+        let (sql, _values) = self.render_select_for(backend, M::TABLE, "*");
+        tracing::info!(
+            target: "suprnova::eloquent::dump",
+            sql = %sql,
+            "query",
+        );
+        self
+    }
+
+    /// Phase 10C T14 — log the rendered SQL at `tracing::error!` and
+    /// then **panic** with the SQL embedded in the panic message.
+    /// Interactive debugging only — never bake into a production
+    /// path.
+    ///
+    /// Mirrors Laravel's `Builder::dd()` ("dump-and-die").
+    ///
+    /// ```rust,ignore
+    /// // Inspect the exact SQL Eloquent will emit, then halt.
+    /// User::query().filter("active", true).dd();
+    /// ```
+    ///
+    /// Panics with `eloquent dd: <sql>` — the literal `eloquent dd`
+    /// prefix is part of the contract so `#[should_panic(expected =
+    /// "eloquent dd")]` test assertions stay stable.
+    pub fn dd(self) -> ! {
+        let backend = DB::connection()
+            .ok()
+            .map(|db| db.inner().get_database_backend())
+            .unwrap_or(DbBackend::Sqlite);
+        let (sql, _values) = self.render_select_for(backend, M::TABLE, "*");
+        tracing::error!(
+            target: "suprnova::eloquent::dump",
+            sql = %sql,
+            "query (dd halt)",
+        );
+        panic!("eloquent dd: {sql}");
+    }
+
     /// Render `DELETE FROM table WHERE ...` from the same WhereTerm
     /// AST. Consumed by Task 10's MassPrunable bulk-delete runner and
     /// any future path that needs an atomic delete from a Builder
