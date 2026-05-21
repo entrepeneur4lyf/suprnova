@@ -47,6 +47,7 @@ pub mod factory;
 pub mod seed;
 pub mod console;
 pub mod supervisor;
+pub mod vector;
 pub mod prelude;
 
 extern crate self as suprnova;
@@ -193,6 +194,10 @@ pub use factory::{persist_via_seaorm, Factory, FactoryBuilder, Persistable, Sequ
 pub use seed::Seeder;
 pub use console::{dispatch_argv, CommandEntry, CommandHandler, TypedCommand};
 pub use supervisor::{RestartPolicy, Supervisor, SupervisorEntry, SupervisorRegistry};
+pub use vector::{
+    MemoryVectorDriver, Vector, VectorDriver, VectorItem, VectorMatch, VectorRegistry,
+    VectorStore,
+};
 
 #[doc(hidden)]
 pub use clap as __clap;
