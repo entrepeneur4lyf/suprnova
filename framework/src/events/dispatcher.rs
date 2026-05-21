@@ -4,13 +4,20 @@ use super::{ErasedListener, Listener, ListenerWrap};
 use crate::FrameworkError;
 use std::any::TypeId;
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use tracing::{debug, error};
 
 /// In-process event dispatcher. Held as a process-global via
 /// `OnceLock` in this module; the `Event` facade is the user-facing
 /// entry point.
+///
+/// The inner [`RwLock`] is the std synchronous form (not
+/// [`tokio::sync::RwLock`]). Holding the lock across an `.await` is
+/// already impossible in the current API — every callsite reads or
+/// writes, drops the guard, then awaits separately — so the cheaper
+/// std lock buys us a synchronous [`Self::clear`] that can run from
+/// `TestContainerGuard`'s `Drop` for test isolation parity with
+/// [`crate::database::ConnectionRegistry::clear`].
 pub struct EventDispatcher {
     listeners: RwLock<HashMap<TypeId, Vec<Arc<dyn ErasedListener>>>>,
 }
@@ -31,10 +38,31 @@ impl EventDispatcher {
         let wrap = Arc::new(ListenerWrap::<E, L>::new(listener)) as Arc<dyn ErasedListener>;
         self.listeners
             .write()
-            .await
+            .expect("event listener registry poisoned")
             .entry(TypeId::of::<E>())
             .or_default()
             .push(wrap);
+    }
+
+    /// Phase 10C audit-fix AF4 — drop every registered listener.
+    /// `#[doc(hidden)]` because it's a test-only escape hatch; called
+    /// from [`crate::testing::TestContainerGuard::drop`] so the next
+    /// test in the same process starts with an empty listener table.
+    /// Production code should never call this.
+    #[doc(hidden)]
+    pub fn clear(&self) {
+        if let Ok(mut map) = self.listeners.write() {
+            map.clear();
+        }
+    }
+
+    /// Sync, fallible clear of the process-global dispatcher.
+    /// Called by [`crate::testing::TestContainerGuard::drop`].
+    #[doc(hidden)]
+    pub fn clear_global() {
+        if let Some(d) = GLOBAL.get() {
+            d.clear();
+        }
     }
 
     /// Dispatch an event. Synchronous events run inline (sequentially,
@@ -43,7 +71,10 @@ impl EventDispatcher {
     /// complete.
     pub async fn dispatch<E: super::Event>(&self, event: E) -> Result<(), FrameworkError> {
         let listeners = {
-            let map = self.listeners.read().await;
+            let map = self
+                .listeners
+                .read()
+                .expect("event listener registry poisoned");
             map.get(&TypeId::of::<E>()).cloned().unwrap_or_default()
         };
 

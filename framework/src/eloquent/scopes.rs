@@ -186,6 +186,22 @@ impl ScopeRegistry {
             .push((scope_type_id, apply));
     }
 
+    /// Phase 10C audit-fix AF4 — wipe every registered global scope.
+    /// `#[doc(hidden)]` because this is a test-only escape hatch
+    /// (mirrors [`crate::database::ConnectionRegistry::clear`]).
+    /// Called from [`crate::testing::TestContainerGuard::drop`] so
+    /// the next test in the same process starts with an empty scope
+    /// registry. Production code never calls this — global scopes
+    /// register at boot and live for the process lifetime.
+    #[doc(hidden)]
+    pub fn clear() {
+        if let Some(lock) = REGISTRY.get()
+            && let Ok(mut reg) = lock.write()
+        {
+            reg.clear();
+        }
+    }
+
     /// Apply every registered scope for `M` to `builder`. Skips any
     /// scope whose `TypeId` appears in `builder.excluded_scopes`.
     /// Returns `builder` unchanged when `builder.skip_all_scopes` is

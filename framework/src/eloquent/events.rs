@@ -157,13 +157,16 @@ pub async fn dispatch_after<E: Event>(event: E) -> Result<(), FrameworkError> {
 
 use std::any::TypeId;
 use std::collections::HashMap;
-use tokio::sync::RwLock;
+use std::sync::RwLock;
 
 #[derive(Default)]
 struct CancellableRegistry {
     listeners: HashMap<TypeId, Vec<Arc<dyn ErasedCancellableListener>>>,
 }
 
+// Phase 10C audit-fix AF4 — std::sync::RwLock so the AF4 clear() helper
+// runs from sync teardown (`TestContainerGuard::drop`). Callers never
+// hold this lock across an `.await`, so the sync flavour is safe.
 static CANCELLABLE_REGISTRY: std::sync::OnceLock<RwLock<CancellableRegistry>> =
     std::sync::OnceLock::new();
 
@@ -177,7 +180,9 @@ fn registry() -> &'static RwLock<CancellableRegistry> {
 /// Phase 10C T2 (observers) wraps this with attribute-driven
 /// auto-registration; T1 exposes the manual entry point.
 pub async fn listen_cancellable<E: Event, L: CancellableListener<E>>(listener: Arc<L>) {
-    let mut reg = registry().write().await;
+    let mut reg = registry()
+        .write()
+        .expect("cancellable listener registry poisoned");
     reg.listeners
         .entry(TypeId::of::<E>())
         .or_default()
@@ -185,11 +190,28 @@ pub async fn listen_cancellable<E: Event, L: CancellableListener<E>>(listener: A
 }
 
 async fn global_cancellable_listeners<E: Event>() -> Vec<Arc<dyn ErasedCancellableListener>> {
-    let reg = registry().read().await;
+    let reg = registry()
+        .read()
+        .expect("cancellable listener registry poisoned");
     reg.listeners
         .get(&TypeId::of::<E>())
         .cloned()
         .unwrap_or_default()
+}
+
+/// Phase 10C audit-fix AF4 — wipe every registered cancellable
+/// listener. Sync + `#[doc(hidden)]` so it can run from
+/// `TestContainerGuard::drop` for test isolation parity with
+/// [`crate::database::ConnectionRegistry::clear`]. Production code
+/// should never call this — listener registration is process-lifetime
+/// in real apps.
+#[doc(hidden)]
+pub fn clear_cancellable_listeners() {
+    if let Some(lock) = CANCELLABLE_REGISTRY.get()
+        && let Ok(mut reg) = lock.write()
+    {
+        reg.listeners.clear();
+    }
 }
 
 /// Macro-implemented hooks bridging each [`Model`](crate::eloquent::Model)

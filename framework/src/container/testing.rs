@@ -131,6 +131,22 @@ impl Drop for TestContainerGuard {
         // thread-local container reset. Wipe it on guard drop so the
         // next test in the same process starts with no `__read_replica__`
         // or other named connection registered.
+        //
+        // Why ConnectionRegistry is safe to clear here but the eloquent
+        // listener / scope registries are NOT (see AF4):
+        // `ConnectionRegistry` is keyed by string name; each test
+        // chooses a unique name and reaches for it explicitly via
+        // `DB::named`. Stale entries don't bleed semantics into
+        // unrelated parallel tests.
+        //
+        // The eloquent `EventDispatcher`, `clear_cancellable_listeners`,
+        // and `ScopeRegistry` are keyed by `TypeId::<M>()` — the
+        // current discipline is that each test uses a unique model
+        // struct so the registrations don't collide. Wiping those
+        // registries from `Drop` would break parallel test execution
+        // (test A's drop clearing test B's still-needed listeners),
+        // so AF4 ships sync `clear()` on each as opt-in (documented in
+        // the framework tests' README) and does NOT call them here.
         crate::database::ConnectionRegistry::clear();
     }
 }
