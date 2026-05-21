@@ -13,19 +13,20 @@
 //! pins that the exclusion holds across every user-facing serialization
 //! path Phase 10A wired up:
 //!
-//! - `to_json()` — Laravel-shape JSON object emitter.
-//! - `to_array()` — alias for `to_json()`.
+//! - `to_array()` — Laravel-shape JSON object emitter (returns
+//!   `serde_json::Value`).
+//! - `to_json()` — string form, returns `serde_json::to_string(&to_array())`.
 //! - The `hidden = [...]` / `visible = [...]` / `appends = [...]`
 //!   visibility filters.
 //! - Real-world loaded state: parent rows after `with([...])`, related
 //!   rows with `__pivot` stamped by a m2m-style loader.
 //!
-//! There is no `attributes()` accessor and no reflection layer — the
-//! macro emits exactly the two methods above (`to_json` /
-//! `to_array`), and `to_array` literally returns `self.to_json()`. So
-//! the only way a leak can sneak in is via the macro losing the
-//! `#[serde(skip)]` annotation in a future refactor, which these tests
-//! pin against.
+//! Phase 10C T6 moved both methods from inherent `impl #struct_ident`
+//! blocks onto the [`Model`] trait. `to_array` is the primary surface;
+//! `to_json` delegates to it. The trait default explicitly removes
+//! `__eager` / `__pivot` keys (belt-and-braces on top of `#[serde(skip)]`)
+//! so this contract holds even against a future hand-rolled `Serialize`
+//! impl. These tests pin both layers of the exclusion.
 
 use std::sync::Arc;
 
@@ -138,15 +139,15 @@ async fn to_json_excludes_eager_and_pivot_fields() {
         __pivot: None,
     };
 
-    let v = u.to_json();
+    let v = u.to_array();
     let obj = v
         .as_object()
-        .expect("to_json must produce a JSON object");
+        .expect("to_array must produce a JSON object");
 
     // Auto-injected fields must be absent.
     assert!(
         !obj.contains_key("__eager"),
-        "__eager must be excluded from to_json — got {v}",
+        "__eager must be excluded from to_array — got {v}",
     );
     assert!(
         !obj.contains_key("__pivot"),
@@ -203,8 +204,8 @@ async fn to_json_does_not_leak_loaded_relations() {
         "fixture broken: expected 2 posts in the eager cache",
     );
 
-    let v = loaded.to_json();
-    let obj = v.as_object().expect("to_json must be an object");
+    let v = loaded.to_array();
+    let obj = v.as_object().expect("to_array must be an object");
 
     // The auto-injected slots are absent.
     assert!(!obj.contains_key("__eager"), "got: {v}");
@@ -217,7 +218,7 @@ async fn to_json_does_not_leak_loaded_relations() {
     // `self.posts_loaded()`.
     assert!(
         !obj.contains_key("posts"),
-        "loaded relation `posts` must not bleed into to_json — got {v}",
+        "loaded relation `posts` must not bleed into to_array — got {v}",
     );
 
     // The post titles must not appear anywhere in the JSON string
@@ -226,7 +227,7 @@ async fn to_json_does_not_leak_loaded_relations() {
     let s = v.to_string();
     assert!(
         !s.contains("post-1") && !s.contains("post-2"),
-        "post titles leaked into parent to_json: {s}",
+        "post titles leaked into parent to_array: {s}",
     );
 
     // The parent's own fields are still there.
@@ -235,10 +236,12 @@ async fn to_json_does_not_leak_loaded_relations() {
     assert_eq!(obj["email"], "a@x.test");
 }
 
-/// Pin: `to_array()` honours the same `__eager` / `__pivot` exclusion
-/// as `to_json()`. The macro emits `to_array` as a literal one-liner
-/// alias (`self.to_json()`), so this is structural — pinning it
-/// guards against a future divergence.
+/// Pin: `to_array()` honours the `__eager` / `__pivot` exclusion, and
+/// `to_json()` is its serialised-string counterpart. Phase 10C T6
+/// moved both methods onto the [`Model`] trait — `to_array()` returns
+/// the `Value`, `to_json()` returns `serde_json::to_string(&to_array())`.
+/// This test pins both the auto-exclusion AND the to_json-as-stringified-
+/// to_array contract.
 #[tokio::test]
 async fn to_array_excludes_eager_and_pivot_fields() {
     let u = SerUser {
@@ -255,8 +258,9 @@ async fn to_array_excludes_eager_and_pivot_fields() {
     assert!(!obj.contains_key("__eager"));
     assert!(!obj.contains_key("__pivot"));
 
-    // Same shape as to_json — pinning the alias.
-    assert_eq!(v, u.to_json());
+    // `to_json()` returns the string form of `to_array()` — pinning
+    // the delegation so both surfaces stay coherent.
+    assert_eq!(u.to_json(), serde_json::to_string(&v).unwrap());
 }
 
 /// Pin: when the user declares `hidden = ["password"]`, they don't
@@ -274,13 +278,13 @@ async fn hidden_attribute_does_not_need_to_exclude_eager_explicitly() {
         __pivot: None,
     };
 
-    let v = u.to_json();
-    let obj = v.as_object().expect("to_json must produce an object");
+    let v = u.to_array();
+    let obj = v.as_object().expect("to_array must produce an object");
 
     // The user's `hidden = ["password"]` did its job.
     assert!(
         !obj.contains_key("password"),
-        "hidden field must be excluded from to_json — got {v}",
+        "hidden field must be excluded from to_array — got {v}",
     );
 
     // The framework's auto-injected fields are excluded too — even
@@ -312,8 +316,8 @@ async fn visible_allowlist_does_not_need_to_exclude_eager_explicitly() {
         __pivot: None,
     };
 
-    let v = u.to_json();
-    let obj = v.as_object().expect("to_json must produce an object");
+    let v = u.to_array();
+    let obj = v.as_object().expect("to_array must produce an object");
 
     // Allowlist did its job.
     assert_eq!(obj["id"], 9);
@@ -363,13 +367,13 @@ async fn to_json_excludes_populated_pivot_slot() {
         __pivot: Some(pivot),
     };
 
-    let v = u.to_json();
-    let obj = v.as_object().expect("to_json must produce an object");
+    let v = u.to_array();
+    let obj = v.as_object().expect("to_array must produce an object");
 
     // Populated pivot is still excluded.
     assert!(
         !obj.contains_key("__pivot"),
-        "populated __pivot must still be excluded from to_json — got {v}",
+        "populated __pivot must still be excluded from to_array — got {v}",
     );
 
     // And the pivot's payload field names / values don't leak via

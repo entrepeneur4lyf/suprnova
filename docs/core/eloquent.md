@@ -145,8 +145,9 @@ pub struct User {
 Function-level macros work alongside the struct attribute:
 
 - `#[accessor]` on a `fn name(&self) -> T` makes it an Eloquent
-  accessor. The model's `to_json()` calls it when `name` is listed
-  in `appends = [...]`.
+  accessor. The model's `to_array()` calls it when `name` is listed
+  in `appends = [...]` (and `to_json()` picks it up via the
+  `to_array` → string delegation).
 - `#[mutator]` on a `fn set_name(&mut self, value: serde_json::Value)`
   makes it an Eloquent mutator. The model's JSON-fill path routes
   through it when `name` is listed in `mutators = [...]`.
@@ -1728,9 +1729,10 @@ impl User {
 }
 ```
 
-When `user.to_json()` runs, the `full_name` accessor is called and
-its return value is inserted into the JSON output. Calling
-`user.full_name()` from Rust is just a regular method call.
+When `user.to_array()` runs (or `user.to_json()`, which delegates
+to it), the `full_name` accessor is called and its return value
+is inserted into the JSON output. Calling `user.full_name()` from
+Rust is just a regular method call.
 
 ### Mutators
 
@@ -1768,10 +1770,11 @@ the mutator automatically because `"password"` is listed in
 
 ### How routing works
 
-- **Serialization (`to_json` / `to_array`)** runs accessors. Every
-  field name listed in `appends = [...]` becomes a call to
-  `self.<name>()`; the return value is inserted into the JSON
-  output.
+- **Serialization (`to_array` → `Value`, `to_json` → `String`)**
+  runs accessors. Every field name listed in `appends = [...]`
+  becomes a call to `self.<name>()`; the return value is inserted
+  into the JSON output. `to_json()` is a thin wrapper:
+  `serde_json::to_string(&self.to_array())`.
 - **Fill-style writes (`fill`, `create`, `update`)** route through
   mutators. Every field name listed in `mutators = [...]` becomes a
   call to `self.set_<field>(value)` instead of direct assignment.

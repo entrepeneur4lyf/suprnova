@@ -814,17 +814,23 @@ where
         out
     }
 
-    /// Serialise the whole collection to a `serde_json::Value`. T5b
-    /// stub — T6 extends this with `hidden = [...]` / `visible = [...]`
-    /// / `appends = [...]` filtering. Until then, this delegates to
-    /// the row's `Serialize` impl directly.
+    /// Serialise the whole collection to a `serde_json::Value`. Phase
+    /// 10C T6 — routes through each row's
+    /// [`crate::eloquent::Model::to_array`] so the model's
+    /// `hidden = [...]` / `visible = [...]` / `appends = [...]`
+    /// filters propagate per-row when the collection serialises.
+    ///
+    /// The naive shape (`serde_json::to_value(&self.0)`) skips the
+    /// per-model filters because serde's blanket `Serialize for Vec<T>`
+    /// runs `T::serialize` directly, bypassing the trait-method
+    /// override the macro emitted on `Model`.
     pub fn to_array(&self) -> Value {
-        serde_json::to_value(&self.0).unwrap_or(Value::Null)
+        Value::Array(self.0.iter().map(|m| m.to_array()).collect())
     }
 
-    /// Serialise the whole collection to a JSON string. Built on
-    /// top of [`Self::to_array`] — see that method's note on T6
-    /// extending the filter pipeline.
+    /// Serialise the whole collection to a JSON string. Built on top
+    /// of [`Self::to_array`] so the per-model filter pipeline applies
+    /// to every row in the output.
     pub fn to_json(&self) -> String {
         serde_json::to_string(&self.to_array()).unwrap_or_default()
     }

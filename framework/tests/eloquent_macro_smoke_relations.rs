@@ -13,7 +13,7 @@
 //! without changes at every call site).
 
 use std::sync::Arc;
-use suprnova::{model, EagerLoadCache};
+use suprnova::{model, EagerLoadCache, Model};
 
 #[model(table = "smoke_users", relations = {})]
 pub struct SmokeUser {
@@ -74,7 +74,7 @@ fn serde_skip_on_eager_and_pivot() {
         __eager: EagerLoadCache::new(),
         __pivot: None,
     };
-    let json = u.to_json();
+    let json = u.to_array();
     assert!(
         json.get("__eager").is_none(),
         "__eager must be #[serde(skip)] — got JSON: {json}",

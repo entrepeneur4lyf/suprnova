@@ -174,7 +174,7 @@ async fn accessor_appended_in_to_json() {
         password: "".into(),
         ..Default::default()
     };
-    let v = u.to_json();
+    let v = u.to_array();
     assert_eq!(v["full_name"], "Alice X");
     assert_eq!(v["first_name"], "Alice");
 }
@@ -215,7 +215,7 @@ async fn hidden_fields_excluded_from_to_json() {
         secret: "shh".into(),
         ..Default::default()
     };
-    let v = u.to_json();
+    let v = u.to_array();
     assert_eq!(v["name"], "Alice");
     assert!(
         v.get("secret").is_none(),
@@ -233,7 +233,7 @@ async fn visible_allowlist_drops_non_listed_fields() {
         secret: "shh".into(),
         ..Default::default()
     };
-    let v = u.to_json();
+    let v = u.to_array();
     assert_eq!(v["id"], 7);
     assert_eq!(v["name"], "Alice");
     assert!(
@@ -311,7 +311,7 @@ async fn appends_coexist_with_hidden_filter() {
         password: "secret".into(),
         ..Default::default()
     };
-    let v = u.to_json();
+    let v = u.to_array();
     assert_eq!(v["first_name"], "Alice");
     assert_eq!(v["full_name"], "Alice X");
     assert!(

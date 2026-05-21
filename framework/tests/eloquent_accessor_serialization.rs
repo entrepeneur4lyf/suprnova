@@ -25,7 +25,7 @@
 //!    appears even though it isn't in the visible allowlist. Same
 //!    bypass mechanism, mirrored for the allowlist path.
 
-use suprnova::{accessor, model};
+use suprnova::{accessor, model, Model};
 
 // ---- Models -------------------------------------------------------------
 
@@ -145,7 +145,7 @@ async fn accessor_without_appends_does_not_appear_in_to_json() {
     // The method is callable directly — pin that the `#[accessor]`
     // attribute is a pure pass-through.
     assert_eq!(u.full_name(), "Alice Smith");
-    let v = u.to_json();
+    let v = u.to_array();
     assert_eq!(v["first_name"], "Alice");
     assert_eq!(v["last_name"], "Smith");
     assert!(
@@ -162,7 +162,7 @@ async fn multiple_accessors_with_mixed_return_types_all_serialise() {
         last_name: "Smith".into(),
         ..Default::default()
     };
-    let v = u.to_json();
+    let v = u.to_array();
     // String accessor.
     assert_eq!(v["display_name"], "Alice Smith");
     // i64 accessor.
@@ -184,7 +184,7 @@ async fn hidden_does_not_suppress_an_appended_accessor() {
         last_name: "Smith".into(),
         ..Default::default()
     };
-    let v = u.to_json();
+    let v = u.to_array();
     assert_eq!(v["first_name"], "Alice");
     assert_eq!(v["last_name"], "Smith");
     assert_eq!(
@@ -205,7 +205,7 @@ async fn visible_does_not_suppress_an_appended_accessor() {
         last_name: "Smith".into(),
         ..Default::default()
     };
-    let v = u.to_json();
+    let v = u.to_array();
     assert_eq!(v["id"], 7);
     assert!(
         v.get("first_name").is_none(),

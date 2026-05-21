@@ -148,7 +148,7 @@ async fn hidden_fields_dropped_from_user_to_json() {
         deleted_at: None,
         ..Default::default()
     };
-    let v = u.to_json();
+    let v = u.to_array();
     assert_eq!(v["name"], "Alice");
     assert!(v.get("password").is_none(), "password is hidden");
     assert!(

@@ -104,6 +104,50 @@ where
         ::core::option::Option::None
     }
 
+    /// Phase 10C T6 — serialise this row to a JSON object.
+    ///
+    /// Default implementation serialises the whole struct via
+    /// `serde_json::to_value(self)` and explicitly removes the
+    /// macro-injected `__eager` / `__pivot` scratch fields. Both
+    /// fields carry `#[serde(skip)]` on the struct definition, so the
+    /// removal is belt-and-braces — it pins the [Phase 10B P6
+    /// contract](../../docs/superpowers/specs/phase-10/phase-10b.md)
+    /// (eager-load cache stays out of serialisation) even against a
+    /// hypothetical future model with a hand-rolled `Serialize` impl.
+    ///
+    /// The macro overrides this when the model declares
+    /// `hidden = [...]`, `visible = [...]`, or `appends = [...]` on
+    /// `#[suprnova::model]`. The override applies those filters in
+    /// Laravel order: visible (whitelist) → hidden (denylist) →
+    /// appends (accessor injection, runs after filters so appends
+    /// always show up even if they share a name with a hidden field).
+    fn to_array(&self) -> serde_json::Value {
+        let mut v = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
+        if let Some(m) = v.as_object_mut() {
+            m.remove("__eager");
+            m.remove("__pivot");
+        }
+        v
+    }
+
+    /// Phase 10C T6 — serialise this row to a JSON string. Delegates
+    /// to [`Self::to_array`] so the same hidden/visible/appends
+    /// filters apply when callers reach for the string shape directly.
+    fn to_json(&self) -> String {
+        serde_json::to_string(&self.to_array()).unwrap_or_default()
+    }
+
+    /// Phase 10C T6 — append-accessor dispatcher. The macro overrides
+    /// this with a `match` block when `appends = [...]` is non-empty,
+    /// dispatching each declared name to the user's
+    /// `#[suprnova::accessor]`-tagged method. The default returns
+    /// `None` for every name, which keeps the [`Self::to_array`]
+    /// override branch a no-op for models that don't declare appends.
+    #[doc(hidden)]
+    fn __append_accessor(&self, _name: &str) -> ::core::option::Option<serde_json::Value> {
+        ::core::option::Option::None
+    }
+
     /// Look up a row by primary key. `None` if no row matches.
     ///
     /// The trait default uses SeaORM's `find_by_id` directly — no
