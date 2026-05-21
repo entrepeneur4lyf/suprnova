@@ -20,6 +20,7 @@ doesn't cover (see the [SeaORM escape hatches](#dropping-to-seaorm)).
 - [Creating and updating](#creating-and-updating)
 - [Deleting and soft deletes](#deleting-and-soft-deletes)
 - [Query builder — dual API](#query-builder--dual-api)
+- [Row locking](#row-locking)
 - [Scopes](#scopes)
 - [Relationships](#relationships)
 - [Eager loading](#eager-loading)
@@ -650,6 +651,94 @@ let second = User::filter("role", "admin");
 let users  = first.union(second).get().await?;
 let users  = first.union_all(second).get().await?;
 ```
+
+## Row locking
+
+Two builder methods request a per-row database lock at SELECT time:
+
+```rust
+// Exclusive write lock — blocks other transactions trying to lock
+// or write the same rows until this transaction commits.
+let order = Order::query()
+    .filter("id", 42)
+    .lock_for_update()
+    .first_or_fail()
+    .await?;
+
+// Shared read lock — allows other shared readers, blocks writers.
+let inventory = Inventory::query()
+    .filter("sku", sku)
+    .shared_lock()
+    .first_or_fail()
+    .await?;
+```
+
+Per-backend SQL emitted:
+
+| Backend  | `lock_for_update()` | `shared_lock()`        |
+|----------|---------------------|------------------------|
+| Postgres | `FOR UPDATE`        | `FOR SHARE`            |
+| MySQL    | `FOR UPDATE`        | `LOCK IN SHARE MODE`   |
+| SQLite   | (no SQL, see below) | (no SQL, see below)    |
+
+The lock clause is appended at the very end of the compound
+statement — after every `UNION` arm, every `ORDER BY`, every
+`LIMIT` / `OFFSET`. A `union(...)` of two builders followed by
+`.lock_for_update()` emits exactly **one** `FOR UPDATE` at the
+outer scope, not one per arm.
+
+### Use inside a transaction
+
+The lock only does useful work **inside a transaction** — without
+one, the SQL still emits but the lock releases at statement end.
+Pair with `DB::transaction(...)`:
+
+```rust
+DB::transaction(|tx| async move {
+    let order = Order::query()
+        .filter("id", 42)
+        .lock_for_update()
+        .first_or_fail()
+        .with_tx(&tx)
+        .await?;
+    // Other transactions trying to lock id=42 block here until commit.
+    order.status = "processed".into();
+    order.save_with_tx(&tx).await?;
+    Ok(())
+}).await?;
+```
+
+### `lock_for_update` vs `shared_lock`
+
+Most "read then write" flows want `lock_for_update`. A shared
+lock still lets another `shared_lock` reader race you to a
+following `UPDATE` — only `FOR UPDATE` is mutually exclusive.
+
+`shared_lock` is right for consistent snapshot reads where you
+read a row, derive a decision from it, and don't write back —
+e.g. an inventory check that doesn't itself decrement stock.
+
+### SQLite
+
+SQLite has no row-level locking. It uses file-level transaction
+locking only (`BEGIN IMMEDIATE` / `BEGIN EXCLUSIVE`). The lock
+methods are **kept** in the SQLite path so cross-backend code
+compiles, but they emit no SQL.
+
+The first time per process that `lock_for_update` / `shared_lock`
+runs against a SQLite backend, the framework logs a single
+`warn!` on the `suprnova::eloquent::lock` tracing target. This
+surfaces the no-op without spamming high-volume code paths.
+
+If you need cross-row contention guarantees on SQLite, wrap the
+critical section in an explicit `BEGIN IMMEDIATE` transaction — at
+the file level that blocks every other writer.
+
+### What's not in v1
+
+- **`NOWAIT` / `SKIP LOCKED`** — useful for job-queue claim
+  workflows but they add API surface. Deferred until a real
+  consumer needs them.
 
 ## Scopes
 

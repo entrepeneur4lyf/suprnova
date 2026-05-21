@@ -150,6 +150,29 @@ pub(crate) enum OrderTerm {
     Random,
 }
 
+/// Row-locking hint applied to a SELECT.
+///
+/// Set via [`Builder::lock_for_update`] / [`Builder::shared_lock`] and
+/// consumed by [`Builder::render_select_for`], which appends the
+/// backend-appropriate clause to the end of the compound statement.
+///
+/// SQLite has no row-level locking — the methods compile but emit no
+/// SQL on that backend (and log a `warn!` once per process so a
+/// misconfigured app surfaces the no-op).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LockMode {
+    /// No row lock — the default.
+    None,
+    /// Exclusive write lock: `SELECT ... FOR UPDATE` on Postgres + MySQL.
+    /// Other transactions trying to lock the same rows block until the
+    /// holding transaction commits or rolls back.
+    ForUpdate,
+    /// Shared read lock: `SELECT ... FOR SHARE` (Postgres) or
+    /// `SELECT ... LOCK IN SHARE MODE` (MySQL). Allows concurrent
+    /// shared readers; blocks concurrent `FOR UPDATE` writers.
+    Shared,
+}
+
 // ---- Eager-load spec -----------------------------------------------------
 
 /// One entry in a [`Builder<M>`]'s eager-load plan. Built by the
@@ -259,6 +282,13 @@ pub struct Builder<M> {
     /// `"posts.comments"` paths recurse through
     /// `__recurse_eager_load`.
     pub(crate) eager_specs: Vec<EagerSpec>,
+    /// Phase 10C T9 — row-locking hint applied at SQL emission time.
+    /// Set via [`Builder::lock_for_update`] / [`Builder::shared_lock`].
+    /// The clause is appended at the very end of the compound
+    /// statement by [`Builder::render_select_for`] — after every
+    /// UNION arm — so multi-statement queries lock once at the outer
+    /// scope, matching standard SQL grammar.
+    pub(crate) lock_mode: LockMode,
     _phantom: PhantomData<M>,
 }
 
@@ -305,6 +335,7 @@ impl<M> Clone for Builder<M> {
             // before they clone, so users see the violation instead of
             // a silent drop.
             eager_specs: Vec::new(),
+            lock_mode: self.lock_mode,
             _phantom: PhantomData,
         }
     }
@@ -330,6 +361,7 @@ impl<M> Builder<M> {
             excluded_scopes: Vec::new(),
             skip_all_scopes: false,
             eager_specs: Vec::new(),
+            lock_mode: LockMode::None,
             _phantom: PhantomData,
         }
     }
@@ -1004,6 +1036,57 @@ impl<M> Builder<M> {
         self
     }
 
+    /// Emit `SELECT ... FOR UPDATE` — an exclusive row lock that
+    /// blocks other transactions from reading-with-lock or writing
+    /// the same rows until the holding transaction commits.
+    ///
+    /// Maps to:
+    /// - **Postgres**: `SELECT ... FOR UPDATE`
+    /// - **MySQL**: `SELECT ... FOR UPDATE`
+    /// - **SQLite**: no SQL emitted (SQLite has no row-level locking;
+    ///   a one-shot `warn!` lands on the
+    ///   `suprnova::eloquent::lock` target the first time per process)
+    ///
+    /// The lock is only meaningful **inside a transaction** — outside
+    /// one, the lock releases at statement end and the call is
+    /// effectively a no-op semantically (the SQL still emits). Pair
+    /// with `DB::transaction(|tx| ...)`:
+    ///
+    /// ```ignore
+    /// DB::transaction(|tx| async move {
+    ///     let order = Order::query()
+    ///         .filter("id", 42)
+    ///         .lock_for_update()
+    ///         .first_or_fail()
+    ///         .with_tx(&tx)
+    ///         .await?;
+    ///     // Other transactions wanting to lock id=42 block here until commit.
+    ///     Ok(())
+    /// }).await?;
+    /// ```
+    pub fn lock_for_update(mut self) -> Self {
+        self.lock_mode = LockMode::ForUpdate;
+        self
+    }
+
+    /// Emit `SELECT ... FOR SHARE` (Postgres) /
+    /// `SELECT ... LOCK IN SHARE MODE` (MySQL) — a shared read lock
+    /// that allows other shared readers but blocks concurrent
+    /// `FOR UPDATE` writers.
+    ///
+    /// Use this when you need a consistent snapshot of a row (e.g. an
+    /// inventory check) without preventing other readers. For most
+    /// "lock then write" flows reach for [`Self::lock_for_update`]
+    /// instead — a shared lock would still let another reader-then-
+    /// writer race you.
+    ///
+    /// SQLite emits no lock SQL (one-shot `warn!`); the call is a
+    /// no-op there.
+    pub fn shared_lock(mut self) -> Self {
+        self.lock_mode = LockMode::Shared;
+        self
+    }
+
     /// Override the model's static cast pipeline for this query. T7b
     /// consumes this; T5 just plumbs it through.
     pub fn with_casts(
@@ -1149,6 +1232,22 @@ fn render_json_length(backend: DbBackend, col: &str, op: &str, len: i64) -> Stri
         DbBackend::MySql => format!("JSON_LENGTH({col}) {op} {len}"),
         DbBackend::Sqlite => format!("json_array_length({col}) {op} {len}"),
     }
+}
+
+/// Phase 10C T9 — log a single `warn!` per process the first time a
+/// SQLite query reaches `lock_for_update` / `shared_lock`. SQLite has
+/// no row-level locking; the lock methods compile so cross-backend
+/// code stays portable, but emitting the warning once per process
+/// surfaces the no-op without spamming high-volume code paths.
+fn warn_sqlite_lock_once() {
+    use std::sync::Once;
+    static WARN: Once = Once::new();
+    WARN.call_once(|| {
+        tracing::warn!(
+            target: "suprnova::eloquent::lock",
+            "lock_for_update / shared_lock are no-ops on SQLite; SQLite uses file-level transaction locking only"
+        );
+    });
 }
 
 impl<M> Builder<M> {
@@ -1313,7 +1412,24 @@ impl<M> Builder<M> {
     ) -> (String, Vec<SeaValue>) {
         let mut values: Vec<SeaValue> = Vec::new();
         let mut n = 0;
-        let sql = self.render_select_into(backend, table, column_expr, &mut values, &mut n);
+        let mut sql = self.render_select_into(backend, table, column_expr, &mut values, &mut n);
+        // Phase 10C T9 — row-lock hint goes at the very end of the
+        // compound statement, after every UNION arm and every
+        // ORDER BY / LIMIT / OFFSET. The lock applies to the outer
+        // SELECT, so emitting it inside `render_select_into` would
+        // place it mid-statement on union arms — wrong shape.
+        let lock_clause: &str = match (backend, self.lock_mode) {
+            (_, LockMode::None) => "",
+            (DbBackend::Postgres, LockMode::ForUpdate) => " FOR UPDATE",
+            (DbBackend::Postgres, LockMode::Shared) => " FOR SHARE",
+            (DbBackend::MySql, LockMode::ForUpdate) => " FOR UPDATE",
+            (DbBackend::MySql, LockMode::Shared) => " LOCK IN SHARE MODE",
+            (DbBackend::Sqlite, LockMode::ForUpdate | LockMode::Shared) => {
+                warn_sqlite_lock_once();
+                ""
+            }
+        };
+        sql.push_str(lock_clause);
         (sql, values)
     }
 
