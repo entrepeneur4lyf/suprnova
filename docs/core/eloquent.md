@@ -987,13 +987,14 @@ Manual mode does **not** install `CURRENT_TX`. Scope individual
 operations through the transaction with `Builder::with_tx(&tx)`
 or the `Model::*_with_tx(&tx, ...)` shims:
 
-| Trait method        | Manual variant                         |
-|---------------------|----------------------------------------|
-| `Model::save`       | `Model::save_with_tx(&tx)`             |
-| `Model::update`     | `Model::update_with_tx(&tx, attrs)`    |
-| `Model::delete`     | `Model::delete_with_tx(&tx)`           |
-| `Model::force_delete` | `Model::force_delete_with_tx(&tx)`    |
-| `Builder::*`        | `Builder::with_tx(&tx).*`              |
+| Trait method        | Manual variant                            |
+|---------------------|-------------------------------------------|
+| `Model::create`     | `Model::create_with_tx(&tx, attrs)`       |
+| `Model::save`       | `Model::save_with_tx(&tx)`                |
+| `Model::update`     | `Model::update_with_tx(&tx, attrs)`       |
+| `Model::delete`     | `Model::delete_with_tx(&tx)`              |
+| `Model::force_delete` | `Model::force_delete_with_tx(&tx)`      |
+| `Builder::*`        | `Builder::with_tx(&tx).*`                 |
 
 Holding a `Transaction` pins one pool connection for the entire
 lifetime of the handle. On SQLite the pool has a single connection,

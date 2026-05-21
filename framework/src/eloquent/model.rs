@@ -651,6 +651,37 @@ where
         Ok(())
     }
 
+    /// Create a row through `tx`. Phase 10C audit-fix AF5 closes the
+    /// manual-transaction shim inventory — every CRUD entry point on
+    /// [`Self`] except `create` previously had a `*_with_tx`
+    /// counterpart, so a user inside [`DB::begin_transaction`] who
+    /// wanted to `create` had to fall back to building an
+    /// `ActiveModel` by hand and reaching for raw SeaORM. This shim
+    /// mirrors [`Self::create`] event-for-event (`Creating` → `Saving`
+    /// → INSERT → `Created` → `Saved`) but pins the INSERT to `tx`.
+    async fn create_with_tx(
+        tx: &crate::database::Transaction,
+        attrs: Attrs,
+    ) -> Result<Self, FrameworkError> {
+        let filtered = Self::fillable_filter().apply(attrs);
+        let shared = std::sync::Arc::new(tokio::sync::Mutex::new(filtered));
+        Self::__dispatch_creating(shared.clone()).await?;
+        Self::__dispatch_saving(shared.clone(), true).await?;
+
+        let final_attrs = shared.lock().await.clone();
+        let am = Self::active_model_from_attrs(final_attrs)?;
+        let exec = crate::database::transaction::ExecutorChoice::from_tx(tx);
+        let inserted = exec
+            .insert_active(am)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let row = Self::from(inserted);
+
+        Self::__dispatch_created(&row).await?;
+        Self::__dispatch_saved(&row).await?;
+        Ok(row)
+    }
+
     /// Force-delete this row through `tx`. Mirrors
     /// [`Self::force_delete`] event-for-event but pins the DELETE to
     /// the supplied transaction.

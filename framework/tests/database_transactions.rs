@@ -332,3 +332,63 @@ async fn builder_with_tx_routes_through_explicit_transaction() {
         .unwrap();
     assert_eq!(after.balance, 777);
 }
+
+// ---- AF5 — Model::create_with_tx ----------------------------------------
+//
+// Manual `DB::begin_transaction` does not install `CURRENT_TX`, so
+// `Model::create()` inside a manual-tx scope silently routed to the
+// pool — defeating the whole point of holding the handle. AF5 adds
+// the missing `create_with_tx(&tx, attrs)` shim that mirrors
+// `create()` event-for-event but pins the INSERT to `tx`. These two
+// tests pin the contract end-to-end: commit lands the row, dropping
+// the handle without committing rolls back.
+
+#[tokio::test]
+async fn create_with_tx_commits_atomically() {
+    let _db = fixture().await;
+
+    let tx = DB::begin_transaction().await.unwrap();
+    let carol = T11Account::create_with_tx(&tx, attrs! { owner: "carol", balance: 999i64 })
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let row = T11Account::query()
+        .filter("id", carol.id)
+        .first()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.owner, "carol");
+    assert_eq!(row.balance, 999);
+}
+
+#[tokio::test]
+async fn create_with_tx_rolls_back_when_handle_dropped_without_commit() {
+    let _db = fixture().await;
+
+    let baseline = T11Account::query().get().await.unwrap().len();
+
+    {
+        let tx = DB::begin_transaction().await.unwrap();
+        let _ =
+            T11Account::create_with_tx(&tx, attrs! { owner: "dave", balance: 1i64 })
+                .await
+                .unwrap();
+        // Drop `tx` without calling commit — the SeaORM
+        // DatabaseTransaction's Drop rolls back any uncommitted work.
+        drop(tx);
+    }
+
+    let after = T11Account::query().get().await.unwrap().len();
+    assert_eq!(
+        after, baseline,
+        "uncommitted manual-tx create must not survive the dropped handle"
+    );
+    let lookup = T11Account::query()
+        .filter("owner", "dave")
+        .first()
+        .await
+        .unwrap();
+    assert!(lookup.is_none(), "rollback must un-insert the in-tx row");
+}
