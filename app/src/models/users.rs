@@ -93,7 +93,7 @@ impl User {
 
     /// Compatibility alias for the pre-T11 builder-style listing.
     pub async fn find_all() -> Result<Vec<Self>, suprnova::FrameworkError> {
-        <Self as suprnova::eloquent::Model>::all().await
+        Ok(<Self as suprnova::eloquent::Model>::all().await?.into_vec())
     }
 }
 

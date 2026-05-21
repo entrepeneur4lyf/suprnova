@@ -25,6 +25,7 @@ mod observers;
 mod parse;
 pub mod prunable;
 mod relations;
+mod serialization;
 
 use parse::ModelInput;
 

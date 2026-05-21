@@ -287,8 +287,7 @@ async fn load_after_fetch() {
     // Collection wraps Vec<M>; the load method delegates to the same
     // orchestrator Builder::get uses.
     let _db = fixture().await;
-    let users_vec = EgUser::all().await.unwrap();
-    let mut users: Collection<EgUser> = Collection::from(users_vec);
+    let mut users = EgUser::all().await.unwrap();
     users.load(["posts"]).await.unwrap();
     let u1 = users.iter().find(|u| u.name == "u1").unwrap();
     assert_eq!(u1.posts_loaded().len(), 2);
@@ -304,8 +303,7 @@ async fn load_missing_idempotent_when_all_have_relation() {
     // semantic: calling twice doesn't break anything AND the loaded
     // count stays correct.
     let _db = fixture().await;
-    let users_vec = EgUser::with(["posts"]).get().await.unwrap();
-    let mut users: Collection<EgUser> = Collection::from(users_vec);
+    let mut users = EgUser::with(["posts"]).get().await.unwrap();
     users.load_missing(["posts"]).await.unwrap();
     let u1 = users.iter().find(|u| u.name == "u1").unwrap();
     assert_eq!(u1.posts_loaded().len(), 2);
@@ -333,8 +331,8 @@ async fn load_missing_per_row_loads_only_uncached_rows() {
         .get()
         .await
         .unwrap();
-    let mut combined: Vec<EgUser> = u1_with;
-    combined.extend(u2_plain);
+    let mut combined: Vec<EgUser> = u1_with.into_vec();
+    combined.extend(u2_plain.into_vec());
     let mut users: Collection<EgUser> = Collection::from(combined);
 
     // Sanity: u2 currently lacks posts in its cache.
@@ -384,7 +382,7 @@ async fn load_missing_nested_partitions_at_every_level() {
     // collection. For the partition assertion proper we fetch u1
     // again with posts-only and load p1's comments via __eager_load
     // directly so p2's stays empty.
-    let mut combined: Vec<EgUser> = u1_with_posts;
+    let mut combined: Vec<EgUser> = u1_with_posts.into_vec();
     // u2 plain (no posts).
     let u2_plain = EgUser::query()
         .filter("name", "u2")
@@ -451,8 +449,7 @@ async fn load_loads_when_no_row_has_it() {
     // relation cached. A fresh collection with no cache hits gets
     // the full eager-load treatment.
     let _db = fixture().await;
-    let users_vec = EgUser::all().await.unwrap();
-    let mut users: Collection<EgUser> = Collection::from(users_vec);
+    let mut users = EgUser::all().await.unwrap();
     users.load_missing(["posts"]).await.unwrap();
     let u1 = users.iter().find(|u| u.name == "u1").unwrap();
     assert_eq!(u1.posts_loaded().len(), 2);
@@ -466,8 +463,7 @@ async fn load_missing_recurses_into_loaded_head_to_fill_tail() {
     // silently dropped the comments load and left `comments_loaded()`
     // panic-on-read.
     let _db = fixture().await;
-    let users_vec = EgUser::with(["posts"]).get().await.unwrap();
-    let mut users: Collection<EgUser> = Collection::from(users_vec);
+    let mut users = EgUser::with(["posts"]).get().await.unwrap();
 
     // Posts are loaded but comments aren't — calling
     // `comments_loaded()` on any loaded post must panic.
@@ -498,8 +494,7 @@ async fn load_missing_dotted_no_head_loads_full_path() {
     // `load_missing(["posts.comments"])` falls through to the regular
     // full-path eager loader.
     let _db = fixture().await;
-    let users_vec = EgUser::all().await.unwrap();
-    let mut users: Collection<EgUser> = Collection::from(users_vec);
+    let mut users = EgUser::all().await.unwrap();
     users.load_missing(["posts.comments"]).await.unwrap();
     let u1 = users.iter().find(|u| u.name == "u1").unwrap();
     let total: usize = u1

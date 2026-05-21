@@ -29,6 +29,7 @@
 use std::marker::PhantomData;
 
 use crate::eloquent::builder::{Builder, Direction, IntoColumn, IntoVal};
+use crate::eloquent::collection::Collection;
 use crate::eloquent::model::Model;
 use crate::eloquent::relations::{Relation, RelationKind};
 use crate::eloquent::EloquentModel;
@@ -198,7 +199,11 @@ where
     }
 
     /// Execute and return every matching child row.
-    pub async fn get(self) -> Result<Vec<R>, FrameworkError> {
+    ///
+    /// Returns a [`Collection<R>`](crate::eloquent::Collection); see
+    /// [`HasMany::get`](super::HasMany::get) for return-type
+    /// rationale.
+    pub async fn get(self) -> Result<Collection<R>, FrameworkError> {
         self.inner.get().await
     }
 

@@ -25,6 +25,7 @@
 use std::marker::PhantomData;
 
 use crate::eloquent::builder::{Builder, IntoColumn, IntoVal};
+use crate::eloquent::collection::Collection;
 use crate::eloquent::model::Model;
 use crate::eloquent::relations::{Relation, RelationKind};
 use crate::eloquent::EloquentModel;
@@ -174,7 +175,11 @@ where
     /// Most callers want [`Self::first`]; `get()` is here for users
     /// who want the unfiltered set without dropping into
     /// `Self::query().filter(...).get()` themselves.
-    pub async fn get(self) -> Result<Vec<R>, FrameworkError> {
+    ///
+    /// Returns a [`Collection<R>`](crate::eloquent::Collection); see
+    /// [`HasMany::get`](super::HasMany::get) for return-type
+    /// rationale.
+    pub async fn get(self) -> Result<Collection<R>, FrameworkError> {
         self.inner.get().await
     }
 }

@@ -32,6 +32,7 @@
 use std::marker::PhantomData;
 
 use crate::eloquent::builder::{Builder, Direction, IntoColumn, IntoVal};
+use crate::eloquent::collection::Collection;
 use crate::eloquent::model::Model;
 use crate::eloquent::relations::{Relation, RelationKind};
 use crate::eloquent::EloquentModel;
@@ -216,7 +217,14 @@ where
     }
 
     /// Execute the inner builder and return every matching child row.
-    pub async fn get(self) -> Result<Vec<R>, FrameworkError> {
+    ///
+    /// Returns a [`Collection<R>`](crate::eloquent::Collection) — the
+    /// Laravel-shaped wrapper around `Vec<R>`. Slice-shape access
+    /// (`.iter()`, `.len()`, indexing) works directly via
+    /// `Deref<Target = [R]>`; call sites that need an owned `Vec`
+    /// reach for `.into_vec()`. The model-aware surface composes:
+    /// `parent.children().get().await?.pluck::<String>("name")`.
+    pub async fn get(self) -> Result<Collection<R>, FrameworkError> {
         self.inner.get().await
     }
 

@@ -24,6 +24,7 @@ use syn::Result;
 
 use super::casts;
 use super::parse::ModelInput;
+use super::serialization;
 
 pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     let struct_ident = &input.item.ident;
@@ -95,6 +96,14 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         })
         .collect();
     let field_strs: Vec<String> = field_idents.iter().map(|i| i.to_string()).collect();
+
+    // Phase 10C T5b — emit `field_value(&self, name) -> Option<Value>`
+    // off the same filtered field-ident slice that drives every other
+    // per-column code path. The result is one match-arm per column
+    // calling `serde_json::to_value(&self.<field>)`; unknown names
+    // return `None`. `Collection<M>`'s string-keyed methods route
+    // through this accessor.
+    let field_value_method = serialization::emit_field_value(&field_idents);
 
     // Phase 10B T1 — every Self { ... } constructor that materialises
     // a user struct (From<inner::Model>, Default, replicate_with) must
@@ -661,8 +670,12 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 }
 
                 /// Fetch every alive row (skips trashed). Inherent
-                /// override of the trait default.
-                pub async fn all() -> ::core::result::Result<::std::vec::Vec<Self>, ::suprnova::FrameworkError> {
+                /// override of the trait default — matches the trait
+                /// `all` return type ([`Collection<Self>`](::suprnova::eloquent::Collection)).
+                pub async fn all() -> ::core::result::Result<
+                    ::suprnova::eloquent::Collection<Self>,
+                    ::suprnova::FrameworkError,
+                > {
                     <Self as ::suprnova::eloquent::Model>::query().get().await
                 }
 
@@ -671,16 +684,24 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 /// order — does not preserve `ids` order. Use
                 /// `Self::with_trashed().where_in(pk, ids).get()` to
                 /// include trashed rows.
+                ///
+                /// Returns `Vec<Self>` (not `Collection<Self>`) to match
+                /// the trait's `find_many` shape — it's a PK-set
+                /// lookup, not a generic query, so the Collection
+                /// surface is unnecessary.
                 pub async fn find_many<I>(
                     ids: I,
                 ) -> ::core::result::Result<::std::vec::Vec<Self>, ::suprnova::FrameworkError>
                 where
                     I: ::core::iter::IntoIterator<Item = #key_type> + ::core::marker::Send,
                 {
-                    <Self as ::suprnova::eloquent::Model>::query()
-                        .where_in(<Self as ::suprnova::eloquent::Model>::primary_key_name(), ids)
-                        .get()
-                        .await
+                    ::core::result::Result::Ok(
+                        <Self as ::suprnova::eloquent::Model>::query()
+                            .where_in(<Self as ::suprnova::eloquent::Model>::primary_key_name(), ids)
+                            .get()
+                            .await?
+                            .into_vec(),
+                    )
                 }
             }
         }
@@ -737,6 +758,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             #fillable_impl
 
             #query_override
+
+            #field_value_method
 
             fn primary_key_value(
                 &self,

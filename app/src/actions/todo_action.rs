@@ -36,6 +36,6 @@ pub struct ListTodosAction;
 
 impl ListTodosAction {
     pub async fn execute(&self) -> Result<Vec<Todo>, suprnova::error::FrameworkError> {
-        <Todo as suprnova::eloquent::Model>::all().await
+        Ok(<Todo as suprnova::eloquent::Model>::all().await?.into_vec())
     }
 }

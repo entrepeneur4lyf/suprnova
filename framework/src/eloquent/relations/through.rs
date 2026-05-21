@@ -33,7 +33,7 @@
 //!
 //! ```ignore
 //! // Instead of `country.posts().get()`, do:
-//! let users: Vec<User> = country.users().get().await?;
+//! let users = country.users().get().await?;
 //! let user_ids: Vec<i64> = users.iter().map(|u| u.id).collect();
 //! let posts = Post::query().filter_in("user_id", user_ids).get().await?;
 //! // Both User and Post scopes apply to their respective query.
@@ -69,6 +69,7 @@ use std::marker::PhantomData;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 
 use crate::database::DB;
+use crate::eloquent::collection::Collection;
 use crate::eloquent::model::{json_value_to_sea_value, Model};
 use crate::eloquent::relations::{Relation, RelationKind};
 use crate::eloquent::EloquentModel;
@@ -213,7 +214,7 @@ where
     ///
     /// Backend-aware placeholders (`?` for sqlite / mysql, `$1` for
     /// postgres) match the rest of the framework's raw-SQL paths.
-    pub async fn get(self) -> Result<Vec<C>, FrameworkError> {
+    pub async fn get(self) -> Result<Collection<C>, FrameworkError> {
         let conn = DB::connection()?;
         let backend = conn.inner().get_database_backend();
         let ph = match backend {
@@ -243,12 +244,14 @@ where
             .all(conn.inner())
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        Ok(rows.into_iter().map(C::from).collect())
+        Ok(Collection::from_vec(
+            rows.into_iter().map(C::from).collect(),
+        ))
     }
 
     /// Convenience over `.get()` — drop everything after the first row.
     pub async fn first(self) -> Result<Option<C>, FrameworkError> {
-        Ok(self.get().await?.into_iter().next())
+        Ok(self.get().await?.into_vec().into_iter().next())
     }
 
     /// `SELECT COUNT(*) FROM <C> INNER JOIN <B> ... WHERE B.<first_key> = ?`.
@@ -417,7 +420,7 @@ where
     /// Fetch the matching `C` row (HasOne semantics — at most one row).
     /// Returns `None` when no `C` row is reachable.
     pub async fn get(self) -> Result<Option<C>, FrameworkError> {
-        Ok(self.inner.get().await?.into_iter().next())
+        Ok(self.inner.get().await?.into_vec().into_iter().next())
     }
 }
 

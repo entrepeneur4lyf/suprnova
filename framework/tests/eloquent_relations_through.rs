@@ -567,7 +567,7 @@ async fn has_many_through_eager_load_distributes_by_parent() {
         .await
         .unwrap();
 
-    let loaded: Vec<ThCountry> = ThCountry::query()
+    let loaded = ThCountry::query()
         .with(["posts"])
         .get()
         .await
@@ -719,7 +719,7 @@ async fn has_many_through_honours_second_local_key() {
 
     // Eager-load distribution (two-query strategy via Query 1's
     // SELECT CAST({slk} AS ...) AS __sn_b_id).
-    let loaded: Vec<SlkCompany> = SlkCompany::query()
+    let loaded = SlkCompany::query()
         .with(["devices"])
         .get()
         .await
@@ -768,7 +768,7 @@ async fn has_one_through_eager_load_distributes_single_row() {
         .await
         .unwrap();
 
-    let loaded: Vec<HoUser> = HoUser::query().with(["profile"]).get().await.unwrap();
+    let loaded = HoUser::query().with(["profile"]).get().await.unwrap();
     let by_id: std::collections::HashMap<i64, &HoUser> =
         loaded.iter().map(|r| (r.id, r)).collect();
     let u1_profile = by_id.get(&u1.id).unwrap().profile_loaded();
@@ -895,7 +895,7 @@ async fn has_many_through_eager_load_with_string_parent_pk() {
     .await
     .unwrap();
 
-    let loaded: Vec<ThStrOwner> = ThStrOwner::query()
+    let loaded = ThStrOwner::query()
         .with(["posts"])
         .get()
         .await

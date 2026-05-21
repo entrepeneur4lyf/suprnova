@@ -69,10 +69,11 @@ impl Post {
 
     /// Every post, ordered by id ascending. Compatibility shim.
     pub async fn all() -> Result<Vec<Self>, suprnova::FrameworkError> {
-        <Self as suprnova::eloquent::Model>::query()
+        Ok(<Self as suprnova::eloquent::Model>::query()
             .order_by_asc("id")
             .get()
-            .await
+            .await?
+            .into_vec())
     }
 
     /// Every public post, ordered by id ascending. Mirrors the
@@ -80,20 +81,22 @@ impl Post {
     /// so the unauthenticated listing can stream the visible subset
     /// without re-running the gate on each row.
     pub async fn all_public() -> Result<Vec<Self>, suprnova::FrameworkError> {
-        <Self as suprnova::eloquent::Model>::query()
+        Ok(<Self as suprnova::eloquent::Model>::query()
             .filter("is_public", true)
             .order_by_asc("id")
             .get()
-            .await
+            .await?
+            .into_vec())
     }
 
     /// Every post authored by `author_id`. Useful for the
     /// `/api/users/{id}/posts` style endpoint a real app would add.
     pub async fn for_author(author_id: i64) -> Result<Vec<Self>, suprnova::FrameworkError> {
-        <Self as suprnova::eloquent::Model>::query()
+        Ok(<Self as suprnova::eloquent::Model>::query()
             .filter("author_id", author_id)
             .order_by_asc("id")
             .get()
-            .await
+            .await?
+            .into_vec())
     }
 }

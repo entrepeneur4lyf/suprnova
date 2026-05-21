@@ -39,6 +39,7 @@ use serde_json::Value;
 
 use crate::database::DB;
 use crate::eloquent::attrs::Attrs;
+use crate::eloquent::collection::Collection;
 use crate::eloquent::model::{json_value_to_sea_value, Model};
 use crate::eloquent::EloquentModel;
 use crate::error::FrameworkError;
@@ -1488,7 +1489,18 @@ where
     /// [`with_casts`]: Self::with_casts
     /// [`with`]: Self::with
     /// [`EagerLoadDispatch::eager_load`]: crate::eloquent::EagerLoadDispatch::eager_load
-    pub async fn get(mut self) -> Result<Vec<M>, FrameworkError> {
+    ///
+    /// ## Return type
+    ///
+    /// Phase 10C T5b returns a
+    /// [`Collection<M>`](crate::eloquent::Collection), the Eloquent
+    /// wrapper around `Vec<M>`. Slice-shape access (`.iter()`,
+    /// `.len()`, indexing, `for row in &result`) works directly via
+    /// `Deref<Target = [M]>`; call sites that need owned `Vec<M>` use
+    /// `.into_vec()`. The model-aware surface (`pluck("col")`,
+    /// `group_by("col")`, `sort_by("col")`, `sum::<T>("col")`, ...)
+    /// composes on top.
+    pub async fn get(mut self) -> Result<Collection<M>, FrameworkError> {
         // Phase 10C T1 — Retrieving fires ONCE per query (not per
         // row) before any SQL runs. Aligns with Laravel's
         // `retrieving` hook, which fires "just before a model is
@@ -1574,7 +1586,7 @@ where
             M::__dispatch_retrieved(row).await?;
         }
 
-        Ok(out)
+        Ok(Collection::from_vec(out))
     }
 
     /// Execute the SELECT and return at most one row.
@@ -1587,8 +1599,9 @@ where
     /// contract.
     pub async fn first(mut self) -> Result<Option<M>, FrameworkError> {
         self.limit = Some(1);
-        let mut rows = self.get().await?;
-        Ok(rows.pop())
+        // `Collection<M>` derefs to `&[M]` but offers no owning `pop` —
+        // unwrap to the inner `Vec` first.
+        Ok(self.get().await?.into_vec().pop())
     }
 
     /// Execute the SELECT and return one row. Errors with

@@ -39,6 +39,7 @@ use serde::Serialize;
 use crate::database::DB;
 use crate::eloquent::attrs::Attrs;
 use crate::eloquent::builder::Builder;
+use crate::eloquent::collection::Collection;
 use crate::eloquent::events::ModelEventHooks;
 use crate::eloquent::fillable::Fillable;
 use crate::eloquent::EloquentModel;
@@ -82,6 +83,26 @@ where
     /// returns `Fillable::guarded(vec![PRIMARY_KEY])`; Task 6 wires
     /// `fillable = [...]` / `guarded = [...]` attributes.
     fn fillable_filter() -> Fillable;
+
+    /// Phase 10C T5b — read this row's field by column name and
+    /// serialise it to a `serde_json::Value`. Returns `None` when the
+    /// column name doesn't match any declared field on the model (and
+    /// when the per-field serialisation fails, which the macro's
+    /// arms lower to `None`).
+    ///
+    /// The default returns `None` so non-`#[suprnova::model]` types
+    /// that meet the supertrait bounds (rare — almost nothing else
+    /// satisfies them) don't break. The macro overrides this with one
+    /// match arm per declared column field.
+    ///
+    /// Powers the string-keyed surface on
+    /// [`Collection<M>`](crate::eloquent::Collection) —
+    /// `pluck("col")`, `group_by("col")`, `sort_by("col")`,
+    /// `where_eq("col", v)`, `sum::<T>("col")`, etc. The macro emission
+    /// lives in `suprnova-macros/src/model/serialization.rs`.
+    fn field_value(&self, _name: &str) -> ::core::option::Option<serde_json::Value> {
+        ::core::option::Option::None
+    }
 
     /// Look up a row by primary key. `None` if no row matches.
     ///
@@ -184,7 +205,15 @@ where
     ///
     /// Dispatches `Retrieving` once before the SELECT and
     /// `Retrieved` once per hydrated row.
-    async fn all() -> Result<Vec<Self>, FrameworkError> {
+    ///
+    /// Returns a [`Collection<Self>`](crate::eloquent::Collection) so
+    /// the result composes with the model-aware string-keyed surface
+    /// (`pluck("col")`, `group_by("col")`, `sum::<T>("col")`, ...). The
+    /// inner `Vec` is reachable via `.into_vec()` for call sites that
+    /// need explicit `Vec` semantics; slice-shape access (`.iter()`,
+    /// `.len()`, indexing, `for row in &collection`) works directly
+    /// via `Deref<Target = [Self]>`.
+    async fn all() -> Result<Collection<Self>, FrameworkError> {
         Self::__dispatch_retrieving().await?;
         let db = DB::connection()?;
         let rows = Self::Entity::find()
@@ -195,7 +224,7 @@ where
         for row in &out {
             Self::__dispatch_retrieved(row).await?;
         }
-        Ok(out)
+        Ok(Collection::from_vec(out))
     }
 
     /// Start a new builder against this model. Phase 10C T4 layers

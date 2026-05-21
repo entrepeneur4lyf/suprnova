@@ -77,6 +77,7 @@ use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
 use crate::database::DB;
 use crate::eloquent::attrs::Attrs;
 use crate::eloquent::builder::Builder;
+use crate::eloquent::collection::Collection;
 use crate::eloquent::model::{json_value_to_sea_value, Model};
 use crate::eloquent::relations::{Relation, RelationKind};
 use crate::eloquent::EloquentModel;
@@ -453,7 +454,7 @@ where
     /// Two-query strategy: fetch related rows by IN-set on the pivot's
     /// related-FK values (filtered by the parent's id + type), then
     /// fetch pivot rows separately and zip via `(parent_id, related_id)`.
-    pub async fn get(self) -> Result<Vec<R>, FrameworkError> {
+    pub async fn get(self) -> Result<Collection<R>, FrameworkError> {
         let conn = DB::connection()?;
         let backend = conn.inner().get_database_backend();
 
@@ -497,7 +498,7 @@ where
             }
         }
         if related_ids.is_empty() {
-            return Ok(Vec::new());
+            return Ok(Collection::new());
         }
 
         // Fetch the related rows by IN-set on their PK column. The
@@ -510,7 +511,7 @@ where
             if let Some(rw) = self.scope_rewrite {
                 q = rw(q);
             }
-            q.get().await?
+            q.get().await?.into_vec()
         };
 
         // Fetch the pivot rows attached to this parent (filtered by
@@ -522,7 +523,8 @@ where
                 serde_json::Value::String(self.parent_morph_type.clone()),
             )
             .get()
-            .await?;
+            .await?
+            .into_vec();
 
         // Index pivots by related_key value (JSON-string form).
         use std::collections::HashMap;
@@ -551,13 +553,13 @@ where
             }
             out.push(row);
         }
-        Ok(out)
+        Ok(Collection::from_vec(out))
     }
 
     /// Convenience over `get()` — drop everything after the first
     /// related row.
     pub async fn first(self) -> Result<Option<R>, FrameworkError> {
-        Ok(self.get().await?.into_iter().next())
+        Ok(self.get().await?.into_vec().into_iter().next())
     }
 
     /// `SELECT COUNT(*) FROM pivot WHERE <name>_id = ? AND <name>_type = ?`.
@@ -855,7 +857,7 @@ where
     /// matches the declared target morph type. Query 2: SELECT R rows
     /// by IN-set on those `<morph_name>_id` values. Zip via the pivot's
     /// `<morph_name>_id` column to stamp `__pivot` per R.
-    pub async fn get(self) -> Result<Vec<R>, FrameworkError> {
+    pub async fn get(self) -> Result<Collection<R>, FrameworkError> {
         let id_col = format!("{}_id", self.morph_name);
         let type_col = format!("{}_type", self.morph_name);
 
@@ -873,9 +875,10 @@ where
                 serde_json::Value::String(self.target_morph_type.clone()),
             )
             .get()
-            .await?;
+            .await?
+            .into_vec();
         if pivot_rows.is_empty() {
-            return Ok(Vec::new());
+            return Ok(Collection::new());
         }
 
         // Pull morph-target IDs out of the pivot rows.
@@ -900,7 +903,7 @@ where
             if let Some(rw) = self.scope_rewrite {
                 q = rw(q);
             }
-            q.get().await?
+            q.get().await?.into_vec()
         };
 
         // Index pivots by `<morph_name>_id` (JSON-string form).
@@ -930,12 +933,12 @@ where
             }
             out.push(row);
         }
-        Ok(out)
+        Ok(Collection::from_vec(out))
     }
 
     /// Convenience over `get()` — drop everything after the first row.
     pub async fn first(self) -> Result<Option<R>, FrameworkError> {
-        Ok(self.get().await?.into_iter().next())
+        Ok(self.get().await?.into_vec().into_iter().next())
     }
 
     /// `SELECT COUNT(*) FROM pivot WHERE pfk = ? AND <name>_type = ?`.

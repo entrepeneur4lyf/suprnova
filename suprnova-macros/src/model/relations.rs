@@ -1843,7 +1843,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         ::core::option::Option::None => __sn_builder,
                     };
                     let rows: ::std::vec::Vec<#target_ty> =
-                        __sn_builder.get().await?;
+                        __sn_builder.get().await?.into_vec();
                     use ::std::collections::HashMap;
                     let mut by_fk: HashMap<::std::string::String, #target_ty> = HashMap::new();
                     for r in rows.into_iter() {
@@ -1928,7 +1928,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             ::core::option::Option::Some(f) => f(__sn_builder),
                             ::core::option::Option::None => __sn_builder,
                         };
-                        __sn_builder.get().await?
+                        __sn_builder.get().await?.into_vec()
                     };
                     use ::std::collections::HashMap;
                     // Group parents by their PK (which is matched by
@@ -2035,7 +2035,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         ::core::option::Option::None => __sn_builder,
                     };
                     let rows: ::std::vec::Vec<#target_ty> =
-                        __sn_builder.get().await?;
+                        __sn_builder.get().await?.into_vec();
                     use ::std::collections::HashMap;
                     let mut by_fk: HashMap<::std::string::String, ::std::vec::Vec<#target_ty>>
                         = HashMap::new();
@@ -2113,7 +2113,8 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         <#pivot_ty as ::suprnova::eloquent::Model>::query()
                             .filter_in(#pivot_fk, pk_values.clone())
                             .get()
-                            .await?;
+                            .await?
+                            .into_vec();
 
                     if pivots.is_empty() {
                         // Every parent gets an empty slice so the
@@ -2164,7 +2165,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             ::core::option::Option::Some(f) => f(__sn_builder),
                             ::core::option::Option::None => __sn_builder,
                         };
-                        __sn_builder.get().await?
+                        __sn_builder.get().await?.into_vec()
                     };
 
                     // Index related rows by their `id` field (JSON-
@@ -2454,7 +2455,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         ::core::option::Option::Some(f) => f(__sn_builder),
                         ::core::option::Option::None => __sn_builder,
                     };
-                    let c_rows: ::std::vec::Vec<#target_ty> = __sn_builder.get().await?;
+                    let c_rows: ::std::vec::Vec<#target_ty> = __sn_builder.get().await?.into_vec();
 
                     // Group C rows by parent_id, via the b->parent
                     // map. The per-row C.second_key is JSON-plucked
@@ -2564,7 +2565,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         ::core::option::Option::Some(f) => f(__sn_builder),
                         ::core::option::Option::None => __sn_builder,
                     };
-                    let rows: ::std::vec::Vec<#target_ty> = __sn_builder.get().await?;
+                    let rows: ::std::vec::Vec<#target_ty> = __sn_builder.get().await?.into_vec();
                     use ::std::collections::HashMap;
                     let mut by_fk: HashMap<::std::string::String, ::std::vec::Vec<#target_ty>>
                         = HashMap::new();
@@ -2642,7 +2643,8 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .filter_in(#id_col, pk_values.clone())
                             .filter(#type_col, morph_type_predicate)
                             .get()
-                            .await?;
+                            .await?
+                            .into_vec();
 
                     if pivots.is_empty() {
                         for p in parents.iter_mut() {
@@ -2681,7 +2683,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             ::core::option::Option::Some(f) => f(__sn_builder),
                             ::core::option::Option::None => __sn_builder,
                         };
-                        __sn_builder.get().await?
+                        __sn_builder.get().await?.into_vec()
                     };
 
                     let mut by_related_id: HashMap<::std::string::String, #target_ty>
@@ -2800,7 +2802,8 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .filter_in(#pivot_fk, pk_values.clone())
                             .filter(#type_col, morph_type_predicate)
                             .get()
-                            .await?;
+                            .await?
+                            .into_vec();
 
                     if pivots.is_empty() {
                         for p in parents.iter_mut() {
@@ -2839,7 +2842,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             ::core::option::Option::Some(f) => f(__sn_builder),
                             ::core::option::Option::None => __sn_builder,
                         };
-                        __sn_builder.get().await?
+                        __sn_builder.get().await?.into_vec()
                     };
 
                     // Index targets by id (JSON-string).
@@ -2960,7 +2963,8 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         <#target_ty as ::suprnova::eloquent::Model>::query()
                             .filter_in(#fk, pk_values)
                             .get()
-                            .await?;
+                            .await?
+                            .into_vec();
                     use ::std::collections::HashMap;
                     let mut counts: HashMap<::std::string::String, u64> = HashMap::new();
                     for r in rows.iter() {
@@ -3023,6 +3027,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .filter_in(#owner_key, fk_values)
                             .get()
                             .await?
+                            .into_vec()
                     };
                     use ::std::collections::HashSet;
                     let mut existing_keys: HashSet<::std::string::String> = HashSet::new();
@@ -3907,7 +3912,8 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         <#target_ty as ::suprnova::eloquent::Model>::query()
                             .filter_in(#fk, pk_values)
                             .get()
-                            .await?;
+                            .await?
+                            .into_vec();
                     use ::std::collections::HashMap;
                     let mut by_fk: HashMap<::std::string::String, f64> = HashMap::new();
                     for r in rows.iter() {
@@ -4011,6 +4017,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             .filter_in(#owner_key, fk_values)
                             .get()
                             .await?
+                            .into_vec()
                     };
                     use ::std::collections::HashMap;
                     let mut by_pk: HashMap<::std::string::String, f64> = HashMap::new();

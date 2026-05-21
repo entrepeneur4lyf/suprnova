@@ -52,6 +52,7 @@ use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
 use crate::database::DB;
 use crate::eloquent::attrs::Attrs;
 use crate::eloquent::builder::Builder;
+use crate::eloquent::collection::Collection;
 use crate::eloquent::model::{json_value_to_sea_value, Model};
 use crate::eloquent::relations::{Relation, RelationKind};
 use crate::eloquent::EloquentModel;
@@ -480,7 +481,7 @@ where
     /// SeaORM's deserialisation path, which is not first-class on the
     /// `FromQueryResult` derive. Two homogeneous queries each round-
     /// trip the rows cleanly through each model's own deserialiser.
-    pub async fn get(self) -> Result<Vec<R>, FrameworkError> {
+    pub async fn get(self) -> Result<Collection<R>, FrameworkError> {
         let conn = DB::connection()?;
         let backend = conn.inner().get_database_backend();
 
@@ -515,7 +516,7 @@ where
             }
         }
         if related_ids.is_empty() {
-            return Ok(Vec::new());
+            return Ok(Collection::new());
         }
 
         // Fetch the related rows by IN-set on their PK column. Any
@@ -528,14 +529,15 @@ where
             if let Some(rw) = self.scope_rewrite {
                 q = rw(q);
             }
-            q.get().await?
+            q.get().await?.into_vec()
         };
 
         // Fetch the pivot rows attached to this parent.
         let pivot_rows: Vec<P> = P::query()
             .filter(self.pivot_foreign_key.as_str(), self.parent_key_value.clone())
             .get()
-            .await?;
+            .await?
+            .into_vec();
 
         // Index pivots by related_key value (JSON-string form).
         use std::collections::HashMap;
@@ -566,13 +568,13 @@ where
             }
             out.push(row);
         }
-        Ok(out)
+        Ok(Collection::from_vec(out))
     }
 
     /// Convenience over `get()` — drop everything after the first
     /// related row.
     pub async fn first(self) -> Result<Option<R>, FrameworkError> {
-        Ok(self.get().await?.into_iter().next())
+        Ok(self.get().await?.into_vec().into_iter().next())
     }
 
     /// `SELECT COUNT(*) FROM pivot WHERE pivot_foreign_key = ?`.

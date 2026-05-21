@@ -23,11 +23,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::eloquent::builder::EagerSpec;
+use crate::eloquent::model::Model;
 use crate::eloquent::relations::eager::load_missing_path;
 use crate::eloquent::relations::EagerLoadDispatch;
 use crate::error::FrameworkError;
@@ -403,6 +406,18 @@ impl<T> Deref for Collection<T> {
     }
 }
 
+/// Mirrors `Vec<T>`'s `DerefMut<Target = [T]>` so call sites that
+/// previously held a `&mut Vec<M>` from `Model::query().get()` keep
+/// working unchanged after the T5b return-type sweep —
+/// `.iter_mut()`, `.sort()`, slice-shape mutation all stay available.
+/// Adding owned mutation (`.push`, `.pop`) still requires unwrapping
+/// to `Vec` via [`Collection::into_vec`].
+impl<T> DerefMut for Collection<T> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        &mut self.0
+    }
+}
+
 impl<T> IntoIterator for Collection<T> {
     type Item = T;
     type IntoIter = std::vec::IntoIter<T>;
@@ -496,6 +511,364 @@ where
             load_missing_path::<M>(&mut self.0, &path, db.inner()).await?;
         }
         Ok(())
+    }
+}
+
+// ─── Phase 10C T5b: model-aware string-keyed Laravel surface ─────────
+//
+// String-keyed methods that route per-row field reads through the
+// macro-emitted `Model::field_value(name)`. The `pluck_by` /
+// `group_by_with` / `sort_with` / `key_by_with` family on the generic
+// `impl<T>` block above takes closures and works for any `T`; the
+// methods below take column-name strings and only exist when `M`
+// implements `Model` (so the macro has emitted the `field_value`
+// arms).
+//
+// Method matrix:
+//
+// - Lookup: `pluck("col")`, `pluck_keyed("k", "v")`,
+//   `group_by("col")`, `key_by("col")`
+// - Order: `sort_by("col")`, `sort_by_desc("col")`
+// - Filter: `where_eq("col", v)`, `where_in("col", [v...])`,
+//   `where_not_in("col", [v...])`
+// - Aggregate: `sum::<T>("col")`, `avg::<T>("col")`,
+//   `min::<T>("col")`, `max::<T>("col")`
+// - Serialise: `to_array()`, `to_json()` (T5b stubs — T6 extends with
+//   `hidden` / `visible` / `appends` filtering)
+//
+// Aggregates and `pluck` deserialise the JSON values via
+// `serde_json::from_value` — rows whose field is missing or whose JSON
+// doesn't round-trip into the target type are silently skipped. That
+// matches Laravel's `$collection->pluck('col')` semantics where
+// missing keys yield `null`s the caller is expected to handle.
+//
+// The `M: Model` bound has to re-elaborate `Model`'s own where-clause
+// bounds because Rust's trait elaboration doesn't transitively
+// propagate associated-type bounds from a supertrait's where clause
+// to a subtrait's method bodies. Same pattern as `impl<M: Model>
+// Builder<M>` in `builder.rs` and `FirstOrCreate` in `model.rs` — the
+// methods below only call `m.field_value(name)` (the new T5b trait
+// method) which by itself doesn't need every supertrait bound, but
+// `Model`'s where clause re-elaboration is what makes `M: Model`
+// resolvable at the impl block boundary.
+
+impl<M> Collection<M>
+where
+    M: Model,
+    M: From<<M::Entity as sea_orm::EntityTrait>::Model>,
+    <M::Entity as sea_orm::EntityTrait>::Model: From<M>
+        + sea_orm::IntoActiveModel<<M::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + serde::Serialize
+        + Send
+        + Sync,
+    <M::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<M::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    /// Project every row's value for `field` into a typed
+    /// `Collection<U>`. Rows whose `field_value` returns `None`, or
+    /// whose JSON value doesn't deserialise into `U`, are silently
+    /// skipped (matches Laravel's missing-key handling).
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// let users: Collection<User> = User::query().get().await?;
+    /// let names: Collection<String> = users.pluck::<String>("name");
+    /// ```
+    pub fn pluck<U>(&self, field: &str) -> Collection<U>
+    where
+        U: DeserializeOwned,
+    {
+        let mut out: Vec<U> = Vec::with_capacity(self.0.len());
+        for m in &self.0 {
+            if let Some(v) = m.field_value(field)
+                && let Ok(u) = serde_json::from_value::<U>(v)
+            {
+                out.push(u);
+            }
+        }
+        Collection(out)
+    }
+
+    /// Project every row into a `(K, V)` pair drawn from two columns
+    /// and collect into a `HashMap<K, V>`. Later rows overwrite
+    /// earlier ones for the same key.
+    pub fn pluck_keyed<K, V>(&self, key_field: &str, value_field: &str) -> HashMap<K, V>
+    where
+        K: Eq + Hash + DeserializeOwned,
+        V: DeserializeOwned,
+    {
+        let mut out: HashMap<K, V> = HashMap::new();
+        for m in &self.0 {
+            let (kv, vv) = match (m.field_value(key_field), m.field_value(value_field)) {
+                (Some(k), Some(v)) => (k, v),
+                _ => continue,
+            };
+            let k: K = match serde_json::from_value(kv) {
+                Ok(x) => x,
+                Err(_) => continue,
+            };
+            let v: V = match serde_json::from_value(vv) {
+                Ok(x) => x,
+                Err(_) => continue,
+            };
+            out.insert(k, v);
+        }
+        out
+    }
+
+    /// Bucket rows by `field` into `HashMap<String, Collection<M>>`.
+    /// Keys are derived via [`json_to_string_key`], which mirrors
+    /// Laravel's `groupBy('team_id')` contract of string-keyed output
+    /// regardless of the column's native type.
+    pub fn group_by(&self, field: &str) -> HashMap<String, Collection<M>>
+    where
+        M: Clone,
+    {
+        let mut out: HashMap<String, Collection<M>> = HashMap::new();
+        for m in &self.0 {
+            let key = match m.field_value(field) {
+                Some(v) => json_to_string_key(&v),
+                None => continue,
+            };
+            out.entry(key).or_default().0.push(m.clone());
+        }
+        out
+    }
+
+    /// Index rows by `field` into `HashMap<String, M>`. Later
+    /// duplicates overwrite earlier ones (matches Laravel's `keyBy`).
+    /// Keys are stringified via [`json_to_string_key`].
+    pub fn key_by(&self, field: &str) -> HashMap<String, M>
+    where
+        M: Clone,
+    {
+        let mut out: HashMap<String, M> = HashMap::new();
+        for m in &self.0 {
+            let key = match m.field_value(field) {
+                Some(v) => json_to_string_key(&v),
+                None => continue,
+            };
+            out.insert(key, m.clone());
+        }
+        out
+    }
+
+    /// Sort rows ascending by `field`. Ordering is best-effort across
+    /// JSON value shapes (see [`compare_json`]) — numeric, string,
+    /// and boolean columns each sort cleanly within their own shape;
+    /// heterogeneous mixes fall back to `Ordering::Equal`.
+    ///
+    /// Requires `M: Clone` because the implementation snapshots the
+    /// underlying `Vec<M>` before delegating to `slice::sort_by` —
+    /// the comparison closure borrows `&self.field_value(field)` via
+    /// the contained `M`, while `sort_by` needs `&mut [M]`, so we
+    /// can't sort in place against the original.
+    pub fn sort_by(self, field: &str) -> Self
+    where
+        M: Clone,
+    {
+        let mut v = self.0.clone();
+        v.sort_by(|a, b| compare_json(&a.field_value(field), &b.field_value(field)));
+        Collection(v)
+    }
+
+    /// Sort rows descending by `field`. Sugar over
+    /// [`Self::sort_by`] + `reverse`.
+    pub fn sort_by_desc(self, field: &str) -> Self
+    where
+        M: Clone,
+    {
+        let mut s = self.sort_by(field);
+        s.0.reverse();
+        s
+    }
+
+    /// Keep rows where `field` equals `val` (JSON-value equality).
+    /// Rows whose `field_value` returns `None` are dropped.
+    pub fn where_eq(self, field: &str, val: Value) -> Self {
+        Collection(
+            self.0
+                .into_iter()
+                .filter(|m| m.field_value(field).as_ref() == Some(&val))
+                .collect(),
+        )
+    }
+
+    /// Keep rows where `field`'s value is in `vals`. Rows whose
+    /// `field_value` returns `None` are dropped.
+    pub fn where_in(self, field: &str, vals: Vec<Value>) -> Self {
+        Collection(
+            self.0
+                .into_iter()
+                .filter(|m| {
+                    m.field_value(field)
+                        .map(|v| vals.iter().any(|x| x == &v))
+                        .unwrap_or(false)
+                })
+                .collect(),
+        )
+    }
+
+    /// Keep rows where `field`'s value is NOT in `vals`. Rows whose
+    /// `field_value` returns `None` are KEPT (the negation of the
+    /// `where_in` predicate is: not present OR not in set).
+    pub fn where_not_in(self, field: &str, vals: Vec<Value>) -> Self {
+        Collection(
+            self.0
+                .into_iter()
+                .filter(|m| {
+                    m.field_value(field)
+                        .map(|v| !vals.iter().any(|x| x == &v))
+                        .unwrap_or(true)
+                })
+                .collect(),
+        )
+    }
+
+    /// Sum the values of `field` across rows. Rows whose value is
+    /// missing or doesn't deserialise into `T` are silently skipped.
+    /// Empty result rolls down to `T::default()` through `Sum`'s
+    /// identity element.
+    pub fn sum<T>(&self, field: &str) -> T
+    where
+        T: DeserializeOwned + std::iter::Sum,
+    {
+        self.0
+            .iter()
+            .filter_map(|m| {
+                m.field_value(field)
+                    .and_then(|v| serde_json::from_value::<T>(v).ok())
+            })
+            .sum()
+    }
+
+    /// Mean of `field` across rows, as `f64`. Returns `None` when no
+    /// row contributes a value (so the caller doesn't divide by zero).
+    ///
+    /// `T: Into<f64>` keeps the bound permissive: numeric columns
+    /// (i64, f64, i32, ...) all coerce cleanly.
+    pub fn avg<T>(&self, field: &str) -> Option<f64>
+    where
+        T: DeserializeOwned + Into<f64> + Copy,
+    {
+        let values: Vec<T> = self
+            .0
+            .iter()
+            .filter_map(|m| {
+                m.field_value(field)
+                    .and_then(|v| serde_json::from_value::<T>(v).ok())
+            })
+            .collect();
+        if values.is_empty() {
+            return None;
+        }
+        let sum: f64 = values.iter().map(|v| (*v).into()).sum();
+        Some(sum / values.len() as f64)
+    }
+
+    /// Smallest value of `field` across rows by `PartialOrd`. Returns
+    /// `None` when no row contributes a value.
+    pub fn min<T>(&self, field: &str) -> Option<T>
+    where
+        T: DeserializeOwned + PartialOrd,
+    {
+        let mut out: Option<T> = None;
+        for m in &self.0 {
+            let v: T = match m
+                .field_value(field)
+                .and_then(|x| serde_json::from_value::<T>(x).ok())
+            {
+                Some(v) => v,
+                None => continue,
+            };
+            out = match out {
+                None => Some(v),
+                Some(cur) => Some(if v < cur { v } else { cur }),
+            };
+        }
+        out
+    }
+
+    /// Largest value of `field` across rows by `PartialOrd`. Returns
+    /// `None` when no row contributes a value.
+    pub fn max<T>(&self, field: &str) -> Option<T>
+    where
+        T: DeserializeOwned + PartialOrd,
+    {
+        let mut out: Option<T> = None;
+        for m in &self.0 {
+            let v: T = match m
+                .field_value(field)
+                .and_then(|x| serde_json::from_value::<T>(x).ok())
+            {
+                Some(v) => v,
+                None => continue,
+            };
+            out = match out {
+                None => Some(v),
+                Some(cur) => Some(if v > cur { v } else { cur }),
+            };
+        }
+        out
+    }
+
+    /// Serialise the whole collection to a `serde_json::Value`. T5b
+    /// stub — T6 extends this with `hidden = [...]` / `visible = [...]`
+    /// / `appends = [...]` filtering. Until then, this delegates to
+    /// the row's `Serialize` impl directly.
+    pub fn to_array(&self) -> Value {
+        serde_json::to_value(&self.0).unwrap_or(Value::Null)
+    }
+
+    /// Serialise the whole collection to a JSON string. Built on
+    /// top of [`Self::to_array`] — see that method's note on T6
+    /// extending the filter pipeline.
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(&self.to_array()).unwrap_or_default()
+    }
+}
+
+/// Stringify a `serde_json::Value` for use as a `HashMap` key in
+/// `group_by` / `key_by`. Matches Laravel's behaviour where
+/// `groupBy('team_id')` yields string keys "1" / "2" regardless of
+/// the column's native numeric type.
+///
+/// - `Value::String(s)` returns `s` (no quotes).
+/// - `Value::Number(n)` / `Value::Bool(b)` / `Value::Null` use the
+///   underlying primitive's `to_string`.
+/// - Compound shapes (Object, Array) lean on `Value::to_string`
+///   (JSON-encoded). Unusual but defined; users grouping by a JSON
+///   column get the canonical encoding.
+fn json_to_string_key(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Null => "null".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Best-effort total order for sorting `Collection<M>` by a string
+/// column name. Comparable JSON shapes (Number vs Number, String vs
+/// String, Bool vs Bool) sort within their kind; heterogeneous mixes
+/// fall back to `Ordering::Equal`. `None` sorts before any present
+/// value (matches Postgres's default NULL FIRST for ASC).
+fn compare_json(a: &Option<Value>, b: &Option<Value>) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (None, None) => Ordering::Equal,
+        (None, _) => Ordering::Less,
+        (_, None) => Ordering::Greater,
+        (Some(Value::Number(x)), Some(Value::Number(y))) => x
+            .as_f64()
+            .partial_cmp(&y.as_f64())
+            .unwrap_or(Ordering::Equal),
+        (Some(Value::String(x)), Some(Value::String(y))) => x.cmp(y),
+        (Some(Value::Bool(x)), Some(Value::Bool(y))) => x.cmp(y),
+        _ => Ordering::Equal,
     }
 }
 
