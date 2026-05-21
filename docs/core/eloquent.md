@@ -21,18 +21,24 @@ doesn't cover (see the [SeaORM escape hatches](#dropping-to-seaorm)).
 - [Deleting and soft deletes](#deleting-and-soft-deletes)
 - [Query builder — dual API](#query-builder--dual-api)
 - [Row locking](#row-locking)
+- [Transactions](#transactions)
 - [Scopes](#scopes)
 - [Relationships](#relationships)
 - [Eager loading](#eager-loading)
 - [Pagination](#pagination)
 - [Chunking and lazy iteration](#chunking-and-lazy-iteration)
+- [Collections](#collections)
 - [Mass assignment](#mass-assignment)
 - [Casts](#casts)
 - [Accessors and mutators](#accessors-and-mutators)
 - [Timestamps](#timestamps)
 - [Observers and lifecycle events](#observers-and-lifecycle-events)
 - [Prunable](#prunable)
+- [Multi-connection routing](#multi-connection-routing)
+- [Replication](#replication)
+- [Debugging — dump and dd](#debugging--dump-and-dd)
 - [Testing models](#testing-models)
+- [DB facade — model-less queries](#db-facade--model-less-queries)
 - [Dropping to SeaORM](#dropping-to-seaorm)
 - [Migrating from `database::Model`](#migrating-from-databasemodel)
 
@@ -2171,6 +2177,90 @@ User::query().chunk(100, |batch| async move {
 }).await?;
 ```
 
+## Collections
+
+`Collection<T>` is Suprnova's Laravel-shape collection — the return
+type of `Builder::get` (where `T` is the model), of `Model::all`, of
+`pluck` / `chunk_map`, and of every other terminal that yields more
+than one row. It dereferences to `&[T]` so existing Vec call sites
+keep working without changes; the Laravel surface is composed on top.
+
+### Generic surface
+
+Available on every `Collection<T>` regardless of `T`:
+
+```rust
+use suprnova::Collection;
+
+let nums: Collection<i32> = Collection::from_vec(vec![3, 1, 4, 1, 5, 9]);
+
+nums.first();              // Some(&3)
+nums.last();               // Some(&9)
+nums.len();                // 6
+nums.is_empty();           // false
+nums.contains(&4);         // true
+nums.first_where(|n| *n > 3); // Some(&4)
+nums.count_where(|n| *n > 2); // 4
+```
+
+Transformations consume `self` and return a new `Collection`:
+
+```rust
+let doubled: Collection<i32> = nums.clone().map(|n| n * 2);
+let evens:   Collection<i32> = nums.clone().filter(|n| n % 2 == 0);
+let chunks:  Vec<Collection<i32>> = nums.clone().chunk(2); // [[3,1],[4,1],[5,9]]
+let unique:  Collection<i32> = nums.clone().unique();
+let sorted:  Collection<i32> = nums.clone().sort();
+```
+
+### Model-aware methods on `Collection<M>`
+
+When `T` is a model, additional string-keyed methods route through
+the macro-emitted `field_value(name)` accessor:
+
+```rust
+let users: Collection<User> = User::query().get().await?;
+
+let emails: Collection<String> = users.pluck::<String>("email");
+let by_role: HashMap<String, Vec<User>> =
+    users.clone().group_by::<String>("role");
+let active: Collection<User> = users.clone().where_eq("active", true);
+
+let total: f64 = users.clone().sum::<f64>("balance");
+let avg:   f64 = users.clone().avg::<f64>("balance");
+let max:   Option<i64> = users.clone().max::<i64>("login_count");
+```
+
+The closure-based `pluck_by` is the typed alternative — useful when
+the field name would otherwise require a string lookup the type
+system can't check:
+
+```rust
+let names: Collection<String> = users.pluck_by(|u| u.name.clone());
+```
+
+Per-row `field_value(name)` returns `Option<serde_json::Value>` —
+`None` when the column name doesn't match any declared field. Custom
+casts that fail to serialise also surface as `None`. The string-keyed
+methods silently skip those rows; the closure form short-circuits in
+the closure body so the caller can decide.
+
+### Streaming via `LazyCollection`
+
+For datasets too large to materialise, `Builder::lazy()` /
+`lazy_by_id(n)` / `cursor()` return a `LazyCollection<M>` — a
+`Stream` wrapper that fetches rows in PK-cursor batches. See
+[Chunking and lazy iteration](#chunking-and-lazy-iteration).
+
+### Eager loading on a collection
+
+`Collection::load(["posts"])` / `load_missing(["posts"])` execute
+the same eager-load dispatch a `Builder::with(...)` chain emits,
+but against an existing collection. `load_missing` is per-row: each
+row in the collection is partitioned into "needs load" / "already
+loaded" buckets and only the missing ones get the bulk-load. See
+[Eager loading](#eager-loading).
+
 ## Mass assignment
 
 ### Fillable allowlist
@@ -2932,6 +3022,212 @@ commands, and supervisors. The `#[suprnova::prunable]` attribute on
 the `impl Prunable for T { ... }` block auto-registers via
 `inventory::submit!` at compile time. No central config file; adding
 a new prunable type is one attribute.
+
+## Multi-connection routing
+
+Production apps regularly need more than one database connection —
+the canonical case is a read replica for analytics + the primary
+for writes, but the surface generalises to any named connection
+(reporting DB, archive DB, per-tenant shard).
+
+### Registering a connection
+
+Call `DB::register_named(name, config)` at boot for every
+non-default connection your app talks to:
+
+```rust
+DB::register_named(
+    "reporting",
+    DatabaseConfig {
+        url: env::var("REPORTING_DATABASE_URL")?,
+        max_connections: Some(20),
+        ..Default::default()
+    },
+).await?;
+```
+
+Two names are reserved: `__primary__` short-circuits the registry
+to `DB::connection()`, and `__read_replica__` opts the connection
+into automatic read-write split routing — see below.
+
+### Per-query opt-in: `Model::on(name)`
+
+`Model::on("reporting")` returns a `Builder<M>` pre-set to route
+through the named connection:
+
+```rust
+let totals = Order::on("reporting")
+    .order_by_desc("total")
+    .limit(100)
+    .get()
+    .await?;
+```
+
+`on(...)` is request-scoped — it only affects the chained builder.
+The next plain `Order::query()` call resolves through the default.
+
+### Per-model default: `#[model(connection = "...")]`
+
+When a model always lives on one connection, declare the default
+on the attribute:
+
+```rust
+#[model(table = "events", connection = "events_db")]
+pub struct Event { /* ... */ }
+```
+
+Every `Event::query()` / `Event::create()` / `Event::find()` call
+routes through `events_db` without needing the per-query `.on(...)`
+override. An explicit `.on(...)` on a builder still wins.
+
+### Read-write split
+
+Registering a connection under the reserved name
+`__read_replica__` opts every model into automatic routing: read
+methods (`first` / `get` / `find` / `count` / `paginate` / `chunk` /
+the closure-driven walkers) flow through the replica; writes
+(`save` / `create` / `update` / `delete` / `force_delete` /
+`replicate` / `attach` / `detach` / `sync` / `increment` /
+`decrement`) flow through the primary.
+
+`Model::on_write_connection()` opts a single builder OUT of the
+replica — useful when read-your-writes consistency matters
+(e.g. immediately after a `save`, before replication catches up).
+
+### Routing precedence
+
+The dispatch chain runs every operation through
+`ExecutorChoice::resolve_read` or `resolve_write`. The order is:
+
+1. **Active transaction wins absolutely.** Inside `DB::transaction`
+   every read AND every write uses the tx connection. `on(name)` is
+   IGNORED inside a transaction — the tx is bound to a specific
+   physical connection. SeaORM can't begin a transaction on one
+   connection and run statements against another.
+2. **Per-builder `on(name)`.** Set via `Model::on(name)` /
+   `Builder::on(name)`. Wins over the model default and the
+   read/write split.
+3. **`Model::on_write_connection()`.** Forces the primary even
+   when the operation would otherwise route to the replica.
+4. **Per-model `#[model(connection = "...")]` default.** Wins
+   over the read/write split for the model's own queries.
+5. **Read/write split.** When `__read_replica__` is registered,
+   read methods route there; writes route to the primary.
+6. **Default.** `DB::connection()` — the primary, the one
+   `DB::init()` set up.
+
+### Caveats
+
+- Active transactions IGNORE `on(name)` (see §1 above). If you
+  need a write on a different connection mid-tx, you can't — the
+  tx is bound to one connection.
+- The reserved names `__primary__` and `__read_replica__` cannot
+  be used as user connection names. `DB::register_named` returns
+  an error on collision.
+- Replica lag is YOUR problem. Suprnova does not retry-on-read or
+  fall back to primary when the replica is stale; if you need
+  read-your-writes after a save, use
+  `Model::on_write_connection()` explicitly.
+
+## Replication
+
+`Model::replicate()` returns an unsaved copy of the model with the
+primary key reset to its default. Useful for "duplicate this
+record" UX where the user wants to start from an existing row.
+
+```rust
+let template: User = User::find_or_fail(42).await?;
+let mut copy = template.replicate().await?;  // id reset to default
+copy.email = "fresh@example.com".into();
+copy.save().await?;  // INSERT, not UPDATE
+```
+
+`replicate` is **async** in Suprnova (diverges from Laravel) because
+it fires the `Replicating` event — `Saving` / `Created` / etc.
+listeners can mutate the replica before it's returned. See
+[Replicating event](#replicating-event) for the listener mutation
+contract.
+
+### `replicate_except`
+
+Drop named fields from the replica:
+
+```rust
+let copy = order.replicate_except(["payment_token", "stripe_id"]).await?;
+```
+
+Listed fields fall back to the model's `Default` impl — `String`s
+become `""`, `Option`s become `None`, etc. Use this for sensitive
+columns the replicated row shouldn't carry forward.
+
+### Cross-type `replicate_into::<T>`
+
+The Suprnova divergence — Laravel can't because PHP has no types.
+`replicate_into::<T>()` bridges to a sibling type via
+`serde_json`:
+
+```rust
+let order: Order = Order::find_or_fail(42).await?;
+let invoice: Invoice = order.replicate_into::<Invoice>().await?;
+invoice.save().await?;
+```
+
+Fields with matching names + serde-compatible types carry over;
+fields that don't match on either side silently drop. `T` must
+implement `Default` so unfilled fields have a value. Cross-type
+replication does NOT fire `Replicating` (the event carries a
+`&mut Self` — there's no way to address `T` through it). If you
+need event-driven mutation, replicate same-type first and then
+materialise `T` from the result.
+
+## Debugging — dump and dd
+
+Two interactive debugging aids on every `Builder<M>`:
+
+```rust
+// Logs SQL + bindings via tracing::info!, returns self.
+let users = User::query()
+    .filter("active", true)
+    .dump()                       // → log line, builder continues
+    .order_by_desc("created_at")
+    .get()
+    .await?;
+
+// Logs at tracing::error!, then panics with the SQL in the message.
+User::query().filter("id", 1).dd();  // — !
+```
+
+`dump` is chainable; `dd` returns `!` (never returns — the panic is
+the contract). Both mirror Laravel's `Builder::dump()` /
+`Builder::dd()` exactly.
+
+Both helpers fall back to the SQLite dialect when no live DB
+connection is bound (matches the `to_sql_with_bindings` fallback) so
+they stay useful at REPL or in a test without `TestDatabase`.
+
+The panic message uses the literal prefix `eloquent dd:` so tests
+can assert against it:
+
+```rust
+#[test]
+#[should_panic(expected = "eloquent dd")]
+fn dd_panics_with_sql_in_message() {
+    User::query().filter("id", 1).dd();
+}
+```
+
+**Never commit `dd()` to a production code path.** It's an
+interactive debugging aid; the panic on the way out is the entire
+point. `dump()` is safer (just logs) but spamming it in hot paths
+will fill your logs — strip it before pushing.
+
+If you want the SQL without the side effects, reach for the
+non-logging helpers:
+
+- `Builder::to_sql()` — returns the rendered SQL as a `String`.
+- `Builder::to_sql_with_bindings()` — returns `(String, Vec<SeaValue>)`.
+- `Builder::to_sql_for(backend)` — render for an explicit dialect
+  (cross-backend debugging).
 
 ## Testing models
 
