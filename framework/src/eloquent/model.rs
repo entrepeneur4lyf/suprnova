@@ -631,6 +631,65 @@ pub fn json_value_to_sea_value(v: &serde_json::Value) -> sea_orm::Value {
     }
 }
 
+/// Inverse of [`json_value_to_sea_value`] — best-effort conversion of
+/// the variants commonly used as cursor / PK boundaries
+/// (`Int`/`BigInt`/`Float`/`Double`/`String`/`Uuid`/`Bool`) into a
+/// JSON form the Builder's `filter_op` chain can rebind through its
+/// own placeholder pipeline.
+///
+/// Unsigned integers fall back to a stringified form when they don't
+/// fit `i64`; rarely-used variants (bytes, decimals, chrono types)
+/// stringify too. The full SeaORM `Value` ↔ JSON round-trip is
+/// handled by the cursor wire codec in `pagination/cursor.rs`; this
+/// helper exists only for the page-fetch boundary, where the value
+/// will be rebound by SQLx within microseconds of being JSON-ified.
+pub fn sea_value_to_json_loose(v: &sea_orm::Value) -> serde_json::Value {
+    use sea_orm::Value;
+    use serde_json::Value as J;
+    match v {
+        Value::Bool(Some(b)) => J::from(*b),
+        Value::TinyInt(Some(i)) => J::from(*i),
+        Value::SmallInt(Some(i)) => J::from(*i),
+        Value::Int(Some(i)) => J::from(*i),
+        Value::BigInt(Some(i)) => J::from(*i),
+        Value::TinyUnsigned(Some(i)) => J::from(*i),
+        Value::SmallUnsigned(Some(i)) => J::from(*i),
+        Value::Unsigned(Some(i)) => J::from(*i),
+        Value::BigUnsigned(Some(i)) => i64::try_from(*i)
+            .map(J::from)
+            .unwrap_or_else(|_| J::String(i.to_string())),
+        Value::Float(Some(f)) => J::from(*f as f64),
+        Value::Double(Some(f)) => J::from(*f),
+        Value::String(Some(s)) => J::String((**s).clone()),
+        Value::Char(Some(c)) => J::String(c.to_string()),
+        Value::Uuid(Some(u)) => J::String(u.to_string()),
+        // Datetimes / decimals stringify — they round-trip back through
+        // `json_value_to_sea_value` as Value::String, which the dialect
+        // adapter then re-binds via SQL string coercion. Sufficient for
+        // a cursor boundary comparison since the underlying column
+        // already accepts string-shaped binds for these types.
+        Value::ChronoDate(Some(d)) => J::String(d.to_string()),
+        Value::ChronoTime(Some(t)) => J::String(t.to_string()),
+        Value::ChronoDateTime(Some(dt)) => J::String(dt.to_string()),
+        Value::ChronoDateTimeUtc(Some(dt)) => J::String(
+            dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        ),
+        Value::ChronoDateTimeLocal(Some(dt)) => J::String(
+            dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        ),
+        Value::ChronoDateTimeWithTimeZone(Some(dt)) => J::String(
+            dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        ),
+        Value::Decimal(Some(d)) => J::String(d.to_string()),
+        Value::BigDecimal(Some(d)) => J::String(d.to_string()),
+        // Null variants (Some=None) or unsupported variants — emit
+        // JSON null so the rebind lands on `WHERE col > NULL`. SQL's
+        // three-valued logic treats that as "no rows match", which is
+        // a safer-than-silent-mismatch failure mode.
+        _ => J::Null,
+    }
+}
+
 /// Macro-generated hook used by [`Model::replicate`] and
 /// [`Model::replicate_except`].
 pub trait ReplicateExt: Sized {

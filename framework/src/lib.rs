@@ -128,7 +128,8 @@ pub use inertia::{
     Prop, PropFuture, PropResolver, ScrollConfig, ScrollMetadata, VersionResolver,
 };
 pub use pagination::{
-    CursorDirection, CursorPaginator, IntoInertiaScroll, LengthAwarePaginator, Paginated, Pagination,
+    CursorDirection, CursorPaginator, IntoInertiaScroll, LengthAwarePaginator, Paginated,
+    Paginator, Pagination,
 };
 pub use broadcasting::{BroadcastEnvelope, BroadcastHub, BroadcastListener, Broadcastable, BroadcastingWsHandler, InMemoryBroadcastHub};
 pub use bus::{Bus, Dispatched};

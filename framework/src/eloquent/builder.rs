@@ -1275,6 +1275,106 @@ impl<M> Builder<M> {
         (sql, values)
     }
 
+    /// Render a COUNT-shaped SELECT against this builder.
+    ///
+    /// Two shapes depending on the builder's structure:
+    ///
+    /// **Flat case** — no `GROUP BY`, no `UNION` arms:
+    /// ```sql
+    /// SELECT COUNT(*) AS count FROM t WHERE ... HAVING ...
+    /// ```
+    /// `ORDER BY` / `LIMIT` / `OFFSET` are stripped — they don't affect
+    /// the count and `ORDER BY` over a bare aggregate is a SQL error
+    /// in some dialects.
+    ///
+    /// **Grouped or union case** — `GROUP BY` non-empty OR unions present:
+    /// ```sql
+    /// SELECT COUNT(*) AS count FROM (
+    ///     SELECT 1 FROM t WHERE ... GROUP BY ... HAVING ...
+    ///     UNION ...
+    /// ) AS __suprnova_paginate_subquery
+    /// ```
+    /// The subquery wrap is necessary because `SELECT COUNT(*) ...
+    /// GROUP BY` returns one row per group (each row reporting the
+    /// group's size), not the number of groups. Same fix Laravel
+    /// applies via `Builder::getCountForPagination` and SeaORM's
+    /// `PaginatorTrait::count`.
+    ///
+    /// Returns a `(sql, values)` pair that can be fed to
+    /// `Statement::from_sql_and_values`.
+    pub(crate) fn render_count_select_for(
+        &self,
+        backend: DbBackend,
+        table: &str,
+    ) -> (String, Vec<SeaValue>) {
+        let mut values: Vec<SeaValue> = Vec::new();
+        let mut n = 0;
+        let mut sql = String::new();
+
+        let needs_subquery_wrap = !self.group_by.is_empty() || !self.unions.is_empty();
+
+        if needs_subquery_wrap {
+            // Wrap: SELECT COUNT(*) AS count FROM (<inner>) AS sub.
+            // The inner SELECT keeps every shape that affects which
+            // rows the page-fetch will see (where / group / having /
+            // unions) but projects a constant column so the wrapper's
+            // COUNT counts distinct grouped/unioned rows.
+            sql.push_str("SELECT COUNT(*) AS count FROM (");
+            sql.push_str("SELECT 1 AS __paginate_marker FROM ");
+            sql.push_str(table);
+            self.render_count_body(backend, &mut sql, &mut values, &mut n);
+
+            // Union arms — recurse with the same placeholder counter
+            // so Postgres `$N` stays monotonic. Each arm projects the
+            // same `1 AS __paginate_marker` column.
+            for (other, all) in &self.unions {
+                let connector = if *all { " UNION ALL " } else { " UNION " };
+                sql.push_str(connector);
+                sql.push_str("SELECT 1 AS __paginate_marker FROM ");
+                sql.push_str(table);
+                other.render_count_body(backend, &mut sql, &mut values, &mut n);
+            }
+
+            sql.push_str(") AS __suprnova_paginate_subquery");
+        } else {
+            sql.push_str("SELECT COUNT(*) AS count FROM ");
+            sql.push_str(table);
+            self.render_count_body(backend, &mut sql, &mut values, &mut n);
+        }
+
+        (sql, values)
+    }
+
+    /// Append the WHERE / GROUP BY / HAVING clauses (without the
+    /// leading SELECT or FROM) onto `sql`. Used by
+    /// [`Self::render_count_select_for`] for both the flat and
+    /// subquery-wrapped shapes — DRY-ing the clause emission across
+    /// the two render paths.
+    fn render_count_body(
+        &self,
+        backend: DbBackend,
+        sql: &mut String,
+        values: &mut Vec<SeaValue>,
+        n: &mut usize,
+    ) {
+        if !self.where_terms.is_empty() {
+            sql.push_str(" WHERE ");
+            let parts: Vec<String> = self
+                .where_terms
+                .iter()
+                .map(|t| self.render_where_term(backend, t, values, n))
+                .collect();
+            sql.push_str(&parts.join(" AND "));
+        }
+
+        if !self.group_by.is_empty() {
+            sql.push_str(" GROUP BY ");
+            sql.push_str(&self.group_by.join(", "));
+        }
+
+        sql.push_str(&self.render_having(backend, values, n));
+    }
+
     /// Internal — render this Builder's SELECT body into a shared
     /// `values` + `n` counter. Used by [`Self::render_select_for`] (the
     /// top-level entry) and by union recursion: unions must share the
@@ -1628,6 +1728,219 @@ where
         self.aggregate_value::<i64>("COUNT(*)").await
     }
 
+    /// Length-aware paginate. Runs a `COUNT(*)` query alongside the
+    /// `LIMIT`/`OFFSET` SELECT — two queries per page.
+    ///
+    /// Reads the current page number from the request's `?page=N`
+    /// query parameter (via [`crate::context::Context::query_param`]).
+    /// Use [`Self::paginate_using`] to override the parameter name —
+    /// useful when a page has multiple paginators that each need their
+    /// own query string.
+    ///
+    /// Returns a [`LengthAwarePaginator<M>`] whose JSON shape matches
+    /// Laravel's `LengthAwarePaginator::toArray()` — ready to ship to
+    /// Inertia / JSON consumers without reshaping.
+    ///
+    /// ## Errors
+    ///
+    /// - `per_page == 0` → `FrameworkError::param("per_page")` (HTTP
+    ///   400).
+    /// - Any database error from the underlying COUNT or LIMIT/OFFSET
+    ///   queries → `FrameworkError::Database`.
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// let users = User::query()
+    ///     .filter("active", true)
+    ///     .order_by_desc("created_at")
+    ///     .paginate(20)
+    ///     .await?;
+    /// // users.data: Vec<User>, users.total: u64, users.last_page: u64, ...
+    /// ```
+    pub async fn paginate(
+        self,
+        per_page: u64,
+    ) -> Result<crate::pagination::LengthAwarePaginator<M>, FrameworkError> {
+        self.paginate_using("page", per_page).await
+    }
+
+    /// Length-aware paginate with a custom page-param name. See
+    /// [`Self::paginate`] for the JSON shape and error semantics.
+    ///
+    /// `page_param` is the query-string key read for the current page
+    /// number — e.g. `paginate_using("p", 20)` reads `?p=2`. Useful
+    /// when a single page renders multiple independent paginators, so
+    /// each can take a different query parameter:
+    ///
+    /// ```ignore
+    /// let posts = Post::query().paginate_using("posts_page", 10).await?;
+    /// let comments = Comment::query().paginate_using("comments_page", 25).await?;
+    /// ```
+    pub async fn paginate_using(
+        self,
+        page_param: &str,
+        per_page: u64,
+    ) -> Result<crate::pagination::LengthAwarePaginator<M>, FrameworkError> {
+        if per_page == 0 {
+            return Err(FrameworkError::param("per_page"));
+        }
+        let page = current_page_from_request(page_param);
+        let offset = page.saturating_sub(1).saturating_mul(per_page);
+
+        // Count phase — borrows `self`, doesn't consume it.
+        let db = DB::connection()?;
+        let backend = db.inner().get_database_backend();
+        let (count_sql, count_vals) = self.render_count_select_for(backend, M::TABLE);
+        let count_stmt = Statement::from_sql_and_values(backend, &count_sql, count_vals);
+        let count_row = db
+            .inner()
+            .query_one(count_stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let total: u64 = count_row
+            .and_then(|r| r.try_get::<i64>("", "count").ok())
+            .map(|n| n.max(0) as u64)
+            .unwrap_or(0);
+
+        // Page phase — consumes `self` for the actual fetch.
+        let rows: Vec<M> = self.limit(per_page).offset(offset).get().await?.into_vec();
+
+        let from = if rows.is_empty() { None } else { Some(offset + 1) };
+        let to = if rows.is_empty() {
+            None
+        } else {
+            Some(offset + rows.len() as u64)
+        };
+
+        Ok(
+            crate::pagination::LengthAwarePaginator::with_window(
+                rows, total, per_page, page, from, to,
+            )
+            .with_page_name(page_param),
+        )
+    }
+
+    /// Simple paginate — no COUNT query.
+    ///
+    /// Fetches `per_page + 1` rows; if the extra row exists, `has_more`
+    /// is set and the row is trimmed from `data`. One query per page —
+    /// cheap to compute for large tables where a total row count would
+    /// be too expensive.
+    ///
+    /// Reads the current page from `?page=N` like [`Self::paginate`].
+    ///
+    /// ## Errors
+    ///
+    /// - `per_page == 0` → `FrameworkError::param("per_page")` (400).
+    pub async fn simple_paginate(
+        self,
+        per_page: u64,
+    ) -> Result<crate::pagination::Paginator<M>, FrameworkError> {
+        if per_page == 0 {
+            return Err(FrameworkError::param("per_page"));
+        }
+        let page = current_page_from_request("page");
+        let offset = page.saturating_sub(1).saturating_mul(per_page);
+        let raw: Vec<M> = self
+            .limit(per_page + 1)
+            .offset(offset)
+            .get()
+            .await?
+            .into_vec();
+        let has_more = (raw.len() as u64) > per_page;
+        let mut rows = raw;
+        if has_more {
+            rows.truncate(per_page as usize);
+        }
+        Ok(crate::pagination::Paginator::new(
+            rows, page, per_page, has_more,
+        ))
+    }
+
+    /// Cursor paginate — opaque-cursor keyset pagination over the
+    /// model's primary key.
+    ///
+    /// Forward-only (the returned `prev_cursor` is always `None`).
+    /// Reads the current cursor from `?cursor=<opaque>`; passes the
+    /// PK as the keyset boundary. Cursors are encrypted+MACd via
+    /// `CursorPaginator::encode_value` so they can't be forged.
+    ///
+    /// Adds `ORDER BY <pk> ASC` to the builder, then fetches
+    /// `per_page + 1` rows; the overflow row drives `next_cursor`.
+    /// Any existing `ORDER BY` on the builder is replaced — cursor
+    /// pagination requires a stable PK order.
+    ///
+    /// ## Errors
+    ///
+    /// - `per_page == 0` → `FrameworkError::param("per_page")` (400).
+    /// - Invalid / tampered cursor → `FrameworkError::ParamParse`.
+    pub async fn cursor_paginate(
+        self,
+        per_page: u64,
+    ) -> Result<crate::pagination::CursorPaginator<M>, FrameworkError> {
+        if per_page == 0 {
+            return Err(FrameworkError::param("per_page"));
+        }
+
+        let pk = M::primary_key_name();
+        let cursor_wire = current_cursor_from_request();
+
+        // Replace any existing ORDER BY with a PK ASC sort. Cursor
+        // pagination requires a stable order over the keyset column
+        // for `gt(boundary)` to slice into a deterministic page
+        // window.
+        let mut q = self;
+        q.orders.clear();
+        let mut q = q.order_by_asc(pk);
+
+        if let Some(c) = &cursor_wire {
+            let (boundary, _dir) =
+                crate::pagination::CursorPaginator::<M>::decode_value(c)?;
+            // Filter `pk > boundary`. Convert the typed SeaORM Value
+            // back to JSON via `sea_value_to_json_loose`; the builder's
+            // own `filter_op` pipeline rebinds it via
+            // `json_value_to_sea_value` in the renderer. The intermediate
+            // JSON form is fine for cursor PKs — every variant we care
+            // about (Int / BigInt / Uuid / String) round-trips losslessly.
+            let boundary_json =
+                crate::eloquent::model::sea_value_to_json_loose(&boundary);
+            q = q.filter_op(pk, ">", boundary_json);
+        }
+
+        let raw: Vec<M> = q.limit(per_page + 1).get().await?.into_vec();
+        let has_more = (raw.len() as u64) > per_page;
+        let mut rows = raw;
+        if has_more {
+            rows.truncate(per_page as usize);
+        }
+
+        let next_cursor = if has_more {
+            if let Some(row) = rows.last() {
+                let pk_val: sea_orm::Value = row.primary_key_value().into();
+                Some(crate::pagination::CursorPaginator::<M>::encode_value(
+                    &pk_val,
+                    crate::pagination::CursorDirection::Next,
+                )?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Forward-only: prev_cursor is always None. Reverse iteration
+        // is a follow-up if a consumer needs it.
+        let prev_cursor = None;
+
+        Ok(crate::pagination::CursorPaginator::new(
+            rows,
+            per_page,
+            next_cursor,
+            prev_cursor,
+        ))
+    }
+
     // Terminal/aggregate type bounds are `TryGetable` — that's the
     // trait SeaORM's `QueryResult::try_get` uses to convert a column
     // value into a Rust type. `DeserializeOwned` (the serde bound) is
@@ -1775,6 +2088,28 @@ where
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(row.and_then(|r| r.try_get::<T>("", expr).ok()))
     }
+}
+
+// ---- Pagination request helpers -----------------------------------------
+
+/// Read the current page number from the request's query string via
+/// the [`Context`][crate::context::Context] facade. Defaults to `1`
+/// when the parameter is missing, empty, non-numeric, or zero.
+///
+/// Used by [`Builder::paginate`] / [`Builder::paginate_using`] /
+/// [`Builder::simple_paginate`] to derive the offset for the page
+/// query.
+fn current_page_from_request(param: &str) -> u64 {
+    crate::context::Context::query_param(param)
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|n| *n >= 1)
+        .unwrap_or(1)
+}
+
+/// Read the opaque cursor from the request's `?cursor=...` query
+/// parameter. Returns `None` when the parameter is missing or empty.
+fn current_cursor_from_request() -> Option<String> {
+    crate::context::Context::query_param("cursor").filter(|s| !s.is_empty())
 }
 
 #[cfg(test)]

@@ -43,21 +43,73 @@ impl CursorDirection {
 /// Paginator that emits opaque cursor strings instead of page numbers.
 ///
 /// Equivalent to Laravel's `CursorPaginator`. Returned by
-/// [`Pagination::cursor`](crate::pagination::Pagination::cursor).
+/// [`Pagination::cursor`](crate::pagination::Pagination::cursor) and by
+/// [`Builder::cursor_paginate`](crate::eloquent::Builder::cursor_paginate).
 ///
 /// The boundary value carried in `next_cursor` / `prev_cursor` is the
 /// last (or first) row's primary-sort column, encoded as a typed
 /// SeaORM [`sea_orm::Value`] so dialects (Postgres, MySQL, SQLite)
 /// receive the correctly-typed bind without any string coercion.
+///
+/// ## JSON shape
+///
+/// ```json
+/// {
+///   "data": [...],
+///   "per_page": 10,
+///   "next_cursor": "...",
+///   "prev_cursor": null,
+///   "path": "/api/users"
+/// }
+/// ```
+///
+/// `path` is omitted when unset; `next_cursor` and `prev_cursor` are
+/// emitted as `null` (not omitted) so client schemas can rely on the
+/// field's presence.
 #[derive(Debug, Clone, Serialize)]
 pub struct CursorPaginator<T> {
     /// The rows on this page.
     pub data: Vec<T>,
+    /// Page size used to fetch this page. Mirrored from the call to
+    /// [`Builder::cursor_paginate`](crate::eloquent::Builder::cursor_paginate)
+    /// — useful when clients want to thread `?per_page=N` for parity
+    /// with offset pagination.
+    pub per_page: u64,
     /// Cursor to fetch the next page, or `None` at the last page.
     pub next_cursor: Option<String>,
     /// Cursor to fetch the previous page, or `None` on the first page
     /// (when the caller passed `cursor: None`).
     pub prev_cursor: Option<String>,
+    /// Optional base URL — clients that build full pagination URLs out
+    /// of `next_cursor` / `prev_cursor` use this as the path prefix.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+impl<T> CursorPaginator<T> {
+    /// Build a cursor paginator from its parts. `per_page` records the
+    /// page size the caller asked for; `path` defaults to `None`.
+    pub fn new(
+        data: Vec<T>,
+        per_page: u64,
+        next_cursor: Option<String>,
+        prev_cursor: Option<String>,
+    ) -> Self {
+        Self {
+            data,
+            per_page,
+            next_cursor,
+            prev_cursor,
+            path: None,
+        }
+    }
+
+    /// Set the optional base URL for the paginator. Returns `self` for
+    /// builder-style chaining.
+    pub fn with_path(mut self, path: impl Into<String>) -> Self {
+        self.path = Some(path.into());
+        self
+    }
 }
 
 /// Wire envelope serialized into the cursor before encryption /

@@ -143,11 +143,7 @@ fn build_page(qs: Option<&str>) -> Result<CursorPaginator<UserProps>, FrameworkE
         }
     };
 
-    Ok(CursorPaginator {
-        data: filtered,
-        next_cursor,
-        prev_cursor,
-    })
+    Ok(CursorPaginator::new(filtered, per_page, next_cursor, prev_cursor))
 }
 
 /// `GET /api/users[?cursor=<opaque>][&per_page=N][&format=json]`

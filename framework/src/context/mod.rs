@@ -13,20 +13,65 @@
 use dashmap::DashMap;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 /// The backing store inside a request's context scope. Two maps —
 /// visible (`data`) and hidden (`hidden`) — so logging serializers
 /// can dump `all()` without leaking secrets.
+///
+/// `query` is the request's query-parameter snapshot. Populated by the
+/// request middleware from the URL query string at scope-entry; read
+/// by [`Context::query_param`] downstream. Stored separately from
+/// `data` so paginate / scope-aware code can't accidentally collide
+/// with user-set context keys.
 #[derive(Default, Debug, Clone)]
 pub struct ContextStore {
     data: Arc<DashMap<String, Value>>,
     hidden: Arc<DashMap<String, Value>>,
+    query: Arc<DashMap<String, String>>,
+}
+
+impl ContextStore {
+    /// Construct a store pre-populated with the supplied query map.
+    /// Used by the request middleware so `Context::query_param` reads
+    /// the real request's `?key=value` pairs.
+    pub fn with_query(query: HashMap<String, String>) -> Self {
+        let q = DashMap::with_capacity(query.len());
+        for (k, v) in query {
+            q.insert(k, v);
+        }
+        Self {
+            data: Arc::new(DashMap::new()),
+            hidden: Arc::new(DashMap::new()),
+            query: Arc::new(q),
+        }
+    }
 }
 
 tokio::task_local! {
     pub static CONTEXT: ContextStore;
+}
+
+// Test-only override for `Context::query_param`.
+//
+// Per-thread so parallel tests don't collide — `#[tokio::test]` uses a
+// current-thread runtime by default, so the future is driven on the
+// calling OS thread and `thread_local!` isolates each test.
+//
+// Tests outside a `CONTEXT.scope` (the common case for unit tests of
+// pure-function paginate logic) can install query params via
+// `Context::test_set_query` without paying the cost of wrapping every
+// async block in a context scope. Reads from the override take
+// priority over the scoped `CONTEXT.query` bag.
+//
+// Production code never touches this — the setter is `#[cfg(test)]`-gated
+// (only compiled in test builds) but the reader is always compiled so the
+// fast path stays uniform.
+thread_local! {
+    static QUERY_OVERRIDE: RefCell<Option<HashMap<String, String>>> =
+        const { RefCell::new(None) };
 }
 
 /// Facade for the per-request key/value bag.
@@ -140,6 +185,68 @@ impl Context {
             .ok()
             .flatten()
     }
+
+    /// Read a query parameter from the current request.
+    ///
+    /// Resolution order:
+    /// 1. The thread-local test override (set via
+    ///    [`Self::test_set_query`]) — non-empty in tests only.
+    /// 2. The active [`CONTEXT`] scope's `query` bag — populated by
+    ///    the request middleware from the URL's `?key=value` pairs.
+    ///
+    /// Returns `None` when the key is absent in both, including when
+    /// called outside any context scope (the case for early-boot code,
+    /// background workers without an installed scope, and tests
+    /// without a query override).
+    pub fn query_param(name: &str) -> Option<String> {
+        // Test override (per-thread) wins over the scoped query bag.
+        // Outside tests this branch always misses and falls through.
+        let from_override = QUERY_OVERRIDE.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|map| map.get(name).cloned())
+        });
+        if from_override.is_some() {
+            return from_override;
+        }
+
+        CONTEXT
+            .try_with(|store| store.query.get(name).map(|v| v.value().clone()))
+            .ok()
+            .flatten()
+    }
+
+    /// **Test-only.** Install a query-parameter override on the current
+    /// thread so [`Self::query_param`] reads it without requiring a
+    /// wrapping [`CONTEXT::scope`][CONTEXT] call.
+    ///
+    /// Repeated calls overlay onto the same map. Use
+    /// [`Self::test_clear_query`] to wipe between tests; otherwise an
+    /// override from a previous `#[tokio::test]` body could leak into
+    /// the next test scheduled onto the same OS thread (Cargo reuses
+    /// threads across the per-binary thread pool).
+    ///
+    /// Compiled only in test builds; absent from release binaries.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn test_set_query(name: impl Into<String>, value: impl Into<String>) {
+        QUERY_OVERRIDE.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            let map = slot.get_or_insert_with(HashMap::new);
+            map.insert(name.into(), value.into());
+        });
+    }
+
+    /// **Test-only.** Wipe the thread-local query override. Pair with
+    /// [`Self::test_set_query`] to keep tests on the same OS thread
+    /// from leaking query params into each other.
+    ///
+    /// Compiled only in test builds; absent from release binaries.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn test_clear_query() {
+        QUERY_OVERRIDE.with(|cell| {
+            *cell.borrow_mut() = None;
+        });
+    }
 }
 
 #[cfg(test)]
@@ -212,5 +319,56 @@ mod tests {
         assert_eq!(Context::get::<String>("k"), None);
         assert!(!Context::has("k"));
         assert!(Context::all().is_empty());
+    }
+
+    #[tokio::test]
+    async fn query_param_reads_scoped_store() {
+        // Wipe any override leaked from a sibling test on the same OS
+        // thread — the per-thread override otherwise wins over the
+        // scoped store and would mask a real read-from-scope bug.
+        Context::test_clear_query();
+        let mut q = HashMap::new();
+        q.insert("page".to_string(), "3".to_string());
+        q.insert("sort".to_string(), "name".to_string());
+        let store = ContextStore::with_query(q);
+        CONTEXT
+            .scope(store, async {
+                assert_eq!(Context::query_param("page"), Some("3".to_string()));
+                assert_eq!(Context::query_param("sort"), Some("name".to_string()));
+                assert_eq!(Context::query_param("missing"), None);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn query_param_outside_scope_is_none() {
+        // Clear any override that may have leaked in from a previous
+        // test on the same OS thread.
+        Context::test_clear_query();
+        assert_eq!(Context::query_param("page"), None);
+    }
+
+    #[tokio::test]
+    async fn test_set_query_overrides_outside_scope() {
+        Context::test_clear_query();
+        Context::test_set_query("page", "7");
+        assert_eq!(Context::query_param("page"), Some("7".to_string()));
+        Context::test_clear_query();
+        assert_eq!(Context::query_param("page"), None);
+    }
+
+    #[tokio::test]
+    async fn test_set_query_overrides_scoped_store() {
+        // The override should win even when a scope is installed.
+        let mut q = HashMap::new();
+        q.insert("page".to_string(), "1".to_string());
+        let store = ContextStore::with_query(q);
+        Context::test_clear_query();
+        Context::test_set_query("page", "42");
+        let result = CONTEXT
+            .scope(store, async { Context::query_param("page") })
+            .await;
+        assert_eq!(result, Some("42".to_string()));
+        Context::test_clear_query();
     }
 }

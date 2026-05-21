@@ -384,11 +384,12 @@ fn length_aware_into_inertia_scroll() {
 
 #[test]
 fn cursor_into_inertia_scroll() {
-    let p: CursorPaginator<String> = CursorPaginator {
-        data: vec!["row-1".to_string(), "row-2".to_string()],
-        next_cursor: Some("opaque-next".to_string()),
-        prev_cursor: Some("opaque-prev".to_string()),
-    };
+    let p: CursorPaginator<String> = CursorPaginator::new(
+        vec!["row-1".to_string(), "row-2".to_string()],
+        10,
+        Some("opaque-next".to_string()),
+        Some("opaque-prev".to_string()),
+    );
     let (meta, data) = p.into_inertia_scroll();
     assert_eq!(meta.page_name, "cursor");
     assert_eq!(meta.next_page, Some(json!("opaque-next")));

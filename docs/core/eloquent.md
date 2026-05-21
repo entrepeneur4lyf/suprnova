@@ -23,6 +23,7 @@ doesn't cover (see the [SeaORM escape hatches](#dropping-to-seaorm)).
 - [Scopes](#scopes)
 - [Relationships](#relationships)
 - [Eager loading](#eager-loading)
+- [Pagination](#pagination)
 - [Mass assignment](#mass-assignment)
 - [Casts](#casts)
 - [Accessors and mutators](#accessors-and-mutators)
@@ -1457,6 +1458,188 @@ For nested paths the partition repeats at every level. Given
 The same per-row partition repeats at every further segment of a
 longer dotted path (`"posts.comments.author"` etc.) — at each step
 only the rows missing that segment get the bulk-load.
+
+## Pagination
+
+Three paginator types compose on top of `Builder<M>`:
+
+| Method | Returns | Queries per page | Use when |
+|--------|---------|------------------|----------|
+| `paginate(per_page)` | `LengthAwarePaginator<M>` | 2 (COUNT + LIMIT) | UI needs total page count |
+| `simple_paginate(per_page)` | `Paginator<M>` | 1 (LIMIT + 1) | Large tables; "Next" button only |
+| `cursor_paginate(per_page)` | `CursorPaginator<M>` | 1 (LIMIT + 1) | Infinite scroll; deep pagination |
+
+All three implement `Serialize` with the Laravel-standard JSON shape,
+so they ship directly to Inertia / JSON consumers without reshaping.
+
+### Length-aware
+
+```rust
+use suprnova::LengthAwarePaginator;
+
+let page: LengthAwarePaginator<User> = User::query()
+    .filter("active", true)
+    .order_by_desc("created_at")
+    .paginate(20)
+    .await?;
+
+// page.data: Vec<User>
+// page.total: u64 — total row count across all pages
+// page.last_page: u64 — 1-based last page index
+// page.current_page: u64
+// page.per_page: u64
+// page.from / page.to: Option<u64> — 1-based window bounds
+// page.path: Option<String> — optional base URL for link generation
+```
+
+Page-param parsing reads `?page=N` from the active request via
+`Context::query_param`. To paginate multiple lists on the same page
+with their own query keys, use `paginate_using`:
+
+```rust
+let posts = Post::query().paginate_using("posts_page", 10).await?;
+let comments = Comment::query().paginate_using("comments_page", 25).await?;
+```
+
+**JSON shape:**
+
+```json
+{
+  "data": [...],
+  "current_page": 1,
+  "last_page": 3,
+  "per_page": 10,
+  "total": 25,
+  "from": 1,
+  "to": 10,
+  "path": "/api/users"
+}
+```
+
+`path` is omitted from JSON when unset.
+
+### Simple paginate (no count)
+
+`paginate` always runs two queries — a `COUNT(*)` plus the page
+fetch. On large tables the count alone can dominate request time.
+`simple_paginate` skips the count entirely; instead it fetches
+`per_page + 1` rows and reports whether a next page exists via the
+`has_more` flag:
+
+```rust
+use suprnova::Paginator;
+
+let page: Paginator<User> = User::query()
+    .order_by_desc("id")
+    .simple_paginate(20)
+    .await?;
+
+// page.has_more: bool — was there an extra row past per_page?
+// page.current_page, page.per_page, page.data, page.path: as above.
+```
+
+**JSON shape:**
+
+```json
+{
+  "data": [...],
+  "current_page": 1,
+  "per_page": 10,
+  "has_more": true
+}
+```
+
+### Cursor paginate (keyset)
+
+Cursor paginate is the choice for infinite scroll, deep pagination,
+or anywhere a stable row order with cheap O(1)-per-page seeking is
+worth more than a numeric page UI. Forward-only by default — the
+returned `prev_cursor` is always `None`.
+
+```rust
+use suprnova::CursorPaginator;
+
+let page: CursorPaginator<User> = User::query()
+    .cursor_paginate(20)
+    .await?;
+
+// page.data: Vec<User>
+// page.per_page: u64
+// page.next_cursor: Option<String> — opaque cursor for the next page
+// page.prev_cursor: Option<String> — None for forward-only iteration
+// page.path: Option<String>
+```
+
+Cursors are **encrypted and authenticated** via `CursorPaginator::encode_value`
+— they encode the keyset boundary (the model's primary key) plus a
+direction tag, AES-256-GCM-sealed with the framework's `APP_KEY`.
+Tampering produces a 400 ParamParse error; the cursor is opaque to
+the client and unforgeable without the key.
+
+The next request passes the cursor through `?cursor=<opaque>`:
+
+```
+GET /api/users?cursor=eyJ0IjoiQmlnSW50IiwidiI6MTAwLCJkIjoibmV4dCJ9...
+```
+
+Cursor pagination **replaces** any existing `ORDER BY` on the
+builder — a stable PK ASC order is required for `gt(boundary)` to
+slice deterministically.
+
+**JSON shape:**
+
+```json
+{
+  "data": [...],
+  "per_page": 10,
+  "next_cursor": "...",
+  "prev_cursor": null,
+  "path": "/api/users"
+}
+```
+
+`next_cursor` and `prev_cursor` are always present as JSON keys
+(emitted as `null` when absent) so client schemas can rely on the
+field's presence; `path` is omitted when unset.
+
+### Errors
+
+| Condition | Variant | HTTP |
+|-----------|---------|------|
+| `per_page == 0` | `FrameworkError::ParamError { param_name: "per_page" }` | 400 |
+| Invalid cursor (bad base64, JSON, or HMAC fails) | `FrameworkError::Internal` from `Crypt::decrypt_string` | 500 |
+| Underlying DB failure | `FrameworkError::Database` | 500 |
+
+Cursor authentication failure surfaces as `Internal` (not
+`ParamParse`) so a tampered cursor doesn't leak protocol-level
+information to the client; the response body still carries a
+human-readable reason.
+
+### Reading query params outside a real request
+
+Tests, console commands, and background workers don't run inside a
+hyper request — so `Context::query_param("page")` returns `None` and
+`paginate` falls back to page 1. Tests that need to exercise a
+specific page can install a per-thread override:
+
+```rust
+use suprnova::context::Context;
+
+#[tokio::test]
+async fn paginate_page_2() {
+    Context::test_clear_query();
+    Context::test_set_query("page", "2");
+
+    let page = User::query().paginate(10).await.unwrap();
+    assert_eq!(page.current_page, 2);
+
+    Context::test_clear_query();
+}
+```
+
+`test_set_query` / `test_clear_query` are gated behind the
+`testing` feature (default-enabled in `framework/Cargo.toml`) so
+release builds never see this surface.
 
 ## Mass assignment
 

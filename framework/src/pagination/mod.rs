@@ -5,10 +5,12 @@
 pub mod cursor;
 pub mod inertia;
 pub mod length_aware;
+pub mod simple;
 
 pub use cursor::{CursorDirection, CursorPaginator};
 pub use inertia::IntoInertiaScroll;
 pub use length_aware::LengthAwarePaginator;
+pub use simple::Paginator;
 
 use sea_orm::{
     ColumnTrait, EntityTrait, ModelTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
@@ -178,11 +180,7 @@ impl Pagination {
             }
         };
 
-        Ok(CursorPaginator {
-            data: rows,
-            next_cursor,
-            prev_cursor,
-        })
+        Ok(CursorPaginator::new(rows, per_page, next_cursor, prev_cursor))
     }
 }
 
