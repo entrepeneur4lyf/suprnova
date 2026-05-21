@@ -8,6 +8,7 @@ mod m20251208_240000_create_posts_table;
 mod m_2026_05_19_phase_10a_user_columns;
 mod m_2026_05_19_phase_10b_relations_schema;
 mod m_2026_05_20_phase_10b_profiles;
+mod m_2026_05_21_phase_10c_audit_log;
 
 pub struct Migrator;
 
@@ -52,6 +53,11 @@ impl MigratorTrait for Migrator {
             // Listed last so re-runs against existing dev databases
             // pick it up as a new pending migration.
             Box::new(m_2026_05_20_phase_10b_profiles::Migration),
+            // Phase 10C T14 — `audit_log` table for the transaction
+            // dogfood. The closeout end-to-end tests wrap a user
+            // creation alongside an audit row in a single
+            // `DB::transaction` block to pin the rollback contract.
+            Box::new(m_2026_05_21_phase_10c_audit_log::Migration),
         ]
     }
 }

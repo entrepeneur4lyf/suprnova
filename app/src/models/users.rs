@@ -14,7 +14,10 @@
 
 use chrono::{DateTime, Utc};
 use std::any::Any;
-use suprnova::{model, Authenticatable};
+use suprnova::eloquent::attrs::Attrs;
+use suprnova::eloquent::events::EventResult;
+use suprnova::eloquent::observers::Observer;
+use suprnova::{model, Authenticatable, FrameworkError};
 
 #[model(
     table = "users",
@@ -108,5 +111,81 @@ impl Authenticatable for User {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+// ---- Phase 10C T14 — local scope dogfood ---------------------------------
+//
+// `active` is the canonical Eloquent local-scope demo. The macro emits:
+//
+//   1. A static helper: `User::active().get().await?` starts a builder
+//      pre-filtered to active rows.
+//   2. A `Builder<User>` extension trait method: `User::query().filter(...).active()`
+//      composes onto an existing chain.
+//
+// Pattern follows `framework/tests/eloquent_scopes_local.rs` — the
+// dogfood exists to prove the macro path works on a real app model, not
+// just the framework's own test fixtures.
+
+#[suprnova::scopes(User)]
+impl User {
+    /// Scope: only active (non-disabled) users.
+    ///
+    /// The `active` column ships in the Phase 10A T11 user-columns
+    /// migration with `DEFAULT TRUE`, so every freshly-created user is
+    /// caught by this scope until something explicitly flips the flag.
+    pub fn active(query: suprnova::Builder<Self>) -> suprnova::Builder<Self> {
+        query.filter("active", true)
+    }
+}
+
+// ---- Phase 10C T14 — Observer<User> dogfood ------------------------------
+//
+// `UserObserver` exercises T2's observer surface end-to-end against a
+// real app model. Two methods are overridden:
+//
+// - `creating` normalises the email column to lower-case before insert.
+//   Demonstrates the cancellable family: it returns `EventResult` so an
+//   observer could veto the create by returning `EventResult::cancel`.
+// - `created` logs the new row's id via `tracing::info!`. Demonstrates
+//   the non-cancellable family — fires AFTER the insert lands.
+//
+// The `#[suprnova::observer(User)]` attribute walks this impl block at
+// parse time and emits exactly the listener adapters for the two
+// overridden methods. The other 14 `Observer<User>` defaults are
+// untouched; no spurious listeners get registered for them.
+//
+// Wired into `app::bootstrap::register()` via
+// `suprnova::eloquent::observers::bootstrap_observers().await`.
+
+pub struct UserObserver;
+
+#[suprnova::observer(User)]
+#[async_trait::async_trait]
+impl Observer<User> for UserObserver {
+    /// Lower-case the `email` column before the row is written. Real
+    /// apps reach for this to keep `WHERE email = ?` lookups consistent
+    /// when users sign up from a phone keyboard that auto-caps the
+    /// first letter.
+    async fn creating(&self, attrs: &mut Attrs) -> EventResult {
+        if let Some(email) = attrs.get("email").and_then(|v| v.as_str()) {
+            let lowered = email.to_lowercase();
+            if lowered != email {
+                attrs.insert("email", suprnova::serde_json::Value::String(lowered));
+            }
+        }
+        EventResult::ok()
+    }
+
+    /// Trace every successful user creation. Hooks for analytics,
+    /// welcome-email queueing, etc. would go here in a real app.
+    async fn created(&self, user: &User) -> Result<(), FrameworkError> {
+        tracing::info!(
+            target: "app::user_observer",
+            user_id = user.id,
+            email = %user.email,
+            "user created",
+        );
+        Ok(())
     }
 }

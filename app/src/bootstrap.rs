@@ -156,6 +156,22 @@ pub async fn register() {
     // shutdown); they run for the lifetime of the process.
     SupervisorRegistry::start_all().await;
 
+    // Phase 10C T14 — install every `#[suprnova::observer(M)]` impl in
+    // the binary. `bootstrap_observers()` drains the
+    // `inventory::iter::<ObserverEntry>` set built up at compile time
+    // and registers each observer's listener adapters with the
+    // framework's `EventDispatcher`. Idempotent: each install closure
+    // gates itself with an `AtomicBool` so re-running this call
+    // (e.g. on a worker that re-bootstraps) does NOT double-register
+    // the listeners.
+    //
+    // The app's `UserObserver` (in `crate::models::users`) lowercases
+    // email on `creating` and traces id on `created`; both adapters
+    // wire up here.
+    suprnova::eloquent::observers::bootstrap_observers()
+        .await
+        .expect("observer install failed");
+
     // Phase 13 — feature flags.
     //
     // Wire the canonical Cached(Database) chain. After this call:
