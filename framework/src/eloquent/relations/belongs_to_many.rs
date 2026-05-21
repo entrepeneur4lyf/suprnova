@@ -49,7 +49,7 @@ use std::sync::Arc;
 
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
 
-use crate::database::DB;
+use crate::database::transaction::ExecutorChoice;
 use crate::eloquent::attrs::Attrs;
 use crate::eloquent::builder::Builder;
 use crate::eloquent::collection::Collection;
@@ -294,20 +294,39 @@ where
         related_id: impl Into<serde_json::Value>,
         extra: Attrs,
     ) -> Result<(), FrameworkError> {
-        let conn = DB::connection()?;
-        let backend = conn.inner().get_database_backend();
-        attach_one(
-            conn.inner(),
-            backend,
-            &self.pivot_table,
-            &self.pivot_foreign_key,
-            &self.pivot_related_key,
-            &self.parent_key_value,
-            &related_id.into(),
-            extra,
-            self.with_timestamps,
-        )
-        .await
+        // Phase 10C audit-fix AF2 — resolve through ExecutorChoice so the
+        // pivot INSERT lands on the ambient transaction connection when
+        // CURRENT_TX is active. The pre-fix path called DB::connection()
+        // directly and silently auto-committed on the pool.
+        let exec = ExecutorChoice::resolve_write(None, None, None).await?;
+        let backend = exec.backend();
+        let id = related_id.into();
+        match &exec {
+            ExecutorChoice::Tx(t) => attach_one(
+                t.as_ref(),
+                backend,
+                &self.pivot_table,
+                &self.pivot_foreign_key,
+                &self.pivot_related_key,
+                &self.parent_key_value,
+                &id,
+                extra,
+                self.with_timestamps,
+            )
+            .await,
+            ExecutorChoice::Pool(c) => attach_one(
+                c.inner(),
+                backend,
+                &self.pivot_table,
+                &self.pivot_foreign_key,
+                &self.pivot_related_key,
+                &self.parent_key_value,
+                &id,
+                extra,
+                self.with_timestamps,
+            )
+            .await,
+        }
     }
 
     /// Delete pivot rows linking the parent to `related_id`. Mirrors
@@ -316,18 +335,34 @@ where
         self,
         related_id: impl Into<serde_json::Value>,
     ) -> Result<(), FrameworkError> {
-        let conn = DB::connection()?;
-        let backend = conn.inner().get_database_backend();
-        detach_one(
-            conn.inner(),
-            backend,
-            &self.pivot_table,
-            &self.pivot_foreign_key,
-            &self.pivot_related_key,
-            &self.parent_key_value,
-            &related_id.into(),
-        )
-        .await
+        // Phase 10C audit-fix AF2 — resolve through ExecutorChoice so the
+        // pivot DELETE lands on the ambient transaction connection when
+        // CURRENT_TX is active.
+        let exec = ExecutorChoice::resolve_write(None, None, None).await?;
+        let backend = exec.backend();
+        let id = related_id.into();
+        match &exec {
+            ExecutorChoice::Tx(t) => detach_one(
+                t.as_ref(),
+                backend,
+                &self.pivot_table,
+                &self.pivot_foreign_key,
+                &self.pivot_related_key,
+                &self.parent_key_value,
+                &id,
+            )
+            .await,
+            ExecutorChoice::Pool(c) => detach_one(
+                c.inner(),
+                backend,
+                &self.pivot_table,
+                &self.pivot_foreign_key,
+                &self.pivot_related_key,
+                &self.parent_key_value,
+                &id,
+            )
+            .await,
+        }
     }
 
     /// Replace the parent's full set of attached relations with the
@@ -349,8 +384,14 @@ where
     {
         use std::collections::{HashMap, HashSet};
 
-        let conn = DB::connection()?;
-        let backend = conn.inner().get_database_backend();
+        // Phase 10C audit-fix AF2 — resolve through ExecutorChoice so the
+        // SELECT + INSERTs + DELETEs all run on the ambient transaction
+        // connection when CURRENT_TX is active. Outside a tx we still
+        // open an inner SeaORM transaction (below) for atomicity of the
+        // attach/detach loop; that inner tx is unnecessary when we
+        // already inherit one from the closure form.
+        let exec = ExecutorChoice::resolve_write(None, None, None).await?;
+        let backend = exec.backend();
 
         // De-duplicate target IDs by JSON-string canonicalisation.
         // Preserves the first occurrence for a deterministic insert
@@ -384,8 +425,7 @@ where
             &select_sql,
             vec![json_value_to_sea_value(&self.parent_key_value)],
         );
-        let rows = conn
-            .inner()
+        let rows = exec
             .query_all(select_stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
@@ -425,41 +465,79 @@ where
             .collect();
 
         // Transactional attach + detach. Either all rows commit or
-        // none do.
-        let txn = conn
-            .inner()
-            .begin()
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        for related_id in detach_set.iter() {
-            detach_one(
-                &txn,
-                backend,
-                &self.pivot_table,
-                &self.pivot_foreign_key,
-                &self.pivot_related_key,
-                &self.parent_key_value,
-                related_id,
-            )
-            .await?;
+        // none do. When we already inherit a tx via `CURRENT_TX` the
+        // ambient one provides atomicity — opening a nested SeaORM
+        // begin() inside a tx connection would silently degrade to a
+        // savepoint that the outer rollback would still discard, so we
+        // just write directly via the executor. Outside a tx we still
+        // wrap the writes in an inner SeaORM transaction so a partial
+        // failure rolls back.
+        match &exec {
+            ExecutorChoice::Tx(t) => {
+                for related_id in detach_set.iter() {
+                    detach_one(
+                        t.as_ref(),
+                        backend,
+                        &self.pivot_table,
+                        &self.pivot_foreign_key,
+                        &self.pivot_related_key,
+                        &self.parent_key_value,
+                        related_id,
+                    )
+                    .await?;
+                }
+                for related_id in attach_set.iter() {
+                    attach_one(
+                        t.as_ref(),
+                        backend,
+                        &self.pivot_table,
+                        &self.pivot_foreign_key,
+                        &self.pivot_related_key,
+                        &self.parent_key_value,
+                        related_id,
+                        Attrs::new(),
+                        self.with_timestamps,
+                    )
+                    .await?;
+                }
+            }
+            ExecutorChoice::Pool(c) => {
+                let txn = c
+                    .inner()
+                    .begin()
+                    .await
+                    .map_err(|e| FrameworkError::database(e.to_string()))?;
+                for related_id in detach_set.iter() {
+                    detach_one(
+                        &txn,
+                        backend,
+                        &self.pivot_table,
+                        &self.pivot_foreign_key,
+                        &self.pivot_related_key,
+                        &self.parent_key_value,
+                        related_id,
+                    )
+                    .await?;
+                }
+                for related_id in attach_set.iter() {
+                    attach_one(
+                        &txn,
+                        backend,
+                        &self.pivot_table,
+                        &self.pivot_foreign_key,
+                        &self.pivot_related_key,
+                        &self.parent_key_value,
+                        related_id,
+                        Attrs::new(),
+                        self.with_timestamps,
+                    )
+                    .await?;
+                }
+                txn.commit()
+                    .await
+                    .map_err(|e| FrameworkError::database(e.to_string()))?;
+            }
         }
-        for related_id in attach_set.iter() {
-            attach_one(
-                &txn,
-                backend,
-                &self.pivot_table,
-                &self.pivot_foreign_key,
-                &self.pivot_related_key,
-                &self.parent_key_value,
-                related_id,
-                Attrs::new(),
-                self.with_timestamps,
-            )
-            .await?;
-        }
-        txn.commit()
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(())
     }
 
@@ -482,8 +560,13 @@ where
     /// `FromQueryResult` derive. Two homogeneous queries each round-
     /// trip the rows cleanly through each model's own deserialiser.
     pub async fn get(self) -> Result<Collection<R>, FrameworkError> {
-        let conn = DB::connection()?;
-        let backend = conn.inner().get_database_backend();
+        // Phase 10C audit-fix AF2 — the pivot-id SELECT used to read
+        // against the pool; route it through ExecutorChoice so it
+        // honors CURRENT_TX. The downstream `Model::query()` calls for
+        // the related and pivot rows already consult CURRENT_TX
+        // through Builder::get's own ExecutorChoice resolution.
+        let exec = ExecutorChoice::resolve_read(None, None, None).await?;
+        let backend = exec.backend();
 
         // Fetch the set of related IDs attached to this parent.
         let id_ph = match backend {
@@ -502,8 +585,7 @@ where
             &id_sql,
             vec![json_value_to_sea_value(&self.parent_key_value)],
         );
-        let id_rows = conn
-            .inner()
+        let id_rows = exec
             .query_all(id_stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
@@ -581,8 +663,11 @@ where
     /// Returns `i64` to match the [`crate::eloquent::HasMany::count`]
     /// surface.
     pub async fn count(self) -> Result<i64, FrameworkError> {
-        let conn = DB::connection()?;
-        let backend = conn.inner().get_database_backend();
+        // Phase 10C audit-fix AF2 — read via ExecutorChoice so a count
+        // taken inside `DB::transaction { ... }` sees in-tx pivot
+        // attaches/detaches.
+        let exec = ExecutorChoice::resolve_read(None, None, None).await?;
+        let backend = exec.backend();
         let ph = match backend {
             DatabaseBackend::Postgres => "$1".to_string(),
             _ => "?".to_string(),
@@ -598,8 +683,7 @@ where
             &sql,
             vec![json_value_to_sea_value(&self.parent_key_value)],
         );
-        let row = conn
-            .inner()
+        let row = exec
             .query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;

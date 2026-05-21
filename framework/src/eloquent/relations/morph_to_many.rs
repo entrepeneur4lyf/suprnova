@@ -74,7 +74,7 @@ use std::sync::Arc;
 
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
 
-use crate::database::DB;
+use crate::database::transaction::ExecutorChoice;
 use crate::eloquent::attrs::Attrs;
 use crate::eloquent::builder::Builder;
 use crate::eloquent::collection::Collection;
@@ -290,21 +290,40 @@ where
         related_id: impl Into<serde_json::Value>,
         extra: Attrs,
     ) -> Result<(), FrameworkError> {
-        let conn = DB::connection()?;
-        let backend = conn.inner().get_database_backend();
-        morph_attach_one(
-            conn.inner(),
-            backend,
-            &self.pivot_table,
-            &self.morph_name,
-            &self.pivot_related_key,
-            &self.parent_key_value,
-            &self.parent_morph_type,
-            &related_id.into(),
-            extra,
-            self.with_timestamps,
-        )
-        .await
+        // Phase 10C audit-fix AF2 — resolve through ExecutorChoice so the
+        // pivot INSERT lands on the ambient transaction when CURRENT_TX
+        // is active.
+        let exec = ExecutorChoice::resolve_write(None, None, None).await?;
+        let backend = exec.backend();
+        let id = related_id.into();
+        match &exec {
+            ExecutorChoice::Tx(t) => morph_attach_one(
+                t.as_ref(),
+                backend,
+                &self.pivot_table,
+                &self.morph_name,
+                &self.pivot_related_key,
+                &self.parent_key_value,
+                &self.parent_morph_type,
+                &id,
+                extra,
+                self.with_timestamps,
+            )
+            .await,
+            ExecutorChoice::Pool(c) => morph_attach_one(
+                c.inner(),
+                backend,
+                &self.pivot_table,
+                &self.morph_name,
+                &self.pivot_related_key,
+                &self.parent_key_value,
+                &self.parent_morph_type,
+                &id,
+                extra,
+                self.with_timestamps,
+            )
+            .await,
+        }
     }
 
     /// Delete pivot rows linking this parent to `related_id`.
@@ -312,19 +331,34 @@ where
         self,
         related_id: impl Into<serde_json::Value>,
     ) -> Result<(), FrameworkError> {
-        let conn = DB::connection()?;
-        let backend = conn.inner().get_database_backend();
-        morph_detach_one(
-            conn.inner(),
-            backend,
-            &self.pivot_table,
-            &self.morph_name,
-            &self.pivot_related_key,
-            &self.parent_key_value,
-            &self.parent_morph_type,
-            &related_id.into(),
-        )
-        .await
+        // Phase 10C audit-fix AF2 — see attach_with above.
+        let exec = ExecutorChoice::resolve_write(None, None, None).await?;
+        let backend = exec.backend();
+        let id = related_id.into();
+        match &exec {
+            ExecutorChoice::Tx(t) => morph_detach_one(
+                t.as_ref(),
+                backend,
+                &self.pivot_table,
+                &self.morph_name,
+                &self.pivot_related_key,
+                &self.parent_key_value,
+                &self.parent_morph_type,
+                &id,
+            )
+            .await,
+            ExecutorChoice::Pool(c) => morph_detach_one(
+                c.inner(),
+                backend,
+                &self.pivot_table,
+                &self.morph_name,
+                &self.pivot_related_key,
+                &self.parent_key_value,
+                &self.parent_morph_type,
+                &id,
+            )
+            .await,
+        }
     }
 
     /// Replace the parent's full set of attached relations with the
@@ -336,8 +370,11 @@ where
     {
         use std::collections::{HashMap, HashSet};
 
-        let conn = DB::connection()?;
-        let backend = conn.inner().get_database_backend();
+        // Phase 10C audit-fix AF2 — same shape as BelongsToMany::sync —
+        // route through ExecutorChoice so the SELECT + inner writes
+        // honor CURRENT_TX.
+        let exec = ExecutorChoice::resolve_write(None, None, None).await?;
+        let backend = exec.backend();
 
         let mut seen_target: HashSet<String> = HashSet::new();
         let mut target_ids: Vec<serde_json::Value> = Vec::new();
@@ -375,8 +412,7 @@ where
                 sea_orm::Value::from(self.parent_morph_type.clone()),
             ],
         );
-        let rows = conn
-            .inner()
+        let rows = exec
             .query_all(select_stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
@@ -407,42 +443,78 @@ where
             .filter_map(|(k, v)| (!target_keys.contains(&k)).then_some(v))
             .collect();
 
-        let txn = conn
-            .inner()
-            .begin()
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        for related_id in detach_set.iter() {
-            morph_detach_one(
-                &txn,
-                backend,
-                &self.pivot_table,
-                &self.morph_name,
-                &self.pivot_related_key,
-                &self.parent_key_value,
-                &self.parent_morph_type,
-                related_id,
-            )
-            .await?;
+        // Atomicity: inherit from CURRENT_TX when active, else open
+        // inner SeaORM tx — same precedence as BelongsToMany::sync.
+        match &exec {
+            ExecutorChoice::Tx(t) => {
+                for related_id in detach_set.iter() {
+                    morph_detach_one(
+                        t.as_ref(),
+                        backend,
+                        &self.pivot_table,
+                        &self.morph_name,
+                        &self.pivot_related_key,
+                        &self.parent_key_value,
+                        &self.parent_morph_type,
+                        related_id,
+                    )
+                    .await?;
+                }
+                for related_id in attach_set.iter() {
+                    morph_attach_one(
+                        t.as_ref(),
+                        backend,
+                        &self.pivot_table,
+                        &self.morph_name,
+                        &self.pivot_related_key,
+                        &self.parent_key_value,
+                        &self.parent_morph_type,
+                        related_id,
+                        Attrs::new(),
+                        self.with_timestamps,
+                    )
+                    .await?;
+                }
+            }
+            ExecutorChoice::Pool(c) => {
+                let txn = c
+                    .inner()
+                    .begin()
+                    .await
+                    .map_err(|e| FrameworkError::database(e.to_string()))?;
+                for related_id in detach_set.iter() {
+                    morph_detach_one(
+                        &txn,
+                        backend,
+                        &self.pivot_table,
+                        &self.morph_name,
+                        &self.pivot_related_key,
+                        &self.parent_key_value,
+                        &self.parent_morph_type,
+                        related_id,
+                    )
+                    .await?;
+                }
+                for related_id in attach_set.iter() {
+                    morph_attach_one(
+                        &txn,
+                        backend,
+                        &self.pivot_table,
+                        &self.morph_name,
+                        &self.pivot_related_key,
+                        &self.parent_key_value,
+                        &self.parent_morph_type,
+                        related_id,
+                        Attrs::new(),
+                        self.with_timestamps,
+                    )
+                    .await?;
+                }
+                txn.commit()
+                    .await
+                    .map_err(|e| FrameworkError::database(e.to_string()))?;
+            }
         }
-        for related_id in attach_set.iter() {
-            morph_attach_one(
-                &txn,
-                backend,
-                &self.pivot_table,
-                &self.morph_name,
-                &self.pivot_related_key,
-                &self.parent_key_value,
-                &self.parent_morph_type,
-                related_id,
-                Attrs::new(),
-                self.with_timestamps,
-            )
-            .await?;
-        }
-        txn.commit()
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(())
     }
 
@@ -455,8 +527,11 @@ where
     /// related-FK values (filtered by the parent's id + type), then
     /// fetch pivot rows separately and zip via `(parent_id, related_id)`.
     pub async fn get(self) -> Result<Collection<R>, FrameworkError> {
-        let conn = DB::connection()?;
-        let backend = conn.inner().get_database_backend();
+        // Phase 10C audit-fix AF2 — route the pivot-id SELECT through
+        // ExecutorChoice so it honors CURRENT_TX. Downstream
+        // Model::query() calls already do so via Builder::get.
+        let exec = ExecutorChoice::resolve_read(None, None, None).await?;
+        let backend = exec.backend();
 
         let id_col = format!("{}_id", self.morph_name);
         let type_col = format!("{}_type", self.morph_name);
@@ -484,8 +559,7 @@ where
                 sea_orm::Value::from(self.parent_morph_type.clone()),
             ],
         );
-        let id_rows = conn
-            .inner()
+        let id_rows = exec
             .query_all(id_stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
@@ -565,8 +639,9 @@ where
     /// `SELECT COUNT(*) FROM pivot WHERE <name>_id = ? AND <name>_type = ?`.
     /// Returns `i64` to match [`BelongsToMany::count`](super::BelongsToMany::count).
     pub async fn count(self) -> Result<i64, FrameworkError> {
-        let conn = DB::connection()?;
-        let backend = conn.inner().get_database_backend();
+        // Phase 10C audit-fix AF2 — see attach_with above.
+        let exec = ExecutorChoice::resolve_read(None, None, None).await?;
+        let backend = exec.backend();
         let (id_ph, type_ph) = match backend {
             DatabaseBackend::Postgres => ("$1".to_string(), "$2".to_string()),
             _ => ("?".to_string(), "?".to_string()),
@@ -590,8 +665,7 @@ where
                 sea_orm::Value::from(self.parent_morph_type),
             ],
         );
-        let row = conn
-            .inner()
+        let row = exec
             .query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
@@ -943,8 +1017,10 @@ where
 
     /// `SELECT COUNT(*) FROM pivot WHERE pfk = ? AND <name>_type = ?`.
     pub async fn count(self) -> Result<i64, FrameworkError> {
-        let conn = DB::connection()?;
-        let backend = conn.inner().get_database_backend();
+        // Phase 10C audit-fix AF2 — route the count through
+        // ExecutorChoice so it honors CURRENT_TX.
+        let exec = ExecutorChoice::resolve_read(None, None, None).await?;
+        let backend = exec.backend();
         let (id_ph, type_ph) = match backend {
             DatabaseBackend::Postgres => ("$1".to_string(), "$2".to_string()),
             _ => ("?".to_string(), "?".to_string()),
@@ -967,8 +1043,7 @@ where
                 sea_orm::Value::from(self.target_morph_type),
             ],
         );
-        let row = conn
-            .inner()
+        let row = exec
             .query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
