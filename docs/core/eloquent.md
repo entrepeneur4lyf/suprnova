@@ -20,6 +20,7 @@ doesn't cover (see the [SeaORM escape hatches](#dropping-to-seaorm)).
 - [Creating and updating](#creating-and-updating)
 - [Deleting and soft deletes](#deleting-and-soft-deletes)
 - [Query builder — dual API](#query-builder--dual-api)
+- [Scopes](#scopes)
 - [Relationships](#relationships)
 - [Eager loading](#eager-loading)
 - [Mass assignment](#mass-assignment)
@@ -646,6 +647,126 @@ let second = User::filter("role", "admin");
 let users  = first.union(second).get().await?;
 let users  = first.union_all(second).get().await?;
 ```
+
+## Scopes
+
+Phase 10C ships two flavours of scope, mirroring Laravel:
+
+- **Local scopes** — extension methods on the builder, declared per
+  model with `#[suprnova::scopes(Model)]`. Each free function in the
+  annotated `impl` block becomes both `Model::name()` (a static
+  starter) and `Builder::name()` (a chainable method).
+- **Global scopes** — implementations of `GlobalScope<M>` registered
+  at boot via `ScopeRegistry::register::<M, _>(scope)`. Every
+  `Model::query()` call layers them on automatically.
+
+### Local scopes
+
+Declare local scopes by giving them the shape
+`fn(query: Builder<Self>, args...) -> Builder<Self>`:
+
+```rust
+#[suprnova::scopes(User)]
+impl User {
+    pub fn active(query: Builder<Self>) -> Builder<Self> {
+        query.filter("active", true)
+    }
+
+    pub fn popular(query: Builder<Self>, threshold: i64) -> Builder<Self> {
+        query.filter_op("followers_count", ">", threshold)
+    }
+}
+
+// Use as either a starter or a chainable method:
+let active_users  = User::active().get().await?;
+let popular_users = User::query().active().popular(500).get().await?;
+```
+
+Non-scope methods declared in the same `impl` block (anything whose
+first parameter isn't `query: Builder<Self>`) pass through unchanged.
+
+### Global scopes
+
+Global scopes apply on every `Model::query()` call. The classic use
+case is multi-tenancy — every read is scoped to the current tenant
+without each caller threading the filter through.
+
+```rust
+use suprnova::eloquent::scopes::{GlobalScope, ScopeRegistry};
+
+pub struct TenantScope;
+
+impl GlobalScope<Article> for TenantScope {
+    fn apply(&self, query: Builder<Article>) -> Builder<Article> {
+        // Reads the current tenant from a task-local /
+        // AtomicI64 / wherever per-request state lives.
+        query.filter("tenant_id", current_tenant_id())
+    }
+}
+
+// At boot — typically inside your provider/bootstrap module:
+ScopeRegistry::register::<Article, _>(TenantScope);
+
+// Every read is auto-scoped to the active tenant:
+let scoped = Article::query().get().await?;
+```
+
+Multiple scopes per model compose in registration order — first
+registered runs first, so its filter clauses appear first in the
+WHERE chain. AND-combined filters don't care about order, but
+left-to-right matters for any clause whose side-effect order is
+visible (e.g. ordering, having, raw fragments).
+
+### Opting out of a global scope
+
+Each model the `#[suprnova::model]` macro touches gets two static
+helpers emitted on it:
+
+```rust
+// Bypass exactly one registered scope by type. Other scopes still apply.
+let all_tenants = Article::without_global_scope::<TenantScope>().get().await?;
+
+// Bypass every registered scope. Admin tooling pattern.
+let everything = Article::without_global_scopes().get().await?;
+```
+
+**Important:** the opt-out helpers must be the entry point. Chaining
+`.without_global_scope::<S>()` onto a builder already returned by
+`Model::query()` doesn't undo scopes that have already run —
+`Model::query()` applies scopes eagerly at construction time, so the
+mask is set too late. Use the per-model static helpers (above) for
+correct semantics.
+
+### Where global scopes apply
+
+| Path | Global scopes apply? |
+|------|----------------------|
+| `Model::query()` | Yes — the canonical scoped entry point |
+| `Model::without_global_scope::<S>()` | Yes, minus `S` |
+| `Model::without_global_scopes()` | No |
+| `Model::find(id)` | No — PK lookup goes through SeaORM directly |
+| `Model::find_many([...])` | No — same reason |
+| `Model::all()` | No — same reason |
+
+This mirrors Laravel: `Eloquent\Model::find` doesn't trigger
+`addGlobalScopes`. Callers that want scoped PK lookups use
+`Self::query().filter("id", pk).first().await?`.
+
+### Soft deletes and global scopes coexist
+
+`#[suprnova::model(soft_deletes)]` installs the
+`deleted_at IS NULL` filter via a separate string-tag mechanism, not
+through the typed scope registry. Both layers compose:
+
+- `Model::query()` filters out trashed rows AND runs every registered
+  scope.
+- `Model::without_global_scopes()` drops registered scopes but
+  preserves the soft-delete filter — admin tooling that wants to read
+  every column-set still excludes trashed rows by default.
+- `Model::with_trashed()` and `Model::only_trashed()` skip soft-delete
+  filtering and also bypass the registry (they build a fresh unscoped
+  builder). Pair with `.without_global_scope::<S>()` if you need
+  scope-aware reads over trashed rows.
 
 ## Relationships
 
