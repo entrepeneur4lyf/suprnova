@@ -25,8 +25,7 @@ use std::hash::Hash;
 
 use async_trait::async_trait;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, IntoActiveModel,
-    PrimaryKeyToColumn, PrimaryKeyTrait, QueryFilter,
+    ColumnTrait, EntityTrait, IntoActiveModel, PrimaryKeyToColumn, PrimaryKeyTrait, QueryFilter,
 };
 // `find_many` calls `<Self::Entity as EntityTrait>::PrimaryKey::iter()`.
 // `iter` lives on `IntoEnumIterator`, brought in via `PrimaryKeyTrait`'s
@@ -36,7 +35,10 @@ use sea_orm::strum::IntoEnumIterator;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::database::DB;
+// Direct `DB::connection()` calls have been replaced with
+// `crate::database::transaction::ExecutorChoice::resolve()` so every
+// Model CRUD path honours an active `DB::transaction` scope without
+// callers threading a tx handle through every method.
 use crate::eloquent::attrs::Attrs;
 use crate::eloquent::builder::Builder;
 use crate::eloquent::collection::Collection;
@@ -165,11 +167,18 @@ where
         K: Into<<<Self::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType> + Send,
     {
         Self::__dispatch_retrieving().await?;
-        let db = DB::connection()?;
-        let row = Self::Entity::find_by_id(id)
-            .one(db.inner())
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        // T11: route through ExecutorChoice so the read honours any
+        // ambient `DB::transaction` closure scope.
+        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        let row = match &exec {
+            crate::database::transaction::ExecutorChoice::Tx(t) => {
+                Self::Entity::find_by_id(id).one(t.as_ref()).await
+            }
+            crate::database::transaction::ExecutorChoice::Pool(c) => {
+                Self::Entity::find_by_id(id).one(c.inner()).await
+            }
+        }
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
         let hydrated = row.map(Self::from);
         if let Some(ref m) = hydrated {
             Self::__dispatch_retrieved(m).await?;
@@ -213,7 +222,6 @@ where
         <<Self::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
             Hash + Eq + Clone,
     {
-        let db = DB::connection()?;
         let id_vec: Vec<_> = ids.into_iter().map(|k| k.into()).collect();
         if id_vec.is_empty() {
             return Ok(Vec::new());
@@ -222,11 +230,23 @@ where
         let pk = <Self::Entity as EntityTrait>::PrimaryKey::iter()
             .next()
             .expect("model has at least one primary-key column");
-        let rows = Self::Entity::find()
-            .filter(pk.into_column().is_in(id_vec.clone()))
-            .all(db.inner())
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        // T11: route through ExecutorChoice.
+        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        let rows = match &exec {
+            crate::database::transaction::ExecutorChoice::Tx(t) => {
+                Self::Entity::find()
+                    .filter(pk.into_column().is_in(id_vec.clone()))
+                    .all(t.as_ref())
+                    .await
+            }
+            crate::database::transaction::ExecutorChoice::Pool(c) => {
+                Self::Entity::find()
+                    .filter(pk.into_column().is_in(id_vec.clone()))
+                    .all(c.inner())
+                    .await
+            }
+        }
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
 
         let mut by_id: HashMap<_, _> = rows
             .into_iter()
@@ -259,11 +279,17 @@ where
     /// via `Deref<Target = [Self]>`.
     async fn all() -> Result<Collection<Self>, FrameworkError> {
         Self::__dispatch_retrieving().await?;
-        let db = DB::connection()?;
-        let rows = Self::Entity::find()
-            .all(db.inner())
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        // T11: route through ExecutorChoice.
+        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        let rows = match &exec {
+            crate::database::transaction::ExecutorChoice::Tx(t) => {
+                Self::Entity::find().all(t.as_ref()).await
+            }
+            crate::database::transaction::ExecutorChoice::Pool(c) => {
+                Self::Entity::find().all(c.inner()).await
+            }
+        }
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
         let out: Vec<Self> = rows.into_iter().map(Self::from).collect();
         for row in &out {
             Self::__dispatch_retrieved(row).await?;
@@ -319,13 +345,13 @@ where
         // Arc<Mutex<_>> handle is dropped once we leave this scope.
         let final_attrs = shared.lock().await.clone();
         let am = Self::active_model_from_attrs(final_attrs)?;
-        let db = DB::connection()?;
-        let inserted = <<Self::Entity as EntityTrait>::ActiveModel as ActiveModelTrait>::insert(
-            am,
-            db.inner(),
-        )
-        .await
-        .map_err(|e| FrameworkError::database(e.to_string()))?;
+        // T11: route through ExecutorChoice — insert lands in the
+        // active transaction when called inside `DB::transaction`.
+        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        let inserted = exec
+            .insert_active(am)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
         let row = Self::from(inserted);
 
         Self::__dispatch_created(&row).await?;
@@ -362,13 +388,12 @@ where
         Self::__dispatch_saving(shared.clone(), false).await?;
 
         let am = self.clone().into_active_model_for_update()?;
-        let db = DB::connection()?;
-        let updated = <<Self::Entity as EntityTrait>::ActiveModel as ActiveModelTrait>::update(
-            am,
-            db.inner(),
-        )
-        .await
-        .map_err(|e| FrameworkError::database(e.to_string()))?;
+        // T11: route through ExecutorChoice.
+        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        let updated = exec
+            .update_active(am)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
         let current = Self::from(updated);
 
         Self::__dispatch_updated(self, &current).await?;
@@ -396,11 +421,12 @@ where
         let row: <Self::Entity as EntityTrait>::Model = self.into();
         let mut am = row.into_active_model();
         Self::apply_attrs_to_active_model(&mut am, final_attrs)?;
-        let db = DB::connection()?;
-        let updated =
-            <<Self::Entity as EntityTrait>::ActiveModel as ActiveModelTrait>::update(am, db.inner())
-                .await
-                .map_err(|e| FrameworkError::database(e.to_string()))?;
+        // T11: route through ExecutorChoice.
+        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        let updated = exec
+            .update_active(am)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
         let current = Self::from(updated);
 
         Self::__dispatch_updated(&previous, &current).await?;
@@ -427,8 +453,9 @@ where
         let snapshot = self.clone();
         let row: <Self::Entity as EntityTrait>::Model = self.into();
         let am = row.into_active_model();
-        let db = DB::connection()?;
-        <<Self::Entity as EntityTrait>::ActiveModel as ActiveModelTrait>::delete(am, db.inner())
+        // T11: route through ExecutorChoice.
+        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        exec.delete_active(am)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
 
@@ -449,8 +476,133 @@ where
         let snapshot = self.clone();
         let row: <Self::Entity as EntityTrait>::Model = self.into();
         let am = row.into_active_model();
-        let db = DB::connection()?;
-        <<Self::Entity as EntityTrait>::ActiveModel as ActiveModelTrait>::delete(am, db.inner())
+        // T11: route through ExecutorChoice.
+        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        exec.delete_active(am)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+
+        Self::__dispatch_force_deleted(&snapshot).await?;
+        Self::__dispatch_deleted(&snapshot, true).await?;
+        Ok(())
+    }
+
+    // ---- Phase 10C T11 — manual-transaction shims --------------------
+    //
+    // `DB::begin_transaction()` returns a `Transaction` handle and
+    // does NOT install the [`CURRENT_TX`] task-local; callers must
+    // opt every operation into the transaction explicitly. These
+    // `_with_tx` methods are the per-Model entry points; pair them
+    // with `Builder::with_tx(&tx)` for read paths.
+    //
+    // The shims route through `ExecutorChoice::from_tx(tx)` which
+    // bypasses CURRENT_TX consultation entirely — the explicit
+    // handle is authoritative. Lifecycle events still fire in the
+    // same order as the non-tx variant.
+
+    /// Persist this row's in-memory state through `tx`. Same lifecycle
+    /// event sequence as [`Self::save`] (`Updating` → `Saving` →
+    /// UPDATE → `Updated` → `Saved`). Used with
+    /// [`DB::begin_transaction`](crate::DB::begin_transaction) when the
+    /// closure form doesn't fit the caller's control flow.
+    async fn save_with_tx(
+        &self,
+        tx: &crate::database::Transaction,
+    ) -> Result<(), FrameworkError> {
+        let attrs_value = serde_json::to_value(self).map_err(|e| {
+            FrameworkError::internal(format!(
+                "save_with_tx: serialize self for Saving event: {e}"
+            ))
+        })?;
+        let attrs = Attrs::from(attrs_value);
+        let shared = std::sync::Arc::new(tokio::sync::Mutex::new(attrs));
+
+        Self::__dispatch_updating(self, shared.clone()).await?;
+        Self::__dispatch_saving(shared.clone(), false).await?;
+
+        let am = self.clone().into_active_model_for_update()?;
+        let exec = crate::database::transaction::ExecutorChoice::from_tx(tx);
+        let updated = exec
+            .update_active(am)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let current = Self::from(updated);
+
+        Self::__dispatch_updated(self, &current).await?;
+        Self::__dispatch_saved(&current).await?;
+        Ok(())
+    }
+
+    /// Apply `attrs` to this row through `tx`. Mirrors
+    /// [`Self::update`] event-for-event but pins the SQL to the
+    /// supplied transaction. Returns the updated row.
+    async fn update_with_tx(
+        self,
+        tx: &crate::database::Transaction,
+        attrs: Attrs,
+    ) -> Result<Self, FrameworkError> {
+        let previous = self.clone();
+        let filtered = Self::fillable_filter().apply(attrs);
+        let shared = std::sync::Arc::new(tokio::sync::Mutex::new(filtered));
+
+        Self::__dispatch_updating(&previous, shared.clone()).await?;
+        Self::__dispatch_saving(shared.clone(), false).await?;
+
+        let final_attrs = shared.lock().await.clone();
+        let row: <Self::Entity as EntityTrait>::Model = self.into();
+        let mut am = row.into_active_model();
+        Self::apply_attrs_to_active_model(&mut am, final_attrs)?;
+        let exec = crate::database::transaction::ExecutorChoice::from_tx(tx);
+        let updated = exec
+            .update_active(am)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let current = Self::from(updated);
+
+        Self::__dispatch_updated(&previous, &current).await?;
+        Self::__dispatch_saved(&current).await?;
+        Ok(current)
+    }
+
+    /// Delete this row through `tx`. Soft-delete models override the
+    /// inherent `delete` to apply tombstone semantics on the trait
+    /// path, but this trait-level shim performs a hard DELETE
+    /// regardless. Use [`Self::force_delete_with_tx`] for symmetry
+    /// when you want the operation to read as "definitely remove" at
+    /// the call site.
+    async fn delete_with_tx(
+        self,
+        tx: &crate::database::Transaction,
+    ) -> Result<(), FrameworkError> {
+        Self::__dispatch_deleting(&self, false).await?;
+
+        let snapshot = self.clone();
+        let row: <Self::Entity as EntityTrait>::Model = self.into();
+        let am = row.into_active_model();
+        let exec = crate::database::transaction::ExecutorChoice::from_tx(tx);
+        exec.delete_active(am)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+
+        Self::__dispatch_deleted(&snapshot, false).await?;
+        Ok(())
+    }
+
+    /// Force-delete this row through `tx`. Mirrors
+    /// [`Self::force_delete`] event-for-event but pins the DELETE to
+    /// the supplied transaction.
+    async fn force_delete_with_tx(
+        self,
+        tx: &crate::database::Transaction,
+    ) -> Result<(), FrameworkError> {
+        Self::__dispatch_deleting(&self, true).await?;
+        Self::__dispatch_force_deleting(&self).await?;
+
+        let snapshot = self.clone();
+        let row: <Self::Entity as EntityTrait>::Model = self.into();
+        let am = row.into_active_model();
+        let exec = crate::database::transaction::ExecutorChoice::from_tx(tx);
+        exec.delete_active(am)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
 
@@ -554,15 +706,16 @@ where
         let pk_name = Self::primary_key_name();
         let pk_value = self.primary_key_value_json();
         let sql = format!("UPDATE {table} SET {column} = {column} + ? WHERE {pk_name} = ?");
-        let db = DB::connection()?;
-        db.inner()
-            .execute(sea_orm::Statement::from_sql_and_values(
-                db.inner().get_database_backend(),
-                &sql,
-                vec![by.into(), json_value_to_sea_value(&pk_value)],
-            ))
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        // T11: route through ExecutorChoice.
+        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        let backend = exec.backend();
+        exec.run(sea_orm::Statement::from_sql_and_values(
+            backend,
+            &sql,
+            vec![by.into(), json_value_to_sea_value(&pk_value)],
+        ))
+        .await
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(())
     }
 

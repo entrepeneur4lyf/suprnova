@@ -67,7 +67,7 @@ pub use csrf::{csrf_field, csrf_meta_tag, csrf_token, CsrfMiddleware};
 pub use data::{current_include_set, scope_include_set, Field, IncludeError, IncludeMiddleware, IsRelationLoaded, RequestIncludeSet};
 pub use database::{
     AutoRouteBinding, Database, DatabaseConfig, DatabaseType, DbConnection, DbTableBuilder,
-    DynamicRow, EntityExt, EntityExtMut, RouteBinding, DB,
+    DynamicRow, EntityExt, EntityExtMut, RouteBinding, Transaction, TxHandle, DB,
 };
 
 // SeaORM type aliasing — Suprnova design principle #4: SeaORM is an

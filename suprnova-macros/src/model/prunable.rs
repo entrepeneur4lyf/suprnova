@@ -77,20 +77,21 @@ pub fn expand(item: TokenStream) -> Result<TokenStream> {
                 // when the prunable() scope sets `.select(...)` /
                 // `.order_by(...)` / etc.
                 let table = <#self_ty as ::suprnova::eloquent::EloquentModel>::TABLE;
-                let db = ::suprnova::DB::connection()?;
-                let backend = <_ as ::suprnova::ConnectionTrait>::get_database_backend(db.inner());
+                // T11: route through ExecutorChoice so MassPrunable
+                // bulk-deletes inside `DB::transaction` land in the
+                // active tx.
+                let exec = ::suprnova::database::transaction::ExecutorChoice::resolve()?;
+                let backend = exec.backend();
                 let (delete_sql, vals) =
                     builder.to_delete_sql_with_bindings_for(backend, table);
-                let res = <_ as ::suprnova::ConnectionTrait>::execute(
-                    db.inner(),
-                    ::suprnova::sea_orm::Statement::from_sql_and_values(
+                let res = exec
+                    .run(::suprnova::sea_orm::Statement::from_sql_and_values(
                         backend,
                         &delete_sql,
                         vals,
-                    ),
-                )
-                .await
-                .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
+                    ))
+                    .await
+                    .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
                 Ok(res.rows_affected())
             }
         }

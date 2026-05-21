@@ -348,9 +348,10 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                             &now,
                         )?,
                     );
-                    let db = ::suprnova::DB::connection()?;
-                    <<#module_name::Entity as ::suprnova::EntityTrait>::ActiveModel
-                        as ::suprnova::ActiveModelTrait>::update(am, db.inner())
+                    // T11: route through ExecutorChoice so touches inside
+                    // a `DB::transaction` scope land in the active tx.
+                    let exec = ::suprnova::database::transaction::ExecutorChoice::resolve()?;
+                    exec.update_active(am)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
                     ::core::result::Result::Ok(())
@@ -472,10 +473,11 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                         "UPDATE {table} SET {} = ? WHERE {pk_name} = ?",
                         #soft_delete_col,
                     );
-                    let db = ::suprnova::DB::connection()?;
-                    let backend = <_ as ::suprnova::ConnectionTrait>::get_database_backend(db.inner());
-                    <_ as ::suprnova::ConnectionTrait>::execute(
-                        db.inner(),
+                    // T11: route through ExecutorChoice so soft-deletes
+                    // inside `DB::transaction` land in the active tx.
+                    let exec = ::suprnova::database::transaction::ExecutorChoice::resolve()?;
+                    let backend = exec.backend();
+                    exec.run(
                         ::suprnova::sea_orm::Statement::from_sql_and_values(
                             backend,
                             &sql,
@@ -518,10 +520,11 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                         "UPDATE {table} SET {} = NULL WHERE {pk_name} = ?",
                         #soft_delete_col,
                     );
-                    let db = ::suprnova::DB::connection()?;
-                    let backend = <_ as ::suprnova::ConnectionTrait>::get_database_backend(db.inner());
-                    <_ as ::suprnova::ConnectionTrait>::execute(
-                        db.inner(),
+                    // T11: route through ExecutorChoice so restores
+                    // inside `DB::transaction` land in the active tx.
+                    let exec = ::suprnova::database::transaction::ExecutorChoice::resolve()?;
+                    let backend = exec.backend();
+                    exec.run(
                         ::suprnova::sea_orm::Statement::from_sql_and_values(
                             backend,
                             &sql,
@@ -584,9 +587,10 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     let snapshot = ::core::clone::Clone::clone(&self);
                     let row: <<Self as ::suprnova::eloquent::EloquentModel>::Entity as ::suprnova::sea_orm::EntityTrait>::Model = self.into();
                     let am = <_ as ::suprnova::sea_orm::IntoActiveModel<_>>::into_active_model(row);
-                    let db = ::suprnova::DB::connection()?;
-                    <<<Self as ::suprnova::eloquent::EloquentModel>::Entity as ::suprnova::sea_orm::EntityTrait>::ActiveModel
-                        as ::suprnova::sea_orm::ActiveModelTrait>::delete(am, db.inner())
+                    // T11: route through ExecutorChoice so force-deletes
+                    // inside `DB::transaction` land in the active tx.
+                    let exec = ::suprnova::database::transaction::ExecutorChoice::resolve()?;
+                    exec.delete_active(am)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
 
@@ -825,8 +829,17 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         impl ::suprnova::Persistable for #struct_ident {
             async fn persist(self) -> ::core::result::Result<Self, ::suprnova::FrameworkError> {
                 let inner: #module_name::Model = self.into();
-                let db = ::suprnova::DB::connection()?;
-                let inserted = ::suprnova::persist_via_seaorm(inner, db.inner()).await?;
+                // T11: route through ExecutorChoice so factory persists
+                // inside `DB::transaction` land in the active tx.
+                let exec = ::suprnova::database::transaction::ExecutorChoice::resolve()?;
+                let inserted = match &exec {
+                    ::suprnova::database::transaction::ExecutorChoice::Tx(t) => {
+                        ::suprnova::persist_via_seaorm(inner, t.as_ref()).await?
+                    }
+                    ::suprnova::database::transaction::ExecutorChoice::Pool(c) => {
+                        ::suprnova::persist_via_seaorm(inner, c.inner()).await?
+                    }
+                };
                 ::core::result::Result::Ok(<Self as ::core::convert::From<#module_name::Model>>::from(inserted))
             }
         }

@@ -38,7 +38,7 @@ use crate::eloquent::attrs::Attrs;
 use crate::eloquent::builder::Direction;
 use crate::eloquent::Collection;
 use crate::FrameworkError;
-use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, JsonValue, Statement, Value as SeaValue};
+use sea_orm::{DbBackend, FromQueryResult, JsonValue, Statement, Value as SeaValue};
 
 /// Standalone query builder returned by
 /// [`DB::table(name)`](crate::DB::table). Mirrors the where / order /
@@ -133,15 +133,22 @@ impl DbTableBuilder {
     /// [`sea_orm::JsonValue::find_by_statement`] under the hood so
     /// column shape is discovered at runtime.
     pub async fn get(self) -> Result<Collection<DynamicRow>, FrameworkError> {
-        let db = DB::connection()?;
-        let backend = db.inner().get_database_backend();
+        // T11: route through ExecutorChoice so `DB::table` reads honour
+        // the ambient `DB::transaction` scope.
+        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        let backend = exec.backend();
         let (sql, values) = self.render_select(backend);
         let stmt = Statement::from_sql_and_values(backend, &sql, values);
 
-        let rows = JsonValue::find_by_statement(stmt)
-            .all(db.inner())
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let rows = match &exec {
+            crate::database::transaction::ExecutorChoice::Tx(t) => {
+                JsonValue::find_by_statement(stmt).all(t.as_ref()).await
+            }
+            crate::database::transaction::ExecutorChoice::Pool(c) => {
+                JsonValue::find_by_statement(stmt).all(c.inner()).await
+            }
+        }
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
 
         let dyn_rows: Vec<DynamicRow> = rows
             .into_iter()
@@ -172,8 +179,9 @@ impl DbTableBuilder {
     /// `FromQueryResult` impl — on SQLite the typed accessor is the
     /// reliable path.
     pub async fn count(self) -> Result<u64, FrameworkError> {
-        let db = DB::connection()?;
-        let backend = db.inner().get_database_backend();
+        // T11: route through ExecutorChoice.
+        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        let backend = exec.backend();
         let mut copy = self;
         copy.select_columns = vec!["COUNT(*) as count".into()];
         copy.order.clear();
@@ -182,8 +190,7 @@ impl DbTableBuilder {
         let (sql, values) = copy.render_select(backend);
         let stmt = Statement::from_sql_and_values(backend, &sql, values);
 
-        let row = db
-            .inner()
+        let row = exec
             .query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
@@ -201,8 +208,9 @@ impl DbTableBuilder {
     /// split: Postgres + SQLite use `RETURNING id`; MySQL runs the
     /// INSERT then issues `SELECT LAST_INSERT_ID()`.
     pub async fn insert(self, attrs: Attrs) -> Result<i64, FrameworkError> {
-        let db = DB::connection()?;
-        let backend = db.inner().get_database_backend();
+        // T11: route through ExecutorChoice.
+        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        let backend = exec.backend();
 
         let cols: Vec<String> = attrs.keys().map(String::from).collect();
         if cols.is_empty() {
@@ -241,8 +249,7 @@ impl DbTableBuilder {
             DbBackend::Postgres | DbBackend::Sqlite => {
                 let sql = format!("{base} RETURNING id");
                 let stmt = Statement::from_sql_and_values(backend, &sql, values);
-                let row = db
-                    .inner()
+                let row = exec
                     .query_one(stmt)
                     .await
                     .map_err(|e| FrameworkError::database(e.to_string()))?;
@@ -259,9 +266,8 @@ impl DbTableBuilder {
                 // be unsafe because the SELECT might land on a
                 // different physical connection than the INSERT.
                 let stmt = Statement::from_sql_and_values(backend, &base, values);
-                let result = db
-                    .inner()
-                    .execute(stmt)
+                let result = exec
+                    .run(stmt)
                     .await
                     .map_err(|e| FrameworkError::database(e.to_string()))?;
                 Ok(result.last_insert_id() as i64)
@@ -282,13 +288,13 @@ impl DbTableBuilder {
                 self.table
             )));
         }
-        let db = DB::connection()?;
-        let backend = db.inner().get_database_backend();
+        // T11: route through ExecutorChoice.
+        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        let backend = exec.backend();
         let (sql, values) = self.render_update(&attrs, backend);
         let stmt = Statement::from_sql_and_values(backend, &sql, values);
-        let result = db
-            .inner()
-            .execute(stmt)
+        let result = exec
+            .run(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(result.rows_affected())
@@ -301,13 +307,13 @@ impl DbTableBuilder {
     /// removes every row by design — add a `filter` if you don't mean
     /// that.
     pub async fn delete(self) -> Result<u64, FrameworkError> {
-        let db = DB::connection()?;
-        let backend = db.inner().get_database_backend();
+        // T11: route through ExecutorChoice.
+        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        let backend = exec.backend();
         let (sql, values) = self.render_delete(backend);
         let stmt = Statement::from_sql_and_values(backend, &sql, values);
-        let result = db
-            .inner()
-            .execute(stmt)
+        let result = exec
+            .run(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(result.rows_affected())
@@ -472,14 +478,21 @@ impl DB {
         sql: &str,
         values: impl IntoIterator<Item = SeaValue>,
     ) -> Result<Vec<DynamicRow>, FrameworkError> {
-        let db = DB::connection()?;
-        let backend = db.inner().get_database_backend();
+        // T11: route through ExecutorChoice so raw selects honour the
+        // ambient `DB::transaction` scope.
+        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        let backend = exec.backend();
         let stmt =
             Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());
-        let rows = JsonValue::find_by_statement(stmt)
-            .all(db.inner())
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let rows = match &exec {
+            crate::database::transaction::ExecutorChoice::Tx(t) => {
+                JsonValue::find_by_statement(stmt).all(t.as_ref()).await
+            }
+            crate::database::transaction::ExecutorChoice::Pool(c) => {
+                JsonValue::find_by_statement(stmt).all(c.inner()).await
+            }
+        }
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(rows
             .into_iter()
             .filter_map(|v| match v {
@@ -511,12 +524,21 @@ impl DB {
     /// Discards the result — use this for `CREATE INDEX`, `ALTER
     /// TABLE`, `VACUUM`, etc.
     pub async fn statement(sql: &str) -> Result<(), FrameworkError> {
-        let db = DB::connection()?;
-        db.inner()
-            .execute_unprepared(sql)
-            .await
-            .map(|_| ())
-            .map_err(|e| FrameworkError::database(e.to_string()))
+        // T11: route through ExecutorChoice. DDL inside `DB::transaction`
+        // is unusual but supported on backends that allow it (Postgres);
+        // SQLite/MySQL accept some DDL inside transactions too.
+        use sea_orm::ConnectionTrait;
+        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        match &exec {
+            crate::database::transaction::ExecutorChoice::Tx(t) => {
+                t.execute_unprepared(sql).await
+            }
+            crate::database::transaction::ExecutorChoice::Pool(c) => {
+                c.inner().execute_unprepared(sql).await
+            }
+        }
+        .map(|_| ())
+        .map_err(|e| FrameworkError::database(e.to_string()))
     }
 
     /// Run a raw statement that produces a `rows_affected` result.
@@ -527,13 +549,13 @@ impl DB {
         sql: &str,
         values: impl IntoIterator<Item = SeaValue>,
     ) -> Result<u64, FrameworkError> {
-        let db = DB::connection()?;
-        let backend = db.inner().get_database_backend();
+        // T11: route through ExecutorChoice.
+        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        let backend = exec.backend();
         let stmt =
             Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());
-        let result = db
-            .inner()
-            .execute(stmt)
+        let result = exec
+            .run(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(result.rows_affected())

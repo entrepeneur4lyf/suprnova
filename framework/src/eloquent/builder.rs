@@ -289,6 +289,12 @@ pub struct Builder<M> {
     /// UNION arm — so multi-statement queries lock once at the outer
     /// scope, matching standard SQL grammar.
     pub(crate) lock_mode: LockMode,
+    /// Phase 10C T11 — per-builder transaction override. When set,
+    /// every terminal method routes through this transaction instead
+    /// of consulting the [`CURRENT_TX`](crate::database::transaction::CURRENT_TX)
+    /// task-local or falling back to [`DB::connection()`]. Installed
+    /// by [`Builder::with_tx`].
+    pub(crate) tx_override: Option<crate::database::TxHandle>,
     _phantom: PhantomData<M>,
 }
 
@@ -336,6 +342,9 @@ impl<M> Clone for Builder<M> {
             // a silent drop.
             eager_specs: Vec::new(),
             lock_mode: self.lock_mode,
+            // T11: transaction override is a cheap `Arc` clone — every
+            // clone of the builder targets the same underlying tx.
+            tx_override: self.tx_override.clone(),
             _phantom: PhantomData,
         }
     }
@@ -362,8 +371,33 @@ impl<M> Builder<M> {
             skip_all_scopes: false,
             eager_specs: Vec::new(),
             lock_mode: LockMode::None,
+            tx_override: None,
             _phantom: PhantomData,
         }
+    }
+
+    /// Scope every terminal method on this builder through `tx`'s
+    /// connection instead of consulting the ambient transaction or
+    /// the global pool. Phase 10C T11.
+    ///
+    /// Precedence: explicit `with_tx` > ambient
+    /// [`CURRENT_TX`](crate::database::transaction::CURRENT_TX) >
+    /// [`DB::connection()`]. Use `with_tx` when you have a manual
+    /// [`Transaction`](crate::Transaction) (from
+    /// [`DB::begin_transaction`](crate::DB::begin_transaction)) and
+    /// want a specific query scoped to it without installing the
+    /// task-local.
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// let tx = DB::begin_transaction().await?;
+    /// let users = User::query().filter("active", true).with_tx(&tx).get().await?;
+    /// tx.commit().await?;
+    /// ```
+    pub fn with_tx(mut self, tx: &crate::database::Transaction) -> Self {
+        self.tx_override = Some(tx.handle());
+        self
     }
 
     /// Append relation names to the eager-load plan.
@@ -1765,8 +1799,12 @@ where
         // hydrated from DB" once for the query as a whole.
         M::__dispatch_retrieving().await?;
 
-        let db = DB::connection()?;
-        let backend = db.inner().get_database_backend();
+        // Phase 10C T11 — resolve executor with three-way precedence:
+        // explicit `with_tx` override > ambient `CURRENT_TX` > pool.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_with_override(
+            self.tx_override.as_ref(),
+        )?;
+        let backend = exec.backend();
         let runtime_casts = self.runtime_casts.clone();
         // Move the eager plan out of `self` — `EagerSpec::WithWhere`
         // owns a `Box<dyn Any>` (the type-erased predicate) which is
@@ -1779,12 +1817,29 @@ where
 
         // Fetch into the entity's `Model` — the SeaORM type that's
         // auto-implementing `FromQueryResult`. This is the storage-shape
-        // type, not the user's runtime struct.
-        let raw_rows = <<M as EloquentModel>::Entity as sea_orm::EntityTrait>::Model
-            ::find_by_statement(stmt)
-            .all(db.inner())
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        // type, not the user's runtime struct. T11: route through the
+        // resolved executor (transaction or pool).
+        //
+        // SeaORM's `.all<C: ConnectionTrait>` is generic + `Sized`;
+        // `&dyn ConnectionTrait` won't satisfy it. Match the executor
+        // variant and call `.all(...)` on each concrete arm so the
+        // generic resolves to either `DatabaseTransaction` or
+        // `DatabaseConnection`.
+        let raw_rows = match &exec {
+            crate::database::transaction::ExecutorChoice::Tx(t) => {
+                <<M as EloquentModel>::Entity as sea_orm::EntityTrait>::Model
+                    ::find_by_statement(stmt)
+                    .all(t.as_ref())
+                    .await
+            }
+            crate::database::transaction::ExecutorChoice::Pool(c) => {
+                <<M as EloquentModel>::Entity as sea_orm::EntityTrait>::Model
+                    ::find_by_statement(stmt)
+                    .all(c.inner())
+                    .await
+            }
+        }
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
 
         let mut out: Vec<M> = if runtime_casts.is_empty() {
             // Fast path — convert each row directly via the
@@ -1827,11 +1882,21 @@ where
         // mutates every row's `__eager` cache in-place. Nested
         // `"posts.comments"` paths recurse via
         // `__recurse_eager_load`.
+        //
+        // T11: `EagerLoadDispatch` takes `&DatabaseConnection` (concrete,
+        // emitted by the macro across every relation kind). The `db`
+        // parameter is retained for trait-signature stability — the
+        // actual routing happens at each SQL leaf (`belongs_to_many.rs`
+        // etc.) via `ExecutorChoice::resolve()`, which consults
+        // `CURRENT_TX` and routes through the active transaction when
+        // present. Outside a tx, leaves use the same pool we pass here;
+        // inside a tx, this `db` is effectively ignored.
         if !eager_specs.is_empty() && !out.is_empty() {
+            let eager_db = DB::connection()?;
             crate::eloquent::relations::eager::apply_eager_specs::<M>(
                 &mut out,
                 eager_specs,
-                db.inner(),
+                eager_db.inner(),
             )
             .await?;
         }
@@ -1947,12 +2012,15 @@ where
         let offset = page.saturating_sub(1).saturating_mul(per_page);
 
         // Count phase — borrows `self`, doesn't consume it.
-        let db = DB::connection()?;
-        let backend = db.inner().get_database_backend();
+        // T11: route through ExecutorChoice (with override) so the
+        // COUNT runs against the same transaction as the page query.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_with_override(
+            self.tx_override.as_ref(),
+        )?;
+        let backend = exec.backend();
         let (count_sql, count_vals) = self.render_count_select_for(backend, M::TABLE);
         let count_stmt = Statement::from_sql_and_values(backend, &count_sql, count_vals);
-        let count_row = db
-            .inner()
+        let count_row = exec
             .query_one(count_stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
@@ -2498,15 +2566,17 @@ where
         self,
         col: impl IntoColumn,
     ) -> Result<Option<T>, FrameworkError> {
-        let db = DB::connection()?;
-        let backend = db.inner().get_database_backend();
+        // T11: respect `with_tx` override + ambient CURRENT_TX.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_with_override(
+            self.tx_override.as_ref(),
+        )?;
+        let backend = exec.backend();
         let mut s = self;
         s.limit = Some(1);
         let col_name = col.col_name();
         let (sql, vals) = s.render_select_for(backend, M::TABLE, &col_name);
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
-        let row = db
-            .inner()
+        let row = exec
             .query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
@@ -2518,13 +2588,15 @@ where
         self,
         col: impl IntoColumn,
     ) -> Result<Vec<T>, FrameworkError> {
-        let db = DB::connection()?;
-        let backend = db.inner().get_database_backend();
+        // T11: respect `with_tx` override + ambient CURRENT_TX.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_with_override(
+            self.tx_override.as_ref(),
+        )?;
+        let backend = exec.backend();
         let col_name = col.col_name();
         let (sql, vals) = self.render_select_for(backend, M::TABLE, &col_name);
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
-        let rows = db
-            .inner()
+        let rows = exec
             .query_all(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
@@ -2540,14 +2612,16 @@ where
         key_col: impl IntoColumn,
         val_col: impl IntoColumn,
     ) -> Result<HashMap<K, V>, FrameworkError> {
-        let db = DB::connection()?;
-        let backend = db.inner().get_database_backend();
+        // T11: respect `with_tx` override + ambient CURRENT_TX.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_with_override(
+            self.tx_override.as_ref(),
+        )?;
+        let backend = exec.backend();
         let kn = key_col.col_name();
         let vn = val_col.col_name();
         let (sql, vals) = self.render_select_for(backend, M::TABLE, &format!("{kn}, {vn}"));
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
-        let rows = db
-            .inner()
+        let rows = exec
             .query_all(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
@@ -2564,12 +2638,14 @@ where
         self,
         expr: &str,
     ) -> Result<T, FrameworkError> {
-        let db = DB::connection()?;
-        let backend = db.inner().get_database_backend();
+        // T11: respect `with_tx` override + ambient CURRENT_TX.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_with_override(
+            self.tx_override.as_ref(),
+        )?;
+        let backend = exec.backend();
         let (sql, vals) = self.render_select_for(backend, M::TABLE, expr);
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
-        let row = db
-            .inner()
+        let row = exec
             .query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
@@ -2582,12 +2658,14 @@ where
         self,
         expr: &str,
     ) -> Result<Option<T>, FrameworkError> {
-        let db = DB::connection()?;
-        let backend = db.inner().get_database_backend();
+        // T11: respect `with_tx` override + ambient CURRENT_TX.
+        let exec = crate::database::transaction::ExecutorChoice::resolve_with_override(
+            self.tx_override.as_ref(),
+        )?;
+        let backend = exec.backend();
         let (sql, vals) = self.render_select_for(backend, M::TABLE, expr);
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
-        let row = db
-            .inner()
+        let row = exec
             .query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;

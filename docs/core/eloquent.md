@@ -740,6 +740,279 @@ the file level that blocks every other writer.
   workflows but they add API surface. Deferred until a real
   consumer needs them.
 
+## Transactions
+
+Suprnova ships three entry points for database transactions plus
+nested-rollback via savepoints. Two of them — the closure form and
+the retry-on-deadlock helper — install an ambient context so model
+operations inside the closure auto-route through the transaction
+without callers threading a handle through every call site.
+
+### Closure form — `DB::transaction`
+
+The closure form is the common case. The closure receives a
+`&Transaction` it can use to checkpoint with `savepoint(name)`;
+every `Model::*` / `Builder::*` operation inside the closure
+auto-routes through the transaction via a `tokio::task_local!`
+called `CURRENT_TX`.
+
+```rust
+use suprnova::{DB, FrameworkError, Model};
+
+DB::transaction(|_tx| {
+    Box::pin(async move {
+        let mut alice = User::query().filter("name", "alice").first_or_fail().await?;
+        alice.balance -= 30;
+        alice.save().await?;
+
+        let mut bob = User::query().filter("name", "bob").first_or_fail().await?;
+        bob.balance += 30;
+        bob.save().await?;
+        Ok::<(), FrameworkError>(())
+    })
+}).await?;
+```
+
+- Closure returns `Ok` → **commit**.
+- Closure returns `Err` → **rollback** (original error propagates).
+- Closure panics → rollback (the in-flight transaction is dropped
+  on unwind; SeaORM's `DatabaseTransaction::drop` rolls back).
+
+Reads inside the closure see writes from the same transaction
+(via `CURRENT_TX` lookup at every leaf SQL call). The first
+`DB::transaction` call after process start picks the database
+backend off `DB::connection()`; subsequent calls reuse the same
+connection registry.
+
+The signature uses a higher-ranked trait bound + `Pin<Box<dyn
+Future>>` so closures can borrow `tx` across `.await` points:
+
+```rust
+DB::transaction(|tx| {
+    Box::pin(async move {
+        // ... pre-savepoint work ...
+        tx.savepoint("inner").await?;
+        // ... inner work ...
+        if some_condition {
+            tx.rollback_to("inner").await?;
+        }
+        Ok::<(), FrameworkError>(())
+    })
+}).await?;
+```
+
+The `Box::pin(async move { ... })` shape is the cost of letting
+the future use `&tx` after an `.await` — without it, the lifetime
+of the borrow can't escape the closure body. Mirrors SeaORM's
+`TransactionTrait::transaction` signature.
+
+### Savepoints — `tx.savepoint(name)` / `tx.rollback_to(name)`
+
+Savepoints checkpoint the transaction so you can drop a block of
+inner work without aborting the outer commit. Works on all three
+backends — SQLite's `SAVEPOINT` is fully functional even though
+SQLite has no row-level locking.
+
+```rust
+DB::transaction(|tx| {
+    Box::pin(async move {
+        let mut account = Account::query().filter("id", id).first_or_fail().await?;
+        account.balance = 200;
+        account.save().await?;     // committed when the outer tx commits
+
+        tx.savepoint("audit_trail").await?;
+
+        let entry = AuditEntry::create(attrs! { actor_id: actor, ... }).await?;
+        if audit_validation_failed(&entry) {
+            tx.rollback_to("audit_trail").await?;
+            // audit_trail row gone; account update still pending commit
+        }
+
+        Ok::<(), FrameworkError>(())
+    })
+}).await?;
+```
+
+The savepoint name is interpolated verbatim into the SQL — use a
+static identifier, do **not** splice user input.
+
+### Nested `DB::transaction` is rejected at runtime
+
+```rust
+DB::transaction(|_outer| Box::pin(async move {
+    let inner = DB::transaction(|_inner| Box::pin(async move {
+        Ok::<(), FrameworkError>(())
+    })).await;
+    // inner is Err(FrameworkError::Database(
+    //     "nested DB::transaction is not supported; use tx.savepoint(name) for nested rollback"
+    // ))
+    Ok::<(), FrameworkError>(())
+})).await?;
+```
+
+SeaORM's `DatabaseConnection::begin()` doesn't compose — calling
+it on a connection that's already holding a transaction starts a
+brand-new physical transaction that commits / rolls back
+independently of the outer scope. That's a silent data-integrity
+footgun, so `DB::transaction` checks `CURRENT_TX` up front and
+returns a database error instead of producing the wrong
+semantics. Use `tx.savepoint(name)` for nested behaviour.
+
+### Retry-on-deadlock — `DB::transaction_with_attempts`
+
+Postgres `SERIALIZABLE` reads and MySQL row-level locks can raise
+serialization-failure / deadlock errors that resolve by retrying
+the transaction. `transaction_with_attempts` runs the closure
+from scratch each time, up to `attempts`:
+
+```rust
+DB::transaction_with_attempts(3, |_tx| {
+    Box::pin(async move {
+        // SERIALIZABLE-isolated logic that may race a concurrent
+        // tx and surface SQLSTATE 40001 / 40P01 on commit.
+        let inventory = Inventory::query()
+            .filter("sku", sku)
+            .lock_for_update()
+            .first_or_fail()
+            .await?;
+        if inventory.units < requested {
+            return Err(FrameworkError::bad_request("out of stock"));
+        }
+        Inventory::query()
+            .filter("sku", sku)
+            .update(attrs! { units: inventory.units - requested })
+            .await?;
+        Ok::<(), FrameworkError>(())
+    })
+}).await?;
+```
+
+Detection is by Display-string substring against the inner error:
+
+- Postgres SQLSTATE `40001` (serialization_failure)
+- Postgres SQLSTATE `40P01` (deadlock_detected)
+- Case-insensitive `"deadlock"` substring (covers MySQL
+  `Deadlock found when trying to get lock` and any user-surfaced
+  deadlock string)
+
+On the final attempt the error propagates unchanged. The closure
+runs from scratch on every attempt — capture owned state or
+`Arc`s rather than `&mut` references so the retry path is
+well-defined.
+
+> **Caveat:** because detection includes a case-insensitive
+> `"deadlock"` substring (needed for MySQL whose driver doesn't
+> surface a SQLSTATE), any inner error whose `Display` contains
+> the word will trigger a retry. When raising your own errors
+> from inside a `transaction_with_attempts` closure, avoid
+> "deadlock" in the message — otherwise an unrelated validation
+> error retries up to `attempts` times before propagating. The
+> Postgres SQLSTATE matches (`40001` / `40P01`) are the reliable
+> signal; the heuristic is for MySQL only.
+
+### Manual form — `DB::begin_transaction` + `*_with_tx` shims
+
+When the transaction lifetime doesn't fit a closure (e.g. spans
+multiple control-flow branches), open a manual `Transaction` and
+opt each operation into it explicitly:
+
+```rust
+let tx = DB::begin_transaction().await?;
+
+let mut user = User::query()
+    .filter("name", "alice")
+    .with_tx(&tx)
+    .first_or_fail()
+    .await?;
+user.balance = 500;
+user.save_with_tx(&tx).await?;
+
+if some_condition {
+    let mut other = User::query()
+        .filter("name", "bob")
+        .with_tx(&tx)
+        .first_or_fail()
+        .await?;
+    other.update_with_tx(&tx, attrs! { balance: 200i64 }).await?;
+}
+
+tx.commit().await?;  // or tx.rollback().await?;
+```
+
+Manual mode does **not** install `CURRENT_TX`. Scope individual
+operations through the transaction with `Builder::with_tx(&tx)`
+or the `Model::*_with_tx(&tx, ...)` shims:
+
+| Trait method        | Manual variant                         |
+|---------------------|----------------------------------------|
+| `Model::save`       | `Model::save_with_tx(&tx)`             |
+| `Model::update`     | `Model::update_with_tx(&tx, attrs)`    |
+| `Model::delete`     | `Model::delete_with_tx(&tx)`           |
+| `Model::force_delete` | `Model::force_delete_with_tx(&tx)`    |
+| `Builder::*`        | `Builder::with_tx(&tx).*`              |
+
+Holding a `Transaction` pins one pool connection for the entire
+lifetime of the handle. On SQLite the pool has a single connection,
+so any parallel non-transactional read against the same database
+blocks until the transaction completes — **load any pre-flight
+rows BEFORE `DB::begin_transaction()`** and route every dependent
+write through the returned `tx`.
+
+`Transaction::commit` / `Transaction::rollback` consume the
+handle and require `Arc::try_unwrap` of the inner SeaORM
+transaction; if any `TxHandle` clones (from `tx.handle()` /
+`Builder::with_tx(&tx)`) are still alive at commit / rollback
+time, both fail with a "TxHandle clones still alive" error. The
+correct fix is to drop your `Builder<M>` / outstanding handles
+before calling `commit` — the framework refuses to race a
+half-uncommitted write against a parallel writer holding the same
+tx.
+
+### Precedence
+
+Three-way precedence for routing an operation through a connection:
+
+1. **Builder-level override** — `Builder::with_tx(&tx)` or any
+   `Model::*_with_tx(&tx, ...)` shim. Explicit beats ambient.
+2. **Ambient `CURRENT_TX`** — installed by `DB::transaction` /
+   `DB::transaction_with_attempts` for the closure's task scope.
+3. **Pool fallback** — `DB::connection()` returns the global
+   `DbConnection` singleton.
+
+Inside `DB::transaction(|tx| ...)`, calling
+`Builder::with_tx(&other_tx)` explicitly routes that one query
+through `other_tx` — bypassing the ambient `CURRENT_TX`. That's
+almost certainly a bug; the override path exists for the manual
+form, not for overriding the closure's own tx.
+
+### `with_tx` and global scopes
+
+A builder carrying a `tx_override` still respects global scopes,
+named scopes, and the eager-load plan — the override only changes
+the connection routing, not the SQL.
+
+### Limitations (v1)
+
+- **Relation eager loads** — `Builder::with(["posts"])` and
+  `Collection::load(["posts"])` route the eager `IN (...)`
+  sub-queries through `DB::connection()`, not through the active
+  transaction. Pending writes inside a `DB::transaction` closure
+  are **not** visible to relations loaded via `.with(...)`. For
+  now, scope tx work to direct `Model::*` / `Builder::*` /
+  `DB::table(...)` calls; defer relation loads until after the
+  outer write lands (or before `DB::begin_transaction` on the
+  manual path). This is a known seam — the routing helper
+  (`ExecutorChoice`) is already in place at every SQL leaf; the
+  blocker is `EagerLoadDispatch::eager_load` taking
+  `&DatabaseConnection` (concrete), which the macro emits for
+  every relation kind. A follow-up sweep will adapt the trait to
+  the dispatch helper.
+- **DDL on Postgres** — `DB::statement(...)` inside a transaction
+  runs the DDL against the tx connection, which Postgres allows;
+  MySQL implicitly commits and is therefore unsupported inside a
+  Suprnova transaction (this matches Laravel's `DB::transaction`
+  caveat).
+
 ## Scopes
 
 Phase 10C ships two flavours of scope, mirroring Laravel:

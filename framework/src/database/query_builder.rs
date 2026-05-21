@@ -30,7 +30,9 @@ use sea_orm::{
     ColumnTrait, EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Select,
 };
 
-use crate::database::DB;
+// `DB::connection()` is no longer called directly here — Phase 10C T11
+// routes through `ExecutorChoice::resolve()` so the same code path
+// honours an active `DB::transaction` scope without explicit threading.
 use crate::error::FrameworkError;
 
 /// Fluent query builder wrapper
@@ -173,11 +175,17 @@ where
     /// let todos = Todo::query().all().await?;
     /// ```
     pub async fn all(self) -> Result<Vec<E::Model>, FrameworkError> {
-        let db = DB::connection()?;
-        self.select
-            .all(db.inner())
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))
+        // T11: route through ExecutorChoice.
+        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        match &exec {
+            crate::database::transaction::ExecutorChoice::Tx(t) => {
+                self.select.all(t.as_ref()).await
+            }
+            crate::database::transaction::ExecutorChoice::Pool(c) => {
+                self.select.all(c.inner()).await
+            }
+        }
+        .map_err(|e| FrameworkError::database(e.to_string()))
     }
 
     /// Execute query and return first result
@@ -193,11 +201,17 @@ where
     ///     .await?;
     /// ```
     pub async fn first(self) -> Result<Option<E::Model>, FrameworkError> {
-        let db = DB::connection()?;
-        self.select
-            .one(db.inner())
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))
+        // T11: route through ExecutorChoice.
+        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        match &exec {
+            crate::database::transaction::ExecutorChoice::Tx(t) => {
+                self.select.one(t.as_ref()).await
+            }
+            crate::database::transaction::ExecutorChoice::Pool(c) => {
+                self.select.one(c.inner()).await
+            }
+        }
+        .map_err(|e| FrameworkError::database(e.to_string()))
     }
 
     /// Execute query and return first result or error
@@ -229,11 +243,17 @@ where
     ///     .await?;
     /// ```
     pub async fn count(self) -> Result<u64, FrameworkError> {
-        let db = DB::connection()?;
-        self.select
-            .count(db.inner())
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))
+        // T11: route through ExecutorChoice.
+        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        match &exec {
+            crate::database::transaction::ExecutorChoice::Tx(t) => {
+                self.select.count(t.as_ref()).await
+            }
+            crate::database::transaction::ExecutorChoice::Pool(c) => {
+                self.select.count(c.inner()).await
+            }
+        }
+        .map_err(|e| FrameworkError::database(e.to_string()))
     }
 
     /// Check if any records exist matching the query
