@@ -17,6 +17,7 @@ pub mod collection;
 pub mod console;
 pub mod events;
 pub mod fillable;
+pub mod lazy;
 pub mod model;
 pub mod observers;
 pub mod prunable;
@@ -36,6 +37,7 @@ pub use casts::{
 };
 pub use collection::Collection;
 pub use fillable::{unguarded, Fillable};
+pub use lazy::LazyCollection;
 pub use model::{FirstOrCreate, Model, ReplicateExt};
 pub use prunable::{
     prune_all, prune_all_dry, prune_one, pruners, MassPrunable, Prunable, PrunerEntry, PrunerFn,

@@ -6108,6 +6108,7 @@ name = "suprnova"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "async-stream",
  "async-trait",
  "aws-credential-types",
  "aws-sigv4",

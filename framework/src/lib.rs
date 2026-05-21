@@ -225,10 +225,10 @@ pub use eloquent::{
     AsHashed, AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsObject, AsOptionalDateTime,
     AsString, AsTimestamp, Attrs, BelongsTo, BelongsToMany, Builder, Cast, Collection, Direction,
     DynCast, EagerLoadCache, EagerLoadDispatch, EloquentModel, Fillable, FirstOrCreate, GlobalScope,
-    HasMany, HasManyThrough, HasOne, HasOneThrough, IntoColumn, IntoDynCast, IntoVal, MassPrunable,
-    Model, ModelEntry, MorphMany, MorphOne, MorphTo, MorphToMany, MorphTypeEntry, MorphedByMany,
-    Prunable, PrunerEntry, Relation, RelationEntry, RelationKind, ReplicateExt, ScopeRegistry,
-    SoftDeletes, Touchable,
+    HasMany, HasManyThrough, HasOne, HasOneThrough, IntoColumn, IntoDynCast, IntoVal, LazyCollection,
+    MassPrunable, Model, ModelEntry, MorphMany, MorphOne, MorphTo, MorphToMany, MorphTypeEntry,
+    MorphedByMany, Prunable, PrunerEntry, Relation, RelationEntry, RelationKind, ReplicateExt,
+    ScopeRegistry, SoftDeletes, Touchable,
 };
 // Phase 10C T1 — model lifecycle events. The 16 per-type event
 // structs (`Created`, `Saving`, ...) are macro-emitted into each

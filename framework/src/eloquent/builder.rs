@@ -268,6 +268,48 @@ impl<M> Default for Builder<M> {
     }
 }
 
+/// Manual `Clone` for `Builder<M>` — every field is `Clone` except
+/// [`EagerSpec::WithWhere`], whose `Box<dyn Any>` payload (the
+/// type-erased relation predicate) is not. Phase 10C T8's chunking
+/// and lazy iteration both need the builder to clone across query
+/// boundaries; rather than tighten `with_where`'s `FnOnce` bound to
+/// `Fn` (which would touch every macro-emitted relation arm), the
+/// clone drops `eager_specs` entirely.
+///
+/// The drop is safe because every chunking entry point
+/// ([`Builder::chunk`], [`Builder::chunk_by_id`], [`Builder::lazy`])
+/// asserts `eager_specs.is_empty()` up front and returns
+/// `FrameworkError::internal` otherwise — so user code that pairs
+/// `.with(...)` with `.chunk(...)` gets a loud error instead of a
+/// silent eager-load drop. Users who need eager loading inside a
+/// chunked walk re-apply `.with(...)` inside the per-chunk closure.
+impl<M> Clone for Builder<M> {
+    fn clone(&self) -> Self {
+        Self {
+            where_terms: self.where_terms.clone(),
+            orders: self.orders.clone(),
+            select_cols: self.select_cols.clone(),
+            select_raw: self.select_raw.clone(),
+            group_by: self.group_by.clone(),
+            having_terms: self.having_terms.clone(),
+            limit: self.limit,
+            offset: self.offset,
+            distinct: self.distinct,
+            unions: self.unions.clone(),
+            runtime_casts: self.runtime_casts.clone(),
+            global_scopes_disabled: self.global_scopes_disabled.clone(),
+            excluded_scopes: self.excluded_scopes.clone(),
+            skip_all_scopes: self.skip_all_scopes,
+            // EagerSpec::WithWhere holds a non-Clone Box<dyn Any>; drop
+            // the plan on clone. Chunking entry points error-check
+            // before they clone, so users see the violation instead of
+            // a silent drop.
+            eager_specs: Vec::new(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
 impl<M> Builder<M> {
     /// Construct an empty builder. Each `Model::query()` call returns
     /// a fresh instance.
@@ -1939,6 +1981,353 @@ where
             next_cursor,
             prev_cursor,
         ))
+    }
+
+    // ---- Chunking + lazy iteration (Phase 10C T8) -----------------------
+
+    /// Process rows in OFFSET-paginated batches of `n`.
+    ///
+    /// Each batch lands as a [`Collection<M>`] in the user's async
+    /// closure. Memory is bounded by the batch size — never the full
+    /// result set. The closure runs to completion before the next
+    /// batch fetches, so a slow consumer doesn't accumulate rows.
+    ///
+    /// ## NOT safe under concurrent inserts
+    ///
+    /// OFFSET pagination skips rows that shift across the page
+    /// boundary mid-iteration. If a row is inserted before the next
+    /// batch's offset, it will be skipped; if a row is deleted before
+    /// the next batch's offset, the row that took its place will be
+    /// processed twice. Use [`Self::chunk_by_id`] for production-grade
+    /// bulk processing — it filters on `id > last_id` and is
+    /// concurrent-safe by construction.
+    ///
+    /// `chunk()` exists as the simple form for read-only workloads
+    /// against stable tables and for models with non-`i64` primary
+    /// keys where `chunk_by_id` cannot be used.
+    ///
+    /// ## Eager loads are not supported
+    ///
+    /// Pairing `.with(...)` with `.chunk(...)` returns
+    /// `FrameworkError::internal` — the cross-batch builder clone
+    /// drops the type-erased eager plan, so honouring the eager spec
+    /// would be silently inconsistent. Re-apply `.with(...)` inside
+    /// the per-chunk closure when needed (each batch's
+    /// [`Collection<M>`] composes Laravel-shape with `load(...)` /
+    /// `load_missing(...)` from T5b).
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// User::query().chunk(100, |batch| async move {
+    ///     for user in &batch {
+    ///         send_welcome_email(user).await?;
+    ///     }
+    ///     Ok(())
+    /// }).await?;
+    /// ```
+    pub async fn chunk<F, Fut>(self, n: u64, mut f: F) -> Result<(), FrameworkError>
+    where
+        F: FnMut(Collection<M>) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<(), FrameworkError>> + Send,
+    {
+        if !self.eager_specs.is_empty() {
+            return Err(FrameworkError::internal(
+                "Builder::chunk does not support eager loading (`.with(...)`); apply `.with(...)` inside the per-chunk closure instead",
+            ));
+        }
+        let mut offset: u64 = 0;
+        loop {
+            let q = self.clone().limit(n).offset(offset);
+            let batch = q.get().await?;
+            if batch.is_empty() {
+                break;
+            }
+            let count = batch.len() as u64;
+            f(batch).await?;
+            if count < n {
+                break;
+            }
+            offset = offset.saturating_add(n);
+        }
+        Ok(())
+    }
+
+    /// Process rows in PK-cursor batches of `n`. Concurrent-safe.
+    ///
+    /// Each batch issues `WHERE id > last_id ORDER BY id ASC LIMIT n`
+    /// against the model's primary-key column, so rows inserted
+    /// mid-iteration with PKs above the current cursor land in a
+    /// later batch (rather than skipping or duplicating, which
+    /// [`Self::chunk`]'s OFFSET form is vulnerable to).
+    ///
+    /// ## Requires an `i64` primary key
+    ///
+    /// The cursor is read off [`Model::field_value`] as an `i64` —
+    /// models with `String` / `Uuid` PKs use [`Self::chunk`] with the
+    /// OFFSET caveat (or wait for a follow-up that generalises the
+    /// cursor shape). If [`Model::field_value`] returns a non-numeric
+    /// JSON value for the PK column the loop breaks rather than
+    /// looping forever; non-`i64` callers should reach for `chunk`.
+    ///
+    /// ## Eager loads
+    ///
+    /// Same restriction as [`Self::chunk`] — `.with(...)` is rejected
+    /// up front. Re-apply inside the per-chunk closure as needed.
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// // Process every user, surviving concurrent inserts.
+    /// User::query().chunk_by_id(500, |batch| async move {
+    ///     for user in &batch {
+    ///         reindex_user(user).await?;
+    ///     }
+    ///     Ok(())
+    /// }).await?;
+    /// ```
+    pub async fn chunk_by_id<F, Fut>(self, n: u64, mut f: F) -> Result<(), FrameworkError>
+    where
+        F: FnMut(Collection<M>) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<(), FrameworkError>> + Send,
+    {
+        if !self.eager_specs.is_empty() {
+            return Err(FrameworkError::internal(
+                "Builder::chunk_by_id does not support eager loading (`.with(...)`); apply `.with(...)` inside the per-chunk closure instead",
+            ));
+        }
+        let pk = M::primary_key_name();
+        let mut last_id: Option<i64> = None;
+        loop {
+            let mut q = self.clone().order_by_asc(pk).limit(n);
+            if let Some(lid) = last_id {
+                q = q.filter_op(pk, ">", lid);
+            }
+            let batch = q.get().await?;
+            if batch.is_empty() {
+                break;
+            }
+            // Read the highest PK in the batch (the rows came back
+            // `ORDER BY pk ASC`, so `.last()` holds it). If the PK
+            // can't be coerced to `i64` we bail rather than loop
+            // forever — non-`i64` PK models should use `chunk()`.
+            last_id = batch
+                .last()
+                .and_then(|m| m.field_value(pk))
+                .and_then(|v| v.as_i64());
+            let count = batch.len() as u64;
+            f(batch).await?;
+            if count < n {
+                break;
+            }
+            if last_id.is_none() {
+                return Err(FrameworkError::internal(
+                    "Builder::chunk_by_id: primary key column did not yield an i64 value — \
+                     models with non-i64 primary keys must use chunk() instead",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// OFFSET-paginated chunking with a per-chunk map. Returns the
+    /// concatenated mapped results as a single [`Collection<U>`].
+    ///
+    /// Memory-bounded across the iteration: only one chunk's worth of
+    /// `M` is in-flight at a time, while the accumulating
+    /// `Collection<U>` retains every mapped item. Pick `U` smaller
+    /// than `M` (a summary, an id, an aggregate) when the result is
+    /// supposed to stay bounded across very large tables — otherwise
+    /// switch to [`Self::chunk`] + an external sink.
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// // Compute per-batch totals across the table; the result is
+    /// // one i64 per batch, not per row.
+    /// let totals: Collection<i64> = Order::query()
+    ///     .chunk_map(1000, |batch| async move {
+    ///         let sum: i64 = batch.iter().map(|o| o.amount).sum();
+    ///         Ok(Collection::from_vec(vec![sum]))
+    ///     })
+    ///     .await?;
+    /// ```
+    pub async fn chunk_map<F, Fut, U>(
+        self,
+        n: u64,
+        mut f: F,
+    ) -> Result<Collection<U>, FrameworkError>
+    where
+        F: FnMut(Collection<M>) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<Collection<U>, FrameworkError>> + Send,
+        U: Send,
+    {
+        // Same shape as `chunk`, but the per-iteration accumulator
+        // lives in this scope so the mapped output can escape.
+        // Delegating to `chunk` would force the accumulator into the
+        // closure capture — the borrow checker rejects the resulting
+        // `&mut out` aliasing across the async iteration.
+        if !self.eager_specs.is_empty() {
+            return Err(FrameworkError::internal(
+                "Builder::chunk_map does not support eager loading (`.with(...)`); apply `.with(...)` inside the per-chunk closure instead",
+            ));
+        }
+        let mut out: Vec<U> = Vec::new();
+        let mut offset: u64 = 0;
+        loop {
+            let q = self.clone().limit(n).offset(offset);
+            let batch = q.get().await?;
+            if batch.is_empty() {
+                break;
+            }
+            let count = batch.len() as u64;
+            let mapped = f(batch).await?;
+            out.extend(mapped.into_vec());
+            if count < n {
+                break;
+            }
+            offset = offset.saturating_add(n);
+        }
+        Ok(Collection::from_vec(out))
+    }
+
+    /// Process every row through `f` one at a time.
+    ///
+    /// Sugar for [`Self::chunk`]`(1, ...)` — issues N queries for N
+    /// rows. For large datasets, switch to [`Self::lazy`] which
+    /// internally batches via PK cursor (default 1000 rows per fetch)
+    /// while still surfacing one row at a time.
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// User::query().each(|user| async move {
+    ///     send_welcome_email(&user).await?;
+    ///     Ok(())
+    /// }).await?;
+    /// ```
+    pub async fn each<F, Fut>(self, mut f: F) -> Result<(), FrameworkError>
+    where
+        F: FnMut(M) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<(), FrameworkError>> + Send,
+    {
+        // Inline OFFSET-paginated loop with batch size 1. Delegating
+        // to `chunk(1, ...)` would force `f` into the closure
+        // capture; the borrow checker rejects re-using the captured
+        // `&mut f` across async iterations. Inline is the simplest
+        // correct shape.
+        if !self.eager_specs.is_empty() {
+            return Err(FrameworkError::internal(
+                "Builder::each does not support eager loading (`.with(...)`); apply `.with(...)` inside the per-row closure instead",
+            ));
+        }
+        let mut offset: u64 = 0;
+        loop {
+            let q = self.clone().limit(1).offset(offset);
+            let batch = q.get().await?;
+            if batch.is_empty() {
+                break;
+            }
+            let count = batch.len() as u64;
+            for row in batch.into_vec() {
+                f(row).await?;
+            }
+            if count < 1 {
+                break;
+            }
+            offset = offset.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    /// Stream rows one at a time via PK-cursor batching (default
+    /// 1000 rows per fetch).
+    ///
+    /// The internal batch size keeps the round-trip count low; the
+    /// returned [`LazyCollection<M>`] surfaces one row at a time to
+    /// the consumer with backpressure via `.next().await`.
+    ///
+    /// Alias: [`Self::cursor`] (Laravel name).
+    ///
+    /// ## Requires an `i64` primary key
+    ///
+    /// Same constraint as [`Self::chunk_by_id`] — the underlying
+    /// batching uses an `id > last_id` filter. Models with `String` /
+    /// `Uuid` PKs need [`Self::chunk`] until the cursor shape
+    /// generalises.
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// let mut stream = User::query().lazy();
+    /// while let Some(row) = stream.next().await {
+    ///     let user = row?;
+    ///     println!("{}", user.email);
+    /// }
+    /// ```
+    pub fn lazy(self) -> crate::eloquent::LazyCollection<M> {
+        self.lazy_by_id(1000)
+    }
+
+    /// Stream rows one at a time, with a custom internal batch size.
+    ///
+    /// Use this when the default 1000-row internal batch in
+    /// [`Self::lazy`] isn't the right shape — e.g. very wide rows
+    /// where 1000 in memory at once is too much, or very narrow rows
+    /// where a larger batch reduces round trips.
+    ///
+    /// Same `i64`-PK constraint as [`Self::chunk_by_id`].
+    pub fn lazy_by_id(self, batch_size: u64) -> crate::eloquent::LazyCollection<M> {
+        let builder = self;
+        let stream = async_stream::try_stream! {
+            // Reject eager loads up front: they would be silently
+            // dropped on the cross-batch clone, identical contract
+            // to chunk()/chunk_by_id().
+            if !builder.eager_specs.is_empty() {
+                Err(FrameworkError::internal(
+                    "Builder::lazy / lazy_by_id / cursor do not support eager loading (`.with(...)`); apply `.with(...)` inside the consumer loop instead",
+                ))?;
+            }
+            let pk = M::primary_key_name();
+            let mut last_id: Option<i64> = None;
+            loop {
+                let mut q = builder.clone().order_by_asc(pk).limit(batch_size);
+                if let Some(lid) = last_id {
+                    q = q.filter_op(pk, ">", lid);
+                }
+                let batch = q.get().await?;
+                if batch.is_empty() {
+                    break;
+                }
+                last_id = batch
+                    .last()
+                    .and_then(|m| m.field_value(pk))
+                    .and_then(|v| v.as_i64());
+                let count = batch.len() as u64;
+                for row in batch.into_vec() {
+                    yield row;
+                }
+                if count < batch_size {
+                    break;
+                }
+                if last_id.is_none() {
+                    Err(FrameworkError::internal(
+                        "Builder::lazy_by_id: primary key column did not yield an i64 value — \
+                         models with non-i64 primary keys cannot use lazy() / cursor()",
+                    ))?;
+                }
+            }
+        };
+        crate::eloquent::LazyCollection::boxed(stream)
+    }
+
+    /// Laravel-shape alias for [`Self::lazy`].
+    ///
+    /// Same shape, same semantics, same `i64`-PK constraint. Ships
+    /// alongside `lazy` so users with Laravel muscle memory don't
+    /// have to translate.
+    pub fn cursor(self) -> crate::eloquent::LazyCollection<M> {
+        self.lazy()
     }
 
     // Terminal/aggregate type bounds are `TryGetable` — that's the

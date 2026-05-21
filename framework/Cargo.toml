@@ -131,6 +131,7 @@ tokio-tungstenite = "0.29.0"
 totp-rs = { version = "5", features = ["gen_secret", "otpauth", "qr"] }
 qrcode = "0.14"
 featureflag = { version = "0.0.3", features = ["feature-registry", "futures"] }
+async-stream = "0.3.6"
 
 [features]
 default = ["testing"]

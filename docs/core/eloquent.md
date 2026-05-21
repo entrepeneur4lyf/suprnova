@@ -24,6 +24,7 @@ doesn't cover (see the [SeaORM escape hatches](#dropping-to-seaorm)).
 - [Relationships](#relationships)
 - [Eager loading](#eager-loading)
 - [Pagination](#pagination)
+- [Chunking and lazy iteration](#chunking-and-lazy-iteration)
 - [Mass assignment](#mass-assignment)
 - [Casts](#casts)
 - [Accessors and mutators](#accessors-and-mutators)
@@ -1640,6 +1641,135 @@ async fn paginate_page_2() {
 `test_set_query` / `test_clear_query` are gated behind the
 `testing` feature (default-enabled in `framework/Cargo.toml`) so
 release builds never see this surface.
+
+## Chunking and lazy iteration
+
+Seven streaming entry points on `Builder<M>` let you process large
+result sets in bounded memory. Pick by trade-off:
+
+| Method | Pagination | Concurrent-safe? | Returns |
+|--------|-----------|------------------|---------|
+| `chunk(n, async \|batch\| { ... })` | OFFSET | No | `Result<(), _>` |
+| `chunk_by_id(n, async \|batch\| { ... })` | PK cursor | **Yes** | `Result<(), _>` |
+| `chunk_map(n, async \|batch\| { ... })` | OFFSET | No | `Collection<U>` |
+| `each(async \|row\| { ... })` | OFFSET, size 1 | No | `Result<(), _>` |
+| `lazy()` | PK cursor, batch 1000 | **Yes** | `LazyCollection<M>` |
+| `lazy_by_id(batch_size)` | PK cursor, custom batch | **Yes** | `LazyCollection<M>` |
+| `cursor()` | Alias for `lazy()` | **Yes** | `LazyCollection<M>` |
+
+### chunk — OFFSET-paginated batches
+
+```rust
+use suprnova::{Collection, Model};
+
+User::query().chunk(100, |batch: Collection<User>| async move {
+    for user in &batch {
+        send_welcome_email(user).await?;
+    }
+    Ok(())
+}).await?;
+```
+
+The closure receives a `Collection<M>` per batch — slice-shape access
+(`.iter()`, indexing) works directly via `Deref`.
+
+`chunk` is OFFSET-paginated and **not safe under concurrent inserts**:
+rows inserted before the next batch's offset get skipped; rows deleted
+before the offset get processed twice (whatever shifted into their
+slot). Use `chunk_by_id` for production-grade bulk processing against
+tables under write load.
+
+### chunk_by_id — PK-cursor batches, concurrent-safe
+
+```rust
+User::query().chunk_by_id(500, |batch| async move {
+    for user in &batch {
+        reindex_user(user).await?;
+    }
+    Ok(())
+}).await?;
+```
+
+Each batch filters on `WHERE id > last_id ORDER BY id ASC LIMIT n`,
+so rows inserted mid-iteration with PKs above the cursor land in a
+later batch (or are picked up by a subsequent run) — they never cause
+an original row to skip or duplicate.
+
+`chunk_by_id` requires an `i64` primary key. Models with `String` /
+`Uuid` PKs use `chunk` with the OFFSET caveat. (Generalising the
+cursor shape to non-`i64` keys is on the follow-up list.)
+
+### chunk_map — chunk + per-chunk map
+
+```rust
+let totals: Collection<i64> = Order::query()
+    .chunk_map(1000, |batch| async move {
+        let sum: i64 = batch.iter().map(|o| o.amount).sum();
+        Ok(Collection::from_vec(vec![sum]))
+    })
+    .await?;
+```
+
+Maps each batch through `f`, concatenates the mapped output, and
+returns a single `Collection<U>`. Memory-bounded only when `U` is
+strictly smaller than `M` — pick this when you're producing summaries
+(per-batch totals, ids, aggregates) rather than transformed rows.
+
+### each — one row at a time, OFFSET
+
+```rust
+User::query().each(|user| async move {
+    send_welcome_email(&user).await?;
+    Ok(())
+}).await?;
+```
+
+Sugar for `chunk(1, ...)` — one query per row. For large datasets,
+switch to `lazy()` which batches internally (default 1000 rows per
+fetch) while still surfacing one row at a time to the consumer.
+
+### lazy / lazy_by_id / cursor — streams
+
+```rust
+let mut stream = User::query().lazy();
+while let Some(row) = stream.next().await {
+    let user = row?;
+    println!("{}", user.email);
+}
+```
+
+`lazy()` returns a `LazyCollection<M>` — a `Send` stream wrapper
+that yields `Result<M, FrameworkError>` per row. Backpressure works
+naturally: a slow consumer parks at the `await` point and the next
+batch only fetches when the in-memory buffer drains.
+
+`lazy()` batches via PK cursor with a default size of 1000 rows.
+Override the batch size with `lazy_by_id(500)`. `cursor()` is the
+Laravel name and is a zero-cost alias for `lazy()`.
+
+Same `i64`-PK constraint as `chunk_by_id`.
+
+### Eager loads inside chunks
+
+All seven entry points **reject `.with(...)` up front** with a loud
+`FrameworkError::internal`. The Builder's cross-batch clone drops
+the type-erased eager-load plan (its boxed-`dyn Any` predicate isn't
+clonable without tightening the public API), so honouring the plan
+would be silently inconsistent across batches. Re-apply `.with(...)`
+inside the per-chunk closure when needed — each batch's
+`Collection<M>` composes with `load(...)` / `load_missing(...)`:
+
+```rust
+User::query().chunk(100, |batch| async move {
+    let mut batch = batch;
+    batch.load("posts").await?;
+    for u in &batch {
+        let posts = u.posts_loaded();
+        // ...
+    }
+    Ok(())
+}).await?;
+```
 
 ## Mass assignment
 
