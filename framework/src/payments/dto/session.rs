@@ -48,7 +48,7 @@ pub enum SessionPayload {
         /// Display message — provider-localized when possible
         /// (e.g. "Check your phone for the MTN MoMo prompt").
         message: String,
-        operator: super::PaymentMethod,
+        operator: super::MobileMoneyOperator,
     },
     Redirect {
         url: String,

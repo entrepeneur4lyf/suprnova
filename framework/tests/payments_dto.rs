@@ -176,15 +176,12 @@ fn session_payload_mobile_money_prompt_round_trip() {
     let p = SessionPayload::MobileMoneyPrompt {
         provider_transaction_id: "txn_lp_001".into(),
         message: "Check your phone for the MTN MoMo prompt".into(),
-        operator: PaymentMethod::MobileMoney {
-            operator: MobileMoneyOperator::MtnMomo,
-            phone: PhoneNumber::new("+260971234567").unwrap(),
-            country: CountryCode::new("ZM").unwrap(),
-        },
+        operator: MobileMoneyOperator::MtnMomo,
     };
     let j = serde_json::to_value(&p).unwrap();
     assert_eq!(j["flow"], "mobile_money_prompt");
     assert_eq!(j["provider_transaction_id"], "txn_lp_001");
+    assert_eq!(j["operator"]["kind"], "mtn_momo");
     let back: SessionPayload = serde_json::from_value(j).unwrap();
     match back {
         SessionPayload::MobileMoneyPrompt { provider_transaction_id, .. } => {
