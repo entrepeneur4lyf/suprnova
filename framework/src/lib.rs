@@ -48,6 +48,7 @@ pub mod seed;
 pub mod console;
 pub mod supervisor;
 pub mod vector;
+pub mod payments;
 pub mod prelude;
 
 extern crate self as suprnova;
@@ -199,6 +200,10 @@ pub use vector::{
     QdrantDistance, QdrantVectorDriver, Vector, VectorDriver, VectorItem, VectorMatch,
     VectorRegistry, VectorStore, SUPRNOVA_ID_PAYLOAD_KEY,
 };
+// Phase 12 — payments. Money + Currency are the foundational primitives;
+// every payment DTO builds on them. Re-exported at the crate root so
+// consumers write `suprnova::Money` / `suprnova::Currency`.
+pub use payments::{Currency, Money};
 
 #[doc(hidden)]
 pub use clap as __clap;
