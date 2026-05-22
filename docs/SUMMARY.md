@@ -31,6 +31,9 @@
 - [core/notifications](core/notifications.md)
 - [core/scheduling](core/scheduling.md)
 - [core/testing](core/testing.md)
+- [core/payments](core/payments.md)
+- [core/payments-provider-guide](core/payments-provider-guide.md)
+- [core/payments-frontend](core/payments-frontend.md)
 
 ## Frontend
 
