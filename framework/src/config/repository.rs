@@ -48,25 +48,49 @@ pub fn init_repository() -> &'static RwLock<ConfigRepository> {
     CONFIG_REPOSITORY.get_or_init(|| RwLock::new(ConfigRepository::new()))
 }
 
-/// Register a config in the global repository
+/// Register a config in the global repository.
+///
+/// A poisoned write lock — possible if another thread panicked while
+/// holding the lock during boot — is recovered via
+/// `PoisonError::into_inner` rather than silently dropping the
+/// registration. Silent failure here would mean a custom `DatabaseConfig`
+/// or `MailConfig` vanishes from the repository for the rest of the
+/// process lifetime; every `Config::get::<T>()` after that returns None,
+/// and the framework falls back to defaults invisibly.
 pub fn register<T: Any + Send + Sync + 'static>(config: T) {
     let repo = init_repository();
-    if let Ok(mut repo) = repo.write() {
-        repo.register(config);
-    }
+    let mut guard = match repo.write() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.register(config);
 }
 
-/// Get a config from the global repository
+/// Get a config from the global repository.
+///
+/// Poisoned read locks recover via `PoisonError::into_inner` so a panic
+/// during a prior `register` cannot silently make every subsequent
+/// `Config::get::<T>()` return None.
 pub fn get<T: Any + Send + Sync + Clone + 'static>() -> Option<T> {
     let repo = CONFIG_REPOSITORY.get()?;
-    repo.read().ok()?.get::<T>()
+    let guard = match repo.read() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.get::<T>()
 }
 
-/// Check if a config type is registered in the global repository
+/// Check if a config type is registered in the global repository.
+///
+/// Poisoned read locks recover via `PoisonError::into_inner` for the
+/// same reason as [`get`].
 pub fn has<T: Any + 'static>() -> bool {
-    CONFIG_REPOSITORY
-        .get()
-        .and_then(|repo| repo.read().ok())
-        .map(|repo| repo.has::<T>())
-        .unwrap_or(false)
+    let Some(repo) = CONFIG_REPOSITORY.get() else {
+        return false;
+    };
+    let guard = match repo.read() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.has::<T>()
 }

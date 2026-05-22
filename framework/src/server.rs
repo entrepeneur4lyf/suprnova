@@ -147,6 +147,17 @@ impl Server {
         }
 
         let config = Config::get::<ServerConfig>().unwrap_or_else(ServerConfig::from_env);
+
+        // Domain 4 audit fix C1: wire the configured body cap into the
+        // process-global atomic the request collector reads from. Before
+        // this, `SERVER_MAX_BODY_SIZE=...` in the environment was parsed
+        // into ServerConfig but silently ignored — the framework kept
+        // using the compile-time default for every request body cap
+        // decision. Per-FormRequest overrides still take precedence
+        // because `FormRequest::max_body_bytes` is checked at extract
+        // time, not at boot.
+        crate::http::body::set_global_max_request_body_bytes(config.max_body_size);
+
         Ok(Self {
             router: Arc::new(router.into()),
             // Pull global middleware registered via global_middleware! in bootstrap.rs
