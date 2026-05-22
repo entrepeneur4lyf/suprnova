@@ -902,6 +902,108 @@ async fn integration_vec_fromtext_accepts_our_format() {
 
 #[tokio::test]
 #[ignore]
+async fn integration_similar_errors_on_distance_mismatch() {
+    // Create the table with DISTANCE=cosine, then configure the
+    // driver for Euclidean and call similar(). The framework's
+    // per-store check must surface the mismatch as a clear error
+    // — MariaDB would otherwise silently degrade to a full table
+    // scan.
+    let url = match mariadb_url_or_skip("integration_similar_errors_on_distance_mismatch") {
+        Some(u) => u,
+        None => return,
+    };
+    let driver = MariaDbVectorDriver::from_url(&url)
+        .unwrap()
+        .with_distance(MariaDbDistance::Euclidean);
+    let table = unique_table("mismatch");
+    drop_table(&driver, &table).await;
+
+    // Table built with DISTANCE=cosine — deliberately different from the driver.
+    let create_sql =
+        MariaDbVectorDriver::ensure_table_sql(&table, 3, MariaDbDistance::Cosine).unwrap();
+    sqlx::query(&create_sql)
+        .execute(driver.pool())
+        .await
+        .expect("CREATE TABLE");
+
+    // upsert/count don't engage the vector index — these must still succeed.
+    driver
+        .upsert(
+            &table,
+            vec![VectorItem::new(
+                "a",
+                vec![1.0, 0.0, 0.0],
+                serde_json::Value::Null,
+            )],
+        )
+        .await
+        .expect("upsert succeeds even on mismatched-index table");
+    assert_eq!(driver.count(&table).await.unwrap(), 1);
+
+    // similar() is where the mismatch silently degrades — the framework
+    // catches it here.
+    let err = driver
+        .similar(&table, vec![1.0, 0.0, 0.0], 1)
+        .await
+        .expect_err("similar must reject distance mismatch");
+    let msg = err.to_string();
+    assert!(msg.contains("DISTANCE=cosine"), "should name table's distance: {msg}");
+    assert!(msg.contains("Euclidean"), "should name driver's distance: {msg}");
+    assert!(
+        msg.contains("full table scan"),
+        "should explain the failure mode: {msg}"
+    );
+
+    drop_table(&driver, &table).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn integration_similar_passes_distance_match_caches_after_first_call() {
+    // Matching distance on both ends — first similar() runs the
+    // SHOW CREATE TABLE check, subsequent calls hit the cache. We
+    // can't directly assert the second call skipped the check, but
+    // we can prove correctness end-to-end by querying twice and
+    // verifying both succeed.
+    let url = match mariadb_url_or_skip(
+        "integration_similar_passes_distance_match_caches_after_first_call",
+    ) {
+        Some(u) => u,
+        None => return,
+    };
+    let driver = MariaDbVectorDriver::from_url(&url).unwrap();
+    let table = unique_table("match_cache");
+    drop_table(&driver, &table).await;
+
+    let create_sql =
+        MariaDbVectorDriver::ensure_table_sql(&table, 3, MariaDbDistance::Cosine).unwrap();
+    sqlx::query(&create_sql)
+        .execute(driver.pool())
+        .await
+        .expect("CREATE TABLE");
+
+    driver
+        .upsert(
+            &table,
+            vec![VectorItem::new(
+                "a",
+                vec![1.0, 0.0, 0.0],
+                serde_json::Value::Null,
+            )],
+        )
+        .await
+        .unwrap();
+
+    // First call: runs ensure_store_distance, populates cache.
+    let _ = driver.similar(&table, vec![1.0, 0.0, 0.0], 1).await.unwrap();
+    // Second call: cache hit, no extra SHOW CREATE TABLE.
+    let _ = driver.similar(&table, vec![1.0, 0.0, 0.0], 1).await.unwrap();
+
+    drop_table(&driver, &table).await;
+}
+
+#[tokio::test]
+#[ignore]
 async fn integration_delete_chunks_across_multiple_batches() {
     // Insert more ids than the driver's internal DELETE_BATCH_SIZE
     // (1000 at time of writing) so a single delete() call has to

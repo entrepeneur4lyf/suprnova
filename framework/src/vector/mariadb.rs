@@ -87,15 +87,35 @@ use crate::FrameworkError;
 use async_trait::async_trait;
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions};
 use sqlx::Row;
+use std::collections::HashSet;
 use std::fmt::Write;
 use std::sync::Arc;
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, RwLock};
 
 /// IN-list size beyond which `delete` splits the call into multiple
 /// `DELETE ... WHERE id IN (...)` statements wrapped in one
 /// transaction. Keeps any single statement well below MariaDB's
 /// `max_allowed_packet` even when deleting millions of ids at once.
 const DELETE_BATCH_SIZE: usize = 1000;
+
+/// Row count per multi-row `INSERT ... VALUES (...), (...), ...`
+/// statement in `upsert`. 500 rows × 3 placeholders each = 1500
+/// placeholders per statement, comfortably under MySQL's 65535
+/// placeholder cap and below the per-packet ceiling for any
+/// reasonable `max_allowed_packet` config. All chunks run inside one
+/// transaction so the whole call is atomic.
+const UPSERT_BATCH_SIZE: usize = 500;
+
+/// Build the `VALUES (?, VEC_FROMTEXT(?), ?), (...) ...` clause used
+/// by the batched upsert. Extracted for pure-fn testability — the
+/// template is entirely framework-controlled (no user input), so the
+/// only failure mode is row_count mismatch with caller binds, which
+/// the unit tests pin.
+fn upsert_values_clause(row_count: usize) -> String {
+    std::iter::repeat_n("(?, VEC_FROMTEXT(?), ?)", row_count)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 /// Distance metric for the MariaDB vector index. Picks both the
 /// `DISTANCE=` clause emitted by [`MariaDbVectorDriver::ensure_table_sql`]
@@ -152,6 +172,14 @@ pub struct MariaDbVectorDriver {
     ///
     /// [`ensure_version`]: Self::ensure_version
     version_check: Arc<OnceCell<Result<(), String>>>,
+    /// Memo of store names whose `VECTOR INDEX ... DISTANCE=<clause>`
+    /// has been verified to match `self.distance`. Populated by
+    /// [`ensure_store_distance`] on the first `similar` call against
+    /// each store, so the `SHOW CREATE TABLE` round-trip only fires
+    /// once per (driver, store) pair.
+    ///
+    /// [`ensure_store_distance`]: Self::ensure_store_distance
+    verified_stores: Arc<RwLock<HashSet<String>>>,
 }
 
 impl MariaDbVectorDriver {
@@ -162,6 +190,7 @@ impl MariaDbVectorDriver {
             pool: Arc::new(pool),
             distance: MariaDbDistance::default(),
             version_check: Arc::new(OnceCell::new()),
+            verified_stores: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -369,6 +398,96 @@ impl MariaDbVectorDriver {
             Err(msg) => Err(FrameworkError::internal(msg.clone())),
         }
     }
+
+    /// Verify the table's `VECTOR INDEX ... DISTANCE=<clause>` matches
+    /// `self.distance`. MariaDB does not error when a `VEC_DISTANCE_*`
+    /// function disagrees with the index's distance — it silently falls
+    /// back to a full table scan, leaving users with mysteriously slow
+    /// queries. This check catches the mismatch at the framework
+    /// boundary so the error surfaces clearly instead of as a
+    /// production perf cliff.
+    ///
+    /// One `SHOW CREATE TABLE` runs per (driver, store) pair on first
+    /// `similar` call; the result is cached in `verified_stores` so
+    /// every subsequent call is zero-cost. Other methods (`upsert`,
+    /// `delete`, `count`) do not engage the vector index and so do not
+    /// trigger the check.
+    ///
+    /// The caller must have already validated `store` via
+    /// [`validate_store_name`] — the name is interpolated into the
+    /// emitted SQL.
+    ///
+    /// [`validate_store_name`]: Self::validate_store_name
+    async fn ensure_store_distance(&self, store: &str) -> Result<(), FrameworkError> {
+        if self.verified_stores.read().await.contains(store) {
+            return Ok(());
+        }
+
+        let sql = format!("SHOW CREATE TABLE `{store}`");
+        let row: (String, String) = sqlx::query_as(&sql)
+            .fetch_one(&*self.pool)
+            .await
+            .map_err(|e| {
+                FrameworkError::internal(format!(
+                    "mariadb: SHOW CREATE TABLE for store '{store}' failed: {e}"
+                ))
+            })?;
+        let ddl = &row.1;
+
+        let table_distance = match extract_vector_index_distance(ddl) {
+            Some(d) => d,
+            None => {
+                return Err(FrameworkError::internal(format!(
+                    "mariadb vector store '{store}' has no VECTOR INDEX — run \
+                     ensure_table_sql_for to emit the canonical CREATE TABLE, \
+                     or add `VECTOR INDEX (embedding) DISTANCE={}` to the \
+                     table definition.",
+                    self.distance.index_clause()
+                )));
+            }
+        };
+
+        let expected = self.distance.index_clause();
+        if table_distance != expected {
+            return Err(FrameworkError::internal(format!(
+                "mariadb vector store '{store}' has VECTOR INDEX DISTANCE={table_distance} \
+                 but the driver is configured with_distance({:?}). Mismatched distances \
+                 silently fall back to a full table scan — rebuild the table with \
+                 DISTANCE={expected} or reconfigure the driver.",
+                self.distance
+            )));
+        }
+
+        self.verified_stores.write().await.insert(store.to_string());
+        Ok(())
+    }
+}
+
+/// Extract the `DISTANCE=<clause>` value from a `SHOW CREATE TABLE`
+/// output's `VECTOR INDEX (...)` line. Returns the literal value
+/// (lowercase) when present; defaults to `"euclidean"` when the
+/// `VECTOR INDEX` line exists but omits the clause (MariaDB's own
+/// default); returns `None` when there is no `VECTOR INDEX` at all.
+///
+/// Token-based parse — searches the line for `DISTANCE=cosine` or
+/// `DISTANCE=euclidean` substrings, in that order. Both are the only
+/// values MariaDB accepts for the clause as of 11.7, so a future
+/// metric would need an explicit update here anyway.
+fn extract_vector_index_distance(ddl: &str) -> Option<&'static str> {
+    for line in ddl.lines() {
+        if line.contains("VECTOR INDEX") {
+            if line.contains("DISTANCE=cosine") {
+                return Some("cosine");
+            }
+            if line.contains("DISTANCE=euclidean") {
+                return Some("euclidean");
+            }
+            // VECTOR INDEX present without explicit DISTANCE — MariaDB
+            // defaults to euclidean per its docs.
+            return Some("euclidean");
+        }
+    }
+    None
 }
 
 /// Parse a MariaDB `VERSION()` string and confirm it advertises ≥ 11.7.
@@ -438,38 +557,51 @@ impl VectorDriver for MariaDbVectorDriver {
         }
         self.ensure_version().await?;
 
-        let sql = format!(
-            "INSERT INTO `{table}` (id, embedding, metadata) \
-             VALUES (?, VEC_FROMTEXT(?), ?) \
-             ON DUPLICATE KEY UPDATE \
-             embedding = VALUES(embedding), \
-             metadata = VALUES(metadata)"
-        );
-
+        // Batched multi-row INSERT — one statement per chunk of
+        // `UPSERT_BATCH_SIZE` rows, all wrapped in a single transaction.
+        // Cuts round-trips by ~500x vs per-row INSERTs on bulk loads
+        // (1536-dim embedding corpora hitting 100k+ rows). Any per-batch
+        // failure rolls back every preceding batch — the whole call
+        // remains atomic.
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| FrameworkError::internal(format!("mariadb upsert begin tx: {e}")))?;
 
-        for item in items {
-            let vec_text = MariaDbVectorDriver::embedding_to_vec_text(&item.embedding)?;
-            let metadata_for_bind = match item.metadata {
-                serde_json::Value::Null => None,
-                v => Some(v),
-            };
-            sqlx::query(&sql)
-                .bind(&item.id)
-                .bind(&vec_text)
-                .bind(metadata_for_bind)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| {
-                    FrameworkError::internal(format!(
-                        "mariadb upsert failed for store '{table}' id '{}': {e}",
-                        item.id
-                    ))
-                })?;
+        let mut iter = items.into_iter();
+        loop {
+            let chunk: Vec<VectorItem> =
+                iter.by_ref().take(UPSERT_BATCH_SIZE).collect();
+            if chunk.is_empty() {
+                break;
+            }
+            let row_count = chunk.len();
+
+            let sql = format!(
+                "INSERT INTO `{table}` (id, embedding, metadata) VALUES {values} \
+                 ON DUPLICATE KEY UPDATE \
+                 embedding = VALUES(embedding), \
+                 metadata = VALUES(metadata)",
+                values = upsert_values_clause(row_count)
+            );
+
+            let mut q = sqlx::query(&sql);
+            for item in chunk {
+                let vec_text =
+                    MariaDbVectorDriver::embedding_to_vec_text(&item.embedding)?;
+                let metadata = match item.metadata {
+                    serde_json::Value::Null => None,
+                    v => Some(v),
+                };
+                q = q.bind(item.id).bind(vec_text).bind(metadata);
+            }
+
+            q.execute(&mut *tx).await.map_err(|e| {
+                FrameworkError::internal(format!(
+                    "mariadb upsert chunk ({row_count} rows) failed for store '{table}': {e}"
+                ))
+            })?;
         }
 
         tx.commit()
@@ -494,6 +626,7 @@ impl VectorDriver for MariaDbVectorDriver {
         }
         let table = MariaDbVectorDriver::validate_store_name(store)?;
         self.ensure_version().await?;
+        self.ensure_store_distance(table).await?;
 
         let vec_text = MariaDbVectorDriver::embedding_to_vec_text(&query)?;
         let sql = format!(
@@ -592,6 +725,105 @@ impl VectorDriver for MariaDbVectorDriver {
             FrameworkError::internal(format!("mariadb count: decode COUNT column: {e}"))
         })?;
         Ok(n.max(0) as usize)
+    }
+}
+
+#[cfg(test)]
+mod upsert_clause_tests {
+    use super::upsert_values_clause;
+
+    #[test]
+    fn single_row() {
+        assert_eq!(upsert_values_clause(1), "(?, VEC_FROMTEXT(?), ?)");
+    }
+
+    #[test]
+    fn three_rows() {
+        assert_eq!(
+            upsert_values_clause(3),
+            "(?, VEC_FROMTEXT(?), ?), (?, VEC_FROMTEXT(?), ?), (?, VEC_FROMTEXT(?), ?)"
+        );
+    }
+
+    #[test]
+    fn zero_rows_produces_empty_string() {
+        // Caller is expected to short-circuit on empty input — but the
+        // helper itself is total over usize.
+        assert_eq!(upsert_values_clause(0), "");
+    }
+
+    #[test]
+    fn placeholder_count_is_three_per_row() {
+        // Each row contributes 3 binds; pin it so a future refactor
+        // doesn't silently change the bind count.
+        let clause = upsert_values_clause(100);
+        let placeholders = clause.matches('?').count();
+        assert_eq!(placeholders, 300);
+    }
+}
+
+#[cfg(test)]
+mod distance_extract_tests {
+    use super::extract_vector_index_distance;
+
+    #[test]
+    fn explicit_cosine() {
+        let ddl = "CREATE TABLE `t` (\n  id INT,\n  embedding VECTOR(3) NOT NULL,\n  \
+                   VECTOR INDEX (embedding) DISTANCE=cosine\n) ENGINE=InnoDB";
+        assert_eq!(extract_vector_index_distance(ddl), Some("cosine"));
+    }
+
+    #[test]
+    fn explicit_euclidean() {
+        let ddl = "...\n  VECTOR INDEX (embedding) DISTANCE=euclidean\n";
+        assert_eq!(extract_vector_index_distance(ddl), Some("euclidean"));
+    }
+
+    #[test]
+    fn with_m_parameter_before_distance() {
+        let ddl = "...\n  VECTOR INDEX (embedding) M=8 DISTANCE=cosine\n";
+        assert_eq!(extract_vector_index_distance(ddl), Some("cosine"));
+    }
+
+    #[test]
+    fn omitted_clause_defaults_to_euclidean() {
+        // MariaDB's own default when DISTANCE= isn't specified.
+        let ddl = "...\n  VECTOR INDEX (embedding)\n";
+        assert_eq!(extract_vector_index_distance(ddl), Some("euclidean"));
+    }
+
+    #[test]
+    fn omitted_clause_with_m_defaults_to_euclidean() {
+        let ddl = "...\n  VECTOR INDEX (embedding) M=16\n";
+        assert_eq!(extract_vector_index_distance(ddl), Some("euclidean"));
+    }
+
+    #[test]
+    fn no_vector_index_returns_none() {
+        let ddl = "CREATE TABLE `t` (\n  id INT,\n  PRIMARY KEY (id),\n  \
+                   INDEX (other_col)\n) ENGINE=InnoDB";
+        assert_eq!(extract_vector_index_distance(ddl), None);
+    }
+
+    #[test]
+    fn matches_canonical_ensure_table_sql_output() {
+        // Pin parity with our own emitter — if ensure_table_sql ever
+        // changes its line format, this test fails first.
+        let sql = super::MariaDbVectorDriver::ensure_table_sql(
+            "documents",
+            128,
+            super::MariaDbDistance::Cosine,
+        )
+        .unwrap();
+        assert_eq!(extract_vector_index_distance(&sql), Some("cosine"));
+
+        let sql = super::MariaDbVectorDriver::ensure_table_sql(
+            "documents",
+            128,
+            super::MariaDbDistance::Euclidean,
+        )
+        .unwrap();
+        assert_eq!(extract_vector_index_distance(&sql), Some("euclidean"));
     }
 }
 

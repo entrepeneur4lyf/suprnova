@@ -192,7 +192,10 @@ let sql = driver.ensure_table_sql_for("documents", 1536)?;
 
 For migration generators that don't have a driver in scope (CLI tools, build scripts), use the static `MariaDbVectorDriver::ensure_table_sql(name, dim, distance)` and pass the same `MariaDbDistance` you'll later configure on the driver.
 
-**Distance must match on both ends.** MariaDB silently falls back to a full table scan when the function used at query time doesn't match the index's `DISTANCE=` clause. `ensure_table_sql_for` enforces this by reading `self.distance` for both the emitted SQL and the runtime function in `similar` — they cannot drift apart. The static form leaves that contract to the caller.
+**Distance must match on both ends.** MariaDB silently falls back to a full table scan when the function used at query time doesn't match the index's `DISTANCE=` clause. The driver guards against this in two layers:
+
+1. **`ensure_table_sql_for(name, dim)`** reads `self.distance` for both the emitted migration SQL and the runtime function in `similar` — they cannot drift apart by construction.
+2. **A runtime check on first `similar` call** runs one `SHOW CREATE TABLE` per store, parses the actual `DISTANCE=` clause from the live schema, and errors clearly if it disagrees with `with_distance(...)`. Result is cached, so subsequent calls are zero-cost. This catches hand-written migrations or `from_pool` setups that bypass `ensure_table_sql_for`.
 
 **Store-name safety.** Store names interpolate into emitted SQL (MySQL doesn't parameterize identifiers). Names are validated as `[A-Za-z_][A-Za-z0-9_]*` of length ≤ 64; the validated name is then backtick-quoted in every statement. Invalid names error with `FrameworkError::param` at the `register`/`upsert`/`similar`/`delete`/`count` boundary.
 
@@ -208,6 +211,14 @@ For migration generators that don't have a driver in scope (CLI tools, build scr
 In both cases, ranking is preserved (best result first); the score is comparable across drivers because every backend lands on the same `higher = better` convention.
 
 **Trapdoor.** `driver.pool()` returns the underlying `sqlx::MySqlPool` for raw queries the trait doesn't cover. `MariaDbVectorDriver::embedding_to_vec_text`, `score_from_distance`, and `ensure_table_sql` are pure functions you can call independently when mixing direct SQL with trait-routed calls.
+
+**Bulk upsert behavior.** `upsert` emits one multi-row `INSERT ... VALUES (...), (...), ...` statement per 500-row chunk, all wrapped in a single transaction. Network round-trips drop ~500x vs per-row inserts when loading a fresh corpus; the call stays atomic across the whole batch. The batch size is internal — call `upsert` once with all your items and the driver handles chunking.
+
+**HNSW indexes rebuild at commit time.** MariaDB updates the HNSW graph as rows go in, but the index work concentrates at commit. A 1M-row `upsert` will hold the transaction open for the full duration of the index build, which can be minutes. For very large initial loads, break the corpus into 10k–100k-row batches and call `upsert` repeatedly so each batch commits and frees the lock between rounds. (Smaller `upsert` calls are not slower per row — they just spread the index work into more commit points.)
+
+**Dimension is pinned at table creation.** `VECTOR(N)` fixes the dimension; switching embedding models from a 768-dim model to a 1536-dim model means a full table migration (new table, re-embed, swap). Plan model upgrades the same way you'd plan a schema migration — there is no "ALTER COLUMN VECTOR(768) → VECTOR(1536)" path.
+
+**Pool sizing.** `from_url` uses sqlx's default `MySqlPoolOptions` — `max_connections = 10` at the time of writing. For high-QPS workloads (hundreds of `similar` calls per second), build the pool yourself with `MySqlPoolOptions::new().max_connections(N).connect_lazy(url)` and pass to `from_pool`. The driver doesn't impose its own connection cap.
 
 **Local setup.** Run MariaDB 11.7+ via Docker:
 
