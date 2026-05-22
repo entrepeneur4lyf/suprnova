@@ -28,10 +28,12 @@
 
 pub mod driver;
 pub mod memory;
+pub mod qdrant;
 pub mod registry;
 
 pub use driver::{VectorDriver, VectorItem, VectorMatch};
 pub use memory::MemoryVectorDriver;
+pub use qdrant::{QdrantDistance, QdrantVectorDriver, SUPRNOVA_ID_PAYLOAD_KEY};
 pub use registry::{VectorRegistry, VectorStore};
 
 use crate::FrameworkError;
