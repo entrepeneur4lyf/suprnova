@@ -7064,7 +7064,9 @@ dependencies = [
  "chrono",
  "hex",
  "hmac 0.12.1",
+ "http 1.4.0",
  "inventory",
+ "rustls 0.23.40",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -7072,6 +7074,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

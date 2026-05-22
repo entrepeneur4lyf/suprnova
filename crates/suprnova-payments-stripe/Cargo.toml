@@ -24,4 +24,7 @@ async-stripe-types = "1.0.0-rc.5"
 chrono = { version = "0.4.44", default-features = false, features = ["clock", "serde"] }
 
 [dev-dependencies]
+http = "1.4"
+rustls = { version = "0.23", features = ["ring"] }
 tokio = { version = "1", features = ["full"] }
+uuid = { version = "1.23.1", features = ["v4"] }
