@@ -1,7 +1,7 @@
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
-use std::ops::{Add, Sub};
+use std::ops::{Add, AddAssign, Sub, SubAssign};
 
 pub use iso_currency::Currency;
 
@@ -59,7 +59,7 @@ impl Money {
     }
 
     /// Returns `true` if the amount is exactly zero.
-    pub fn is_zero(&self) -> bool {
+    pub const fn is_zero(&self) -> bool {
         self.minor_units == 0
     }
 }
@@ -68,13 +68,17 @@ impl Add for Money {
     type Output = Money;
 
     fn add(self, rhs: Money) -> Money {
-        assert_eq!(
-            self.currency, rhs.currency,
+        assert!(
+            self.currency == rhs.currency,
             "currency mismatch: {:?} vs {:?}",
-            self.currency, rhs.currency
+            self.currency,
+            rhs.currency
         );
         Money {
-            minor_units: self.minor_units + rhs.minor_units,
+            minor_units: self
+                .minor_units
+                .checked_add(rhs.minor_units)
+                .expect("Money arithmetic overflow"),
             currency: self.currency,
         }
     }
@@ -84,14 +88,30 @@ impl Sub for Money {
     type Output = Money;
 
     fn sub(self, rhs: Money) -> Money {
-        assert_eq!(
-            self.currency, rhs.currency,
+        assert!(
+            self.currency == rhs.currency,
             "currency mismatch: {:?} vs {:?}",
-            self.currency, rhs.currency
+            self.currency,
+            rhs.currency
         );
         Money {
-            minor_units: self.minor_units - rhs.minor_units,
+            minor_units: self
+                .minor_units
+                .checked_sub(rhs.minor_units)
+                .expect("Money arithmetic overflow"),
             currency: self.currency,
         }
+    }
+}
+
+impl AddAssign for Money {
+    fn add_assign(&mut self, rhs: Money) {
+        *self = *self + rhs;
+    }
+}
+
+impl SubAssign for Money {
+    fn sub_assign(&mut self, rhs: Money) {
+        *self = *self - rhs;
     }
 }
