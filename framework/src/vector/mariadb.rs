@@ -8,9 +8,12 @@
 //!
 //! `VECTOR(N)` and `VEC_DISTANCE_*` builtins land in **MariaDB 11.7+**. The
 //! driver runs a `SELECT VERSION()` on first use and rejects anything older
-//! with [`FrameworkError::internal`]. The check is cached in a
-//! [`tokio::sync::OnceCell`] — failures are sticky (a pre-11.7 server stays
-//! rejected without re-querying on every call).
+//! with [`FrameworkError::internal`]. The result is cached in a
+//! [`tokio::sync::OnceCell`] — *definitive* outcomes (verified ≥ 11.7, or
+//! a parsed pre-11.7 / non-MariaDB version string) stick across calls.
+//! Transient query failures (lazy-connect first-dial timeout, brief
+//! network blip, restart-induced auth gap) are NOT cached, so the next
+//! call gets a fresh shot once the underlying issue clears.
 //!
 //! # Schema convention
 //!
@@ -130,10 +133,18 @@ impl MariaDbDistance {
 pub struct MariaDbVectorDriver {
     pool: Arc<MySqlPool>,
     distance: MariaDbDistance,
-    /// Cached `SELECT VERSION()` result. `Ok(())` once verified ≥ 11.7;
-    /// `Err(msg)` once a pre-11.7 server (or non-MariaDB) is detected.
-    /// Failures stick — we don't keep hammering the server with version
-    /// queries after a definitive rejection.
+    /// Cached `SELECT VERSION()` result. Populated lazily on first use:
+    /// `Ok(())` once verified ≥ 11.7; `Err(msg)` once a pre-11.7 server
+    /// (or non-MariaDB) is *definitively* detected (server responded
+    /// with a string we could parse). Definitive results stick — we
+    /// don't keep hammering the server.
+    ///
+    /// Transient *query* failures (connection refused, timeout,
+    /// auth blip during a lazy-connect first dial) are NOT cached;
+    /// they bubble out of [`ensure_version`] and let the next call
+    /// re-attempt. Implemented via `get_or_try_init`.
+    ///
+    /// [`ensure_version`]: Self::ensure_version
     version_check: Arc<OnceCell<Result<(), String>>>,
 }
 
@@ -314,25 +325,39 @@ impl MariaDbVectorDriver {
         }
     }
 
-    /// Run the `SELECT VERSION()` check once per driver. The cell
-    /// stores `Ok(())` on success or `Err(<message>)` on failure;
-    /// subsequent calls short-circuit through the cached value without
-    /// re-querying.
+    /// Run the `SELECT VERSION()` check at most once per driver per
+    /// successful execution path. The cell stores the *definitive*
+    /// result — `Ok(())` once verified ≥ 11.7, `Err(msg)` once a
+    /// pre-11.7 server (or non-MariaDB) is identified — and subsequent
+    /// calls short-circuit through it.
+    ///
+    /// **Transient failures are not cached.** If the `VERSION()` query
+    /// itself fails (connection refused, timeout, auth blip during a
+    /// lazy-connect first dial), the error bubbles out without touching
+    /// the cell, so the next call gets a fresh attempt once the
+    /// underlying issue clears. This is implemented via
+    /// `get_or_try_init`, which only writes to the cell when its init
+    /// closure returns `Ok`.
     async fn ensure_version(&self) -> Result<(), FrameworkError> {
         let pool = Arc::clone(&self.pool);
-        let cached = self
+        let cached: &Result<(), String> = self
             .version_check
-            .get_or_init(|| async move {
-                let row: (String,) = match sqlx::query_as("SELECT VERSION()")
+            .get_or_try_init(|| async move {
+                let row: (String,) = sqlx::query_as("SELECT VERSION()")
                     .fetch_one(&*pool)
                     .await
-                {
-                    Ok(row) => row,
-                    Err(e) => return Err(format!("mariadb VERSION() query failed: {e}")),
-                };
-                check_mariadb_117(&row.0)
+                    .map_err(|e| {
+                        // Transient query failure — bubble out so the
+                        // next call retries. Not cached.
+                        FrameworkError::internal(format!(
+                            "mariadb VERSION() query failed: {e}"
+                        ))
+                    })?;
+                // Server responded — the version check itself is
+                // deterministic and its result IS cached, sticky.
+                Ok::<_, FrameworkError>(check_mariadb_117(&row.0))
             })
-            .await;
+            .await?;
         match cached {
             Ok(()) => Ok(()),
             Err(msg) => Err(FrameworkError::internal(msg.clone())),
