@@ -23,6 +23,12 @@ pub enum PaymentError {
     #[error("webhook signature verification failed: {0}")]
     WebhookSignature(String),
 
+    #[error("invalid phone number: {0}")]
+    InvalidPhoneNumber(String),
+
+    #[error("invalid country code: {0}")]
+    InvalidCountryCode(String),
+
     #[error("internal payments error: {0}")]
     Internal(String),
 }

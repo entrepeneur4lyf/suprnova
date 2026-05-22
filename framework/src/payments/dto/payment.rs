@@ -2,16 +2,33 @@ use crate::payments::Money;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum PaymentStatus {
+    /// Payment object created but not yet attempted.
+    Created,
+    /// Awaiting customer or merchant action (3DS / SCA / USSD prompt).
+    RequiresAction,
+    /// Submitted to provider; not yet finalized.
     Pending,
+    /// Provider is processing asynchronously (Stripe `processing`).
+    Processing,
+    /// Authorized but not yet captured (separate-capture flow).
+    Authorized,
+    /// Checkout session or authorization expired before payment completed.
+    Expired,
+    /// Successfully completed.
     Succeeded,
+    /// Payment failed.
     Failed,
-    Refunded,
-    PartiallyRefunded,
-    Disputed,
+    /// Customer or merchant canceled.
     Canceled,
+    /// Fully refunded.
+    Refunded,
+    /// Partially refunded.
+    PartiallyRefunded,
+    /// Customer disputed the charge (chargeback opened).
+    Disputed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
