@@ -204,11 +204,60 @@ impl HttpResponse {
     /// `BoxBody<Bytes, Infallible>` so the server can hand any
     /// `HttpResponse` — static or streaming — to `hyper` without
     /// branching on the body shape.
+    ///
+    /// Headers are validated per-entry via `HeaderName::try_from` and
+    /// `HeaderValue::try_from`. Any header rejected by hyper (CRLF
+    /// injection attempts, invalid characters, oversize values) is
+    /// **dropped** with a `tracing::warn!` and the response is built
+    /// without it. The alternative — accumulating builder errors and
+    /// panicking at `.body()` — would tear down the per-connection task
+    /// on attacker-controlled input that any reflection-style
+    /// middleware would forward into a header (CORS allow-headers,
+    /// `X-Forwarded-*`, custom debug headers).
+    ///
+    /// The status code goes through `StatusCode::from_u16` with the
+    /// same drop-on-invalid policy; out-of-range values (>999 or any
+    /// non-status integer) downgrade to a 500 rather than panic.
     pub fn into_hyper(self) -> hyper::Response<BoxBody<Bytes, Infallible>> {
-        let mut builder = hyper::Response::builder().status(self.status);
+        let status = match hyper::StatusCode::from_u16(self.status) {
+            Ok(s) => s,
+            Err(_) => {
+                tracing::warn!(
+                    status = self.status,
+                    "dropping invalid HTTP status code; falling back to 500"
+                );
+                hyper::StatusCode::INTERNAL_SERVER_ERROR
+            }
+        };
+        let mut builder = hyper::Response::builder().status(status);
 
         for (name, value) in self.headers {
-            builder = builder.header(name, value);
+            let header_name = match hyper::header::HeaderName::try_from(name.as_str()) {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!(
+                        header = %name,
+                        error = %e,
+                        "dropping invalid response header name; \
+                         rejected by hyper validation"
+                    );
+                    continue;
+                }
+            };
+            let header_value = match hyper::header::HeaderValue::try_from(value.as_str()) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        header = %name,
+                        error = %e,
+                        "dropping invalid response header value; \
+                         rejected by hyper validation (likely CR/LF \
+                         or other control character)"
+                    );
+                    continue;
+                }
+            };
+            builder = builder.header(header_name, header_value);
         }
 
         let body: BoxBody<Bytes, Infallible> = match self.body {
@@ -216,7 +265,13 @@ impl HttpResponse {
             Body::Stream(body) => body,
         };
 
-        builder.body(body).unwrap()
+        // After per-header validation above, the only way `.body()` can
+        // fail is an internal hyper invariant violation — which would
+        // be a hyper bug, not user input. Panic in that case is the
+        // right move because there's no meaningful recovery.
+        builder
+            .body(body)
+            .expect("hyper builder body must succeed after pre-validated headers + status")
     }
 }
 
@@ -690,6 +745,88 @@ mod stream_tests {
         let resp = HttpResponse::text("hello world").into_hyper();
         let collected = resp.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&collected[..], b"hello world");
+    }
+}
+
+#[cfg(test)]
+mod header_validation_tests {
+    //! Domain 3a audit fix DR1: invalid response headers must be
+    //! dropped + logged, not propagated to a builder.body().unwrap()
+    //! panic that would tear down the per-connection task. The
+    //! catch_unwind in `execute_chain_safely` (Domain 2) doesn't cover
+    //! `into_hyper` because that runs after the chain returns, so the
+    //! validation has to live here.
+
+    use super::*;
+
+    /// A header name containing CRLF would be a header-injection
+    /// attempt. Build still succeeds; the bad header is silently
+    /// dropped (with a tracing::warn that's not asserted here).
+    #[test]
+    fn invalid_header_name_drops_quietly_and_response_builds() {
+        let resp = HttpResponse::text("ok")
+            .header("X-Bad\r\nX-Injected", "value")
+            .into_hyper();
+        assert_eq!(resp.status(), 200);
+        assert!(
+            resp.headers().get("X-Bad\r\nX-Injected").is_none(),
+            "invalid header name must be dropped"
+        );
+        assert!(
+            resp.headers().get("X-Injected").is_none(),
+            "injection target must not appear as a separate header"
+        );
+    }
+
+    /// A header value containing CR/LF would split the response.
+    /// Build still succeeds; bad header dropped.
+    #[test]
+    fn invalid_header_value_drops_quietly_and_response_builds() {
+        let resp = HttpResponse::text("ok")
+            .header("X-Custom", "value\r\nX-Injected: yes")
+            .into_hyper();
+        assert_eq!(resp.status(), 200);
+        assert!(
+            resp.headers().get("X-Custom").is_none(),
+            "invalid header value must be dropped"
+        );
+        assert!(
+            resp.headers().get("X-Injected").is_none(),
+            "injection target must not appear as a separate header"
+        );
+    }
+
+    /// Valid headers still pass through. Sanity check that the
+    /// validation is a filter, not a block.
+    #[test]
+    fn valid_headers_pass_through_unchanged() {
+        let resp = HttpResponse::text("ok")
+            .header("X-Request-Id", "abc-123")
+            .header("X-Custom-Header", "value-with-spaces and dashes")
+            .into_hyper();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers().get("X-Request-Id").unwrap(),
+            "abc-123"
+        );
+        assert_eq!(
+            resp.headers().get("X-Custom-Header").unwrap(),
+            "value-with-spaces and dashes"
+        );
+    }
+
+    /// Out-of-range status codes downgrade to 500 rather than panic.
+    /// Hyper's `StatusCode::from_u16` rejects values outside the
+    /// 100-999 range; before the fix, the body builder's .unwrap()
+    /// would panic.
+    #[test]
+    fn invalid_status_code_falls_back_to_500() {
+        // 0 and 9999 are both outside the HTTP status range.
+        let resp = HttpResponse::text("ok").status(9999).into_hyper();
+        assert_eq!(resp.status(), 500);
+
+        let resp = HttpResponse::text("ok").status(0).into_hyper();
+        assert_eq!(resp.status(), 500);
     }
 }
 
