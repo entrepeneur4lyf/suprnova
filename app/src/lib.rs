@@ -14,6 +14,7 @@ pub mod middleware;
 pub mod migrations;
 pub mod models;
 pub mod notifications;
+pub mod payments;
 pub mod policies;
 pub mod props;
 pub mod providers;
