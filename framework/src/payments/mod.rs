@@ -4,6 +4,7 @@
 
 pub mod dto;
 pub mod error;
+pub mod migrations;
 pub mod money;
 pub mod traits;
 

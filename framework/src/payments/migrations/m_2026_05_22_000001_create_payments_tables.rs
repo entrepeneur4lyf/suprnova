@@ -1,0 +1,264 @@
+//! Migration that creates the six DB-mirror tables consumed by the
+//! payments subsystem.
+//!
+//! Tables created:
+//! - `payments_customers`          — one row per (provider, user_id) pair
+//! - `payments_payment_methods`    — stored payment methods per customer
+//! - `payments_subscriptions`      — subscription lifecycle state
+//! - `payments_subscription_items` — line items inside a subscription
+//! - `payments_transactions`       — one-off charges and subscription invoices
+//! - `payments_webhook_events`     — audit log + idempotency guard
+//!
+//! Consumer apps include this migration in their `Migrator`'s
+//! `migrations()` list — the framework owns the schema, the app owns
+//! when to apply it.
+
+use sea_orm_migration::prelude::*;
+
+#[derive(DeriveMigrationName)]
+pub struct Migration;
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // ── payments_customers ────────────────────────────────────────
+        manager.create_table(
+            Table::create()
+                .table(Alias::new("payments_customers"))
+                .if_not_exists()
+                .col(ColumnDef::new(Alias::new("id")).big_integer().not_null().auto_increment().primary_key())
+                .col(ColumnDef::new(Alias::new("provider")).string_len(64).not_null())
+                .col(ColumnDef::new(Alias::new("provider_customer_id")).string_len(255).not_null())
+                .col(ColumnDef::new(Alias::new("user_id")).string_len(64).not_null())
+                .col(ColumnDef::new(Alias::new("email")).string_len(255).not_null())
+                .col(ColumnDef::new(Alias::new("provider_metadata")).json_binary().not_null())
+                .col(ColumnDef::new(Alias::new("created_at")).timestamp_with_time_zone().not_null())
+                .col(ColumnDef::new(Alias::new("updated_at")).timestamp_with_time_zone().not_null())
+                .to_owned(),
+        ).await?;
+        manager.create_index(
+            Index::create()
+                .name("uniq_payments_customers_provider_customer_id")
+                .table(Alias::new("payments_customers"))
+                .col(Alias::new("provider"))
+                .col(Alias::new("provider_customer_id"))
+                .unique()
+                .to_owned(),
+        ).await?;
+        manager.create_index(
+            Index::create()
+                .name("idx_payments_customers_user_id")
+                .table(Alias::new("payments_customers"))
+                .col(Alias::new("user_id"))
+                .to_owned(),
+        ).await?;
+
+        // ── payments_payment_methods ──────────────────────────────────
+        manager.create_table(
+            Table::create()
+                .table(Alias::new("payments_payment_methods"))
+                .if_not_exists()
+                .col(ColumnDef::new(Alias::new("id")).big_integer().not_null().auto_increment().primary_key())
+                .col(ColumnDef::new(Alias::new("provider")).string_len(64).not_null())
+                .col(ColumnDef::new(Alias::new("provider_payment_method_id")).string_len(255).not_null())
+                .col(ColumnDef::new(Alias::new("provider_customer_id")).string_len(255).not_null())
+                .col(ColumnDef::new(Alias::new("method_type")).string_len(32).not_null())
+                .col(ColumnDef::new(Alias::new("method_details")).json_binary().not_null())
+                .col(ColumnDef::new(Alias::new("is_default")).boolean().not_null().default(false))
+                .col(ColumnDef::new(Alias::new("provider_metadata")).json_binary().not_null())
+                .col(ColumnDef::new(Alias::new("created_at")).timestamp_with_time_zone().not_null())
+                .col(ColumnDef::new(Alias::new("updated_at")).timestamp_with_time_zone().not_null())
+                .to_owned(),
+        ).await?;
+        manager.create_index(
+            Index::create()
+                .name("uniq_payments_payment_methods_provider_pm_id")
+                .table(Alias::new("payments_payment_methods"))
+                .col(Alias::new("provider"))
+                .col(Alias::new("provider_payment_method_id"))
+                .unique()
+                .to_owned(),
+        ).await?;
+        manager.create_index(
+            Index::create()
+                .name("idx_payments_payment_methods_customer_id")
+                .table(Alias::new("payments_payment_methods"))
+                .col(Alias::new("provider_customer_id"))
+                .to_owned(),
+        ).await?;
+
+        // ── payments_subscriptions ────────────────────────────────────
+        manager.create_table(
+            Table::create()
+                .table(Alias::new("payments_subscriptions"))
+                .if_not_exists()
+                .col(ColumnDef::new(Alias::new("id")).big_integer().not_null().auto_increment().primary_key())
+                .col(ColumnDef::new(Alias::new("provider")).string_len(64).not_null())
+                .col(ColumnDef::new(Alias::new("provider_subscription_id")).string_len(255).not_null())
+                .col(ColumnDef::new(Alias::new("provider_customer_id")).string_len(255).not_null())
+                .col(ColumnDef::new(Alias::new("status")).string_len(32).not_null())
+                .col(ColumnDef::new(Alias::new("current_period_start")).timestamp_with_time_zone().not_null())
+                .col(ColumnDef::new(Alias::new("current_period_end")).timestamp_with_time_zone().not_null())
+                .col(ColumnDef::new(Alias::new("cancel_at_period_end")).boolean().not_null().default(false))
+                .col(ColumnDef::new(Alias::new("canceled_at")).timestamp_with_time_zone().null())
+                .col(ColumnDef::new(Alias::new("provider_metadata")).json_binary().not_null())
+                .col(ColumnDef::new(Alias::new("created_at")).timestamp_with_time_zone().not_null())
+                .col(ColumnDef::new(Alias::new("updated_at")).timestamp_with_time_zone().not_null())
+                .to_owned(),
+        ).await?;
+        manager.create_index(
+            Index::create()
+                .name("uniq_payments_subscriptions_provider_sub_id")
+                .table(Alias::new("payments_subscriptions"))
+                .col(Alias::new("provider"))
+                .col(Alias::new("provider_subscription_id"))
+                .unique()
+                .to_owned(),
+        ).await?;
+        manager.create_index(
+            Index::create()
+                .name("idx_payments_subscriptions_customer_id")
+                .table(Alias::new("payments_subscriptions"))
+                .col(Alias::new("provider_customer_id"))
+                .to_owned(),
+        ).await?;
+        manager.create_index(
+            Index::create()
+                .name("idx_payments_subscriptions_status")
+                .table(Alias::new("payments_subscriptions"))
+                .col(Alias::new("status"))
+                .to_owned(),
+        ).await?;
+
+        // ── payments_subscription_items ───────────────────────────────
+        manager.create_table(
+            Table::create()
+                .table(Alias::new("payments_subscription_items"))
+                .if_not_exists()
+                .col(ColumnDef::new(Alias::new("id")).big_integer().not_null().auto_increment().primary_key())
+                .col(ColumnDef::new(Alias::new("subscription_id")).big_integer().not_null())
+                .col(ColumnDef::new(Alias::new("provider_item_id")).string_len(255).not_null())
+                .col(ColumnDef::new(Alias::new("provider_price_id")).string_len(255).not_null())
+                .col(ColumnDef::new(Alias::new("quantity")).integer().not_null().default(1))
+                .col(ColumnDef::new(Alias::new("unit_amount_minor")).big_integer().null())
+                .col(ColumnDef::new(Alias::new("unit_currency")).string_len(3).null())
+                .col(ColumnDef::new(Alias::new("provider_metadata")).json_binary().not_null())
+                .col(ColumnDef::new(Alias::new("created_at")).timestamp_with_time_zone().not_null())
+                .col(ColumnDef::new(Alias::new("updated_at")).timestamp_with_time_zone().not_null())
+                .foreign_key(
+                    ForeignKey::create()
+                        .from(Alias::new("payments_subscription_items"), Alias::new("subscription_id"))
+                        .to(Alias::new("payments_subscriptions"), Alias::new("id"))
+                        .on_delete(ForeignKeyAction::Cascade),
+                )
+                .to_owned(),
+        ).await?;
+        manager.create_index(
+            Index::create()
+                .name("idx_payments_subscription_items_sub_id")
+                .table(Alias::new("payments_subscription_items"))
+                .col(Alias::new("subscription_id"))
+                .to_owned(),
+        ).await?;
+
+        // ── payments_transactions ─────────────────────────────────────
+        manager.create_table(
+            Table::create()
+                .table(Alias::new("payments_transactions"))
+                .if_not_exists()
+                .col(ColumnDef::new(Alias::new("id")).big_integer().not_null().auto_increment().primary_key())
+                .col(ColumnDef::new(Alias::new("provider")).string_len(64).not_null())
+                .col(ColumnDef::new(Alias::new("provider_transaction_id")).string_len(255).not_null())
+                .col(ColumnDef::new(Alias::new("provider_customer_id")).string_len(255).not_null())
+                .col(ColumnDef::new(Alias::new("provider_subscription_id")).string_len(255).null())
+                .col(ColumnDef::new(Alias::new("amount_total_minor")).big_integer().not_null())
+                .col(ColumnDef::new(Alias::new("amount_tax_minor")).big_integer().not_null().default(0))
+                .col(ColumnDef::new(Alias::new("currency")).string_len(3).not_null())
+                .col(ColumnDef::new(Alias::new("status")).string_len(32).not_null())
+                .col(ColumnDef::new(Alias::new("provider_metadata")).json_binary().not_null())
+                .col(ColumnDef::new(Alias::new("paid_at")).timestamp_with_time_zone().null())
+                .col(ColumnDef::new(Alias::new("created_at")).timestamp_with_time_zone().not_null())
+                .col(ColumnDef::new(Alias::new("updated_at")).timestamp_with_time_zone().not_null())
+                .to_owned(),
+        ).await?;
+        manager.create_index(
+            Index::create()
+                .name("uniq_payments_transactions_provider_tx_id")
+                .table(Alias::new("payments_transactions"))
+                .col(Alias::new("provider"))
+                .col(Alias::new("provider_transaction_id"))
+                .unique()
+                .to_owned(),
+        ).await?;
+        manager.create_index(
+            Index::create()
+                .name("idx_payments_transactions_customer_id")
+                .table(Alias::new("payments_transactions"))
+                .col(Alias::new("provider_customer_id"))
+                .to_owned(),
+        ).await?;
+        manager.create_index(
+            Index::create()
+                .name("idx_payments_transactions_subscription_id")
+                .table(Alias::new("payments_transactions"))
+                .col(Alias::new("provider_subscription_id"))
+                .to_owned(),
+        ).await?;
+        manager.create_index(
+            Index::create()
+                .name("idx_payments_transactions_status")
+                .table(Alias::new("payments_transactions"))
+                .col(Alias::new("status"))
+                .to_owned(),
+        ).await?;
+
+        // ── payments_webhook_events ───────────────────────────────────
+        manager.create_table(
+            Table::create()
+                .table(Alias::new("payments_webhook_events"))
+                .if_not_exists()
+                .col(ColumnDef::new(Alias::new("id")).big_integer().not_null().auto_increment().primary_key())
+                .col(ColumnDef::new(Alias::new("provider")).string_len(64).not_null())
+                .col(ColumnDef::new(Alias::new("provider_event_id")).string_len(255).not_null())
+                .col(ColumnDef::new(Alias::new("provider_event_type")).string_len(128).not_null())
+                .col(ColumnDef::new(Alias::new("neutral_event_kind")).string_len(64).null())
+                .col(ColumnDef::new(Alias::new("payload")).json_binary().not_null())
+                .col(ColumnDef::new(Alias::new("received_at")).timestamp_with_time_zone().not_null())
+                .col(ColumnDef::new(Alias::new("processed_at")).timestamp_with_time_zone().null())
+                .col(ColumnDef::new(Alias::new("process_error")).text().null())
+                .to_owned(),
+        ).await?;
+        manager.create_index(
+            Index::create()
+                .name("uniq_payments_webhook_events_provider_event_id")
+                .table(Alias::new("payments_webhook_events"))
+                .col(Alias::new("provider"))
+                .col(Alias::new("provider_event_id"))
+                .unique()
+                .to_owned(),
+        ).await?;
+        manager.create_index(
+            Index::create()
+                .name("idx_payments_webhook_events_event_type")
+                .table(Alias::new("payments_webhook_events"))
+                .col(Alias::new("provider_event_type"))
+                .to_owned(),
+        ).await?;
+
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        for name in [
+            "payments_webhook_events",
+            "payments_transactions",
+            "payments_subscription_items",
+            "payments_subscriptions",
+            "payments_payment_methods",
+            "payments_customers",
+        ] {
+            manager.drop_table(Table::drop().table(Alias::new(name)).to_owned()).await?;
+        }
+        Ok(())
+    }
+}
