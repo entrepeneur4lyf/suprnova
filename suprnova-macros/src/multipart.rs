@@ -19,6 +19,13 @@ use syn::{parse_macro_input, Data, DeriveInput, Fields, LitStr, Type};
 
 pub fn expand(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+    expand_inner(input).into()
+}
+
+/// Pure-`proc_macro2` helper so unit tests can exercise the
+/// expansion shape without leaving the proc-macro crate. Returns the
+/// expansion (or a `compile_error!`-shaped token stream on bad input).
+fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
     let struct_name = &input.ident;
 
     // Parse struct-level `#[multipart(...)]` options.
@@ -31,7 +38,11 @@ pub fn expand(input: TokenStream) -> TokenStream {
     let mut max_body_bytes: Option<proc_macro2::TokenStream> = None;
     for attr in &input.attrs {
         if attr.path().is_ident("multipart") {
-            let _ = attr.parse_nested_meta(|meta| {
+            // Domain 5 audit M-D5-3: propagate parse errors as a
+            // compile_error rather than swallowing them via `let _ = ...`.
+            // Previously a typo like `#[multipart(max_body_byte = 1024)]`
+            // (missing the trailing `s`) silently kept the default cap.
+            if let Err(e) = attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("custom_hooks") {
                     emit_default_hooks = false;
                     return Ok(());
@@ -42,7 +53,9 @@ pub fn expand(input: TokenStream) -> TokenStream {
                     return Ok(());
                 }
                 Err(meta.error("unknown #[multipart(...)] option"))
-            });
+            }) {
+                return e.to_compile_error();
+            }
         }
     }
 
@@ -57,13 +70,11 @@ pub fn expand(input: TokenStream) -> TokenStream {
 
     let Data::Struct(data) = &input.data else {
         return syn::Error::new_spanned(&input, "MultipartRequest requires a struct")
-            .to_compile_error()
-            .into();
+            .to_compile_error();
     };
     let Fields::Named(fields) = &data.fields else {
         return syn::Error::new_spanned(&data.fields, "MultipartRequest requires named fields")
-            .to_compile_error()
-            .into();
+            .to_compile_error();
     };
 
     let mut field_decls = Vec::new();
@@ -123,7 +134,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
                         field_name = Some(name);
                         max_count = max;
                     }
-                    Err(e) => return e.to_compile_error().into(),
+                    Err(e) => return e.to_compile_error(),
                 }
             }
         }
@@ -132,8 +143,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
                 &ident,
                 "each MultipartRequest field needs #[field(\"name\")]",
             )
-            .to_compile_error()
-            .into();
+            .to_compile_error();
         };
         let field_name_str = field_name.value();
 
@@ -153,8 +163,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
                 "#[field(..., max_count = N)] is only valid on `Vec<...>` fields; \
                  scalar and `Option<...>` fields already keep first-write-wins semantics",
             )
-            .to_compile_error()
-            .into();
+            .to_compile_error();
         }
 
         match shape {
@@ -471,7 +480,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
         #hooks_impl
     };
 
-    expanded.into()
+    expanded
 }
 
 enum FieldShape {
@@ -550,4 +559,95 @@ fn uploaded_file_validator(ty: &Type) -> Option<proc_macro2::TokenStream> {
         return Some(quote! { () });
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    //! Domain 5 audit M-D5-3 regression: unknown keys inside
+    //! `#[multipart(...)]` must surface as compile errors. Before the
+    //! fix, `let _ = attr.parse_nested_meta(|meta| { ... })` silently
+    //! discarded the `Err(meta.error("unknown ..."))` returned for
+    //! typos like `max_body_byte` — operators thought they'd set a
+    //! larger per-struct cap but production kept the default.
+    //!
+    //! These tests also lock in the existing rejection paths
+    //! (`tuple struct`, missing `#[field(...)]`, `max_count` on
+    //! scalar fields) so a future refactor can't quietly silence
+    //! them.
+
+    use super::*;
+    use syn::parse_quote;
+
+    fn render(input: DeriveInput) -> String {
+        expand_inner(input).to_string()
+    }
+
+    #[test]
+    fn unknown_multipart_option_emits_compile_error() {
+        // The `typo_key` is intentionally not one of `custom_hooks`
+        // or `max_body_bytes`. Before M-D5-3 this silently went
+        // through; now it must produce a `compile_error!` token.
+        let input: DeriveInput = parse_quote! {
+            #[multipart(typo_key = 1024)]
+            struct Bad {
+                #[field("file")]
+                file: UploadedFile<()>,
+            }
+        };
+        let rendered = render(input);
+        assert!(
+            rendered.contains("compile_error"),
+            "unknown #[multipart(...)] option must produce a compile_error; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("unknown") || rendered.contains("multipart"),
+            "compile_error message must reference the bad option; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn known_multipart_options_compile_through() {
+        let input: DeriveInput = parse_quote! {
+            #[multipart(max_body_bytes = 1024)]
+            struct Good {
+                #[field("file")]
+                file: UploadedFile<()>,
+            }
+        };
+        let rendered = render(input);
+        assert!(
+            !rendered.contains("compile_error"),
+            "known multipart options should not error; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn tuple_struct_emits_compile_error() {
+        let input: DeriveInput = parse_quote! {
+            struct Bad(String);
+        };
+        let rendered = render(input);
+        assert!(
+            rendered.contains("compile_error"),
+            "tuple structs must be rejected; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn missing_field_attr_emits_compile_error() {
+        let input: DeriveInput = parse_quote! {
+            struct Bad {
+                file: UploadedFile<()>,
+            }
+        };
+        let rendered = render(input);
+        assert!(
+            rendered.contains("compile_error"),
+            "field without #[field(\"...\")] must be rejected; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("MultipartRequest field needs"),
+            "diagnostic must explain the missing #[field] attribute; got: {rendered}"
+        );
+    }
 }

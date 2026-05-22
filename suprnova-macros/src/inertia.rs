@@ -125,25 +125,59 @@ pub fn derive_inertia_props_impl(input: TokenStream) -> TokenStream {
 
 /// Implementation for the `inertia_response!` macro
 pub fn inertia_response_impl(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as InertiaResponseInput);
+    let parsed_input = parse_macro_input!(input as InertiaResponseInput);
+    inertia_response_inner(parsed_input).into()
+}
 
+/// Pure-`proc_macro2` helper so unit tests can exercise the
+/// expansion shape without leaving the proc-macro crate.
+/// The validation against the frontend filesystem happens here too —
+/// it's a no-op when `CARGO_MANIFEST_DIR` is unset (e.g. some IDE
+/// states), exactly as before.
+fn inertia_response_inner(input: InertiaResponseInput) -> proc_macro2::TokenStream {
     let component_name = input.component.value();
     let component_lit = &input.component;
 
     if let Err(err) = validate_component_exists(&component_name, component_lit.span()) {
-        return err.to_compile_error().into();
+        return err.to_compile_error();
     }
 
+    render_inertia_response_expansion(&input)
+}
+
+/// Render the macro expansion proper — the value-expr, the match
+/// over the Object branch, and the trailing `resolve(...).await`.
+/// Split out of `inertia_response_inner` so unit tests can target
+/// the expansion shape without tripping the frontend-filesystem
+/// validation that the outer helper applies.
+fn render_inertia_response_expansion(input: &InertiaResponseInput) -> proc_macro2::TokenStream {
+    let component_name = input.component.value();
+    let component_lit = &input.component;
     let request_expr = &input.request;
 
     // Materialize props as a `serde_json::Value`, then unfold into individual
     // eager props on the `InertiaResponse` builder. Unfolding (one prop per
     // top-level key) is what makes partial-reload filtering work — the
     // framework needs to know each prop's name to honor X-Inertia-Partial-Data.
+    //
+    // Domain 5 audit M-D5-2: previously the typed-props branch panicked via
+    // `.expect(...)` on a `Serialize` failure, and the non-object branch
+    // panicked when the props expression resolved to a non-object Value.
+    // Both now propagate `FrameworkError::internal` through the macro's
+    // already-Result-returning expansion. The macro MUST be invoked in a
+    // function whose return type accepts `FrameworkError` via `From`
+    // (typically `Result<InertiaResponse, FrameworkError>` or the
+    // framework's blanket `Result<_, E>` where `FrameworkError: Into<E>`);
+    // this matches the existing contract on the `resolve(...).await`
+    // call's `.map_err(Into::into)`.
     let value_expr = match &input.props {
         PropsKind::Typed(expr) => quote! {
             ::suprnova::serde_json::to_value(&#expr)
-                .expect("inertia_response!: typed props failed to serialize")
+                .map_err(|__se| ::suprnova::FrameworkError::internal(::std::format!(
+                    "inertia_response!({}): typed props failed to serialize: {}",
+                    #component_name,
+                    __se,
+                )))?
         },
         PropsKind::Json(tokens) => quote! {
             ::suprnova::serde_json::json!({#tokens})
@@ -159,30 +193,36 @@ pub fn inertia_response_impl(input: TokenStream) -> TokenStream {
         let __value: ::suprnova::serde_json::Value = #value_expr;
         let mut __response = ::suprnova::InertiaResponse::new(#component_lit);
         #config_setup
-        if let ::suprnova::serde_json::Value::Object(__map) = __value {
-            for (__k, __v) in __map {
-                __response.__add_eager(__k, __v);
-            }
-        } else {
-            // Non-object props (e.g. an array, string, number) — the v3
-            // protocol requires `props` to be an object, so we reject this
-            // at runtime with a clear message rather than silently emit
-            // malformed JSON.
-            panic!(
-                "inertia_response!: page props must serialize to a JSON object, got {}",
-                __value
-            );
-        }
         // resolve() is async (Lazy/Optional props may await). Errors flow
         // through the framework's Response type via the existing
-        // From<FrameworkError> for HttpResponse conversion.
-        __response
-            .resolve(#request_expr)
-            .await
-            .map_err(::core::convert::Into::into)
+        // From<FrameworkError> for HttpResponse conversion. The non-object
+        // branch returns Err directly — Inertia v3's protocol requires
+        // `props` to be an object, so a non-Object payload would render an
+        // invalid response.
+        match __value {
+            ::suprnova::serde_json::Value::Object(__map) => {
+                for (__k, __v) in __map {
+                    __response.__add_eager(__k, __v);
+                }
+                __response
+                    .resolve(#request_expr)
+                    .await
+                    .map_err(::core::convert::Into::into)
+            }
+            __other => ::core::result::Result::Err(
+                ::core::convert::Into::into(
+                    ::suprnova::FrameworkError::internal(::std::format!(
+                        "inertia_response!({}): page props must serialize to a \
+                         JSON object, got {}",
+                        #component_name,
+                        __other,
+                    ))
+                )
+            ),
+        }
     }};
 
-    expanded.into()
+    expanded
 }
 
 fn validate_component_exists(component_name: &str, span: Span) -> Result<(), syn::Error> {
@@ -305,4 +345,100 @@ fn find_similar_component(target: &str, available: &[String]) -> Option<String> 
     }
 
     best_match.map(|(name, _)| name)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Domain 5 audit M-D5-2 regression: the `inertia_response!`
+    //! expansion must propagate Serialize failures and non-Object
+    //! props via `FrameworkError::internal` rather than panicking.
+    //! Without these checks, a deploy that exposed a buggy `Serialize`
+    //! impl would panic per-request — Domain 2's middleware safety
+    //! net catches the panic but the operator loses the structured
+    //! error path.
+
+    use super::*;
+    use syn::parse_quote;
+
+    /// Render the macro on a typed-props input and assert the typed
+    /// serialization branch propagates via `?` against `FrameworkError`,
+    /// not `.expect`.
+    #[test]
+    fn typed_props_branch_uses_question_mark_not_expect() {
+        let parsed: InertiaResponseInput = parse_quote! {
+            &req, "Home", HomeProps { title: "Welcome".to_string() }
+        };
+        let rendered = render_inertia_response_expansion(&parsed).to_string();
+        assert!(
+            !rendered.contains(".expect ("),
+            "typed-props branch must not panic via .expect; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("FrameworkError :: internal"),
+            "typed-props branch must wrap Serialize errors in FrameworkError; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("typed props failed to serialize"),
+            "typed-props branch must carry diagnostic; got: {rendered}"
+        );
+    }
+
+    /// The non-Object branch must return `Err`, not panic, when the
+    /// runtime Value is a non-Object (the v3 protocol requires
+    /// `props` to be an object).
+    #[test]
+    fn non_object_branch_returns_err_not_panic() {
+        let parsed: InertiaResponseInput = parse_quote! {
+            &req, "Home", PropsAsString
+        };
+        let rendered = render_inertia_response_expansion(&parsed).to_string();
+        assert!(
+            !rendered.contains("panic !"),
+            "non-Object branch must not panic; got: {rendered}"
+        );
+        // The Err arm carries the FrameworkError::internal carrying
+        // the component name for debuggability. The source-level
+        // line continuation in the macro's format string preserves
+        // the backslash when round-tripped through `quote!.to_string()`,
+        // so the assertion checks just the leading portion.
+        assert!(
+            rendered.contains("page props must serialize to a"),
+            "Err arm must carry diagnostic; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("JSON object"),
+            "Err arm message must mention JSON object requirement; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("Result :: Err"),
+            "non-object branch must return Result::Err; got: {rendered}"
+        );
+    }
+
+    /// JSON-syntax props go through `serde_json::json!` which is
+    /// infallible — the typed-only error wrapper must NOT appear in
+    /// the JSON branch's `value_expr`. (Both branches share the
+    /// non-Object Err arm; this assertion targets just the value
+    /// production phase.)
+    #[test]
+    fn json_props_branch_does_not_wrap_in_framework_error() {
+        let parsed: InertiaResponseInput = parse_quote! {
+            &req, "Home", { "title": "Welcome" }
+        };
+        let rendered = render_inertia_response_expansion(&parsed).to_string();
+        // The JSON-shape props expression is constructed via
+        // `serde_json::json!({...})` and never goes through the
+        // Serialize-failure wrapper, so the typed-only error string
+        // must not appear in the rendered output.
+        assert!(
+            !rendered.contains("typed props failed to serialize"),
+            "JSON branch should not carry the typed-props error wrapper; got: {rendered}"
+        );
+        // The block must still terminate in a Result-returning
+        // resolve/match shape so the caller's `?`/`Into` work.
+        assert!(
+            rendered.contains("resolve") && rendered.contains("map_err"),
+            "block must end in resolve(...).map_err(...) shape; got: {rendered}"
+        );
+    }
 }
