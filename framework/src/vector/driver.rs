@@ -66,7 +66,7 @@ pub trait VectorDriver: Send + Sync + 'static {
     async fn delete(&self, store: &str, ids: Vec<String>) -> Result<(), FrameworkError>;
 
     /// Number of points currently in the store. Used for size
-    /// assertions in tests + the [`Vector::registered_names`]
+    /// assertions in tests + the [`Vector::registered_names`](crate::Vector::registered_names)
     /// admin path.
     async fn count(&self, store: &str) -> Result<usize, FrameworkError>;
 }

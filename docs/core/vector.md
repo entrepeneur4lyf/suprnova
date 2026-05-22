@@ -1,0 +1,187 @@
+# Vector
+
+Suprnova's vector layer treats every vector backend as a first-class driver behind one trait. v1 ships **Memory** (in-process), **Qdrant** (gRPC), and **Pinecone** (gRPC). Weaviate, Milvus, LanceDB, pgvector, MariaDB and LibSQL queue up behind real consumer demand.
+
+Laravel ships vectors only via Postgres `pgvector`. Suprnova diverges: pick the right database for the job. Same trait, swap drivers without rewriting consumer code.
+
+## Quickstart
+
+```rust
+use std::sync::Arc;
+use suprnova::{MemoryVectorDriver, Vector, VectorItem};
+
+// Bootstrap (typically once at app start)
+Vector::register("documents", Arc::new(MemoryVectorDriver::new()));
+
+// Use it
+let store = Vector::store("documents")?;
+store
+    .upsert(vec![
+        VectorItem::new("doc-1", embedding_for("Hello"), serde_json::json!({ "title": "Hello" })),
+        VectorItem::new("doc-2", embedding_for("World"), serde_json::json!({ "title": "World" })),
+    ])
+    .await?;
+
+let hits = store.similar(query_embedding, 10).await?;
+for hit in hits {
+    println!("{}: {} (score {:.3})", hit.id, hit.metadata["title"], hit.score);
+}
+```
+
+## The contract
+
+```rust
+#[async_trait]
+pub trait VectorDriver: Send + Sync + 'static {
+    async fn upsert(&self, store: &str, items: Vec<VectorItem>) -> Result<(), FrameworkError>;
+    async fn similar(&self, store: &str, query: Vec<f32>, k: usize) -> Result<Vec<VectorMatch>, FrameworkError>;
+    async fn delete(&self, store: &str, ids: Vec<String>) -> Result<(), FrameworkError>;
+    async fn count(&self, store: &str) -> Result<usize, FrameworkError>;
+}
+```
+
+`VectorItem` carries an arbitrary `String` id, an `embedding: Vec<f32>`, and freeform `metadata: serde_json::Value` (must be a JSON object or `null`). `VectorMatch` returns the original id, the backend's similarity score, and the same metadata shape.
+
+The trait is intentionally small. When you need filter expressions on search, sparse vectors, scroll/list, snapshots, or quantization knobs, drop down to the driver's underlying SDK via its public `client()` trapdoor.
+
+## Drivers
+
+### Memory — `MemoryVectorDriver`
+
+In-process driver backed by `HashMap`. Cosine similarity, dimension-mismatch points are silently skipped on query (so mixed-dim test data doesn't blow up), zero-vector queries error clearly.
+
+```rust
+Vector::register("docs", Arc::new(MemoryVectorDriver::new()));
+```
+
+Use in tests and dev. Each `MemoryVectorDriver::new()` instance is hermetic — no shared state between two new()s.
+
+### Qdrant — `QdrantVectorDriver`
+
+Talks to Qdrant over gRPC (default port 6334) via the official `qdrant-client` SDK.
+
+```rust
+use suprnova::{QdrantDistance, QdrantVectorDriver};
+
+let driver = QdrantVectorDriver::from_url("http://localhost:6334")?
+    .with_distance(QdrantDistance::Cosine)  // default
+    .with_auto_create(true);                // default
+
+Vector::register("docs", Arc::new(driver));
+```
+
+For Qdrant Cloud:
+
+```rust
+let driver = QdrantVectorDriver::from_url_with_api_key(
+    "https://xxxxxxxx.eu-central.aws.cloud.qdrant.io:6334",
+    std::env::var("QDRANT_API_KEY")?,
+)?;
+```
+
+**ID mapping.** Qdrant requires point IDs to be either `u64` or a valid UUID. The framework bridges arbitrary strings with three rules:
+
+1. If the string parses as `u64`, use the `Num(u64)` variant.
+2. If the string is a valid UUID, use the `Uuid(String)` variant verbatim.
+3. Otherwise, derive a deterministic v5 UUID from a stable namespace.
+
+The caller's original string is stashed in the point's payload under the reserved key `__suprnova_id` (exported as `SUPRNOVA_ID_PAYLOAD_KEY`) and stripped from `VectorMatch.metadata` on retrieval. Power users who query Qdrant directly via `driver.client()` can filter on `__suprnova_id` to bridge framework writes with direct calls.
+
+**Auto-create.** On first `upsert` for an unseen collection, the driver creates it with the dimension inferred from the first item and the configured distance metric (Cosine by default). Race-safe — concurrent upserters on the same fresh collection won't fail; whichever creates first wins, the other proceeds. Disable via `.with_auto_create(false)` to require explicit creation.
+
+**Cache invalidation.** If a collection is dropped externally (or Qdrant restarts before persistence flushed), the driver detects the "not found" error on upsert, drops the cache entry, re-runs `ensure_collection`, and retries once.
+
+**Trapdoor.** `driver.client()` returns the underlying `qdrant_client::Qdrant` — use it for filter expressions on search, scroll, snapshots, or other APIs not surfaced via the trait. `QdrantVectorDriver::resolve_point_id`, `build_point`, and `decode_match` let you mix direct and trait-routed calls without losing id translation.
+
+**Local setup.** Run Qdrant via Docker:
+
+```bash
+docker run -p 6334:6334 -p 6333:6333 qdrant/qdrant
+```
+
+Integration tests run via:
+
+```bash
+QDRANT_URL=http://localhost:6334 cargo test -p suprnova --test vector_qdrant -- --ignored
+```
+
+### Pinecone — `PineconeVectorDriver`
+
+Talks to Pinecone over gRPC via the official `pinecone-sdk` crate.
+
+```rust
+use suprnova::PineconeVectorDriver;
+
+// API key directly
+let driver = PineconeVectorDriver::from_api_key(std::env::var("PINECONE_API_KEY")?)?;
+
+// Or via env (uses the SDK's PINECONE_API_KEY env contract)
+let driver = PineconeVectorDriver::from_env()?;
+
+// Bind to a non-default namespace
+let driver = driver.with_namespace("public");
+
+Vector::register("docs", Arc::new(driver));
+```
+
+The store name passed via `Vector::store(name)` maps to a Pinecone index name. The driver lazily resolves the index host via `describe_index` on first use and caches the resulting `Index` handle.
+
+**No auto-create.** Pinecone index creation requires picking cloud (AWS/GCP/Azure), region, vector dimension, distance metric, and deletion-protection — too many trade-offs to default well. Create indexes via the Pinecone console or via the underlying client (`driver.client().create_serverless_index(...)`) before registering, then point the framework at the existing name.
+
+This is the principal asymmetry with the Qdrant driver, which auto-creates collections on first upsert.
+
+**IDs and metadata.** Pinecone accepts arbitrary `String` ids natively, so `VectorItem::id` passes straight through. Metadata bridges `serde_json::Value` ↔ `prost_types::Struct` via `PineconeVectorDriver::json_to_metadata` / `metadata_to_json`. Pinecone stores numbers as `f64` — that's a Pinecone constraint, not a framework one.
+
+**Namespaces.** One driver instance binds to one namespace. To use multiple namespaces of the same index, register one driver per namespace under different store names:
+
+```rust
+Vector::register("docs-public", Arc::new(
+    PineconeVectorDriver::from_env()?.with_namespace("public")
+));
+Vector::register("docs-private", Arc::new(
+    PineconeVectorDriver::from_env()?.with_namespace("private")
+));
+```
+
+**Throughput.** v1 caches one `Index` per index name behind a `tokio::Mutex`. Calls to the same Pinecone index serialize through that mutex — a pragmatic limitation because pinecone-sdk exposes `Index` only behind `&mut self`. For higher throughput register multiple driver instances or call `driver.client()` directly.
+
+**Trapdoor.** `driver.client()` returns the underlying `PineconeClient` for filter expressions on query, sparse vectors, multi-namespace queries, and index management.
+
+**Integration tests** require both env vars:
+
+```bash
+PINECONE_API_KEY=... PINECONE_TEST_INDEX=my-test-index \
+    cargo test -p suprnova --test vector_pinecone -- --ignored
+```
+
+## Driver comparison
+
+| Aspect | Memory | Qdrant | Pinecone |
+| --- | --- | --- | --- |
+| Backing store | `HashMap` | Qdrant gRPC | Pinecone gRPC |
+| Persistence | None | Yes | Yes |
+| Auto-create | n/a | Yes (configurable) | No (user creates index) |
+| String IDs | Native | Hashed to UUID-5 | Native |
+| Metadata key reserved | None | `__suprnova_id` | None |
+| Throughput | Per-process | Concurrent | Serialized per index (v1) |
+| Distance metric | Cosine | Configurable | Set at index creation |
+
+## Operational notes
+
+**Store name conventions.** The store name passed to `Vector::register` and `Vector::store` is a label — it can be any string. For Qdrant the framework uses it as the collection name; for Pinecone as the index name. Match the label to the backend's existing naming scheme.
+
+**Re-registering** a name with a new driver instance is a last-write-wins operation by design — useful for swapping drivers in test harnesses without restarting the process.
+
+**Test isolation.** Both Memory and registry-backed driver tests use timestamp-tagged unique store names to avoid collisions under parallel test runs.
+
+**Error semantics.** `Vector::store(name)` returns `FrameworkError::not_found` for unregistered names. Driver-level failures (network, auth, dimension mismatch) come back as `FrameworkError::internal` or `FrameworkError::param` with the cause string in the display message.
+
+## Extending
+
+To add a fifth backend (Weaviate, Milvus, LanceDB, pgvector, MariaDB, LibSQL, ...):
+
+1. Add a new `framework/src/vector/<backend>.rs` implementing `VectorDriver`.
+2. Re-export the driver type from `framework/src/vector/mod.rs` and the crate root.
+3. Mirror the Qdrant/Pinecone test split: pure-function tests always run, integration tests `#[ignore]`-gated behind env vars for credentials.
+
+The trait is intentionally small so the bar to ship a new driver stays low. If a backend needs surface that doesn't fit (filter expressions, sparse vectors, hybrid search), expose it via the driver's `client()` trapdoor — don't bloat the trait.

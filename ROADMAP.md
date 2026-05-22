@@ -345,6 +345,18 @@ is what makes Rust frameworks reach 80% production-ready and stall.
   declarations route correctly. `with_trashed` / `only_trashed`
   forwarding on all 10 relation types. Prunable does NOT cascade
   (correct Laravel default); cascade via DB FK or `pruning()` hook.
+- **Vector** (Phase 9A) — `VectorDriver` trait + `Vector::register` /
+  `Vector::store` facade + `VectorItem` / `VectorMatch` contract.
+  Three production drivers ship in v1: `MemoryVectorDriver` (in-process,
+  cosine similarity), `QdrantVectorDriver` (gRPC via `qdrant-client`,
+  auto-create collections, parse-then-hash-to-UUID-5 id mapping with
+  `__suprnova_id` payload key), `PineconeVectorDriver` (gRPC via
+  `pinecone-sdk`, namespace-scoped, native string ids, JSON ↔
+  `prost_types::Struct` metadata bridge). Each driver exposes a
+  `client()` trapdoor for filter expressions / scroll / quantization
+  not surfaced via the trait. Laravel ships pgvector-only; we don't
+  gatekeep. Weaviate + Milvus + LanceDB + pgvector + MariaDB + LibSQL
+  queue up behind real consumer demand. See `docs/core/vector.md`.
 - **Eloquent Lifecycle + Collections + Querying Power** (Phase 10C)
   — Model events: 16 lifecycle structs in a per-model `events::*`
   submodule (`Retrieving` / `Retrieved` / `Saving` / `Creating` /
@@ -440,9 +452,6 @@ Major missing tracks beyond Phase 10C:
   `ModelEntry` + `RelationEntry` + `MorphTypeEntry` + `CommandEntry` +
   `SupervisorEntry` inventories to enumerate every administerable
   surface in the binary.
-- **Phase 9A — Vector** (Qdrant + Pinecone + Memory drivers verified;
-  Weaviate + Milvus + LanceDB + pgvector + MariaDB + LibSQL planned).
-  Laravel ships pgvector-only; we don't gatekeep.
 - **Phase 12 — Billing v1** (Stripe + PayPal + Paddle). Subscription
   + one-off + webhook handling.
 
