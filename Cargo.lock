@@ -7057,7 +7057,11 @@ name = "suprnova-payments-stripe"
 version = "0.1.0"
 dependencies = [
  "async-stripe",
+ "async-stripe-client-core",
+ "async-stripe-shared",
+ "async-stripe-types",
  "async-trait",
+ "chrono",
  "hex",
  "hmac 0.12.1",
  "inventory",

@@ -18,6 +18,10 @@ sha2 = "0.10"
 hex = "0.4"
 tracing = "0.1"
 tokio = { version = "1", features = ["macros", "rt"] }
+async-stripe-client-core = "1.0.0-rc.5"
+async-stripe-shared = "1.0.0-rc.5"
+async-stripe-types = "1.0.0-rc.5"
+chrono = { version = "0.4.44", default-features = false, features = ["clock", "serde"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
