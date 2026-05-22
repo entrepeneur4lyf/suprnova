@@ -6,6 +6,8 @@ members = [
     "suprnova-cli",
     "suprnova-macros",
     "crates/suprnova-web-push",
+    "crates/suprnova-payments-stripe",
+    "crates/suprnova-payments-paddle",
 ]
 
 [workspace.package]
