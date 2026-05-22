@@ -3,6 +3,7 @@
 //! See `docs/core/payments.md` for the user-facing guide.
 
 pub mod dto;
+pub mod entities;
 pub mod error;
 pub mod migrations;
 pub mod money;
