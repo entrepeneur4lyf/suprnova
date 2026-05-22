@@ -135,6 +135,7 @@ async-stream = "0.3.6"
 qdrant-client = "1.18.0"
 pinecone-sdk = "0.1.2"
 prost-types = "0.12"
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "mysql", "json"] }
 
 [features]
 default = ["testing"]

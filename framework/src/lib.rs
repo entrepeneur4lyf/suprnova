@@ -195,8 +195,9 @@ pub use seed::Seeder;
 pub use console::{dispatch_argv, CommandEntry, CommandHandler, TypedCommand};
 pub use supervisor::{RestartPolicy, Supervisor, SupervisorEntry, SupervisorRegistry};
 pub use vector::{
-    MemoryVectorDriver, PineconeVectorDriver, QdrantDistance, QdrantVectorDriver, Vector,
-    VectorDriver, VectorItem, VectorMatch, VectorRegistry, VectorStore, SUPRNOVA_ID_PAYLOAD_KEY,
+    MariaDbDistance, MariaDbVectorDriver, MemoryVectorDriver, PineconeVectorDriver,
+    QdrantDistance, QdrantVectorDriver, Vector, VectorDriver, VectorItem, VectorMatch,
+    VectorRegistry, VectorStore, SUPRNOVA_ID_PAYLOAD_KEY,
 };
 
 #[doc(hidden)]

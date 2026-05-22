@@ -1,8 +1,10 @@
 # Vector
 
-Suprnova's vector layer treats every vector backend as a first-class driver behind one trait. v1 ships **Memory** (in-process), **Qdrant** (gRPC), and **Pinecone** (gRPC). Weaviate, Milvus, LanceDB, pgvector, MariaDB and LibSQL queue up behind real consumer demand.
+Suprnova's vector layer treats every vector backend as a first-class driver behind one trait. v1 ships **Memory** (in-process), **Qdrant** (gRPC), **Pinecone** (gRPC), and **MariaDB** (native `VECTOR(N)` + HNSW, 11.7+). Weaviate, Milvus, LanceDB, pgvector and LibSQL queue up behind real consumer demand.
 
 Laravel ships vectors only via Postgres `pgvector`. Suprnova diverges: pick the right database for the job. Same trait, swap drivers without rewriting consumer code.
+
+> **Production recommendation.** Suprnova's default development database is SQLite (zero setup, single file). For production, we recommend **MariaDB 11.7+**: one engine handles relational tables, vectors, JSON / NoSQL workloads, and system-versioned temporal tables — fewer moving parts than `Postgres + Redis + Qdrant` separately. The MariaDB driver below is what powers that recommendation.
 
 ## Quickstart
 
@@ -154,17 +156,87 @@ PINECONE_API_KEY=... PINECONE_TEST_INDEX=my-test-index \
     cargo test -p suprnova --test vector_pinecone -- --ignored
 ```
 
+### MariaDB — `MariaDbVectorDriver`
+
+Talks to MariaDB 11.7+ via direct `sqlx::MySqlPool`, using MariaDB's native `VECTOR(N)` column type and HNSW indexing. The first time you call a driver method, it runs `SELECT VERSION()` and rejects anything below 11.7 — older servers don't have the vector functions.
+
+```rust
+use std::sync::Arc;
+use suprnova::{MariaDbDistance, MariaDbVectorDriver, Vector};
+
+let driver = MariaDbVectorDriver::from_url(
+    "mysql://user:pass@localhost:3306/myapp",
+)?
+.with_distance(MariaDbDistance::Cosine);  // default
+
+Vector::register("documents", Arc::new(driver));
+```
+
+`from_url` is lazy — it validates the URL syntax but does NOT open a connection until first use, so calling it at app bootstrap is safe even before the database is reachable. Wrap an existing pool with `MariaDbVectorDriver::from_pool(pool)` when you need custom pool options.
+
+**Schema is yours.** The driver does not auto-create tables — schema is a migration concern. The recommended path is `driver.ensure_table_sql_for(name, dim)`, which inherits the driver's configured distance so the migration's `DISTANCE=` clause and the query function `similar` uses are guaranteed to match:
+
+```rust
+let driver = MariaDbVectorDriver::from_url(url)?
+    .with_distance(MariaDbDistance::Cosine);
+
+let sql = driver.ensure_table_sql_for("documents", 1536)?;
+// Result:
+// CREATE TABLE IF NOT EXISTS `documents` (
+//   id VARCHAR(255) NOT NULL PRIMARY KEY,
+//   embedding VECTOR(1536) NOT NULL,
+//   metadata JSON NULL,
+//   VECTOR INDEX (embedding) DISTANCE=cosine
+// ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+```
+
+For migration generators that don't have a driver in scope (CLI tools, build scripts), use the static `MariaDbVectorDriver::ensure_table_sql(name, dim, distance)` and pass the same `MariaDbDistance` you'll later configure on the driver.
+
+**Distance must match on both ends.** MariaDB silently falls back to a full table scan when the function used at query time doesn't match the index's `DISTANCE=` clause. `ensure_table_sql_for` enforces this by reading `self.distance` for both the emitted SQL and the runtime function in `similar` — they cannot drift apart. The static form leaves that contract to the caller.
+
+**Store-name safety.** Store names interpolate into emitted SQL (MySQL doesn't parameterize identifiers). Names are validated as `[A-Za-z_][A-Za-z0-9_]*` of length ≤ 64; the validated name is then backtick-quoted in every statement. Invalid names error with `FrameworkError::param` at the `register`/`upsert`/`similar`/`delete`/`count` boundary.
+
+**IDs and metadata.** `VARCHAR(255)` accepts arbitrary `String` ids — no UUID derivation, no reserved payload keys. Metadata round-trips through MariaDB's `JSON` column type; `null` metadata stores as SQL `NULL`. Non-object metadata (arrays, primitives) is rejected with `FrameworkError::param` for parity with Qdrant and Pinecone.
+
+**Score normalization.** MariaDB returns raw *distance* (lower = closer). The trait contract is *score* (higher = more similar) — the driver converts per metric:
+
+| Metric    | MariaDB returns       | Exposed `score`              |
+| --------- | --------------------- | ---------------------------- |
+| Cosine    | `[0, 2]` (`1 - cos`)  | `1.0 - d / 2.0` → `[0, 1]`   |
+| Euclidean | `[0, ∞)` L2 norm      | `1.0 / (1.0 + d)` → `(0, 1]` |
+
+In both cases, ranking is preserved (best result first); the score is comparable across drivers because every backend lands on the same `higher = better` convention.
+
+**Trapdoor.** `driver.pool()` returns the underlying `sqlx::MySqlPool` for raw queries the trait doesn't cover. `MariaDbVectorDriver::embedding_to_vec_text`, `score_from_distance`, and `ensure_table_sql` are pure functions you can call independently when mixing direct SQL with trait-routed calls.
+
+**Local setup.** Run MariaDB 11.7+ via Docker:
+
+```bash
+docker run -p 3306:3306 \
+    -e MARIADB_ROOT_PASSWORD=secret \
+    -e MARIADB_DATABASE=vectors \
+    mariadb:11.7
+```
+
+Integration tests run via:
+
+```bash
+MARIADB_URL='mysql://root:secret@localhost:3306/vectors' \
+    cargo test -p suprnova --test vector_mariadb -- --ignored
+```
+
 ## Driver comparison
 
-| Aspect | Memory | Qdrant | Pinecone |
-| --- | --- | --- | --- |
-| Backing store | `HashMap` | Qdrant gRPC | Pinecone gRPC |
-| Persistence | None | Yes | Yes |
-| Auto-create | n/a | Yes (configurable) | No (user creates index) |
-| String IDs | Native | Hashed to UUID-5 | Native |
-| Metadata key reserved | None | `__suprnova_id` | None |
-| Throughput | Per-process | Concurrent | Serialized per index (v1) |
-| Distance metric | Cosine | Configurable | Set at index creation |
+| Aspect | Memory | Qdrant | Pinecone | MariaDB |
+| --- | --- | --- | --- | --- |
+| Backing store | `HashMap` | Qdrant gRPC | Pinecone gRPC | MariaDB SQL |
+| Persistence | None | Yes | Yes | Yes |
+| Auto-create | n/a | Yes (configurable) | No (user creates index) | No (migration is yours) |
+| String IDs | Native | Hashed to UUID-5 | Native | Native |
+| Metadata key reserved | None | `__suprnova_id` | None | None |
+| Throughput | Per-process | Concurrent | Serialized per index (v1) | Concurrent (pool-bounded) |
+| Distance metric | Cosine | Configurable | Set at index creation | Cosine / Euclidean |
+| Version requirement | — | Any | Any | **11.7+** |
 
 ## Operational notes
 
@@ -178,7 +250,7 @@ PINECONE_API_KEY=... PINECONE_TEST_INDEX=my-test-index \
 
 ## Extending
 
-To add a fifth backend (Weaviate, Milvus, LanceDB, pgvector, MariaDB, LibSQL, ...):
+To add a fifth backend (Weaviate, Milvus, LanceDB, pgvector, LibSQL, ...):
 
 1. Add a new `framework/src/vector/<backend>.rs` implementing `VectorDriver`.
 2. Re-export the driver type from `framework/src/vector/mod.rs` and the crate root.
