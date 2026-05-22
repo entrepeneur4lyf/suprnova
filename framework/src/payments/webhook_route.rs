@@ -1,34 +1,53 @@
 //! Webhook ingress route for the payments subsystem.
 //!
 //! Registers `POST /webhooks/payments/{provider}` on a Suprnova `Router`.
-//! The handler:
-//! 1. Resolves the named provider from `PaymentProviderRegistry`.
-//! 2. Verifies the inbound signature via `WebhookHandler::verify`.
-//! 3. Parses the body into a neutral `WebhookEvent`.
-//! 4. Short-circuits with 200 if `(provider, provider_event_id)` already
-//!    exists in `payments_webhook_events` (idempotency for retrying providers).
-//! 5. Inserts the audit row.
-//! 6. Dispatches to the mirror-table hydration paths driven by `event.neutral`
-//!    and the IDs returned by `WebhookHandler::extract_payload_ids` /
-//!    `WebhookHandler::extract_payment_snapshot`. Hydration failures mark the
-//!    audit row as failed but never return non-2xx to the provider, so the
-//!    provider does not endlessly retry an event we've already accepted.
-//! 7. Marks the audit row processed.
+//!
+//! Production-grade contract:
+//!
+//! 1. **Idempotency, retry-aware.** A duplicate of an event that was
+//!    *successfully* processed (`processed_at IS NOT NULL`) returns 200
+//!    `duplicate` immediately. A duplicate of an event that previously
+//!    *failed* (`processed_at IS NULL`, `process_error` set) re-attempts
+//!    hydration — the provider's retry is the recovery mechanism.
+//! 2. **Atomic hydration.** All mirror-table writes for one event happen
+//!    inside a single DB transaction along with `mark_processed`. Partial
+//!    state is not observable: either the mirror catches up AND
+//!    `processed_at` is set, or both are rolled back together.
+//! 3. **5xx on failure.** Hydration errors return 503 so the provider
+//!    retries with backoff. The audit row's `process_error` is updated
+//!    outside the rolled-back transaction so operators can see the
+//!    failure across retries.
+//! 4. **Auditability.** Every accepted event lands in
+//!    `payments_webhook_events` before hydration begins — even failures
+//!    leave an audit trail.
 
 use crate::http::{text, HttpResponse, Response};
 use crate::payments::entities::{customer, subscription, subscription_item, transaction, webhook_event};
 use crate::payments::{
-    NeutralEventKind, PaymentError, PaymentProviderRegistry, PaymentSnapshot, SubscriptionResult,
-    SubscriptionStatus, WebhookContext, WebhookEvent,
+    CustomerSnapshot, NeutralEventKind, PaymentError, PaymentProvider, PaymentProviderRegistry,
+    PaymentSnapshot, SubscriptionResult, SubscriptionStatus, WebhookContext, WebhookEvent,
 };
 use crate::routing::Router;
 use crate::Request;
 use chrono::Utc;
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
+    Set, TransactionTrait,
+};
 use std::sync::Arc;
 
 fn err_response(status: u16, body: &str) -> Response {
     Ok(HttpResponse::text(body).status(status))
+}
+
+/// A `UNIQUE` violation surfaces differently per backend (SQLite says
+/// `UNIQUE constraint failed`, Postgres says `duplicate key value violates
+/// unique constraint`, MySQL says `Duplicate entry`). This catches all
+/// three by substring — the alternative is per-driver SQLSTATE matching,
+/// which SeaORM abstracts away.
+fn is_unique_violation(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("unique") || m.contains("duplicate")
 }
 
 async fn handle_webhook_inner(
@@ -47,13 +66,13 @@ async fn handle_webhook_inner(
         }
     };
 
-    // 2. Parse remote_addr
+    // 2. Parse remote_addr (best-effort; never blocks the request)
     let remote_addr = remote_addr_str
         .as_deref()
         .and_then(|s| s.split(',').next())
         .and_then(|s| s.trim().parse().ok());
 
-    // 3. Verify signature (sync)
+    // 3. Verify signature
     let ctx = WebhookContext {
         body: &body,
         headers: &headers,
@@ -64,7 +83,7 @@ async fn handle_webhook_inner(
         return err_response(401, "signature");
     }
 
-    // 4. Parse event (sync)
+    // 4. Parse event
     let event: WebhookEvent = match provider.parse_event(&body) {
         Ok(e) => e,
         Err(e) => {
@@ -73,74 +92,117 @@ async fn handle_webhook_inner(
         }
     };
 
-    // 5. Idempotency check
-    let existing = webhook_event::Entity::find()
+    // 5. Idempotency, retry-aware. Successfully-processed events short-circuit
+    //    here; previously-failed events fall through to retry hydration.
+    let existing = match webhook_event::Entity::find()
         .filter(webhook_event::Column::Provider.eq(&event.provider))
         .filter(webhook_event::Column::ProviderEventId.eq(&event.provider_event_id))
         .one(db)
-        .await;
-    match existing {
-        Ok(Some(_)) => {
-            tracing::debug!(
-                provider = %provider_name,
-                event_id = %event.provider_event_id,
-                "duplicate webhook — already processed"
-            );
-            return err_response(200, "duplicate");
-        }
-        Ok(None) => { /* proceed */ }
+        .await
+    {
+        Ok(r) => r,
         Err(e) => {
             tracing::error!(error = %e, "db error checking webhook idempotency");
             return err_response(500, "db");
         }
-    }
-
-    // 6. Serialize neutral_event_kind
-    let neutral_str = event.neutral.and_then(|k| {
-        serde_json::to_value(k)
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-    });
-
-    // 7. Insert audit row
-    let record = webhook_event::ActiveModel {
-        provider: Set(event.provider.clone()),
-        provider_event_id: Set(event.provider_event_id.clone()),
-        provider_event_type: Set(event.provider_event_type.clone()),
-        neutral_event_kind: Set(neutral_str),
-        payload: Set(event.raw_payload.clone()),
-        received_at: Set(Utc::now().to_rfc3339()),
-        processed_at: Set(None),
-        process_error: Set(None),
-        ..Default::default()
     };
-
-    if let Err(e) = record.insert(db).await {
-        let msg = format!("{e}");
-        let is_dup = msg.contains("UNIQUE") || msg.contains("duplicate");
-        if is_dup {
-            return err_response(200, "duplicate-race");
-        }
-        tracing::error!(error = %e, "failed to persist webhook event");
-        return err_response(500, "persist");
-    }
-
-    // 8. Hydrate mirror tables. Hydration errors are logged + recorded but
-    //    we still return 2xx so the provider doesn't retry forever — the
-    //    audit row + process_error makes the failure visible for operators.
-    if let Err(e) = process_webhook(db, provider.as_ref(), &event).await {
-        tracing::error!(
+    if let Some(row) = &existing
+        && row.processed_at.is_some()
+    {
+        tracing::debug!(
             provider = %provider_name,
             event_id = %event.provider_event_id,
-            error = %e,
-            "webhook hydration failed"
+            "duplicate webhook — already processed"
         );
-        let _ = mark_failed(db, &event, &format!("{e}")).await;
-        return text("ok-with-errors");
+        return err_response(200, "duplicate");
     }
 
-    let _ = mark_processed(db, &event).await;
-    text("ok")
+    // 6. Ensure audit row exists. INSERT race on (provider, event_id) UNIQUE
+    //    is treated as a concurrent duplicate — return 200 so the racing
+    //    caller can retry against the now-existing row if it later fails.
+    if existing.is_none() {
+        let neutral_str = event.neutral.and_then(|k| {
+            serde_json::to_value(k)
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+        });
+        let record = webhook_event::ActiveModel {
+            provider: Set(event.provider.clone()),
+            provider_event_id: Set(event.provider_event_id.clone()),
+            provider_event_type: Set(event.provider_event_type.clone()),
+            neutral_event_kind: Set(neutral_str),
+            payload: Set(event.raw_payload.clone()),
+            received_at: Set(Utc::now().to_rfc3339()),
+            processed_at: Set(None),
+            process_error: Set(None),
+            ..Default::default()
+        };
+        if let Err(e) = record.insert(db).await {
+            let msg = format!("{e}");
+            if is_unique_violation(&msg) {
+                return err_response(200, "duplicate-race");
+            }
+            tracing::error!(error = %e, "failed to persist webhook event");
+            return err_response(500, "persist");
+        }
+    } else {
+        // Retry: clear stale process_error from a previous failed attempt so
+        // the audit row reflects the current attempt's outcome.
+        if let Some(row) = existing {
+            let mut am: webhook_event::ActiveModel = row.into();
+            am.process_error = Set(None);
+            if let Err(e) = am.update(db).await {
+                tracing::error!(error = %e, "failed to clear stale process_error before retry");
+                // Continue — the retry can still succeed and overwrite this.
+            }
+        }
+    }
+
+    // 7. Hydrate inside a transaction. On failure, audit row + process_error
+    //    survive the rollback; the response is 503 so the provider retries.
+    match try_hydrate(db, provider.as_ref(), &event).await {
+        Ok(()) => text("ok"),
+        Err(e) => {
+            tracing::error!(
+                provider = %provider_name,
+                event_id = %event.provider_event_id,
+                error = %e,
+                "webhook hydration failed"
+            );
+            let _ = mark_failed(db, &event, &format!("{e}")).await;
+            err_response(503, "hydration-failed")
+        }
+    }
+}
+
+/// Run `process_webhook` and `mark_processed` inside one DB transaction.
+/// On error, rolls back so partial mirror state isn't observable.
+async fn try_hydrate(
+    db: &DatabaseConnection,
+    provider: &dyn PaymentProvider,
+    event: &WebhookEvent,
+) -> Result<(), PaymentError> {
+    let txn = db
+        .begin()
+        .await
+        .map_err(|e| PaymentError::Internal(format!("begin tx: {e}")))?;
+
+    match process_webhook(&txn, provider, event).await {
+        Ok(()) => match mark_processed(&txn, event).await {
+            Ok(()) => txn
+                .commit()
+                .await
+                .map_err(|e| PaymentError::Internal(format!("commit: {e}"))),
+            Err(e) => {
+                let _ = txn.rollback().await;
+                Err(e)
+            }
+        },
+        Err(e) => {
+            let _ = txn.rollback().await;
+            Err(e)
+        }
+    }
 }
 
 /// Dispatch a parsed [`WebhookEvent`] to the mirror-table hydration paths.
@@ -148,11 +210,17 @@ async fn handle_webhook_inner(
 /// Unmapped events (no `neutral`) are no-ops — the audit row is the only
 /// effect. Mapped events extract IDs / snapshots from the provider, look up
 /// or fetch the canonical entity state, then upsert the relevant mirror rows.
-async fn process_webhook(
-    db: &DatabaseConnection,
-    provider: &dyn crate::payments::PaymentProvider,
+/// Missing IDs in events whose neutral kind requires one are treated as
+/// validation errors — silent success would leave the mirror stale without
+/// operator visibility.
+async fn process_webhook<C>(
+    db: &C,
+    provider: &dyn PaymentProvider,
     event: &WebhookEvent,
-) -> Result<(), PaymentError> {
+) -> Result<(), PaymentError>
+where
+    C: ConnectionTrait + Send + Sync,
+{
     let Some(neutral) = event.neutral else {
         return Ok(());
     };
@@ -163,28 +231,25 @@ async fn process_webhook(
         NeutralEventKind::SubscriptionCreated
         | NeutralEventKind::SubscriptionUpdated
         | NeutralEventKind::SubscriptionCanceled => {
-            let Some(sub_id) = ids.subscription_id.as_deref() else {
-                tracing::warn!(
-                    event_id = %event.provider_event_id,
-                    provider_event_type = %event.provider_event_type,
-                    "subscription webhook missing subscription_id"
-                );
-                return Ok(());
-            };
+            let sub_id = ids.subscription_id.as_deref().ok_or_else(|| {
+                PaymentError::Validation(format!(
+                    "subscription webhook missing subscription_id (provider_event_type={})",
+                    event.provider_event_type
+                ))
+            })?;
             let result = provider.get(sub_id).await?;
             upsert_subscription(db, &event.provider, &result, neutral).await?;
             sync_subscription_items(db, &event.provider, sub_id, &result).await?;
         }
         NeutralEventKind::CustomerCreated | NeutralEventKind::CustomerUpdated => {
-            let Some(cust_id) = ids.customer_id.as_deref() else {
-                tracing::warn!(
-                    event_id = %event.provider_event_id,
-                    provider_event_type = %event.provider_event_type,
-                    "customer webhook missing customer_id"
-                );
-                return Ok(());
-            };
-            update_customer_mirror(db, &event.provider, cust_id, event).await?;
+            let cust_id = ids.customer_id.as_deref().ok_or_else(|| {
+                PaymentError::Validation(format!(
+                    "customer webhook missing customer_id (provider_event_type={})",
+                    event.provider_event_type
+                ))
+            })?;
+            let snapshot = provider.extract_customer_snapshot(event);
+            update_customer_mirror(db, &event.provider, cust_id, snapshot.as_ref()).await?;
         }
         NeutralEventKind::PaymentSucceeded
         | NeutralEventKind::PaymentFailed
@@ -193,6 +258,9 @@ async fn process_webhook(
         | NeutralEventKind::InvoicePaid
         | NeutralEventKind::InvoiceFailed => {
             let Some(snapshot) = provider.extract_payment_snapshot(event) else {
+                // Providers may legitimately omit snapshots for events they
+                // can't translate (e.g., adjustment events with no charge id).
+                // Audit-only is correct here.
                 tracing::debug!(
                     event_id = %event.provider_event_id,
                     provider_event_type = %event.provider_event_type,
@@ -217,12 +285,15 @@ fn subscription_status_to_str(s: SubscriptionStatus) -> &'static str {
     }
 }
 
-async fn upsert_subscription(
-    db: &DatabaseConnection,
+async fn upsert_subscription<C>(
+    db: &C,
     provider: &str,
     result: &SubscriptionResult,
     neutral: NeutralEventKind,
-) -> Result<(), PaymentError> {
+) -> Result<(), PaymentError>
+where
+    C: ConnectionTrait + Send + Sync,
+{
     let existing = subscription::Entity::find()
         .filter(subscription::Column::Provider.eq(provider))
         .filter(subscription::Column::ProviderSubscriptionId.eq(&result.provider_subscription_id))
@@ -278,12 +349,15 @@ async fn upsert_subscription(
     Ok(())
 }
 
-async fn sync_subscription_items(
-    db: &DatabaseConnection,
+async fn sync_subscription_items<C>(
+    db: &C,
     provider: &str,
     provider_subscription_id: &str,
     result: &SubscriptionResult,
-) -> Result<(), PaymentError> {
+) -> Result<(), PaymentError>
+where
+    C: ConnectionTrait + Send + Sync,
+{
     let parent = subscription::Entity::find()
         .filter(subscription::Column::Provider.eq(provider))
         .filter(subscription::Column::ProviderSubscriptionId.eq(provider_subscription_id))
@@ -361,11 +435,14 @@ async fn sync_subscription_items(
     Ok(())
 }
 
-async fn upsert_transaction(
-    db: &DatabaseConnection,
+async fn upsert_transaction<C>(
+    db: &C,
     provider: &str,
     snapshot: &PaymentSnapshot,
-) -> Result<(), PaymentError> {
+) -> Result<(), PaymentError>
+where
+    C: ConnectionTrait + Send + Sync,
+{
     let existing = transaction::Entity::find()
         .filter(transaction::Column::Provider.eq(provider))
         .filter(transaction::Column::ProviderTransactionId.eq(&snapshot.provider_transaction_id))
@@ -384,6 +461,8 @@ async fn upsert_transaction(
             am.amount_tax_minor = Set(snapshot.amount_tax_minor);
             am.currency = Set(snapshot.currency.clone());
             am.status = Set(snapshot.status.clone());
+            // Preserve original paid_at across refund/dispute events — the
+            // original payment time is the canonical reference.
             if snapshot.paid_at.is_some() {
                 am.paid_at = Set(snapshot.paid_at.map(|t| t.to_rfc3339()));
             }
@@ -417,19 +496,23 @@ async fn upsert_transaction(
     Ok(())
 }
 
-/// Update an existing `payments_customers` mirror row.
+/// Update an existing `payments_customers` mirror row from a provider-supplied
+/// snapshot.
 ///
 /// We deliberately do NOT insert when no row exists: `user_id` is `NOT NULL`
 /// and only the app knows which user a provider-side customer maps to
-/// (creation goes through [`CustomerStore::create_customer`] +
-/// app-controlled DB write). Out-of-band customers (created in the Stripe
-/// dashboard, say) are logged but not synthesized.
-async fn update_customer_mirror(
-    db: &DatabaseConnection,
+/// (creation goes through [`crate::payments::CustomerStore::create_customer`]
+/// plus an app-controlled DB write). Out-of-band customers (created in the
+/// Stripe dashboard, say) are logged but not synthesized.
+async fn update_customer_mirror<C>(
+    db: &C,
     provider: &str,
     provider_customer_id: &str,
-    event: &WebhookEvent,
-) -> Result<(), PaymentError> {
+    snapshot: Option<&CustomerSnapshot>,
+) -> Result<(), PaymentError>
+where
+    C: ConnectionTrait + Send + Sync,
+{
     let existing = customer::Entity::find()
         .filter(customer::Column::Provider.eq(provider))
         .filter(customer::Column::ProviderCustomerId.eq(provider_customer_id))
@@ -446,28 +529,13 @@ async fn update_customer_mirror(
         return Ok(());
     };
 
-    // Extract the email from the standard Stripe/Paddle shape — both put
-    // the customer object at `data.object` (Stripe) or `data` (Paddle).
-    // Best-effort: if we can't find it, we still update provider_metadata.
-    let new_email = event
-        .raw_payload
-        .pointer("/data/object/email")
-        .or_else(|| event.raw_payload.pointer("/data/email"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let new_metadata = event
-        .raw_payload
-        .pointer("/data/object")
-        .or_else(|| event.raw_payload.pointer("/data"))
-        .cloned()
-        .unwrap_or_else(|| event.raw_payload.clone());
-
     let mut am: customer::ActiveModel = model.into();
-    if let Some(email) = new_email {
-        am.email = Set(email);
+    if let Some(snap) = snapshot {
+        if let Some(email) = snap.email.as_ref() {
+            am.email = Set(email.clone());
+        }
+        am.provider_metadata = Set(snap.provider_metadata.clone());
     }
-    am.provider_metadata = Set(new_metadata);
     am.updated_at = Set(Utc::now().to_rfc3339());
     am.update(db)
         .await
@@ -475,10 +543,10 @@ async fn update_customer_mirror(
     Ok(())
 }
 
-async fn mark_processed(
-    db: &DatabaseConnection,
-    event: &WebhookEvent,
-) -> Result<(), PaymentError> {
+async fn mark_processed<C>(db: &C, event: &WebhookEvent) -> Result<(), PaymentError>
+where
+    C: ConnectionTrait + Send + Sync,
+{
     let model = webhook_event::Entity::find()
         .filter(webhook_event::Column::Provider.eq(&event.provider))
         .filter(webhook_event::Column::ProviderEventId.eq(&event.provider_event_id))
@@ -488,6 +556,7 @@ async fn mark_processed(
         .ok_or_else(|| PaymentError::Internal("webhook event vanished after insert".into()))?;
     let mut am: webhook_event::ActiveModel = model.into();
     am.processed_at = Set(Some(Utc::now().to_rfc3339()));
+    am.process_error = Set(None);
     am.update(db)
         .await
         .map_err(|e| PaymentError::Internal(format!("{e}")))?;

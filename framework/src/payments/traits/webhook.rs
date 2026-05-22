@@ -27,6 +27,17 @@ pub trait WebhookHandler: Send + Sync {
     fn extract_payment_snapshot(&self, _event: &WebhookEvent) -> Option<PaymentSnapshot> {
         None
     }
+
+    /// Build a [`CustomerSnapshot`] from a customer-type webhook payload.
+    /// Providers override to surface the fields they expose (typically
+    /// `email` plus a metadata blob).
+    ///
+    /// Returning `None` causes `update_customer_mirror` to skip the
+    /// email/metadata refresh — it still bumps `updated_at` on the existing
+    /// row so the operator can see the event was received.
+    fn extract_customer_snapshot(&self, _event: &WebhookEvent) -> Option<CustomerSnapshot> {
+        None
+    }
 }
 
 /// IDs extracted from a webhook payload that identify which mirror rows to
@@ -53,5 +64,17 @@ pub struct PaymentSnapshot {
     pub currency: String,
     pub status: String,
     pub paid_at: Option<DateTime<Utc>>,
+    pub provider_metadata: Value,
+}
+
+/// Customer fields extracted from a customer-event webhook payload. Built
+/// by `WebhookHandler::extract_customer_snapshot`. The framework uses this
+/// to refresh the `payments_customers` mirror row's `email` and
+/// `provider_metadata` columns — `user_id` and `provider_customer_id` are
+/// load-bearing keys that the webhook path never modifies.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CustomerSnapshot {
+    pub provider_customer_id: String,
+    pub email: Option<String>,
     pub provider_metadata: Value,
 }

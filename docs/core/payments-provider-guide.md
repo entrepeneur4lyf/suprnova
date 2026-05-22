@@ -404,13 +404,14 @@ Key points:
 - The framework's `webhook_routes` handler calls `verify` before `parse_event` and returns 401 on verification failure, 400 on parse failure.
 - Never log the raw secret or the received signature.
 
-### Mirror-table hydration: `extract_payload_ids` + `extract_payment_snapshot`
+### Mirror-table hydration: `extract_payload_ids` + `extract_payment_snapshot` + `extract_customer_snapshot`
 
-After `parse_event` returns a `WebhookEvent`, the framework's webhook route hydrates the mirror tables. Two optional trait methods drive that — both have safe default no-op implementations, so an adapter can ship without them and still pass through the audit layer:
+After `parse_event` returns a `WebhookEvent`, the framework's webhook route hydrates the mirror tables. Three optional trait methods drive that — all have safe default no-op implementations, so an adapter can ship without them and still pass through the audit layer:
 
 ```rust,ignore
 fn extract_payload_ids(&self, event: &WebhookEvent) -> PayloadIds;
 fn extract_payment_snapshot(&self, event: &WebhookEvent) -> Option<PaymentSnapshot>;
+fn extract_customer_snapshot(&self, event: &WebhookEvent) -> Option<CustomerSnapshot>;
 ```
 
 `PayloadIds` is the bridge between the parsed event and the framework's mirror logic. Implement it so the framework can find the right entity:
@@ -444,6 +445,24 @@ pub struct PaymentSnapshot {
 Stripe's reference implementation reads `data.object.{id,amount,currency,customer}` for `PaymentIntent`/`Charge` events and `data.object.{id,amount_paid,tax,currency,customer,subscription,status_transitions.paid_at}` for `Invoice` events. Paddle's reads `data.{id,customer_id,currency_code,details.totals.{total,tax},billed_at,subscription_id}`. Mirror the conventions that match your provider's payload shape — the framework doesn't care how you extract, only that the snapshot is correct.
 
 If you return `None` from `extract_payment_snapshot`, the audit row is still written but `payments_transactions` is not touched. That is the correct return for subscription / customer events, or for any payment event where the payload doesn't carry enough information to populate a row.
+
+`CustomerSnapshot` keeps customer-mirror sync provider-driven (no hardcoded JSON paths in the framework):
+
+```rust,ignore
+pub struct CustomerSnapshot {
+    pub provider_customer_id: String,
+    pub email: Option<String>,
+    pub provider_metadata: Value,
+}
+```
+
+The framework will `email = Set(snapshot.email)` only when the snapshot supplies one; `provider_metadata` is always replaced with the provider's view of the customer (`updated_at` is also bumped regardless). Customer-mirror rows are only ever **updated** — never inserted — because `user_id` is `NOT NULL` and the app owns the user ↔ customer link via `CustomerStore::create_customer`.
+
+### Failure semantics
+
+If `extract_payload_ids` returns `None` for `subscription_id` on a subscription event (or for `customer_id` on a customer event), the framework treats that as a `Validation` error: the hydration transaction rolls back, the audit row's `process_error` is set, and the HTTP response is **503 hydration-failed** so the provider retries. Silent success on a malformed payload would leave the mirror stale without operator visibility — provider retries are the recovery mechanism.
+
+This contract means an adapter's extractor must populate the relevant IDs honestly. Returning `None` is reserved for events your provider can't translate at all (e.g. a payment event with no charge ID in the payload), not for "I didn't bother to parse this one."
 
 ## 7. Register at App Boot
 

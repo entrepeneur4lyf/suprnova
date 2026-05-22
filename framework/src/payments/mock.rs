@@ -23,11 +23,11 @@
 //! See `framework/tests/payments_mock_discriminator.rs` for the full E2E flow.
 
 use crate::payments::{
-    Checkout, CreateCustomerRequest, CustomerRef, CustomerStore, NeutralEventKind, PaymentError,
-    PaymentProvider, PaymentResult, PaymentSnapshot, PayloadIds, SessionPayload,
-    StartSessionRequest, SubscribeRequest, Subscription, SubscriptionItemSnapshot,
-    SubscriptionResult, SubscriptionStatus, UpdateCustomerRequest, UpdateSubscriptionRequest,
-    WebhookContext, WebhookEvent, WebhookHandler,
+    Checkout, CreateCustomerRequest, CustomerRef, CustomerSnapshot, CustomerStore,
+    NeutralEventKind, PaymentError, PaymentProvider, PaymentResult, PaymentSnapshot, PayloadIds,
+    SessionPayload, StartSessionRequest, SubscribeRequest, Subscription,
+    SubscriptionItemSnapshot, SubscriptionResult, SubscriptionStatus, UpdateCustomerRequest,
+    UpdateSubscriptionRequest, WebhookContext, WebhookEvent, WebhookHandler,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -332,5 +332,24 @@ impl WebhookHandler for MockPaymentProvider {
             paid_at,
             provider_metadata: obj.clone(),
         })
+    }
+
+    fn extract_customer_snapshot(&self, event: &WebhookEvent) -> Option<CustomerSnapshot> {
+        match event.neutral? {
+            NeutralEventKind::CustomerCreated | NeutralEventKind::CustomerUpdated => {
+                let obj = event.raw_payload.pointer("/data/object")?;
+                let provider_customer_id = obj.get("id")?.as_str()?.to_string();
+                let email = obj
+                    .get("email")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                Some(CustomerSnapshot {
+                    provider_customer_id,
+                    email,
+                    provider_metadata: obj.clone(),
+                })
+            }
+            _ => None,
+        }
     }
 }

@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use suprnova::payments::{
-    NeutralEventKind, PaymentError, PaymentResult, PaymentSnapshot, PayloadIds, WebhookContext,
-    WebhookEvent, WebhookHandler,
+    CustomerSnapshot, NeutralEventKind, PaymentError, PaymentResult, PaymentSnapshot, PayloadIds,
+    WebhookContext, WebhookEvent, WebhookHandler,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -263,6 +263,29 @@ impl WebhookHandler for StripeProvider {
             _ => None,
         }
     }
+
+    /// Build a [`CustomerSnapshot`] from Stripe `customer.created` /
+    /// `customer.updated` payloads. Stripe puts the full Customer object at
+    /// `data.object` — we pull `id` + `email` and keep the rest in
+    /// `provider_metadata` for downstream readers.
+    fn extract_customer_snapshot(&self, event: &WebhookEvent) -> Option<CustomerSnapshot> {
+        match event.neutral? {
+            NeutralEventKind::CustomerCreated | NeutralEventKind::CustomerUpdated => {
+                let obj = event.raw_payload.pointer("/data/object")?;
+                let provider_customer_id = obj.get("id")?.as_str()?.to_string();
+                let email = obj
+                    .get("email")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                Some(CustomerSnapshot {
+                    provider_customer_id,
+                    email,
+                    provider_metadata: obj.clone(),
+                })
+            }
+            _ => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -281,4 +304,195 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Install the rustls ring CryptoProvider exactly once — `StripeProvider::new`
+    /// constructs a hyper-rustls client which panics at TLS init when both
+    /// `aws-lc-rs` and `ring` are in the dep graph (as they are via async-stripe).
+    fn install_crypto_provider() {
+        static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        ONCE.get_or_init(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+    }
+
+    fn provider() -> StripeProvider {
+        install_crypto_provider();
+        StripeProvider::new("sk_test_dummy", "pk_test_dummy", "whsec_dummy")
+    }
+
+    fn event(neutral: NeutralEventKind, payload: serde_json::Value) -> WebhookEvent {
+        WebhookEvent {
+            provider: "stripe".into(),
+            provider_event_id: "evt_test".into(),
+            provider_event_type: format!("{neutral:?}"),
+            neutral: Some(neutral),
+            raw_payload: payload,
+        }
+    }
+
+    #[test]
+    fn extract_payload_ids_subscription_created() {
+        let p = provider();
+        let e = event(
+            NeutralEventKind::SubscriptionCreated,
+            serde_json::json!({
+                "data": { "object": { "id": "sub_abc", "customer": "cus_xyz" } }
+            }),
+        );
+        let ids = p.extract_payload_ids(&e);
+        assert_eq!(ids.subscription_id.as_deref(), Some("sub_abc"));
+        assert_eq!(ids.customer_id.as_deref(), Some("cus_xyz"));
+        assert!(ids.transaction_id.is_none());
+    }
+
+    #[test]
+    fn extract_payload_ids_invoice_paid_carries_subscription() {
+        let p = provider();
+        let e = event(
+            NeutralEventKind::InvoicePaid,
+            serde_json::json!({
+                "data": { "object": {
+                    "id": "in_99",
+                    "customer": "cus_77",
+                    "subscription": "sub_44"
+                }}
+            }),
+        );
+        let ids = p.extract_payload_ids(&e);
+        assert_eq!(ids.transaction_id.as_deref(), Some("in_99"));
+        assert_eq!(ids.customer_id.as_deref(), Some("cus_77"));
+        assert_eq!(ids.subscription_id.as_deref(), Some("sub_44"));
+    }
+
+    #[test]
+    fn extract_payload_ids_returns_empty_when_data_object_missing() {
+        let p = provider();
+        let e = event(
+            NeutralEventKind::PaymentSucceeded,
+            serde_json::json!({ "unexpected": "shape" }),
+        );
+        let ids = p.extract_payload_ids(&e);
+        assert!(ids.subscription_id.is_none());
+        assert!(ids.customer_id.is_none());
+        assert!(ids.transaction_id.is_none());
+    }
+
+    #[test]
+    fn extract_payment_snapshot_payment_succeeded() {
+        let p = provider();
+        let e = event(
+            NeutralEventKind::PaymentSucceeded,
+            serde_json::json!({
+                "data": { "object": {
+                    "id": "pi_test",
+                    "customer": "cus_1",
+                    "amount": 4242,
+                    "currency": "usd",
+                    "created": 1717000000
+                }}
+            }),
+        );
+        let snap = p.extract_payment_snapshot(&e).expect("snapshot present");
+        assert_eq!(snap.provider_transaction_id, "pi_test");
+        assert_eq!(snap.provider_customer_id, "cus_1");
+        assert_eq!(snap.amount_total_minor, 4242);
+        assert_eq!(snap.currency, "USD", "currency must be uppercased");
+        assert_eq!(snap.status, "succeeded");
+        assert!(snap.paid_at.is_some(), "PaymentSucceeded must parse `created` as paid_at");
+    }
+
+    #[test]
+    fn extract_payment_snapshot_invoice_paid_uses_amount_paid_and_tax() {
+        let p = provider();
+        let e = event(
+            NeutralEventKind::InvoicePaid,
+            serde_json::json!({
+                "data": { "object": {
+                    "id": "in_x",
+                    "customer": "cus_x",
+                    "subscription": "sub_x",
+                    "amount_paid": 12345,
+                    "amount_due": 99999,
+                    "tax": 234,
+                    "currency": "EUR",
+                    "status_transitions": { "paid_at": 1717000000 }
+                }}
+            }),
+        );
+        let snap = p.extract_payment_snapshot(&e).expect("snapshot present");
+        assert_eq!(snap.amount_total_minor, 12345, "amount_paid takes precedence");
+        assert_eq!(snap.amount_tax_minor, 234);
+        assert_eq!(snap.currency, "EUR");
+        assert_eq!(snap.provider_subscription_id.as_deref(), Some("sub_x"));
+        assert!(snap.paid_at.is_some());
+    }
+
+    #[test]
+    fn extract_payment_snapshot_falls_back_to_amount_due_when_amount_paid_absent() {
+        let p = provider();
+        let e = event(
+            NeutralEventKind::InvoiceFailed,
+            serde_json::json!({
+                "data": { "object": {
+                    "id": "in_fail",
+                    "customer": "cus_y",
+                    "amount_due": 5500,
+                    "currency": "GBP"
+                }}
+            }),
+        );
+        let snap = p.extract_payment_snapshot(&e).expect("snapshot present");
+        assert_eq!(snap.amount_total_minor, 5500);
+        assert_eq!(snap.status, "failed");
+    }
+
+    #[test]
+    fn extract_payment_snapshot_returns_none_for_subscription_event() {
+        let p = provider();
+        let e = event(
+            NeutralEventKind::SubscriptionUpdated,
+            serde_json::json!({
+                "data": { "object": { "id": "sub_x" } }
+            }),
+        );
+        assert!(p.extract_payment_snapshot(&e).is_none());
+    }
+
+    #[test]
+    fn extract_customer_snapshot_pulls_email_from_data_object() {
+        let p = provider();
+        let e = event(
+            NeutralEventKind::CustomerUpdated,
+            serde_json::json!({
+                "data": { "object": {
+                    "id": "cus_email_test",
+                    "email": "new@example.com",
+                    "name": "Test User"
+                }}
+            }),
+        );
+        let snap = p.extract_customer_snapshot(&e).expect("snapshot present");
+        assert_eq!(snap.provider_customer_id, "cus_email_test");
+        assert_eq!(snap.email.as_deref(), Some("new@example.com"));
+        assert_eq!(snap.provider_metadata["name"], "Test User");
+    }
+
+    #[test]
+    fn extract_customer_snapshot_returns_none_for_non_customer_events() {
+        let p = provider();
+        let e = event(
+            NeutralEventKind::PaymentSucceeded,
+            serde_json::json!({"data": {"object": {"id": "pi_x", "email": "x@x.com"}}}),
+        );
+        assert!(p.extract_customer_snapshot(&e).is_none());
+    }
 }

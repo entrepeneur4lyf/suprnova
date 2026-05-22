@@ -26,7 +26,7 @@ use serde_json::json;
 use suprnova::handle_request;
 use suprnova::payments::{
     entities::webhook_event, MockPaymentProvider, PaymentProvider, PaymentProviderRegistry,
-    webhook_routes,
+    SubscribeRequest, Subscription, webhook_routes,
 };
 use suprnova::testing::TestDatabase;
 use suprnova::{MiddlewareRegistry, Router};
@@ -118,13 +118,16 @@ async fn send_webhook(
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// Register the mock provider under a test-scoped name, returning that name.
+/// Register the mock provider under a test-scoped name and return the concrete
+/// Arc so the caller can pre-populate provider-side state (e.g. subscriptions).
 ///
 /// Each test uses a unique name so parallel runs don't stomp on each other
 /// inside the process-global registry.
-fn register_mock(name: &'static str) {
-    let mock = Arc::new(MockPaymentProvider::new()) as Arc<dyn PaymentProvider>;
-    PaymentProviderRegistry::bind(name, mock);
+fn register_mock(name: &'static str) -> Arc<MockPaymentProvider> {
+    let mock = Arc::new(MockPaymentProvider::new());
+    let as_trait: Arc<dyn PaymentProvider> = mock.clone();
+    PaymentProviderRegistry::bind(name, as_trait);
+    mock
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -136,12 +139,27 @@ fn register_mock(name: &'static str) {
 #[tokio::test]
 async fn duplicate_webhook_deduped_and_returns_ok() {
     let provider_name: &'static str = "mock-idem-dedup";
-    register_mock(provider_name);
+    let mock = register_mock(provider_name);
 
     let db = TestDatabase::fresh::<PaymentsTestMigrator>()
         .await
         .expect("TestDatabase::fresh");
     let conn = Arc::new(db.conn().clone());
+
+    // Pre-populate a subscription in the mock so the webhook's
+    // Subscription::get(id) call returns canonical state instead of NotFound —
+    // we're testing idempotency, but the full hydration path now runs in a
+    // transaction and a missing subscription would fail with 503.
+    let sub = mock
+        .subscribe(SubscribeRequest {
+            customer_ref: "cus_idem_test".into(),
+            price_refs: vec!["price_idem".into()],
+            trial_days: None,
+            idempotency_key: None,
+            metadata: None,
+        })
+        .await
+        .expect("mock subscribe");
 
     let router = webhook_routes(conn.clone());
     // 4 accepts: 2 for the two POSTs + 2 headroom for connection keep-alive
@@ -151,7 +169,10 @@ async fn duplicate_webhook_deduped_and_returns_ok() {
         json!({
             "id": "evt_unique_abc123",
             "type": "subscription.created",
-            "data": { "subscription_id": "sub_999" }
+            "data": { "object": {
+                "id": sub.provider_subscription_id,
+                "customer": sub.provider_customer_id
+            }}
         })
         .to_string(),
     );

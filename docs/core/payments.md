@@ -377,7 +377,7 @@ When `neutral` is `None`, the event is provider-specific. Read `provider_event_t
 
 ### Mirror-table hydration
 
-After the audit row is persisted, the framework dispatches the event to the relevant mirror table based on `neutral`:
+After the audit row is persisted, the framework dispatches the event to the relevant mirror table based on `neutral`. **All mirror writes for one event happen inside a single DB transaction along with `mark_processed`** — partial mirror state is never observable. Either everything commits together or everything rolls back.
 
 | `NeutralEventKind`               | Mirror effect                                                                                       |
 |----------------------------------|-----------------------------------------------------------------------------------------------------|
@@ -385,12 +385,21 @@ After the audit row is persisted, the framework dispatches the event to the rele
 | `SubscriptionCanceled`           | Same as above; also sets `canceled_at` and flips `status` to `canceled` on the existing row.        |
 | `PaymentSucceeded / Failed / Refunded / Disputed` | Upserts `payments_transactions` from the snapshot the provider produces from `raw_payload`.        |
 | `InvoicePaid / InvoiceFailed`    | Upserts `payments_transactions` with `provider_subscription_id` linked.                              |
-| `CustomerCreated / CustomerUpdated` | Updates the existing `payments_customers` row's `email` / `provider_metadata`. **Never inserts.**   |
+| `CustomerCreated / CustomerUpdated` | Updates the existing `payments_customers` row's `email` / `provider_metadata` from the provider's `CustomerSnapshot`. **Never inserts.**   |
 | `None` (unmapped)                | Audit row only — no mirror change.                                                                   |
 
 The customer mirror is intentionally update-only on the webhook path. `user_id` is `NOT NULL` and only the app knows which user a provider customer belongs to (the link is created by your code right after `CustomerStore::create_customer`). Out-of-band customers — created in the Stripe dashboard, say — are logged but never synthesized into the mirror.
 
-Hydration failures do not return 5xx to the provider. The audit row's `process_error` field captures the failure for operator review while the handler responds with `200 ok-with-errors`. This keeps providers from retrying forever when the failure is on your side.
+### Failure recovery contract
+
+The handler treats provider retries as the recovery mechanism:
+
+- **Hydration succeeds:** transaction commits, `processed_at` set, `process_error` cleared. Response: `200 ok`.
+- **Hydration fails:** transaction rolls back (no partial mirror state), audit row keeps `processed_at = NULL` and `process_error` records the failure. Response: `503 hydration-failed` — the provider will retry with backoff.
+- **Provider retries the failed event:** idempotency check sees the existing audit row but `processed_at IS NULL`, so hydration runs again. The retry replaces the stale `process_error` with the current attempt's outcome.
+- **Provider retries a succeeded event:** idempotency check sees `processed_at IS NOT NULL`, returns `200 duplicate` immediately. No re-hydration.
+
+A subscription/customer event with a missing `subscription_id` / `customer_id` in the payload is treated as a `Validation` error (also 503 + `process_error` recorded). Silent success on a malformed payload would leave the mirror stale without operator visibility.
 
 Items removed from a subscription on the provider side (e.g. user dropped a seat add-on) are removed from `payments_subscription_items` when the next `subscription.updated` webhook arrives. The provider's `Subscription::get(id)` response is the source of truth on every sync.
 
