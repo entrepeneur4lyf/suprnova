@@ -203,7 +203,7 @@ pub use vector::{
 // Phase 12 — payments. Money + Currency are the foundational primitives;
 // every payment DTO builds on them. Re-exported at the crate root so
 // consumers write `suprnova::Money` / `suprnova::Currency`.
-pub use payments::{Currency, Money};
+pub use payments::{Currency, MockPaymentProvider, Money, PaymentProviderEntry, PaymentProviderRegistry};
 
 #[doc(hidden)]
 pub use clap as __clap;
