@@ -6952,6 +6952,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
+ "percent-encoding",
  "pinecone-sdk",
  "pretty_assertions",
  "prometheus-client",

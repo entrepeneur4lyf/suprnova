@@ -298,18 +298,34 @@ where
         // Create server with configuration from environment.
         //
         // `from_config` returns Err when APP_KEY is required (any
-        // non-development environment) but unset or malformed. We
-        // expect-out the boot error with the message verbatim — the
-        // message itself is the user-facing remediation (it points at
-        // `suprnova key:generate`). This is the boot-time fail-closed
-        // path described in codex review finding #1.
-        let server = Server::from_config(router)
-            .unwrap_or_else(|e| panic!("Failed to start server: {e}"));
-        server.run().await.expect("Failed to start server");
+        // non-development environment) but unset or malformed. The
+        // error type carries the user-facing remediation (it points at
+        // `suprnova key:generate`); we surface it on stderr without a
+        // panic stack-trace wrapper so production boot logs stay clean.
+        // This is the boot-time fail-closed path described in codex
+        // review finding #1.
+        let server = match Server::from_config(router) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("suprnova: failed to start server: {e}");
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = server.run().await {
+            eprintln!("suprnova: server exited with error: {e}");
+            std::process::exit(1);
+        }
     }
 
     async fn get_database_connection() -> sea_orm::DatabaseConnection {
-        let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
+            eprintln!(
+                "suprnova: DATABASE_URL is not set. \
+                 Configure DATABASE_URL in your environment (e.g. .env) \
+                 before running a database subcommand."
+            );
+            std::process::exit(1);
+        });
 
         // For SQLite, ensure the database file can be created
         let database_url = if database_url.starts_with("sqlite://") {
@@ -422,6 +438,19 @@ where
     async fn run_workflow_worker_internal(
         bootstrap_fn: Option<BootstrapFn>,
     ) {
+        // Audit fix: workflow workers must see the same Cache / Queue /
+        // RateLimit / Mail drivers as the web server. Without this the
+        // worker would silently default to in-memory queue + in-memory
+        // cache even when QUEUE_DRIVER=redis was set in the environment,
+        // because `Server::run`'s driver bootstrap is never reached when
+        // booting through `workflow:work`. Drivers are bootstrapped
+        // BEFORE the user's bootstrap_fn so user code can register
+        // queue handlers, attach to cache, etc., against live drivers.
+        if let Err(e) = Self::bootstrap_runtime_drivers().await {
+            eprintln!("Workflow worker bootstrap error: {e}");
+            std::process::exit(1);
+        }
+
         if let Some(bootstrap_fn) = bootstrap_fn {
             bootstrap_fn().await;
         }
@@ -435,8 +464,22 @@ where
         println!("==============================================");
 
         if let Err(e) = crate::workflow::WorkflowWorker::work_loop().await {
-            eprintln!("Workflow worker error: {}", e);
+            eprintln!("Workflow worker error: {e}");
             std::process::exit(1);
         }
+    }
+
+    /// Shared bootstrap for non-server subcommands that still need the
+    /// runtime drivers: Cache, Queue, RateLimit, Mail. Mirrors the
+    /// driver-bootstrap order in `Server::run` (telemetry / encryption
+    /// keys / authorization init are subcommand-specific and stay out
+    /// of this helper).
+    async fn bootstrap_runtime_drivers(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        crate::cache::Cache::bootstrap().await;
+        crate::queue::bootstrap_from_env().await?;
+        crate::rate_limit::bootstrap_from_env().await?;
+        crate::mail::boot::bootstrap_from_env()?;
+        Ok(())
     }
 }

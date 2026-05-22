@@ -250,7 +250,34 @@ impl Server {
         loop {
             tokio::select! {
                 accept = listener.accept() => {
-                    let (stream, _) = accept?;
+                    // Surviving transient accept errors keeps the server
+                    // up under file-descriptor pressure, recoverable
+                    // peer-side aborts (ECONNABORTED), and similar. The
+                    // listener itself stays bound; only the per-connection
+                    // accept failed.
+                    //
+                    // We log every transient error so persistent failures
+                    // surface in operator dashboards, and apply a small
+                    // backoff so a tight-loop failure mode (e.g. EMFILE
+                    // until a connection drops) can't burn CPU. Truly
+                    // fatal listener errors are extremely rare in
+                    // practice; if they do happen, the per-iteration
+                    // warn + 50ms sleep keeps the loop visible without
+                    // dropping the server.
+                    let (stream, _) = match accept {
+                        Ok(pair) => pair,
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                "accept error; continuing after 50ms backoff"
+                            );
+                            tokio::time::sleep(
+                                std::time::Duration::from_millis(50),
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
                     let io = TokioIo::new(stream);
                     let router = router.clone();
                     let middleware = middleware.clone();
@@ -583,6 +610,12 @@ async fn handle_ws_upgrade(
     // unwoken websocket future drops cleanly. Middleware can substitute
     // a modified Request via `next(modified_req)`; the terminator
     // captures the final Request into a shared Mutex slot.
+    //
+    // Lock-poison handling: a panic inside a middleware would normally
+    // poison the captured-request Mutex. We translate that into a 500
+    // response and abort the upgrade, rather than re-panicking inside
+    // the per-connection task — one poisoned upgrade must not cascade
+    // into killing the accept loop or other in-flight connections.
     let suprnova_req = if middleware_list.is_empty() {
         initial_request
     } else {
@@ -592,9 +625,16 @@ async fn handle_ws_upgrade(
         let terminator: Arc<BoxedHandler> = Arc::new(Box::new(move |req: Request| {
             let captured = captured_for_terminator.clone();
             Box::pin(async move {
-                *lock::lock(&captured)
-                    .expect("WS middleware terminator mutex poisoned") = Some(req);
-                Ok(HttpResponse::text("").status(200))
+                match lock::lock(&captured) {
+                    Ok(mut guard) => {
+                        *guard = Some(req);
+                        Ok(HttpResponse::text("").status(200))
+                    }
+                    Err(_) => Err(HttpResponse::text(
+                        "internal error: websocket upgrade aborted (terminator lock poisoned)",
+                    )
+                    .status(500)),
+                }
             })
                 as std::pin::Pin<
                     Box<dyn std::future::Future<Output = crate::http::Response> + Send>,
@@ -621,10 +661,39 @@ async fn handle_ws_upgrade(
             return http_response.into_hyper();
         }
 
-        lock::lock(&captured)
-            .expect("WS middleware terminator mutex poisoned")
-            .take()
-            .expect("WS middleware terminator must have captured the request")
+        match lock::lock(&captured) {
+            Ok(mut guard) => match guard.take() {
+                Some(req) => req,
+                None => {
+                    // Middleware chain returned 2xx without ever
+                    // invoking `next(req)`. That's a programming bug
+                    // in the middleware — abort the upgrade with a
+                    // 500 so the issue is visible rather than the
+                    // peer hanging on a stalled upgrade.
+                    tracing::error!(
+                        route = %pattern,
+                        "websocket upgrade aborted: middleware chain \
+                         returned 2xx without invoking `next(req)`"
+                    );
+                    return HttpResponse::text(
+                        "internal error: websocket upgrade aborted (middleware did not call next)",
+                    )
+                    .status(500)
+                    .into_hyper();
+                }
+            },
+            Err(_) => {
+                tracing::error!(
+                    route = %pattern,
+                    "websocket upgrade aborted: terminator lock poisoned"
+                );
+                return HttpResponse::text(
+                    "internal error: websocket upgrade aborted (terminator lock poisoned)",
+                )
+                .status(500)
+                .into_hyper();
+            }
+        }
     };
 
     // Tracing span covers the entire WS connection lifecycle from
@@ -738,9 +807,16 @@ fn convert_response_body(
     hyper::Response::from_parts(parts, boxed)
 }
 
-/// Built-in health check endpoint at /_suprnova/health
-/// Returns {"status": "ok", "timestamp": "..."} by default
-/// Add ?db=true to also check database connectivity (/_suprnova/health?db=true)
+/// Built-in health check endpoint at /_suprnova/health.
+///
+/// Returns `{"status": "ok", "timestamp": "..."}` with HTTP 200 by
+/// default. Add `?db=true` to also check database connectivity; if any
+/// sub-check fails, the response status flips to 503 Service Unavailable
+/// and the top-level `status` field changes to `"degraded"` so
+/// k8s-style `livenessProbe` / `readinessProbe` configurations against
+/// this endpoint can trigger restart on outage. The body shape (with
+/// `database` and `database_error` fields) stays the same so dashboards
+/// can parse both healthy and degraded responses uniformly.
 async fn health_response(query: &str) -> hyper::Response<ServerBody> {
     use chrono::Utc;
     use serde_json::json;
@@ -752,6 +828,7 @@ async fn health_response(query: &str) -> hyper::Response<ServerBody> {
         "status": "ok",
         "timestamp": timestamp
     });
+    let mut degraded = false;
 
     if check_db {
         // Try to check database connection
@@ -762,21 +839,30 @@ async fn health_response(query: &str) -> hyper::Response<ServerBody> {
             Err(e) => {
                 response["database"] = json!("error");
                 response["database_error"] = json!(e);
+                response["status"] = json!("degraded");
+                degraded = true;
             }
         }
     }
 
-    let body = serde_json::to_string(&response).unwrap_or_else(|_| r#"{"status":"ok"}"#.to_string());
+    let status = if degraded { 503 } else { 200 };
+    let body = serde_json::to_string(&response).unwrap_or_else(|_| {
+        if degraded {
+            r#"{"status":"degraded"}"#.to_string()
+        } else {
+            r#"{"status":"ok"}"#.to_string()
+        }
+    });
 
     hyper::Response::builder()
-        .status(200)
+        .status(status)
         .header("Content-Type", "application/json")
         .body(
             Full::new(Bytes::from(body))
                 .map_err(|never| match never {})
                 .boxed(),
         )
-        .unwrap()
+        .expect("health response builder must succeed for a static status + header set")
 }
 
 /// Check database health by attempting a simple query

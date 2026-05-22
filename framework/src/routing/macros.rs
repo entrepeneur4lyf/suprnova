@@ -53,7 +53,7 @@ use std::sync::Arc;
 /// - `/users/:id` → `/users/{id}`
 /// - `/posts/:post_id/comments/:id` → `/posts/{post_id}/comments/{id}`
 /// - `/users/{id}` → `/users/{id}` (already correct syntax, unchanged)
-fn convert_route_params(path: &str) -> String {
+pub(crate) fn convert_route_params(path: &str) -> String {
     let mut result = String::with_capacity(path.len() + 4); // Extra space for braces
     let mut chars = path.chars().peekable();
 
@@ -635,16 +635,19 @@ impl GroupDef {
         for item in self.items {
             match item {
                 GroupItem::Route(route) => {
-                    // Convert :param to {param} for matchit compatibility
-                    let converted_route_path = convert_route_params(route.path);
-
-                    // Build full path with prefix
-                    // If route path is "/" (root), just use the prefix without trailing slash
-                    let full_path = if converted_route_path == "/" {
+                    // Build full path with prefix, then convert :param to
+                    // {param} for matchit compatibility. Conversion runs
+                    // AFTER concatenation so a group prefix containing
+                    // `:param` (e.g. `group!("/api/:version", { ... })`)
+                    // gets normalised the same way the route segment does
+                    // — without that, `:version` would reach matchit as a
+                    // literal segment instead of a parameter.
+                    let raw_full = if route.path == "/" {
                         full_prefix.clone()
                     } else {
-                        format!("{}{}", full_prefix, converted_route_path)
+                        format!("{}{}", full_prefix, route.path)
                     };
+                    let full_path = convert_route_params(&raw_full);
                     // We need to leak the string to get a 'static str for the router
                     let full_path: &'static str = Box::leak(full_path.into_boxed_str());
 

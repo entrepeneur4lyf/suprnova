@@ -1,5 +1,6 @@
 //! Route grouping with shared prefix and middleware
 
+use super::macros::convert_route_params;
 use super::{BoxedHandler, RouteBuilder, Router};
 use crate::http::{Request, Response};
 use crate::middleware::{into_boxed, BoxedMiddleware, Middleware};
@@ -59,11 +60,20 @@ impl GroupBuilder {
         self
     }
 
-    /// Finalize the group and merge routes into the outer router
+    /// Finalize the group and merge routes into the outer router.
+    ///
+    /// Path normalisation: prefix + inner path are concatenated and then
+    /// run through `convert_route_params` so Express-style `:id` segments
+    /// are translated to matchit-style `{id}`. The same canonical pattern
+    /// is used both for the matchit insert and for the middleware lookup
+    /// key — without that, group middleware on a parameterised route
+    /// would miss the dispatcher's lookup (it queries by matched pattern,
+    /// not raw path).
     fn finalize(mut self) -> Router {
         // Insert all group routes into the outer router with the prefix
         for route in self.group_routes {
-            let full_path = format!("{}{}", self.prefix, route.path);
+            let raw_full = format!("{}{}", self.prefix, route.path);
+            let full_path = convert_route_params(&raw_full);
 
             // Insert into the appropriate method router using public(crate) methods,
             // and capture the canonical `hyper::Method` so middleware is keyed by
@@ -88,7 +98,11 @@ impl GroupBuilder {
                 }
             };
 
-            // Apply group middleware to each route under its own (method, path) key.
+            // Apply group middleware to each route under its own
+            // (method, converted_path) key. The dispatcher in
+            // `server.rs` looks middleware up by the matched pattern;
+            // both insert and lookup must therefore use the same
+            // canonical form.
             for mw in &self.middleware {
                 self.outer_router
                     .add_middleware(http_method.clone(), &full_path, mw.clone());

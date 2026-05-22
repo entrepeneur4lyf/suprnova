@@ -3,6 +3,7 @@ use crate::middleware::{into_boxed, BoxedMiddleware, Middleware};
 use crate::ws::BoxedWebSocketHandler;
 use hyper::Method;
 use matchit::Router as MatchitRouter;
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -11,15 +12,122 @@ use std::sync::{Arc, OnceLock, RwLock};
 /// Global registry mapping route names to path patterns
 static ROUTE_REGISTRY: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
 
-/// Register a route name -> path mapping
+/// Characters that must be percent-encoded when substituting a value
+/// into a route pattern segment. The set covers the gen-delims and
+/// sub-delims from RFC 3986 (`/ ? # [ ] @ ! $ & ' ( ) * + , ; =`) plus
+/// the unsafe characters (space, `"`, `<`, `>`, `\`, `^`, `` ` ``, `{`,
+/// `|`, `}`, `%`) and ASCII control codes.
+///
+/// Unreserved characters (`A-Z a-z 0-9 - _ . ~`) pass through unchanged,
+/// matching what a browser sends for a URL-safe path segment.
+const PATH_SEGMENT_ENCODE: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'<')
+    .add(b'>')
+    .add(b'\\')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}')
+    .add(b'%')
+    // gen-delims
+    .add(b':')
+    .add(b'/')
+    .add(b'?')
+    .add(b'#')
+    .add(b'[')
+    .add(b']')
+    .add(b'@')
+    // sub-delims
+    .add(b'!')
+    .add(b'$')
+    .add(b'&')
+    .add(b'\'')
+    .add(b'(')
+    .add(b')')
+    .add(b'*')
+    .add(b'+')
+    .add(b',')
+    .add(b';')
+    .add(b'=');
+
+/// Register a route name -> path mapping.
+///
+/// # Panics
+///
+/// Panics if `name` is already registered under a different `path`.
+/// Two routes resolving the same name silently shadowing each other is
+/// a security-shaped bug — redirects and named-URL helpers would route
+/// to whichever happened to win the registration race. Route names
+/// must be unique; collisions fail loudly at boot.
+///
+/// Re-registering the same `(name, path)` pair is a no-op (idempotent).
+/// Poisoned write locks are recovered via `PoisonError::into_inner` —
+/// a panic during one thread's registration must not silently make
+/// every subsequent name lookup return `None`.
 pub fn register_route_name(name: &str, path: &str) {
     let registry = ROUTE_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
-    if let Ok(mut map) = registry.write() {
-        map.insert(name.to_string(), path.to_string());
+    let mut map = match registry.write() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(existing) = map.get(name)
+        && existing != path
+    {
+        panic!(
+            "Route name '{name}' is already registered to path '{existing}'; \
+             refusing to re-register to '{path}'. Route names must be unique \
+             across the application — rename one of the routes.",
+        );
     }
+    map.insert(name.to_string(), path.to_string());
 }
 
-/// Generate a URL for a named route with parameters
+fn lookup_route(name: &str) -> Option<String> {
+    let lock = ROUTE_REGISTRY.get()?;
+    let map = match lock.read() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    map.get(name).cloned()
+}
+
+fn substitute<F>(pattern: &str, mut next_value: F) -> String
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut out = String::with_capacity(pattern.len() + 16);
+    let mut rest = pattern;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        rest = &rest[open + 1..];
+        let Some(close) = rest.find('}') else {
+            out.push('{');
+            out.push_str(rest);
+            return out;
+        };
+        let key = &rest[..close];
+        if let Some(encoded) = next_value(key) {
+            out.push_str(&encoded);
+        } else {
+            out.push('{');
+            out.push_str(key);
+            out.push('}');
+        }
+        rest = &rest[close + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Generate a URL for a named route with parameters.
+///
+/// Path-parameter values are percent-encoded per RFC 3986 path-segment
+/// rules so user-supplied content (slugs, IDs from query strings) cannot
+/// inject path delimiters, query strings, or fragments into the resulting
+/// URL. Unreserved characters (`A-Z a-z 0-9 - _ . ~`) pass through.
 ///
 /// # Arguments
 /// * `name` - The route name (e.g., "users.show")
@@ -35,28 +143,32 @@ pub fn register_route_name(name: &str, path: &str) {
 ///
 /// let url = route("users.show", &[("id", "123")]);
 /// assert_eq!(url, Some("/users/123".to_string()));
+///
+/// // Path-traversal attempts are encoded, not pasted in raw:
+/// let url = route("users.show", &[("id", "../../etc/passwd")]);
+/// assert_eq!(url, Some("/users/..%2F..%2Fetc%2Fpasswd".to_string()));
 /// ```
 pub fn route(name: &str, params: &[(&str, &str)]) -> Option<String> {
-    let registry = ROUTE_REGISTRY.get()?.read().ok()?;
-    let path_pattern = registry.get(name)?;
-
-    let mut url = path_pattern.clone();
-    for (key, value) in params {
-        url = url.replace(&format!("{{{}}}", key), value);
-    }
-    Some(url)
+    let path_pattern = lookup_route(name)?;
+    Some(substitute(&path_pattern, |key| {
+        params
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| utf8_percent_encode(v, PATH_SEGMENT_ENCODE).to_string())
+    }))
 }
 
-/// Generate URL with HashMap parameters (used internally by Redirect)
+/// Generate URL with HashMap parameters (used internally by Redirect).
+///
+/// Path-parameter values are percent-encoded; see [`route`] for the
+/// encoding policy.
 pub fn route_with_params(name: &str, params: &HashMap<String, String>) -> Option<String> {
-    let registry = ROUTE_REGISTRY.get()?.read().ok()?;
-    let path_pattern = registry.get(name)?;
-
-    let mut url = path_pattern.clone();
-    for (key, value) in params {
-        url = url.replace(&format!("{{{}}}", key), value);
-    }
-    Some(url)
+    let path_pattern = lookup_route(name)?;
+    Some(substitute(&path_pattern, |key| {
+        params
+            .get(key)
+            .map(|v| utf8_percent_encode(v, PATH_SEGMENT_ENCODE).to_string())
+    }))
 }
 
 /// Type alias for route handlers
@@ -163,98 +275,156 @@ impl Router {
             .map(|h| (h.clone(), self.fallback_middleware.clone()))
     }
 
-    /// Insert a GET route with a pre-boxed handler (internal use for groups)
+    /// Insert a GET route with a pre-boxed handler (internal use for groups).
+    ///
+    /// # Panics
+    ///
+    /// Panics on duplicate route registration or any other matchit insert
+    /// error (malformed pattern, too-many-segments, ...). Route registration
+    /// is boot-time; silent swallowing of the second registration was a
+    /// security-shaped bug because the surviving handler depended on
+    /// registration order rather than user intent.
     pub(crate) fn insert_get(&mut self, path: &str, handler: Arc<BoxedHandler>) {
         self.get_routes
             .insert(path, (path.to_string(), handler))
-            .ok();
+            .unwrap_or_else(|e| panic!("Failed to register GET route '{path}': {e}"));
     }
 
-    /// Insert a POST route with a pre-boxed handler (internal use for groups)
+    /// Insert a POST route with a pre-boxed handler (internal use for groups).
+    ///
+    /// # Panics
+    ///
+    /// Panics on duplicate registration or any other matchit insert error.
+    /// See [`Router::insert_get`] for rationale.
     pub(crate) fn insert_post(&mut self, path: &str, handler: Arc<BoxedHandler>) {
         self.post_routes
             .insert(path, (path.to_string(), handler))
-            .ok();
+            .unwrap_or_else(|e| panic!("Failed to register POST route '{path}': {e}"));
     }
 
-    /// Insert a PUT route with a pre-boxed handler (internal use for groups)
+    /// Insert a PUT route with a pre-boxed handler (internal use for groups).
+    ///
+    /// # Panics
+    ///
+    /// Panics on duplicate registration or any other matchit insert error.
+    /// See [`Router::insert_get`] for rationale.
     pub(crate) fn insert_put(&mut self, path: &str, handler: Arc<BoxedHandler>) {
         self.put_routes
             .insert(path, (path.to_string(), handler))
-            .ok();
+            .unwrap_or_else(|e| panic!("Failed to register PUT route '{path}': {e}"));
     }
 
-    /// Insert a DELETE route with a pre-boxed handler (internal use for groups)
+    /// Insert a DELETE route with a pre-boxed handler (internal use for groups).
+    ///
+    /// # Panics
+    ///
+    /// Panics on duplicate registration or any other matchit insert error.
+    /// See [`Router::insert_get`] for rationale.
     pub(crate) fn insert_delete(&mut self, path: &str, handler: Arc<BoxedHandler>) {
         self.delete_routes
             .insert(path, (path.to_string(), handler))
-            .ok();
+            .unwrap_or_else(|e| panic!("Failed to register DELETE route '{path}': {e}"));
     }
 
-    /// Register a GET route
+    /// Register a GET route.
+    ///
+    /// Express-style `:param` segments are converted to matchit-style
+    /// `{param}` automatically — `Router::new().get("/users/:id", h)`
+    /// and the `get!("/users/:id", h)` macro produce identical
+    /// `matchit` registrations.
+    ///
+    /// # Panics
+    ///
+    /// Panics on duplicate route registration (two handlers on the same
+    /// pattern) or any matchit insert error. See [`Router::insert_get`].
     pub fn get<H, Fut>(mut self, path: &str, handler: H) -> RouteBuilder
     where
         H: Fn(Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response> + Send + 'static,
     {
+        let converted = crate::routing::macros::convert_route_params(path);
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         self.get_routes
-            .insert(path, (path.to_string(), Arc::new(handler)))
-            .ok();
+            .insert(&converted, (converted.clone(), Arc::new(handler)))
+            .unwrap_or_else(|e| panic!("Failed to register GET route '{path}': {e}"));
         RouteBuilder {
             router: self,
-            last_path: path.to_string(),
+            last_path: converted,
             last_method: Method::GET,
         }
     }
 
-    /// Register a POST route
+    /// Register a POST route.
+    ///
+    /// Express-style `:param` segments are converted to matchit-style
+    /// `{param}` automatically.
+    ///
+    /// # Panics
+    ///
+    /// Panics on duplicate registration or any matchit insert error.
     pub fn post<H, Fut>(mut self, path: &str, handler: H) -> RouteBuilder
     where
         H: Fn(Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response> + Send + 'static,
     {
+        let converted = crate::routing::macros::convert_route_params(path);
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         self.post_routes
-            .insert(path, (path.to_string(), Arc::new(handler)))
-            .ok();
+            .insert(&converted, (converted.clone(), Arc::new(handler)))
+            .unwrap_or_else(|e| panic!("Failed to register POST route '{path}': {e}"));
         RouteBuilder {
             router: self,
-            last_path: path.to_string(),
+            last_path: converted,
             last_method: Method::POST,
         }
     }
 
-    /// Register a PUT route
+    /// Register a PUT route.
+    ///
+    /// Express-style `:param` segments are converted to matchit-style
+    /// `{param}` automatically.
+    ///
+    /// # Panics
+    ///
+    /// Panics on duplicate registration or any matchit insert error.
     pub fn put<H, Fut>(mut self, path: &str, handler: H) -> RouteBuilder
     where
         H: Fn(Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response> + Send + 'static,
     {
+        let converted = crate::routing::macros::convert_route_params(path);
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         self.put_routes
-            .insert(path, (path.to_string(), Arc::new(handler)))
-            .ok();
+            .insert(&converted, (converted.clone(), Arc::new(handler)))
+            .unwrap_or_else(|e| panic!("Failed to register PUT route '{path}': {e}"));
         RouteBuilder {
             router: self,
-            last_path: path.to_string(),
+            last_path: converted,
             last_method: Method::PUT,
         }
     }
 
-    /// Register a DELETE route
+    /// Register a DELETE route.
+    ///
+    /// Express-style `:param` segments are converted to matchit-style
+    /// `{param}` automatically.
+    ///
+    /// # Panics
+    ///
+    /// Panics on duplicate registration or any matchit insert error.
     pub fn delete<H, Fut>(mut self, path: &str, handler: H) -> RouteBuilder
     where
         H: Fn(Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response> + Send + 'static,
     {
+        let converted = crate::routing::macros::convert_route_params(path);
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         self.delete_routes
-            .insert(path, (path.to_string(), Arc::new(handler)))
-            .ok();
+            .insert(&converted, (converted.clone(), Arc::new(handler)))
+            .unwrap_or_else(|e| panic!("Failed to register DELETE route '{path}': {e}"));
         RouteBuilder {
             router: self,
-            last_path: path.to_string(),
+            last_path: converted,
             last_method: Method::DELETE,
         }
     }
@@ -368,6 +538,17 @@ impl Router {
     /// and an optional [`WsConfig`] override. This is the canonical registration
     /// method — all other `ws*` variants delegate to this one.
     ///
+    /// Express-style `:param` segments are converted to matchit-style
+    /// `{param}` automatically — `Router::new().ws("/ws/rooms/:id", h)`
+    /// and the `ws!("/ws/rooms/:id", h)` macro produce identical
+    /// `matchit` registrations.
+    ///
+    /// # Panics
+    ///
+    /// Panics on duplicate route registration or any matchit insert error.
+    /// WebSocket routes share the same boot-time-fail-loud policy as HTTP
+    /// routes (see [`Router::insert_get`]).
+    ///
     /// [`WsConfig`]: crate::ws::WsConfig
     #[doc(hidden)]
     pub fn ws_boxed_with_middleware_and_config(
@@ -377,9 +558,13 @@ impl Router {
         middleware: Vec<BoxedMiddleware>,
         config: Option<crate::ws::WsConfig>,
     ) -> Router {
+        let converted = crate::routing::macros::convert_route_params(path);
         self.ws_routes
-            .insert(path, (path.to_string(), handler, middleware, config))
-            .ok();
+            .insert(
+                &converted,
+                (converted.clone(), handler, middleware, config),
+            )
+            .unwrap_or_else(|e| panic!("Failed to register WS route '{path}': {e}"));
         self
     }
 
@@ -582,5 +767,177 @@ impl WsMatch {
     /// [`WsConfig::default()`]: crate::ws::WsConfig::default
     pub fn config(&self) -> Option<&crate::ws::WsConfig> {
         self.config.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Domain 1 audit regressions (2026-05).
+    //!
+    //! Findings F1, F5, F6, F7, F8 from
+    //! `docs/superpowers/audit-2026-05/DOMAIN-01-router-and-dispatch.md`.
+
+    use super::*;
+    use crate::http::text;
+
+    async fn h(_req: Request) -> Response {
+        text("ok")
+    }
+
+    /// F1: duplicate route registration panics instead of silently dropping
+    /// the second handler.
+    #[test]
+    #[should_panic(expected = "Failed to register GET route '/users'")]
+    fn duplicate_get_registration_panics() {
+        let _ = Router::new().get("/users", h).get("/users", h);
+    }
+
+    /// F1: insert_post / put / delete share the same policy.
+    #[test]
+    #[should_panic(expected = "Failed to register DELETE route '/x'")]
+    fn duplicate_delete_registration_panics() {
+        let _ = Router::new().delete("/x", h).delete("/x", h);
+    }
+
+    /// F6: fluent `Router::get(":id", h)` registers under the matchit-shape
+    /// pattern `/users/{id}` and captures `id` from the request path.
+    /// Previously the fluent path passed `:id` through verbatim and matchit
+    /// treated it as a literal segment, so `/users/42` failed to match.
+    #[test]
+    fn fluent_path_supports_colon_param_syntax() {
+        let router: Router = Router::new().get("/users/:id", h).into();
+        let m = router.match_route(&Method::GET, "/users/42");
+        let (pattern, _handler, params) = m.expect(
+            "fluent :id syntax must match /users/42 \
+             — convert_route_params should run in the fluent path too",
+        );
+        assert_eq!(pattern, "/users/{id}");
+        assert_eq!(params.get("id"), Some(&"42".to_string()));
+    }
+
+    /// F6 + F5 + F7 + name resolution: a fluent `:id` route registered with
+    /// `.name(...)` must resolve via `route(name, &[...])` to the same URL
+    /// the macro path would produce.
+    #[test]
+    fn fluent_named_colon_route_resolves_via_route_helper() {
+        let _ = Router::new()
+            .get("/posts/:slug", h)
+            .name("posts.show.fluent");
+        let url = route("posts.show.fluent", &[("slug", "hello-world")]);
+        assert_eq!(url, Some("/posts/hello-world".to_string()));
+    }
+
+    /// F5: path-segment values containing reserved characters are
+    /// percent-encoded. Without this fix, a user-controlled slug
+    /// containing `/`, `?`, `#`, or `&` would corrupt the generated URL
+    /// (open-redirect / path-injection class).
+    #[test]
+    fn route_percent_encodes_reserved_path_characters() {
+        let _ = Router::new()
+            .get("/users/{id}", h)
+            .name("users.show.encoding");
+        let url = route(
+            "users.show.encoding",
+            &[("id", "../../etc/passwd")],
+        );
+        assert_eq!(
+            url.as_deref(),
+            Some("/users/..%2F..%2Fetc%2Fpasswd"),
+            "slash characters must be percent-encoded out of path segments",
+        );
+    }
+
+    /// F5: question-mark, hash, ampersand are not allowed to inject query
+    /// string or fragment into the URL.
+    #[test]
+    fn route_percent_encodes_query_and_fragment_delimiters() {
+        let _ = Router::new()
+            .get("/posts/{slug}", h)
+            .name("posts.show.frag");
+        let url = route(
+            "posts.show.frag",
+            &[("slug", "x?evil=1#hash&y=2")],
+        );
+        assert_eq!(
+            url.as_deref(),
+            Some("/posts/x%3Fevil%3D1%23hash%26y%3D2"),
+            "?, #, =, & must be percent-encoded so they cannot inject \
+             query string or fragment into the generated URL",
+        );
+    }
+
+    /// F5: unreserved characters pass through unchanged so URLs stay
+    /// readable when the slug is well-formed.
+    #[test]
+    fn route_preserves_unreserved_characters() {
+        let _ = Router::new()
+            .get("/posts/{slug}", h)
+            .name("posts.show.safe");
+        let url = route(
+            "posts.show.safe",
+            &[("slug", "hello-world_42.html~tilde")],
+        );
+        assert_eq!(
+            url.as_deref(),
+            Some("/posts/hello-world_42.html~tilde"),
+        );
+    }
+
+    /// F7: registering the same name to a different path panics. Two
+    /// routes claiming the same name silently shadowing each other is a
+    /// security-shaped bug.
+    #[test]
+    #[should_panic(expected = "Route name 'users.duplicate'")]
+    fn duplicate_route_name_panics() {
+        let _ = Router::new()
+            .get("/a", h)
+            .name("users.duplicate")
+            .get("/b", h)
+            .name("users.duplicate");
+    }
+
+    /// F7: registering the same `(name, path)` pair twice is idempotent.
+    /// This matters for inventory-driven registration where the same
+    /// route may be registered on every test that calls
+    /// `routes::register()`.
+    #[test]
+    fn registering_same_name_same_path_is_idempotent() {
+        register_route_name("idempotent.example", "/foo/{id}");
+        register_route_name("idempotent.example", "/foo/{id}");
+        let url = route("idempotent.example", &[("id", "1")]);
+        assert_eq!(url, Some("/foo/1".to_string()));
+    }
+
+    /// F5: `route_with_params` (HashMap path) shares the same encoding.
+    #[test]
+    fn route_with_params_percent_encodes_values() {
+        let _ = Router::new()
+            .get("/redirect/{target}", h)
+            .name("redirect.target");
+        let params: HashMap<String, String> = [(
+            "target".to_string(),
+            "https://evil.example/".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let url = route_with_params("redirect.target", &params);
+        assert_eq!(
+            url.as_deref(),
+            Some("/redirect/https%3A%2F%2Fevil.example%2F"),
+        );
+    }
+
+    /// F5: missing parameter values leave the `{name}` placeholder intact.
+    /// Previously the substitution silently produced a partial URL with
+    /// `{name}` still embedded; verify the behaviour stays the same
+    /// (callers can detect the missing param visually) and that the
+    /// re-encoded form contains the original placeholder unchanged.
+    #[test]
+    fn route_leaves_unfilled_placeholders_in_place() {
+        let _ = Router::new()
+            .get("/{a}/{b}", h)
+            .name("two.params.test");
+        let url = route("two.params.test", &[("a", "x")]);
+        assert_eq!(url, Some("/x/{b}".to_string()));
     }
 }
