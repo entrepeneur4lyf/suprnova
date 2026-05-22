@@ -453,15 +453,29 @@ is what makes Rust frameworks reach 80% production-ready and stall.
   with the same DSL.
 **Missing - the rest of this document.**
 
-Major missing tracks beyond Phase 10C:
+Major missing tracks beyond Phase 12:
 
 - **Phase 8 — Admin Panel** (8A backend contract + 8B Scheduler/Queue
   inspectors + 8C UI shell on Inertia). Phase 8A walks the
   `ModelEntry` + `RelationEntry` + `MorphTypeEntry` + `CommandEntry` +
-  `SupervisorEntry` inventories to enumerate every administerable
-  surface in the binary.
-- **Phase 12 — Billing v1** (Stripe + PayPal + Paddle). Subscription
-  + one-off + webhook handling.
+  `SupervisorEntry` inventories — plus the Phase 12 `payments_*` mirror
+  tables — to enumerate every administerable surface in the binary.
+  Deferred until a starter kit demands it (see
+  `project_starter_kits_strategy`).
+
+Shipped tracks:
+
+- **Phase 12 — Payments v1** Generic provider-neutral trait surface
+  (`Checkout` + `Payment`-optional + `Subscription` + `CustomerStore` +
+  `WebhookHandler`) shipped in `framework/src/payments/`. Two reference
+  adapters as workspace member crates: `suprnova-payments-stripe`
+  (Stripe gateway, full Payment impl) and `suprnova-payments-paddle`
+  (Merchant-of-Record, no Payment impl by design). Six mirror tables
+  with `provider_metadata` jsonb escape hatch + free idempotency via
+  `UNIQUE(provider, provider_event_id)` on webhook_events. Flow-tagged
+  `SessionPayload` enum drives Inertia frontend dispatch. The architecture
+  is "no gatekeeping" — third parties can publish their own adapter
+  crates without coordination with the framework.
 
 ## The remaining tracks
 
