@@ -8,6 +8,7 @@ use crate::middleware::{into_boxed, Middleware, MiddlewareChain, MiddlewareRegis
 use crate::routing::Router;
 use crate::telemetry::{init_telemetry, OtelConfig};
 use bytes::Bytes;
+use futures::FutureExt;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::server::conn::http1;
@@ -16,6 +17,7 @@ use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, OnceLock};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex as TokioMutex;
@@ -482,8 +484,6 @@ async fn handle_request_inner(
     method: hyper::Method,
     path: &str,
 ) -> hyper::Response<ServerBody> {
-    
-
     match router.match_route(&method, path) {
         Some((pattern, handler, params)) => {
             let request = Request::new(req).with_params(params);
@@ -511,11 +511,12 @@ async fn handle_request_inner(
             let route_middleware = router.get_route_middleware(&method, &pattern);
             chain.extend(route_middleware);
 
-            // 3. Execute chain with handler
-            let response = chain.execute(request, handler).await;
+            // 3. Execute chain with handler, catching panics in middleware
+            //    or handler so the client receives a proper 500 instead
+            //    of a dropped connection.
+            let http_response =
+                execute_chain_safely(chain, request, handler, &method, path).await;
 
-            // Unwrap the Result - both Ok and Err contain HttpResponse
-            let http_response = response.unwrap_or_else(|e| e);
             // Mark the active tracing span as errored on 5xx so the
             // tracing-opentelemetry bridge translates it to OTel
             // `Status::Error`. The field is a no-op when no span is
@@ -543,11 +544,10 @@ async fn handle_request_inner(
                 // 2. Add fallback-specific middleware
                 chain.extend(fallback_middleware);
 
-                // 3. Execute chain with fallback handler
-                let response = chain.execute(request, fallback_handler).await;
+                // 3. Execute chain with fallback handler, catching panics.
+                let http_response =
+                    execute_chain_safely(chain, request, fallback_handler, &method, path).await;
 
-                // Unwrap the Result - both Ok and Err contain HttpResponse
-                let http_response = response.unwrap_or_else(|e| e);
                 // Mark the active tracing span as errored on 5xx so the
                 // tracing-opentelemetry bridge translates it to OTel
                 // `Status::Error`. The field is a no-op when no span is
@@ -562,6 +562,59 @@ async fn handle_request_inner(
                 HttpResponse::text("404 Not Found").status(404).into_hyper()
             }
         }
+    }
+}
+
+/// Run `chain.execute(request, handler)` with panic recovery.
+///
+/// A panic anywhere in the middleware stack or the route handler would
+/// otherwise propagate up the per-connection task and tear down the
+/// hyper service mid-response, leaving the client with a TCP reset and
+/// no HTTP response. That's a hostile failure mode for an OSS framework
+/// — a user-authored middleware calling `.unwrap()` on a `None` should
+/// surface as a visible 500 the operator can debug, not a silent
+/// connection drop. This helper catches the panic, logs it with the
+/// request method + path for triage, and returns a 500 so the client
+/// always gets a well-formed HTTP response.
+///
+/// `AssertUnwindSafe` is sound here because the captured state (chain,
+/// request, handler) is internal framework data; users don't observe
+/// partially-mutated state across the await boundary.
+async fn execute_chain_safely(
+    chain: MiddlewareChain,
+    request: Request,
+    handler: Arc<crate::routing::BoxedHandler>,
+    method: &hyper::Method,
+    path: &str,
+) -> HttpResponse {
+    let exec = AssertUnwindSafe(chain.execute(request, handler));
+    match exec.catch_unwind().await {
+        Ok(result) => result.unwrap_or_else(|e| e),
+        Err(panic) => {
+            let msg = panic_payload_message(&panic);
+            tracing::error!(
+                panic = %msg,
+                method = %method,
+                path = %path,
+                "request middleware or handler panicked — translating to 500"
+            );
+            HttpResponse::text("Internal Server Error").status(500)
+        }
+    }
+}
+
+/// Extract a printable message from a panic payload returned by
+/// `catch_unwind`. Panics in Rust are typed `Box<dyn Any + Send>`; the
+/// common payload shapes are `&'static str` (literal panic messages)
+/// and `String` (`format!`-built panic messages). Anything else
+/// returns a generic placeholder so the logging path stays infallible.
+fn panic_payload_message(p: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = p.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = p.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "panic with non-string payload".to_string()
     }
 }
 
@@ -644,7 +697,31 @@ async fn handle_ws_upgrade(
         let mut chain = MiddlewareChain::new();
         chain.extend(middleware_list);
 
-        let chain_response = chain.execute(initial_request, terminator).await;
+        // catch_unwind around the WS terminator chain so a panicking
+        // per-route middleware can't tear down the upgrading connection
+        // task. On panic we abort the upgrade with 500 — same policy
+        // as the HTTP request path (see `execute_chain_safely`).
+        let chain_response = match AssertUnwindSafe(
+            chain.execute(initial_request, terminator),
+        )
+        .catch_unwind()
+        .await
+        {
+            Ok(resp) => resp,
+            Err(panic) => {
+                let msg = panic_payload_message(&panic);
+                tracing::error!(
+                    panic = %msg,
+                    route = %pattern,
+                    "websocket per-route middleware panicked — aborting upgrade"
+                );
+                return HttpResponse::text(
+                    "internal error: websocket upgrade aborted (middleware panicked)",
+                )
+                .status(500)
+                .into_hyper();
+            }
+        };
 
         // Response = Result<HttpResponse, HttpResponse>; collapse both
         // arms to a single HttpResponse the same way handle_request does.

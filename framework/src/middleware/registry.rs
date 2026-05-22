@@ -9,9 +9,18 @@ use std::sync::{OnceLock, RwLock};
 /// Global middleware registry (populated via `global_middleware!` macro in bootstrap.rs)
 static GLOBAL_MIDDLEWARE: OnceLock<RwLock<Vec<BoxedMiddleware>>> = OnceLock::new();
 
-/// Register a global middleware that runs on every request
+/// Register a global middleware that runs on every request.
 ///
-/// Called by the `global_middleware!` macro. Middleware runs in registration order.
+/// Called by the `global_middleware!` macro. Middleware runs in
+/// registration order.
+///
+/// A poisoned write lock — possible if one middleware panicked while
+/// another thread held the registry lock during boot — is recovered
+/// via `PoisonError::into_inner` rather than silently dropping the
+/// registration. Silently failing here would mean global auth / CSRF /
+/// logging middleware vanish from every subsequent request based on
+/// the outcome of an unrelated panic, which is a security-shaped
+/// failure mode.
 ///
 /// # Example
 ///
@@ -22,20 +31,32 @@ static GLOBAL_MIDDLEWARE: OnceLock<RwLock<Vec<BoxedMiddleware>>> = OnceLock::new
 /// ```
 pub fn register_global_middleware<M: Middleware + 'static>(middleware: M) {
     let registry = GLOBAL_MIDDLEWARE.get_or_init(|| RwLock::new(Vec::new()));
-    if let Ok(mut vec) = registry.write() {
-        vec.push(into_boxed(middleware));
-    }
+    let mut vec = match registry.write() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    vec.push(into_boxed(middleware));
 }
 
-/// Get all registered global middleware
+/// Get all registered global middleware.
 ///
-/// Used internally by `Server::from_config()` to apply middleware.
+/// Used internally by `MiddlewareRegistry::from_global()` (and
+/// therefore by `Server::from_config()`) to populate the per-request
+/// middleware list.
+///
+/// Poisoned read locks recover via `PoisonError::into_inner` for the
+/// same reason as [`register_global_middleware`] — a panic during one
+/// global middleware's `handle()` must not silently disable the
+/// remaining global middleware on every subsequent request.
 pub fn get_global_middleware() -> Vec<BoxedMiddleware> {
-    GLOBAL_MIDDLEWARE
-        .get()
-        .and_then(|lock| lock.read().ok())
-        .map(|vec| vec.clone())
-        .unwrap_or_default()
+    let Some(lock) = GLOBAL_MIDDLEWARE.get() else {
+        return Vec::new();
+    };
+    let guard = match lock.read() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.clone()
 }
 
 /// Registry for global middleware that runs on every request
