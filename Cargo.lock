@@ -7042,6 +7042,8 @@ name = "suprnova-payments-paddle"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
+ "http 1.4.0",
  "inventory",
  "paddle-rust-sdk",
  "serde",
@@ -7050,6 +7052,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

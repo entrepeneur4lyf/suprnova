@@ -15,6 +15,9 @@ thiserror = "2"
 inventory = "0.3"
 tracing = "0.1"
 tokio = { version = "1", features = ["macros", "rt"] }
+chrono = "0.4.44"
 
 [dev-dependencies]
+http = "1.4.0"
 tokio = { version = "1", features = ["full"] }
+uuid = { version = "1.23.1", features = ["v4"] }
