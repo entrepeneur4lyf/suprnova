@@ -17,5 +17,8 @@ pub use error::{PaymentError, PaymentResult};
 pub use mock::MockPaymentProvider;
 pub use money::{Currency, Money};
 pub use registry::{PaymentProviderEntry, PaymentProviderRegistry};
-pub use traits::{Checkout, CustomerStore, Payment, PaymentProvider, Subscription, WebhookHandler};
+pub use traits::{
+    Checkout, CustomerStore, Payment, PaymentProvider, PaymentSnapshot, PayloadIds, Subscription,
+    WebhookHandler,
+};
 pub use webhook_route::webhook_routes;

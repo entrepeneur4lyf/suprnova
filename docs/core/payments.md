@@ -375,6 +375,25 @@ pub enum NeutralEventKind {
 
 When `neutral` is `None`, the event is provider-specific. Read `provider_event_type` and `raw_payload` for the full data.
 
+### Mirror-table hydration
+
+After the audit row is persisted, the framework dispatches the event to the relevant mirror table based on `neutral`:
+
+| `NeutralEventKind`               | Mirror effect                                                                                       |
+|----------------------------------|-----------------------------------------------------------------------------------------------------|
+| `SubscriptionCreated/Updated`    | Calls `Subscription::get(id)` on the provider, upserts `payments_subscriptions`, syncs items.       |
+| `SubscriptionCanceled`           | Same as above; also sets `canceled_at` and flips `status` to `canceled` on the existing row.        |
+| `PaymentSucceeded / Failed / Refunded / Disputed` | Upserts `payments_transactions` from the snapshot the provider produces from `raw_payload`.        |
+| `InvoicePaid / InvoiceFailed`    | Upserts `payments_transactions` with `provider_subscription_id` linked.                              |
+| `CustomerCreated / CustomerUpdated` | Updates the existing `payments_customers` row's `email` / `provider_metadata`. **Never inserts.**   |
+| `None` (unmapped)                | Audit row only — no mirror change.                                                                   |
+
+The customer mirror is intentionally update-only on the webhook path. `user_id` is `NOT NULL` and only the app knows which user a provider customer belongs to (the link is created by your code right after `CustomerStore::create_customer`). Out-of-band customers — created in the Stripe dashboard, say — are logged but never synthesized into the mirror.
+
+Hydration failures do not return 5xx to the provider. The audit row's `process_error` field captures the failure for operator review while the handler responds with `200 ok-with-errors`. This keeps providers from retrying forever when the failure is on your side.
+
+Items removed from a subscription on the provider side (e.g. user dropped a seat add-on) are removed from `payments_subscription_items` when the next `subscription.updated` webhook arrives. The provider's `Subscription::get(id)` response is the source of truth on every sync.
+
 ## Money
 
 Amounts are represented as `Money` — an `i64` minor-unit count plus a `Currency`. No `f64` involved.

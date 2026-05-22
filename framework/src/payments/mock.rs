@@ -24,9 +24,10 @@
 
 use crate::payments::{
     Checkout, CreateCustomerRequest, CustomerRef, CustomerStore, NeutralEventKind, PaymentError,
-    PaymentProvider, PaymentResult, SessionPayload, StartSessionRequest, SubscribeRequest,
-    Subscription, SubscriptionItemSnapshot, SubscriptionResult, SubscriptionStatus,
-    UpdateCustomerRequest, UpdateSubscriptionRequest, WebhookContext, WebhookEvent, WebhookHandler,
+    PaymentProvider, PaymentResult, PaymentSnapshot, PayloadIds, SessionPayload,
+    StartSessionRequest, SubscribeRequest, Subscription, SubscriptionItemSnapshot,
+    SubscriptionResult, SubscriptionStatus, UpdateCustomerRequest, UpdateSubscriptionRequest,
+    WebhookContext, WebhookEvent, WebhookHandler,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -114,6 +115,18 @@ impl Subscription for MockPaymentProvider {
             .ok_or_else(|| PaymentError::NotFound(req.provider_subscription_id.clone()))?;
         if let Some(c) = req.cancel_at_period_end {
             sub.cancel_at_period_end = c;
+        }
+        if let Some(prices) = req.new_price_refs {
+            let sub_id = sub.provider_subscription_id.clone();
+            sub.items = prices
+                .iter()
+                .map(|price_ref| SubscriptionItemSnapshot {
+                    provider_item_id: format!("{sub_id}_item_{price_ref}"),
+                    provider_price_id: price_ref.clone(),
+                    quantity: 1,
+                    unit_amount: None,
+                })
+                .collect();
         }
         Ok(sub.clone())
     }
@@ -212,6 +225,13 @@ impl WebhookHandler for MockPaymentProvider {
             "subscription.updated" => Some(NeutralEventKind::SubscriptionUpdated),
             "subscription.canceled" => Some(NeutralEventKind::SubscriptionCanceled),
             "payment.succeeded" => Some(NeutralEventKind::PaymentSucceeded),
+            "payment.failed" => Some(NeutralEventKind::PaymentFailed),
+            "payment.refunded" => Some(NeutralEventKind::PaymentRefunded),
+            "payment.disputed" => Some(NeutralEventKind::PaymentDisputed),
+            "invoice.paid" => Some(NeutralEventKind::InvoicePaid),
+            "invoice.failed" => Some(NeutralEventKind::InvoiceFailed),
+            "customer.created" => Some(NeutralEventKind::CustomerCreated),
+            "customer.updated" => Some(NeutralEventKind::CustomerUpdated),
             _ => None,
         };
         Ok(WebhookEvent {
@@ -224,6 +244,93 @@ impl WebhookHandler for MockPaymentProvider {
             provider_event_type,
             neutral,
             raw_payload: raw,
+        })
+    }
+
+    /// Mock follows Stripe's envelope convention: `data.object.*` carries the
+    /// entity, with `id`, `customer`, and `subscription` as canonical pointers.
+    fn extract_payload_ids(&self, event: &WebhookEvent) -> PayloadIds {
+        let obj = match event.raw_payload.pointer("/data/object") {
+            Some(o) => o,
+            None => return PayloadIds::default(),
+        };
+        let mut ids = PayloadIds::default();
+        match event.neutral {
+            Some(
+                NeutralEventKind::SubscriptionCreated
+                | NeutralEventKind::SubscriptionUpdated
+                | NeutralEventKind::SubscriptionCanceled,
+            ) => {
+                ids.subscription_id = obj.get("id").and_then(|v| v.as_str()).map(String::from);
+                ids.customer_id =
+                    obj.get("customer").and_then(|v| v.as_str()).map(String::from);
+            }
+            Some(NeutralEventKind::CustomerCreated | NeutralEventKind::CustomerUpdated) => {
+                ids.customer_id = obj.get("id").and_then(|v| v.as_str()).map(String::from);
+            }
+            Some(
+                NeutralEventKind::PaymentSucceeded
+                | NeutralEventKind::PaymentFailed
+                | NeutralEventKind::PaymentRefunded
+                | NeutralEventKind::PaymentDisputed
+                | NeutralEventKind::InvoicePaid
+                | NeutralEventKind::InvoiceFailed,
+            ) => {
+                ids.transaction_id = obj.get("id").and_then(|v| v.as_str()).map(String::from);
+                ids.customer_id =
+                    obj.get("customer").and_then(|v| v.as_str()).map(String::from);
+                ids.subscription_id = obj
+                    .get("subscription")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+            }
+            None => {}
+        }
+        ids
+    }
+
+    fn extract_payment_snapshot(&self, event: &WebhookEvent) -> Option<PaymentSnapshot> {
+        let obj = event.raw_payload.pointer("/data/object")?;
+        let provider_transaction_id = obj.get("id")?.as_str()?.to_string();
+        let provider_customer_id = obj
+            .get("customer")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let provider_subscription_id = obj
+            .get("subscription")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let amount_total_minor = obj.get("amount").and_then(|v| v.as_i64()).unwrap_or(0);
+        let amount_tax_minor = obj.get("tax").and_then(|v| v.as_i64()).unwrap_or(0);
+        let currency = obj
+            .get("currency")
+            .and_then(|v| v.as_str())
+            .unwrap_or("USD")
+            .to_uppercase();
+        let status = match event.neutral? {
+            NeutralEventKind::PaymentSucceeded | NeutralEventKind::InvoicePaid => "succeeded",
+            NeutralEventKind::PaymentFailed | NeutralEventKind::InvoiceFailed => "failed",
+            NeutralEventKind::PaymentRefunded => "refunded",
+            NeutralEventKind::PaymentDisputed => "disputed",
+            _ => return None,
+        }
+        .to_string();
+        let paid_at = obj
+            .get("paid_at")
+            .and_then(|v| v.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc));
+        Some(PaymentSnapshot {
+            provider_transaction_id,
+            provider_customer_id,
+            provider_subscription_id,
+            amount_total_minor,
+            amount_tax_minor,
+            currency,
+            status,
+            paid_at,
+            provider_metadata: obj.clone(),
         })
     }
 }

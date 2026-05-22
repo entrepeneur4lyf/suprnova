@@ -404,6 +404,47 @@ Key points:
 - The framework's `webhook_routes` handler calls `verify` before `parse_event` and returns 401 on verification failure, 400 on parse failure.
 - Never log the raw secret or the received signature.
 
+### Mirror-table hydration: `extract_payload_ids` + `extract_payment_snapshot`
+
+After `parse_event` returns a `WebhookEvent`, the framework's webhook route hydrates the mirror tables. Two optional trait methods drive that — both have safe default no-op implementations, so an adapter can ship without them and still pass through the audit layer:
+
+```rust,ignore
+fn extract_payload_ids(&self, event: &WebhookEvent) -> PayloadIds;
+fn extract_payment_snapshot(&self, event: &WebhookEvent) -> Option<PaymentSnapshot>;
+```
+
+`PayloadIds` is the bridge between the parsed event and the framework's mirror logic. Implement it so the framework can find the right entity:
+
+```rust,ignore
+pub struct PayloadIds {
+    pub subscription_id: Option<String>,
+    pub customer_id: Option<String>,
+    pub transaction_id: Option<String>,
+}
+```
+
+For each `neutral` value, populate the IDs that the provider's payload exposes. Subscription events should set `subscription_id` so the framework can call `Subscription::get(id)` and refresh the mirror from the canonical state. Customer events set `customer_id`. Payment / invoice events set `transaction_id`, plus `subscription_id` when it's a recurring charge.
+
+`PaymentSnapshot` is built directly from the webhook payload — there's no `Payment::get` callback. Implement it for payment / invoice neutrals:
+
+```rust,ignore
+pub struct PaymentSnapshot {
+    pub provider_transaction_id: String,
+    pub provider_customer_id: String,
+    pub provider_subscription_id: Option<String>,
+    pub amount_total_minor: i64,
+    pub amount_tax_minor: i64,
+    pub currency: String,
+    pub status: String,             // "succeeded" | "failed" | "refunded" | "disputed"
+    pub paid_at: Option<DateTime<Utc>>,
+    pub provider_metadata: Value,   // typically the entity object from the payload
+}
+```
+
+Stripe's reference implementation reads `data.object.{id,amount,currency,customer}` for `PaymentIntent`/`Charge` events and `data.object.{id,amount_paid,tax,currency,customer,subscription,status_transitions.paid_at}` for `Invoice` events. Paddle's reads `data.{id,customer_id,currency_code,details.totals.{total,tax},billed_at,subscription_id}`. Mirror the conventions that match your provider's payload shape — the framework doesn't care how you extract, only that the snapshot is correct.
+
+If you return `None` from `extract_payment_snapshot`, the audit row is still written but `payments_transactions` is not touched. That is the correct return for subscription / customer events, or for any payment event where the payload doesn't carry enough information to populate a row.
+
 ## 7. Register at App Boot
 
 Two mechanisms are available — pick one:

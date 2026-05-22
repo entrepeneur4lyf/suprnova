@@ -7,7 +7,10 @@ use crate::{event_map::stripe_event_to_neutral, StripeProvider};
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use suprnova::payments::{PaymentError, PaymentResult, WebhookContext, WebhookEvent, WebhookHandler};
+use suprnova::payments::{
+    NeutralEventKind, PaymentError, PaymentResult, PaymentSnapshot, PayloadIds, WebhookContext,
+    WebhookEvent, WebhookHandler,
+};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -109,6 +112,156 @@ impl WebhookHandler for StripeProvider {
             neutral,
             raw_payload: raw,
         })
+    }
+
+    /// Extract IDs from Stripe's `data.object.*` envelope.
+    ///
+    /// Stripe is consistent: every webhook puts the relevant entity at
+    /// `data.object`, with `id` as its primary key and `customer` as the
+    /// customer pointer where applicable. Invoice and PaymentIntent events
+    /// also carry `subscription` when the charge is recurring.
+    fn extract_payload_ids(&self, event: &WebhookEvent) -> PayloadIds {
+        let obj = match event.raw_payload.pointer("/data/object") {
+            Some(o) => o,
+            None => return PayloadIds::default(),
+        };
+
+        let mut ids = PayloadIds::default();
+
+        match event.neutral {
+            Some(
+                NeutralEventKind::SubscriptionCreated
+                | NeutralEventKind::SubscriptionUpdated
+                | NeutralEventKind::SubscriptionCanceled,
+            ) => {
+                ids.subscription_id = obj.get("id").and_then(|v| v.as_str()).map(String::from);
+                ids.customer_id =
+                    obj.get("customer").and_then(|v| v.as_str()).map(String::from);
+            }
+            Some(NeutralEventKind::CustomerCreated | NeutralEventKind::CustomerUpdated) => {
+                ids.customer_id = obj.get("id").and_then(|v| v.as_str()).map(String::from);
+            }
+            Some(
+                NeutralEventKind::PaymentSucceeded
+                | NeutralEventKind::PaymentFailed
+                | NeutralEventKind::PaymentRefunded
+                | NeutralEventKind::PaymentDisputed,
+            ) => {
+                ids.transaction_id = obj.get("id").and_then(|v| v.as_str()).map(String::from);
+                ids.customer_id =
+                    obj.get("customer").and_then(|v| v.as_str()).map(String::from);
+            }
+            Some(NeutralEventKind::InvoicePaid | NeutralEventKind::InvoiceFailed) => {
+                ids.transaction_id = obj.get("id").and_then(|v| v.as_str()).map(String::from);
+                ids.customer_id =
+                    obj.get("customer").and_then(|v| v.as_str()).map(String::from);
+                ids.subscription_id = obj
+                    .get("subscription")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+            }
+            None => {}
+        }
+        ids
+    }
+
+    /// Build a [`PaymentSnapshot`] from a Stripe payment / invoice payload.
+    ///
+    /// - `payment_intent.*` → uses `id`, `amount`, `currency`, `status`, `customer`
+    /// - `charge.refunded` / `charge.dispute.created` → uses Charge fields
+    /// - `invoice.*` → uses `id`, `amount_paid`, `tax`, `currency`, `customer`,
+    ///   `subscription`, `status_transitions.paid_at`
+    ///
+    /// Returns `None` for subscription / customer events (those go through
+    /// the `extract_payload_ids` + provider API path).
+    fn extract_payment_snapshot(&self, event: &WebhookEvent) -> Option<PaymentSnapshot> {
+        let obj = event.raw_payload.pointer("/data/object")?;
+        let provider_transaction_id = obj.get("id")?.as_str()?.to_string();
+        let provider_customer_id = obj
+            .get("customer")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        match event.neutral? {
+            NeutralEventKind::PaymentSucceeded
+            | NeutralEventKind::PaymentFailed
+            | NeutralEventKind::PaymentRefunded
+            | NeutralEventKind::PaymentDisputed => {
+                // PaymentIntent or Charge — both expose amount + currency at the top level.
+                let amount_total_minor = obj.get("amount").and_then(|v| v.as_i64()).unwrap_or(0);
+                let currency = obj
+                    .get("currency")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("usd")
+                    .to_uppercase();
+                let status = match event.neutral? {
+                    NeutralEventKind::PaymentSucceeded => "succeeded",
+                    NeutralEventKind::PaymentFailed => "failed",
+                    NeutralEventKind::PaymentRefunded => "refunded",
+                    NeutralEventKind::PaymentDisputed => "disputed",
+                    _ => unreachable!(),
+                }
+                .to_string();
+                let paid_at = if matches!(event.neutral, Some(NeutralEventKind::PaymentSucceeded)) {
+                    obj.get("created")
+                        .and_then(|v| v.as_i64())
+                        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+                } else {
+                    None
+                };
+                Some(PaymentSnapshot {
+                    provider_transaction_id,
+                    provider_customer_id,
+                    provider_subscription_id: None,
+                    amount_total_minor,
+                    amount_tax_minor: 0,
+                    currency,
+                    status,
+                    paid_at,
+                    provider_metadata: obj.clone(),
+                })
+            }
+            NeutralEventKind::InvoicePaid | NeutralEventKind::InvoiceFailed => {
+                let amount_total_minor = obj
+                    .get("amount_paid")
+                    .and_then(|v| v.as_i64())
+                    .or_else(|| obj.get("amount_due").and_then(|v| v.as_i64()))
+                    .unwrap_or(0);
+                let amount_tax_minor = obj.get("tax").and_then(|v| v.as_i64()).unwrap_or(0);
+                let currency = obj
+                    .get("currency")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("usd")
+                    .to_uppercase();
+                let status = if matches!(event.neutral, Some(NeutralEventKind::InvoicePaid)) {
+                    "succeeded"
+                } else {
+                    "failed"
+                }
+                .to_string();
+                let provider_subscription_id = obj
+                    .get("subscription")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let paid_at = obj
+                    .pointer("/status_transitions/paid_at")
+                    .and_then(|v| v.as_i64())
+                    .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0));
+                Some(PaymentSnapshot {
+                    provider_transaction_id,
+                    provider_customer_id,
+                    provider_subscription_id,
+                    amount_total_minor,
+                    amount_tax_minor,
+                    currency,
+                    status,
+                    paid_at,
+                    provider_metadata: obj.clone(),
+                })
+            }
+            _ => None,
+        }
     }
 }
 
