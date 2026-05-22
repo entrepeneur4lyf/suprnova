@@ -133,6 +133,8 @@ qrcode = "0.14"
 featureflag = { version = "0.0.3", features = ["feature-registry", "futures"] }
 async-stream = "0.3.6"
 qdrant-client = "1.18.0"
+pinecone-sdk = "0.1.2"
+prost-types = "0.12"
 
 [features]
 default = ["testing"]
