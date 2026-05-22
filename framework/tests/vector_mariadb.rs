@@ -902,6 +902,62 @@ async fn integration_vec_fromtext_accepts_our_format() {
 
 #[tokio::test]
 #[ignore]
+async fn integration_delete_chunks_across_multiple_batches() {
+    // Insert more ids than the driver's internal DELETE_BATCH_SIZE
+    // (1000 at time of writing) so a single delete() call has to
+    // split into multiple statements wrapped in one transaction.
+    // Verifies the chunking path actually runs against MariaDB and
+    // produces a clean count == 0 at the end.
+    let url = match mariadb_url_or_skip("integration_delete_chunks_across_multiple_batches") {
+        Some(u) => u,
+        None => return,
+    };
+    let driver = MariaDbVectorDriver::from_url(&url).unwrap();
+    let table = unique_table("chunk_del");
+    drop_table(&driver, &table).await;
+
+    let create_sql =
+        MariaDbVectorDriver::ensure_table_sql(&table, 3, MariaDbDistance::Cosine).unwrap();
+    sqlx::query(&create_sql)
+        .execute(driver.pool())
+        .await
+        .expect("CREATE TABLE");
+
+    // 1500 items — comfortably above 1000, low enough that the test
+    // stays under a couple seconds even with HNSW index updates.
+    const N: usize = 1500;
+    let items: Vec<VectorItem> = (0..N)
+        .map(|i| {
+            VectorItem::new(
+                format!("id_{i:05}"),
+                vec![i as f32, (i + 1) as f32, (i + 2) as f32],
+                serde_json::Value::Null,
+            )
+        })
+        .collect();
+    let ids: Vec<String> = items.iter().map(|it| it.id.clone()).collect();
+
+    driver
+        .upsert(&table, items)
+        .await
+        .expect("upsert 1500 items");
+    assert_eq!(driver.count(&table).await.unwrap(), N);
+
+    driver
+        .delete(&table, ids)
+        .await
+        .expect("delete 1500 ids in one call");
+    assert_eq!(
+        driver.count(&table).await.unwrap(),
+        0,
+        "all rows must be removed even when the IN-list spans batches"
+    );
+
+    drop_table(&driver, &table).await;
+}
+
+#[tokio::test]
+#[ignore]
 async fn integration_count_on_empty_table_is_zero() {
     let url = match mariadb_url_or_skip("integration_count_on_empty_table_is_zero") {
         Some(u) => u,

@@ -91,6 +91,12 @@ use std::fmt::Write;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
+/// IN-list size beyond which `delete` splits the call into multiple
+/// `DELETE ... WHERE id IN (...)` statements wrapped in one
+/// transaction. Keeps any single statement well below MariaDB's
+/// `max_allowed_packet` even when deleting millions of ids at once.
+const DELETE_BATCH_SIZE: usize = 1000;
+
 /// Distance metric for the MariaDB vector index. Picks both the
 /// `DISTANCE=` clause emitted by [`MariaDbVectorDriver::ensure_table_sql`]
 /// and the `VEC_DISTANCE_*` function used in `similar`.
@@ -541,15 +547,37 @@ impl VectorDriver for MariaDbVectorDriver {
         let table = MariaDbVectorDriver::validate_store_name(store)?;
         self.ensure_version().await?;
 
-        let placeholders = vec!["?"; ids.len()].join(",");
-        let sql = format!("DELETE FROM `{table}` WHERE id IN ({placeholders})");
-        let mut q = sqlx::query(&sql);
-        for id in &ids {
-            q = q.bind(id);
+        // Chunk the IN-list so a single DELETE statement never exceeds
+        // MariaDB's `max_allowed_packet` (default 64 MiB; reasonable
+        // deployments tune it down to 16 MiB). 1000 placeholders per
+        // batch keeps the serialized statement comfortably under any
+        // sensible packet ceiling — even worst-case 255-byte VARCHAR
+        // ids leave ~250 KiB of overhead. All batches run inside one
+        // transaction so the call is atomic: any per-batch failure
+        // rolls back every preceding batch.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| FrameworkError::internal(format!("mariadb delete begin tx: {e}")))?;
+
+        for chunk in ids.chunks(DELETE_BATCH_SIZE) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!("DELETE FROM `{table}` WHERE id IN ({placeholders})");
+            let mut q = sqlx::query(&sql);
+            for id in chunk {
+                q = q.bind(id);
+            }
+            q.execute(&mut *tx).await.map_err(|e| {
+                FrameworkError::internal(format!(
+                    "mariadb delete failed for store '{table}': {e}"
+                ))
+            })?;
         }
-        q.execute(&*self.pool).await.map_err(|e| {
-            FrameworkError::internal(format!("mariadb delete failed for store '{table}': {e}"))
-        })?;
+
+        tx.commit()
+            .await
+            .map_err(|e| FrameworkError::internal(format!("mariadb delete commit: {e}")))?;
         Ok(())
     }
 
