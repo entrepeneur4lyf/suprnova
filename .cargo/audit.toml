@@ -1,0 +1,8 @@
+[advisories]
+ignore = [
+    # No fixed upgrade is available as of 2026-05-23. The remaining
+    # production-relevant path is sqlx-mysql, which is required for
+    # Suprnova's first-class MySQL support. Revisit when rsa/sqlx/SeaORM
+    # publish a compatible fixed chain.
+    "RUSTSEC-2023-0071",
+]
