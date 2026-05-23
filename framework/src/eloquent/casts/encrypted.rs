@@ -61,7 +61,17 @@ impl DynCast for AsEncryptedDyn {
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        let wire = v.as_str().unwrap_or("").to_string();
+        // Domain 7 audit D7-A — strict-validate input shape; was silently
+        // coercing non-strings to "" and attempting to decrypt that.
+        let wire = v
+            .as_str()
+            .ok_or_else(|| {
+                FrameworkError::validation(
+                    "AsEncrypted",
+                    format!("dyn from_storage: expected JSON string, got {v:?}"),
+                )
+            })?
+            .to_string();
         Ok(serde_json::Value::String(AsEncrypted::from_storage(&wire)?))
     }
 
@@ -69,7 +79,18 @@ impl DynCast for AsEncryptedDyn {
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        let s = v.as_str().unwrap_or("").to_string();
+        // Domain 7 audit D7-A — strict-validate. Critical for the
+        // write path because a non-string input here used to be
+        // silently encrypted as the empty string.
+        let s = v
+            .as_str()
+            .ok_or_else(|| {
+                FrameworkError::validation(
+                    "AsEncrypted",
+                    format!("dyn to_storage: expected JSON string, got {v:?}"),
+                )
+            })?
+            .to_string();
         Ok(serde_json::Value::String(AsEncrypted::to_storage(&s)?))
     }
 }
@@ -120,7 +141,16 @@ where
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        let wire = v.as_str().unwrap_or("").to_string();
+        // Domain 7 audit D7-A — strict-validate input shape.
+        let wire = v
+            .as_str()
+            .ok_or_else(|| {
+                FrameworkError::validation(
+                    "AsEncryptedArray",
+                    format!("dyn from_storage: expected JSON string, got {v:?}"),
+                )
+            })?
+            .to_string();
         let decrypted: Vec<T> = AsEncryptedArray::<T>::from_storage(&wire)?;
         Ok(serde_json::to_value(decrypted).expect("Vec<T> serialises"))
     }
@@ -189,7 +219,16 @@ where
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        let wire = v.as_str().unwrap_or("").to_string();
+        // Domain 7 audit D7-A — strict-validate input shape.
+        let wire = v
+            .as_str()
+            .ok_or_else(|| {
+                FrameworkError::validation(
+                    "AsEncryptedObject",
+                    format!("dyn from_storage: expected JSON string, got {v:?}"),
+                )
+            })?
+            .to_string();
         let decrypted: T = AsEncryptedObject::<T>::from_storage(&wire)?;
         Ok(serde_json::to_value(decrypted).expect("T serialises"))
     }
@@ -256,7 +295,16 @@ where
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        let wire = v.as_str().unwrap_or("").to_string();
+        // Domain 7 audit D7-A — strict-validate input shape.
+        let wire = v
+            .as_str()
+            .ok_or_else(|| {
+                FrameworkError::validation(
+                    "AsEncryptedCollection",
+                    format!("dyn from_storage: expected JSON string, got {v:?}"),
+                )
+            })?
+            .to_string();
         let decrypted = AsEncryptedCollection::<T>::from_storage(&wire)?;
         Ok(serde_json::to_value(decrypted.into_vec()).expect("Vec<T> serialises"))
     }
@@ -352,7 +400,21 @@ impl DynCast for AsHashedDyn {
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        let s = v.as_str().unwrap_or("").to_string();
+        // Domain 7 audit D7-A — was `v.as_str().unwrap_or("")` which
+        // would silently bcrypt the empty string if user code routed a
+        // non-string value through here (e.g. via a future `with_casts`
+        // write-path wiring). The damage shape: every row's password
+        // column overwritten with bcrypt("") and no error returned.
+        // Strict-validation eliminates that footgun by construction.
+        let s = v
+            .as_str()
+            .ok_or_else(|| {
+                FrameworkError::validation(
+                    "AsHashed",
+                    format!("dyn to_storage: expected JSON string, got {v:?}"),
+                )
+            })?
+            .to_string();
         Ok(serde_json::Value::String(AsHashed::to_storage(&s)?))
     }
 }

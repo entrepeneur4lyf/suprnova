@@ -58,7 +58,16 @@ where
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        let s = v.as_str().unwrap_or("");
+        // Domain 7 audit D7-A — was `v.as_str().unwrap_or("")` which
+        // silently coerced non-strings to the empty string and produced
+        // a misleading "AsEnum: '' isn't a valid variant" error instead
+        // of "AsEnum: expected JSON string, got <actual>".
+        let s = v.as_str().ok_or_else(|| {
+            FrameworkError::validation(
+                "AsEnum",
+                format!("dyn from_storage: expected JSON string, got {v:?}"),
+            )
+        })?;
         let parsed = AsEnum::<E>::from_storage(&s.to_string())?;
         Ok(serde_json::Value::String(parsed.as_ref().to_string()))
     }

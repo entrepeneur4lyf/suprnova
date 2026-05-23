@@ -11,6 +11,27 @@
 //! Pick whichever your muscle memory matches. Both compile, both produce
 //! identical SQL.
 //!
+//! ## SQL identifier contract (security)
+//!
+//! Column names taken through [`IntoColumn`] — the trait that backs
+//! every `filter*` / `where_*` / `order_by` / `group_by` / `having*`
+//! method — are interpolated **raw** into the rendered SQL. There is
+//! no quoting or escaping at this layer; matches Laravel's
+//! `DB::table()->where(...)` contract exactly.
+//!
+//! Therefore: **never accept a column name from untrusted input**
+//! (URL params, request body, query strings). Hardcode the column or
+//! select it from a known allowlist before passing it to the builder.
+//! The right-hand-side of comparisons goes through [`IntoVal`] and
+//! becomes a parameterised SQL bind — those values ARE safe to take
+//! from untrusted input.
+//!
+//! The raw-SQL escape hatches [`Builder::where_raw`],
+//! [`Builder::order_by_raw`], [`Builder::select_raw`] (and their
+//! `filter_raw` aliases) extend the same contract: the raw SQL
+//! fragment is interpolated verbatim; only the positional bindings
+//! Vec is parameterised.
+//!
 //! ## Per-WhereTerm SQL renderer
 //!
 //! [`Builder::render_select_for`] emits per-backend SQL from the
@@ -50,6 +71,21 @@ use crate::error::FrameworkError;
 /// Implemented by every macro-generated `Column` enum so users can write
 /// either typed (`Column::Email`) or string (`"email"`) arguments
 /// throughout the builder API.
+///
+/// # Security: column names are SQL identifiers, not parameters
+///
+/// The string returned by `col_name()` is interpolated **raw** into the
+/// rendered SQL — there is no quoting or escaping at this layer (same
+/// contract as Laravel's `DB::table()->where(...)`). Anywhere
+/// `IntoColumn` appears in the public surface, **never accept the value
+/// from untrusted input** (URL params, request body, query strings).
+/// Hardcode the column or pick it from a known allowlist before
+/// calling the builder.
+///
+/// Values (the right-hand side of comparisons, IN lists, BETWEEN
+/// bounds, etc.) go through [`IntoVal`] → `serde_json::Value` and
+/// become parameterised binds — those ARE safe to take from untrusted
+/// input.
 pub trait IntoColumn {
     /// Return the snake-case column name as a `String`. Owned because
     /// the typed-enum impl materialises a new string from a
@@ -1007,6 +1043,14 @@ impl<M> Builder<M> {
     /// `WHERE <sql>` — raw SQL fragment with positional bindings. The
     /// caller is responsible for placeholder shape (`?` for SQLite /
     /// MySQL, `$N` for Postgres).
+    ///
+    /// # Security
+    ///
+    /// `sql` is interpolated verbatim into the query string; only the
+    /// `bindings` Vec is parameterised. **Never pass user input as the
+    /// SQL fragment** — concatenating a request value into the fragment
+    /// is a SQL-injection vulnerability. Put user input in the
+    /// `bindings` Vec and reference each bind by its placeholder.
     #[doc(alias = "where_raw")]
     pub fn filter_raw(mut self, sql: impl Into<String>, bindings: Vec<Value>) -> Self {
         self.where_terms.push(WhereTerm::Raw(sql.into(), bindings));
@@ -1039,6 +1083,14 @@ impl<M> Builder<M> {
 
     /// `ORDER BY <raw>` — pass through arbitrary expressions
     /// (`age * -1`, `CASE WHEN ...`).
+    ///
+    /// # Security
+    ///
+    /// `sql` is interpolated verbatim into the query. **Never pass user
+    /// input here** — it is the same SQL-injection surface as
+    /// [`filter_raw`](Self::filter_raw) without even the placeholder
+    /// indirection. Hardcode the expression or build it from a known
+    /// allowlist.
     pub fn order_by_raw(mut self, sql: impl Into<String>) -> Self {
         self.orders.push(OrderTerm::Raw(sql.into()));
         self
@@ -1120,6 +1172,13 @@ impl<M> Builder<M> {
 
     /// Replace the SELECT column list with a raw SQL fragment
     /// (`COUNT(*) AS total`, `name, COUNT(role) OVER (...)`, ...).
+    ///
+    /// # Security
+    ///
+    /// `raw` is interpolated verbatim into the query. **Never pass
+    /// user input here** — same SQL-injection surface as
+    /// [`filter_raw`](Self::filter_raw) and [`order_by_raw`](Self::order_by_raw).
+    /// Hardcode the expression or build it from a known allowlist.
     pub fn select_raw(mut self, raw: impl Into<String>) -> Self {
         self.select_raw = Some(raw.into());
         self

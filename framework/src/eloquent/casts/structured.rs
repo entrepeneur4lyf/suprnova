@@ -68,9 +68,19 @@ where
         // gives us the encoded payload; parse it back into `Vec<T>`
         // then re-emit as a JSON array so downstream deserialization
         // into the user model's `Vec<T>` field succeeds.
-        let s = v.as_str().unwrap_or("[]");
+        //
+        // Domain 7 audit D7-A — was `v.as_str().unwrap_or("[]")` which
+        // silently treated non-string storage as an empty array. Now
+        // strict so a misconfigured column produces an explicit type
+        // mismatch rather than a silent empty Vec<T>.
+        let s = v.as_str().ok_or_else(|| {
+            FrameworkError::validation(
+                "AsArray",
+                format!("dyn from_storage: expected JSON string, got {v:?}"),
+            )
+        })?;
         let parsed: Vec<T> = serde_json::from_str(s)
-            .map_err(|e| FrameworkError::validation("AsArray", format!("dyn: {e}")))?;
+            .map_err(|e| FrameworkError::validation("AsArray", format!("dyn parse: {e}")))?;
         Ok(serde_json::to_value(parsed).expect("Vec<T> serialises"))
     }
 
@@ -125,9 +135,15 @@ where
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        let s = v.as_str().unwrap_or("{}");
+        // Domain 7 audit D7-A — strict-validate input shape.
+        let s = v.as_str().ok_or_else(|| {
+            FrameworkError::validation(
+                "AsObject",
+                format!("dyn from_storage: expected JSON string, got {v:?}"),
+            )
+        })?;
         let parsed: T = serde_json::from_str(s)
-            .map_err(|e| FrameworkError::validation("AsObject", format!("dyn: {e}")))?;
+            .map_err(|e| FrameworkError::validation("AsObject", format!("dyn parse: {e}")))?;
         Ok(serde_json::to_value(parsed).expect("T serialises"))
     }
 
@@ -189,9 +205,15 @@ where
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        let s = v.as_str().unwrap_or("[]");
+        // Domain 7 audit D7-A — strict-validate input shape.
+        let s = v.as_str().ok_or_else(|| {
+            FrameworkError::validation(
+                "AsCollection",
+                format!("dyn from_storage: expected JSON string, got {v:?}"),
+            )
+        })?;
         let parsed: Vec<T> = serde_json::from_str(s)
-            .map_err(|e| FrameworkError::validation("AsCollection", format!("dyn: {e}")))?;
+            .map_err(|e| FrameworkError::validation("AsCollection", format!("dyn parse: {e}")))?;
         Ok(serde_json::to_value(parsed).expect("Vec<T> serialises"))
     }
 
@@ -247,9 +269,15 @@ where
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        let s = v.as_str().unwrap_or("null");
+        // Domain 7 audit D7-A — strict-validate input shape.
+        let s = v.as_str().ok_or_else(|| {
+            FrameworkError::validation(
+                "AsJson",
+                format!("dyn from_storage: expected JSON string, got {v:?}"),
+            )
+        })?;
         let parsed: T = serde_json::from_str(s)
-            .map_err(|e| FrameworkError::validation("AsJson", format!("dyn: {e}")))?;
+            .map_err(|e| FrameworkError::validation("AsJson", format!("dyn parse: {e}")))?;
         Ok(serde_json::to_value(parsed).expect("T serialises"))
     }
 
@@ -314,9 +342,15 @@ where
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        let s = v.as_str().unwrap_or("{}");
+        // Domain 7 audit D7-A — strict-validate input shape.
+        let s = v.as_str().ok_or_else(|| {
+            FrameworkError::validation(
+                "AsArrayObject",
+                format!("dyn from_storage: expected JSON string, got {v:?}"),
+            )
+        })?;
         let parsed: indexmap::IndexMap<String, T> = serde_json::from_str(s)
-            .map_err(|e| FrameworkError::validation("AsArrayObject", format!("dyn: {e}")))?;
+            .map_err(|e| FrameworkError::validation("AsArrayObject", format!("dyn parse: {e}")))?;
         Ok(serde_json::to_value(parsed).expect("IndexMap serialises"))
     }
 

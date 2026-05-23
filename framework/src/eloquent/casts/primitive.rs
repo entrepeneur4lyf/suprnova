@@ -52,7 +52,15 @@ impl DynCast for AsBoolDyn {
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        let n = v.as_i64().or_else(|| v.as_u64().map(|x| x as i64)).unwrap_or(0);
+        // Domain 7 audit D7-A — strict-validate the input shape so a
+        // misconfigured column produces a clear "expected integer, got
+        // <value>" message instead of silently coercing to `false`.
+        let n = v.as_i64().or_else(|| v.as_u64().map(|x| x as i64)).ok_or_else(|| {
+            FrameworkError::validation(
+                "AsBool",
+                format!("dyn from_storage: expected integer, got {v:?}"),
+            )
+        })?;
         Ok(serde_json::Value::Bool(n != 0))
     }
 
@@ -60,7 +68,12 @@ impl DynCast for AsBoolDyn {
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        let b = v.as_bool().unwrap_or(false);
+        let b = v.as_bool().ok_or_else(|| {
+            FrameworkError::validation(
+                "AsBool",
+                format!("dyn to_storage: expected boolean, got {v:?}"),
+            )
+        })?;
         Ok(serde_json::Value::Number(if b { 1.into() } else { 0.into() }))
     }
 }
@@ -249,7 +262,18 @@ impl<const P: u32> DynCast for AsDecimalDyn<P> {
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        let s = v.as_str().unwrap_or("0").to_string();
+        // Domain 7 audit D7-A — was `v.as_str().unwrap_or("0")` which
+        // silently coerced non-strings to "0" and returned 0.00 without
+        // surfacing the type mismatch. Now strict.
+        let s = v
+            .as_str()
+            .ok_or_else(|| {
+                FrameworkError::validation(
+                    "AsDecimal",
+                    format!("dyn from_storage: expected JSON string, got {v:?}"),
+                )
+            })?
+            .to_string();
         let d = AsDecimal::<P>::from_storage(&s)?;
         Ok(serde_json::Value::String(d.to_string()))
     }
@@ -265,5 +289,63 @@ impl<const P: u32> DynCast for AsDecimalDyn<P> {
 impl<const P: u32> IntoDynCast for AsDecimal<P> {
     fn into_dyn() -> Box<dyn DynCast> {
         Box::new(AsDecimalDyn::<P>)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Domain 7 audit D7-A regression — the dyn-cast layer used to
+    //! silently coerce malformed JSON input ("" / "0" / `false`) before
+    //! attempting to parse, producing cryptic downstream errors. The
+    //! fix makes every dyn cast surface an explicit type-mismatch
+    //! diagnostic so a misconfigured column produces a clear "expected
+    //! JSON <type>, got <actual>" error.
+    //!
+    //! These tests assert ONE representative misshape per cast — full
+    //! happy-path coverage lives in
+    //! `framework/tests/eloquent_casts_*.rs`.
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn as_bool_from_storage_rejects_non_integer() {
+        let dyn_cast = AsBool::into_dyn();
+        let err = dyn_cast
+            .from_storage_json(&json!("true"))
+            .err()
+            .expect("non-integer input must reject");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("AsBool") && msg.contains("expected integer"),
+            "error must name the cast + expected shape; got: {msg}",
+        );
+    }
+
+    #[test]
+    fn as_bool_to_storage_rejects_non_boolean() {
+        let dyn_cast = AsBool::into_dyn();
+        let err = dyn_cast
+            .to_storage_json(&json!(1))
+            .err()
+            .expect("non-boolean input must reject");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("AsBool") && msg.contains("expected boolean"),
+            "error must name the cast + expected shape; got: {msg}",
+        );
+    }
+
+    #[test]
+    fn as_decimal_from_storage_rejects_non_string() {
+        let dyn_cast = <AsDecimal<4> as IntoDynCast>::into_dyn();
+        let err = dyn_cast
+            .from_storage_json(&json!(42))
+            .err()
+            .expect("non-string input must reject (was silently coerced to '0')");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("AsDecimal") && msg.contains("expected JSON string"),
+            "error must name the cast + expected shape; got: {msg}",
+        );
     }
 }

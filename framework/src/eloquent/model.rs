@@ -824,6 +824,13 @@ where
 
     /// Atomic `UPDATE table SET col = col + by WHERE pk = ?`. Safe
     /// against concurrent updates — no read-modify-write race.
+    ///
+    /// # Security
+    ///
+    /// `column` is interpolated **raw** into the SQL string (it is a
+    /// SQL identifier, not a parameter). Never pass untrusted input
+    /// here — hardcode the column or pick from a known allowlist.
+    /// Same contract as Laravel's `Model::increment($column, $by)`.
     async fn increment(&self, column: &str, by: i64) -> Result<(), FrameworkError> {
         let table = Self::TABLE;
         let pk_name = Self::primary_key_name();

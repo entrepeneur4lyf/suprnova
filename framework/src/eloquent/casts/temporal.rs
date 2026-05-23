@@ -53,7 +53,19 @@ impl DynCast for AsDateDyn {
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        let s = v.as_str().unwrap_or("").to_string();
+        // Domain 7 audit D7-A — was `v.as_str().unwrap_or("")` which
+        // silently coerced non-strings to "" and produced a cryptic
+        // chrono parse-error instead of an explicit "expected JSON
+        // string, got <actual>" diagnostic.
+        let s = v
+            .as_str()
+            .ok_or_else(|| {
+                FrameworkError::validation(
+                    "AsDate",
+                    format!("dyn from_storage: expected JSON string, got {v:?}"),
+                )
+            })?
+            .to_string();
         let d = AsDate::from_storage(&s)?;
         Ok(serde_json::to_value(d).expect("NaiveDate serialises"))
     }
@@ -99,7 +111,16 @@ impl DynCast for AsDateTimeDyn {
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        let s = v.as_str().unwrap_or("").to_string();
+        // Domain 7 audit D7-A — strict-validate the input shape.
+        let s = v
+            .as_str()
+            .ok_or_else(|| {
+                FrameworkError::validation(
+                    "AsDateTime",
+                    format!("dyn from_storage: expected JSON string, got {v:?}"),
+                )
+            })?
+            .to_string();
         let dt = AsDateTime::from_storage(&s)?;
         Ok(serde_json::to_value(dt).expect("DateTime<Utc> serialises"))
     }
