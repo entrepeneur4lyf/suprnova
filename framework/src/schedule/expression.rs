@@ -243,6 +243,13 @@ impl CronExpression {
     }
 
     /// Every N minutes: `*/N * * * *`
+    ///
+    /// # Panics
+    ///
+    /// Panics if `n` is outside the cron minute range `1..=59`. Cron
+    /// step values must be positive and below the field width. Use a
+    /// `1..=59` value, or fall back to [`Self::hourly`] / similar
+    /// helpers for coarser intervals.
     pub fn every_n_minutes(n: u32) -> Self {
         Self::parse(&format!("*/{} * * * *", n)).unwrap()
     }
@@ -253,6 +260,11 @@ impl CronExpression {
     }
 
     /// Every hour at specific minute: `M * * * *`
+    ///
+    /// # Panics
+    ///
+    /// Panics if `minute` is outside `0..=59`. Cron minute field accepts
+    /// 0 through 59 inclusive.
     pub fn hourly_at(minute: u32) -> Self {
         Self::parse(&format!("{} * * * *", minute)).unwrap()
     }
@@ -263,6 +275,16 @@ impl CronExpression {
     }
 
     /// Daily at specific time: `M H * * *`
+    ///
+    /// `time` is a `HH:MM` string (24-hour clock). Non-numeric segments
+    /// fall back to `0` via `parse().unwrap_or(0)`; segments that ARE
+    /// numeric but out-of-range hit the underlying cron parser.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either segment is numeric but out of cron range
+    /// (hour `0..=23`, minute `0..=59`). Pass a well-formed `"HH:MM"`
+    /// to avoid the panic — e.g. `"09:30"` or `"23:00"`.
     pub fn daily_at(time: &str) -> Self {
         let parts: Vec<&str> = time.split(':').collect();
         if parts.len() == 2 {
@@ -296,6 +318,12 @@ impl CronExpression {
     }
 
     /// Monthly on specific day at midnight: `0 0 D * *`
+    ///
+    /// # Panics
+    ///
+    /// Panics if `day` is outside `1..=31`. Use a day-of-month value
+    /// the calendar can hit — months without a 31st silently skip
+    /// (this is cron-standard behaviour).
     pub fn monthly_on(day: u32) -> Self {
         Self::parse(&format!("0 0 {} * *", day)).unwrap()
     }
