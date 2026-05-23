@@ -277,8 +277,24 @@ impl DatabaseEvaluator {
 
 impl Evaluator for DatabaseEvaluator {
     fn is_enabled(&self, feature: &str, context: &Context) -> Option<bool> {
-        let store = lock::read(&self.flags)
-            .expect("DatabaseEvaluator flags RwLock poisoned");
+        // Domain 17 audit D17-A — was
+        // `lock::read(...).expect("DatabaseEvaluator flags RwLock poisoned")`.
+        // `is_enabled` is the HOT PATH — every feature-flag check
+        // dispatches through it. Returning None on poison means the
+        // caller's composite evaluator falls through to the next
+        // backend / disabled default; an error log surfaces the poison
+        // for ops. Safer than panicking every flag check.
+        let store = match lock::read(&self.flags) {
+            Ok(s) => s,
+            Err(_) => {
+                tracing::error!(
+                    feature = %feature,
+                    "DatabaseEvaluator flags RwLock poisoned; returning None \
+                     (falling through to downstream evaluator / default)."
+                );
+                return None;
+            }
+        };
 
         for key in self.scope_keys_for(context) {
             if let Some(enabled) = store.get(&(feature.to_string(), key)) {
