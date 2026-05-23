@@ -179,24 +179,53 @@ fn registry() -> &'static RwLock<CancellableRegistry> {
 ///
 /// Phase 10C T2 (observers) wraps this with attribute-driven
 /// auto-registration; T1 exposes the manual entry point.
+///
+/// **Poison policy** (Domain 9 audit D9-A): if the global registry's
+/// `RwLock` is poisoned (a previous writer panicked while holding the
+/// guard), the registration is skipped after a `tracing::error!`.
+/// Production: an app whose registry is poisoned has bigger problems
+/// than a missing listener — the log lets ops surface that.
 pub async fn listen_cancellable<E: Event, L: CancellableListener<E>>(listener: Arc<L>) {
-    let mut reg = registry()
-        .write()
-        .expect("cancellable listener registry poisoned");
-    reg.listeners
-        .entry(TypeId::of::<E>())
-        .or_default()
-        .push(Arc::new(CancellableListenerWrap::<E, L>::new(listener)));
+    match registry().write() {
+        Ok(mut reg) => {
+            reg.listeners
+                .entry(TypeId::of::<E>())
+                .or_default()
+                .push(Arc::new(CancellableListenerWrap::<E, L>::new(listener)));
+        }
+        Err(_) => {
+            tracing::error!(
+                event_type = std::any::type_name::<E>(),
+                "cancellable listener registry lock poisoned; \
+                 skipping registration. A prior writer panicked under \
+                 the write guard — the framework can no longer dispatch \
+                 cancellable events for this type."
+            );
+        }
+    }
 }
 
 async fn global_cancellable_listeners<E: Event>() -> Vec<Arc<dyn ErasedCancellableListener>> {
-    let reg = registry()
-        .read()
-        .expect("cancellable listener registry poisoned");
-    reg.listeners
-        .get(&TypeId::of::<E>())
-        .cloned()
-        .unwrap_or_default()
+    // Domain 9 audit D9-A — degrade to empty vec on poison rather than
+    // panicking the dispatcher path. Empty == "no listeners registered",
+    // which is the safe fallback: dispatch proceeds with no
+    // cancellation possible (the operation is allowed by default per
+    // event semantics).
+    match registry().read() {
+        Ok(reg) => reg
+            .listeners
+            .get(&TypeId::of::<E>())
+            .cloned()
+            .unwrap_or_default(),
+        Err(_) => {
+            tracing::error!(
+                event_type = std::any::type_name::<E>(),
+                "cancellable listener registry lock poisoned during dispatch; \
+                 treating as empty (no listeners), event proceeds uncancelled.",
+            );
+            Vec::new()
+        }
+    }
 }
 
 /// Phase 10C audit-fix AF4 — wipe every registered cancellable

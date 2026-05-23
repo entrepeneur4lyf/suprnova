@@ -175,15 +175,29 @@ impl ScopeRegistry {
             Box::new(result) as Box<dyn Any + Send>
         });
 
-        let mut reg = registry()
-            .write()
-            .expect("ScopeRegistry: write lock poisoned");
-        reg.entry(model_type_id)
-            .or_insert_with(|| PerModelScopes {
-                entries: Vec::new(),
-            })
-            .entries
-            .push((scope_type_id, apply));
+        // Domain 9 audit D9-B — degrade gracefully on poisoned lock
+        // rather than propagating the panic into application boot.
+        // An app whose scope registry is poisoned has bigger problems
+        // than a missing scope; the error log lets ops surface it.
+        match registry().write() {
+            Ok(mut reg) => {
+                reg.entry(model_type_id)
+                    .or_insert_with(|| PerModelScopes {
+                        entries: Vec::new(),
+                    })
+                    .entries
+                    .push((scope_type_id, apply));
+            }
+            Err(_) => {
+                tracing::error!(
+                    model_type = std::any::type_name::<M>(),
+                    scope_type = std::any::type_name::<S>(),
+                    "ScopeRegistry write lock poisoned; skipping scope \
+                     registration. Queries against this model will not \
+                     have the scope applied."
+                );
+            }
+        }
     }
 
     /// Phase 10C audit-fix AF4 — wipe every registered global scope.
@@ -233,11 +247,23 @@ impl ScopeRegistry {
         // the read lock, then release the lock before running user
         // code so a scope that itself touches the registry doesn't
         // deadlock.
-        let entries: Vec<(TypeId, ErasedApply)> = {
-            let reg = registry().read().expect("ScopeRegistry: read lock poisoned");
-            match reg.get(&TypeId::of::<M>()) {
+        //
+        // Domain 9 audit D9-B — degrade to no-scope-applied on
+        // poison. Returning the unscoped builder preserves the
+        // documented "no scope registered = query unchanged"
+        // semantic; an error log lets ops see the underlying poison.
+        let entries: Vec<(TypeId, ErasedApply)> = match registry().read() {
+            Ok(reg) => match reg.get(&TypeId::of::<M>()) {
                 Some(p) => p.entries.clone(),
                 None => return builder,
+            },
+            Err(_) => {
+                tracing::error!(
+                    model_type = std::any::type_name::<M>(),
+                    "ScopeRegistry read lock poisoned during apply_to; \
+                     returning unscoped builder."
+                );
+                return builder;
             }
         };
 
@@ -257,12 +283,14 @@ impl ScopeRegistry {
     /// Test-only escape hatch. Drops every registered scope. Used by
     /// the framework's own `#[cfg(test)]` blocks to keep test
     /// isolation simple; production code should NEVER call this.
+    ///
+    /// Mirrors [`Self::clear`] (the `#[doc(hidden)]` opt-in)'s poison
+    /// handling — silently skip on poison rather than propagate.
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn __clear_for_tests() {
-        let mut reg = registry()
-            .write()
-            .expect("ScopeRegistry: write lock poisoned");
-        reg.clear();
+        if let Ok(mut reg) = registry().write() {
+            reg.clear();
+        }
     }
 }
