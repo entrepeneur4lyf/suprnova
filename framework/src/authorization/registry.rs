@@ -41,10 +41,24 @@ impl GateRegistry {
             let r = r.downcast_ref::<R>().expect("gate resource type");
             f(u, r)
         });
-        self.gates
-            .write()
-            .unwrap()
-            .insert(key, GateEntry::Sync(erased));
+        // Domain 10 audit D10-A — degrade gracefully on lock poison
+        // rather than panic-the-boot-path. Skipping a single gate
+        // registration is recoverable; the gate's authorize calls
+        // return None → safe-deny (`Err(FrameworkError::Unauthorized)`).
+        match self.gates.write() {
+            Ok(mut gates) => {
+                gates.insert(key, GateEntry::Sync(erased));
+            }
+            Err(_) => {
+                tracing::error!(
+                    action = %action,
+                    user_type = std::any::type_name::<U>(),
+                    resource_type = std::any::type_name::<R>(),
+                    "Gate registry lock poisoned; skipping sync gate registration. \
+                     Calls to Gate::authorize for this action will safe-deny."
+                );
+            }
+        }
     }
 
     /// Register an async gate.
@@ -67,10 +81,22 @@ impl GateRegistry {
             let fut = f(u, r);
             Box::pin(fut)
         });
-        self.gates
-            .write()
-            .unwrap()
-            .insert(key, GateEntry::Async(erased));
+        // Domain 10 audit D10-A — same poison-recovery shape as
+        // `register` (sync). Safe-deny on next authorize attempt.
+        match self.gates.write() {
+            Ok(mut gates) => {
+                gates.insert(key, GateEntry::Async(erased));
+            }
+            Err(_) => {
+                tracing::error!(
+                    action = %action,
+                    user_type = std::any::type_name::<U>(),
+                    resource_type = std::any::type_name::<R>(),
+                    "Gate registry lock poisoned; skipping async gate registration. \
+                     Calls to Gate::authorize_async for this action will safe-deny."
+                );
+            }
+        }
     }
 
     /// Invoke a sync gate. Returns `None` if not registered, `Some(false)` if
@@ -86,7 +112,22 @@ impl GateRegistry {
         resource: &R,
     ) -> Option<bool> {
         let key = (action.to_string(), TypeId::of::<U>(), TypeId::of::<R>());
-        let gates = self.gates.read().unwrap();
+        // Domain 10 audit D10-A — every Gate::authorize call dispatches
+        // through here. Returning None on poison means the caller's
+        // `Gate::authorize` returns Err(Unauthorized) — safe-deny.
+        let gates = match self.gates.read() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::error!(
+                    action = %action,
+                    user_type = std::any::type_name::<U>(),
+                    resource_type = std::any::type_name::<R>(),
+                    "Gate registry lock poisoned during invoke; safe-denying \
+                     (returning None so authorize maps to Err(Unauthorized))."
+                );
+                return None;
+            }
+        };
         match gates.get(&key) {
             Some(GateEntry::Sync(f)) => Some(f(user as &dyn Any, resource as &dyn Any)),
             Some(GateEntry::Async(_)) => {
@@ -117,14 +158,25 @@ impl GateRegistry {
         let key = (action.to_string(), TypeId::of::<U>(), TypeId::of::<R>());
         // We hold the read lock only long enough to clone the result or start
         // the async dispatch — we must NOT hold it across an `.await`.
-        let entry_result: EntryResult = {
-            let gates = self.gates.read().unwrap();
-            match gates.get(&key) {
+        //
+        // Domain 10 audit D10-A — degrade to None on poison; caller's
+        // `Gate::authorize_async` returns Err(Unauthorized) (safe-deny).
+        let entry_result: EntryResult = match self.gates.read() {
+            Ok(gates) => match gates.get(&key) {
                 Some(GateEntry::Sync(f)) => Some(Ok(f(user as &dyn Any, resource as &dyn Any))),
                 Some(GateEntry::Async(f)) => {
                     Some(Err(f(user as &dyn Any, resource as &dyn Any)))
                 }
                 None => None,
+            },
+            Err(_) => {
+                tracing::error!(
+                    action = %action,
+                    user_type = std::any::type_name::<U>(),
+                    resource_type = std::any::type_name::<R>(),
+                    "Gate registry lock poisoned during invoke_async; safe-denying."
+                );
+                None
             }
         };
 

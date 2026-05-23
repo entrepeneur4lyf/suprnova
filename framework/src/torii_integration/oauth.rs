@@ -191,10 +191,26 @@ impl OAuthAuth {
     /// Register (or overwrite) the provider config for this provider.
     ///
     /// Idempotent: calling again replaces the existing config.
+    ///
+    /// **Poison policy** (Domain 10 audit D10-B): if the registry lock
+    /// is poisoned, the config is NOT applied — a `tracing::error!` is
+    /// emitted instead. Next OAuth-flow attempt for this provider will
+    /// return "provider not configured" via the read path's normal
+    /// error propagation. Production: an app whose lock is poisoned at
+    /// boot has bigger problems than a missing OAuth config.
     pub fn configure(&self, config: OAuthProviderConfig) {
-        lock::write(configs())
-            .expect("OAuthProviderConfig lock poisoned")
-            .insert(self.provider.clone(), config);
+        match lock::write(configs()) {
+            Ok(mut map) => {
+                map.insert(self.provider.clone(), config);
+            }
+            Err(_) => {
+                tracing::error!(
+                    provider = %self.provider,
+                    "OAuth provider config lock poisoned; skipping configure. \
+                     OAuth flows for this provider will report 'not configured'."
+                );
+            }
+        }
     }
 
     /// Begin the OAuth flow.
