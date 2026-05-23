@@ -20,11 +20,25 @@ pub struct VectorRegistry;
 
 impl VectorRegistry {
     /// Insert or replace a driver under `name`.
+    ///
+    /// **Poison policy** (Domain 18 audit D18-A): on RwLock poison
+    /// the driver is NOT installed — a `tracing::error!` is emitted.
+    /// Next `VectorRegistry::lookup(name)` returns the existing
+    /// "not registered" error via the read path, which already
+    /// propagates poison via `?` at L34. Symmetric with the
+    /// rest of the framework's per-registry poison policy.
     pub fn install(name: String, driver: Arc<dyn VectorDriver>) {
-        registry()
-            .write()
-            .expect("vector registry lock not poisoned")
-            .insert(name, driver);
+        match registry().write() {
+            Ok(mut guard) => {
+                guard.insert(name, driver);
+            }
+            Err(_) => {
+                tracing::error!(
+                    store = %name,
+                    "Vector registry lock poisoned; skipping driver install."
+                );
+            }
+        }
     }
 
     /// Resolve a [`VectorStore`] handle by name.
