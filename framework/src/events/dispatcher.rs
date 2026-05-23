@@ -30,18 +30,31 @@ impl EventDispatcher {
     }
 
     /// Register a listener for events of type `E`.
+    ///
+    /// **Poison policy** (Domain 11 audit D11-A): if the listener
+    /// registry's `RwLock` is poisoned, the registration is skipped
+    /// and a `tracing::error!` is emitted. Production: the listener
+    /// that couldn't register surfaces to ops via the log; framework
+    /// stays alive.
     pub async fn listen<E, L>(&self, listener: Arc<L>)
     where
         E: super::Event,
         L: Listener<E>,
     {
         let wrap = Arc::new(ListenerWrap::<E, L>::new(listener)) as Arc<dyn ErasedListener>;
-        self.listeners
-            .write()
-            .expect("event listener registry poisoned")
-            .entry(TypeId::of::<E>())
-            .or_default()
-            .push(wrap);
+        match self.listeners.write() {
+            Ok(mut map) => {
+                map.entry(TypeId::of::<E>()).or_default().push(wrap);
+            }
+            Err(_) => {
+                tracing::error!(
+                    event_type = std::any::type_name::<E>(),
+                    "EventDispatcher listener registry lock poisoned; \
+                     skipping listener registration. Events of this type \
+                     will dispatch with no listener invoked."
+                );
+            }
+        }
     }
 
     /// Phase 10C audit-fix AF4 — drop every registered listener.
@@ -69,13 +82,23 @@ impl EventDispatcher {
     /// in registration order). Queued events spawn a tokio task per
     /// listener; this call returns after spawning, not after they
     /// complete.
+    ///
+    /// **Poison policy** (Domain 11 audit D11-A): if the listener
+    /// registry lock is poisoned, dispatch returns `Ok(())` after
+    /// logging an error — equivalent to "no listeners registered for
+    /// this event type", which is the documented safe-fallback
+    /// semantic (events are not guaranteed to have subscribers).
     pub async fn dispatch<E: super::Event>(&self, event: E) -> Result<(), FrameworkError> {
-        let listeners = {
-            let map = self
-                .listeners
-                .read()
-                .expect("event listener registry poisoned");
-            map.get(&TypeId::of::<E>()).cloned().unwrap_or_default()
+        let listeners = match self.listeners.read() {
+            Ok(map) => map.get(&TypeId::of::<E>()).cloned().unwrap_or_default(),
+            Err(_) => {
+                tracing::error!(
+                    event = E::event_name(),
+                    "EventDispatcher listener registry lock poisoned during dispatch; \
+                     treating as no listeners (event dropped silently apart from this log)."
+                );
+                return Ok(());
+            }
         };
 
         debug!(

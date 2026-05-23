@@ -94,9 +94,25 @@ impl Bus {
                 Ok(json)
             })
         });
-        let mut g = lock::write(&REGISTRY).expect("bus registry poisoned");
-        g.get_or_insert_with(HashMap::new)
-            .insert(TypeId::of::<C>(), dispatcher);
+        // Domain 11 audit D11-B — was `lock::write(...).expect(...)`
+        // which defeated the helper's whole point (the read path at
+        // dispatch() correctly propagates via `?`). Now matches the
+        // helper's `Result` shape and logs + skips on poison so the
+        // bus boot doesn't crash on a recoverable internal error.
+        match lock::write(&REGISTRY) {
+            Ok(mut g) => {
+                g.get_or_insert_with(HashMap::new)
+                    .insert(TypeId::of::<C>(), dispatcher);
+            }
+            Err(_) => {
+                tracing::error!(
+                    command = C::command_name(),
+                    "Bus registry lock poisoned; skipping handler registration. \
+                     Bus::dispatch calls for this command will return \
+                     'no handler for ...' errors."
+                );
+            }
+        }
     }
 
     /// Dispatch a command. Runs the registered handler in-process and returns
