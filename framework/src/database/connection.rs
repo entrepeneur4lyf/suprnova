@@ -115,13 +115,17 @@ impl DbConnection {
     pub fn conn(&self) -> &DatabaseConnection {
         &self.inner
     }
-
-    /// Check if the connection is closed
-    pub fn is_closed(&self) -> bool {
-        // SeaORM doesn't expose this directly, but we can check via ping
-        false
-    }
 }
+
+// Domain 6 audit D6-3 — `pub fn is_closed(&self) -> bool` was removed.
+// The previous implementation hardcoded `false` with a comment saying
+// "SeaORM doesn't expose this directly, but we can check via ping"; in
+// practice it lied about every connection's state. `ping().is_err()`
+// would also conflate transient network blips with closed-state and
+// would still leave the public name `is_closed` semantically wrong (a
+// failed ping is "unhealthy", not "closed"). With one caller — a
+// tautological `assert!(!conn.is_closed())` in the registry round-trip
+// test — removing the method is cleaner than papering over it.
 
 impl AsRef<DatabaseConnection> for DbConnection {
     fn as_ref(&self) -> &DatabaseConnection {

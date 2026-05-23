@@ -23,6 +23,51 @@
 //!
 //! If the model is not found, a 404 Not Found response is returned.
 //! If the parameter cannot be parsed, a 400 Bad Request response is returned.
+//!
+//! # Security: binding is identity, not authorization
+//!
+//! Route model binding answers **"does this row exist?"** — it does **not**
+//! answer **"is the current user allowed to see this row?"**. Mirrors Laravel
+//! semantics, but the implication is easy to miss:
+//!
+//! ```rust,ignore
+//! // BAD: any authenticated user can view any post by guessing /posts/N.
+//! #[handler]
+//! pub async fn show(post: post::Model) -> Response {
+//!     json_response!({ "title": post.title })
+//! }
+//! ```
+//!
+//! Authorize against the bound model in the handler using
+//! [`crate::authorization::Gate`] (and optionally an inventory-registered
+//! [`Policy`](crate::authorization::Policy) for per-model rules). The
+//! framework's auth surface gives you the current user through
+//! [`Auth::user_as::<U>()`](crate::auth::Auth::user_as):
+//!
+//! ```rust,ignore
+//! use suprnova::{handler, json_response, Auth, FrameworkError, Response};
+//! use suprnova::authorization::Gate;
+//! use crate::models::{Post, User};
+//!
+//! #[handler]
+//! pub async fn show(post: Post) -> Result<Response, FrameworkError> {
+//!     let current_user = Auth::user_as::<User>()
+//!         .await?
+//!         .ok_or(FrameworkError::Unauthorized)?;
+//!     Gate::authorize("view-post", &current_user, &post)?;
+//!     Ok(json_response!({ "title": post.title }))
+//! }
+//! ```
+//!
+//! `Gate::authorize` takes the action name first, then the user, then the
+//! resource. It returns `Err(FrameworkError::Unauthorized)` (mapped to 403)
+//! when denied. See `framework/tests/authorization.rs` and
+//! `app/src/controllers/admin.rs` for working examples.
+//!
+//! The 404 returned on a missing row does NOT prevent IDOR probing — a 404
+//! vs. 403 split discloses existence. If existence-disclosure matters in
+//! your threat model, return 404 from the policy too (so unauthorized rows
+//! look identical to non-existent ones).
 
 use crate::error::FrameworkError;
 use async_trait::async_trait;

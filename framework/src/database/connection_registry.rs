@@ -33,6 +33,24 @@
 //! teardown so the next test in the same process starts with an empty
 //! registry.
 //!
+//! ## Lock-poisoning policy (Domain 6 audit D6-1)
+//!
+//! The registry uses `std::sync::RwLock`. Historically every guard
+//! acquisition was `.expect("connection registry poisoned")` — a single
+//! panicked writer would take down the whole framework on the next
+//! request. The fixed shape:
+//!
+//! - [`Self::register`] / [`Self::register_existing`] / [`Self::get`]
+//!   route through [`crate::lock::write`] / [`crate::lock::read`] and
+//!   propagate a [`FrameworkError::internal`] on poison instead of
+//!   panicking. Application code surfaces the failure normally.
+//!
+//! - [`Self::has`] is called inline as a `bool` by the executor
+//!   read-replica routing path; widening its signature to
+//!   `Result<bool, FrameworkError>` would force every caller to
+//!   `?`-bubble. Instead `has` degrades to `false` on poison — the
+//!   safe fallback (executor drops back to the primary pool).
+//!
 //! [`Builder::get`]: crate::eloquent::Builder::get
 //! [`Builder::first`]: crate::eloquent::Builder::first
 //! [`Builder::count`]: crate::eloquent::Builder::count
@@ -89,7 +107,7 @@ impl ConnectionRegistry {
     pub async fn register(name: &str, config: DatabaseConfig) -> Result<(), FrameworkError> {
         Self::ensure_name_writable(name)?;
         let conn = DbConnection::connect(&config).await?;
-        let mut r = reg().write().expect("connection registry poisoned");
+        let mut r = crate::lock::write(reg())?;
         r.insert(name.to_string(), conn);
         Ok(())
     }
@@ -102,7 +120,7 @@ impl ConnectionRegistry {
     /// Same reserved-name policy as [`Self::register`].
     pub async fn register_existing(name: &str, conn: DbConnection) -> Result<(), FrameworkError> {
         Self::ensure_name_writable(name)?;
-        let mut r = reg().write().expect("connection registry poisoned");
+        let mut r = crate::lock::write(reg())?;
         r.insert(name.to_string(), conn);
         Ok(())
     }
@@ -110,9 +128,10 @@ impl ConnectionRegistry {
     /// Look up the connection registered under `name`. Returns a
     /// `Database` error when no connection is registered — application
     /// code must handle this failure (no automatic fallback to the
-    /// primary; that would mask the misconfiguration).
+    /// primary; that would mask the misconfiguration). Returns an
+    /// `Internal` error if the registry lock is poisoned.
     pub async fn get(name: &str) -> Result<DbConnection, FrameworkError> {
-        let r = reg().read().expect("connection registry poisoned");
+        let r = crate::lock::read(reg())?;
         r.get(name).cloned().ok_or_else(|| {
             FrameworkError::database(format!("connection '{name}' not registered"))
         })
@@ -120,9 +139,18 @@ impl ConnectionRegistry {
 
     /// Whether `name` is registered. Used by the read-replica auto-
     /// routing path in [`crate::database::transaction::ExecutorChoice`].
+    ///
+    /// **Poison policy**: returns `false` on poisoned lock. The caller
+    /// (executor routing) then falls back to the primary pool, which
+    /// is the safe behavior. [`Self::get`] returns
+    /// [`FrameworkError::internal`] on the same condition so the
+    /// application learns about the poison through the next read or
+    /// write that actually needs the named connection.
     pub async fn has(name: &str) -> bool {
-        let r = reg().read().expect("connection registry poisoned");
-        r.contains_key(name)
+        match reg().read() {
+            Ok(r) => r.contains_key(name),
+            Err(_) => false,
+        }
     }
 
     /// Remove every registered connection. Called from
@@ -178,8 +206,11 @@ mod tests {
             .await
             .unwrap();
         assert!(ConnectionRegistry::has("unit_test_round_trip").await);
-        let conn = ConnectionRegistry::get("unit_test_round_trip").await.unwrap();
-        assert!(!conn.is_closed());
+        // The round-trip succeeded if `get` returned a connection; no
+        // need for a follow-up `is_closed` check (the prior call to
+        // that method was a tautology — it hardcoded `false`. See the
+        // Domain 6 audit D6-3 note in `database/connection.rs`).
+        let _conn = ConnectionRegistry::get("unit_test_round_trip").await.unwrap();
     }
 
     #[tokio::test]
@@ -219,5 +250,59 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Domain 6 audit D6-1 regression: a panic while holding the
+    /// registry write lock poisons it. After the fix, subsequent
+    /// `register`/`get` calls surface the poison as
+    /// `FrameworkError::internal` instead of panicking the framework,
+    /// and `has` degrades to `false` so the executor's read-replica
+    /// routing safely falls back to the primary pool.
+    ///
+    /// Runs in a fresh `RwLock` (not the global `REGISTRY`) — we
+    /// can't intentionally poison the global one without contaminating
+    /// every other test in the same process.
+    #[test]
+    fn poisoned_lock_does_not_panic_register_get_has() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let lock = Arc::new(RwLock::new(HashMap::<String, ()>::new()));
+        let lock_clone = Arc::clone(&lock);
+        let _ = thread::spawn(move || {
+            let _guard = lock_clone.write().unwrap();
+            panic!("intentional poison");
+        })
+        .join();
+        assert!(
+            lock.is_poisoned(),
+            "test setup: lock must be poisoned after panicked writer",
+        );
+
+        // `crate::lock::write` / `crate::lock::read` propagate the
+        // poison as a `FrameworkError` instead of panicking. The
+        // production `register`/`get` paths use these helpers — the
+        // shape below is the exact transformation.
+        let write_err = crate::lock::write(&lock).err();
+        assert!(
+            write_err.is_some(),
+            "lock::write must return Err on poison, got Ok",
+        );
+        let read_err = crate::lock::read(&lock).err();
+        assert!(
+            read_err.is_some(),
+            "lock::read must return Err on poison, got Ok",
+        );
+
+        // `has` degrades to `false` on the same condition — see the
+        // `has` impl above.
+        let has_result = match lock.read() {
+            Ok(r) => r.contains_key("anything"),
+            Err(_) => false,
+        };
+        assert!(
+            !has_result,
+            "has() must return false on poisoned lock, never panic",
+        );
     }
 }

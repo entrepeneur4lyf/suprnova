@@ -606,9 +606,20 @@ impl DB {
                 // unwrap, so we drop the `Arc` and let SeaORM's
                 // `DatabaseTransaction::drop` rollback when the last
                 // reference goes away. Either way the inner closure
-                // error is surfaced to the caller.
-                if let Ok(tx) = Arc::try_unwrap(tx_arc) {
-                    let _ = tx.rollback().await;
+                // error is surfaced to the caller — but a failed
+                // explicit rollback (DB unhealthy, network blip) is
+                // an operational signal worth a warn-level log so
+                // it doesn't disappear silently.
+                if let Ok(tx) = Arc::try_unwrap(tx_arc)
+                    && let Err(rb_err) = tx.rollback().await
+                {
+                    tracing::warn!(
+                        error = %rb_err,
+                        "Transaction rollback failed after closure error; \
+                         the original closure error is still surfaced to \
+                         the caller. Common cause: connection lost between \
+                         BEGIN and the failing query.",
+                    );
                 }
                 Err(e)
             }
