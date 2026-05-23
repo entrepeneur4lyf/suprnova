@@ -280,7 +280,28 @@ fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::
                         }
                     };
                     match key.as_str() {
-                        "id_field" => id_field = value,
+                        "id_field" => {
+                            // Domain 5 audit M-D5-7 — `id_field = "..."`
+                            // is emitted as `syn::Ident::new(&opts.id_field,
+                            // Span::call_site())` at `data.rs:1112` so the
+                            // generated `IntoJsonResource` impl can reference
+                            // the matching struct field via `self.#id_field`.
+                            // A non-ident value (`id_field = "user-id"`,
+                            // `id_field = "user id"`) panics the macro
+                            // instead of producing a clean compile error.
+                            if syn::parse_str::<syn::Ident>(&value).is_err() {
+                                return Err(syn::Error::new_spanned(
+                                    &assign.right,
+                                    format!(
+                                        "`id_field = \"{value}\"` — must parse as a Rust \
+                                         identifier because it names a struct field on the \
+                                         resource type. Use a snake_case name without \
+                                         dashes / spaces (e.g. \"user_id\")."
+                                    ),
+                                ));
+                            }
+                            id_field = value;
+                        }
                         other => {
                             return Err(syn::Error::new_spanned(
                                 &assign.left,
@@ -655,12 +676,28 @@ fn build_into_inertia_props(
                     ));
                 }
             } else {
+                // Domain 5 audit M-D5-9 — emitted panic now names the
+                // struct + field so operators can pinpoint which
+                // `serde_json::to_value` failed in production logs.
+                // Matches the diagnostic shape M-D5-1 introduced on
+                // the cast-failure path. Keeps the panic (vs. ? + Result)
+                // because the trait `IntoInertiaProps` is infallible by
+                // signature and changing that would ripple to every
+                // Inertia render call site.
                 quote! {
                     out.push((
                         #name.to_string(),
                         ::suprnova::inertia::PropEntry::Eager(
                             ::suprnova::serde_json::to_value(&self.#ident)
-                                .expect("__into_inertia_props: field failed to serialize"),
+                                .unwrap_or_else(|__suprnova_ser_err| ::std::panic!(
+                                    "__into_inertia_props: serde_json::to_value failed for \
+                                     field `{}::{}`: {} (the field's Serialize impl returned \
+                                     Err — check for invalid float/NaN, broken custom \
+                                     serializer, or unsupported type)",
+                                    #struct_name_str,
+                                    #name,
+                                    __suprnova_ser_err,
+                                )),
                         ),
                     ));
                 }
@@ -1139,13 +1176,26 @@ fn build_into_json_resource(
         })
         .collect();
 
+    let struct_name_str = struct_name.to_string();
     let attrs_entries = attr_fields.iter().map(|(ident, name)| {
+        // Domain 5 audit M-D5-9 — same diagnostic upgrade as
+        // `__into_inertia_props` above. The "attribute serialization
+        // should succeed" expect message was a black box in
+        // production logs; the new panic surfaces the offending
+        // struct + field + the underlying serde error.
         quote! {
             if fieldset_includes(#name) {
                 map.insert(
                     #name.to_string(),
                     ::suprnova::serde_json::to_value(&self.#ident)
-                        .expect("attribute serialization should succeed"),
+                        .unwrap_or_else(|__suprnova_ser_err| ::std::panic!(
+                            "IntoJsonResource::resource_attributes: serde_json::to_value \
+                             failed for field `{}::{}`: {} (the field's Serialize impl \
+                             returned Err)",
+                            #struct_name_str,
+                            #name,
+                            __suprnova_ser_err,
+                        )),
                 );
             }
         }

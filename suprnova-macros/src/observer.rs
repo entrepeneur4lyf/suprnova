@@ -44,7 +44,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, parse_str, Expr, ImplItem, ItemImpl, Type};
+use syn::{parse_macro_input, parse_str, ImplItem, ItemImpl, Path, Type};
 
 /// Lifecycle methods that return `Result<(), FrameworkError>` and
 /// register through `EventFacade::listen`. Tuple is `(method_name,
@@ -79,13 +79,22 @@ const CANCELLABLE_METHODS: &[(&str, &str)] = &[
 /// overridden trait method, and emits an `ObserverEntry` inventory
 /// submission whose `install` closure registers every adapter.
 pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let model_expr: Expr = match parse_str(&attr.to_string()) {
-        Ok(e) => e,
+    // Domain 5 audit M-D5-7 — parse the model arg as `syn::Path`
+    // (not `syn::Expr`). The downstream module-path emission requires
+    // a sequence of named segments (`crate::models::User` → walk to
+    // `user`); `Expr` accepted unparseable shapes like `123` or
+    // `2 + 2`, which then panicked inside `Ident::new` at
+    // `expr_to_snake_module_path` instead of producing a clean
+    // compile error. Path's segment-typed AST guarantees each segment
+    // is already a valid `syn::Ident`, so the panic class is gone.
+    let model_path: Path = match parse_str(&attr.to_string()) {
+        Ok(p) => p,
         Err(e) => {
             return syn::Error::new_spanned(
                 proc_macro2::TokenStream::from(attr.clone()),
                 format!(
-                    "#[suprnova::observer(Model)] takes one model type argument: {e}"
+                    "#[suprnova::observer(Model)] takes one model type argument as a \
+                     qualified path (e.g. `User`, `crate::models::User`): {e}"
                 ),
             )
             .to_compile_error()
@@ -110,7 +119,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    let module_path = expr_to_snake_module_path(&model_expr);
+    let module_path = path_to_snake_module_path(&model_path);
 
     // Identify which trait methods the user actually wrote by name
     // match. The trait defaults everything to no-ops, so any method
@@ -229,7 +238,7 @@ fn to_snake(s: &str) -> String {
     out
 }
 
-/// Convert a model type expression into the module-path prefix the
+/// Convert a model `Path` into the module-path prefix the
 /// `#[suprnova::model]` macro uses for the per-model `events::`
 /// submodule.
 ///
@@ -240,27 +249,45 @@ fn to_snake(s: &str) -> String {
 /// Only the LAST segment is snake-cased; earlier segments are passed
 /// through verbatim because they're already-valid module identifiers
 /// authored by the user.
-fn expr_to_snake_module_path(model: &Expr) -> TokenStream2 {
-    let s = quote!(#model).to_string();
-    // `quote!` round-trips with spaces around `::`; strip them so the
-    // split picks up the segments cleanly.
-    let s = s.replace(' ', "");
-    let parts: Vec<&str> = s.split("::").collect();
-    let last = parts
+///
+/// Domain 5 audit M-D5-7 — takes `&syn::Path` instead of `&syn::Expr`
+/// so the segment-walk operates on typed `PathSegment`s. The previous
+/// implementation round-tripped through a string and called
+/// `Ident::new(&snake, ...)` on the result, which panicked when the
+/// user supplied a non-path expression (e.g. `#[observer(123)]`).
+/// `Path::parse` rejects those at the entry point now.
+fn path_to_snake_module_path(model: &Path) -> TokenStream2 {
+    // Path::parse always yields at least one segment; an empty path
+    // is not constructible via `syn::parse_str::<Path>`.
+    let segments = &model.segments;
+    let last_seg = segments
         .last()
-        .expect("split on `::` always yields at least one segment");
-    let snake = to_snake(last);
+        .expect("Path::parse guarantees at least one segment");
+    let snake = to_snake(&last_seg.ident.to_string());
     let snake_ident: syn::Ident =
-        syn::Ident::new(&snake, proc_macro2::Span::call_site());
+        syn::Ident::new(&snake, last_seg.ident.span());
 
-    if parts.len() == 1 {
-        quote! { #snake_ident }
+    if segments.len() == 1 {
+        // Preserve the leading `::` (absolute path) on the
+        // sole-segment case for consistency with the multi-segment
+        // branch — only matters when the user writes `::User`,
+        // which is syntactically legal but unusual.
+        if model.leading_colon.is_some() {
+            quote! { ::#snake_ident }
+        } else {
+            quote! { #snake_ident }
+        }
     } else {
-        let prefix = parts[..parts.len() - 1].join("::");
-        let prefix: proc_macro2::TokenStream = prefix
-            .parse()
-            .expect("model path prefix is a valid token stream");
-        quote! { #prefix::#snake_ident }
+        // Walk all-but-last segments verbatim, then append the
+        // snake-cased final segment. Each segment is already a valid
+        // ident — no string round-trip / re-parse needed.
+        let prefix_segments = segments.iter().take(segments.len() - 1);
+        let leading = if model.leading_colon.is_some() {
+            quote! { :: }
+        } else {
+            quote! {}
+        };
+        quote! { #leading #(#prefix_segments)::*::#snake_ident }
     }
 }
 
@@ -410,5 +437,83 @@ fn emit_cancellable_adapter_call(method: &str) -> TokenStream2 {
             );
             quote! { compile_error!(#msg) }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Domain 5 audit M-D5-7 regression: the `#[suprnova::observer(M)]`
+    //! macro used to accept any `syn::Expr` as the model argument and
+    //! then panic at `Ident::new` if the expression wasn't path-shaped
+    //! (`observer(123)` → "rustc panicked"). The fix swapped `Expr` for
+    //! `syn::Path` at the entry point — non-path inputs reject cleanly
+    //! through syn's parser, and `path_to_snake_module_path` walks
+    //! typed segments that are already valid idents.
+    //!
+    //! These tests lock in the segment-walk semantics on the happy
+    //! paths so a future refactor of the snake-module-path helper
+    //! can't silently break them.
+    use super::*;
+    use syn::parse_str;
+
+    fn render(path: &Path) -> String {
+        path_to_snake_module_path(path).to_string().replace(' ', "")
+    }
+
+    #[test]
+    fn single_segment_camelcase_snake_cases() {
+        let p: Path = parse_str("User").unwrap();
+        assert_eq!(render(&p), "user");
+    }
+
+    #[test]
+    fn multi_segment_only_last_is_snake_cased() {
+        let p: Path = parse_str("crate::models::User").unwrap();
+        // Earlier segments pass through verbatim; only `User` →
+        // `user`.
+        assert_eq!(render(&p), "crate::models::user");
+    }
+
+    #[test]
+    fn super_relative_path_handled() {
+        let p: Path = parse_str("super::User").unwrap();
+        assert_eq!(render(&p), "super::user");
+    }
+
+    #[test]
+    fn leading_colon_absolute_path_preserved() {
+        let p: Path = parse_str("::crate::models::User").unwrap();
+        // Leading `::` survives the walk; trailing segment snake-cased.
+        let rendered = render(&p);
+        assert!(
+            rendered.starts_with("::") && rendered.ends_with("::user"),
+            "expected leading `::` preserved + user suffix; got: {rendered}",
+        );
+    }
+
+    #[test]
+    fn camelcase_with_multiple_words_snake_cased() {
+        let p: Path = parse_str("MorphPost").unwrap();
+        assert_eq!(render(&p), "morph_post");
+    }
+
+    #[test]
+    fn non_path_input_rejected_by_parse_path() {
+        // The actual panic class M-D5-7 catches: `#[observer(123)]`
+        // used to panic at Ident::new on the snake-cased "123".
+        // Now `parse_str::<Path>` rejects at the entry, never reaching
+        // the snake-case helper.
+        let result: syn::Result<Path> = parse_str("123");
+        assert!(
+            result.is_err(),
+            "syn::Path::parse must reject numeric-only input \
+             (pre-fix, Expr accepted this and panicked downstream)",
+        );
+
+        let result: syn::Result<Path> = parse_str("2 + 2");
+        assert!(
+            result.is_err(),
+            "syn::Path::parse must reject arithmetic expressions",
+        );
     }
 }

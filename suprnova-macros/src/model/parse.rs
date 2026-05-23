@@ -339,6 +339,76 @@ impl ModelInput {
             }
         }
 
+        // Domain 5 audit M-D5-7 — `created_at`, `updated_at`,
+        // `soft_deletes_column`, and `mutators[]` entries are all
+        // emitted as Rust idents downstream:
+        //
+        //   * `created_at` / `updated_at` → `format_ident!("{}", ...)`
+        //     in `derive_eloquent.rs:307-308` (timestamp inject paths +
+        //     `Touchable` impl). The format_ident! runs unconditionally
+        //     — `timestamps_enabled` only gates the emit, not the
+        //     ident construction.
+        //   * `soft_deletes_column` → `format_ident!("{}", ...)` at
+        //     `derive_eloquent.rs:420` (tombstone filter + restore
+        //     path). Same unconditional construction.
+        //   * each `mutators` entry → `format_ident!("set_{}", name)`
+        //     at `derive_eloquent.rs:260` so `fill()` can dispatch to
+        //     `self.set_<name>(value)?`. A non-ident entry leaves a
+        //     broken downstream call.
+        //
+        // Without parse-time validation, a user typo (`updated_at =
+        // "modified at"`, `mutators = ["set-password"]`) surfaces as
+        // "rustc panicked" with no useful diagnostic. Catch each one
+        // at the declaration site with a clean span-pointed message.
+        if syn::parse_str::<Ident>(&created_at).is_err() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "`created_at = \"{created_at}\"` — must parse as a Rust identifier \
+                     because it names a struct field on the model. Use a snake_case \
+                     name without dashes / spaces (or override with a name that \
+                     matches an existing field on your model struct)."
+                ),
+            ));
+        }
+        if syn::parse_str::<Ident>(&updated_at).is_err() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "`updated_at = \"{updated_at}\"` — must parse as a Rust identifier \
+                     because it names a struct field on the model. Use a snake_case \
+                     name without dashes / spaces (or override with a name that \
+                     matches an existing field on your model struct)."
+                ),
+            ));
+        }
+        if syn::parse_str::<Ident>(&soft_deletes_column).is_err() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "`soft_deletes_column = \"{soft_deletes_column}\"` — must parse as \
+                     a Rust identifier because it names a struct field on the model. \
+                     Use a snake_case name without dashes / spaces."
+                ),
+            ));
+        }
+        if let Some(ref mutators_list) = attrs.mutators {
+            for name in mutators_list {
+                if syn::parse_str::<Ident>(name).is_err() {
+                    return Err(syn::Error::new(
+                        Span::call_site(),
+                        format!(
+                            "`mutators = [..., \"{name}\", ...]` — each name must \
+                             parse as a Rust identifier so the emitted dispatcher \
+                             can call `self.set_{name}(value)?`. Rename the mutator \
+                             method + this entry to a valid ident (snake_case, no \
+                             dashes / spaces)."
+                        ),
+                    ));
+                }
+            }
+        }
+
         // T9 — auto-detect timestamp columns from the struct fields.
         //
         //   user attribute       | struct has BOTH      | exactly ONE     | NEITHER
@@ -1016,7 +1086,25 @@ fn parse_relation_options(input: ParseStream, kind: RelationKindAttr) -> Result<
             match key_str.as_str() {
                 "fk" => {
                     let s: LitStr = content.parse()?;
-                    out.push(RelationOpt::ForeignKey(s.value()));
+                    let v = s.value();
+                    // Domain 5 audit M-D5-7 — `fk = "..."` is emitted
+                    // as `format_ident!("{}", fk)` at
+                    // `relations.rs:1034/1874/3003/4035` for the
+                    // BelongsTo / lazy-m2m field-access shape
+                    // (`self.#fk_ident`). A non-ident value (`fk =
+                    // "user-id"`) panics the macro instead of producing
+                    // a clean error.
+                    if syn::parse_str::<Ident>(&v).is_err() {
+                        return Err(syn::Error::new(
+                            s.span(),
+                            format!(
+                                "`fk = \"{v}\"` — must parse as a Rust identifier because \
+                                 it names a struct field on the related model. Use a \
+                                 snake_case name (e.g. \"owner_id\")."
+                            ),
+                        ));
+                    }
+                    out.push(RelationOpt::ForeignKey(v));
                 }
                 "lk" => {
                     let s: LitStr = content.parse()?;
@@ -1042,7 +1130,28 @@ fn parse_relation_options(input: ParseStream, kind: RelationKindAttr) -> Result<
                 }
                 "name" | "morph_name" => {
                     let s: LitStr = content.parse()?;
-                    out.push(RelationOpt::MorphName(s.value()));
+                    let v = s.value();
+                    // Domain 5 audit M-D5-7 — `morph_name = "..."` is
+                    // emitted as `format_ident!("{morph_name}_id")` and
+                    // `format_ident!("{morph_name}_type")` at
+                    // `relations.rs:1376-1377` so the macro can
+                    // reference the corresponding columns on the
+                    // child struct (`self.#id_field` / `self.#type_field`).
+                    // A non-ident value (`morph_name = "comment-able"`)
+                    // panics the macro instead of producing a clean
+                    // error.
+                    if syn::parse_str::<Ident>(&v).is_err() {
+                        return Err(syn::Error::new(
+                            s.span(),
+                            format!(
+                                "`morph_name = \"{v}\"` — must parse as a Rust identifier \
+                                 because it names struct fields on the child model \
+                                 (`{v}_id`, `{v}_type`). Use a snake_case name without \
+                                 dashes / spaces."
+                            ),
+                        ));
+                    }
+                    out.push(RelationOpt::MorphName(v));
                 }
                 "targets" => {
                     if kind != RelationKindAttr::MorphTo {
@@ -1242,6 +1351,144 @@ mod tests {
             result.is_ok(),
             "valid appends names must parse cleanly: {:?}",
             result.err()
+        );
+    }
+
+    // ---- Domain 5 audit M-D5-7 regression tests ----------------------
+    //
+    // Each test in this block pins a `format_ident!`-or-`Ident::new`
+    // panic that used to fire when a user wrote a non-ident attribute
+    // string. After the fix, the parse step itself catches the bad name
+    // and returns a span-pointed compile error. See the inline comments
+    // in `ModelInput::parse` (M-D5-7 block) for the per-attribute
+    // rationale.
+
+    #[test]
+    fn invalid_created_at_rejected_at_parse_time() {
+        let result = ModelInput::parse(
+            quote! { created_at = "modified at" },
+            quote! { pub struct X { pub id: i64 } },
+        );
+        let err = match result {
+            Ok(_) => panic!("expected created_at non-ident to reject, got Ok"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("created_at") && err.contains("modified at"),
+            "error must name the bad value; got: {err}",
+        );
+        assert!(
+            err.contains("Rust identifier"),
+            "error must explain WHY the value is bad; got: {err}",
+        );
+    }
+
+    #[test]
+    fn invalid_updated_at_rejected_at_parse_time() {
+        let result = ModelInput::parse(
+            quote! { updated_at = "last-touched" },
+            quote! { pub struct X { pub id: i64 } },
+        );
+        let err = match result {
+            Ok(_) => panic!("expected updated_at non-ident to reject, got Ok"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("updated_at") && err.contains("last-touched"),
+            "error must name the bad value; got: {err}",
+        );
+    }
+
+    #[test]
+    fn invalid_soft_deletes_column_rejected_at_parse_time() {
+        let result = ModelInput::parse(
+            quote! { soft_deletes, soft_deletes_column = "removed at" },
+            quote! { pub struct X { pub id: i64 } },
+        );
+        let err = match result {
+            Ok(_) => panic!("expected soft_deletes_column non-ident to reject, got Ok"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("soft_deletes_column") && err.contains("removed at"),
+            "error must name the bad value; got: {err}",
+        );
+    }
+
+    #[test]
+    fn invalid_mutator_entry_rejected_at_parse_time() {
+        let result = ModelInput::parse(
+            quote! { mutators = ["set-password"] },
+            quote! { pub struct X { pub id: i64 } },
+        );
+        let err = match result {
+            Ok(_) => panic!("expected mutators non-ident entry to reject, got Ok"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("mutators") && err.contains("set-password"),
+            "error must name the bad entry; got: {err}",
+        );
+        assert!(
+            err.contains("set_set-password") || err.contains("Rust identifier"),
+            "error must explain WHY the entry is bad; got: {err}",
+        );
+    }
+
+    #[test]
+    fn valid_mutator_entries_accepted() {
+        // Snake-case names — the happy path must remain valid.
+        let result = ModelInput::parse(
+            quote! { mutators = ["password", "display_name"] },
+            quote! { pub struct X { pub id: i64 } },
+        );
+        assert!(
+            result.is_ok(),
+            "valid mutators names must parse cleanly: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn invalid_relation_fk_rejected_at_parse_time() {
+        let result = ModelInput::parse(
+            quote! { relations = { posts: HasMany<Post> { fk = "owner-id" } } },
+            quote! { pub struct User { pub id: i64 } },
+        );
+        let err = match result {
+            Ok(_) => panic!("expected relation fk non-ident to reject, got Ok"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("fk") && err.contains("owner-id"),
+            "error must name the bad fk value; got: {err}",
+        );
+        assert!(
+            err.contains("Rust identifier"),
+            "error must explain WHY the value is bad; got: {err}",
+        );
+    }
+
+    #[test]
+    fn invalid_relation_morph_name_rejected_at_parse_time() {
+        let result = ModelInput::parse(
+            quote! { relations = { commentable: MorphOne<Post> { morph_name = "comment-able" } } },
+            quote! { pub struct Comment { pub id: i64 } },
+        );
+        let err = match result {
+            Ok(_) => panic!("expected relation morph_name non-ident to reject, got Ok"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("morph_name") && err.contains("comment-able"),
+            "error must name the bad morph_name value; got: {err}",
+        );
+        // The downstream usage is `format_ident!("{morph_name}_id/_type")`
+        // — the error should hint at that so users understand the
+        // constraint origin.
+        assert!(
+            err.contains("comment-able_id") || err.contains("Rust identifier"),
+            "error must explain WHY the value is bad; got: {err}",
         );
     }
 

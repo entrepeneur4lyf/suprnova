@@ -55,7 +55,24 @@ fn parse_attrs(input: &DeriveInput) -> syn::Result<FactoryAttrs> {
             let v = s.value();
 
             match key.as_str() {
-                "name" => attrs.name = Some(v),
+                "name" => {
+                    // Domain 5 audit M-D5-7 — the `name = "..."` value
+                    // is emitted as `format_ident!("{}", factory_name)`
+                    // at the bottom of `derive_factory_impl` to declare
+                    // a new `pub struct <Name>;` type. A non-ident
+                    // value (`name = "User Factory"`, `name =
+                    // "user-factory"`) panics the macro instead of
+                    // producing a clean compile error.
+                    if syn::parse_str::<syn::Ident>(&v).is_err() {
+                        return Err(nested.error(format!(
+                            "`name = \"{v}\"` in #[factory(...)] — must parse as a Rust \
+                             identifier (type name) because the macro emits \
+                             `pub struct {v};`. Use a CamelCase name without spaces / \
+                             dashes (e.g. \"CustomFactory\")."
+                        )));
+                    }
+                    attrs.name = Some(v);
+                }
                 other => {
                     return Err(nested.error(format!(
                         "unknown key `{other}` in #[factory(...)] — supported keys: name"
@@ -125,4 +142,71 @@ pub fn derive_factory_impl(input: TokenStream) -> TokenStream {
     };
 
     expanded.into()
+}
+
+#[cfg(test)]
+mod tests {
+    //! Domain 5 audit M-D5-7 regression: the `#[factory(name = "...")]`
+    //! value used to be forced into a Rust ident via
+    //! `format_ident!("{}", factory_name)` at expand time with no
+    //! parse-time check. A user typo (`name = "User Factory"`) panicked
+    //! the macro; after the fix, parse_attrs rejects with a clean
+    //! span-pointed error.
+    use super::*;
+    use syn::parse_quote;
+
+    #[test]
+    fn factory_name_with_space_rejected() {
+        let input: DeriveInput = parse_quote! {
+            #[factory(name = "User Factory")]
+            pub struct User;
+        };
+        let err = parse_attrs(&input)
+            .err()
+            .expect("name with space must reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("User Factory"),
+            "error must name the bad value; got: {msg}",
+        );
+        assert!(
+            msg.contains("Rust identifier"),
+            "error must explain WHY the value is bad; got: {msg}",
+        );
+    }
+
+    #[test]
+    fn factory_name_with_dash_rejected() {
+        let input: DeriveInput = parse_quote! {
+            #[factory(name = "user-factory")]
+            pub struct User;
+        };
+        let err = parse_attrs(&input)
+            .err()
+            .expect("name with dash must reject");
+        let msg = err.to_string();
+        assert!(msg.contains("user-factory"), "got: {msg}");
+    }
+
+    #[test]
+    fn factory_valid_camelcase_name_accepted() {
+        let input: DeriveInput = parse_quote! {
+            #[factory(name = "CustomFactory")]
+            pub struct User;
+        };
+        let attrs = parse_attrs(&input).expect("valid name must parse");
+        assert_eq!(attrs.name.as_deref(), Some("CustomFactory"));
+    }
+
+    #[test]
+    fn factory_no_attribute_uses_default() {
+        // Bare struct — no #[factory] attribute. Default name path
+        // (`<ModelName>Factory`) kicks in downstream; parse_attrs just
+        // returns None here.
+        let input: DeriveInput = parse_quote! {
+            pub struct User;
+        };
+        let attrs = parse_attrs(&input).expect("no attribute is legal");
+        assert!(attrs.name.is_none());
+    }
 }
