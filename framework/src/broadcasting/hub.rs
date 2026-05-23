@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use tokio::sync::broadcast;
 use tokio::sync::RwLock as AsyncRwLock;
+use tokio::sync::broadcast;
 
 /// Per-channel broadcast buffer capacity. Subscribers that fall this
 /// far behind get a `RecvError::Lagged(n)` on the next recv; the
@@ -104,11 +104,38 @@ impl InMemoryBroadcastHub {
             return tx;
         }
         // Slow path — create the channel under a write lock.
-        let mut map = lock::write(&self.channels)
-            .expect("BroadcastHub channels RwLock poisoned");
-        map.entry(channel.to_string())
-            .or_insert_with(|| broadcast::channel(CHANNEL_CAPACITY).0)
-            .clone()
+        //
+        // Domain 16 audit D16-A — was
+        // `lock::write(...).expect("BroadcastHub channels RwLock poisoned")`
+        // which violates the framework's own `framework/src/lock.rs`
+        // policy ("treat a poisoned lock as an internal error,
+        // callers should almost always get a FrameworkError instead
+        // of panicking"). The lock SHOULD be poison-immune in practice
+        // (no panic-able code runs under the write guard), but we
+        // route through the helper to make the path consistent with
+        // the rest of the framework.
+        //
+        // On poison: log an error and return an orphan sender (one
+        // with no live receivers). Publishes to it succeed-and-drop;
+        // subscribes get a Receiver that will never see a message.
+        // This isolates the failure to broadcasting (messages silently
+        // dropped + visible in logs) instead of taking down the
+        // request via panic.
+        match lock::write(&self.channels) {
+            Ok(mut map) => map
+                .entry(channel.to_string())
+                .or_insert_with(|| broadcast::channel(CHANNEL_CAPACITY).0)
+                .clone(),
+            Err(_) => {
+                tracing::error!(
+                    channel = %channel,
+                    "BroadcastHub channels RwLock poisoned; returning orphan \
+                     sender for this channel. Messages on this channel will \
+                     be dropped silently until process restart."
+                );
+                broadcast::channel(CHANNEL_CAPACITY).0
+            }
+        }
     }
 }
 
