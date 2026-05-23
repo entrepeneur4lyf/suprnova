@@ -314,6 +314,31 @@ impl ModelInput {
             ));
         }
 
+        // Domain 5 audit M-D5-6 — every `appends` entry has to parse
+        // as a Rust ident because the emitted dispatcher calls
+        // `self.<name>()` against the corresponding `#[accessor]`
+        // method. A non-ident name (`appends = ["full-name"]`) would
+        // make `serialization::emit_append_accessor_dispatch` panic
+        // via `syn::parse_str::<Ident>(name).expect(...)` and surface
+        // as "rustc panicked" with no useful location. Catch the bad
+        // name here at the model declaration site and emit a clean
+        // span-pointed compile error instead.
+        if let Some(ref appends_list) = attrs.appends {
+            for name in appends_list {
+                if syn::parse_str::<Ident>(name).is_err() {
+                    return Err(syn::Error::new(
+                        Span::call_site(),
+                        format!(
+                            "`appends = [..., \"{name}\", ...]` — each name must \
+                             parse as a Rust identifier so the emitted dispatcher \
+                             can call `self.{name}()`. Rename the accessor + this \
+                             entry to a valid ident (snake_case, no dashes / spaces)."
+                        ),
+                    ));
+                }
+            }
+        }
+
         // T9 — auto-detect timestamp columns from the struct fields.
         //
         //   user attribute       | struct has BOTH      | exactly ONE     | NEITHER
@@ -1174,6 +1199,50 @@ mod tests {
                 "unexpected error message: {e}",
             ),
         }
+    }
+
+    #[test]
+    fn invalid_append_ident_rejected_at_parse_time() {
+        // Domain 5 audit M-D5-6: an `appends` entry that doesn't
+        // parse as a Rust ident used to slip through to
+        // `emit_append_accessor_dispatch`, which called
+        // `syn::parse_str::<Ident>(name).expect(...)` and panicked at
+        // macro-expansion time — the user saw "rustc panicked" with
+        // no useful diagnostic. After the fix, the parse step itself
+        // catches the bad name and returns a span-pointed error.
+        let result = ModelInput::parse(
+            quote! { appends = ["full-name"] },
+            quote! { pub struct X { pub id: i64 } },
+        );
+        match result {
+            Ok(_) => panic!("expected appends `full-name` to be rejected, got Ok"),
+            Err(e) => {
+                let s = e.to_string();
+                assert!(
+                    s.contains("full-name"),
+                    "error must name the bad entry; got: {s}",
+                );
+                assert!(
+                    s.contains("Rust identifier"),
+                    "error must explain WHY the name is bad; got: {s}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn valid_append_ident_accepted() {
+        // Snake-case names with underscores are valid Rust idents
+        // and must continue to parse cleanly.
+        let result = ModelInput::parse(
+            quote! { appends = ["full_name", "display_name"] },
+            quote! { pub struct X { pub id: i64 } },
+        );
+        assert!(
+            result.is_ok(),
+            "valid appends names must parse cleanly: {:?}",
+            result.err()
+        );
     }
 
     #[test]

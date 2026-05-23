@@ -4,6 +4,7 @@
 //! error types with automatic HTTP response conversion.
 
 use proc_macro::TokenStream;
+use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{parse_macro_input, DeriveInput, Expr, Lit, Meta};
 
@@ -22,40 +23,97 @@ impl Default for DomainErrorAttrs {
     }
 }
 
-fn parse_attrs(attr: TokenStream) -> DomainErrorAttrs {
+/// Parse `#[domain_error(status = 404, message = "...")]`.
+///
+/// Domain 5 audit M-D5-4: this used to silently swallow EVERY error
+/// — bad punctuation in the attribute body, overflowed status values
+/// (`status = 100000`), wrong literal types (`message = 42`), and
+/// unknown keys all collapsed to the defaults with no compile error.
+/// A user setting `status = 70_000` to mark "rate-limited" expected
+/// 429 behaviour and got 500 instead, with no signal anything was
+/// wrong. Errors now propagate through `syn::Result` so the user
+/// sees a span-pointed compile error at the offending key/value.
+fn parse_attrs(attr: TokenStream2) -> syn::Result<DomainErrorAttrs> {
     let mut result = DomainErrorAttrs::default();
 
-    // Parse as a comma-separated list of key=value pairs
     let parser = syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated;
-    let metas = match syn::parse::Parser::parse(parser, attr) {
-        Ok(metas) => metas,
-        Err(_) => return result,
-    };
+    let metas = syn::parse::Parser::parse2(parser, attr)?;
 
     for meta in metas {
-        if let Meta::NameValue(nv) = meta {
-            let key = nv.path.get_ident().map(|i| i.to_string());
+        let nv = match &meta {
+            Meta::NameValue(nv) => nv,
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    &meta,
+                    "#[domain_error(...)] expects `key = value` pairs",
+                ));
+            }
+        };
 
-            match key.as_deref() {
-                Some("status") => {
-                    if let Expr::Lit(expr_lit) = &nv.value
-                        && let Lit::Int(lit_int) = &expr_lit.lit
-                            && let Ok(val) = lit_int.base10_parse::<u16>() {
-                                result.status = val;
-                            }
-                }
-                Some("message") => {
-                    if let Expr::Lit(expr_lit) = &nv.value
-                        && let Lit::Str(lit_str) = &expr_lit.lit {
-                            result.message = Some(lit_str.value());
-                        }
-                }
-                _ => {}
+        let key = nv
+            .path
+            .get_ident()
+            .ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &nv.path,
+                    "#[domain_error(...)] keys must be plain identifiers",
+                )
+            })?
+            .to_string();
+
+        match key.as_str() {
+            "status" => {
+                let Expr::Lit(expr_lit) = &nv.value else {
+                    return Err(syn::Error::new_spanned(
+                        &nv.value,
+                        "`status` in #[domain_error(...)] expects an integer literal",
+                    ));
+                };
+                let Lit::Int(lit_int) = &expr_lit.lit else {
+                    return Err(syn::Error::new_spanned(
+                        &expr_lit.lit,
+                        "`status` in #[domain_error(...)] expects an integer literal",
+                    ));
+                };
+                let val = lit_int.base10_parse::<u16>().map_err(|e| {
+                    syn::Error::new_spanned(
+                        lit_int,
+                        format!(
+                            "`status` in #[domain_error(...)] must fit in u16 \
+                             (HTTP status codes are 100-599): {e}"
+                        ),
+                    )
+                })?;
+                result.status = val;
+            }
+            "message" => {
+                let Expr::Lit(expr_lit) = &nv.value else {
+                    return Err(syn::Error::new_spanned(
+                        &nv.value,
+                        "`message` in #[domain_error(...)] expects a string literal",
+                    ));
+                };
+                let Lit::Str(lit_str) = &expr_lit.lit else {
+                    return Err(syn::Error::new_spanned(
+                        &expr_lit.lit,
+                        "`message` in #[domain_error(...)] expects a string literal",
+                    ));
+                };
+                result.message = Some(lit_str.value());
+            }
+            other => {
+                return Err(syn::Error::new_spanned(
+                    &nv.path,
+                    format!(
+                        "unknown key `{other}` in #[domain_error(...)] — \
+                         supported keys: status, message"
+                    ),
+                ));
             }
         }
     }
 
-    result
+    Ok(result)
 }
 
 /// Implements the `#[domain_error]` attribute macro
@@ -86,7 +144,10 @@ fn parse_attrs(attr: TokenStream) -> DomainErrorAttrs {
 /// - `status`: HTTP status code (default: 500)
 /// - `message`: Error message for Display (default: struct name converted to sentence)
 pub fn domain_error_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
-    let attrs = parse_attrs(attr);
+    let attrs = match parse_attrs(attr.into()) {
+        Ok(a) => a,
+        Err(e) => return e.to_compile_error().into(),
+    };
     let input = parse_macro_input!(input as DeriveInput);
 
     let name = &input.ident;
@@ -156,4 +217,74 @@ pub fn domain_error_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Domain 5 audit M-D5-4 regression: `#[domain_error(...)]`
+    //! attribute parsing must NOT silently swallow malformed input,
+    //! overflowed status values, wrong literal types, or unknown
+    //! keys. Each was previously a default-fallback; now each is a
+    //! span-pointed compile error.
+
+    use super::*;
+
+    fn ok_attrs(src: &str) -> DomainErrorAttrs {
+        let tokens: proc_macro2::TokenStream = src.parse().expect("test attr parses as tokens");
+        // The proc-macro / proc-macro2 boundary needs `.into()` to
+        // round-trip the tokens. `parse_attrs` expects
+        // `proc_macro::TokenStream` because that's what the macro
+        // entry point delivers; tests construct a `proc_macro2`
+        // stream and convert. The two are interchangeable inside a
+        // proc-macro crate.
+        parse_attrs(tokens.into()).expect("attrs parse")
+    }
+
+    fn err_attrs(src: &str) -> String {
+        let tokens: proc_macro2::TokenStream = src.parse().expect("test attr parses as tokens");
+        parse_attrs(tokens.into())
+            .err()
+            .expect("attrs must reject")
+            .to_string()
+    }
+
+    #[test]
+    fn happy_path_status_and_message() {
+        let attrs = ok_attrs("status = 404, message = \"User not found\"");
+        assert_eq!(attrs.status, 404);
+        assert_eq!(attrs.message.as_deref(), Some("User not found"));
+    }
+
+    #[test]
+    fn overflow_status_now_rejected() {
+        // 70_000 doesn't fit in u16; old behaviour silently fell
+        // through to the default 500.
+        let msg = err_attrs("status = 70000, message = \"x\"");
+        assert!(
+            msg.contains("u16"),
+            "overflow status must mention u16; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn wrong_literal_type_now_rejected() {
+        // `message = 42` is an integer where a string literal is
+        // expected; old behaviour silently dropped it and built the
+        // sentence-cased fallback from the struct name.
+        let msg = err_attrs("status = 404, message = 42");
+        assert!(
+            msg.contains("string literal"),
+            "wrong message type must reject; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn unknown_key_now_rejected() {
+        // `code` instead of `status` was previously silently ignored.
+        let msg = err_attrs("code = 404");
+        assert!(
+            msg.contains("unknown key") && msg.contains("code"),
+            "unknown key must name itself in the error; got: {msg}"
+        );
+    }
 }
