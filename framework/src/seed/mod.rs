@@ -83,9 +83,24 @@ pub trait Seeder: Send + Sync {
 /// position, so test stubs slot in cleanly).
 pub fn register<S: Seeder + 'static>() {
     let f: SeederFn = || Box::pin(S::run());
-    let mut g = lock::write(&REGISTRY).expect("seeder registry poisoned");
-    g.get_or_insert_with(IndexMap::new)
-        .insert(S::name().to_string(), f);
+    // Domain 14 audit D14-A — was `lock::write(...).expect(...)` which
+    // defeated the helper's purpose (run_all at L97 correctly
+    // propagates via `?`). Now matches the helper's Result shape; on
+    // poison, the seeder is silently skipped and a tracing::error! is
+    // emitted so ops can surface it. `db:seed` for this seeder will
+    // print "no seeder registered for ..." via run_one's normal path.
+    match lock::write(&REGISTRY) {
+        Ok(mut g) => {
+            g.get_or_insert_with(IndexMap::new)
+                .insert(S::name().to_string(), f);
+        }
+        Err(_) => {
+            tracing::error!(
+                seeder = S::name(),
+                "Seeder registry lock poisoned; skipping registration."
+            );
+        }
+    }
 }
 
 /// Run every registered seeder in registration order. Stops on the
@@ -108,18 +123,30 @@ pub async fn run_all() -> Result<(), FrameworkError> {
 
 /// Number of currently-registered seeders. Useful for tests asserting
 /// "the bootstrap registered all expected seeders."
+///
+/// Returns `0` on registry-lock poison after logging an error —
+/// matches the "treat poison as empty" pattern used by the
+/// registration path.
 pub fn count() -> usize {
-    lock::read(&REGISTRY)
-        .expect("seeder registry poisoned")
-        .as_ref()
-        .map(|m| m.len())
-        .unwrap_or(0)
+    match lock::read(&REGISTRY) {
+        Ok(g) => g.as_ref().map(|m| m.len()).unwrap_or(0),
+        Err(_) => {
+            tracing::error!("Seeder registry lock poisoned; reporting count=0.");
+            0
+        }
+    }
 }
 
 /// Clear every registered seeder. Test-only helper — production code
 /// should never need to call this because the registry is built once
 /// at boot.
+///
+/// Silently no-ops on poison (matches the test-helper-friendly
+/// shape `ScopeRegistry::__clear_for_tests` and
+/// `ConnectionRegistry::clear` already use).
 #[doc(hidden)]
 pub fn clear() {
-    *lock::write(&REGISTRY).expect("seeder registry poisoned") = None;
+    if let Ok(mut g) = lock::write(&REGISTRY) {
+        *g = None;
+    }
 }
