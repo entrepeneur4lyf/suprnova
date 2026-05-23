@@ -55,6 +55,26 @@ pub use morph_registry::{find_morph_type, find_morph_type_by_id, morph_types, Mo
 pub use morph_to_many::{MorphToMany, MorphedByMany};
 pub use through::{HasManyThrough, HasOneThrough};
 
+// Domain 8 audit D8-A — SQL identifier contract (security).
+//
+// Every relation kind extends the same trust model as the core
+// `Builder<M>` (see `framework/src/eloquent/builder.rs` module docs §
+// "SQL identifier contract"): column names, foreign keys, pivot table
+// names, and `through` intermediate keys all interpolate raw into the
+// rendered SQL; values are parameterised binds.
+//
+// The relation-builder DSL methods that take `impl Into<String>`
+// (`BelongsToMany::foreign_pivot_key`, `Through::first_key`,
+// `morph_name` setters, etc.) all trust the caller for the identifier
+// shape. Likewise, the `Attrs` keys in `attach_with(extra)` flow
+// directly into the pivot INSERT column list with no Fillable filter.
+//
+// **Never accept these key/identifier strings from untrusted input.**
+// Hardcode them in the relation declaration / in `attrs!{}` macro
+// invocations, or pick from a known allowlist. Same Laravel semantic
+// as `$user->roles()->attach($id, ['note' => $note])` where `'note'`
+// is hardcoded and `$note` is parameterised.
+
 use std::any::{Any, TypeId};
 use std::future::Future;
 use std::pin::Pin;

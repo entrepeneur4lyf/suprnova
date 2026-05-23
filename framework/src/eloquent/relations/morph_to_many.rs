@@ -285,6 +285,14 @@ where
 
     /// Insert a pivot row with extra column values (and timestamps
     /// when `with_timestamps()` is on).
+    ///
+    /// # Security
+    ///
+    /// Same contract as
+    /// [`BelongsToMany::attach_with`](crate::eloquent::BelongsToMany::attach_with):
+    /// keys of `extra` are pivot column names that interpolate **raw**
+    /// into the rendered INSERT. Never accept the key names from
+    /// untrusted input.
     pub async fn attach_with(
         self,
         related_id: impl Into<serde_json::Value>,

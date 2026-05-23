@@ -289,6 +289,20 @@ where
     /// Insert a pivot row with extra column values (and timestamps
     /// when `with_timestamps()` is on). Mirrors Laravel's
     /// `->attach($id, ['note' => '...'])`.
+    ///
+    /// # Security
+    ///
+    /// Keys of `extra` are pivot column names — they interpolate
+    /// **raw** into the rendered `INSERT INTO pivot (...) VALUES (...)`
+    /// SQL (same SQL-identifier contract as
+    /// [`Builder::filter`](crate::eloquent::Builder::filter) — see the
+    /// builder module docs). The Fillable / Guarded mass-assignment
+    /// guard does NOT apply at this layer. **Never accept the key
+    /// names from untrusted input**; hardcode them via the
+    /// [`attrs!`](crate::attrs) macro (which stringifies identifier
+    /// keys at compile time) or pick from a known allowlist. The
+    /// values are parameterised binds and ARE safe to take from
+    /// untrusted input.
     pub async fn attach_with(
         self,
         related_id: impl Into<serde_json::Value>,
