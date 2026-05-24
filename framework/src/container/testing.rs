@@ -1,8 +1,25 @@
-//! Test utilities for the Application Container
+//! Test utilities for the Application Container.
 //!
-//! Provides mechanisms for test isolation via thread-local container overrides.
+//! Two flavours of test isolation:
 //!
-//! # Example
+//! - **Thread-local — [`TestContainer::fake`]**: ergonomic for sync tests and
+//!   `#[tokio::test]` running on the default `current_thread` flavour. The
+//!   override is bound to the thread that called `fake()`. Tasks spawned with
+//!   `tokio::spawn` (which can run on different worker threads) do NOT see
+//!   the override.
+//!
+//! - **Task-local — [`TestContainer::scope`]**: async-safe across multi-thread
+//!   runtimes (`#[tokio::test(flavor = "multi_thread")]`). The override is
+//!   bound to the future passed to `scope`, so it persists across awaits even
+//!   if the runtime migrates the future between worker threads. Bind your
+//!   fakes inside the scoped future via `TestContainer::bind` / `singleton`
+//!   / `factory` — those calls route through the task-local first.
+//!
+//! Lookup order in [`crate::App`]: task-local, then thread-local, then global.
+//! Mutation helpers ([`TestContainer::bind`], etc.) write to whichever scope
+//! is currently active (task-local takes precedence over thread-local).
+//!
+//! # Example — thread-local
 //!
 //! ```rust,ignore
 //! use suprnova::testing::{TestContainer, TestContainerGuard};
@@ -19,10 +36,28 @@
 //!     let client: Arc<dyn HttpClient> = App::make::<dyn HttpClient>().unwrap();
 //! }
 //! ```
+//!
+//! # Example — task-local (multi-thread runtime)
+//!
+//! ```rust,ignore
+//! use suprnova::testing::TestContainer;
+//!
+//! #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+//! async fn test_async_safe() {
+//!     TestContainer::scope(async {
+//!         TestContainer::bind::<dyn HttpClient>(Arc::new(FakeHttpClient::new()));
+//!         // App::make() inside this future sees the fake even after
+//!         // awaits that hop between worker threads.
+//!         do_async_work().await;
+//!     })
+//!     .await;
+//! }
+//! ```
 
-use super::{Container, TEST_CONTAINER};
+use super::{Container, TASK_CONTAINER, TEST_CONTAINER};
 use std::any::Any;
-use std::sync::Arc;
+use std::future::Future;
+use std::sync::{Arc, RwLock};
 
 /// Test utilities for the container
 ///
@@ -51,13 +86,67 @@ impl TestContainer {
         TestContainerGuard
     }
 
-    /// Register a fake singleton for testing
+    /// Run a future with a task-local test container override.
+    ///
+    /// Async-safe alternative to [`TestContainer::fake`]. Use this for
+    /// `#[tokio::test(flavor = "multi_thread")]` or any test where the
+    /// future may migrate between worker threads — the task-local
+    /// override persists for the entire future regardless of which
+    /// thread the runtime picks.
+    ///
+    /// Bind your fakes inside the scoped future via the usual
+    /// `TestContainer::bind` / `singleton` / `factory` helpers — those
+    /// route through the task-local first, so a call inside `scope`
+    /// writes to the task-local container.
+    ///
+    /// # Caveat — `tokio::spawn`
+    ///
+    /// tokio task-locals are NOT inherited by `tokio::spawn`'d
+    /// sub-tasks. If your test spawns sub-tasks that need to read the
+    /// fakes, wrap each sub-task with another `TestContainer::scope`
+    /// (and re-register the fakes inside it). The framework test suite
+    /// currently has zero `TestContainer::*` + `tokio::spawn` overlaps
+    /// where the spawn body reads from `App`, so this remains a
+    /// documented caveat rather than an automatic propagation.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    /// async fn test_async_safe() {
+    ///     TestContainer::scope(async {
+    ///         TestContainer::bind::<dyn HttpClient>(Arc::new(FakeHttpClient::new()));
+    ///         do_async_work().await;  // sees the fake across worker hops
+    ///     })
+    ///     .await;
+    /// }
+    /// ```
+    pub async fn scope<Fut: Future>(future: Fut) -> Fut::Output {
+        let container = Arc::new(RwLock::new(Container::new()));
+        TASK_CONTAINER.scope(container, future).await
+    }
+
+    /// Register a fake singleton for testing.
+    ///
+    /// Writes to the active scope: task-local takes precedence over
+    /// thread-local, so calls inside a [`TestContainer::scope`] block
+    /// land on the task-local container; calls under a
+    /// [`TestContainer::fake`] guard land on the thread-local container.
+    /// Outside either scope this is a no-op.
     ///
     /// # Example
     /// ```rust,ignore
     /// TestContainer::singleton(FakeDatabase::new());
     /// ```
     pub fn singleton<T: Any + Send + Sync + 'static>(instance: T) {
+        // Task-local first.
+        let task_done = TASK_CONTAINER.try_with(|c| c.clone()).ok();
+        if let Some(container) = task_done
+            && let Ok(mut c) = container.write()
+        {
+            c.singleton(instance);
+            return;
+        }
+        // Fall back to thread-local.
         TEST_CONTAINER.with(|c| {
             if let Some(ref mut container) = *c.borrow_mut() {
                 container.singleton(instance);
@@ -65,7 +154,10 @@ impl TestContainer {
         });
     }
 
-    /// Register a fake factory for testing
+    /// Register a fake factory for testing.
+    ///
+    /// Writes to the active scope — see [`TestContainer::singleton`] for
+    /// the precedence rules.
     ///
     /// # Example
     /// ```rust,ignore
@@ -76,6 +168,13 @@ impl TestContainer {
         T: Any + Send + Sync + 'static,
         F: Fn() -> T + Send + Sync + 'static,
     {
+        let task_done = TASK_CONTAINER.try_with(|c| c.clone()).ok();
+        if let Some(container) = task_done
+            && let Ok(mut c) = container.write()
+        {
+            c.factory(factory);
+            return;
+        }
         TEST_CONTAINER.with(|c| {
             if let Some(ref mut container) = *c.borrow_mut() {
                 container.factory(factory);
@@ -83,13 +182,23 @@ impl TestContainer {
         });
     }
 
-    /// Bind a fake trait implementation for testing
+    /// Bind a fake trait implementation for testing.
+    ///
+    /// Writes to the active scope — see [`TestContainer::singleton`] for
+    /// the precedence rules.
     ///
     /// # Example
     /// ```rust,ignore
     /// TestContainer::bind::<dyn HttpClient>(Arc::new(FakeHttpClient::new()));
     /// ```
     pub fn bind<T: ?Sized + Send + Sync + 'static>(instance: Arc<T>) {
+        let task_done = TASK_CONTAINER.try_with(|c| c.clone()).ok();
+        if let Some(container) = task_done
+            && let Ok(mut c) = container.write()
+        {
+            c.bind(instance);
+            return;
+        }
         TEST_CONTAINER.with(|c| {
             if let Some(ref mut container) = *c.borrow_mut() {
                 container.bind(instance);
@@ -97,7 +206,10 @@ impl TestContainer {
         });
     }
 
-    /// Bind a fake trait factory for testing
+    /// Bind a fake trait factory for testing.
+    ///
+    /// Writes to the active scope — see [`TestContainer::singleton`] for
+    /// the precedence rules.
     ///
     /// # Example
     /// ```rust,ignore
@@ -107,6 +219,13 @@ impl TestContainer {
     where
         F: Fn() -> Arc<T> + Send + Sync + 'static,
     {
+        let task_done = TASK_CONTAINER.try_with(|c| c.clone()).ok();
+        if let Some(container) = task_done
+            && let Ok(mut c) = container.write()
+        {
+            c.bind_factory(factory);
+            return;
+        }
         TEST_CONTAINER.with(|c| {
             if let Some(ref mut container) = *c.borrow_mut() {
                 container.bind_factory(factory);

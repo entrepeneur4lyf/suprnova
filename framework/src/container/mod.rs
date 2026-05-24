@@ -37,9 +37,39 @@ use std::sync::{Arc, OnceLock, RwLock};
 /// Global application container
 static APP_CONTAINER: OnceLock<RwLock<Container>> = OnceLock::new();
 
-// Thread-local test overrides for isolated testing
+// Thread-local test overrides for isolated testing.
+//
+// Suitable for sync tests and `#[tokio::test]` running on the default
+// `current_thread` flavour. NOT safe across `flavor = "multi_thread"`
+// or `tokio::spawn` boundaries — see [`TASK_CONTAINER`] for the
+// async-safe alternative.
 thread_local! {
     pub(crate) static TEST_CONTAINER: RefCell<Option<Container>> = const { RefCell::new(None) };
+}
+
+// Task-local test overrides for async-safe isolated testing.
+//
+// `tokio::task_local!` is per-async-task, so the override persists for
+// the entire future regardless of which worker thread the runtime
+// picks up the future on. This closes the audit-flagged hole where
+// `TEST_CONTAINER` (thread-local) could become invisible on a
+// multi-thread runtime when the future migrated to a different worker.
+//
+// Lookups in `App` consult this first, then [`TEST_CONTAINER`], then
+// the global container — so existing `TestContainer::fake()` callers
+// keep working unchanged while new tests opt into the async-safe path
+// via [`testing::TestContainer::scope`].
+//
+// Caveat: tokio task-locals are NOT inherited by `tokio::spawn`'d
+// child tasks. If a test spawns sub-tasks that need the override,
+// wrap each sub-task with another `TestContainer::scope` (or close
+// over a clone of the relevant fakes and bind them inside the new
+// scope). The current test suite has zero `TestContainer::fake()` +
+// `tokio::spawn` co-occurrences where the spawn body reads from
+// `App`, so this caveat is documented rather than worked around at
+// runtime.
+tokio::task_local! {
+    pub(crate) static TASK_CONTAINER: Arc<RwLock<Container>>;
 }
 
 /// Binding types: either a singleton instance or a factory closure
@@ -355,16 +385,30 @@ impl App {
         }
     }
 
-    /// Resolve a concrete type
+    /// Resolve a concrete type.
     ///
-    /// Checks test overrides first, then falls back to global container.
+    /// Lookup order:
+    /// 1. Task-local test override ([`testing::TestContainer::scope`]) —
+    ///    async-safe across multi-thread runtimes.
+    /// 2. Thread-local test override ([`testing::TestContainer::fake`]) —
+    ///    sync / `current_thread` tests.
+    /// 3. Global container — production lookup.
     ///
     /// # Example
     /// ```rust,ignore
     /// let db: DatabaseConnection = App::get().unwrap();
     /// ```
     pub fn get<T: Any + Send + Sync + Clone + 'static>() -> Option<T> {
-        // Check test overrides first (thread-local)
+        // Task-local first (async-safe).
+        if let Some(t) = TASK_CONTAINER
+            .try_with(|c| c.read().ok().and_then(|c| c.get::<T>()))
+            .ok()
+            .flatten()
+        {
+            return Some(t);
+        }
+
+        // Thread-local second (sync / current_thread compat).
         let test_result = TEST_CONTAINER.with(|c| {
             c.borrow()
                 .as_ref()
@@ -375,21 +419,35 @@ impl App {
             return test_result;
         }
 
-        // Fall back to global container
+        // Fall back to global container.
         let container = APP_CONTAINER.get()?;
         container.read().ok()?.get::<T>()
     }
 
-    /// Resolve a trait binding - returns Arc<T>
+    /// Resolve a trait binding - returns Arc<T>.
     ///
-    /// Checks test overrides first, then falls back to global container.
+    /// Lookup order:
+    /// 1. Task-local test override ([`testing::TestContainer::scope`]) —
+    ///    async-safe across multi-thread runtimes.
+    /// 2. Thread-local test override ([`testing::TestContainer::fake`]) —
+    ///    sync / `current_thread` tests.
+    /// 3. Global container — production lookup.
     ///
     /// # Example
     /// ```rust,ignore
     /// let client: Arc<dyn HttpClient> = App::make::<dyn HttpClient>().unwrap();
     /// ```
     pub fn make<T: ?Sized + Send + Sync + 'static>() -> Option<Arc<T>> {
-        // Check test overrides first (thread-local)
+        // Task-local first (async-safe).
+        if let Some(t) = TASK_CONTAINER
+            .try_with(|c| c.read().ok().and_then(|c| c.make::<T>()))
+            .ok()
+            .flatten()
+        {
+            return Some(t);
+        }
+
+        // Thread-local second (sync / current_thread compat).
         let test_result = TEST_CONTAINER.with(|c| {
             c.borrow()
                 .as_ref()
@@ -400,7 +458,7 @@ impl App {
             return test_result;
         }
 
-        // Fall back to global container
+        // Fall back to global container.
         let container = APP_CONTAINER.get()?;
         container.read().ok()?.make::<T>()
     }
@@ -435,9 +493,19 @@ impl App {
         Self::make::<T>().ok_or_else(crate::error::FrameworkError::service_not_found::<T>)
     }
 
-    /// Check if a concrete type is registered
+    /// Check if a concrete type is registered.
+    ///
+    /// Lookup order matches [`App::get`]: task-local, thread-local, global.
     pub fn has<T: Any + 'static>() -> bool {
-        // Check test container first
+        // Task-local first.
+        if TASK_CONTAINER
+            .try_with(|c| c.read().ok().map(|c| c.has::<T>()).unwrap_or(false))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+
+        // Thread-local second.
         let in_test = TEST_CONTAINER.with(|c| {
             c.borrow()
                 .as_ref()
@@ -456,9 +524,19 @@ impl App {
             .unwrap_or(false)
     }
 
-    /// Check if a trait binding is registered
+    /// Check if a trait binding is registered.
+    ///
+    /// Lookup order matches [`App::make`]: task-local, thread-local, global.
     pub fn has_binding<T: ?Sized + 'static>() -> bool {
-        // Check test container first
+        // Task-local first.
+        if TASK_CONTAINER
+            .try_with(|c| c.read().ok().map(|c| c.has_binding::<T>()).unwrap_or(false))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+
+        // Thread-local second.
         let in_test = TEST_CONTAINER.with(|c| {
             c.borrow()
                 .as_ref()
@@ -495,10 +573,21 @@ impl App {
     /// Resolve the active Inertia registry — test override if set, else
     /// the global container's. Used by both `App::inertia_share*` writes
     /// and `InertiaResponse::resolve` reads so tests that swap a
-    /// `TestContainer::fake()` guard get clean isolation.
+    /// `TestContainer::fake()` (thread-local) or `TestContainer::scope`
+    /// (task-local) get clean isolation.
+    ///
+    /// Lookup order matches [`App::get`]: task-local, thread-local, global.
     pub fn inertia_registry() -> Arc<crate::inertia::InertiaRegistry> {
-        // Test override first (thread-local). The check pattern mirrors
-        // `App::get` / `App::make` — see those for the rationale.
+        // Task-local first (async-safe).
+        if let Some(reg) = TASK_CONTAINER
+            .try_with(|c| c.read().ok().map(|c| c.inertia.clone()))
+            .ok()
+            .flatten()
+        {
+            return reg;
+        }
+
+        // Thread-local second (sync / current_thread compat).
         let test = TEST_CONTAINER.with(|c| {
             c.borrow()
                 .as_ref()
