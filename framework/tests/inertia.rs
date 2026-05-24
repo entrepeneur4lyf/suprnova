@@ -1321,6 +1321,119 @@ async fn once_with_expired_until_forces_resolver_despite_client_cache_header() {
 }
 
 #[tokio::test]
+async fn lazy_resolver_fanout_is_bounded_by_max_concurrent_resolvers() {
+    // D20-E regression — ChatGPT MODULE_REVIEW_NOTES ## inertia MEDIUM
+    // #4. Without a cap a page with many lazy props would fire all
+    // resolvers in parallel via `try_join_all`. Now the response
+    // pipeline routes them through `stream.buffered(N)` so at most N
+    // resolvers run concurrently.
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let high_water = Arc::new(AtomicUsize::new(0));
+
+    let cfg = InertiaConfig::new().max_concurrent_resolvers(3);
+    let req = MockReq::new("/").inertia();
+
+    let mut resp = InertiaResponse::new("Dashboard").with_config(cfg);
+    for i in 0..20 {
+        let flight = in_flight.clone();
+        let high = high_water.clone();
+        let key = format!("k{i}");
+        resp = resp.lazy(key, move || {
+            let flight = flight.clone();
+            let high = high.clone();
+            async move {
+                let now = flight.fetch_add(1, Ordering::SeqCst) + 1;
+                // Track the highest observed concurrent count.
+                high.fetch_max(now, Ordering::SeqCst);
+                // Hold the resolver "in flight" briefly so multiple
+                // resolvers contend.
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                flight.fetch_sub(1, Ordering::SeqCst);
+                Ok::<_, suprnova::FrameworkError>(serde_json::json!(i))
+            }
+        });
+    }
+
+    let _resp = resp.resolve(&req).await.unwrap();
+
+    let peak = high_water.load(Ordering::SeqCst);
+    assert!(
+        peak <= 3,
+        "max concurrent resolvers should not exceed cap of 3; observed {peak}"
+    );
+    assert!(
+        peak >= 2,
+        "with 20 resolvers and a 3-cap we should observe at least some concurrency; \
+         observed {peak} — buffered(N) may have degenerated to serial"
+    );
+}
+
+#[tokio::test]
+async fn ssr_response_body_cap_falls_back_to_csr_when_exceeded() {
+    // D20-D regression — ChatGPT MODULE_REVIEW_NOTES ## inertia MEDIUM
+    // #3. The SSR client now reads through http_body_util::Limited,
+    // capping the worker's response body at `max_response_bytes`. When
+    // exceeded, render() either falls back to CSR (default) or
+    // surfaces a 500 (throw_on_error=true).
+    //
+    // We spin a tiny TCP listener that responds with an oversized
+    // body for one POST, then verify the framework falls back to
+    // CSR cleanly.
+    use std::net::SocketAddr;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local: SocketAddr = listener.local_addr().unwrap();
+
+    // Server task: accept one connection, drain request, write an
+    // oversized response.
+    let server = tokio::spawn(async move {
+        if let Ok((mut sock, _)) = listener.accept().await {
+            // Drain request just enough to unblock the client.
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            // Write a 1 MiB response — well above our 64 KiB cap.
+            let body = vec![b'A'; 1_000_000];
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\n\r\n",
+                body.len()
+            );
+            let _ = sock.write_all(header.as_bytes()).await;
+            let _ = sock.write_all(&body).await;
+        }
+    });
+
+    let cfg = InertiaConfig::new()
+        .ssr(format!("http://{local}"))
+        .ssr_max_response_bytes(64 * 1024)
+        // Don't throw — exercise the fallback path explicitly.
+        .ssr_throw_on_error(false);
+
+    let req = MockReq::new("/dashboard");
+    let resp = InertiaResponse::new("Dashboard")
+        .with_config(cfg)
+        .resolve(&req)
+        .await
+        .unwrap();
+
+    server.await.ok();
+
+    // CSR fallback — no `data-server-rendered="true"` attribute.
+    let body = body_to_string(resp.into_hyper().into_body());
+    assert!(
+        !body.contains("data-server-rendered=\"true\""),
+        "oversized SSR response should NOT inject server-rendered marker; \
+         body must show CSR fallback. body excerpt: {}",
+        &body[..body.len().min(300)]
+    );
+}
+
+#[tokio::test]
 async fn once_with_future_until_honours_client_cache_header() {
     // Inverse of the D20-C regression: when expiry is in the future
     // the client's cache header is honoured (no resolver call, only

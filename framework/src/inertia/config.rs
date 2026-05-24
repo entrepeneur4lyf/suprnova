@@ -166,6 +166,15 @@ pub struct InertiaConfig {
     /// `/assets`). Combined with the manifest entry's `file` field to
     /// produce the final `<script src>` / `<link href>` URL.
     pub assets_base_url: String,
+    /// Maximum number of lazy/deferred/once/shared prop resolvers that
+    /// run concurrently for a single response.
+    ///
+    /// Default: 16 — generous for typical Inertia pages while bounding
+    /// downstream fan-out on pages with many lazy resolvers. Without
+    /// this cap a page with N lazy props issues N parallel database /
+    /// HTTP calls per request (Domain 20 audit D20-E / ChatGPT
+    /// MODULE_REVIEW_NOTES ## inertia MEDIUM #4).
+    pub max_concurrent_resolvers: usize,
     /// Lazy-loaded Vite manifest cache.
     ///
     /// Initialized on first call to [`Self::vite_manifest`]. The cache
@@ -211,6 +220,14 @@ pub struct SsrConfig {
     /// logger / Sentry / DataDog client here. When events parity
     /// lands, `SsrRenderFailed` will fire from this callback too.
     pub on_error: Option<SsrErrorHook>,
+    /// Cap on the SSR worker's response body. Bytes past this point
+    /// abort the read and the request falls back to CSR (or 500 if
+    /// `throw_on_error` is set). Default: 8 MiB — comfortably larger
+    /// than any realistic SSR-rendered page but small enough to bound
+    /// damage from a misconfigured or compromised loopback worker
+    /// (Domain 20 audit D20-D / ChatGPT MODULE_REVIEW_NOTES ## inertia
+    /// MEDIUM #3).
+    pub max_response_bytes: usize,
 }
 
 impl std::fmt::Debug for SsrConfig {
@@ -222,6 +239,7 @@ impl std::fmt::Debug for SsrConfig {
             .field("throw_on_error", &self.throw_on_error)
             .field("excluded_paths", &self.excluded_paths)
             .field("on_error", &self.on_error.as_ref().map(|_| "<closure>"))
+            .field("max_response_bytes", &self.max_response_bytes)
             .finish()
     }
 }
@@ -235,6 +253,7 @@ impl Default for SsrConfig {
             throw_on_error: false,
             excluded_paths: Vec::new(),
             on_error: None,
+            max_response_bytes: 8 * 1024 * 1024,
         }
     }
 }
@@ -318,6 +337,7 @@ impl Default for InertiaConfig {
             ssr: SsrConfig::default(),
             manifest_path: PathBuf::from("public/assets/.vite/manifest.json"),
             assets_base_url: "/assets".to_string(),
+            max_concurrent_resolvers: 16,
             manifest: Arc::new(OnceLock::new()),
         }
     }
@@ -431,6 +451,18 @@ impl InertiaConfig {
         self
     }
 
+    /// Override the SSR-response body byte cap.
+    ///
+    /// The default is 8 MiB. Reads that exceed this bound abort and the
+    /// response falls back to CSR (or 500 if `ssr_throw_on_error` is
+    /// set). Bound chosen to be larger than any realistic SSR page but
+    /// small enough to constrain damage from a misconfigured or
+    /// compromised loopback worker.
+    pub fn ssr_max_response_bytes(mut self, bytes: usize) -> Self {
+        self.ssr.max_response_bytes = bytes;
+        self
+    }
+
     /// Register an observability callback for SSR render failures.
     /// Replaces the default `eprintln!` to stderr.
     pub fn on_ssr_error<F>(mut self, f: F) -> Self
@@ -456,6 +488,14 @@ impl InertiaConfig {
     /// `{base}/{file}`.
     pub fn assets_base_url(mut self, url: impl Into<String>) -> Self {
         self.assets_base_url = url.into();
+        self
+    }
+
+    /// Override the per-response cap on concurrent prop resolvers.
+    /// Default: 16. Zero is treated as `usize::MAX` (no cap) — the
+    /// builder normalizes that for the caller.
+    pub fn max_concurrent_resolvers(mut self, n: usize) -> Self {
+        self.max_concurrent_resolvers = if n == 0 { usize::MAX } else { n };
         self
     }
 

@@ -87,7 +87,7 @@ pub(crate) async fn render(
     })?;
     let url = format!("{}/render", config.url.trim_end_matches('/'));
 
-    let result = post_json(&url, body, config.timeout).await;
+    let result = post_json(&url, body, config.timeout, config.max_response_bytes).await;
     match result {
         Ok(resp) => Ok(Some(resp)),
         Err(e) => {
@@ -137,12 +137,26 @@ fn shared_client() -> &'static hyper_util::client::legacy::Client<
 
 /// POST JSON to the SSR worker and deserialize the response. Uses
 /// `hyper` directly — we already depend on it, so no extra crate.
+///
+/// Domain 20 audit D20-D: response body is read through
+/// [`http_body_util::Limited`] so a misconfigured or compromised
+/// loopback worker can't return arbitrarily large data and exhaust
+/// memory. The cap is propagated from `SsrConfig::max_response_bytes`
+/// (default 8 MiB). When the body exceeds the cap the Limited wrapper
+/// returns an error which is surfaced as `Err("read body: ...")`;
+/// `render()` then either falls back to CSR or propagates depending on
+/// `throw_on_error`.
+///
+/// Content-Length pre-check: if the worker is honest enough to set
+/// the header but reports a value larger than the cap, the request is
+/// rejected before any body bytes are read.
 async fn post_json(
     url: &str,
     body: Vec<u8>,
     timeout: Duration,
+    max_response_bytes: usize,
 ) -> Result<SsrResponse, String> {
-    use http_body_util::{BodyExt, Full};
+    use http_body_util::{BodyExt, Full, Limited};
     use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
     use hyper::Request;
 
@@ -175,8 +189,22 @@ async fn post_json(
         return Err(format!("ssr worker returned {}", status));
     }
 
-    let collected = resp
-        .into_body()
+    if let Some(cl) = resp
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<usize>().ok())
+        && cl > max_response_bytes
+    {
+        return Err(format!(
+            "ssr response Content-Length {cl} exceeds cap of \
+             {max_response_bytes} bytes (configure via \
+             InertiaConfig::ssr_max_response_bytes)"
+        ));
+    }
+
+    let limited = Limited::new(resp.into_body(), max_response_bytes);
+    let collected = limited
         .collect()
         .await
         .map_err(|e| format!("read body: {e}"))?;

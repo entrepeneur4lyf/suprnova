@@ -634,6 +634,7 @@ impl InertiaResponse {
             error_bag.as_deref(),
             scroll_intent.as_deref(),
             &lazy_owned,
+            config.max_concurrent_resolvers,
         )
         .await?;
 
@@ -692,7 +693,7 @@ impl InertiaResponse {
             lazy_owned,
         } = self;
         let (materialized, metadata) =
-            resolve_props(props, filter, &[], &[], None, None, &lazy_owned)
+            resolve_props(props, filter, &[], &[], None, None, &lazy_owned, usize::MAX)
                 .await
                 .expect("test resolver should not fail");
         let resolved_encrypt_history = encrypt_history
@@ -817,6 +818,7 @@ fn parse_csv_header<R: InertiaRequestExt>(req: &R, name: &str) -> Vec<String> {
 /// client wants to start fresh from. For those keys we resolve the
 /// value normally but suppress the merge metadata, so the client
 /// treats the value as a replacement rather than an append.
+#[allow(clippy::too_many_arguments)] // Internal helper; arguments group naturally as inputs.
 async fn resolve_props(
     props: IndexMap<String, Prop>,
     filter: &PartialFilter,
@@ -825,6 +827,7 @@ async fn resolve_props(
     error_bag: Option<&str>,
     scroll_intent: Option<&str>,
     lazy_owned: &IndexMap<String, (&'static str, &'static str)>,
+    max_concurrency: usize,
 ) -> Result<(serde_json::Map<String, Value>, PageMetadata), FrameworkError> {
     let mut materialized = serde_json::Map::new();
     let mut metadata = PageMetadata::default();
@@ -1018,7 +1021,22 @@ async fn resolve_props(
         }
     }
 
-    let outcomes = futures::future::try_join_all(tasks).await?;
+    // Domain 20 audit D20-E: bounded resolver fan-out. Without a cap a
+    // page with N lazy props issues N parallel db/HTTP calls. The cap
+    // is configurable via `InertiaConfig::max_concurrent_resolvers`;
+    // `usize::MAX` (the explicit "no limit" sentinel set by the
+    // builder for `max_concurrent_resolvers(0)`) disables it.
+    //
+    // `buffered` (vs. `buffer_unordered`) preserves input ordering in
+    // the output stream — outcome order does not actually matter for
+    // the materialized map / metadata population below, but stable
+    // ordering keeps test snapshots predictable.
+    use futures::stream::{self, StreamExt, TryStreamExt};
+    let concurrency = max_concurrency.max(1);
+    let outcomes: Vec<TaskOutcome> = stream::iter(tasks)
+        .buffered(concurrency)
+        .try_collect()
+        .await?;
 
     for outcome in outcomes {
         match outcome {
