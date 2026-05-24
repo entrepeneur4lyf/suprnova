@@ -45,9 +45,24 @@ fn generic_struct_deserializes() {
 }
 
 #[test]
-fn allowlist_keyed_by_bare_struct_name_not_instantiation() {
-    assert!(registry::is_allowed("Paginated", "meta"));
-    assert!(!registry::is_allowed("Paginated", "items"));
+fn allowlist_keyed_by_fully_qualified_type_name() {
+    // Audit HIGH #336: previously the registry was keyed by the bare
+    // struct name ("Paginated"), so two DTOs with the same identifier
+    // in different modules would silently overwrite each other.
+    // Post-fix the key is the fully-qualified type name produced by
+    // `concat!(module_path!(), "::", stringify!(StructName))`.
+    let qualified = ::std::concat!(::std::module_path!(), "::", "Paginated");
+    assert!(
+        registry::is_allowed(qualified, "meta"),
+        "fully-qualified type name must be the registry key; tried `{qualified}`"
+    );
+    assert!(!registry::is_allowed(qualified, "items"));
+
+    // Bare struct names must NOT match — that was the collision-prone
+    // contract this audit finding closed.
+    assert!(!registry::is_allowed("Paginated", "meta"));
+    // Per-instantiation keys must not match either — generic
+    // instantiations share the type's allowlist.
     assert!(!registry::is_allowed("Paginated<Item>", "meta"));
 }
 

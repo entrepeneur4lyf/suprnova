@@ -746,6 +746,7 @@ fn add_de_lifetime(g: &syn::Generics) -> syn::Generics {
 fn build_into_inertia_props(
     struct_name: &Ident,
     struct_name_str: &str,
+    qualified_name_expr: &TokenStream2,
     impl_generics: &syn::ImplGenerics,
     ty_generics: &syn::TypeGenerics,
     where_clause: Option<&syn::WhereClause>,
@@ -759,26 +760,30 @@ fn build_into_inertia_props(
             let name = ident.to_string();
 
             if let Some(flavor) = &opts.lazy {
+                // Audit HIGH #336: `owner` is the FULLY-QUALIFIED type name so
+                // include-allowlist lookups match the registry key (also fully
+                // qualified). Bare struct names would collide across modules
+                // and nondeterministically resolve the wrong allowlist.
                 let entry_construction = match flavor {
                     LazyFlavor::Plain
                     | LazyFlavor::Inertia
                     | LazyFlavor::WhenLoaded => quote! {
                         ::suprnova::inertia::PropEntry::LazyOwned {
-                            owner: #struct_name_str,
+                            owner: #qualified_name_expr,
                             field: #name,
                             prop: self.#ident,
                         }
                     },
                     LazyFlavor::Deferred => quote! {
                         ::suprnova::inertia::PropEntry::DeferredOwned {
-                            owner: #struct_name_str,
+                            owner: #qualified_name_expr,
                             field: #name,
                             prop: self.#ident,
                         }
                     },
                     LazyFlavor::Closure => quote! {
                         ::suprnova::inertia::PropEntry::ClosureOwned {
-                            owner: #struct_name_str,
+                            owner: #qualified_name_expr,
                             field: #name,
                             prop: self.#ident,
                         }
@@ -935,7 +940,15 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
             struct_opts.allow_unknown_fields,
         )
     };
-    let allowlist_registration = build_allowlist_registration(&struct_name_str, &parsed);
+    // Fully-qualified type name expression — used as the registry key for
+    // include allowlists and as the `owner` field on lazy PropEntry variants.
+    // `concat!(module_path!(), "::", stringify!(StructName))` resolves to a
+    // single `&'static str` literal at compile time, unique per module path
+    // even when two crates define structs with the same bare identifier.
+    let qualified_name_expr: TokenStream2 = quote! {
+        ::std::concat!(::std::module_path!(), "::", ::std::stringify!(#struct_name))
+    };
+    let allowlist_registration = build_allowlist_registration(&qualified_name_expr, &parsed);
     // Skip FormRequest for generic structs (any type or lifetime params).
     // FormRequest requires DeserializeOwned + Send + Validate; these bounds
     // cannot be generically propagated without knowing the concrete type params.
@@ -951,6 +964,7 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
     let into_inertia_props_impl = build_into_inertia_props(
         struct_name,
         &struct_name_str,
+        &qualified_name_expr,
         &impl_generics,
         &ty_generics,
         where_clause,
@@ -1396,7 +1410,7 @@ fn build_into_json_resource(
 }
 
 fn build_allowlist_registration(
-    struct_name_str: &str,
+    qualified_name_expr: &TokenStream2,
     parsed: &[(&Field, FieldOptions)],
 ) -> TokenStream2 {
     let allow_include_names: Vec<String> = parsed
@@ -1413,10 +1427,17 @@ fn build_allowlist_registration(
     // by typetag, sqlx, and clap-derive. Unlike `#[ctor::ctor]`, it
     // survives `cargo test` symbol stripping because the linker sees
     // these as live data, not unused init functions.
+    //
+    // Audit HIGH #336: the registry key is the FULLY-QUALIFIED type name
+    // (`my_crate::my_module::MyDto`) — not the bare struct name. This
+    // prevents two DTOs with the same identifier in different modules
+    // from overwriting each other's include allowlists nondeterministically.
+    // `concat!(module_path!(), "::", stringify!(...))` resolves to a
+    // single `&'static str` literal at expansion time.
     quote! {
         ::suprnova::inventory::submit! {
             ::suprnova::data::registry::AllowedIncludes {
-                struct_name: #struct_name_str,
+                struct_name: #qualified_name_expr,
                 fields: &[#(#allow_include_names),*],
             }
         }

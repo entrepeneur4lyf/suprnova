@@ -126,13 +126,14 @@ fn allow_include_fields_register_via_inventory() {
         artist: None,
     };
 
-    assert!(registry::is_allowed("TestAlbumDtoT8", "songs"));
-    assert!(registry::is_allowed("TestAlbumDtoT8", "artist"));
-    assert!(!registry::is_allowed("TestAlbumDtoT8", "title"));
-    assert_eq!(
-        registry::allowed_for("TestAlbumDtoT8"),
-        vec!["songs", "artist"]
-    );
+    // Audit HIGH #336: registry keys are fully-qualified type names —
+    // `concat!(module_path!(), "::", stringify!(StructName))` — to
+    // prevent collisions between same-named DTOs in different modules.
+    let key = ::std::concat!(::std::module_path!(), "::TestAlbumDtoT8");
+    assert!(registry::is_allowed(key, "songs"));
+    assert!(registry::is_allowed(key, "artist"));
+    assert!(!registry::is_allowed(key, "title"));
+    assert_eq!(registry::allowed_for(key), vec!["songs", "artist"]);
 }
 
 // ── Task 18: #[data(lazy)] + #[data(auto_lazy)] ──────────────────────────
@@ -151,8 +152,10 @@ pub struct _test_UserDto_t18 {
 #[test]
 fn lazy_field_registers_in_allowlist() {
     use suprnova::data::registry;
-    assert!(registry::is_allowed("_test_UserDto_t18", "favorite_song"));
-    assert!(!registry::is_allowed("_test_UserDto_t18", "id"));
+    // Audit HIGH #336: fully-qualified type name as the registry key.
+    let key = ::std::concat!(::std::module_path!(), "::_test_UserDto_t18");
+    assert!(registry::is_allowed(key, "favorite_song"));
+    assert!(!registry::is_allowed(key, "id"));
 }
 
 #[test]
@@ -170,7 +173,9 @@ fn into_inertia_props_emits_owner_tagged_lazy() {
     let song_entry = props.into_iter().find(|(k, _)| k == "favorite_song").unwrap().1;
     match song_entry {
         PropEntry::LazyOwned { owner, field, .. } => {
-            assert_eq!(owner, "_test_UserDto_t18");
+            // Owner is the fully-qualified type name now (audit HIGH #336).
+            let expected = ::std::concat!(::std::module_path!(), "::_test_UserDto_t18");
+            assert_eq!(owner, expected);
             assert_eq!(field, "favorite_song");
         }
         _ => panic!("expected LazyOwned entry"),
@@ -189,7 +194,9 @@ pub struct _test_AutoLazyDto_t18 {
 #[test]
 fn auto_lazy_marks_all_prop_typed_fields() {
     use suprnova::data::registry;
-    assert!(registry::is_allowed("_test_AutoLazyDto_t18", "song"));
-    assert!(registry::is_allowed("_test_AutoLazyDto_t18", "album"));
-    assert!(!registry::is_allowed("_test_AutoLazyDto_t18", "id"));
+    // Audit HIGH #336: fully-qualified type name as the registry key.
+    let key = ::std::concat!(::std::module_path!(), "::_test_AutoLazyDto_t18");
+    assert!(registry::is_allowed(key, "song"));
+    assert!(registry::is_allowed(key, "album"));
+    assert!(!registry::is_allowed(key, "id"));
 }
