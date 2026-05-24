@@ -1270,6 +1270,98 @@ async fn once_with_until_emits_expires_at() {
 }
 
 #[tokio::test]
+async fn once_with_expired_until_forces_resolver_despite_client_cache_header() {
+    // D20-C regression — ChatGPT MODULE_REVIEW_NOTES ## inertia HIGH #2.
+    //
+    // The client sends `X-Inertia-Except-Once-Props: rates` claiming it
+    // has `rates` cached. Without server-side expiry enforcement the
+    // resolver would silently skip and the client would keep its stale
+    // value forever. With D20-C the server checks `expires_at` against
+    // wall-clock time and forces the resolver to run when expired.
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let resolver_ran = Arc::new(AtomicBool::new(false));
+    let flag = resolver_ran.clone();
+
+    // Expiry in the past: epoch + 1ms (Jan 1 1970 + 1ms). Now() is
+    // long past this, so the cache is server-expired.
+    let past_expires_ms: i64 = 1;
+
+    let req = MockReq::new("/")
+        .inertia()
+        .header("X-Inertia-Except-Once-Props", "rates");
+
+    let resp = InertiaResponse::new("Dashboard")
+        .once_with(
+            "rates",
+            suprnova::OnceOptions::new().until(past_expires_ms),
+            move || {
+                let flag = flag.clone();
+                async move {
+                    flag.store(true, Ordering::SeqCst);
+                    Ok::<_, suprnova::FrameworkError>(serde_json::json!([1, 2, 3]))
+                }
+            },
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+
+    // Resolver MUST have run because the server-side expiry has passed.
+    assert!(
+        resolver_ran.load(Ordering::SeqCst),
+        "expired once-prop resolver must run despite client cache header"
+    );
+
+    // And the freshly-resolved value must be on the page under `props.rates`.
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(page["props"]["rates"], serde_json::json!([1, 2, 3]));
+}
+
+#[tokio::test]
+async fn once_with_future_until_honours_client_cache_header() {
+    // Inverse of the D20-C regression: when expiry is in the future
+    // the client's cache header is honoured (no resolver call, only
+    // metadata emitted). This preserves the optimisation when no
+    // expiry is breached.
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let resolver_ran = Arc::new(AtomicBool::new(false));
+    let flag = resolver_ran.clone();
+
+    // Far-future expiry: year 2099.
+    let future_expires_ms: i64 = 4_070_908_800_000;
+
+    let req = MockReq::new("/")
+        .inertia()
+        .header("X-Inertia-Except-Once-Props", "rates");
+
+    let _resp = InertiaResponse::new("Dashboard")
+        .once_with(
+            "rates",
+            suprnova::OnceOptions::new().until(future_expires_ms),
+            move || {
+                let flag = flag.clone();
+                async move {
+                    flag.store(true, Ordering::SeqCst);
+                    Ok::<_, suprnova::FrameworkError>(serde_json::json!([1, 2, 3]))
+                }
+            },
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+
+    assert!(
+        !resolver_ran.load(Ordering::SeqCst),
+        "unexpired once-prop resolver must NOT run when client claims cache"
+    );
+}
+
+#[tokio::test]
 async fn app_flash_persists_to_response_via_task_local() {
     let _guard = suprnova::testing::TestContainer::fake();
     let req = MockReq::new("/").inertia();

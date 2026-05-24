@@ -973,8 +973,21 @@ async fn resolve_props(
                 }
             }
             Prop::Once(c) => {
-                let client_has_cached =
-                    !c.fresh && except_once.iter().any(|k| k == &c.cache_key);
+                // Domain 20 audit D20-C: enforce expires_at server-side.
+                // Without this check a malicious or stale client can hold
+                // `X-Inertia-Except-Once-Props` forever and the resolver
+                // never runs, even past the `until(...)` deadline. The
+                // server is the source of truth — the client's claim
+                // about its cache is only honoured while the server's
+                // expiry window is open.
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let server_expired = match c.expires_at {
+                    Some(ts) => now_ms >= ts,
+                    None => false,
+                };
+                let client_has_cached = !c.fresh
+                    && !server_expired
+                    && except_once.iter().any(|k| k == &c.cache_key);
                 if client_has_cached {
                     // Client already has the value cached — skip resolver
                     // but still emit metadata so the client confirms the
