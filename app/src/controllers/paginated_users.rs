@@ -153,7 +153,7 @@ fn build_page(qs: Option<&str>) -> Result<CursorPaginator<UserProps>, FrameworkE
 /// scroll metadata wired through). Pass `?format=json` to receive the
 /// raw paginator as JSON.
 pub async fn index(req: Request) -> Response {
-    let qs = req.inner().uri().query().map(|s| s.to_string());
+    let qs = req.query().map(|s| s.to_string());
     let want_json = query_param(qs.as_deref(), "format").as_deref() == Some("json");
 
     let paginator = match build_page(qs.as_deref()) {

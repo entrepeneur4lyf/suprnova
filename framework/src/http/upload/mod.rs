@@ -525,7 +525,31 @@ where
     // does not impl `Into<Bytes>` (multer's bound). `BodyDataStream` drops
     // trailer frames and yields `Result<Bytes, hyper::Error>` directly,
     // which is exactly what multer wants.
-    let stream = BodyDataStream::new(body);
+    //
+    // Multipart bodies are never pre-buffered by middleware (CSRF only
+    // buffers form-urlencoded). If we somehow see a buffered body here
+    // it's a programming error — return a clear 400 rather than
+    // silently truncating.
+    let incoming = match body {
+        crate::http::BodyState::Streaming(inc) => inc,
+        crate::http::BodyState::Buffered(_) => {
+            return Err(FrameworkError::Domain {
+                message: "multipart upload received a pre-buffered body — this is a \
+                          framework bug; multipart bodies must arrive as streams"
+                    .into(),
+                status_code: 400,
+            });
+        }
+        crate::http::BodyState::Consumed => {
+            return Err(FrameworkError::Domain {
+                message: "multipart upload received a fully consumed body — middleware \
+                          drained the body without buffering"
+                    .into(),
+                status_code: 400,
+            });
+        }
+    };
+    let stream = BodyDataStream::new(incoming);
     let mut multipart = Multipart::new(stream, boundary);
 
     let mut payload = MultipartPayload::default();

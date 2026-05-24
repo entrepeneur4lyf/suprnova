@@ -601,7 +601,7 @@ pub fn webhook_routes(db: Arc<DatabaseConnection>) -> Router {
             let db = db_for_handler.clone();
             async move {
                 // Extract header map and remote addr before consuming the request body.
-                let headers = req.inner().headers().clone();
+                let headers = req.headers().clone();
                 let remote_addr_str = headers
                     .get("x-forwarded-for")
                     .and_then(|v| v.to_str().ok())
