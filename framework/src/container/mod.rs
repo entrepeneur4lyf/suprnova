@@ -477,12 +477,19 @@ impl App {
             .unwrap_or(false)
     }
 
-    /// Boot all auto-registered services
+    /// Boot all auto-registered services.
     ///
-    /// This registers all services marked with `#[service(ConcreteType)]`.
+    /// Registers everything declared via `#[service(ConcreteType)]` and
+    /// `#[injectable]`. Service bindings run as a single pass; singletons run
+    /// in a fixed-point loop so an `#[injectable]` type whose `#[inject]`
+    /// fields name another `#[injectable]` resolves regardless of inventory
+    /// iteration order. Returns a structured error if a singleton's
+    /// dependencies cannot be resolved (missing `#[injectable]` or a cyclic
+    /// dependency) rather than panicking inside the registration closure.
+    ///
     /// Called automatically by `Server::from_config()`.
-    pub fn boot_services() {
-        provider::bootstrap();
+    pub fn boot_services() -> Result<(), crate::error::FrameworkError> {
+        provider::bootstrap()
     }
 
     /// Resolve the active Inertia registry — test override if set, else

@@ -71,7 +71,9 @@ pub fn injectable_impl(input: TokenStream) -> TokenStream {
                     generate_for_named_struct(name, name_str, vis, attrs, generics, fields_named)
                 }
                 Fields::Unit => {
-                    // Unit struct - use Default
+                    // Unit struct - use Default. No `#[inject]` fields so the
+                    // closure never needs to resolve anything from the
+                    // container and always returns Ok.
                     quote! {
                         #(#attrs)*
                         #[derive(Default, Clone)]
@@ -79,11 +81,12 @@ pub fn injectable_impl(input: TokenStream) -> TokenStream {
 
                         ::suprnova::inventory::submit! {
                             ::suprnova::container::provider::SingletonEntry {
-                                register: || {
+                                register: || -> ::std::result::Result<(), ::std::string::String> {
                                     // singleton_if_absent — boot is idempotent
                                     // and does not clobber manual overrides or
                                     // stateful instances installed before boot.
                                     ::suprnova::App::singleton_if_absent(<#name as ::std::default::Default>::default());
+                                    ::std::result::Result::Ok(())
                                 },
                                 name: #name_str,
                             }
@@ -133,10 +136,12 @@ fn generate_for_named_struct(
 
             ::suprnova::inventory::submit! {
                 ::suprnova::container::provider::SingletonEntry {
-                    register: || {
+                    register: || -> ::std::result::Result<(), ::std::string::String> {
                         // singleton_if_absent — boot is idempotent and does
-                        // not clobber manual overrides.
+                        // not clobber manual overrides. No `#[inject]` fields,
+                        // so we always return Ok.
                         ::suprnova::App::singleton_if_absent(<#name as ::std::default::Default>::default());
+                        ::std::result::Result::Ok(())
                     },
                     name: #name_str,
                 }
@@ -177,17 +182,23 @@ fn generate_with_injection(
         });
 
         if has_inject_attr(field) {
-            // This field needs to be resolved from the container
+            // This field needs to be resolved from the container.
+            //
+            // We propagate via `?` so the bootstrap loop can distinguish
+            // "still waiting on a dependency" from genuine missing/cyclic
+            // deps. Inventory iteration order is implementation-defined,
+            // so a producer #[injectable] may register after us on the
+            // first pass — returning Err here makes the bootstrap loop
+            // retry this entry on the next iteration, by which point the
+            // producer is installed.
             field_initializations.push(quote! {
                 #field_name: ::suprnova::App::resolve::<#field_ty>()
-                    .expect(&format!(
-                        "Failed to resolve dependency '{}' for '{}'. \
-                         Make sure '{}' is registered before '{}'.",
-                        stringify!(#field_ty),
+                    .map_err(|e| ::std::format!(
+                        "failed to resolve dependency `{}` for `{}`: {}",
+                        ::std::stringify!(#field_ty),
                         #name_str,
-                        stringify!(#field_ty),
-                        #name_str
-                    ))
+                        e,
+                    ))?
             });
         } else {
             // Use Default for non-injected fields
@@ -205,20 +216,28 @@ fn generate_with_injection(
         }
 
         impl #name {
-            /// Resolve all dependencies and create an instance
-            fn __resolve_dependencies() -> Self {
-                Self {
+            /// Resolve all dependencies and create an instance.
+            ///
+            /// Returns `Err` if any `#[inject]` field's dependency isn't
+            /// installed yet. The bootstrap loop retries failed entries on
+            /// the next iteration so inventory iteration order doesn't
+            /// matter for inter-injectable resolution.
+            fn __resolve_dependencies() -> ::std::result::Result<Self, ::std::string::String> {
+                ::std::result::Result::Ok(Self {
                     #(#field_initializations),*
-                }
+                })
             }
         }
 
         ::suprnova::inventory::submit! {
             ::suprnova::container::provider::SingletonEntry {
-                register: || {
+                register: || -> ::std::result::Result<(), ::std::string::String> {
                     // singleton_if_absent — boot is idempotent and does not
-                    // clobber manual overrides.
-                    ::suprnova::App::singleton_if_absent(#name::__resolve_dependencies());
+                    // clobber manual overrides. `?` defers to the bootstrap
+                    // loop if a dependency isn't installed yet.
+                    let instance = #name::__resolve_dependencies()?;
+                    ::suprnova::App::singleton_if_absent(instance);
+                    ::std::result::Result::Ok(())
                 },
                 name: #name_str,
             }

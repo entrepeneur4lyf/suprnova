@@ -90,7 +90,9 @@ impl Server {
         App::init();
 
         // Boot all auto-registered services from #[service(ConcreteType)]
-        App::boot_services();
+        // and #[injectable]. Propagates a structured error if a singleton's
+        // dependency graph is unresolvable (missing #[injectable] or cycle).
+        App::boot_services()?;
 
         // Install the process-wide encryption key ring.
         //

@@ -169,12 +169,18 @@ pub fn service_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
             // test that already installed a fake before booting) leaves the
             // existing binding in place rather than replacing it with a fresh
             // `Default::default()` instance.
+            //
+            // The closure returns `Result<(), String>` so the bootstrap loop
+            // can distinguish "registered" from "still waiting on a
+            // dependency". Service bindings construct via `Default::default()`
+            // and never touch the container, so they always return `Ok`.
             ::suprnova::inventory::submit! {
                 ::suprnova::container::provider::ServiceBindingEntry {
-                    register: || {
+                    register: || -> ::std::result::Result<(), ::std::string::String> {
                         ::suprnova::App::bind_if_absent::<dyn #trait_name>(
                             ::std::sync::Arc::new(<#concrete_type as ::std::default::Default>::default())
                         );
+                        ::std::result::Result::Ok(())
                     },
                     name: #trait_name_str,
                 }

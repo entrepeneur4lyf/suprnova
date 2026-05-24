@@ -92,7 +92,8 @@ pub fn suprnova_test_impl(attr: TokenStream, input: TokenStream) -> TokenStream 
         quote! {
             // Bootstrap services so #[injectable] types are available
             ::suprnova::App::init();
-            ::suprnova::App::boot_services();
+            ::suprnova::App::boot_services()
+                .expect("App::boot_services() failed in #[suprnova_test] setup");
             let #param_name = ::suprnova::testing::TestDatabase::fresh::<#migrator_type>()
                 .await
                 .expect("Failed to set up test database");
@@ -103,7 +104,8 @@ pub fn suprnova_test_impl(attr: TokenStream, input: TokenStream) -> TokenStream 
         quote! {
             // Bootstrap services so #[injectable] types are available
             ::suprnova::App::init();
-            ::suprnova::App::boot_services();
+            ::suprnova::App::boot_services()
+                .expect("App::boot_services() failed in #[suprnova_test] setup");
             let _db = ::suprnova::testing::TestDatabase::fresh::<#migrator_type>()
                 .await
                 .expect("Failed to set up test database");

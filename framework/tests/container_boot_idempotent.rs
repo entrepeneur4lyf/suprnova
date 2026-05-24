@@ -147,7 +147,7 @@ fn app_singleton_if_absent_pre_boot_override_survives() {
     // inventory-registered singletons. Our marker type isn't registered
     // via `#[injectable]`, but the equivalent contract is: any second
     // attempt to install via if_absent leaves the original in place.
-    App::boot_services();
+    App::boot_services().expect("boot_services must succeed in this test");
 
     // A second if_absent attempt (simulating the inventory call) MUST
     // be a no-op.
