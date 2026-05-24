@@ -402,9 +402,17 @@ impl PasskeyAuth {
         }
 
         // Verify the browser response against the **session-bound** state.
+        // WebAuthn finish failures are user/client protocol failures
+        // (bad challenge response, malformed attestation, signature
+        // mismatch). 401 is the right code — these must not generate
+        // 500 responses or internal-error telemetry. ChatGPT audit
+        // `torii_integration` HIGH #2.
         let passkey = webauthn
             .finish_passkey_registration(&response, &ceremony.state)
-            .map_err(|e| FrameworkError::internal(format!("webauthn finish_passkey_registration: {e:?}")))?;
+            .map_err(|e| FrameworkError::Domain {
+                message: format!("webauthn registration verification failed: {e:?}"),
+                status_code: 401,
+            })?;
 
         // Load the user via the **session-bound** email (belt-and-braces:
         // even if the email comparison were bypassed, the lookup goes
@@ -586,9 +594,17 @@ impl PasskeyAuth {
             .collect::<Result<_, _>>()?;
 
         // Verify the browser response against the **session-bound** state.
+        // WebAuthn finish failures are user/client protocol failures
+        // (bad challenge response, malformed assertion, signature
+        // mismatch). 401 is the right code — these must not generate
+        // 500 responses or internal-error telemetry. ChatGPT audit
+        // `torii_integration` HIGH #2.
         let auth_result: PasskeyAuthenticationResult = webauthn
             .finish_passkey_authentication(&response, &ceremony.state)
-            .map_err(|e| FrameworkError::internal(format!("webauthn finish_passkey_authentication: {e:?}")))?;
+            .map_err(|e| FrameworkError::Domain {
+                message: format!("webauthn authentication verification failed: {e:?}"),
+                status_code: 401,
+            })?;
 
         // Update the counter on the matching passkey and persist.
         // We assert the matched credential is present — webauthn verifies it is in

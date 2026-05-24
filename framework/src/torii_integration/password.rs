@@ -41,7 +41,7 @@ impl PasswordAuth {
             .password()
             .register(email, password)
             .await
-            .map_err(|e| FrameworkError::internal(format!("torii password register: {e}")))
+            .map_err(super::map_torii_error)
     }
 
     /// Authenticate a user by email and password, returning the user and a new session.
@@ -64,6 +64,6 @@ impl PasswordAuth {
             .password()
             .authenticate(email, password, user_agent, ip_address)
             .await
-            .map_err(|e| FrameworkError::internal(format!("torii password authenticate: {e}")))
+            .map_err(super::map_torii_error)
     }
 }

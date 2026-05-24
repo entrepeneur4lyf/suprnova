@@ -435,12 +435,28 @@ impl OAuthAuth {
                 status_code: 502,
             })?;
 
-        // Derive the email (required by torii).
+        // Resolve a stable provider-side identifier. If the provider
+        // sent neither `sub` nor `id`, we cannot safely attribute the
+        // user — refuse the callback rather than collapse to a constant
+        // that would conflate distinct users (ChatGPT audit
+        // `torii_integration` HIGH #4). 502 because the upstream
+        // produced an unusable payload.
+        let provider_id = profile.id_str().ok_or_else(|| FrameworkError::Domain {
+            message: format!(
+                "oauth provider '{}' returned a userinfo payload with neither `sub` nor `id` — cannot attribute account",
+                self.provider
+            ),
+            status_code: 502,
+        })?;
+
+        // Derive the email (required by torii). Fall back to login,
+        // then to the provider id — but only after we've proven the
+        // provider id is real and stable.
         let email = profile
             .email
             .clone()
             .or_else(|| profile.login.clone())
-            .unwrap_or_else(|| profile.id_str());
+            .unwrap_or_else(|| provider_id.clone());
 
         // Upsert the user in torii's store. Failures here are genuine
         // server faults (DB unreachable, schema drift, etc.) so the 500
@@ -449,7 +465,7 @@ impl OAuthAuth {
             .oauth()
             .get_or_create_user(
                 &self.provider,
-                &profile.id_str(),
+                &provider_id,
                 &email,
                 profile.name.clone(),
             )
@@ -601,15 +617,21 @@ struct ProviderProfile {
 }
 
 impl ProviderProfile {
-    fn id_str(&self) -> String {
+    /// Returns the provider's stable user identifier. `None` if the
+    /// provider response carries neither `sub` (OpenID Connect) nor
+    /// `id` (GitHub-style). Callers MUST reject such responses as
+    /// they cannot be safely attributed — collapsing missing IDs to
+    /// a constant like `"unknown"` would conflate multiple distinct
+    /// users under one identity (ChatGPT audit `torii_integration`
+    /// HIGH #4).
+    fn id_str(&self) -> Option<String> {
         if let Some(sub) = &self.sub {
-            return sub.clone();
+            return Some(sub.clone());
         }
         if let Some(id) = &self.id_num {
-            return id.to_string();
+            return Some(id.to_string());
         }
-        // Fallback: shouldn't happen with well-known providers.
-        "unknown".to_string()
+        None
     }
 }
 

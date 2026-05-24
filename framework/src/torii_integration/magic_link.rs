@@ -60,7 +60,7 @@ impl MagicLinkAuth {
             .magic_link()
             .send_link(email, callback_url)
             .await
-            .map_err(|e| FrameworkError::internal(format!("torii magic_link send_link: {e}")))?;
+            .map_err(super::map_torii_error)?;
 
         // In the suprnova-torii-rs fork, `SecureToken::token` is a private field
         // wrapping a `SecretString`, exposed via `.token()` which returns the
@@ -96,6 +96,6 @@ impl MagicLinkAuth {
             .magic_link()
             .authenticate(token, None, None)
             .await
-            .map_err(|e| FrameworkError::internal(format!("torii magic_link authenticate: {e}")))
+            .map_err(super::map_torii_error)
     }
 }

@@ -37,6 +37,13 @@ use crate::error::FrameworkError;
 // dependency.
 pub use torii::{LockoutStatus, Session, SessionToken, User, UserId};
 
+/// Serializes concurrent `init_torii` callers so that `TORII`, `PROVIDER`,
+/// and the passkey `WEBAUTHN` cannot land from different configs under a
+/// startup race (ChatGPT audit `torii_integration` HIGH #1). `init_torii`
+/// double-checks `TORII.get()` both before and after acquiring this lock,
+/// so the fast path stays lock-free once initialised.
+static INIT_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// The single global Torii instance, pinned to the SeaORM repository provider.
 static TORII: OnceLock<Torii<SeaORMRepositoryProvider>> = OnceLock::new();
 
@@ -266,6 +273,20 @@ impl ToriiConfig {
 /// init_torii(config).await?;
 /// ```
 pub async fn init_torii(config: ToriiConfig) -> Result<(), FrameworkError> {
+    // Fast path: already initialised.
+    if TORII.get().is_some() {
+        return Ok(());
+    }
+
+    // Serialize concurrent initializers so they cannot split TORII /
+    // PROVIDER / WEBAUTHN across different configs (ChatGPT audit
+    // `torii_integration` HIGH #1). Two callers that both pass the
+    // TORII.get().is_some() check above would otherwise race
+    // independently and each set could land from a different caller.
+    let _guard = INIT_GUARD.lock().await;
+
+    // Double-check after acquiring the guard: another caller may have
+    // raced us between the fast-path check and our lock acquisition.
     if TORII.get().is_some() {
         return Ok(());
     }
@@ -286,14 +307,38 @@ pub async fn init_torii(config: ToriiConfig) -> Result<(), FrameworkError> {
     let provider = Arc::new(storage.into_repository_provider());
     let torii = Torii::new(provider.clone());
 
-    // Store the raw provider so internal code (e.g. passkey) can call
-    // find_or_create_by_email without creating a dummy password row.
+    // We hold INIT_GUARD — no other initializer is running, so neither
+    // OnceLock can have been populated since the double-check. The set
+    // calls are guaranteed to succeed; ignore the result anyway.
     let _ = PROVIDER.set(provider);
-
-    // Ignore set() error — another caller may have raced us. Either winner
-    // produces an equivalent, fully-initialised instance.
     let _ = TORII.set(torii);
     Ok(())
+}
+
+/// Map a [`torii::ToriiError`] to a [`FrameworkError`] with the
+/// appropriate HTTP status code (ChatGPT audit `torii_integration`
+/// HIGH #2). Auth failures are user/client protocol failures and
+/// must map to 401 — not 500 — so they do not generate spurious
+/// internal-error telemetry or 500 responses. Storage failures are
+/// genuine server faults and stay as 500 internal errors.
+pub(crate) fn map_torii_error(e: torii::ToriiError) -> FrameworkError {
+    use torii::ToriiError;
+    match e {
+        // Auth failures are user-facing protocol failures (bad password,
+        // locked account, invalid/used magic link, etc.). 401 is the
+        // standard HTTP code for "authentication required / failed";
+        // a dedicated 423 for "Locked" exists but ToriiError collapses
+        // both into the same string variant, so we use 401 uniformly.
+        ToriiError::AuthError(msg) => FrameworkError::Domain {
+            message: msg,
+            status_code: 401,
+        },
+        // Storage failures are genuine server faults (DB unreachable,
+        // schema drift, etc.) — 500 internal is correct.
+        ToriiError::StorageError(msg) => {
+            FrameworkError::internal(format!("torii storage: {msg}"))
+        }
+    }
 }
 
 /// Retrieve a reference to the initialised Torii instance.
