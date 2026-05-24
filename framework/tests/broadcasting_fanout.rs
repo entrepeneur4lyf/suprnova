@@ -429,3 +429,61 @@ async fn crashed_hub_members_pruned_via_ttl() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
+
+// ── env-gated Redis backend integration ──────────────────────────────────────
+
+/// Two independent `SeaStreamerBroadcastHub` instances pointed at the same
+/// Redis stream MUST exchange envelopes cross-process — this is the whole
+/// point of HIGH #208 (the socket-adapter refactor). Subscribers on hub_b
+/// receive events published on hub_a.
+///
+/// Skipped unless `REDIS_BROADCAST_URL` is set, e.g.
+///
+/// ```sh
+/// REDIS_BROADCAST_URL=redis://127.0.0.1:6379 \
+///     cargo test -p suprnova --features broadcasting-fanout \
+///     --test broadcasting_fanout -- --ignored
+/// ```
+///
+/// Uses a per-run UUID stream key so concurrent test runs and prior failed
+/// runs do not see each other's events.
+#[tokio::test]
+#[ignore = "requires REDIS_BROADCAST_URL pointing at a running Redis"]
+async fn redis_backend_cross_hub_fanout() {
+    let url = match std::env::var("REDIS_BROADCAST_URL") {
+        Ok(u) if !u.is_empty() => u,
+        _ => return, // explicit ignore covers this, but belt+braces
+    };
+
+    let stream_key = format!("suprnova-test-{}", uuid::Uuid::new_v4());
+
+    let hub_a = SeaStreamerBroadcastHub::new(&url, &stream_key)
+        .await
+        .expect("hub_a Redis connect");
+    let hub_b = SeaStreamerBroadcastHub::new(&url, &stream_key)
+        .await
+        .expect("hub_b Redis connect");
+
+    // Subscribe on hub_b so the stream consumer is live before hub_a publishes.
+    let mut rx = hub_b.subscribe("chat.cross");
+
+    // Give the Redis consumer pump a beat to come up; without this, Redis
+    // Streams' XADD before XREAD-from-tail can be lost.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    hub_a
+        .publish(envelope(
+            "chat.cross",
+            "MessagePosted",
+            json!({ "from": "hub_a" }),
+        ))
+        .await;
+
+    let envelope = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("cross-hub event arrives within 5 s")
+        .expect("recv");
+    assert_eq!(envelope.channel, "chat.cross");
+    assert_eq!(envelope.event, "MessagePosted");
+    assert_eq!(envelope.data["from"], "hub_a");
+}

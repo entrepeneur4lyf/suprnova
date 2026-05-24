@@ -375,14 +375,20 @@ pub async fn register() {
 }
 ```
 
-`SeaStreamerBroadcastHub` accepts any broker URI supported by sea-streamer. Common forms:
+`SeaStreamerBroadcastHub` accepts any broker URI supported by sea-streamer. The backend is selected at runtime from the URI scheme:
 
-| Backend | URI shape |
-|---------|-----------|
-| Redis Streams | `redis://host:6379/stream-name` |
-| Kafka | `kafka://host:9092/topic-name` |
+| URI scheme | Backend | Production-ready | Notes |
+|------------|---------|------------------|-------|
+| `redis://` `rediss://` | Redis Streams | **Yes** | Default recommendation. `rediss://` uses TLS. |
+| `kafka://` | Kafka | **Yes** | Requires adding `kafka` to the `sea-streamer` features in `framework/Cargo.toml`. |
+| `stdio://` | stdin/stdout pipes | No — tests only | Single-process loopback. Used by the framework's own integration tests. |
+| `file://` | Local file | No — single-host | Requires adding `file` to the `sea-streamer` features. |
+
+The stream key (the part after the URI) is the topic/stream name shared by every process in the cluster: `SeaStreamerBroadcastHub::new("redis://host:6379", "suprnova-broadcast")`.
 
 Published events flow through the broker to every process in the cluster. Each process's local in-memory layer delivers the event to its own WebSocket subscribers. The application code that dispatches events does not change — only the bootstrap wiring changes.
+
+**Backend dispatch is enum-based, not trait-object.** The hub stores a concrete `SeaProducer` / `SeaConsumer` from `sea-streamer`'s socket adapter, which is an enum over every backend compiled into the dependency. There is no `dyn Producer` overhead at the call site.
 
 ### Cross-process presence
 

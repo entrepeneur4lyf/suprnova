@@ -11,7 +11,7 @@
 //!       │
 //!       ├─► InMemoryBroadcastHub::publish (immediate, local WS subs)
 //!       │
-//!       └─► StdioProducer::send (serialized JSON to sea-streamer stream)
+//!       └─► SeaProducer::send (serialized JSON to sea-streamer stream)
 //!                │
 //!                ▼ (loopback/other processes)
 //!           consumer_pump_task
@@ -51,28 +51,44 @@
 //!
 //! ## Backends
 //!
-//! The implementation uses `sea_streamer::stdio::StdioStreamer` (stdin/stdout
-//! pipes). For production, swap in `sea_streamer_kafka::KafkaStreamer` or
-//! `sea_streamer_redis::RedisStreamer` — they all implement the same
-//! `sea_streamer_types::Streamer` trait. The URI scheme drives the backend
-//! when using the socket adapter (`sea-streamer` with the `socket` feature).
+//! The hub uses sea-streamer's **socket adapter** (`SeaStreamer`,
+//! `SeaProducer`, `SeaConsumer`), which is an enum-dispatched wrapper over
+//! every backend compiled into the `sea-streamer` dependency. The backend is
+//! selected at runtime from the URI scheme:
+//!
+//! | URI scheme           | Backend                                  | Production-ready |
+//! |----------------------|------------------------------------------|------------------|
+//! | `stdio://`           | stdin/stdout pipes (tests, single-proc)  | No               |
+//! | `redis://` `rediss://` | Redis Streams (`sea-streamer-redis`)  | **Yes**          |
+//! | `kafka://` `kafka+ssl://` | Kafka (if `sea-streamer-kafka` is enabled) | **Yes** |
+//! | `file://`            | Local file (`sea-streamer-file`)         | No               |
+//!
+//! The default Suprnova build enables `stdio` + `redis` + `socket`. To enable
+//! Kafka, add `kafka` to the `sea-streamer` feature set in `framework/Cargo.toml`
+//! (it pulls in `sea-streamer-kafka`).
+//!
+//! For multi-process deployments, use `redis://host:6379` (or `rediss://` for
+//! TLS). Redis Streams persists events, supports consumer groups, and survives
+//! a hub restart — the cross-process fanout works exactly like the loopback
+//! test scenario.
 //!
 //! ## Loopback mode
 //!
 //! `SeaStreamerBroadcastHub::new_loopback` enables the stdio loopback option,
 //! which feeds produced messages back to consumers in the same process. This
-//! is intended for testing only — the duplicate guard (instance_id) ensures
-//! the local hub still sees each app-data event only once.
+//! is intended for **testing only** — the duplicate guard (instance_id) ensures
+//! the local hub still sees each app-data event only once. Loopback is a
+//! stdio-specific option; if you pass `loopback = true` with a non-stdio URI
+//! the option is silently ignored by the non-stdio backends (each one has its
+//! own native cross-process behaviour).
 
 use crate::broadcasting::hub::{BroadcastEnvelope, BroadcastHub, InMemoryBroadcastHub};
 use crate::FrameworkError;
 use async_trait::async_trait;
-use sea_streamer::stdio::{
-    StdioConnectOptions, StdioConsumerOptions, StdioProducerOptions, StdioStreamer,
-};
 use sea_streamer::{
-    Buffer, Consumer, ConsumerMode, ConsumerOptions, Message, Producer, StreamKey, Streamer,
-    StreamerUri,
+    Buffer, Consumer, ConsumerMode, ConsumerOptions, Message, Producer, SeaConnectOptions,
+    SeaConsumer, SeaConsumerOptions, SeaProducer, SeaProducerOptions, SeaStreamer, StreamKey,
+    Streamer, StreamerUri,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -193,7 +209,7 @@ type CrossProcessView = Arc<AsyncRwLock<HashMap<String, HashMap<(String, String)
 /// meta-channel. See module-level docs for the full design.
 pub struct SeaStreamerBroadcastHub {
     local: Arc<InMemoryBroadcastHub>,
-    producer: sea_streamer::stdio::StdioProducer,
+    producer: SeaProducer,
     instance_id: Uuid,
     /// Replicated presence view: merged local + remote members.
     cross_process_view: CrossProcessView,
@@ -285,6 +301,11 @@ impl SeaStreamerBroadcastHub {
     }
 
     /// Internal constructor.
+    ///
+    /// Backend selection is driven by the URI scheme — see the module-level
+    /// "Backends" table. `loopback` is a stdio-only option (other backends
+    /// have native cross-process behaviour); we set it on the stdio sub-options
+    /// unconditionally and let other backends ignore it.
     async fn connect(
         streamer_uri: &str,
         stream_key_str: &str,
@@ -303,19 +324,19 @@ impl SeaStreamerBroadcastHub {
             ))
         })?;
 
-        let mut connect_opts = StdioConnectOptions::default();
-        connect_opts.set_loopback(loopback);
+        let mut connect_opts = SeaConnectOptions::default();
+        connect_opts.set_stdio_connect_options(|opts| {
+            opts.set_loopback(loopback);
+        });
 
-        let streamer = StdioStreamer::connect(uri, connect_opts)
-            .await
-            .map_err(|e| {
-                FrameworkError::internal(format!(
-                    "SeaStreamerBroadcastHub: connect failed: {e}"
-                ))
-            })?;
+        let streamer = SeaStreamer::connect(uri, connect_opts).await.map_err(|e| {
+            FrameworkError::internal(format!(
+                "SeaStreamerBroadcastHub: connect failed: {e}"
+            ))
+        })?;
 
         let producer = streamer
-            .create_producer(stream_key.clone(), StdioProducerOptions::default())
+            .create_producer(stream_key.clone(), SeaProducerOptions::default())
             .await
             .map_err(|e| {
                 FrameworkError::internal(format!(
@@ -326,7 +347,7 @@ impl SeaStreamerBroadcastHub {
         let consumer = streamer
             .create_consumer(
                 std::slice::from_ref(&stream_key),
-                StdioConsumerOptions::new(ConsumerMode::RealTime),
+                SeaConsumerOptions::new(ConsumerMode::RealTime),
             )
             .await
             .map_err(|e| {
@@ -446,7 +467,7 @@ impl SeaStreamerBroadcastHub {
 /// - All other channels → local hub (skipping own instance_id to prevent
 ///   double-delivery for app-data envelopes).
 async fn consumer_pump_task(
-    consumer: sea_streamer::stdio::StdioConsumer,
+    consumer: SeaConsumer,
     local: Arc<InMemoryBroadcastHub>,
     own_id: Uuid,
     cross_view: CrossProcessView,
@@ -542,7 +563,7 @@ async fn apply_presence_event(view: &CrossProcessView, event: PresenceEvent) {
 /// process instances that started after the original `MemberAdded` was
 /// published — so stale TTL pruning doesn't evict live members.
 async fn heartbeat_task(
-    producer: sea_streamer::stdio::StdioProducer,
+    producer: SeaProducer,
     instance_id: String,
     local_members: Arc<AsyncRwLock<HashMap<(String, String), Value>>>,
     interval: std::time::Duration,
@@ -592,7 +613,7 @@ async fn prune_task(view: CrossProcessView, interval: std::time::Duration, ttl: 
 /// function so it can be called from the spawned task without capturing
 /// `self`.
 fn send_presence_via_producer(
-    producer: &sea_streamer::stdio::StdioProducer,
+    producer: &SeaProducer,
     event: &PresenceEvent,
     instance_id_str: &str,
 ) {

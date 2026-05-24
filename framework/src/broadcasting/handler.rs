@@ -10,12 +10,23 @@
 //!
 //! # Security note
 //!
-//! Client-initiated `Publish` frames are gated by per-channel
-//! authorization via `Channel::authorize_publish`. The default
-//! implementation returns `false` (deny), so only channels that
-//! explicitly override the hook to return `true` accept client-side
-//! publishes. Unknown channels always reject. Server-side
-//! `hub.publish()` calls bypass this gate entirely.
+//! Client-initiated `Publish` frames are gated by **two** checks:
+//!
+//! 1. The connection MUST hold an authorized subscription to the
+//!    target channel (i.e. an entry in the per-connection forwarders
+//!    map placed there by a successful `Subscribe`). Publishes from
+//!    connections that never subscribed — or whose subscription was
+//!    rejected — are refused even if `authorize_publish` would have
+//!    returned `true`. This mirrors the Pusher client-event contract
+//!    where client events require an established private/presence
+//!    subscription.
+//! 2. `Channel::authorize_publish` is then consulted on the resolved
+//!    channel. The default implementation returns `false` (deny), so
+//!    only channels that explicitly override the hook accept client
+//!    publishes.
+//!
+//! Unknown channels always reject. Server-side `hub.publish()` calls
+//! bypass both gates entirely (server is already trusted).
 
 use crate::broadcasting::channel::ChannelRegistry;
 use crate::broadcasting::hub::{BroadcastEnvelope, BroadcastHub};
@@ -130,15 +141,27 @@ impl WebSocketHandler for BroadcastingWsHandler {
                             .await?;
                         }
                         Ok(ClientFrame::Publish { channel, event, data }) => {
-                            // Per-channel publish authorization. Default Channel impl
-                            // returns false; channels that explicitly opt in must
-                            // override `authorize_publish`. Fail closed on:
+                            // Two-stage publish authorization. Fail closed on:
+                            //   - Connection never subscribed: no entry in
+                            //     `forwarders` → reject (Pusher client-event
+                            //     contract requires an established subscription)
                             //   - Unknown channel: no impl to consult → reject
                             //   - Channel says no: reject with Error frame
                             //   - Channel says yes: proceed to hub.publish
-                            let allowed = match self.registry.resolve(&channel) {
-                                Some(ch) => ch.authorize_publish(&req, &event, &data).await,
-                                None => false,
+                            let is_subscribed = {
+                                let map = forwarders.lock().await;
+                                map.contains_key(&channel)
+                            };
+
+                            let allowed = if !is_subscribed {
+                                false
+                            } else {
+                                match self.registry.resolve(&channel) {
+                                    Some(ch) => {
+                                        ch.authorize_publish(&req, &event, &data).await
+                                    }
+                                    None => false,
+                                }
                             };
 
                             if !allowed {

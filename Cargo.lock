@@ -6133,6 +6133,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "971ec0f94d12ca48d82042d8b669c67be1527c5b5a44350f28d55b341173feb1"
 dependencies = [
  "futures",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "time",
  "url",

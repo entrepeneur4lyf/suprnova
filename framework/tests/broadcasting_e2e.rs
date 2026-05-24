@@ -353,6 +353,98 @@ async fn client_publish_allowed_when_channel_authorizes() {
     listener.close(None).await.unwrap();
 }
 
+/// Regression: HIGH #207 (ChatGPT audit `broadcasting`). A client
+/// that never subscribed to a channel must not be able to publish
+/// to it, even if `authorize_publish` would have returned `true`
+/// for the event name. Pusher's client-event contract requires an
+/// established subscription first; we mirror it.
+#[tokio::test]
+async fn client_publish_rejected_when_not_subscribed() {
+    let (port, _hub) = spawn_broadcasting_server().await;
+    let url = format!("ws://127.0.0.1:{port}/ws/broadcast");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
+
+    // Note: NO subscribe step. Jump straight to publish on chat.public,
+    // which would have authorized "MessagePosted" if we had subscribed.
+    ws.send(Message::text(
+        serde_json::to_string(&json!({
+            "action": "publish",
+            "channel": "chat.public",
+            "event": "MessagePosted",
+            "data": {"text": "smuggled"}
+        }))
+        .unwrap(),
+    ))
+    .await
+    .unwrap();
+
+    let frame = read_server_frame(&mut ws).await;
+    assert_eq!(frame["action"], "error");
+    assert_eq!(frame["channel"], "chat.public");
+    assert!(
+        frame["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("unauthorized"),
+        "expected 'unauthorized' in reason, got: {:?}",
+        frame["reason"]
+    );
+
+    ws.close(None).await.unwrap();
+}
+
+/// Regression: HIGH #207 (ChatGPT audit `broadcasting`). A client
+/// that has subscribed to one channel must not be able to publish
+/// to a different channel just because it has an active connection.
+/// Each channel's subscription is its own publish gate.
+#[tokio::test]
+async fn client_publish_rejected_when_subscribed_to_different_channel() {
+    let (port, _hub) = spawn_broadcasting_server().await;
+    let url = format!("ws://127.0.0.1:{port}/ws/broadcast");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
+
+    // Subscribe to chat.no_publish (authorize_publish defaults to false anyway,
+    // but that's fine — what we're testing is publish-to-different-channel).
+    ws.send(Message::text(
+        serde_json::to_string(&json!({
+            "action": "subscribe",
+            "channel": "chat.no_publish"
+        }))
+        .unwrap(),
+    ))
+    .await
+    .unwrap();
+    let _ = read_server_frame(&mut ws).await; // subscribed
+
+    // Try to publish to chat.public (which DOES authorize MessagePosted)
+    // from a connection that subscribed to chat.no_publish — must fail.
+    ws.send(Message::text(
+        serde_json::to_string(&json!({
+            "action": "publish",
+            "channel": "chat.public",
+            "event": "MessagePosted",
+            "data": {"text": "cross-channel"}
+        }))
+        .unwrap(),
+    ))
+    .await
+    .unwrap();
+
+    let frame = read_server_frame(&mut ws).await;
+    assert_eq!(frame["action"], "error");
+    assert_eq!(frame["channel"], "chat.public");
+    assert!(
+        frame["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("unauthorized"),
+        "expected 'unauthorized' in reason, got: {:?}",
+        frame["reason"]
+    );
+
+    ws.close(None).await.unwrap();
+}
+
 #[tokio::test]
 async fn client_publish_rejected_when_event_name_disallowed() {
     let (port, _hub) = spawn_broadcasting_server().await;

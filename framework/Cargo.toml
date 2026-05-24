@@ -116,7 +116,7 @@ tempfile = "3"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form", "multipart"] }
 getrandom = "0.4.2"
 tokio-util = { version = "0.7.18", features = ["time"] }
-sea-streamer = { version = "0.5.0", features = ["redis", "stdio", "runtime-tokio"] }
+sea-streamer = { version = "0.5.0", features = ["redis", "stdio", "runtime-tokio", "socket", "json"], default-features = false }
 sea-streamer-redis = { version = "0.5.2", features = ["runtime-tokio"] }
 lettre = { version = "0.11.22", default-features = false, features = ["smtp-transport", "pool", "rustls-tls", "hostname", "builder", "tokio1", "tokio1-rustls"] }
 tera = "1"
