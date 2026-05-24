@@ -90,16 +90,41 @@ impl crate::middleware::Middleware for RequestIdMiddleware {
         let id_str = id.as_str().to_string();
         let id_for_context = id_str.clone();
 
+        // Snapshot the request's query parameters into a `HashMap` so
+        // `Context::query_param` and downstream paginate / cursor code
+        // can read them without re-parsing the URI on every call.
+        //
+        // Audit HIGH #333: prior to this snapshot the middleware used
+        // `ContextStore::default()`, so the in-scope `query` bag was
+        // always empty for real HTTP requests — `Context::query_param`
+        // always returned `None` and Eloquent pagination silently
+        // defaulted to page 1 / no-cursor regardless of `?page=` or
+        // `?cursor=` in the URL.
+        let query_map: std::collections::HashMap<String, String> = request
+            .query()
+            .map(|q| {
+                url::form_urlencoded::parse(q.as_bytes())
+                    .into_owned()
+                    .collect()
+            })
+            .unwrap_or_default();
+
         // Scope both REQUEST_ID and CONTEXT for the rest of the
         // request. The CONTEXT scope seeds `_request_id` so downstream
-        // log emitters / jobs / broadcasting can read the id by name.
+        // log emitters / jobs / broadcasting can read the id by name,
+        // and the query snapshot so `Context::query_param` returns the
+        // real URL's `?key=value` pairs (last-wins on duplicate keys,
+        // matching Laravel semantics).
         let result = crate::context::CONTEXT
-            .scope(crate::context::ContextStore::default(), async move {
-                crate::context::Context::add("_request_id", id_for_context);
-                REQUEST_ID
-                    .scope(id, async move { next(request).await })
-                    .await
-            })
+            .scope(
+                crate::context::ContextStore::with_query(query_map),
+                async move {
+                    crate::context::Context::add("_request_id", id_for_context);
+                    REQUEST_ID
+                        .scope(id, async move { next(request).await })
+                        .await
+                },
+            )
             .await;
 
         // Echo X-Request-Id on both success and error variants.
