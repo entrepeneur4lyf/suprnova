@@ -68,6 +68,22 @@ impl InertiaRegistry {
 
     /// Add or replace a synchronous shared prop. Maps to
     /// `Inertia::share($k, $v)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `value`'s `Serialize` impl returns `Err`. This is a
+    /// programmer error in the value's type — `share_value` is typically
+    /// called from `App` bootstrap (`bootstrap.rs`), so a broken
+    /// `Serialize` impl surfaces at process startup. If called from a
+    /// request handler, the framework's request-level panic-catch
+    /// middleware (`framework/src/middleware/chain.rs`) converts the
+    /// panic to a 500 instead of taking the process down.
+    ///
+    /// For runtime-fallible values use [`share_lazy`] — its resolver
+    /// returns `Result<V, FrameworkError>` and surfaces serialization
+    /// failures as Inertia JSON errors instead of panics.
+    ///
+    /// [`share_lazy`]: Self::share_lazy
     pub fn share_value<V: Serialize>(&self, key: impl Into<String>, value: V) {
         let v = serde_json::to_value(&value)
             .expect("App::inertia_share value must serialize cleanly");
@@ -111,19 +127,46 @@ impl InertiaRegistry {
     }
 
     fn upsert(&self, key: String, prop: Prop) {
-        let mut reg = lock::write(&self.shares).expect("inertia share registry poisoned");
-        if let Some(existing) = reg.iter_mut().find(|e| e.key == key) {
-            existing.prop = prop;
-        } else {
-            reg.push(StaticEntry { key, prop });
+        // Poison policy (Domain 20 audit D20-A): if the registry lock is
+        // poisoned the upsert is skipped and a `tracing::error!` is logged.
+        // The framework's lock helper already returns Result; defeating it
+        // with `.expect(...)` would let a single panic cascade through
+        // every subsequent `App::inertia_share*` call. Read side
+        // (`snapshot_static`/`trait_provider`) already propagates via `?`,
+        // so the asymmetry was visible.
+        match lock::write(&self.shares) {
+            Ok(mut reg) => {
+                if let Some(existing) = reg.iter_mut().find(|e| e.key == key) {
+                    existing.prop = prop;
+                } else {
+                    reg.push(StaticEntry { key, prop });
+                }
+            }
+            Err(_) => {
+                tracing::error!(
+                    %key,
+                    "Inertia share registry lock poisoned; skipping upsert."
+                );
+            }
         }
     }
 
     /// Register the singleton [`InertiaSharedData`] implementation.
     /// Subsequent calls replace any prior registration.
+    ///
+    /// **Poison policy** (Domain 20 audit D20-A): on lock poison the
+    /// registration is skipped and a `tracing::error!` is emitted.
     pub fn register_trait(&self, provider: Arc<dyn InertiaSharedData>) {
-        let mut slot = lock::write(&self.provider).expect("inertia shared trait slot poisoned");
-        *slot = Some(provider);
+        match lock::write(&self.provider) {
+            Ok(mut slot) => {
+                *slot = Some(provider);
+            }
+            Err(_) => {
+                tracing::error!(
+                    "Inertia shared trait slot lock poisoned; skipping registration."
+                );
+            }
+        }
     }
 
     /// Snapshot of the static registry — clones each entry. Cheap because

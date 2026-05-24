@@ -1308,11 +1308,22 @@ fn eager_resolver(value: Value) -> PropResolver {
     })
 }
 
+/// Serialize an eager prop value to `Value`, panicking on `Serialize`
+/// failure.
+///
+/// # Panics
+///
+/// Panics if `value`'s `Serialize` impl returns `Err`. This is a bug
+/// in the value's type — a hand-written custom `Serialize`
+/// implementation returning `Err` is the only path that triggers this.
+///
+/// The panic is caught by the request-level panic-recovery middleware
+/// (`framework/src/middleware/chain.rs`, Domain 2 M1) and converted to
+/// a 500 response, so the process stays up. For runtime-fallible
+/// values use [`InertiaResponse::lazy`] — its resolver returns
+/// `Result<V, FrameworkError>` which surfaces as an Inertia JSON
+/// error envelope instead of a server-level 500.
 fn to_value_or_die<V: Serialize>(value: &V) -> Value {
-    // `serde_json::to_value` only fails when the type's Serialize impl
-    // errors (the rare case — typically a custom impl that returns Err).
-    // For framework consumers this is a bug in their type, so panicking
-    // with a clear message is the right call.
     serde_json::to_value(value)
         .expect("InertiaResponse prop value must serialize cleanly; check the type's Serialize impl")
 }
