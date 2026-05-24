@@ -18,6 +18,10 @@ pub fn run(
     ui::banner();
 
     let project_name = get_project_name(name, no_interaction);
+    if let Err(e) = validate_project_name(&project_name) {
+        ui::error(&e);
+        std::process::exit(1);
+    }
     let package_name = to_snake_case(&project_name);
 
     if api {
@@ -193,6 +197,66 @@ fn get_git_author() -> Option<String> {
 
 fn to_snake_case(s: &str) -> String {
     s.replace('-', "_").to_lowercase()
+}
+
+/// Validate a project name supplied to `suprnova new`.
+///
+/// Domain 22 audit D22-A: `get_project_name` previously returned the
+/// user's raw input unmodified. The value was then used as a path
+/// (`Path::new(project_name)`) under `fs::create_dir_all`. A name
+/// containing `..` or absolute-path components would create
+/// directories outside the working directory. The snake-cased form
+/// is also written into `Cargo.toml` as the crate name, so it has to
+/// satisfy crate-name rules too.
+///
+/// Rejected:
+/// - empty
+/// - longer than 64 characters
+/// - contains a path separator (`/`, `\`) or `..`
+/// - leading dot (hidden directory)
+/// - first character is not an ASCII letter (Cargo crate names must
+///   start with a letter; otherwise downstream `cargo new` would
+///   reject the manifest anyway)
+/// - contains a character that is not ASCII alphanumeric, `-`, or `_`
+fn validate_project_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Project name cannot be empty".to_string());
+    }
+    if name.len() > 64 {
+        return Err(format!(
+            "Project name '{name}' is too long (max 64 characters)"
+        ));
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err(format!(
+            "Project name '{name}' must not contain path separators (/ or \\)"
+        ));
+    }
+    if name.contains("..") {
+        return Err(format!(
+            "Project name '{name}' must not contain '..' (path traversal)"
+        ));
+    }
+    if name.starts_with('.') {
+        return Err(format!(
+            "Project name '{name}' must not start with '.' (hidden directory)"
+        ));
+    }
+    let first = name.chars().next().unwrap_or(' ');
+    if !first.is_ascii_alphabetic() {
+        return Err(format!(
+            "Project name '{name}' must start with an ASCII letter"
+        ));
+    }
+    for c in name.chars() {
+        if !c.is_ascii_alphanumeric() && c != '-' && c != '_' {
+            return Err(format!(
+                "Project name '{name}' contains invalid character '{c}'; \
+                 use ASCII letters, digits, '-', or '_'"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn to_title_case(s: &str) -> String {
@@ -481,4 +545,73 @@ fn create_project(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_project_name;
+
+    #[test]
+    fn accepts_well_formed_names() {
+        for name in ["foo", "my-app", "my_app", "foo123", "Foo", "a"] {
+            assert!(validate_project_name(name).is_ok(), "rejected: {name}");
+        }
+    }
+
+    #[test]
+    fn rejects_empty() {
+        assert!(validate_project_name("").is_err());
+    }
+
+    #[test]
+    fn rejects_path_separators_and_traversal() {
+        for bad in [
+            "../etc",
+            "foo/bar",
+            "foo\\bar",
+            "..",
+            "..foo",
+            "foo/..",
+            ".hidden",
+        ] {
+            assert!(
+                validate_project_name(bad).is_err(),
+                "should reject: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_non_letter_first_char() {
+        for bad in ["1foo", "_foo", "-foo", "9", "/", "."] {
+            assert!(
+                validate_project_name(bad).is_err(),
+                "should reject leading-non-letter: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_disallowed_characters() {
+        for bad in [
+            "foo bar",
+            "foo!bar",
+            "foo@bar",
+            "foo.bar",
+            "foo:bar",
+            "foo;bar",
+            "foo`bar",
+        ] {
+            assert!(
+                validate_project_name(bad).is_err(),
+                "should reject: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_overlong_names() {
+        let long = "a".repeat(65);
+        assert!(validate_project_name(&long).is_err());
+    }
 }
