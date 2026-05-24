@@ -427,6 +427,25 @@ impl BootKeyRing {
 }
 
 #[doc(hidden)]
+// ----------------------------------------------------------------------
+// Test-only key installation hooks.
+//
+// HIGH audit #334: these helpers used to be plain `pub fn` items guarded
+// only by `#[doc(hidden)]`, which is not a real boundary — `doc(hidden)`
+// hides them from rustdoc but does NOT remove them from the binary or
+// from `use suprnova::crypto::*` access. A consumer (or attacker) could
+// install a key before `Server::from_config`, bypassing the APP_KEY
+// validation that the server runs only when `Crypt` is uninitialized.
+//
+// They are now gated behind `cfg(any(test, feature = "testing"))` —
+// when a downstream consumer disables `default-features`, these
+// functions vanish from the binary entirely. The complementary fix in
+// `Server::from_config` (always run APP_KEY validation, not just when
+// `Crypt` is uninitialized) closes the same exposure from a different
+// angle so the hard boundary holds even if a future consumer
+// re-enables the feature.
+// ----------------------------------------------------------------------
+
 /// Test-only helper: install a single key without going through
 /// `OnceLock::set` for the second-and-later test in a suite. Returns
 /// `true` if the key was actually installed, `false` if a ring was
@@ -435,9 +454,9 @@ impl BootKeyRing {
 /// Tests must serialize themselves via a `Mutex<()>` because the global
 /// `CRYPT_RING` is shared.
 ///
-/// **Test-only — do not call from production code.** The double-leading-
-/// underscore name signals "internal test fixture, not API." Marked
-/// `#[doc(hidden)]` to keep it out of public rustdoc.
+/// **Test-only — do not call from production code.** Compiled out when
+/// the `testing` feature is disabled.
+#[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub fn _test_install_key(key: EncryptionKey) -> bool {
     CRYPT_RING
@@ -448,7 +467,6 @@ pub fn _test_install_key(key: EncryptionKey) -> bool {
         .is_ok()
 }
 
-#[doc(hidden)]
 /// Test-only helper: install a key ring (current + previous list)
 /// directly. Same semantics as [`_test_install_key`] but exposes the
 /// rotation surface needed by
@@ -456,6 +474,10 @@ pub fn _test_install_key(key: EncryptionKey) -> bool {
 ///
 /// Returns `true` if the ring was actually installed, `false` if a
 /// ring was already present.
+///
+/// **Test-only — do not call from production code.** Compiled out when
+/// the `testing` feature is disabled.
+#[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub fn _test_install_keyring(
     current: EncryptionKey,
@@ -464,7 +486,6 @@ pub fn _test_install_keyring(
     CRYPT_RING.set(KeyRing { current, previous }).is_ok()
 }
 
-#[doc(hidden)]
 /// Test-only helper: encrypt `plaintext` under an *arbitrary* key
 /// (bypassing the installed ring). Used to mint ciphertext under a key
 /// that isn't the current `APP_KEY` so rotation tests can simulate
@@ -474,6 +495,10 @@ pub fn _test_install_keyring(
 /// format as [`Crypt::encrypt_string`]. The returned string is byte-
 /// for-byte indistinguishable from a normal `Crypt::encrypt_string`
 /// output produced under `key`.
+///
+/// **Test-only — do not call from production code.** Compiled out when
+/// the `testing` feature is disabled.
+#[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub fn _test_encrypt_with(
     key: &EncryptionKey,

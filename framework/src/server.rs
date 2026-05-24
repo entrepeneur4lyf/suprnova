@@ -108,21 +108,37 @@ impl Server {
         // boot decision covers the whole ring; malformed previous-key
         // entries fail boot the same way a malformed `APP_KEY` does.
         //
-        // The `is_initialized()` guard makes this idempotent in tests
-        // (and embedders that call `from_config` more than once). On
-        // re-entry, we keep whatever ring is already installed.
-        if !crate::crypto::Crypt::is_initialized() {
-            let environment = Config::get::<crate::config::AppConfig>()
-                .map(|c| c.environment)
-                .unwrap_or_else(crate::config::Environment::detect);
-            let app_key = std::env::var("APP_KEY").ok();
-            let app_key_previous = std::env::var("APP_KEY_PREVIOUS").ok();
-            let boot_ring = crate::crypto::resolve_boot_keyring(
-                &environment,
-                app_key.as_deref(),
-                app_key_previous.as_deref(),
-            )?;
+        // Validate `APP_KEY` (+ `APP_KEY_PREVIOUS`) on EVERY boot, not just
+        // when `Crypt` is uninitialized.
+        //
+        // Audit HIGH #334: the previous `if !Crypt::is_initialized()` gate
+        // meant that any earlier key install (test hooks, embedders that
+        // boot the server more than once, etc.) skipped the validation
+        // entirely on subsequent boots — a missing/malformed APP_KEY in
+        // production would slip through if any code path had pre-installed
+        // a transient or test key. We now resolve the boot ring on every
+        // call, so a production boot fails closed regardless of what may
+        // have been installed earlier in the process.
+        //
+        // `init_with_keyring` is itself idempotent (no-op + `warn!` on
+        // second call) so installing again after validation is safe; what
+        // we get back is the freshly-validated key, even though the
+        // installed ring still wins (sealed for the process lifetime).
+        let environment = Config::get::<crate::config::AppConfig>()
+            .map(|c| c.environment)
+            .unwrap_or_else(crate::config::Environment::detect);
+        let app_key = std::env::var("APP_KEY").ok();
+        let app_key_previous = std::env::var("APP_KEY_PREVIOUS").ok();
+        let boot_ring = crate::crypto::resolve_boot_keyring(
+            &environment,
+            app_key.as_deref(),
+            app_key_previous.as_deref(),
+        )?;
 
+        // Only emit the dev-key / rotation-active operator hints on the
+        // FIRST boot — repeated emissions on idempotent re-boot are noise.
+        let first_boot = !crate::crypto::Crypt::is_initialized();
+        if first_boot {
             if boot_ring.is_current_generated() {
                 tracing::warn!(
                     environment = %environment,
@@ -133,9 +149,6 @@ impl Server {
                 );
             }
             if !boot_ring.previous.is_empty() {
-                // Loud (info-level) confirmation that APP_KEY_PREVIOUS
-                // is being honoured. Operators rotating keys want to
-                // see this line in startup logs.
                 tracing::info!(
                     previous_key_count = boot_ring.previous.len(),
                     "APP_KEY_PREVIOUS active — decrypt will fall back to {n} previous \
