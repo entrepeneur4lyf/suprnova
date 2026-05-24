@@ -1,5 +1,6 @@
 //! Create the `remember_tokens` table consumed by
-//! `suprnova::auth::remember` (codex review finding #13).
+//! `suprnova::auth::remember` (codex review finding #13; selector
+//! column added per ChatGPT audit `auth` HIGH #1 + #2).
 //!
 //! Schema mirrors the SeaORM entity defined in
 //! `framework/src/auth/remember.rs::entity::Model`:
@@ -8,18 +9,24 @@
 //! - `user_id` VARCHAR not null — opaque string id (post-Phase-3
 //!   String-everywhere refactor; no FK on purpose, so the table is
 //!   usable against any user store)
-//! - `token_hash` VARCHAR not null — bcrypt hash of the plaintext token
+//! - `selector` VARCHAR not null UNIQUE — 22-char URL-safe base64
+//!   lookup key for O(1) indexed verification (replaces the previous
+//!   full-scan bcrypt design)
+//! - `token_hash` VARCHAR not null — bcrypt hash of the verifier
+//!   plaintext (the verifier half of the composite cookie token)
 //! - `expires_at` TIMESTAMP not null — token TTL boundary
 //! - `created_at` TIMESTAMP not null
 //! - `last_used_at` TIMESTAMP null
 //!
-//! Two indexes:
+//! Three indexes:
 //!
 //! - `idx_remember_tokens_user_id` — revoke-by-user is a DELETE with
 //!   `WHERE user_id = ?`; index makes it O(matches) instead of O(table).
-//! - `idx_remember_tokens_expires_at` — verify-and-rotate filters
-//!   `WHERE expires_at > now()`; `prune_expired` filters
-//!   `WHERE expires_at <= now()`. Both want this index.
+//! - `idx_remember_tokens_expires_at` — `prune_expired` filters
+//!   `WHERE expires_at <= now()`.
+//! - `idx_remember_tokens_selector` — UNIQUE; verification does
+//!   `SELECT ... WHERE selector = ? LIMIT 1`. The UNIQUE constraint
+//!   also enforces selector collision impossibility at the DB level.
 
 use sea_orm_migration::prelude::*;
 
@@ -42,6 +49,7 @@ impl MigrationTrait for Migration {
                             .primary_key(),
                     )
                     .col(ColumnDef::new(RememberTokens::UserId).string().not_null())
+                    .col(ColumnDef::new(RememberTokens::Selector).string().not_null())
                     .col(ColumnDef::new(RememberTokens::TokenHash).string().not_null())
                     .col(ColumnDef::new(RememberTokens::ExpiresAt).timestamp().not_null())
                     .col(
@@ -73,6 +81,17 @@ impl MigrationTrait for Migration {
                     .col(RememberTokens::ExpiresAt)
                     .to_owned(),
             )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_remember_tokens_selector")
+                    .table(RememberTokens::Table)
+                    .col(RememberTokens::Selector)
+                    .unique()
+                    .to_owned(),
+            )
             .await
     }
 
@@ -89,6 +108,7 @@ enum RememberTokens {
     Table,
     Id,
     UserId,
+    Selector,
     TokenHash,
     ExpiresAt,
     CreatedAt,

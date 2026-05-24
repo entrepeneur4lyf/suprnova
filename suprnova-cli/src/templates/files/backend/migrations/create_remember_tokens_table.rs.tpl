@@ -19,6 +19,7 @@ impl MigrationTrait for Migration {
                             .primary_key(),
                     )
                     .col(ColumnDef::new(RememberTokens::UserId).string().not_null())
+                    .col(ColumnDef::new(RememberTokens::Selector).string().not_null())
                     .col(ColumnDef::new(RememberTokens::TokenHash).string().not_null())
                     .col(ColumnDef::new(RememberTokens::ExpiresAt).timestamp().not_null())
                     .col(
@@ -44,7 +45,6 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // verify_and_rotate filters `expires_at > now()` and
         // prune_expired filters `expires_at <= now()`.
         manager
             .create_index(
@@ -52,6 +52,20 @@ impl MigrationTrait for Migration {
                     .name("idx_remember_tokens_expires_at")
                     .table(RememberTokens::Table)
                     .col(RememberTokens::ExpiresAt)
+                    .to_owned(),
+            )
+            .await?;
+
+        // verify_and_rotate looks up by selector — UNIQUE + indexed
+        // gives O(1) lookup and enforces selector collision impossibility
+        // at the DB level.
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_remember_tokens_selector")
+                    .table(RememberTokens::Table)
+                    .col(RememberTokens::Selector)
+                    .unique()
                     .to_owned(),
             )
             .await
@@ -69,6 +83,7 @@ enum RememberTokens {
     Table,
     Id,
     UserId,
+    Selector,
     TokenHash,
     ExpiresAt,
     CreatedAt,

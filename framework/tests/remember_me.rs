@@ -177,6 +177,7 @@ impl MigrationTrait for CreateRememberTokensTable {
                             .primary_key(),
                     )
                     .col(ColumnDef::new(RememberTokens::UserId).string().not_null())
+                    .col(ColumnDef::new(RememberTokens::Selector).string().not_null())
                     .col(ColumnDef::new(RememberTokens::TokenHash).string().not_null())
                     .col(ColumnDef::new(RememberTokens::ExpiresAt).timestamp().not_null())
                     .col(
@@ -186,6 +187,17 @@ impl MigrationTrait for CreateRememberTokensTable {
                             .default(Expr::current_timestamp()),
                     )
                     .col(ColumnDef::new(RememberTokens::LastUsedAt).timestamp().null())
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_test_remember_tokens_selector")
+                    .table(RememberTokens::Table)
+                    .col(RememberTokens::Selector)
+                    .unique()
                     .to_owned(),
             )
             .await
@@ -203,6 +215,7 @@ enum RememberTokens {
     Table,
     Id,
     UserId,
+    Selector,
     TokenHash,
     ExpiresAt,
     CreatedAt,
@@ -261,6 +274,7 @@ fn decode_remember_cookie(cookies: &[Cookie]) -> String {
 /// future-expiring rows.
 async fn insert_raw_token(
     user_id: &str,
+    selector: &str,
     token_hash: &str,
     expires_at: chrono::DateTime<chrono::Utc>,
 ) {
@@ -270,6 +284,7 @@ async fn insert_raw_token(
     let now = chrono::Utc::now();
     let model = suprnova::auth::remember::entity::ActiveModel {
         user_id: Set(user_id.to_string()),
+        selector: Set(selector.to_string()),
         token_hash: Set(token_hash.to_string()),
         expires_at: Set(expires_at.naive_utc()),
         created_at: Set(now.naive_utc()),
@@ -304,9 +319,16 @@ fn login_remember_issues_cookie_and_persists_token() {
         let count = count_tokens_for(user_id).await;
         assert_eq!(count, 1, "exactly one remember_tokens row expected");
 
-        // Cookie queued and decrypts to a 43-char base64 plaintext.
+        // Cookie queued and decrypts to a composite "selector.verifier"
+        // plaintext (22-char selector + '.' + 43-char verifier = 66
+        // chars total).
         let plaintext = decode_remember_cookie(&pending);
-        assert_eq!(plaintext.len(), 43, "32-byte token -> 43 base64 chars");
+        assert_eq!(plaintext.len(), 66, "selector.verifier composite token expected");
+        let (sel, ver) = plaintext
+            .split_once('.')
+            .expect("composite token must contain a '.' separator");
+        assert_eq!(sel.len(), 22, "selector is 22 base64 chars (16 bytes)");
+        assert_eq!(ver.len(), 43, "verifier is 43 base64 chars (32 bytes)");
 
         let cookie = pending
             .iter()
@@ -467,17 +489,19 @@ fn expired_token_rejected_and_cleaned_up_by_prune() {
         let user_id = "test-user-expired";
         let ttl_minutes: i64 = 60 * 24;
 
-        // Generate a real token + hash, but insert with expires_at in
-        // the past. Bypasses `issue` (which always uses now + TTL).
-        let (plaintext, hash) =
+        // Generate a real (selector, verifier, hash) triple, but
+        // insert with expires_at in the past. Bypasses `issue` (which
+        // always uses now + TTL).
+        let (selector, verifier, hash) =
             suprnova::auth::remember::generate_token().expect("generate token");
+        let composite = format!("{selector}.{verifier}");
         let past_expiry = chrono::Utc::now() - chrono::Duration::seconds(60);
-        insert_raw_token(user_id, &hash, past_expiry).await;
+        insert_raw_token(user_id, &selector, &hash, past_expiry).await;
         assert_eq!(count_tokens_for(user_id).await, 1);
 
         // Verify rejects expired rows up front (the WHERE expires_at > now
         // filter excludes them — they never reach the bcrypt compare).
-        let result = suprnova::auth::remember::verify_and_rotate(&plaintext, ttl_minutes)
+        let result = suprnova::auth::remember::verify_and_rotate(&composite, ttl_minutes)
             .await
             .expect("verify expired");
         assert!(result.is_none(), "expired token must not authenticate");
@@ -516,17 +540,77 @@ fn forged_cookie_does_not_authenticate() {
         let before = count_tokens_for(user_id).await;
         assert_eq!(before, 1);
 
-        // A forged plaintext (43 chars to match the real shape, but
-        // with a deterministic value that cannot collide with any
-        // bcrypt-hashed real token).
-        let forged = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF";
+        // A forged composite "<selector>.<verifier>" whose selector
+        // cannot collide with any issued one (random uppercase F's are
+        // not produced by URL_SAFE_NO_PAD base64).
+        let forged = "FFFFFFFFFFFFFFFFFFFFFF.FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF";
         let result = suprnova::auth::remember::verify_and_rotate(forged, ttl_minutes)
             .await
             .expect("verify forged");
         assert!(result.is_none(), "forged token must not authenticate");
 
+        // A malformed token (no '.' separator) must also reject without
+        // any DB hit or bcrypt cost.
+        let malformed = "noseparatorhere";
+        let result = suprnova::auth::remember::verify_and_rotate(malformed, ttl_minutes)
+            .await
+            .expect("verify malformed");
+        assert!(result.is_none(), "malformed token must not authenticate");
+
         // Row count unchanged — verify on a non-match must not mutate.
         assert_eq!(count_tokens_for(user_id).await, before);
+    });
+}
+
+/// Test 6b (concurrency invariant): two concurrent verifications of
+/// the SAME captured token must result in exactly one successful
+/// rotation and one None. This proves the audit-fix is real — the
+/// previous design could mint two replacement tokens for one captured
+/// cookie (ChatGPT audit `auth` HIGH #1: "remember-me token rotation
+/// is not single-use under concurrency").
+#[test]
+fn verify_and_rotate_is_single_use_under_concurrency() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let user_id = "test-user-race";
+        let ttl_minutes: i64 = 60 * 24;
+
+        // Issue one token; capture the plaintext that both racers will
+        // attempt to verify simultaneously.
+        let captured = suprnova::auth::remember::issue(user_id, ttl_minutes)
+            .await
+            .expect("issue captured");
+        assert_eq!(count_tokens_for(user_id).await, 1);
+
+        // Race: two concurrent verify_and_rotate calls against the same
+        // plaintext. Whichever wins the DELETE rotates; the loser must
+        // see rows_affected == 0 and return None — NOT mint a second
+        // replacement.
+        let c1 = captured.clone();
+        let c2 = captured.clone();
+        let (a, b) = tokio::join!(
+            suprnova::auth::remember::verify_and_rotate(&c1, ttl_minutes),
+            suprnova::auth::remember::verify_and_rotate(&c2, ttl_minutes),
+        );
+        let r1 = a.expect("racer 1 db ok");
+        let r2 = b.expect("racer 2 db ok");
+
+        // Exactly one Some, exactly one None.
+        let success_count = [r1.is_some(), r2.is_some()].iter().filter(|x| **x).count();
+        assert_eq!(
+            success_count, 1,
+            "exactly one racer must succeed; the other must return None — got r1={r1:?} r2={r2:?}"
+        );
+
+        // After the race, exactly ONE row exists for the user: the
+        // winner's freshly-issued replacement. If the loser had also
+        // minted a replacement (the pre-fix bug), we'd see 2 rows.
+        assert_eq!(
+            count_tokens_for(user_id).await,
+            1,
+            "single-use rotation: exactly one row survives the race"
+        );
     });
 }
 
