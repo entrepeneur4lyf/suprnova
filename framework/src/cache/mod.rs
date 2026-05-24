@@ -1,12 +1,16 @@
 //! Cache module for suprnova framework
 //!
-//! Provides a Redis-backed cache with automatic in-memory fallback.
+//! Provides a unified facade over an in-memory store and a Redis store.
+//! The backend is selected explicitly via the `CACHE_DRIVER` env var
+//! (`memory` — default — or `redis`); a misconfigured or unreachable
+//! Redis fails boot rather than silently downgrading to a per-process
+//! in-memory cache (HIGH audit finding #251).
 //!
 //! # Quick Start
 //!
-//! The cache is automatically initialized when the server starts. If Redis is
-//! available (via `REDIS_URL`), it uses Redis. Otherwise, it falls back to
-//! an in-memory cache.
+//! The cache is automatically initialized when the server starts. The
+//! driver defaults to in-memory; set `CACHE_DRIVER=redis` to bootstrap
+//! against `REDIS_URL`.
 //!
 //! ```rust,ignore
 //! use suprnova::Cache;
@@ -35,7 +39,7 @@ pub mod memory;
 pub mod redis;
 pub mod store;
 
-pub use config::{CacheConfig, CacheConfigBuilder};
+pub use config::{CacheConfig, CacheConfigBuilder, CacheDriver};
 pub use memory::InMemoryCache;
 pub use redis::RedisCache;
 pub use store::CacheStore;
@@ -75,26 +79,46 @@ use std::time::Duration;
 pub struct Cache;
 
 impl Cache {
-    /// Bootstrap the cache system
+    /// Bootstrap the cache system.
     ///
-    /// Tries to connect to Redis first. If Redis is unavailable,
-    /// falls back to in-memory cache automatically.
+    /// Reads `CacheConfig` from the configured `Config` (or constructs
+    /// it from env). The bootstrap dispatches on `CacheConfig::driver`:
     ///
-    /// This is called automatically by `Server::run()`.
-    pub(crate) async fn bootstrap() {
-        let config = Config::get::<CacheConfig>().unwrap_or_default();
+    /// - [`CacheDriver::Memory`] — bind an `InMemoryCache` derived from
+    ///   the prefix and default TTL. Always succeeds.
+    /// - [`CacheDriver::Redis`] — connect to `REDIS_URL` and bind the
+    ///   resulting `RedisCache`. **Fails closed** if the URL is
+    ///   unreachable so a misconfigured production deployment never
+    ///   silently downgrades to a per-process cache (HIGH audit
+    ///   finding #251).
+    ///
+    /// Called automatically by `Server::run()` and `App` boot helpers.
+    pub(crate) async fn bootstrap() -> Result<(), FrameworkError> {
+        let config = match Config::get::<CacheConfig>() {
+            Some(c) => c,
+            None => CacheConfig::from_env()?,
+        };
 
-        // Try Redis first
-        match RedisCache::connect(&config).await {
-            Ok(redis_cache) => {
-                App::bind::<dyn CacheStore>(Arc::new(redis_cache));
-            }
-            Err(_) => {
-                // Fallback to in-memory
-                let memory_cache = InMemoryCache::with_prefix(&config.prefix);
+        match config.driver {
+            CacheDriver::Memory => {
+                let memory_cache = InMemoryCache::with_config(&config);
                 App::bind::<dyn CacheStore>(Arc::new(memory_cache));
             }
+            CacheDriver::Redis => {
+                // No silent downgrade — surface the connection failure
+                // so operators notice misconfiguration at boot.
+                let redis_cache = RedisCache::connect(&config).await.map_err(|e| {
+                    FrameworkError::internal(format!(
+                        "Cache::bootstrap: CACHE_DRIVER=redis but Redis is unreachable at \
+                         {url}: {e}. Fix the URL or set CACHE_DRIVER=memory to use the \
+                         in-memory backend explicitly.",
+                        url = config.url,
+                    ))
+                })?;
+                App::bind::<dyn CacheStore>(Arc::new(redis_cache));
+            }
         }
+        Ok(())
     }
 
     /// Get the underlying cache store
@@ -133,9 +157,13 @@ impl Cache {
         }
     }
 
-    /// Store an item in the cache
+    /// Store an item in the cache.
     ///
-    /// If `ttl` is `None`, uses the default TTL from config (or no expiration if 0).
+    /// If `ttl` is `None`, uses the default TTL from config (or no
+    /// expiration if the default is 0). The default-TTL resolution
+    /// happens at the facade layer — both in-memory and Redis backends
+    /// honour `None` literally at the store level (HIGH audit finding
+    /// #252 + parity finding for the in-memory divergence).
     ///
     /// # Example
     ///
@@ -151,10 +179,16 @@ impl Cache {
         let json = serde_json::to_string(value).map_err(|e| {
             FrameworkError::internal(format!("Cache serialize error: {}", e))
         })?;
-        store.put_raw(key, &json, ttl).await
+        let effective_ttl = ttl.or_else(|| store.default_ttl());
+        store.put_raw(key, &json, effective_ttl).await
     }
 
-    /// Store an item forever (no expiration)
+    /// Store an item forever (no expiration).
+    ///
+    /// Bypasses the configured default TTL entirely — even if
+    /// `CACHE_DEFAULT_TTL` is set, the value will never expire. This
+    /// path is symmetric across in-memory and Redis backends (HIGH
+    /// audit finding #252).
     ///
     /// # Example
     ///
@@ -162,7 +196,14 @@ impl Cache {
     /// Cache::forever("config:settings", &settings).await?;
     /// ```
     pub async fn forever<T: Serialize>(key: &str, value: &T) -> Result<(), FrameworkError> {
-        Self::put(key, value, None).await
+        let store = Self::store()?;
+        let json = serde_json::to_string(value).map_err(|e| {
+            FrameworkError::internal(format!("Cache serialize error: {}", e))
+        })?;
+        // Pass `None` literally so the store writes without any TTL.
+        // Do NOT delegate to `Cache::put` — that would resolve the
+        // facade default and make forever non-forever.
+        store.put_raw(key, &json, None).await
     }
 
     /// Check if a key exists in the cache

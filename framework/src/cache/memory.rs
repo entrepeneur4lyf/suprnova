@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
+use super::config::CacheConfig;
 use super::store::CacheStore;
 use crate::error::FrameworkError;
 
@@ -42,6 +43,10 @@ pub struct InMemoryCache {
     store: RwLock<HashMap<String, CacheEntry>>,
     tag_index: RwLock<HashMap<String, HashSet<String>>>,
     prefix: String,
+    /// Default TTL applied by the `Cache` facade when callers pass `None`
+    /// to `put` / `tags_put`. `Cache::forever` and direct `put_raw(None)`
+    /// calls bypass this. `None` means no facade-level default.
+    default_ttl: Option<Duration>,
 }
 
 impl InMemoryCache {
@@ -51,6 +56,7 @@ impl InMemoryCache {
             store: RwLock::new(HashMap::new()),
             tag_index: RwLock::new(HashMap::new()),
             prefix: "suprnova_cache:".to_string(),
+            default_ttl: None,
         }
     }
 
@@ -60,6 +66,24 @@ impl InMemoryCache {
             store: RwLock::new(HashMap::new()),
             tag_index: RwLock::new(HashMap::new()),
             prefix: prefix.into(),
+            default_ttl: None,
+        }
+    }
+
+    /// Create from a `CacheConfig` — picks up both the prefix and the
+    /// configured `default_ttl` so that the facade-level default TTL
+    /// applies uniformly across in-memory and Redis backends.
+    pub fn with_config(config: &CacheConfig) -> Self {
+        let default_ttl = if config.default_ttl > 0 {
+            Some(Duration::from_secs(config.default_ttl))
+        } else {
+            None
+        };
+        Self {
+            store: RwLock::new(HashMap::new()),
+            tag_index: RwLock::new(HashMap::new()),
+            prefix: config.prefix.clone(),
+            default_ttl,
         }
     }
 
@@ -76,6 +100,10 @@ impl Default for InMemoryCache {
 
 #[async_trait]
 impl CacheStore for InMemoryCache {
+    fn default_ttl(&self) -> Option<Duration> {
+        self.default_ttl
+    }
+
     async fn get_raw(&self, key: &str) -> Result<Option<String>, FrameworkError> {
         let key = self.prefixed_key(key);
 

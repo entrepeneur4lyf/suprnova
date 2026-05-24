@@ -228,8 +228,10 @@ impl Server {
         // Register all #[policy] gates collected via inventory::submit!
         crate::authorization::init_policies();
 
-        // Bootstrap cache (Redis with in-memory fallback)
-        Cache::bootstrap().await;
+        // Bootstrap cache — picks in-memory (default) or Redis based on
+        // `CACHE_DRIVER`. Redis bootstrap fails closed on connect error;
+        // no silent downgrade. See `Cache::bootstrap` for the contract.
+        Cache::bootstrap().await?;
 
         // Bootstrap queue and rate-limit drivers from env vars.
         // Defaults to in-memory when QUEUE_DRIVER / RATE_LIMIT_DRIVER are unset.

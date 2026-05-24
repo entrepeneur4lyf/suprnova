@@ -1,16 +1,16 @@
 ---
 title: "Cache"
-description: "Redis-backed caching with automatic in-memory fallback"
+description: "Laravel-inspired cache facade with explicit memory or Redis backend selection"
 icon: "database"
 ---
 
 # Cache
 
-suprnova provides a Laravel-inspired Cache facade for storing and retrieving data with optional TTL (time-to-live) expiration. The cache automatically uses Redis when available, falling back to an in-memory cache when Redis is unavailable.
+suprnova provides a Laravel-inspired Cache facade for storing and retrieving data with optional TTL (time-to-live) expiration. The backend — in-memory or Redis — is selected explicitly at boot via `CACHE_DRIVER`.
 
 ## Overview
 
-The cache system is **automatically initialized** when your server starts - no manual setup required. It tries to connect to Redis first, and if Redis isn't available, it seamlessly falls back to an in-memory cache.
+The cache system is **automatically initialized** when your server starts. The driver defaults to `memory` so single-process dev loops work without external dependencies. Production deployments set `CACHE_DRIVER=redis` and provide a reachable `REDIS_URL`; a misconfigured Redis fails boot rather than silently downgrading to per-process memory.
 
 ## Quick Start
 
@@ -39,17 +39,27 @@ The cache uses environment variables for configuration. All are optional with se
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `REDIS_URL` | Redis connection URL | `redis://127.0.0.1:6379` |
+| `CACHE_DRIVER` | Backend to bootstrap: `memory` or `redis` | `memory` |
+| `REDIS_URL` | Redis connection URL (consulted only when `CACHE_DRIVER=redis`) | `redis://127.0.0.1:6379` |
 | `REDIS_PREFIX` | Prefix for all cache keys | `suprnova_cache:` |
-| `CACHE_DEFAULT_TTL` | Default TTL in seconds (0 = no expiration) | `3600` |
+| `CACHE_DEFAULT_TTL` | Default TTL in seconds for `Cache::put(None)` (0 = no default; `Cache::forever` always bypasses this) | `3600` |
 
 ### Example `.env`
 
 ```env
+CACHE_DRIVER=redis
 REDIS_URL=redis://localhost:6379
 REDIS_PREFIX=myapp:cache:
 CACHE_DEFAULT_TTL=7200
 ```
+
+### Fail-closed Redis bootstrap
+
+When `CACHE_DRIVER=redis`, an unreachable Redis URL fails boot with a descriptive error — **there is no silent downgrade to in-memory**. This is intentional: silent downgrade would change tag, lock, and cross-process semantics in production without any visible signal. Set `CACHE_DRIVER=memory` (or unset it) to use the in-memory backend explicitly.
+
+### `Cache::forever` is forever — even with a default TTL
+
+`Cache::forever` and `Cache::remember_forever` bypass `CACHE_DEFAULT_TTL` entirely; the value never expires, regardless of how the facade-level default is configured. `Cache::put(key, value, None)` does apply the default. The two store backends (in-memory and Redis) honour `None` ttl literally at the store boundary, so this contract holds uniformly across both.
 
 ## Basic Operations
 
@@ -186,11 +196,9 @@ let cached: Option<UserProfile> = Cache::get("profile:1").await?;
 | Shared across processes | Yes | No |
 | TTL support | Yes | Yes |
 | Atomic operations | Yes | Yes |
-| Default | When `REDIS_URL` is accessible | Fallback |
+| Selected via | `CACHE_DRIVER=redis` | `CACHE_DRIVER=memory` (default) |
 
-The framework automatically selects the appropriate backend:
-- **Redis**: When `REDIS_URL` environment variable is set and Redis is accessible
-- **In-Memory**: When Redis is not available (development, testing, or Redis failure)
+The framework selects the backend from the `CACHE_DRIVER` env var. There is no implicit fallback — production deployments that mean Redis must say so explicitly. The default is `memory` because most dev loops run in a single process and shouldn't be forced to stand up Redis to get a working cache.
 
 ## Best Practices
 

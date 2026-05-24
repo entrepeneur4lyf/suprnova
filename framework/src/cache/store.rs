@@ -11,18 +11,38 @@ use crate::error::FrameworkError;
 ///
 /// This trait uses JSON strings for values to enable dynamic typing.
 /// The `Cache` facade handles serialization/deserialization.
+///
+/// # TTL contract
+///
+/// All write methods that take an `Option<Duration>` interpret `None`
+/// as **no expiration** (literal forever). Defaulting `None` to a
+/// configured TTL is the facade's responsibility, not the store's —
+/// otherwise `Cache::forever` would not be forever on backends that
+/// substitute a default. See `Cache::forever` for the call path that
+/// bypasses any facade-level default.
 #[async_trait]
 pub trait CacheStore: Send + Sync {
     /// Retrieve a raw JSON value from the cache by key
     async fn get_raw(&self, key: &str) -> Result<Option<String>, FrameworkError>;
 
-    /// Store a raw JSON value in the cache
+    /// Store a raw JSON value in the cache.
+    ///
+    /// `None` ttl means **no expiration**. Callers that want to apply a
+    /// configured default TTL must resolve it before calling this method.
     async fn put_raw(
         &self,
         key: &str,
         value: &str,
         ttl: Option<Duration>,
     ) -> Result<(), FrameworkError>;
+
+    /// The default TTL configured for `Cache::put` / `Cache::tags_put`
+    /// when callers pass `None`. The facade reads this to resolve its
+    /// own default; the store itself never substitutes it. `None` means
+    /// no configured default (writes with `None` truly never expire).
+    fn default_ttl(&self) -> Option<Duration> {
+        None
+    }
 
     /// Check if a key exists in the cache
     async fn has(&self, key: &str) -> Result<bool, FrameworkError>;
@@ -45,6 +65,9 @@ pub trait CacheStore: Send + Sync {
 
     /// Store a tagged value. The tag index is updated on every write —
     /// flushing a tag deletes every key associated with that tag.
+    ///
+    /// `None` ttl means **no expiration**; the facade resolves any
+    /// configured default before calling this method.
     async fn tagged_put_raw(
         &self,
         tags: &[&str],

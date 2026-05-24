@@ -476,7 +476,7 @@ where
     /// of this helper).
     async fn bootstrap_runtime_drivers(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        crate::cache::Cache::bootstrap().await;
+        crate::cache::Cache::bootstrap().await?;
         crate::queue::bootstrap_from_env().await?;
         crate::rate_limit::bootstrap_from_env().await?;
         crate::mail::boot::bootstrap_from_env()?;

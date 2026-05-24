@@ -68,9 +68,11 @@ impl CacheStore for RedisCache {
         let mut conn = self.conn.clone();
         let key = self.prefixed_key(key);
 
-        let effective_ttl = ttl.or(self.default_ttl);
-
-        if let Some(duration) = effective_ttl {
+        // `None` ttl means **no expiration** per the CacheStore contract.
+        // The facade resolves any configured default before calling this
+        // method — otherwise `Cache::forever` would not be forever on
+        // Redis (HIGH audit finding #252).
+        if let Some(duration) = ttl {
             conn.set_ex::<_, _, ()>(&key, value, duration.as_secs())
                 .await
                 .map_err(|e| FrameworkError::internal(format!("Cache set error: {}", e)))?;
@@ -81,6 +83,10 @@ impl CacheStore for RedisCache {
         }
 
         Ok(())
+    }
+
+    fn default_ttl(&self) -> Option<Duration> {
+        self.default_ttl
     }
 
     async fn has(&self, key: &str) -> Result<bool, FrameworkError> {
@@ -160,7 +166,8 @@ impl CacheStore for RedisCache {
 
         let mut pipe = redis::pipe();
         pipe.atomic();
-        if let Some(d) = ttl.or(self.default_ttl) {
+        // `None` ttl honoured literally — see put_raw for rationale.
+        if let Some(d) = ttl {
             pipe.cmd("SET")
                 .arg(&pkey)
                 .arg(value)
