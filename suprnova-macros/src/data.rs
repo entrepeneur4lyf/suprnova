@@ -499,8 +499,17 @@ fn build_form_request(
     }
 
     // At least one field is injected from a route param: generate a custom
-    // `extract` that snapshots params, merges them (path WINS) into the body
-    // map, then deserializes + validates the merged map.
+    // `extract` that runs the FULL FormRequest lifecycle (Precognition
+    // detection, content-type-aware body parsing honoring max_body_bytes,
+    // after_validation cross-field hook) with one extra step — route-param
+    // injection into the parsed body map before deserialization, with path
+    // params winning (IDOR protection).
+    //
+    // Audit HIGH #336: prior to this, the route-param branch read
+    // `body_bytes()` without honoring `max_body_bytes`, never parsed
+    // form-urlencoded bodies, didn't handle Precognition, and skipped the
+    // `after_validation` cross-field hook. Adding a single route-param
+    // field silently changed the request semantics for the whole DTO.
     quote! {
         #[::suprnova::__async_trait::async_trait]
         impl #impl_generics ::suprnova::http::FormRequest for #struct_name #ty_generics #where_clause {
@@ -513,37 +522,143 @@ fn build_form_request(
                     return Err(::suprnova::FrameworkError::Unauthorized);
                 }
 
-                // Snapshot route params BEFORE consuming the request with body_bytes().
+                // Snapshot route params BEFORE consuming the request body.
                 let route_snapshot: ::std::collections::HashMap<String, String> =
                     req.all_route_params();
 
-                // Collect and parse body.
-                let (_, body_bytes) = req.body_bytes().await?;
-                let body: ::suprnova::serde_json::Value =
-                    if body_bytes.is_empty() {
-                        ::suprnova::serde_json::Value::Object(
-                            ::suprnova::serde_json::Map::new()
-                        )
-                    } else {
-                        ::suprnova::serde_json::from_slice(&body_bytes)
-                            .map_err(|e| ::suprnova::FrameworkError::bad_request(e.to_string()))?
-                    };
+                // --- Precognition detection (mirrors default FormRequest::extract) ---
+                let is_precognition = req
+                    .header("Precognition")
+                    .map(|v| v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                let validate_only: Vec<String> = req
+                    .header("Precognition-Validate-Only")
+                    .map(|raw| {
+                        raw.split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                // --- Content-type-aware body parsing with per-struct cap ---
+                let content_type = req.content_type().map(|s| s.to_string());
+                let (_, body_bytes) = req
+                    .body_bytes_with_cap(Self::max_body_bytes())
+                    .await?;
+
                 let mut map: ::suprnova::serde_json::Map<String, ::suprnova::serde_json::Value> =
-                    body.as_object().cloned().unwrap_or_default();
+                    if body_bytes.is_empty() {
+                        ::suprnova::serde_json::Map::new()
+                    } else {
+                        match content_type.as_deref() {
+                            ::core::option::Option::Some(ct)
+                                if ct.starts_with("application/x-www-form-urlencoded") =>
+                            {
+                                // Form-urlencoded: flatten pairs into a JSON object
+                                // (last value wins on duplicate keys, matching Laravel).
+                                let mut obj = ::suprnova::serde_json::Map::new();
+                                for (k, v) in ::url::form_urlencoded::parse(&body_bytes) {
+                                    obj.insert(
+                                        k.into_owned(),
+                                        ::suprnova::serde_json::Value::String(v.into_owned()),
+                                    );
+                                }
+                                obj
+                            }
+                            _ => {
+                                // JSON: must be an object. Reject non-object payloads
+                                // explicitly rather than silently treating them as `{}`.
+                                let parsed: ::suprnova::serde_json::Value =
+                                    ::suprnova::serde_json::from_slice(&body_bytes)
+                                        .map_err(|e| ::suprnova::FrameworkError::bad_request(
+                                            ::std::format!("malformed JSON body: {e}"),
+                                        ))?;
+                                match parsed {
+                                    ::suprnova::serde_json::Value::Object(m) => m,
+                                    _ => {
+                                        return ::core::result::Result::Err(
+                                            ::suprnova::FrameworkError::bad_request(
+                                                "request body must be a JSON object \
+                                                 (DTOs with route-param fields cannot \
+                                                 accept arrays / strings / null at the \
+                                                 top level)",
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    };
 
                 // Inject route params into the map (path params WIN — IDOR protection).
                 #(#route_param_injections)*
 
+                // Deserialize the merged map into Self.
                 let dto: Self = ::suprnova::serde_json::from_value(
                     ::suprnova::serde_json::Value::Object(map),
                 ).map_err(|e| ::suprnova::FrameworkError::bad_request(e.to_string()))?;
 
+                // --- Validate + Precognition + after_validation (mirrors default) ---
                 use ::validator::Validate;
-                dto.validate().map_err(|e| ::suprnova::FrameworkError::Validation(
-                    ::suprnova::ValidationErrors::from_validator(e)
-                ))?;
+                let validation_result = dto.validate();
 
-                Ok(dto)
+                if is_precognition {
+                    return match validation_result {
+                        ::core::result::Result::Ok(()) => {
+                            match dto.after_validation() {
+                                ::core::result::Result::Ok(()) => ::core::result::Result::Err(
+                                    ::suprnova::FrameworkError::PrecognitionSuccess,
+                                ),
+                                ::core::result::Result::Err(errs) => {
+                                    let filtered = if validate_only.is_empty() {
+                                        errs
+                                    } else {
+                                        errs.retain_fields(&validate_only)
+                                    };
+                                    if filtered.is_empty() {
+                                        ::core::result::Result::Err(
+                                            ::suprnova::FrameworkError::PrecognitionSuccess,
+                                        )
+                                    } else {
+                                        ::core::result::Result::Err(
+                                            ::suprnova::FrameworkError::PrecognitionFailure(filtered),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        ::core::result::Result::Err(errors) => {
+                            let errs = ::suprnova::ValidationErrors::from_validator(errors);
+                            let filtered = if validate_only.is_empty() {
+                                errs
+                            } else {
+                                errs.retain_fields(&validate_only)
+                            };
+                            if filtered.is_empty() {
+                                ::core::result::Result::Err(
+                                    ::suprnova::FrameworkError::PrecognitionSuccess,
+                                )
+                            } else {
+                                ::core::result::Result::Err(
+                                    ::suprnova::FrameworkError::PrecognitionFailure(filtered),
+                                )
+                            }
+                        }
+                    };
+                }
+
+                if let ::core::result::Result::Err(errors) = validation_result {
+                    return ::core::result::Result::Err(::suprnova::FrameworkError::Validation(
+                        ::suprnova::ValidationErrors::from_validator(errors),
+                    ));
+                }
+
+                if let ::core::result::Result::Err(errs) = dto.after_validation() {
+                    return ::core::result::Result::Err(::suprnova::FrameworkError::Validation(errs));
+                }
+
+                ::core::result::Result::Ok(dto)
             }
         }
     }
