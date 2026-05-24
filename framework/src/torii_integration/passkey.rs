@@ -119,52 +119,81 @@ struct PasskeyAuthenticationCeremony {
     user_id: UserId,
 }
 
-/// Store the in-flight registration ceremony in the current request session.
-fn store_registration_ceremony(
+/// Store the in-flight registration ceremony in the auth_ceremony_tokens
+/// table and put just the ceremony selector in the session. The session
+/// is no longer the source of truth for the ceremony payload — the table
+/// is, with a UNIQUE selector + conditional DELETE for atomic single-use
+/// consumption. ChatGPT audit `torii_integration` HIGH #3.
+async fn store_registration_ceremony(
     ceremony: &PasskeyRegistrationCeremony,
 ) -> Result<(), FrameworkError> {
-    let json = serde_json::to_string(ceremony)
-        .map_err(|e| FrameworkError::internal(format!("passkey: serialize reg ceremony: {e}")))?;
-    session_mut(|s| s.put(SESSION_KEY_REG, json));
+    let selector = uuid::Uuid::new_v4().to_string();
+    // 10 minutes is the standard WebAuthn ceremony timeout — generous
+    // enough for slow browsers + biometric prompts, short enough that
+    // dead ceremonies prune quickly.
+    super::ceremony::issue(
+        &selector,
+        super::ceremony::kind::PASSKEY_REGISTER,
+        ceremony,
+        10,
+    )
+    .await?;
+    session_mut(|s| s.put(SESSION_KEY_REG, selector));
     Ok(())
 }
 
-/// Retrieve and consume the in-flight registration ceremony from the session.
+/// Atomically consume the in-flight registration ceremony from the
+/// auth_ceremony_tokens table. The session carries only the selector;
+/// the actual payload lives in the table where a conditional DELETE
+/// guarantees exactly-once consumption under concurrency.
 ///
-/// Missing ceremony is a **caller** problem (400), not a server fault — the
-/// caller either never started a ceremony or let their session expire. We
-/// map it to a `Domain` error so the response converter emits 400 with a
-/// public-safe message, rather than the 500-leaking `internal` variant.
-fn take_registration_ceremony() -> Result<PasskeyRegistrationCeremony, FrameworkError> {
-    let json: String = session()
+/// Missing ceremony is a **caller** problem (400), not a server fault —
+/// the caller either never started a ceremony, the ceremony expired,
+/// or another concurrent finish-request already consumed it.
+async fn take_registration_ceremony() -> Result<PasskeyRegistrationCeremony, FrameworkError> {
+    let selector: String = session()
         .and_then(|s| s.get::<String>(SESSION_KEY_REG))
         .ok_or_else(|| FrameworkError::Domain {
             message: "passkey registration not started or expired".to_string(),
             status_code: 400,
         })?;
+    // Best-effort cleanup of the session pointer. The atomic DELETE
+    // below is the single-use authority; the session.forget here is
+    // janitorial. If two concurrent finishes race, both forget the same
+    // selector — harmless idempotency.
     session_mut(|s| {
         s.forget(SESSION_KEY_REG);
     });
-    serde_json::from_str(&json).map_err(|e| {
-        FrameworkError::internal(format!("passkey: deserialize reg ceremony: {e}"))
-    })
+    super::ceremony::consume(&selector, super::ceremony::kind::PASSKEY_REGISTER)
+        .await?
+        .ok_or_else(|| FrameworkError::Domain {
+            message: "passkey registration ceremony missing, expired, or already consumed"
+                .to_string(),
+            status_code: 400,
+        })
 }
 
-/// Store the in-flight authentication ceremony in the current request session.
-fn store_authentication_ceremony(
+/// Store the in-flight authentication ceremony in the
+/// auth_ceremony_tokens table. See [`store_registration_ceremony`].
+async fn store_authentication_ceremony(
     ceremony: &PasskeyAuthenticationCeremony,
 ) -> Result<(), FrameworkError> {
-    let json = serde_json::to_string(ceremony)
-        .map_err(|e| FrameworkError::internal(format!("passkey: serialize auth ceremony: {e}")))?;
-    session_mut(|s| s.put(SESSION_KEY_AUTH, json));
+    let selector = uuid::Uuid::new_v4().to_string();
+    super::ceremony::issue(
+        &selector,
+        super::ceremony::kind::PASSKEY_AUTHENTICATE,
+        ceremony,
+        10,
+    )
+    .await?;
+    session_mut(|s| s.put(SESSION_KEY_AUTH, selector));
     Ok(())
 }
 
-/// Retrieve and consume the in-flight authentication ceremony from the session.
-///
-/// Missing ceremony is a caller problem (400) — see `take_registration_ceremony`.
-fn take_authentication_ceremony() -> Result<PasskeyAuthenticationCeremony, FrameworkError> {
-    let json: String = session()
+/// Atomically consume the in-flight authentication ceremony. See
+/// [`take_registration_ceremony`].
+async fn take_authentication_ceremony() -> Result<PasskeyAuthenticationCeremony, FrameworkError> {
+    let selector: String = session()
         .and_then(|s| s.get::<String>(SESSION_KEY_AUTH))
         .ok_or_else(|| FrameworkError::Domain {
             message: "passkey authentication not started or expired".to_string(),
@@ -173,9 +202,13 @@ fn take_authentication_ceremony() -> Result<PasskeyAuthenticationCeremony, Frame
     session_mut(|s| {
         s.forget(SESSION_KEY_AUTH);
     });
-    serde_json::from_str(&json).map_err(|e| {
-        FrameworkError::internal(format!("passkey: deserialize auth ceremony: {e}"))
-    })
+    super::ceremony::consume(&selector, super::ceremony::kind::PASSKEY_AUTHENTICATE)
+        .await?
+        .ok_or_else(|| FrameworkError::Domain {
+            message: "passkey authentication ceremony missing, expired, or already consumed"
+                .to_string(),
+            status_code: 400,
+        })
 }
 
 /// Initialise the global `Webauthn` instance.
@@ -349,7 +382,8 @@ impl PasskeyAuth {
             state: pending_reg,
             email: email.to_string(),
             user_id: user.id.clone(),
-        })?;
+        })
+        .await?;
 
         Ok(PasskeyRegistrationChallenge {
             challenge: challenge_str,
@@ -382,7 +416,7 @@ impl PasskeyAuth {
 
         // Retrieve and consume the in-flight ceremony from the session
         // (one-time use). Missing or expired ceremony → 400.
-        let ceremony = take_registration_ceremony()?;
+        let ceremony = take_registration_ceremony().await?;
 
         // **Codex review finding #3**: reject if the caller-supplied email
         // doesn't match the email the ceremony was begun for. Without this
@@ -519,7 +553,8 @@ impl PasskeyAuth {
             state: pending_auth,
             email: email.to_string(),
             user_id: user.id.clone(),
-        })?;
+        })
+        .await?;
 
         Ok(PasskeyAuthenticationChallenge {
             challenge: challenge_str,
@@ -552,7 +587,7 @@ impl PasskeyAuth {
 
         // Retrieve and consume the in-flight ceremony from the session
         // (one-time use). Missing or expired → 400.
-        let ceremony = take_authentication_ceremony()?;
+        let ceremony = take_authentication_ceremony().await?;
 
         // **Codex review finding #3**: reject if the caller-supplied email
         // doesn't match the email the ceremony was begun for.

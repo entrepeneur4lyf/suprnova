@@ -9,6 +9,7 @@ mod m_2026_05_19_phase_10a_user_columns;
 mod m_2026_05_19_phase_10b_relations_schema;
 mod m_2026_05_20_phase_10b_profiles;
 mod m_2026_05_21_phase_10c_audit_log;
+mod m20251209_000000_create_auth_ceremony_tokens_table;
 
 pub struct Migrator;
 
@@ -58,6 +59,12 @@ impl MigratorTrait for Migrator {
             // creation alongside an audit row in a single
             // `DB::transaction` block to pin the rollback contract.
             Box::new(m_2026_05_21_phase_10c_audit_log::Migration),
+            // Auth ceremony tokens — single-use OAuth state + Passkey
+            // challenge storage (ChatGPT audit `torii_integration`
+            // HIGH #3). Externalises the single-use authority from the
+            // race-prone session R-M-W to a UNIQUE-selector table with
+            // atomic conditional DELETE.
+            Box::new(m20251209_000000_create_auth_ceremony_tokens_table::Migration),
         ]
     }
 }

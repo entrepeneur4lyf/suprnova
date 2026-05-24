@@ -235,22 +235,48 @@ impl OAuthAuth {
         let config = self.config()?;
         let endpoints = self.endpoints_for(&config)?;
 
-        // Generate a cryptographically random CSRF state token.
+        // Generate a cryptographically random CSRF state token. The
+        // state IS the ceremony selector — it's echoed in the
+        // authorize URL and the provider sends it back on the callback,
+        // giving us O(1) lookup of the matching ceremony payload.
         let state = uuid::Uuid::new_v4().to_string();
 
         // Generate the PKCE code_verifier + S256 challenge per RFC 7636.
         let verifier = generate_pkce_verifier();
         let challenge = pkce_s256_challenge(&verifier);
 
-        // Store both in THIS session, scoped to the provider. No global
-        // store — binding to the session prevents cross-session CSRF and
-        // ensures the verifier cannot be replayed by an attacker who
-        // intercepts the authorization code but never had the session.
-        let state_key = format!("oauth_state_{}", self.provider);
-        let verifier_key = format!("oauth_pkce_verifier_{}", self.provider);
+        // Store the (state, verifier, provider) ceremony in the
+        // single-use `auth_ceremony_tokens` table. ChatGPT audit
+        // `torii_integration` HIGH #3: the previous design stored
+        // these in the session and relied on a non-atomic
+        // get-and-forget — two concurrent callbacks with the same
+        // session cookie could both consume the same ceremony.
+        // The ceremony-tokens table provides atomic single-use via a
+        // conditional DELETE keyed on the UNIQUE selector.
+        //
+        // TTL: 10 minutes — generous for slow networks while keeping
+        // unused ceremonies pruned.
+        super::ceremony::issue(
+            &state,
+            super::ceremony::kind::OAUTH,
+            &OAuthCeremonyPayload {
+                provider: self.provider.clone(),
+                pkce_verifier: verifier,
+            },
+            10,
+        )
+        .await?;
+
+        // Session binding: write the state under a provider-scoped
+        // session key. `complete` requires THIS session to hold the
+        // exact state before consuming the ceremony — preserves the
+        // codex finding #7 property that an attacker who steals a
+        // state value but not the session cookie cannot complete the
+        // flow. The atomic ceremony consume gives single-use on top
+        // of the session check.
+        let session_state_key = format!("oauth_state_{}", self.provider);
         session_mut(|s| {
-            s.put(&state_key, state.clone());
-            s.put(&verifier_key, verifier);
+            s.put(&session_state_key, state.clone());
         });
 
         // Build the authorization URL. PKCE params are required by
@@ -315,37 +341,68 @@ impl OAuthAuth {
         let endpoints = self.endpoints_for(&config)?;
         let torii = instance()?;
 
-        // Read and consume the expected state from THIS session (one-time use).
-        let state_key = format!("oauth_state_{}", self.provider);
-        let verifier_key = format!("oauth_pkce_verifier_{}", self.provider);
-        let expected_state: Option<String> = session().and_then(|s| s.get(&state_key));
-        let pkce_verifier: Option<String> = session().and_then(|s| s.get(&verifier_key));
-        // Delete from session immediately — one-time use for both.
-        session_mut(|s| {
-            s.forget(&state_key);
-            s.forget(&verifier_key);
-        });
+        // Session binding (codex finding #7): the session that called
+        // `begin` is the only session that can complete the flow. An
+        // attacker who steals a state value but not the session cookie
+        // sees an empty session here and is rejected.
+        let session_state_key = format!("oauth_state_{}", self.provider);
+        let expected_state: Option<String> = session().and_then(|s| s.get(&session_state_key));
 
-        match expected_state {
+        match expected_state.as_deref() {
             None => {
                 return Err(FrameworkError::Domain {
                     message: "OAuth state missing from session — flow not initiated or session expired".to_string(),
                     status_code: 400,
                 });
             }
-            Some(ref expected) if expected != state => {
+            Some(expected) if expected != state => {
                 return Err(FrameworkError::Domain {
                     message: "OAuth state mismatch — possible CSRF attack or expired flow".to_string(),
                     status_code: 400,
                 });
             }
-            Some(_) => {} // state matches, proceed
+            _ => {} // state matches the session's stored value
         }
 
-        let verifier = pkce_verifier.ok_or_else(|| FrameworkError::Domain {
-            message: "OAuth PKCE verifier missing from session — flow not initiated or session expired".to_string(),
+        // Atomically consume the ceremony keyed by the state echoed
+        // back from the provider. Single-use under concurrency: two
+        // concurrent callbacks with the same `state` both pass the
+        // session check above, but only one wins the atomic DELETE
+        // (rows_affected == 1) and gets the payload; the other gets
+        // `None` and rejects. ChatGPT audit `torii_integration` HIGH
+        // #3 — replay race impossible by construction.
+        let payload: OAuthCeremonyPayload = super::ceremony::consume(
+            state,
+            super::ceremony::kind::OAUTH,
+        )
+        .await?
+        .ok_or_else(|| FrameworkError::Domain {
+            message: "OAuth state already consumed or expired — replay attempt or stale flow".to_string(),
             status_code: 400,
         })?;
+
+        // Best-effort clear the session pointer. The atomic consume
+        // above is the single-use authority; this is janitorial.
+        session_mut(|s| {
+            s.forget(&session_state_key);
+        });
+
+        // Verify the provider in the ceremony matches the facade
+        // instance handling this callback. Prevents a state token
+        // generated for provider A from being consumed by provider B
+        // (defence-in-depth, since the OAuth controller routes
+        // per-provider anyway).
+        if payload.provider != self.provider {
+            return Err(FrameworkError::Domain {
+                message: format!(
+                    "OAuth state was issued for provider '{}' but consumed against '{}'",
+                    payload.provider, self.provider
+                ),
+                status_code: 400,
+            });
+        }
+
+        let verifier = payload.pkce_verifier;
 
         let client = Client::builder()
             .user_agent("suprnova-oauth/0.1")
@@ -588,6 +645,17 @@ mod pkce_tests {
         let challenge = pkce_s256_challenge(verifier);
         assert_eq!(challenge, "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
     }
+}
+
+// ── Ceremony payload ──────────────────────────────────────────────────────────
+
+/// In-flight OAuth ceremony stored in `auth_ceremony_tokens` between
+/// `begin` and `complete`. Atomic single-use via the table's
+/// UNIQUE selector + conditional DELETE.
+#[derive(Serialize, Deserialize)]
+struct OAuthCeremonyPayload {
+    provider: String,
+    pkce_verifier: String,
 }
 
 // ── Deserialisation helpers ───────────────────────────────────────────────────

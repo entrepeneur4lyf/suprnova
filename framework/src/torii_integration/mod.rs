@@ -21,6 +21,8 @@ pub mod password;
 
 use std::sync::{Arc, OnceLock};
 
+pub mod ceremony;
+
 use torii::seaorm::SeaORMRepositoryProvider;
 use torii::Torii;
 use torii_core::repositories::{

@@ -20,6 +20,8 @@
 //! runs, regardless of parallel execution order.
 
 use once_cell::sync::Lazy;
+use sea_orm_migration::prelude::*;
+use sea_orm_migration::MigratorTrait;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
@@ -29,17 +31,130 @@ use suprnova::Auth;
 /// One tokio runtime shared across every test in this file.
 static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
 
-/// One-time Torii initialisation shared across all tests.
+/// One-time Torii + Suprnova initialisation shared across all tests.
 ///
 /// Accessing `SETUP` (via `Lazy::force`) is idempotent and thread-safe.
+///
+/// Sets up:
+/// - Torii's database via `sqlite_in_memory()` and `init_torii`.
+/// - A Suprnova `DbConnection` sharing the same in-memory SQLite database
+///   (via the `?cache=shared` URL) so the passkey/OAuth facades can
+///   atomically issue/consume single-use ceremony tokens through the
+///   `auth_ceremony_tokens` table (ChatGPT audit `torii_integration`
+///   HIGH #3).
 static SETUP: Lazy<()> = Lazy::new(|| {
     RT.block_on(async {
         let config = ToriiConfig::sqlite_in_memory()
             .await
             .expect("sqlite in-memory connection");
         init_torii(config).await.expect("init_torii");
+
+        // Open a Suprnova DbConnection pointing at the same in-memory
+        // SQLite database (same `?cache=shared` URL that
+        // ToriiConfig::sqlite_in_memory uses internally), then migrate
+        // the auth_ceremony_tokens table. Passkey + OAuth ceremony
+        // single-use storage flows through this connection.
+        let supr_config = suprnova::database::DatabaseConfig::builder()
+            .url("sqlite:file::memory:?cache=shared")
+            .max_connections(1)
+            .min_connections(1)
+            .logging(false)
+            .build();
+        let supr_conn = suprnova::database::DbConnection::connect(&supr_config)
+            .await
+            .expect("connect sqlite for ceremony tokens");
+        TestMigrator::up(supr_conn.inner(), None)
+            .await
+            .expect("migrate auth_ceremony_tokens");
+        suprnova::App::singleton(supr_conn);
     });
 });
+
+/// Local migrator for the auth_ceremony_tokens table. Mirrors the app
+/// migration in app/src/migrations/m20251209_000000_*.
+struct TestMigrator;
+
+#[async_trait::async_trait]
+impl MigratorTrait for TestMigrator {
+    fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+        vec![Box::new(CreateAuthCeremonyTokensTable)]
+    }
+}
+
+struct CreateAuthCeremonyTokensTable;
+
+impl MigrationName for CreateAuthCeremonyTokensTable {
+    fn name(&self) -> &str {
+        "m20251209_000000_create_auth_ceremony_tokens_table"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CreateAuthCeremonyTokensTable {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(AuthCeremonyTokens::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(AuthCeremonyTokens::Id)
+                            .big_integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(AuthCeremonyTokens::Selector)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(AuthCeremonyTokens::Kind).string().not_null())
+                    .col(ColumnDef::new(AuthCeremonyTokens::Payload).text().not_null())
+                    .col(
+                        ColumnDef::new(AuthCeremonyTokens::ExpiresAt)
+                            .timestamp()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(AuthCeremonyTokens::CreatedAt)
+                            .timestamp()
+                            .not_null()
+                            .default(Expr::current_timestamp()),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_test_auth_ceremony_tokens_selector")
+                    .table(AuthCeremonyTokens::Table)
+                    .col(AuthCeremonyTokens::Selector)
+                    .unique()
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(AuthCeremonyTokens::Table).to_owned())
+            .await
+    }
+}
+
+#[derive(DeriveIden)]
+enum AuthCeremonyTokens {
+    Table,
+    Id,
+    Selector,
+    Kind,
+    Payload,
+    ExpiresAt,
+    CreatedAt,
+}
 
 /// Register a user then authenticate with the correct password.
 ///
@@ -155,32 +270,36 @@ fn magic_link_consume_returns_user_and_session() {
     });
 }
 
-/// FIX 2 + Codex finding #3: Passkey in-flight state is stored in the session
-/// as a `{state, email, user_id}` ceremony, not a process-local DashMap and
-/// not just the bare WebAuthn state.
+/// FIX 2 + Codex finding #3: Passkey in-flight state is bound to the
+/// begin-time `{state, email, user_id}` ceremony, not just a bare
+/// WebAuthn state.
 ///
-/// Calls `begin_registration` inside a session scope, then decodes the JSON
-/// stored under `passkey_reg` and asserts:
+/// After ChatGPT audit `torii_integration` HIGH #3, the ceremony's
+/// authoritative storage moved from the session payload (race-prone
+/// R-M-W) to the `auth_ceremony_tokens` table (atomic single-use via
+/// conditional DELETE). The session now carries only the ceremony
+/// selector (a UUID); the actual `{email, user_id, state}` payload
+/// lives in the DB row.
 ///
-/// - The blob contains an `email` field equal to the begin-time email.
-/// - The blob contains a `user_id` field (proves the ceremony is bound to a
-///   specific user, not just a WebAuthn challenge).
-/// - The blob contains a `state` field (the WebAuthn challenge that
-///   `finish_passkey_registration` consumes).
-///
-/// This pins the contract that makes the cross-email finish attack
-/// (codex finding #3) impossible: even if the caller passes a different
-/// email to `finish_registration`, the ceremony in the session names the
-/// begin-time identity and the finisher rejects the mismatch.
+/// This test verifies the new binding:
+/// 1. The session stores a ceremony selector under `passkey_reg`.
+/// 2. The auth_ceremony_tokens table has exactly one matching row.
+/// 3. The row's payload decodes to JSON with `email`, `user_id`, and
+///    `state` fields — preserving the cross-email finish defence
+///    (codex finding #3).
 #[test]
 fn passkey_registration_ceremony_stored_in_session() {
+    use sea_orm::ColumnTrait;
+    use sea_orm::EntityTrait;
+    use sea_orm::QueryFilter;
+
     Lazy::force(&SETUP);
 
     RT.block_on(async {
         let slot = suprnova::session::new_session_slot_for_test();
         let begin_email = "ceremony-stored@example.com";
 
-        let ceremony_json = suprnova::session::session_scope_for_test(slot, async {
+        let selector = suprnova::session::session_scope_for_test(slot, async {
             let _challenge = Auth::passkey()
                 .begin_registration(begin_email)
                 .await
@@ -189,30 +308,94 @@ fn passkey_registration_ceremony_stored_in_session() {
             suprnova::session::session()
                 .and_then(|s| s.get::<String>("passkey_reg"))
         })
-        .await;
+        .await
+        .expect("begin_registration must store a ceremony selector under 'passkey_reg'");
 
-        let json = ceremony_json
-            .expect("begin_registration must store a ceremony under 'passkey_reg'");
-        assert!(!json.is_empty(), "stored ceremony must not be empty");
+        assert!(!selector.is_empty(), "stored selector must not be empty");
+
+        // Look up the ceremony row in the auth_ceremony_tokens table.
+        // The session stores only the selector; the actual payload
+        // lives in the DB where atomic single-use is enforced.
+        let conn = suprnova::DB::connection().expect("db connection");
+        let row = suprnova::torii_integration::ceremony::entity::Entity::find()
+            .filter(
+                suprnova::torii_integration::ceremony::entity::Column::Selector
+                    .eq(selector.clone()),
+            )
+            .one(conn.inner())
+            .await
+            .expect("ceremony lookup query")
+            .expect("a ceremony row must exist for the selector stored in the session");
+
+        assert_eq!(
+            row.kind, "passkey_register",
+            "ceremony row kind must be 'passkey_register'"
+        );
 
         let parsed: serde_json::Value =
-            serde_json::from_str(&json).expect("session blob must be valid JSON");
+            serde_json::from_str(&row.payload).expect("ceremony payload must be valid JSON");
 
         assert_eq!(
             parsed
                 .get("email")
                 .and_then(|v| v.as_str())
-                .expect("ceremony JSON must have an 'email' field"),
+                .expect("ceremony payload must have an 'email' field"),
             begin_email,
             "stored ceremony email must equal the begin-time email"
         );
         assert!(
             parsed.get("user_id").is_some(),
-            "ceremony JSON must have a 'user_id' field — proves binding to a specific user"
+            "ceremony payload must have a 'user_id' field — proves binding to a specific user"
         );
         assert!(
             parsed.get("state").is_some(),
-            "ceremony JSON must have a 'state' field — the WebAuthn challenge"
+            "ceremony payload must have a 'state' field — the WebAuthn challenge"
+        );
+    });
+}
+
+/// ChatGPT audit `torii_integration` HIGH #3 — concurrency regression
+/// test. Two concurrent passkey-registration finish attempts against
+/// the SAME captured ceremony selector must result in exactly one
+/// successful consume and one None (ceremony already consumed). The
+/// atomic conditional DELETE in `ceremony::consume` is the
+/// single-use authority — the loser of the race must NOT also
+/// receive the payload.
+#[test]
+fn ceremony_consume_is_single_use_under_concurrency() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let selector = uuid::Uuid::new_v4().to_string();
+        suprnova::torii_integration::ceremony::issue(
+            &selector,
+            "race_test",
+            &serde_json::json!({ "secret": "should-only-be-revealed-once" }),
+            10,
+        )
+        .await
+        .expect("issue ceremony");
+
+        // Race: two concurrent consumes against the same selector.
+        let sel_a = selector.clone();
+        let sel_b = selector.clone();
+        let (a, b) = tokio::join!(
+            suprnova::torii_integration::ceremony::consume::<serde_json::Value>(
+                &sel_a,
+                "race_test",
+            ),
+            suprnova::torii_integration::ceremony::consume::<serde_json::Value>(
+                &sel_b,
+                "race_test",
+            ),
+        );
+        let r1 = a.expect("racer 1 db ok");
+        let r2 = b.expect("racer 2 db ok");
+
+        let success_count = [r1.is_some(), r2.is_some()].iter().filter(|x| **x).count();
+        assert_eq!(
+            success_count, 1,
+            "exactly one consume must succeed; the loser must return None — got r1={r1:?} r2={r2:?}"
         );
     });
 }
@@ -661,16 +844,18 @@ fn oauth_begin_emits_pkce_challenge_and_stores_verifier_in_session() {
         endpoints_override: None,
     });
 
+    use sea_orm::ColumnTrait;
+    use sea_orm::EntityTrait;
+    use sea_orm::QueryFilter;
+
     RT.block_on(async {
         let slot = suprnova::session::new_session_slot_for_test();
-        let (url, stored_verifier, stored_state) =
+        let (url, stored_state) =
             suprnova::session::session_scope_for_test(slot, async {
                 let kickoff = Auth::oauth("github").begin().await.unwrap();
-                let verifier: Option<String> = suprnova::session::session()
-                    .and_then(|s| s.get("oauth_pkce_verifier_github"));
                 let state: Option<String> = suprnova::session::session()
                     .and_then(|s| s.get("oauth_state_github"));
-                (kickoff.authorization_url, verifier, state)
+                (kickoff.authorization_url, state)
             })
             .await;
 
@@ -683,8 +868,31 @@ fn oauth_begin_emits_pkce_challenge_and_stores_verifier_in_session() {
             "authorize URL missing code_challenge_method=S256: {url}"
         );
 
-        let verifier = stored_verifier
-            .expect("begin() must store the PKCE verifier under oauth_pkce_verifier_github");
+        let state = stored_state.expect(
+            "begin() must still store the CSRF state under oauth_state_github (session binding)",
+        );
+
+        // Post-HIGH #3: the PKCE verifier lives in the ceremony table,
+        // not the session. The session carries only the state pointer
+        // (for the session-binding check); the verifier travels in
+        // the ceremony payload that's atomically consumed by complete().
+        let conn = suprnova::DB::connection().expect("db connection");
+        let row = suprnova::torii_integration::ceremony::entity::Entity::find()
+            .filter(
+                suprnova::torii_integration::ceremony::entity::Column::Selector.eq(state.clone()),
+            )
+            .one(conn.inner())
+            .await
+            .expect("ceremony lookup query")
+            .expect("begin() must issue a ceremony row keyed by the state");
+        assert_eq!(row.kind, "oauth", "ceremony row kind must be 'oauth'");
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&row.payload).expect("ceremony payload must be valid JSON");
+        let verifier = payload
+            .get("pkce_verifier")
+            .and_then(|v| v.as_str())
+            .expect("ceremony payload must carry a pkce_verifier field");
         // RFC 7636 §4.1: 43..=128 chars from [A-Za-z0-9-._~]. We use
         // base64url-no-pad, a strict subset that's all in [A-Za-z0-9_-].
         assert!(
@@ -697,10 +905,6 @@ fn oauth_begin_emits_pkce_challenge_and_stores_verifier_in_session() {
                 .chars()
                 .all(|c| matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_')),
             "verifier has chars outside [A-Za-z0-9_-]: {verifier}"
-        );
-        assert!(
-            stored_state.is_some(),
-            "begin() must still store the CSRF state alongside the verifier"
         );
     });
 }
@@ -834,26 +1038,50 @@ fn oauth_complete_sends_code_verifier_to_token_endpoint() {
             },
         );
 
+        use sea_orm::ColumnTrait;
+        use sea_orm::EntityTrait;
+        use sea_orm::QueryFilter;
+
         let slot = suprnova::session::new_session_slot_for_test();
-        let (result, verifier_after) = suprnova::session::session_scope_for_test(slot, async {
+        let (result, state_key_after) = suprnova::session::session_scope_for_test(slot, async {
             let kickoff = Auth::oauth(provider_name).begin().await.unwrap();
-            // Read the stored verifier BEFORE complete() consumes it.
-            let stored_verifier: Option<String> = suprnova::session::session()
-                .and_then(|s| s.get(format!("oauth_pkce_verifier_{provider_name}").as_str()));
+
+            // Look up the verifier from the ceremony table BEFORE
+            // complete() atomically consumes it. (Post-HIGH #3 the
+            // verifier lives in the auth_ceremony_tokens row, not in
+            // the session.)
+            let conn = suprnova::DB::connection().expect("db connection");
+            let row = suprnova::torii_integration::ceremony::entity::Entity::find()
+                .filter(
+                    suprnova::torii_integration::ceremony::entity::Column::Selector
+                        .eq(kickoff.state.clone()),
+                )
+                .one(conn.inner())
+                .await
+                .expect("ceremony lookup query")
+                .expect("begin() must issue a ceremony row");
+            let payload: serde_json::Value =
+                serde_json::from_str(&row.payload).expect("ceremony payload must be valid JSON");
+            let stored_verifier = payload
+                .get("pkce_verifier")
+                .and_then(|v| v.as_str())
+                .expect("ceremony payload must carry pkce_verifier")
+                .to_string();
 
             let res = Auth::oauth(provider_name).complete("real-auth-code", &kickoff.state).await;
 
-            // After complete() the session key must be cleared (one-time use).
+            // After complete() the session state pointer must be
+            // cleared (one-time use).
             let after: Option<String> = suprnova::session::session()
-                .and_then(|s| s.get(format!("oauth_pkce_verifier_{provider_name}").as_str()));
-            (res.map(|_| stored_verifier.expect("verifier present before complete()")), after)
+                .and_then(|s| s.get(format!("oauth_state_{provider_name}").as_str()));
+            (res.map(|_| stored_verifier), after)
         })
         .await;
 
         let stored_verifier = result.expect("complete() should succeed against the mock provider");
         assert!(
-            verifier_after.is_none(),
-            "complete() must clear the PKCE verifier from session — found: {verifier_after:?}"
+            state_key_after.is_none(),
+            "complete() must clear the OAuth state pointer from session — found: {state_key_after:?}"
         );
 
         let token_body = token_body_captured
@@ -864,7 +1092,7 @@ fn oauth_complete_sends_code_verifier_to_token_endpoint() {
         let expected_verifier_param = format!("code_verifier={stored_verifier}");
         assert!(
             token_body.contains(&expected_verifier_param),
-            "token POST body missing the exact code_verifier from session.\
+            "token POST body missing the exact code_verifier from the ceremony row.\
              \nexpected: {expected_verifier_param}\nbody:     {token_body}"
         );
         assert!(
@@ -884,13 +1112,19 @@ fn oauth_complete_sends_code_verifier_to_token_endpoint() {
     });
 }
 
-/// Codex finding #7c: if the PKCE verifier is missing from the session
-/// (e.g. session expired between `begin()` and `complete()`),
-/// `complete()` must return 400 Bad Request — same class as missing
-/// state. The error message must call out the missing verifier so
-/// operators can distinguish it from a missing-state failure.
+/// ChatGPT audit `torii_integration` HIGH #3 — replay protection.
+///
+/// After a successful `complete()` consumes the ceremony, a second
+/// `complete()` with the same state value must fail. This proves the
+/// atomic single-use property at the OAuth facade level.
+///
+/// (Replaces the prior `_returns_400_when_pkce_verifier_missing_from_session`
+/// test, which probed the old session-state design where the verifier
+/// lived under a separate key. Post-HIGH #3, state and verifier are
+/// atomically linked in one ceremony row, so they cannot be partially
+/// missing — but the row can be consumed once and then gone.)
 #[test]
-fn oauth_complete_returns_400_when_pkce_verifier_missing_from_session() {
+fn oauth_complete_rejects_state_replay_after_ceremony_consumed() {
     Lazy::force(&SETUP);
 
     Auth::oauth("github").configure(suprnova::torii_integration::oauth::OAuthProviderConfig {
@@ -901,37 +1135,49 @@ fn oauth_complete_returns_400_when_pkce_verifier_missing_from_session() {
         endpoints_override: None,
     });
 
+    use sea_orm::ColumnTrait;
+    use sea_orm::EntityTrait;
+    use sea_orm::QueryFilter;
+
     RT.block_on(async {
         let slot = suprnova::session::new_session_slot_for_test();
         let result = suprnova::session::session_scope_for_test(slot, async {
-            // Begin populates BOTH state and the verifier.
             let state = Auth::oauth("github").begin().await.unwrap().state;
-            // Simulate the verifier being lost (session pruned, dropped
-            // by a middleware, partial restore, etc.) while the state
-            // remains. complete() must reject this cleanly.
-            suprnova::session::session_mut(|s| {
-                s.forget("oauth_pkce_verifier_github");
-            });
+
+            // Simulate the ceremony having been consumed by a prior
+            // (concurrent) `complete()` call: directly delete the row
+            // from the auth_ceremony_tokens table.
+            let conn = suprnova::DB::connection().expect("db connection");
+            let dr = suprnova::torii_integration::ceremony::entity::Entity::delete_many()
+                .filter(
+                    suprnova::torii_integration::ceremony::entity::Column::Selector
+                        .eq(state.clone()),
+                )
+                .exec(conn.inner())
+                .await
+                .expect("manual delete (simulating prior consume)");
+            assert_eq!(dr.rows_affected, 1, "ceremony row must have existed");
+
+            // The session-bound state is still set; complete() passes
+            // the session check but the atomic ceremony consume now
+            // returns None → 400.
             Auth::oauth("github").complete("any-code", &state).await
         })
         .await;
 
-        let err = result.expect_err("complete() must fail when PKCE verifier is missing");
+        let err = result.expect_err("complete() must fail when the ceremony row is gone");
         assert_eq!(
             err.status_code(),
             400,
-            "missing PKCE verifier must surface as 400 Bad Request, got: status={} msg={}",
+            "replayed/consumed state must surface as 400 Bad Request, got: status={} msg={}",
             err.status_code(),
             err,
         );
         let err_msg = err.to_string();
         assert!(
-            err_msg.to_ascii_lowercase().contains("pkce"),
-            "expected 'pkce' in error message so operators can tell this apart from missing-state, got: {err_msg}"
-        );
-        assert!(
-            err_msg.to_ascii_lowercase().contains("verifier"),
-            "expected 'verifier' in error message, got: {err_msg}"
+            err_msg.to_ascii_lowercase().contains("already consumed")
+                || err_msg.to_ascii_lowercase().contains("replay"),
+            "expected 'already consumed' or 'replay' in error message, got: {err_msg}"
         );
     });
 }
