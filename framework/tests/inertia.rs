@@ -278,8 +278,16 @@ async fn html_shell_for_vue_omits_react_preamble() {
 }
 
 #[tokio::test]
-async fn production_html_shell_uses_built_assets() {
-    let cfg = InertiaConfig::new().production();
+async fn production_html_shell_falls_back_to_legacy_paths_when_manifest_missing() {
+    // When no manifest.json exists on disk, the framework falls back to the
+    // pre-manifest hardcoded `/{assets_base_url}/main.{js,css}` shape so apps
+    // produced before D20-B keep booting. A tracing::warn! fires once on
+    // first read inside `InertiaConfig::vite_manifest` (not asserted here —
+    // requires tracing capture).
+    let cfg = InertiaConfig::new()
+        .production()
+        // Point at a path guaranteed not to exist.
+        .manifest_path("/definitely/not/a/real/manifest.json");
     let req = MockReq::new("/home");
     let resp = InertiaResponse::new("Home")
         .with_config(cfg)
@@ -291,6 +299,95 @@ async fn production_html_shell_uses_built_assets() {
     // Dev-only Vite scripts should NOT appear in production
     assert!(!body.contains("/@vite/client"));
     assert!(!body.contains("@react-refresh"));
+}
+
+#[tokio::test]
+async fn production_html_shell_reads_vite_manifest_for_hashed_assets() {
+    // D20-B regression: with a real manifest pointing entry `src/main.ts`
+    // at hashed output, the prod shell emits the hashed filenames + CSS +
+    // modulepreload chunks instead of the legacy `/assets/main.js` path.
+    let dir = std::env::temp_dir();
+    let manifest_path = dir.join(format!(
+        "test-inertia-manifest-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    let manifest = r#"{
+        "src/main.ts": {
+            "file": "main-Q9zSqcUL.js",
+            "name": "main",
+            "src": "src/main.ts",
+            "isEntry": true,
+            "css": ["main-3R4lN-AT.css"],
+            "imports": ["_runtime-DTQbz0Cz.js"]
+        },
+        "_runtime-DTQbz0Cz.js": {
+            "file": "runtime-DTQbz0Cz.js"
+        }
+    }"#;
+    std::fs::write(&manifest_path, manifest).unwrap();
+
+    let cfg = InertiaConfig::new()
+        .production()
+        .manifest_path(&manifest_path);
+
+    let req = MockReq::new("/home");
+    let resp = InertiaResponse::new("Home")
+        .with_config(cfg)
+        .resolve(&req).await.unwrap();
+
+    let body = body_to_string(resp.into_hyper().into_body());
+    std::fs::remove_file(&manifest_path).ok();
+
+    // Hashed entry file present
+    assert!(body.contains("/assets/main-Q9zSqcUL.js"),
+        "body should contain hashed entry; got: {body}");
+    // Hashed CSS file present
+    assert!(body.contains("/assets/main-3R4lN-AT.css"),
+        "body should contain hashed CSS; got: {body}");
+    // Module preload for the imported runtime chunk
+    assert!(body.contains("modulepreload"),
+        "body should contain modulepreload tag");
+    assert!(body.contains("/assets/runtime-DTQbz0Cz.js"),
+        "body should contain preloaded chunk; got: {body}");
+    // Legacy hardcoded paths should NOT appear
+    assert!(!body.contains("/assets/main.js"));
+    assert!(!body.contains("/assets/main.css"));
+}
+
+#[tokio::test]
+async fn production_html_shell_respects_custom_assets_base_url() {
+    // assets_base_url defaults to /assets; users can override (e.g. when
+    // serving from /build or a CDN).
+    let dir = std::env::temp_dir();
+    let manifest_path = dir.join(format!(
+        "test-inertia-manifest-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    let manifest = r#"{
+        "src/main.ts": {
+            "file": "main-AAA.js",
+            "isEntry": true,
+            "css": []
+        }
+    }"#;
+    std::fs::write(&manifest_path, manifest).unwrap();
+
+    let cfg = InertiaConfig::new()
+        .production()
+        .manifest_path(&manifest_path)
+        .assets_base_url("/build");
+
+    let req = MockReq::new("/home");
+    let resp = InertiaResponse::new("Home")
+        .with_config(cfg)
+        .resolve(&req).await.unwrap();
+
+    let body = body_to_string(resp.into_hyper().into_body());
+    std::fs::remove_file(&manifest_path).ok();
+
+    assert!(body.contains("/build/main-AAA.js"),
+        "custom base URL should prefix asset path; got: {body}");
+    assert!(!body.contains("/assets/main"));
 }
 
 #[tokio::test]

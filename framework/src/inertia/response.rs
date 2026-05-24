@@ -1350,7 +1350,7 @@ fn build_html_response(
     let head_extras = if config.development {
         render_dev_head(config)
     } else {
-        render_prod_head()
+        render_prod_head(config)
     };
 
     // SSR injection. The worker returns `head` as a list of HTML
@@ -1422,10 +1422,44 @@ fn render_dev_head(config: &InertiaConfig) -> String {
     )
 }
 
-fn render_prod_head() -> String {
-    "<script type=\"module\" src=\"/assets/main.js\"></script>\n\
-     <link rel=\"stylesheet\" href=\"/assets/main.css\">\n"
-        .to_string()
+fn render_prod_head(config: &InertiaConfig) -> String {
+    // Resolve `entry_point` (e.g. `src/main.ts`) to the hashed output
+    // files via Vite's manifest.json. When the manifest is missing or
+    // doesn't contain the configured entry, fall back to the legacy
+    // hardcoded `/{assets_base_url}/main.{js,css}` shape so apps
+    // produced before the manifest layer keep booting. The fallback
+    // path emits a tracing::warn! at first read inside
+    // `InertiaConfig::vite_manifest`.
+    let base = config.assets_base_url.trim_end_matches('/');
+    let entry = &config.entry_point;
+    if let Some(assets) = config
+        .vite_manifest()
+        .and_then(|m| m.resolve_entry(entry))
+    {
+        let mut out = String::new();
+        for css in &assets.css {
+            out.push_str(&format!(
+                "<link rel=\"stylesheet\" href=\"{base}/{css}\">\n"
+            ));
+        }
+        for js in &assets.js {
+            out.push_str(&format!(
+                "<script type=\"module\" src=\"{base}/{js}\"></script>\n"
+            ));
+        }
+        for chunk in &assets.preload {
+            out.push_str(&format!(
+                "<link rel=\"modulepreload\" href=\"{base}/{chunk}\">\n"
+            ));
+        }
+        out
+    } else {
+        // Manifest absent or entry not present — legacy fallback.
+        format!(
+            "<script type=\"module\" src=\"{base}/main.js\"></script>\n\
+             <link rel=\"stylesheet\" href=\"{base}/main.css\">\n"
+        )
+    }
 }
 
 fn escape_html_attr(s: &str) -> String {

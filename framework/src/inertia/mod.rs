@@ -3,6 +3,7 @@ mod conversion_middleware;
 mod encrypt_middleware;
 pub(crate) mod flash;
 mod facade;
+mod manifest;
 mod prop;
 mod response;
 mod shared;
@@ -10,6 +11,7 @@ pub(crate) mod ssr;
 mod version_middleware;
 
 pub use config::{Frontend, InertiaConfig, SsrConfig, VersionResolver};
+pub use manifest::{ManifestEntry, ResolvedAssets, ViteManifest};
 pub use facade::Inertia;
 pub use ssr::SsrResponse;
 pub use conversion_middleware::Inertia303Middleware;

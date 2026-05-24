@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
+
+use super::manifest::ViteManifest;
 
 /// Shared error-observer callback for SSR render failures.
 pub(crate) type SsrErrorHook = Arc<dyn Fn(&str) + Send + Sync>;
@@ -145,6 +148,34 @@ pub struct InertiaConfig {
     pub encrypt_history_default: bool,
     /// Server-side rendering configuration. See [`SsrConfig`].
     pub ssr: SsrConfig,
+    /// Path to Vite's `manifest.json` (Vite 5.0+ default location is
+    /// `<outDir>/.vite/manifest.json`). Default points at
+    /// `public/assets/.vite/manifest.json`, matching the framework's
+    /// scaffolded `vite.config.ts` (`outDir: '../public/assets'`).
+    ///
+    /// When the file exists, [`render_prod_head`] resolves the entry
+    /// point to its hashed output + CSS + transitively-imported
+    /// chunks (for `modulepreload`). When it's missing the framework
+    /// falls back to the legacy hardcoded `/{assets_base_url}/main.js`
+    /// path and emits a `tracing::warn!` so the gap is visible in
+    /// production logs.
+    ///
+    /// [`render_prod_head`]: super::response
+    pub manifest_path: PathBuf,
+    /// URL prefix under which the Vite build assets are served (e.g.
+    /// `/assets`). Combined with the manifest entry's `file` field to
+    /// produce the final `<script src>` / `<link href>` URL.
+    pub assets_base_url: String,
+    /// Lazy-loaded Vite manifest cache.
+    ///
+    /// Initialized on first call to [`Self::vite_manifest`]. The cache
+    /// holds `Some(manifest)` on successful load and `None` when the
+    /// file is missing or malformed — both states are stable for the
+    /// process lifetime, matching how a long-running production server
+    /// reads the build artefact exactly once. Use `manifest_path()` to
+    /// repoint at a different file for tests; that builder method
+    /// resets the cache by constructing a fresh `OnceLock`.
+    pub(crate) manifest: Arc<OnceLock<Option<ViteManifest>>>,
 }
 
 /// SSR (server-side rendering) configuration.
@@ -285,6 +316,9 @@ impl Default for InertiaConfig {
             default_title: "Suprnova".to_string(),
             encrypt_history_default: false,
             ssr: SsrConfig::default(),
+            manifest_path: PathBuf::from("public/assets/.vite/manifest.json"),
+            assets_base_url: "/assets".to_string(),
+            manifest: Arc::new(OnceLock::new()),
         }
     }
 }
@@ -405,6 +439,52 @@ impl InertiaConfig {
     {
         self.ssr.on_error = Some(std::sync::Arc::new(f));
         self
+    }
+
+    /// Override the Vite manifest file location. Resets the lazy cache
+    /// so the next [`Self::vite_manifest`] call re-reads from disk.
+    /// Default: `public/assets/.vite/manifest.json`.
+    pub fn manifest_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.manifest_path = path.into();
+        self.manifest = Arc::new(OnceLock::new());
+        self
+    }
+
+    /// Override the URL prefix under which built assets are served.
+    /// Default: `/assets`. The leading slash is required; the value
+    /// is concatenated with the manifest entry's `file` field as
+    /// `{base}/{file}`.
+    pub fn assets_base_url(mut self, url: impl Into<String>) -> Self {
+        self.assets_base_url = url.into();
+        self
+    }
+
+    /// Return the cached Vite manifest. On the first call this reads
+    /// [`Self::manifest_path`] from disk; subsequent calls return the
+    /// cached value (or cached `None` if the read failed).
+    ///
+    /// `None` is returned when the file is missing or malformed — the
+    /// production HTML shell renderer falls back to a legacy hardcoded
+    /// path and logs a `tracing::warn!`. This keeps existing
+    /// pre-manifest apps booting; new apps with a proper Vite build
+    /// pick up hashed assets automatically.
+    pub fn vite_manifest(&self) -> Option<&ViteManifest> {
+        self.manifest
+            .get_or_init(|| match ViteManifest::load(&self.manifest_path) {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    tracing::warn!(
+                        path = %self.manifest_path.display(),
+                        error = %e,
+                        "Vite manifest could not be loaded; production asset \
+                         tags will fall back to the legacy hardcoded path. \
+                         Ensure `build.manifest: true` is set in vite.config.ts \
+                         and that the build has produced an output."
+                    );
+                    None
+                }
+            })
+            .as_ref()
     }
 }
 
