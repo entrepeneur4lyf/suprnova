@@ -33,12 +33,18 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// In-memory implementation of all four universal payment traits.
 ///
-/// Thread-safe: internal state is wrapped in `Arc<RwLock<_>>`. Instances can be
-/// cloned or wrapped in `Arc` and shared across async tasks.
+/// Thread-safe: internal state is wrapped in `Arc<tokio::sync::RwLock<_>>`.
+/// Instances can be cloned or wrapped in `Arc` and shared across async tasks.
+///
+/// Uses tokio's async `RwLock` rather than `std::sync::RwLock` so that the lock
+/// surface is poison-immune (Domain 19 audit D19-B): a panic inside one trait
+/// method can no longer poison the shared store and cascade `PaymentError`s
+/// through every subsequent call.
 #[derive(Default)]
 pub struct MockPaymentProvider {
     customers: Arc<RwLock<HashMap<String, CustomerRef>>>,
@@ -52,8 +58,8 @@ impl MockPaymentProvider {
         Self::default()
     }
 
-    fn next_id(&self, prefix: &str) -> String {
-        let mut seq = self.sequence.write().unwrap();
+    async fn next_id(&self, prefix: &str) -> String {
+        let mut seq = self.sequence.write().await;
         *seq += 1;
         format!("{prefix}_mock_{}", *seq)
     }
@@ -69,7 +75,7 @@ impl PaymentProvider for MockPaymentProvider {
 #[async_trait]
 impl Checkout for MockPaymentProvider {
     async fn start_session(&self, req: StartSessionRequest) -> PaymentResult<SessionPayload> {
-        let session_id = self.next_id("ses");
+        let session_id = self.next_id("ses").await;
         Ok(SessionPayload::Redirect {
             url: format!("https://mock.example/{}/{}", req.customer_ref, session_id),
             provider_session_id: session_id,
@@ -80,7 +86,7 @@ impl Checkout for MockPaymentProvider {
 #[async_trait]
 impl Subscription for MockPaymentProvider {
     async fn subscribe(&self, req: SubscribeRequest) -> PaymentResult<SubscriptionResult> {
-        let id = self.next_id("sub");
+        let id = self.next_id("sub").await;
         let now = Utc::now();
         let result = SubscriptionResult {
             provider_subscription_id: id.clone(),
@@ -101,15 +107,12 @@ impl Subscription for MockPaymentProvider {
             cancel_at_period_end: false,
             provider_metadata: json!({}),
         };
-        self.subscriptions
-            .write()
-            .unwrap()
-            .insert(id, result.clone());
+        self.subscriptions.write().await.insert(id, result.clone());
         Ok(result)
     }
 
     async fn update(&self, req: UpdateSubscriptionRequest) -> PaymentResult<SubscriptionResult> {
-        let mut store = self.subscriptions.write().unwrap();
+        let mut store = self.subscriptions.write().await;
         let sub = store
             .get_mut(&req.provider_subscription_id)
             .ok_or_else(|| PaymentError::NotFound(req.provider_subscription_id.clone()))?;
@@ -136,7 +139,7 @@ impl Subscription for MockPaymentProvider {
         provider_subscription_id: &str,
         at_period_end: bool,
     ) -> PaymentResult<SubscriptionResult> {
-        let mut store = self.subscriptions.write().unwrap();
+        let mut store = self.subscriptions.write().await;
         let sub = store
             .get_mut(provider_subscription_id)
             .ok_or_else(|| PaymentError::NotFound(provider_subscription_id.to_string()))?;
@@ -151,7 +154,7 @@ impl Subscription for MockPaymentProvider {
     async fn get(&self, provider_subscription_id: &str) -> PaymentResult<SubscriptionResult> {
         self.subscriptions
             .read()
-            .unwrap()
+            .await
             .get(provider_subscription_id)
             .cloned()
             .ok_or_else(|| PaymentError::NotFound(provider_subscription_id.to_string()))
@@ -161,19 +164,19 @@ impl Subscription for MockPaymentProvider {
 #[async_trait]
 impl CustomerStore for MockPaymentProvider {
     async fn create_customer(&self, req: CreateCustomerRequest) -> PaymentResult<CustomerRef> {
-        let id = self.next_id("cus");
+        let id = self.next_id("cus").await;
         let cr = CustomerRef {
             provider_customer_id: id.clone(),
             user_id: req.user_id,
             email: req.email,
             provider_metadata: req.metadata.unwrap_or(json!({})),
         };
-        self.customers.write().unwrap().insert(id, cr.clone());
+        self.customers.write().await.insert(id, cr.clone());
         Ok(cr)
     }
 
     async fn update_customer(&self, req: UpdateCustomerRequest) -> PaymentResult<CustomerRef> {
-        let mut store = self.customers.write().unwrap();
+        let mut store = self.customers.write().await;
         let cr = store
             .get_mut(&req.provider_customer_id)
             .ok_or_else(|| PaymentError::NotFound(req.provider_customer_id.clone()))?;
@@ -189,7 +192,7 @@ impl CustomerStore for MockPaymentProvider {
     async fn get_customer(&self, provider_customer_id: &str) -> PaymentResult<CustomerRef> {
         self.customers
             .read()
-            .unwrap()
+            .await
             .get(provider_customer_id)
             .cloned()
             .ok_or_else(|| PaymentError::NotFound(provider_customer_id.to_string()))
@@ -198,7 +201,7 @@ impl CustomerStore for MockPaymentProvider {
     async fn delete_customer(&self, provider_customer_id: &str) -> PaymentResult<()> {
         self.customers
             .write()
-            .unwrap()
+            .await
             .remove(provider_customer_id)
             .map(|_| ())
             .ok_or_else(|| PaymentError::NotFound(provider_customer_id.to_string()))

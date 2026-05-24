@@ -31,6 +31,17 @@ impl Money {
     ///
     /// For zero-decimal currencies (JPY, KRW, VND) the decimal is treated as
     /// whole units and stored unchanged.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the resulting minor-unit value does not fit in `i64`. The
+    /// threshold is currency-dependent: USD/EUR (exponent 2) overflows above
+    /// ~9.2 × 10¹⁶ major units, zero-decimal currencies (JPY/KRW) above
+    /// 9.2 × 10¹⁸. Real-world payment-rail amounts are bounded far below
+    /// these limits — `Stripe`, `Paddle`, and every other provider Suprnova
+    /// targets cap line items below `i64::MAX / 100`. If you are propagating
+    /// untrusted off-rail data through this constructor, validate the
+    /// decimal range before calling.
     pub fn from_decimal(major: Decimal, currency: Currency) -> Self {
         let exp: u32 = currency.exponent().unwrap_or(2).into();
         let multiplier = Decimal::from(10u64.pow(exp));
@@ -67,6 +78,15 @@ impl Money {
 impl Add for Money {
     type Output = Money;
 
+    /// Adds two `Money` values of the same currency.
+    ///
+    /// # Panics
+    ///
+    /// - Currency mismatch — silent cross-currency arithmetic would corrupt
+    ///   amounts, so the type panics rather than producing a wrong number.
+    /// - i64 minor-unit overflow — unreachable for any realistic payment
+    ///   amount (the threshold is ~9.2 × 10¹⁶ for two-decimal currencies),
+    ///   but documented for completeness.
     fn add(self, rhs: Money) -> Money {
         assert!(
             self.currency == rhs.currency,
@@ -87,6 +107,12 @@ impl Add for Money {
 impl Sub for Money {
     type Output = Money;
 
+    /// Subtracts two `Money` values of the same currency.
+    ///
+    /// # Panics
+    ///
+    /// Same conditions as [`Add::add`] — currency mismatch or i64 minor-unit
+    /// overflow. See the `Add` impl docs above.
     fn sub(self, rhs: Money) -> Money {
         assert!(
             self.currency == rhs.currency,
