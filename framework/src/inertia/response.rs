@@ -1426,30 +1426,52 @@ fn build_html_response(
 }
 
 fn render_dev_head(config: &InertiaConfig) -> String {
+    // Domain 20 audit D20-G / ChatGPT MODULE_REVIEW_NOTES ## inertia
+    // LOW #1: HTML-escape vite_dev_server + entry_point before
+    // interpolation. These are normally trusted config values, but a
+    // misconfigured env / config file could otherwise break the shell
+    // or inject markup into the dev-time HTML.
+    //
+    // For the React preamble, the same `vite_dev_server` value is used
+    // inside a JS single-quoted string. We use `serde_json::to_string`
+    // to produce a safe JS string literal (it produces a double-quoted
+    // string that we re-wrap with the surrounding `'...'`-aware
+    // shape).
+    let server_attr = escape_html_attr(&config.vite_dev_server);
+    let entry_attr = escape_html_attr(&config.entry_point);
+
     // React requires the `@react-refresh` preamble before any module loads;
     // Svelte and Vue have HMR built into their Vite plugins and don't need
     // any extra preamble script.
     let preamble = match config.frontend {
-        Frontend::React => format!(
-            "<script type=\"module\">\n\
-             import RefreshRuntime from '{server}/@react-refresh'\n\
-             RefreshRuntime.injectIntoGlobalHook(window)\n\
-             window.$RefreshReg$ = () => {{}}\n\
-             window.$RefreshSig$ = () => (type) => type\n\
-             window.__vite_plugin_react_preamble_installed__ = true\n\
-             </script>\n",
-            server = config.vite_dev_server,
-        ),
+        Frontend::React => {
+            // `serde_json::to_string` always produces a double-quoted JSON
+            // literal (e.g. `"http://localhost:5173"`). Stripping the
+            // surrounding `"` and wrapping with `'` keeps the existing
+            // single-quote shape, while keeping all `\`/`'`/control-char
+            // escapes that serde_json already applied.
+            let js_server = serde_json::to_string(&config.vite_dev_server)
+                .unwrap_or_else(|_| "\"\"".to_string());
+            let js_server_inner = js_server.trim_matches('"');
+            // Re-escape any embedded single quotes for the wrapping `'…'`.
+            let js_server_safe = js_server_inner.replace('\'', "\\'");
+            format!(
+                "<script type=\"module\">\n\
+                 import RefreshRuntime from '{js_server_safe}/@react-refresh'\n\
+                 RefreshRuntime.injectIntoGlobalHook(window)\n\
+                 window.$RefreshReg$ = () => {{}}\n\
+                 window.$RefreshSig$ = () => (type) => type\n\
+                 window.__vite_plugin_react_preamble_installed__ = true\n\
+                 </script>\n"
+            )
+        }
         Frontend::Svelte | Frontend::Vue => String::new(),
     };
 
     format!(
         "{preamble}\
-         <script type=\"module\" src=\"{server}/@vite/client\"></script>\n\
-         <script type=\"module\" src=\"{server}/{entry}\"></script>\n",
-        preamble = preamble,
-        server = config.vite_dev_server,
-        entry = config.entry_point,
+         <script type=\"module\" src=\"{server_attr}/@vite/client\"></script>\n\
+         <script type=\"module\" src=\"{server_attr}/{entry_attr}\"></script>\n"
     )
 }
 

@@ -27,8 +27,7 @@ mod chain;
 mod registry;
 
 pub use chain::MiddlewareChain;
-pub use registry::register_global_middleware;
-pub use registry::MiddlewareRegistry;
+pub use registry::{get_global_middleware, register_global_middleware, MiddlewareRegistry};
 
 use crate::http::{Request, Response};
 use async_trait::async_trait;

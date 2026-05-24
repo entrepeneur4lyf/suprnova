@@ -29,7 +29,7 @@ use std::time::Duration;
 #[allow(unused_imports)]
 use suprnova::{
     bind, global_middleware, singleton, App, EventFacade, FrameworkError, IncludeMiddleware,
-    InertiaRequestExt, InertiaSharedData, InertiaVersionMiddleware, Prop, S3Config, SessionConfig,
+    Inertia, InertiaConfig, InertiaRequestExt, InertiaSharedData, Prop, S3Config, SessionConfig,
     SessionMiddleware, Storage, SupervisorRegistry, UserProvider, DB,
 };
 use suprnova::broadcasting::{BroadcastHub, ChannelRegistry, InMemoryBroadcastHub};
@@ -57,13 +57,14 @@ pub async fn register() {
     // into task-local state so JSON:API resource handlers can read them.
     global_middleware!(IncludeMiddleware);
 
-    // Asset-version 409 middleware — sends clients with stale SPA bundles
-    // through a full-page reload when the server's version has bumped.
-    // Without this, asset-version mismatches are silent. Version string
-    // here matches `InertiaConfig::default().version` ("1.0" today);
-    // when we wire `cargo build` to stamp a real hash we'll pass it
-    // through env or a build-script-generated const.
-    global_middleware!(InertiaVersionMiddleware::new("1.0"));
+    // Inertia protocol middleware (version mismatch 409 + 302→303
+    // conversion). Single call replaces the two prior opt-in
+    // `global_middleware!` registrations; closes Domain 20 audit
+    // D20-F by making the protocol-critical layer install in one
+    // visible place. Version string matches `InertiaConfig::default().version`
+    // ("1.0" today); when we wire `cargo build` to stamp a real hash
+    // we'll pass it through env or a build-script-generated const.
+    Inertia::install(&InertiaConfig::new().version("1.0"));
 
     // Register the user provider for Auth::user()
     bind!(dyn UserProvider, DatabaseUserProvider);

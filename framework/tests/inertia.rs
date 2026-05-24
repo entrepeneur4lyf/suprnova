@@ -1321,6 +1321,43 @@ async fn once_with_expired_until_forces_resolver_despite_client_cache_header() {
 }
 
 #[tokio::test]
+async fn dev_head_html_escapes_vite_dev_server_and_entry_point() {
+    // D20-G regression — ChatGPT MODULE_REVIEW_NOTES ## inertia LOW
+    // #1. Dev-server URLs are normally trusted config values, but a
+    // misconfigured env / dotfile shouldn't be able to inject markup
+    // into the dev HTML shell.
+    let cfg = InertiaConfig::new()
+        // Inject an attribute-breaking sequence via vite_dev_server.
+        .vite_dev_server("http://evil.test\"><script>alert(1)</script>")
+        .entry_point("src/main.ts\"><img src=x>");
+
+    let req = MockReq::new("/");
+    let resp = InertiaResponse::new("Home")
+        .with_config(cfg)
+        .resolve(&req)
+        .await
+        .unwrap();
+
+    let body = body_to_string(resp.into_hyper().into_body());
+    // The raw injection sequence must NOT appear unescaped.
+    assert!(
+        !body.contains("\"><script>alert(1)</script>"),
+        "dev shell must HTML-attr-escape vite_dev_server; body contains raw \
+         attribute-breaking sequence"
+    );
+    assert!(
+        !body.contains("\"><img src=x>"),
+        "dev shell must HTML-attr-escape entry_point; body contains raw \
+         attribute-breaking sequence"
+    );
+    // Escaped form (the &quot; sequence) must appear.
+    assert!(
+        body.contains("&quot;"),
+        "dev shell must emit &quot; for embedded double quote in config"
+    );
+}
+
+#[tokio::test]
 async fn lazy_resolver_fanout_is_bounded_by_max_concurrent_resolvers() {
     // D20-E regression — ChatGPT MODULE_REVIEW_NOTES ## inertia MEDIUM
     // #4. Without a cap a page with many lazy props would fire all

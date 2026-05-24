@@ -3,8 +3,9 @@
 
 use crate::pagination::IntoInertiaScroll;
 
+use super::config::InertiaConfig;
 use super::response::IntoInertiaData;
-use super::InertiaResponse;
+use super::{Inertia303Middleware, InertiaResponse, InertiaVersionMiddleware};
 
 /// Static facade. Today it exposes `Inertia::paginate`; future helpers
 /// (render, location, etc.) will land here.
@@ -44,5 +45,69 @@ impl Inertia {
         T: IntoInertiaData,
     {
         InertiaResponse::from_data_props(component, dto.__into_inertia_props())
+    }
+
+    /// Install the standard Inertia protocol middleware globally.
+    ///
+    /// Registers two global middlewares in order:
+    /// 1. [`InertiaVersionMiddleware`] — emits `409 Conflict` +
+    ///    `X-Inertia-Location` when the client's `X-Inertia-Version`
+    ///    header doesn't match the server's configured version.
+    ///    Without it, asset-version mismatches are silent and stale
+    ///    clients keep hitting the new server with the old bundle.
+    /// 2. [`Inertia303Middleware`] — converts `302` redirects on
+    ///    non-GET Inertia visits to `303`, so the client's follow-up
+    ///    request is explicitly a GET. Without it, browsers may
+    ///    re-submit the original PUT/PATCH/DELETE to the redirect
+    ///    target — silently breaking form-create-then-redirect flows.
+    ///
+    /// Both middlewares were previously opt-in via the `global_middleware!`
+    /// macro. Closes ChatGPT MODULE_REVIEW_NOTES ## inertia MEDIUM #1
+    /// (Domain 20 audit D20-F): generated apps that forgot either
+    /// middleware quietly got stale-asset behaviour or method-preserving
+    /// redirects in production.
+    ///
+    /// Call once at boot. The `config.version` value is cloned out of
+    /// the supplied `InertiaConfig` so callers can keep ownership of
+    /// the config for `InertiaResponse::with_config(...)`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use suprnova::{Inertia, InertiaConfig};
+    ///
+    /// pub fn register() {
+    ///     Inertia::install(
+    ///         &InertiaConfig::new().version(env!("CARGO_PKG_VERSION")),
+    ///     );
+    /// }
+    /// ```
+    pub fn install(config: &InertiaConfig) {
+        use crate::middleware::register_global_middleware;
+        let version = config.version.clone();
+        register_global_middleware(
+            InertiaVersionMiddleware::with_resolver(move || version.resolve()),
+        );
+        register_global_middleware(Inertia303Middleware::new());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::middleware::get_global_middleware;
+
+    #[test]
+    fn install_registers_two_middlewares() {
+        let before = get_global_middleware().len();
+        Inertia::install(&InertiaConfig::new().version("test-version"));
+        let after = get_global_middleware().len();
+        assert_eq!(
+            after - before,
+            2,
+            "Inertia::install should register exactly two middlewares \
+             (version + 303), got delta={}",
+            after - before
+        );
     }
 }
