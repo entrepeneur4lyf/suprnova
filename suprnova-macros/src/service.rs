@@ -162,11 +162,17 @@ pub fn service_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
     // Generate impl registration if impl_type is specified
     let impl_registration = args.impl_type.as_ref().map(|concrete_type| {
         quote! {
-            // Auto-register this service binding at startup
+            // Auto-register this service binding at startup.
+            //
+            // `bind_if_absent` keeps boot idempotent: re-running the bootstrap
+            // (e.g. on `Server::from_config` for the second time, or from a
+            // test that already installed a fake before booting) leaves the
+            // existing binding in place rather than replacing it with a fresh
+            // `Default::default()` instance.
             ::suprnova::inventory::submit! {
                 ::suprnova::container::provider::ServiceBindingEntry {
                     register: || {
-                        ::suprnova::App::bind::<dyn #trait_name>(
+                        ::suprnova::App::bind_if_absent::<dyn #trait_name>(
                             ::std::sync::Arc::new(<#concrete_type as ::std::default::Default>::default())
                         );
                     },

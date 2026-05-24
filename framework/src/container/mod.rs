@@ -112,6 +112,10 @@ impl Container {
     /// This stores the value under `TypeId::of::<Arc<dyn Trait>>()` which allows
     /// trait objects to be resolved via `make::<dyn Trait>()`.
     ///
+    /// Last write wins — calling `bind` again for the same trait overwrites the
+    /// previous binding. Use [`Container::bind_if_absent`] when registering
+    /// from boot hooks that may run more than once.
+    ///
     /// # Example
     /// ```rust,ignore
     /// container.bind::<dyn HttpClient>(RealHttpClient::new());
@@ -121,6 +125,40 @@ impl Container {
         let type_id = TypeId::of::<Arc<T>>();
         let arc: Arc<dyn Any + Send + Sync> = Arc::new(instance);
         self.bindings.insert(type_id, Binding::Singleton(arc));
+    }
+
+    /// Bind a trait object to a concrete implementation only if no binding
+    /// already exists for that trait. Returns `true` if the binding was
+    /// installed, `false` if a binding was already present.
+    ///
+    /// This is the idempotent variant used by `#[service]` auto-registration so
+    /// that re-running boot does not clobber manual overrides or stateful
+    /// singletons.
+    pub fn bind_if_absent<T: ?Sized + Send + Sync + 'static>(&mut self, instance: Arc<T>) -> bool {
+        let type_id = TypeId::of::<Arc<T>>();
+        if self.bindings.contains_key(&type_id) {
+            return false;
+        }
+        let arc: Arc<dyn Any + Send + Sync> = Arc::new(instance);
+        self.bindings.insert(type_id, Binding::Singleton(arc));
+        true
+    }
+
+    /// Register a singleton instance only if none is registered for the type.
+    /// Returns `true` if the singleton was installed, `false` if a binding for
+    /// that type already exists.
+    ///
+    /// This is the idempotent variant used by `#[injectable]` auto-registration
+    /// so that re-running boot does not replace runtime state with a fresh
+    /// `Default::default()` value.
+    pub fn singleton_if_absent<T: Any + Send + Sync + 'static>(&mut self, instance: T) -> bool {
+        let type_id = TypeId::of::<T>();
+        if self.bindings.contains_key(&type_id) {
+            return false;
+        }
+        let arc: Arc<dyn Any + Send + Sync> = Arc::new(instance);
+        self.bindings.insert(type_id, Binding::Singleton(arc));
+        true
     }
 
     /// Bind a trait object to a factory
@@ -253,6 +291,10 @@ impl App {
 
     /// Bind a trait object to a concrete implementation (as singleton)
     ///
+    /// Last write wins — calling `bind` again for the same trait overwrites
+    /// the previous binding. Use [`App::bind_if_absent`] when registering from
+    /// boot hooks that may run more than once.
+    ///
     /// # Example
     /// ```rust,ignore
     /// App::bind::<dyn HttpClient>(Arc::new(RealHttpClient::new()));
@@ -261,6 +303,39 @@ impl App {
         let container = APP_CONTAINER.get_or_init(|| RwLock::new(Container::new()));
         if let Ok(mut c) = container.write() {
             c.bind(instance);
+        }
+    }
+
+    /// Bind a trait object only if no binding already exists for that trait.
+    /// Returns `true` if the binding was installed, `false` if a binding was
+    /// already present. Used by `#[service]` auto-registration so re-running
+    /// boot does not clobber manual overrides or stateful singletons.
+    ///
+    /// Manual `App::bind` calls always override, so application code retains
+    /// the ability to replace a default-registered service explicitly.
+    pub fn bind_if_absent<T: ?Sized + Send + Sync + 'static>(instance: Arc<T>) -> bool {
+        let container = APP_CONTAINER.get_or_init(|| RwLock::new(Container::new()));
+        if let Ok(mut c) = container.write() {
+            c.bind_if_absent(instance)
+        } else {
+            false
+        }
+    }
+
+    /// Register a singleton only if none is registered for the concrete type.
+    /// Returns `true` if the singleton was installed, `false` if a binding for
+    /// that type already exists. Used by `#[injectable]` auto-registration so
+    /// re-running boot does not replace runtime state with a fresh
+    /// `Default::default()` value.
+    ///
+    /// Manual `App::singleton` calls always override, so application code can
+    /// still install a custom instance after boot.
+    pub fn singleton_if_absent<T: Any + Send + Sync + 'static>(instance: T) -> bool {
+        let container = APP_CONTAINER.get_or_init(|| RwLock::new(Container::new()));
+        if let Ok(mut c) = container.write() {
+            c.singleton_if_absent(instance)
+        } else {
+            false
         }
     }
 

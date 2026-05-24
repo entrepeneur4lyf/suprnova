@@ -80,7 +80,10 @@ pub fn injectable_impl(input: TokenStream) -> TokenStream {
                         ::suprnova::inventory::submit! {
                             ::suprnova::container::provider::SingletonEntry {
                                 register: || {
-                                    ::suprnova::App::singleton(<#name as ::std::default::Default>::default());
+                                    // singleton_if_absent — boot is idempotent
+                                    // and does not clobber manual overrides or
+                                    // stateful instances installed before boot.
+                                    ::suprnova::App::singleton_if_absent(<#name as ::std::default::Default>::default());
                                 },
                                 name: #name_str,
                             }
@@ -131,7 +134,9 @@ fn generate_for_named_struct(
             ::suprnova::inventory::submit! {
                 ::suprnova::container::provider::SingletonEntry {
                     register: || {
-                        ::suprnova::App::singleton(<#name as ::std::default::Default>::default());
+                        // singleton_if_absent — boot is idempotent and does
+                        // not clobber manual overrides.
+                        ::suprnova::App::singleton_if_absent(<#name as ::std::default::Default>::default());
                     },
                     name: #name_str,
                 }
@@ -211,7 +216,9 @@ fn generate_with_injection(
         ::suprnova::inventory::submit! {
             ::suprnova::container::provider::SingletonEntry {
                 register: || {
-                    ::suprnova::App::singleton(#name::__resolve_dependencies());
+                    // singleton_if_absent — boot is idempotent and does not
+                    // clobber manual overrides.
+                    ::suprnova::App::singleton_if_absent(#name::__resolve_dependencies());
                 },
                 name: #name_str,
             }
