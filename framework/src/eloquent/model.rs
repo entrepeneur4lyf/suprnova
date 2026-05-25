@@ -430,7 +430,14 @@ where
         Self::__dispatch_updating(self, shared.clone()).await?;
         Self::__dispatch_saving(shared.clone(), false).await?;
 
-        let am = self.clone().into_active_model_for_update()?;
+        // Audit HIGH `eloquent` #2 — read the (possibly listener-
+        // mutated) attrs back from the shared map and overlay onto
+        // the ActiveModel. The earlier code built the ActiveModel
+        // straight from `self.clone()` and silently dropped any
+        // listener mutations to the Updating / Saving payload.
+        let final_attrs = shared.lock().await.clone();
+        let mut am = self.clone().into_active_model_for_update()?;
+        Self::apply_attrs_to_active_model(&mut am, final_attrs)?;
         // T11/T12: route through resolve_write.
         let exec = crate::database::transaction::ExecutorChoice::resolve_write(
             None,
@@ -583,7 +590,12 @@ where
         Self::__dispatch_updating(self, shared.clone()).await?;
         Self::__dispatch_saving(shared.clone(), false).await?;
 
-        let am = self.clone().into_active_model_for_update()?;
+        // Audit HIGH `eloquent` #2 — match `save()`'s lifecycle: read
+        // the listener-mutated attrs back and apply them to the
+        // ActiveModel before the UPDATE fires.
+        let final_attrs = shared.lock().await.clone();
+        let mut am = self.clone().into_active_model_for_update()?;
+        Self::apply_attrs_to_active_model(&mut am, final_attrs)?;
         let exec = crate::database::transaction::ExecutorChoice::from_tx(tx);
         let updated = exec
             .update_active(am)
@@ -827,11 +839,17 @@ where
     ///
     /// # Security
     ///
-    /// `column` is interpolated **raw** into the SQL string (it is a
-    /// SQL identifier, not a parameter). Never pass untrusted input
-    /// here — hardcode the column or pick from a known allowlist.
-    /// Same contract as Laravel's `Model::increment($column, $by)`.
+    /// `column` is interpolated as a SQL identifier (not a bound
+    /// parameter — SQL doesn't allow that). The call validates
+    /// `column` via [`crate::database::validate_identifier`] before
+    /// rendering, so attacker-controlled strings are rejected at the
+    /// I/O boundary with [`FrameworkError`]. Same contract as
+    /// Laravel's `Model::increment($column, $by)`.
     async fn increment(&self, column: &str, by: i64) -> Result<(), FrameworkError> {
+        // Audit HIGH `eloquent` #1 — column is interpolated raw into
+        // the SQL string and cannot be parameterised. Validate
+        // against the framework's SQL identifier rules before render.
+        crate::database::validate_identifier(column)?;
         let table = Self::TABLE;
         let pk_name = Self::primary_key_name();
         let pk_value = self.primary_key_value_json();

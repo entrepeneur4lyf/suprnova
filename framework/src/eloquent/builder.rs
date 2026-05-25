@@ -397,7 +397,104 @@ impl<M> Clone for Builder<M> {
     }
 }
 
+/// Walk a [`WhereTerm`] and validate every identifier + operator it
+/// carries. Free function (not a method) so [`Builder::validate_inputs`]
+/// can recurse via `Not` / `Or` without monomorphisation noise on
+/// `M`. See [`Builder::validate_inputs`] for the full contract.
+fn validate_where_term(term: &WhereTerm) -> Result<(), FrameworkError> {
+    use crate::database::{validate_identifier, validate_sql_operator};
+    match term {
+        WhereTerm::Eq(c, _)
+        | WhereTerm::In(c, _)
+        | WhereTerm::NotIn(c, _)
+        | WhereTerm::Between(c, _, _)
+        | WhereTerm::NotBetween(c, _, _)
+        | WhereTerm::Null(c)
+        | WhereTerm::NotNull(c)
+        | WhereTerm::Like(c, _)
+        | WhereTerm::NotLike(c, _)
+        | WhereTerm::JsonContains(c, _)
+        | WhereTerm::DatePart(_, c, _) => {
+            validate_identifier(c)?;
+        }
+        WhereTerm::Op(c, op, _) | WhereTerm::JsonLength(c, op, _) => {
+            validate_identifier(c)?;
+            validate_sql_operator(op)?;
+        }
+        WhereTerm::Column(a, b) => {
+            validate_identifier(a)?;
+            validate_identifier(b)?;
+        }
+        WhereTerm::Raw(_, _) => {
+            // Explicit raw-SQL escape hatch; caller documents the
+            // trust boundary at `Builder::where_raw` /
+            // `Builder::having_raw`.
+        }
+        WhereTerm::Not(inner) => validate_where_term(inner)?,
+        WhereTerm::Or(terms) => {
+            for t in terms {
+                validate_where_term(t)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 impl<M> Builder<M> {
+    /// Walk the builder's accumulated identifiers and operators and
+    /// reject any that don't pass
+    /// [`crate::database::validate_identifier`] /
+    /// [`crate::database::validate_sql_operator`]. Called from every
+    /// public terminal method (`get`, `first`, `count`, `exists`, the
+    /// paginators, chunk / lazy, the aggregate helpers) before SQL is
+    /// rendered.
+    ///
+    /// Audit HIGH `eloquent` #1: `IntoColumn` accepts `&str` /
+    /// `String` as a passthrough — so even though the typed-column
+    /// path exists, every fluent method also accepts opaque strings.
+    /// Without validation, user-controlled strings reach the SQL
+    /// renderer verbatim. The validator runs once per terminal at the
+    /// I/O boundary; the fluent builder methods stay infallible.
+    ///
+    /// `select_raw`, `WhereTerm::Raw`, and `OrderTerm::Raw` are
+    /// explicit raw-SQL escape hatches — their docs warn callers
+    /// about the trust boundary, and validation deliberately skips
+    /// them (otherwise the escape hatch wouldn't exist).
+    pub(crate) fn validate_inputs(&self) -> Result<(), FrameworkError> {
+        use crate::database::validate_identifier;
+
+        if let Some(cols) = &self.select_cols {
+            for c in cols {
+                validate_identifier(c)?;
+            }
+        }
+        for c in &self.group_by {
+            validate_identifier(c)?;
+        }
+        for term in self
+            .where_terms
+            .iter()
+            .chain(self.having_terms.iter())
+        {
+            validate_where_term(term)?;
+        }
+        for o in &self.orders {
+            match o {
+                OrderTerm::Col(c, _) => {
+                    validate_identifier(c)?;
+                }
+                OrderTerm::Raw(_) | OrderTerm::Random => {
+                    // Explicit escape hatch / framework literal.
+                }
+            }
+        }
+        // UNION arms must also pass.
+        for (other, _is_all) in &self.unions {
+            other.validate_inputs()?;
+        }
+        Ok(())
+    }
+
     /// Construct an empty builder. Each `Model::query()` call returns
     /// a fresh instance.
     pub fn new() -> Self {
@@ -1570,7 +1667,14 @@ impl<M> Builder<M> {
         backend: DbBackend,
         table: &str,
         column_expr: &str,
-    ) -> (String, Vec<SeaValue>) {
+    ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
+        // Audit HIGH `eloquent` #1: every identifier and operator on
+        // this builder must clear `validate_identifier` /
+        // `validate_sql_operator` before reaching the SQL renderer.
+        // Raw-SQL escape hatches (`select_raw`, `WhereTerm::Raw`,
+        // `OrderTerm::Raw`) are deliberately skipped — they exist
+        // precisely so power users can opt past the validator.
+        self.validate_inputs()?;
         let mut values: Vec<SeaValue> = Vec::new();
         let mut n = 0;
         let mut sql = self.render_select_into(backend, table, column_expr, &mut values, &mut n);
@@ -1591,7 +1695,7 @@ impl<M> Builder<M> {
             }
         };
         sql.push_str(lock_clause);
-        (sql, values)
+        Ok((sql, values))
     }
 
     /// Render a COUNT-shaped SELECT against this builder.
@@ -1625,7 +1729,11 @@ impl<M> Builder<M> {
         &self,
         backend: DbBackend,
         table: &str,
-    ) -> (String, Vec<SeaValue>) {
+    ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
+        // Audit HIGH `eloquent` #1 — same identifier validation as
+        // `render_select_for`. Count uses the same WHERE / GROUP BY /
+        // HAVING clauses, so the attack surface is identical.
+        self.validate_inputs()?;
         let mut values: Vec<SeaValue> = Vec::new();
         let mut n = 0;
         let mut sql = String::new();
@@ -1661,7 +1769,7 @@ impl<M> Builder<M> {
             self.render_count_body(backend, &mut sql, &mut values, &mut n);
         }
 
-        (sql, values)
+        Ok((sql, values))
     }
 
     /// Append the WHERE / GROUP BY / HAVING clauses (without the
@@ -1799,12 +1907,21 @@ where
 
     /// Render the SQL for the live DB connection's backend, returning
     /// both the SQL string and the bound values.
+    ///
+    /// **Panics** when this builder contains an identifier or
+    /// operator that fails [`crate::database::validate_identifier`] /
+    /// [`crate::database::validate_sql_operator`] — the same
+    /// validation the execution path applies. The debug-only API
+    /// keeps an infallible signature; the execution path
+    /// ([`Self::get`] / [`Self::count`] / ...) surfaces the same
+    /// condition as `Err(FrameworkError)` instead.
     pub fn to_sql_with_bindings(&self) -> (String, Vec<SeaValue>) {
         let backend = DB::connection()
             .ok()
             .map(|db| db.inner().get_database_backend())
             .unwrap_or(DbBackend::Sqlite);
         self.render_select_for(backend, M::TABLE, "*")
+            .expect("to_sql_with_bindings: builder contains invalid identifier/operator")
     }
 
     /// Render the SQL for a specific dialect. Useful when debugging
@@ -1818,6 +1935,7 @@ where
     /// string and the bound values.
     pub fn to_sql_with_bindings_for(&self, backend: DbBackend) -> (String, Vec<SeaValue>) {
         self.render_select_for(backend, M::TABLE, "*")
+            .expect("to_sql_with_bindings_for: builder contains invalid identifier/operator")
     }
 
     /// Phase 10C T14 — log the rendered SQL via `tracing` and return
@@ -1846,12 +1964,27 @@ where
             .ok()
             .map(|db| db.inner().get_database_backend())
             .unwrap_or(DbBackend::Sqlite);
-        let (sql, _values) = self.render_select_for(backend, M::TABLE, "*");
-        tracing::info!(
-            target: "suprnova::eloquent::dump",
-            sql = %sql,
-            "query",
-        );
+        match self.render_select_for(backend, M::TABLE, "*") {
+            Ok((sql, _values)) => {
+                tracing::info!(
+                    target: "suprnova::eloquent::dump",
+                    sql = %sql,
+                    "query",
+                );
+            }
+            Err(e) => {
+                // Debug-only path — log the validation error instead
+                // of panicking so the user can keep chaining and see
+                // the structural issue. The execution path
+                // (`get`/`count`/...) surfaces the same error as
+                // `Err`.
+                tracing::error!(
+                    target: "suprnova::eloquent::dump",
+                    error = %e,
+                    "dump: builder contains invalid identifier/operator",
+                );
+            }
+        }
         self
     }
 
@@ -1875,7 +2008,10 @@ where
             .ok()
             .map(|db| db.inner().get_database_backend())
             .unwrap_or(DbBackend::Sqlite);
-        let (sql, _values) = self.render_select_for(backend, M::TABLE, "*");
+        let sql = self
+            .render_select_for(backend, M::TABLE, "*")
+            .map(|(sql, _values)| sql)
+            .unwrap_or_else(|e| format!("<invalid: {e}>"));
         tracing::error!(
             target: "suprnova::eloquent::dump",
             sql = %sql,
@@ -2008,7 +2144,7 @@ where
         // / LIMIT terms; afterwards we hand the plan to the eager
         // orchestrator.
         let eager_specs = std::mem::take(&mut self.eager_specs);
-        let (sql, vals) = self.render_select_for(backend, M::TABLE, "*");
+        let (sql, vals) = self.render_select_for(backend, M::TABLE, "*")?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
 
         // Fetch into the entity's `Model` — the SeaORM type that's
@@ -2218,7 +2354,7 @@ where
         )
         .await?;
         let backend = exec.backend();
-        let (count_sql, count_vals) = self.render_count_select_for(backend, M::TABLE);
+        let (count_sql, count_vals) = self.render_count_select_for(backend, M::TABLE)?;
         let count_stmt = Statement::from_sql_and_values(backend, &count_sql, count_vals);
         let count_row = exec
             .query_one(count_stmt)
@@ -2778,7 +2914,7 @@ where
         let mut s = self;
         s.limit = Some(1);
         let col_name = col.col_name();
-        let (sql, vals) = s.render_select_for(backend, M::TABLE, &col_name);
+        let (sql, vals) = s.render_select_for(backend, M::TABLE, &col_name)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let row = exec
             .query_one(stmt)
@@ -2802,7 +2938,7 @@ where
         .await?;
         let backend = exec.backend();
         let col_name = col.col_name();
-        let (sql, vals) = self.render_select_for(backend, M::TABLE, &col_name);
+        let (sql, vals) = self.render_select_for(backend, M::TABLE, &col_name)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let rows = exec
             .query_all(stmt)
@@ -2831,7 +2967,7 @@ where
         let backend = exec.backend();
         let kn = key_col.col_name();
         let vn = val_col.col_name();
-        let (sql, vals) = self.render_select_for(backend, M::TABLE, &format!("{kn}, {vn}"));
+        let (sql, vals) = self.render_select_for(backend, M::TABLE, &format!("{kn}, {vn}"))?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let rows = exec
             .query_all(stmt)
@@ -2859,7 +2995,7 @@ where
         )
         .await?;
         let backend = exec.backend();
-        let (sql, vals) = self.render_select_for(backend, M::TABLE, expr);
+        let (sql, vals) = self.render_select_for(backend, M::TABLE, expr)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let row = exec
             .query_one(stmt)
@@ -2883,7 +3019,7 @@ where
         )
         .await?;
         let backend = exec.backend();
-        let (sql, vals) = self.render_select_for(backend, M::TABLE, expr);
+        let (sql, vals) = self.render_select_for(backend, M::TABLE, expr)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let row = exec
             .query_one(stmt)
