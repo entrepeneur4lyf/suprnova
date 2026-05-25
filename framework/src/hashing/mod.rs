@@ -98,7 +98,7 @@ pub fn hash_with_cost(password: &str, cost: u32) -> Result<String, FrameworkErro
 ///
 /// **Synchronous** — see [`verify_async`] for the async-safe variant.
 /// Uses constant-time comparison to prevent timing attacks. Passwords
-/// > [`MAX_PASSWORD_BYTES`] cannot match any hash this module
+/// longer than [`MAX_PASSWORD_BYTES`] cannot match any hash this module
 /// produces, so they return `Ok(false)` rather than an error — keeps
 /// the calling auth flow returning the same "invalid credentials"
 /// response regardless of length.
