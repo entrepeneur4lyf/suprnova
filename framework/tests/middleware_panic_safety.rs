@@ -112,9 +112,12 @@ async fn send_get(
 // ── tests ──────────────────────────────────────────────────────────────────
 
 /// A panicking middleware must translate to a 500 response, not a
-/// dropped connection. The body should identify the failure mode so
-/// operators can grep dashboards for "Internal Server Error" from
-/// middleware versus other 500 paths.
+/// dropped connection. After audit HIGH `error` #1 the body uses the
+/// same standardised JSON shape the `FrameworkError -> HttpResponse`
+/// path emits — generic 5xx-sanitised `message`, optional
+/// `request_id`, optional `debug_message` when `APP_DEBUG=true`.
+/// The panic payload still appears in the structured tracing log,
+/// just not in the wire response.
 #[tokio::test]
 async fn panicking_middleware_translates_to_500() {
     let router = Router::new()
@@ -131,10 +134,17 @@ async fn panicking_middleware_translates_to_500() {
         "panicking middleware must yield 500, got body: {}",
         String::from_utf8_lossy(&body),
     );
-    assert!(
-        body.starts_with(b"Internal Server Error"),
-        "response body should identify the failure; got: {}",
+    let parsed: serde_json::Value = serde_json::from_slice(&body).expect(
+        "panic response must be valid JSON via the FrameworkError -> HttpResponse path",
+    );
+    assert_eq!(
+        parsed["message"], "Internal Server Error",
+        "panic body must carry the sanitised 5xx message; got: {}",
         String::from_utf8_lossy(&body),
+    );
+    assert!(
+        parsed.get("request_id").is_some(),
+        "panic body must include `request_id` key (null outside an active scope)"
     );
 }
 

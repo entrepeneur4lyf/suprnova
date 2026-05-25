@@ -626,7 +626,22 @@ async fn execute_chain_safely(
                 path = %path,
                 "request middleware or handler panicked — translating to 500"
             );
-            HttpResponse::text("Internal Server Error").status(500)
+            // Audit HIGH `error` #1: route the panic through the same
+            // `FrameworkError -> HttpResponse` conversion that returned
+            // 5xx errors use. That gives us:
+            //   - The sanitised `{"message": "Internal Server Error"}`
+            //     JSON body (no panic payload leaks downstream).
+            //   - `request_id` injection so a client error can be
+            //     correlated to the structured log.
+            //   - `ErrorOccurred` event dispatch — observability
+            //     listeners (Sentry, Pagerduty, custom log shippers)
+            //     that fire on returned 5xx errors now also fire on
+            //     panics, instead of seeing only the tracing log.
+            // The panic message remains in the tracing::error! above,
+            // not in the HTTP body — same 5xx-sanitisation contract.
+            HttpResponse::from(crate::error::FrameworkError::internal(format!(
+                "request handler panicked: {msg}"
+            )))
         }
     }
 }
