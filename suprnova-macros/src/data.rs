@@ -153,6 +153,12 @@ struct StructOptions {
     /// for response DTOs read back from external services that may
     /// carry forward-compatible extra keys.
     allow_unknown_fields: bool,
+    /// `Some(N)` when `#[data(max_body_bytes = N)]` is present — overrides
+    /// the `FormRequest::max_body_bytes` trait default for this DTO.
+    /// Honored by both the simple (no route-param) and the inlined-lifecycle
+    /// (with route-param) `FormRequest` impl arms — the override is part
+    /// of the trait surface, not a route-param-only feature.
+    max_body_bytes: Option<u64>,
     /// `Some(...)` when `#[json_resource("...")]` is present on the struct.
     json_resource: Option<JsonResourceOptions>,
 }
@@ -187,6 +193,26 @@ fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::
                     opts.authorize_fn = Some(path);
                 } else if meta.path.is_ident("allow_unknown_fields") {
                     opts.allow_unknown_fields = true;
+                } else if meta.path.is_ident("max_body_bytes") {
+                    // #[data(max_body_bytes = N)] — overrides
+                    // FormRequest::max_body_bytes for this DTO. N must
+                    // be a non-zero integer literal.
+                    let lit: syn::LitInt = meta.value()?.parse()?;
+                    let value: u64 = lit.base10_parse().map_err(|e| {
+                        syn::Error::new(
+                            lit.span(),
+                            format!(
+                                "#[data(max_body_bytes = N)] — N must parse as u64: {}",
+                                e
+                            ),
+                        )
+                    })?;
+                    if value == 0 {
+                        return Err(meta.error(
+                            "#[data(max_body_bytes = 0)] is not allowed — a zero-byte cap would reject every request; use a positive value (the trait default is 64 MiB)",
+                        ));
+                    }
+                    opts.max_body_bytes = Some(value);
                 } else if meta.path.is_ident("deny_unknown_fields") {
                     // `deny_unknown_fields` was the opt-in flag when
                     // permissive was the default. Strict is now the
@@ -204,7 +230,7 @@ fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::
                     ));
                 } else {
                     return Err(meta.error(
-                        "unknown struct-level #[data(...)] flag — expected auto_lazy, authorize, or allow_unknown_fields",
+                        "unknown struct-level #[data(...)] flag — expected auto_lazy, authorize, allow_unknown_fields, or max_body_bytes",
                     ));
                 }
                 Ok(())
@@ -486,6 +512,21 @@ fn build_form_request(
         })
         .collect();
 
+    // `#[data(max_body_bytes = N)]` — emit an override that shadows the
+    // trait default. Both the simple (no-op extract) and the inlined-
+    // lifecycle (with route-param) arms emit it; the inlined arm calls
+    // `Self::max_body_bytes()` directly, so the override propagates
+    // automatically once present on the impl.
+    let max_body_bytes_override: TokenStream2 = match struct_opts.max_body_bytes {
+        Some(n) => {
+            let lit = syn::LitInt::new(&n.to_string(), proc_macro2::Span::call_site());
+            quote! {
+                fn max_body_bytes() -> usize { #lit as usize }
+            }
+        }
+        None => quote! {},
+    };
+
     // If no fields use from_route_param, emit the simple no-op FormRequest impl
     // (delegates to the trait's default `extract` which reads the body normally).
     if route_param_injections.is_empty() {
@@ -494,6 +535,8 @@ fn build_form_request(
                 fn authorize(req: &::suprnova::Request) -> bool {
                     #authorize_body
                 }
+
+                #max_body_bytes_override
             }
         };
     }
@@ -516,6 +559,8 @@ fn build_form_request(
             fn authorize(req: &::suprnova::Request) -> bool {
                 #authorize_body
             }
+
+            #max_body_bytes_override
 
             async fn extract(req: ::suprnova::Request) -> ::core::result::Result<Self, ::suprnova::FrameworkError> {
                 if !Self::authorize(&req) {

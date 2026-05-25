@@ -58,6 +58,7 @@ use super::{Container, TASK_CONTAINER, TEST_CONTAINER};
 use std::any::Any;
 use std::future::Future;
 use std::sync::{Arc, RwLock};
+use tokio::task::JoinHandle;
 
 /// Test utilities for the container
 ///
@@ -99,15 +100,13 @@ impl TestContainer {
     /// route through the task-local first, so a call inside `scope`
     /// writes to the task-local container.
     ///
-    /// # Caveat — `tokio::spawn`
+    /// # Spawning sub-tasks
     ///
-    /// tokio task-locals are NOT inherited by `tokio::spawn`'d
-    /// sub-tasks. If your test spawns sub-tasks that need to read the
-    /// fakes, wrap each sub-task with another `TestContainer::scope`
-    /// (and re-register the fakes inside it). The framework test suite
-    /// currently has zero `TestContainer::*` + `tokio::spawn` overlaps
-    /// where the spawn body reads from `App`, so this remains a
-    /// documented caveat rather than an automatic propagation.
+    /// tokio task-locals are NOT inherited by bare `tokio::spawn`'d
+    /// sub-tasks. Use [`TestContainer::spawn`] (which captures the
+    /// current task-local container and re-installs it inside the
+    /// spawned future) any time a test spawns a sub-task that needs
+    /// to read the fakes via `App::make` / `App::resolve`.
     ///
     /// # Example
     /// ```rust,ignore
@@ -116,6 +115,12 @@ impl TestContainer {
     ///     TestContainer::scope(async {
     ///         TestContainer::bind::<dyn HttpClient>(Arc::new(FakeHttpClient::new()));
     ///         do_async_work().await;  // sees the fake across worker hops
+    ///         TestContainer::spawn(async {
+    ///             // also sees the fake — task-local was captured and re-installed
+    ///             let client = App::make::<dyn HttpClient>().unwrap();
+    ///         })
+    ///         .await
+    ///         .unwrap();
     ///     })
     ///     .await;
     /// }
@@ -123,6 +128,48 @@ impl TestContainer {
     pub async fn scope<Fut: Future>(future: Fut) -> Fut::Output {
         let container = Arc::new(RwLock::new(Container::new()));
         TASK_CONTAINER.scope(container, future).await
+    }
+
+    /// Spawn an async task that inherits the current task-local test
+    /// container.
+    ///
+    /// `tokio::spawn` does not inherit task-locals — a future spawned
+    /// from inside a [`TestContainer::scope`] block would otherwise
+    /// see only the global container. This helper captures the
+    /// current scope's `Arc<RwLock<Container>>` and re-installs it
+    /// inside the spawned future, so test fakes registered via
+    /// `TestContainer::bind` / `singleton` / `factory` remain visible
+    /// to the sub-task. The same `Arc` is shared, so bindings added
+    /// in the sub-task become visible to the parent (and any other
+    /// concurrent sub-tasks) on commit; this matches the semantics
+    /// of `TestContainer::*` inside the parent scope.
+    ///
+    /// Outside a `scope` block this falls through to `tokio::spawn`
+    /// unchanged.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// TestContainer::scope(async {
+    ///     TestContainer::bind::<dyn HttpClient>(Arc::new(FakeHttpClient::new()));
+    ///     let h = TestContainer::spawn(async {
+    ///         // resolves the fake — task-local propagated
+    ///         App::make::<dyn HttpClient>().unwrap()
+    ///     });
+    ///     let _client = h.await.unwrap();
+    /// })
+    /// .await;
+    /// ```
+    pub fn spawn<Fut>(future: Fut) -> JoinHandle<Fut::Output>
+    where
+        Fut: Future + Send + 'static,
+        Fut::Output: Send + 'static,
+    {
+        match TASK_CONTAINER.try_with(|c| c.clone()) {
+            Ok(container) => {
+                tokio::spawn(async move { TASK_CONTAINER.scope(container, future).await })
+            }
+            Err(_) => tokio::spawn(future),
+        }
     }
 
     /// Register a fake singleton for testing.

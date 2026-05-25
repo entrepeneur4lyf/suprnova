@@ -397,3 +397,41 @@ cargo test test_user_creation
 # Run tests with output
 cargo test -- --nocapture
 ```
+
+## The `testing` feature and production builds
+
+`suprnova` exposes test helpers (`Storage::fake()`, `TestContainer`,
+`TestDatabase`, crypto rotation hooks like `_test_install_keyring`) behind
+a Cargo feature named `testing`. The feature is part of the default
+feature set so consuming test suites pick them up for free with:
+
+```toml
+[dependencies]
+suprnova = "0.x"
+
+[dev-dependencies]
+# `testing` is on transitively via the dependency above — nothing extra.
+```
+
+The test hooks themselves are `#[doc(hidden)]` and prefixed with `_test_`,
+so they aren't reachable from idiomatic application code even when the
+feature is on. The load-bearing safeguard is `Server::from_config`: it
+validates `APP_KEY` on **every** boot, not only when the key ring is
+uninitialized. A pre-installed test key cannot bypass that check —
+boot fails fast if `APP_KEY` is missing or malformed regardless of
+whether anything in-process pre-installed a key.
+
+If you'd rather the helpers not be present in your production artifact
+at all (defense in depth), depend on `suprnova` with default features
+off and enable only what you ship:
+
+```toml
+[dependencies]
+suprnova = { version = "0.x", default-features = false, features = ["..."] }
+
+[dev-dependencies]
+suprnova = { version = "0.x", features = ["testing", "..."] }
+```
+
+This is a tightening, not a fix — boot validation closes the actual
+exploit regardless of which posture you pick.

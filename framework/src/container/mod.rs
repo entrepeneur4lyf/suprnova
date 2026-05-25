@@ -60,14 +60,12 @@ thread_local! {
 // keep working unchanged while new tests opt into the async-safe path
 // via [`testing::TestContainer::scope`].
 //
-// Caveat: tokio task-locals are NOT inherited by `tokio::spawn`'d
-// child tasks. If a test spawns sub-tasks that need the override,
-// wrap each sub-task with another `TestContainer::scope` (or close
-// over a clone of the relevant fakes and bind them inside the new
-// scope). The current test suite has zero `TestContainer::fake()` +
-// `tokio::spawn` co-occurrences where the spawn body reads from
-// `App`, so this caveat is documented rather than worked around at
-// runtime.
+// Note on `tokio::spawn`: bare `tokio::spawn`'d child tasks do NOT
+// inherit task-locals. Tests that spawn sub-tasks needing access to
+// the override should use [`testing::TestContainer::spawn`] instead
+// — it captures the current task-local container and re-installs it
+// inside the spawned future, so the fakes remain visible across the
+// spawn boundary.
 tokio::task_local! {
     pub(crate) static TASK_CONTAINER: Arc<RwLock<Container>>;
 }

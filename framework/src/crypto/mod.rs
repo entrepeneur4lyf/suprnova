@@ -30,6 +30,30 @@
 //! ciphertext in the log payload — just the fact + an opaque
 //! "re-encrypt to remove APP_KEY_PREVIOUS dependency" hint) so admins
 //! know to schedule a re-encrypt pass.
+//!
+//! # Production hardening
+//!
+//! The `_test_install_*` helpers below are gated behind
+//! `cfg(any(test, feature = "testing"))`. The `testing` feature is part
+//! of `suprnova`'s default feature set so that downstream test suites
+//! can use `Storage::fake()` and similar helpers without opting in. In
+//! production binaries this means the test hooks are present in the
+//! compiled artifact, but they remain unreachable for two independent
+//! reasons:
+//!
+//! 1. They are `#[doc(hidden)]` and prefixed `_test_` so application
+//!    code can't reach them without going out of its way.
+//! 2. `Server::from_config` validates `APP_KEY` *on every boot*, not
+//!    only when the key ring is uninitialized — so a hypothetical
+//!    test-hook install in production would still fail boot if
+//!    `APP_KEY` is missing or malformed. The validation is the
+//!    load-bearing defense; the cfg gate is defense in depth.
+//!
+//! Operators who want the test hooks entirely absent from production
+//! artifacts should depend on `suprnova` with `default-features = false`
+//! and explicitly enable only what they ship. The defense-in-depth
+//! posture above means this is a tightening, not a fix — the boot
+//! validation closes the actual exploit either way.
 
 pub mod key;
 pub(crate) mod aead;

@@ -6,6 +6,27 @@
 //! the runtime map via `ensure_initialized`. The `register(name,
 //! fields)` helper below stays available for tests that need to inject
 //! ad-hoc allowlists. Default-deny: a DTO not registered allows nothing.
+//!
+//! # Key shape — fully-qualified type names
+//!
+//! Keys are the fully-qualified type name produced by
+//! `concat!(module_path!(), "::", stringify!(StructName))` — the same
+//! expression the derive macro emits at the `inventory::submit!` call
+//! site. This prevents collisions between two same-named DTOs in
+//! different modules (audit HIGH `data` #336, second half).
+//!
+//! Callers — both for `register` (writes) and `is_allowed` /
+//! `allowed_for` (reads) — MUST use the same key shape:
+//!
+//! ```ignore
+//! // Correct: matches what `#[derive(Data)]` writes for `crate::dto::AlbumDto`.
+//! const KEY: &str = concat!(module_path!(), "::", "AlbumDto");
+//! registry::register(KEY, &["songs", "artist"]);
+//! assert!(registry::is_allowed(KEY, "songs"));
+//! ```
+//!
+//! Bare struct names (`"AlbumDto"`) will silently miss every lookup —
+//! the registry treats them as a different key entirely.
 
 use crate::lock;
 use once_cell::sync::Lazy;
@@ -47,6 +68,15 @@ fn ensure_initialized() {
 /// prevents that anyway, but the pre-drain makes the ordering explicit).
 ///
 /// This is the primary test-injection path for ad-hoc allowlists.
+///
+/// # `struct_name` must be a fully-qualified type name
+///
+/// The derive macro writes keys as
+/// `concat!(module_path!(), "::", stringify!(StructName))`. Manual
+/// callers MUST use the same key shape, or `is_allowed` / `allowed_for`
+/// lookups will silently miss. See the [module docs](self) for the
+/// rationale and an example. A bare struct name like `"AlbumDto"`
+/// will register a "ghost" entry that no real lookup will ever hit.
 pub fn register(struct_name: &'static str, fields: &'static [&'static str]) {
     ensure_initialized();
     let mut map = lock::write(&REGISTRY)
@@ -54,7 +84,9 @@ pub fn register(struct_name: &'static str, fields: &'static [&'static str]) {
     map.insert(struct_name, fields.to_vec());
 }
 
-/// Check whether `field` is includable on `struct_name`.
+/// Check whether `field` is includable on `struct_name`. The
+/// `struct_name` must be the fully-qualified type name — see the
+/// [module docs](self) for the key shape.
 pub fn is_allowed(struct_name: &str, field: &str) -> bool {
     ensure_initialized();
     lock::read(&REGISTRY)
@@ -65,7 +97,9 @@ pub fn is_allowed(struct_name: &str, field: &str) -> bool {
 }
 
 /// Returns the full allowed-include list for a DTO. Empty when the DTO
-/// has not been registered.
+/// has not been registered. The `struct_name` must be the
+/// fully-qualified type name — see the [module docs](self) for the
+/// key shape.
 pub fn allowed_for(struct_name: &str) -> Vec<&'static str> {
     ensure_initialized();
     lock::read(&REGISTRY)
