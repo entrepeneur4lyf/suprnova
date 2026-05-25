@@ -1,6 +1,7 @@
 //! Database configuration for suprnova framework
 
-use crate::config::{env, env_optional};
+use crate::config::{env, env_optional, Environment};
+use crate::FrameworkError;
 
 /// Database type enumeration
 #[derive(Debug, Clone, PartialEq)]
@@ -9,6 +10,25 @@ pub enum DatabaseType {
     Mysql,
     Sqlite,
     Unknown,
+}
+
+/// Source provenance of [`DatabaseConfig::url`].
+///
+/// Tracks whether the URL came from the `DATABASE_URL` env variable
+/// (`Env`), was filled in by the silent SQLite fallback (`Default`),
+/// or was supplied explicitly via [`DatabaseConfigBuilder::url`]
+/// (`Explicit`). Audit HIGH `database` #1: production boots must
+/// refuse the silent fallback — see
+/// [`DatabaseConfig::validate_for_environment`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UrlSource {
+    /// URL was read from the `DATABASE_URL` env var.
+    Env,
+    /// URL fell through to the dev-convenience `sqlite://./database.db`
+    /// fallback because `DATABASE_URL` was unset.
+    Default,
+    /// URL was set programmatically (typically via the builder).
+    Explicit,
 }
 
 /// Database configuration
@@ -47,18 +67,39 @@ pub struct DatabaseConfig {
     pub connect_timeout: u64,
     /// Enable SQL query logging
     pub logging: bool,
+    /// Where [`Self::url`] came from — env var, dev-fallback default,
+    /// or an explicit programmatic value. Used by
+    /// [`Self::validate_for_environment`] to refuse the silent
+    /// SQLite fallback in production.
+    pub url_source: UrlSource,
 }
 
 impl DatabaseConfig {
-    /// Create configuration from environment variables
+    /// The dev-convenience SQLite fallback URL used when
+    /// `DATABASE_URL` is unset. Public so production
+    /// preflight tooling can compare against it without
+    /// hard-coding the string.
+    pub const DEFAULT_SQLITE_URL: &'static str = "sqlite://./database.db";
+
+    /// Create configuration from environment variables.
+    ///
+    /// When `DATABASE_URL` is unset, falls back to
+    /// [`Self::DEFAULT_SQLITE_URL`] and records the source as
+    /// [`UrlSource::Default`] — that flag is what
+    /// [`Self::validate_for_environment`] uses to refuse the silent
+    /// fallback in production.
     pub fn from_env() -> Self {
+        let (url, url_source) = match env_optional("DATABASE_URL") {
+            Some(u) => (u, UrlSource::Env),
+            None => (Self::DEFAULT_SQLITE_URL.to_string(), UrlSource::Default),
+        };
         Self {
-            url: env_optional("DATABASE_URL")
-                .unwrap_or_else(|| "sqlite://./database.db".to_string()),
+            url,
             max_connections: env("DB_MAX_CONNECTIONS", 10),
             min_connections: env("DB_MIN_CONNECTIONS", 1),
             connect_timeout: env("DB_CONNECT_TIMEOUT", 30),
             logging: env("DB_LOGGING", false),
+            url_source,
         }
     }
 
@@ -80,9 +121,44 @@ impl DatabaseConfig {
         }
     }
 
-    /// Check if database URL is configured (not the default)
+    /// Returns whether the database URL was explicitly configured
+    /// rather than falling through to the dev SQLite default.
+    ///
+    /// Use this as a precondition signal — production boots that
+    /// observe `false` here must refuse to continue. The lower-level
+    /// helper that gates `DB::init` on this is
+    /// [`Self::validate_for_environment`].
     pub fn is_configured(&self) -> bool {
-        self.url != "sqlite://./database.db"
+        self.url_source != UrlSource::Default
+    }
+
+    /// Refuse to boot in a production-like environment when the URL
+    /// fell through to the dev SQLite fallback.
+    ///
+    /// "Production-like" = [`Environment::Production`] or
+    /// [`Environment::Staging`]. Local / Development / Testing /
+    /// Custom environments keep the silent fallback for zero-setup
+    /// iteration, matching the project's documented dev posture
+    /// ("Suprnova dev default = SQLite").
+    ///
+    /// Called automatically by [`DB::init`](crate::DB::init) and
+    /// [`DB::init_with`](crate::DB::init_with); manual `DB::init_with`
+    /// callers that pre-build a config can call this themselves to
+    /// fail-fast at config-creation time if they want a tighter
+    /// guarantee.
+    pub fn validate_for_environment(&self, env: &Environment) -> Result<(), FrameworkError> {
+        let prod_like = env.is_production() || matches!(env, Environment::Staging);
+        if prod_like && self.url_source == UrlSource::Default {
+            return Err(FrameworkError::param(format!(
+                "DATABASE_URL is required in `{env}` but was unset — refusing to boot \
+                 against the dev SQLite fallback `{}`. Set DATABASE_URL to the \
+                 production database URL, or construct an explicit config via \
+                 `DatabaseConfig::builder().url(...)` when a SQLite file really is \
+                 the production database.",
+                Self::DEFAULT_SQLITE_URL,
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -133,15 +209,28 @@ impl DatabaseConfigBuilder {
         self
     }
 
-    /// Build the configuration
+    /// Build the configuration.
+    ///
+    /// `url`: if [`Self::url`] was called the resulting config
+    /// carries [`UrlSource::Explicit`] (production-safe — the
+    /// operator chose this URL deliberately). Otherwise the URL +
+    /// source are inherited from
+    /// [`DatabaseConfig::from_env`] — `Env` when `DATABASE_URL` is
+    /// set, `Default` when it falls through to the SQLite
+    /// convenience URL.
     pub fn build(self) -> DatabaseConfig {
         let defaults = DatabaseConfig::from_env();
+        let (url, url_source) = match self.url {
+            Some(u) => (u, UrlSource::Explicit),
+            None => (defaults.url, defaults.url_source),
+        };
         DatabaseConfig {
-            url: self.url.unwrap_or(defaults.url),
+            url,
             max_connections: self.max_connections.unwrap_or(defaults.max_connections),
             min_connections: self.min_connections.unwrap_or(defaults.min_connections),
             connect_timeout: self.connect_timeout.unwrap_or(defaults.connect_timeout),
             logging: self.logging.unwrap_or(defaults.logging),
+            url_source,
         }
     }
 }

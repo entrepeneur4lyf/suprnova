@@ -144,11 +144,36 @@ impl DbTableBuilder {
         self
     }
 
+    /// Validate every user-supplied identifier and operator captured
+    /// in this builder. Called by every terminal method before the
+    /// SQL is rendered. See [`identifier`](crate::database::identifier)
+    /// for the contract.
+    fn validate_inputs(&self) -> Result<(), FrameworkError> {
+        crate::database::validate_identifier(&self.table)?;
+        for col in &self.select_columns {
+            crate::database::validate_identifier(col)?;
+        }
+        for (col, op, _val) in &self.where_terms {
+            crate::database::validate_identifier(col)?;
+            crate::database::validate_sql_operator(op)?;
+        }
+        for (col, _dir) in &self.order {
+            crate::database::validate_identifier(col)?;
+        }
+        Ok(())
+    }
+
     /// Execute the SELECT and return every matching row as a
     /// [`Collection<DynamicRow>`]. Uses
     /// [`sea_orm::JsonValue::find_by_statement`] under the hood so
     /// column shape is discovered at runtime.
     pub async fn get(self) -> Result<Collection<DynamicRow>, FrameworkError> {
+        // Audit HIGH `database` #2: validate every identifier and
+        // operator before rendering SQL. Values stay parameterised by
+        // SeaORM; identifiers can't be parameterised, so the validator
+        // is the only thing standing between user input and the SQL
+        // string.
+        self.validate_inputs()?;
         // T11/T12: route through resolve_read so `DB::table` reads
         // honour the ambient `DB::transaction` scope, the per-builder
         // `.on(name)` override, and `__read_replica__` auto-routing.
@@ -201,6 +226,11 @@ impl DbTableBuilder {
     /// `FromQueryResult` impl — on SQLite the typed accessor is the
     /// reliable path.
     pub async fn count(self) -> Result<u64, FrameworkError> {
+        // Validate user inputs BEFORE the COUNT(*) override stomps
+        // `select_columns` — the override is framework-controlled
+        // literal SQL and would otherwise fail the identifier
+        // validator on the parenthesised aggregate.
+        self.validate_inputs()?;
         // T11/T12: route through resolve_read.
         let exec = crate::database::transaction::ExecutorChoice::resolve_read(
             None,
@@ -235,6 +265,13 @@ impl DbTableBuilder {
     /// split: Postgres + SQLite use `RETURNING id`; MySQL runs the
     /// INSERT then issues `SELECT LAST_INSERT_ID()`.
     pub async fn insert(self, attrs: Attrs) -> Result<i64, FrameworkError> {
+        // Audit HIGH `database` #2 — validate identifiers and operators
+        // captured in the builder state, plus the attrs keys which are
+        // themselves identifiers being interpolated into SQL.
+        self.validate_inputs()?;
+        for col in attrs.keys() {
+            crate::database::validate_identifier(col)?;
+        }
         // T11/T12: route through resolve_write — writes never go to
         // `__read_replica__`.
         let exec = crate::database::transaction::ExecutorChoice::resolve_write(
@@ -321,6 +358,13 @@ impl DbTableBuilder {
                 self.table
             )));
         }
+        // Audit HIGH `database` #2 — same validation as insert; the
+        // attrs keys land in `SET col = ?` so they must be safe
+        // identifiers.
+        self.validate_inputs()?;
+        for col in attrs.keys() {
+            crate::database::validate_identifier(col)?;
+        }
         // T11/T12: route through resolve_write.
         let exec = crate::database::transaction::ExecutorChoice::resolve_write(
             None,
@@ -345,6 +389,8 @@ impl DbTableBuilder {
     /// removes every row by design — add a `filter` if you don't mean
     /// that.
     pub async fn delete(self) -> Result<u64, FrameworkError> {
+        // Audit HIGH `database` #2 — identifier + operator validation.
+        self.validate_inputs()?;
         // T11/T12: route through resolve_write.
         let exec = crate::database::transaction::ExecutorChoice::resolve_write(
             None,

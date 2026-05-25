@@ -41,6 +41,7 @@ pub mod connection;
 pub mod connection_registry;
 pub mod db_facade;
 pub mod dynamic_row;
+pub mod identifier;
 pub mod model;
 pub mod query_builder;
 pub mod route_binding;
@@ -54,6 +55,7 @@ pub use connection_registry::{
 };
 pub use db_facade::DbTableBuilder;
 pub use dynamic_row::DynamicRow;
+pub use identifier::{validate_identifier, validate_sql_operator};
 pub use model::{EntityExt, EntityExtMut};
 pub use query_builder::QueryBuilder;
 pub use route_binding::{AutoRouteBinding, RouteBinding};
@@ -132,6 +134,12 @@ impl DB {
                 "DatabaseConfig not registered. Call Config::register(DatabaseConfig::from_env()) first.",
             )
         })?;
+
+        // Audit HIGH `database` #1: refuse the silent SQLite fallback
+        // in production-like environments. `validate_for_environment`
+        // is a no-op in Local/Development/Testing/Custom envs so the
+        // documented dev posture ("zero-setup SQLite") is preserved.
+        config.validate_for_environment(&crate::Config::environment())?;
 
         let connection = DbConnection::connect(&config).await?;
         App::singleton(connection);

@@ -601,25 +601,47 @@ impl DB {
                 Ok(value)
             }
             Err(e) => {
-                // Best-effort rollback: if the user stashed a
-                // `TxHandle` clone outside the closure we can't
-                // unwrap, so we drop the `Arc` and let SeaORM's
-                // `DatabaseTransaction::drop` rollback when the last
-                // reference goes away. Either way the inner closure
-                // error is surfaced to the caller — but a failed
-                // explicit rollback (DB unhealthy, network blip) is
-                // an operational signal worth a warn-level log so
-                // it doesn't disappear silently.
-                if let Ok(tx) = Arc::try_unwrap(tx_arc)
-                    && let Err(rb_err) = tx.rollback().await
-                {
-                    tracing::warn!(
-                        error = %rb_err,
-                        "Transaction rollback failed after closure error; \
-                         the original closure error is still surfaced to \
-                         the caller. Common cause: connection lost between \
-                         BEGIN and the failing query.",
-                    );
+                // Try to roll back immediately. If TxHandle clones
+                // were leaked past the closure boundary,
+                // `Arc::try_unwrap` returns the `Arc` back — drop it
+                // here so OUR reference goes away, log loudly, and
+                // surface the original closure error. SeaORM's
+                // `DatabaseTransaction::drop` rolls back when the
+                // LAST reference drops; until the leaked clones go
+                // away the transaction is in a zombie state
+                // (queries via the leaked handle still run against
+                // an open tx). Audit HIGH `database` #3 — escalate
+                // the diagnostic so this can't disappear silently.
+                match Arc::try_unwrap(tx_arc) {
+                    Ok(tx) => {
+                        if let Err(rb_err) = tx.rollback().await {
+                            tracing::warn!(
+                                error = %rb_err,
+                                "Transaction rollback failed after closure error; \
+                                 the original closure error is still surfaced to \
+                                 the caller. Common cause: connection lost between \
+                                 BEGIN and the failing query.",
+                            );
+                        }
+                    }
+                    Err(arc) => {
+                        // Leaked clones — count them before our Arc
+                        // drops so the operator sees the size of the
+                        // leak.
+                        let strong_count = Arc::strong_count(&arc);
+                        let leaked = strong_count.saturating_sub(1);
+                        drop(arc); // release OUR ref; leaked refs still keep the tx alive
+                        tracing::error!(
+                            leaked_handles = leaked,
+                            closure_error = %e,
+                            "DB::transaction: closure returned Err but TxHandle clones \
+                             leaked past the closure boundary. The transaction is in \
+                             ZOMBIE STATE — pending rollback until ALL leaked handles \
+                             drop. Queries via the leaked handles continue to run \
+                             against the still-open transaction. Drop them before the \
+                             closure returns so rollback is deterministic.",
+                        );
+                    }
                 }
                 Err(e)
             }
