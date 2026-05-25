@@ -123,7 +123,7 @@ pub const COOKIE_NAME: &str = "remember_me";
 /// `framework/tests/remember_me.rs` can build "real-shaped" rows whose
 /// hash matches a known verifier (used for the expired-token test).
 #[doc(hidden)]
-pub fn generate_token() -> Result<(String, String, String), FrameworkError> {
+pub async fn generate_token() -> Result<(String, String, String), FrameworkError> {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
     // High-entropy OS randomness for both halves. `getrandom::fill`
@@ -140,7 +140,10 @@ pub fn generate_token() -> Result<(String, String, String), FrameworkError> {
         .map_err(|e| FrameworkError::internal(format!("OS RNG failure (verifier): {e}")))?;
     let verifier_plaintext = URL_SAFE_NO_PAD.encode(verifier_bytes);
 
-    let verifier_hash = hashing::hash(&verifier_plaintext)?;
+    // Audit HIGH `hashing` #1 — bcrypt is CPU-bound (~250ms @ cost 12).
+    // Use the async variant so the Tokio worker thread isn't blocked
+    // while the framework issues a token under request load.
+    let verifier_hash = hashing::hash_async(&verifier_plaintext).await?;
     Ok((selector, verifier_plaintext, verifier_hash))
 }
 
@@ -151,7 +154,7 @@ pub fn generate_token() -> Result<(String, String, String), FrameworkError> {
 /// client (via the session middleware's pending-cookies slot, set by
 /// `Auth::login_remember`).
 pub async fn issue(user_id: &str, ttl_minutes: i64) -> Result<String, FrameworkError> {
-    let (selector, verifier_plaintext, verifier_hash) = generate_token()?;
+    let (selector, verifier_plaintext, verifier_hash) = generate_token().await?;
     let expires_at = chrono::Utc::now() + Duration::minutes(ttl_minutes);
     let now = chrono::Utc::now();
 
@@ -221,8 +224,10 @@ pub async fn verify_and_rotate(
     };
 
     // Exactly one `bcrypt::verify` per request — constant-time
-    // comparison, no scanning.
-    if !hashing::verify(verifier, &row.token_hash)? {
+    // comparison, no scanning. Audit HIGH `hashing` #1: the async
+    // variant runs the CPU-bound bcrypt verification on
+    // `spawn_blocking` so the request worker thread stays free.
+    if !hashing::verify_async(verifier, &row.token_hash).await? {
         return Ok(None);
     }
 
@@ -334,9 +339,9 @@ mod tests {
 
     /// `generate_token` produces a fresh selector + verifier + matching
     /// hash on each call.
-    #[test]
-    fn generate_token_round_trips_through_bcrypt() {
-        let (sel, ver, hash) = generate_token().expect("token gen");
+    #[tokio::test]
+    async fn generate_token_round_trips_through_bcrypt() {
+        let (sel, ver, hash) = generate_token().await.expect("token gen");
         // 16 bytes → 22 base64 chars, 32 bytes → 43 base64 chars.
         assert_eq!(sel.len(), 22, "selector is 22 base64 chars (16 bytes)");
         assert_eq!(ver.len(), 43, "verifier is 43 base64 chars (32 bytes)");
@@ -348,7 +353,7 @@ mod tests {
 
         // Different generations must produce different selectors AND
         // different verifiers.
-        let (sel2, ver2, _h2) = generate_token().expect("token gen 2");
+        let (sel2, ver2, _h2) = generate_token().await.expect("token gen 2");
         assert_ne!(sel, sel2, "selectors must not collide");
         assert_ne!(ver, ver2, "verifiers must not collide");
         assert!(

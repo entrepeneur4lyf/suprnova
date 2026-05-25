@@ -2,17 +2,46 @@
 //!
 //! Provides secure password hashing using bcrypt, the same default as Laravel.
 //!
+//! # Two flavours — async-safe and sync
+//!
+//! Bcrypt at cost 12 is intentionally CPU-bound: a single hash takes
+//! ~250ms on modern hardware. Calling `hash` / `verify` directly from
+//! a Tokio request handler blocks the worker thread for the whole
+//! duration. Use the `*_async` variants ([`hash_async`],
+//! [`hash_with_cost_async`], [`verify_async`]) inside `async fn`
+//! handlers — they wrap the bcrypt call in `tokio::task::spawn_blocking`
+//! so the worker stays free for other requests. The sync variants
+//! stay for tests, CLI tools, and other non-async call sites.
+//!
+//! # 72-byte password ceiling
+//!
+//! Bcrypt's internal block size limits passwords to 72 bytes — the
+//! crate's `hash` / `verify` functions silently truncate longer
+//! inputs, which means two distinct passphrases that share their
+//! first 72 bytes hash to the same value (audit HIGH `hashing` #2).
+//! This module's `hash` / `verify` reject passwords > 72 bytes
+//! up-front:
+//!
+//! - `hash` returns `FrameworkError::param("password exceeds 72 bytes")`.
+//! - `verify` returns `Ok(false)` so the calling auth flow surfaces
+//!   the same "invalid credentials" response regardless — no
+//!   length-based information disclosure.
+//!
+//! The underlying bcrypt call uses the `non_truncating_*` variants
+//! as defense in depth.
+//!
 //! # Example
 //!
 //! ```rust,ignore
 //! use suprnova::hashing;
 //!
-//! // Hash a password
-//! let hash = hashing::hash("my_password")?;
+//! // Async (preferred inside request handlers):
+//! let hash = hashing::hash_async("my_password").await?;
+//! let valid = hashing::verify_async("my_password", &hash).await?;
 //!
-//! // Verify a password
+//! // Sync (tests, CLI tools, non-async contexts):
+//! let hash = hashing::hash("my_password")?;
 //! let valid = hashing::verify("my_password", &hash)?;
-//! assert!(valid);
 //! ```
 
 use crate::error::FrameworkError;
@@ -20,7 +49,24 @@ use crate::error::FrameworkError;
 /// Default bcrypt cost factor (same as Laravel)
 pub const DEFAULT_COST: u32 = 12;
 
-/// Hash a password using bcrypt with the default cost factor
+/// Maximum password length accepted by [`hash`] / [`verify`] (and
+/// their `_async` siblings). Bcrypt requires a trailing null byte
+/// inside its 72-byte block, so the usable password limit is 71
+/// bytes — `non_truncating_hash` itself errors with
+/// `"Expected 72 bytes or fewer; found 73 bytes"` when handed
+/// exactly 72 password bytes. The framework rejects up-front to
+/// prevent two distinct passphrases with the same first 71 bytes
+/// from authenticating as the same password. See module docs.
+pub const MAX_PASSWORD_BYTES: usize = 71;
+
+/// Hash a password using bcrypt with the default cost factor.
+///
+/// **Synchronous** — blocks the calling thread for ~250ms at cost 12.
+/// Use [`hash_async`] inside Tokio request handlers.
+///
+/// Returns `FrameworkError::param` if `password` exceeds
+/// [`MAX_PASSWORD_BYTES`] (72 bytes) — see module docs for the
+/// rationale.
 ///
 /// # Example
 ///
@@ -31,9 +77,11 @@ pub fn hash(password: &str) -> Result<String, FrameworkError> {
     hash_with_cost(password, DEFAULT_COST)
 }
 
-/// Hash a password using bcrypt with a custom cost factor
+/// Hash a password using bcrypt with a custom cost factor.
 ///
-/// Higher cost = more secure but slower. Default is 12.
+/// **Synchronous** — see [`hash_with_cost_async`] for the async-safe
+/// variant. Higher cost = more secure but slower; default is 12.
+/// Rejects passwords > [`MAX_PASSWORD_BYTES`].
 ///
 /// # Example
 ///
@@ -41,13 +89,19 @@ pub fn hash(password: &str) -> Result<String, FrameworkError> {
 /// let hash = suprnova::hashing::hash_with_cost("my_password", 14)?;
 /// ```
 pub fn hash_with_cost(password: &str, cost: u32) -> Result<String, FrameworkError> {
-    bcrypt::hash(password, cost)
+    enforce_password_length(password)?;
+    bcrypt::non_truncating_hash(password, cost)
         .map_err(|e| FrameworkError::internal(format!("Password hash error: {}", e)))
 }
 
-/// Verify a password against a bcrypt hash
+/// Verify a password against a bcrypt hash.
 ///
-/// Uses constant-time comparison to prevent timing attacks.
+/// **Synchronous** — see [`verify_async`] for the async-safe variant.
+/// Uses constant-time comparison to prevent timing attacks. Passwords
+/// > [`MAX_PASSWORD_BYTES`] cannot match any hash this module
+/// produces, so they return `Ok(false)` rather than an error — keeps
+/// the calling auth flow returning the same "invalid credentials"
+/// response regardless of length.
 ///
 /// # Example
 ///
@@ -58,8 +112,58 @@ pub fn hash_with_cost(password: &str, cost: u32) -> Result<String, FrameworkErro
 /// }
 /// ```
 pub fn verify(password: &str, hash: &str) -> Result<bool, FrameworkError> {
+    if password.len() > MAX_PASSWORD_BYTES {
+        return Ok(false);
+    }
     bcrypt::verify(password, hash)
         .map_err(|e| FrameworkError::internal(format!("Password verify error: {}", e)))
+}
+
+/// Async-safe wrapper around [`hash`] — runs the CPU-bound bcrypt
+/// work on `tokio::task::spawn_blocking` so the calling worker
+/// thread stays free for other requests.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let hash = suprnova::hashing::hash_async("my_password").await?;
+/// ```
+pub async fn hash_async(password: &str) -> Result<String, FrameworkError> {
+    hash_with_cost_async(password, DEFAULT_COST).await
+}
+
+/// Async-safe wrapper around [`hash_with_cost`].
+pub async fn hash_with_cost_async(password: &str, cost: u32) -> Result<String, FrameworkError> {
+    let owned = password.to_string();
+    tokio::task::spawn_blocking(move || hash_with_cost(&owned, cost))
+        .await
+        .map_err(|e| FrameworkError::internal(format!("hash_async join error: {e}")))?
+}
+
+/// Async-safe wrapper around [`verify`].
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let valid = suprnova::hashing::verify_async("my_password", &stored).await?;
+/// ```
+pub async fn verify_async(password: &str, hash: &str) -> Result<bool, FrameworkError> {
+    let pw = password.to_string();
+    let h = hash.to_string();
+    tokio::task::spawn_blocking(move || verify(&pw, &h))
+        .await
+        .map_err(|e| FrameworkError::internal(format!("verify_async join error: {e}")))?
+}
+
+fn enforce_password_length(password: &str) -> Result<(), FrameworkError> {
+    if password.len() > MAX_PASSWORD_BYTES {
+        return Err(FrameworkError::param(format!(
+            "password exceeds {MAX_PASSWORD_BYTES}-byte bcrypt usable limit (block size 72 minus null terminator) (got {} bytes); \
+             reject at the form-input layer or split into a longer-key derivation",
+            password.len()
+        )));
+    }
+    Ok(())
 }
 
 /// Check if a hash needs to be rehashed (e.g., if cost factor changed)

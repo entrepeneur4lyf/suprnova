@@ -492,8 +492,9 @@ fn expired_token_rejected_and_cleaned_up_by_prune() {
         // Generate a real (selector, verifier, hash) triple, but
         // insert with expires_at in the past. Bypasses `issue` (which
         // always uses now + TTL).
-        let (selector, verifier, hash) =
-            suprnova::auth::remember::generate_token().expect("generate token");
+        let (selector, verifier, hash) = suprnova::auth::remember::generate_token()
+            .await
+            .expect("generate token");
         let composite = format!("{selector}.{verifier}");
         let past_expiry = chrono::Utc::now() - chrono::Duration::seconds(60);
         insert_raw_token(user_id, &selector, &hash, past_expiry).await;
