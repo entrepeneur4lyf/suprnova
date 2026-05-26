@@ -290,7 +290,12 @@ impl Middleware for SessionMiddleware {
                 SessionData::new(session_id.clone(), generate_csrf_token())
             }
             Err(e) => {
-                eprintln!("Session read error: {}", e);
+                // Store read failed (outage, corruption). Degrade
+                // gracefully by minting a fresh session — same posture as
+                // Laravel when the session row is unreadable. `warn!`, not
+                // `error!`: this fires once per request, so during an
+                // outage an error-level line would spam at request rate.
+                tracing::warn!(error = %e, "session read failed; minting a fresh session");
                 SessionData::new(session_id.clone(), generate_csrf_token())
             }
         };
@@ -359,8 +364,13 @@ impl Middleware for SessionMiddleware {
                             // DB error — log and continue without
                             // remember-me. Don't clear the cookie:
                             // this might be a transient outage, not
-                            // a forged token.
-                            eprintln!("Remember-me verify error: {}", e);
+                            // a forged token. `warn!` (not `error!`) for
+                            // the same per-request-spam reason as the
+                            // session-read path above.
+                            tracing::warn!(
+                                error = %e,
+                                "remember-me verification failed; continuing without it"
+                            );
                         }
                     }
                 }
@@ -399,9 +409,41 @@ impl Middleware for SessionMiddleware {
 
         // Save session and add cookie to response
         if let Some(session) = session {
-            // Always save to update last_activity
+            // Always save — even an unmodified session gets its
+            // last_activity bumped (sliding expiration).
             if let Err(e) = self.store.write(&session).await {
-                eprintln!("Session write error: {}", e);
+                if session.is_dirty() {
+                    // The session was mutated this request (login, logout,
+                    // CSRF rotation, flash, remember-me hydration, ...) and
+                    // we could not persist it. Returning the handler's
+                    // success response now would lie: the client would get
+                    // a session cookie for state the store never recorded,
+                    // so the next request loads an empty session and the
+                    // mutation silently vanishes — e.g. a "successful"
+                    // login that didn't stick. Fail closed. We return
+                    // BEFORE create_session_cookie below, so no cookie is
+                    // attached: a cookie for an id the store never saw is
+                    // worse than none.
+                    tracing::error!(
+                        error = %e,
+                        session_id = %session.id,
+                        "session write failed for a mutated session; failing closed with 500"
+                    );
+                    return Err(crate::http::HttpResponse::text(
+                        "Internal Server Error: session persistence failed",
+                    )
+                    .status(500));
+                }
+                // Not dirty: the write was only a last_activity touch, so
+                // the user-visible state is intact. Log and let the request
+                // through rather than 500 every read-only request during a
+                // transient store outage. `warn!` for the same
+                // per-request-spam reason as the read path.
+                tracing::warn!(
+                    error = %e,
+                    session_id = %session.id,
+                    "session last-activity write failed (session unmodified); continuing"
+                );
             }
 
             // Add session cookie to response. Encryption must succeed
