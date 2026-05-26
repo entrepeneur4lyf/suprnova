@@ -12,9 +12,10 @@ use crate::error::FrameworkError;
 /// production. Operators choosing Redis MUST set the driver explicitly
 /// so connection failures surface at boot instead of silently degrading
 /// to per-process in-memory state (HIGH audit finding #251).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CacheDriver {
     /// Per-process in-memory cache. Default. No external dependencies.
+    #[default]
     Memory,
     /// Redis-backed cache. Reads `REDIS_URL`. Boot fails closed if the
     /// configured URL is unreachable.
@@ -33,12 +34,6 @@ impl CacheDriver {
                 "CACHE_DRIVER: unknown driver `{other}` (expected `memory` or `redis`)"
             ))),
         }
-    }
-}
-
-impl Default for CacheDriver {
-    fn default() -> Self {
-        Self::Memory
     }
 }
 

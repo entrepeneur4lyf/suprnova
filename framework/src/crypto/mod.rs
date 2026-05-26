@@ -450,7 +450,6 @@ impl BootKeyRing {
     }
 }
 
-#[doc(hidden)]
 // ----------------------------------------------------------------------
 // Test-only key installation hooks.
 //
