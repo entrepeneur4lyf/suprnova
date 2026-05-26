@@ -53,8 +53,8 @@ use async_trait::async_trait;
 use featureflag::context::Context;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context as TaskContext, Poll};
 
 /// Type-erased per-request extractor returning the stringified user id.
@@ -129,9 +129,7 @@ impl FeatureMiddleware {
     /// (a small `String`) so the value is `'static`-stable.
     pub fn with_team_from_header(self, header_name: impl Into<String>) -> Self {
         let header_name = header_name.into();
-        self.with_team_extractor(move |request| {
-            request.header(&header_name).map(|s| s.to_string())
-        })
+        self.with_team_extractor(move |request| request.header(&header_name).map(|s| s.to_string()))
     }
 }
 
@@ -236,7 +234,7 @@ impl<F: Future + Unpin> Future for InContext<F> {
 mod tests {
     use super::*;
     use crate::features::fields::{TeamField, UserIdField};
-    use featureflag::evaluator::{with_default, Evaluator};
+    use featureflag::evaluator::{Evaluator, with_default};
 
     /// Inspector evaluator: records the (user_id, team) it observes
     /// on each `is_enabled` call. Used to drive black-box assertions
@@ -290,9 +288,7 @@ mod tests {
                 }
             }
             if let Some(team) = fields.get("team").and_then(|v| v.as_str()) {
-                context
-                    .extensions_mut()
-                    .insert(TeamField(team.to_string()));
+                context.extensions_mut().insert(TeamField(team.to_string()));
             }
         }
     }
@@ -376,8 +372,8 @@ mod tests {
         // via the integration-level test in `framework/tests/features.rs`
         // (Phase 13 T7 wires a real request); here we assert the slot
         // is populated and not the default function pointer.
-        let custom = FeatureMiddleware::new()
-            .with_user_id_extractor(|_req| Some("custom".to_string()));
+        let custom =
+            FeatureMiddleware::new().with_user_id_extractor(|_req| Some("custom".to_string()));
         // Arc::strong_count == 1 because the slot holds the only clone.
         assert_eq!(Arc::strong_count(&custom.user_id), 1);
     }

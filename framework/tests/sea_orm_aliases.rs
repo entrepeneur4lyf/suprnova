@@ -4,9 +4,22 @@
 // `DeriveActiveEnum` is a derive macro (not a type) — verify it via
 // an actual derive use on a probe enum below.
 use suprnova::DeriveActiveEnum;
-#[derive(::std::clone::Clone, ::std::fmt::Debug, ::std::marker::Copy, PartialEq, Eq, ::suprnova::sea_orm::EnumIter, DeriveActiveEnum)]
+#[derive(
+    ::std::clone::Clone,
+    ::std::fmt::Debug,
+    ::std::marker::Copy,
+    PartialEq,
+    Eq,
+    ::suprnova::sea_orm::EnumIter,
+    DeriveActiveEnum,
+)]
 #[sea_orm(rs_type = "i32", db_type = "Integer")]
-enum _DeriveActiveEnumProbe { #[sea_orm(num_value = 1)] A, #[sea_orm(num_value = 2)] B }
+enum _DeriveActiveEnumProbe {
+    #[sea_orm(num_value = 1)]
+    A,
+    #[sea_orm(num_value = 2)]
+    B,
+}
 
 #[test]
 fn sea_orm_types_are_aliased_under_suprnova() {
@@ -14,8 +27,8 @@ fn sea_orm_types_are_aliased_under_suprnova() {
     // (re-exported as bare names by SeaORM), so they're verified by
     // constructing values — not by type position.
     use suprnova::{
-        ActiveValue, DatabaseConnection, DatabaseTransaction, NotSet, RelationDef,
-        Schema, Select, Set,
+        ActiveValue, DatabaseConnection, DatabaseTransaction, NotSet, RelationDef, Schema, Select,
+        Set,
     };
     let _set: ActiveValue<i64> = Set(7);
     let _not_set: ActiveValue<i64> = NotSet;
@@ -28,7 +41,9 @@ fn sea_orm_types_are_aliased_under_suprnova() {
     )>;
     // `Select<E>` requires `E: EntityTrait`. Trait-bound check fn proves
     // the re-export resolves without naming a concrete entity here.
-    fn _t_select<E: suprnova::EntityTrait>() -> Option<Select<E>> { None }
+    fn _t_select<E: suprnova::EntityTrait>() -> Option<Select<E>> {
+        None
+    }
 
     // Traits — verified via trait-bound check fns. Bare trait names
     // can't appear as types; `<T: Trait>()` checks the trait resolves

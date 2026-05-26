@@ -44,10 +44,22 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(AuthCeremonyTokens::Selector).string().not_null())
+                    .col(
+                        ColumnDef::new(AuthCeremonyTokens::Selector)
+                            .string()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(AuthCeremonyTokens::Kind).string().not_null())
-                    .col(ColumnDef::new(AuthCeremonyTokens::Payload).text().not_null())
-                    .col(ColumnDef::new(AuthCeremonyTokens::ExpiresAt).timestamp().not_null())
+                    .col(
+                        ColumnDef::new(AuthCeremonyTokens::Payload)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(AuthCeremonyTokens::ExpiresAt)
+                            .timestamp()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(AuthCeremonyTokens::CreatedAt)
                             .timestamp()

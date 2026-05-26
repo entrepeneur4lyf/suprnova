@@ -80,8 +80,12 @@ async fn local_fanout_delivers_to_subscriber() {
 
     let mut rx = hub.subscribe("chat.1");
 
-    hub.publish(envelope("chat.1", "MessagePosted", json!({ "text": "hello" })))
-        .await;
+    hub.publish(envelope(
+        "chat.1",
+        "MessagePosted",
+        json!({ "text": "hello" }),
+    ))
+    .await;
 
     let received = tokio::time::timeout(Duration::from_secs(1), rx.recv())
         .await
@@ -102,8 +106,7 @@ async fn publish_with_no_subscriber_is_silent() {
         .expect("hub connect");
 
     // No subscriber — publish should not panic.
-    hub.publish(envelope("lonely", "Tick", json!({})))
-        .await;
+    hub.publish(envelope("lonely", "Tick", json!({}))).await;
 }
 
 /// `subscriber_count` reflects the live receivers.
@@ -243,8 +246,10 @@ async fn channel_isolation() {
     let mut rx_a = hub.subscribe("ch.a");
     let mut rx_b = hub.subscribe("ch.b");
 
-    hub.publish(envelope("ch.a", "EventA", json!({ "src": "a" }))).await;
-    hub.publish(envelope("ch.b", "EventB", json!({ "src": "b" }))).await;
+    hub.publish(envelope("ch.a", "EventA", json!({ "src": "a" })))
+        .await;
+    hub.publish(envelope("ch.b", "EventB", json!({ "src": "b" })))
+        .await;
 
     let msg_a = tokio::time::timeout(Duration::from_millis(200), rx_a.recv())
         .await
@@ -321,7 +326,10 @@ async fn cross_process_member_visibility() {
         .iter()
         .filter_map(|v| v["user_id"].as_i64())
         .collect();
-    assert!(user_ids_a.contains(&1), "hub_a missing alice; {members_a:?}");
+    assert!(
+        user_ids_a.contains(&1),
+        "hub_a missing alice; {members_a:?}"
+    );
     assert!(user_ids_a.contains(&2), "hub_a missing bob; {members_a:?}");
 }
 
@@ -330,14 +338,12 @@ async fn cross_process_member_visibility() {
 /// `list_members`.
 #[tokio::test]
 async fn untrack_propagates_across_processes() {
-    let hub_a =
-        SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-presence-untrack")
-            .await
-            .expect("hub_a connect");
-    let hub_b =
-        SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-presence-untrack")
-            .await
-            .expect("hub_b connect");
+    let hub_a = SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-presence-untrack")
+        .await
+        .expect("hub_a connect");
+    let hub_b = SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-presence-untrack")
+        .await
+        .expect("hub_b connect");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -369,8 +375,7 @@ async fn untrack_propagates_across_processes() {
         "hub_b should only see bob after alice is untracked; got {members:?}"
     );
     assert_eq!(
-        members[0]["user_id"],
-        2,
+        members[0]["user_id"], 2,
         "remaining member should be bob; got {members:?}"
     );
 }
@@ -388,10 +393,13 @@ async fn untrack_propagates_across_processes() {
 async fn crashed_hub_members_pruned_via_ttl() {
     let ttl = Duration::from_millis(600); // heartbeat = 100ms, prune = 300ms
 
-    let hub_b =
-        SeaStreamerBroadcastHub::new_loopback_with_presence_ttl("stdio://", "suprnova-test-ttl-prune", ttl)
-            .await
-            .expect("hub_b connect");
+    let hub_b = SeaStreamerBroadcastHub::new_loopback_with_presence_ttl(
+        "stdio://",
+        "suprnova-test-ttl-prune",
+        ttl,
+    )
+    .await
+    .expect("hub_b connect");
 
     // Allow hub_b's consumer pump to start.
     tokio::time::sleep(Duration::from_millis(100)).await;

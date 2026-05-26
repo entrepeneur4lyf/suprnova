@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use suprnova::data::{registry, RequestIncludeSet, REQUEST_INCLUDE_SET};
+use suprnova::data::{REQUEST_INCLUDE_SET, RequestIncludeSet, registry};
 use suprnova::inertia::Prop;
 
 #[tokio::test]

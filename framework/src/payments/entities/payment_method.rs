@@ -1,9 +1,6 @@
 use chrono::{DateTime, Utc};
 
-#[suprnova::model(
-    table = "payments_payment_methods",
-    timestamps,
-)]
+#[suprnova::model(table = "payments_payment_methods", timestamps)]
 pub struct PaymentMethod {
     pub id: i64,
     pub provider: String,
@@ -17,5 +14,5 @@ pub struct PaymentMethod {
     pub updated_at: DateTime<Utc>,
 }
 
-pub use payment_method::{ActiveModel, Column, Entity};
 pub use payment_method::Model;
+pub use payment_method::{ActiveModel, Column, Entity};

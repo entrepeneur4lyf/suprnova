@@ -6,8 +6,8 @@
 //! `bootstrap::register`); T5's BroadcastingWsHandler looks them
 //! up by name when parsing client `subscribe` envelopes.
 
-use crate::http::Request;
 use crate::FrameworkError;
+use crate::http::Request;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -79,12 +79,7 @@ pub trait Channel: Send + Sync + 'static {
     /// hook only governs `ClientFrame::Publish` received over the
     /// WebSocket connection — server-side `hub.publish()` calls are
     /// unaffected and bypass this gate entirely.
-    async fn authorize_publish(
-        &self,
-        _req: &Request,
-        _event: &str,
-        _data: &Value,
-    ) -> bool {
+    async fn authorize_publish(&self, _req: &Request, _event: &str, _data: &Value) -> bool {
         false
     }
 
@@ -228,7 +223,9 @@ mod tests {
     fn register_reserved_name_panics() {
         let mut registry = ChannelRegistry::new();
         // `__presence__` is a framework-reserved name; registration must panic.
-        registry.register(DummyChannel { name: "__presence__" });
+        registry.register(DummyChannel {
+            name: "__presence__",
+        });
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use suprnova::{Gate, FrameworkError, policy};
+use suprnova::{FrameworkError, Gate, policy};
 
 // FIX 6: kebab-case resource names in generated action strings.
 
@@ -49,9 +49,7 @@ async fn gate_define_and_allows_for_closure() {
 
 #[tokio::test]
 async fn gate_authorize_returns_forbidden_when_denied() {
-    Gate::define::<User, Post>("edit-post", |user, post| {
-        post.author_id == user.id
-    });
+    Gate::define::<User, Post>("edit-post", |user, post| post.author_id == user.id);
     let alice = User {
         id: 1,
         is_admin: false,
@@ -90,7 +88,10 @@ fn policy_macro_registers_gates_via_inventory() {
     // Eagerly trigger inventory collection at startup:
     suprnova::authorization::init_policies();
 
-    let alice = User { id: 1, is_admin: false };
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
     let mine = Comment { author_id: 1 };
     let theirs = Comment { author_id: 99 };
 
@@ -144,10 +145,22 @@ async fn gate_async_closure_allows_and_denies() {
         }
     });
 
-    let alice = User { id: 1, is_admin: false };
-    let public_item = Item { is_public: true, owner_id: 99 };
-    let private_foreign = Item { is_public: false, owner_id: 99 };
-    let owned_item = Item { is_public: false, owner_id: 1 };
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
+    let public_item = Item {
+        is_public: true,
+        owner_id: 99,
+    };
+    let private_foreign = Item {
+        is_public: false,
+        owner_id: 99,
+    };
+    let owned_item = Item {
+        is_public: false,
+        owner_id: 1,
+    };
 
     // Async path works correctly.
     assert!(Gate::allows_async("view-item-async", &alice, &public_item).await);
@@ -155,8 +168,10 @@ async fn gate_async_closure_allows_and_denies() {
     assert!(Gate::allows_async("view-item-async", &alice, &owned_item).await);
 
     // Sync path must default-deny for async-registered gates.
-    assert!(!Gate::allows("view-item-async", &alice, &public_item),
-        "sync allows() on an async gate must return false (default deny)");
+    assert!(
+        !Gate::allows("view-item-async", &alice, &public_item),
+        "sync allows() on an async gate must return false (default deny)"
+    );
 }
 
 /// `allows_async` also works for sync-registered gates (backwards compatible).
@@ -166,9 +181,18 @@ async fn gate_allows_async_dispatches_sync_registered_gates() {
         item.is_public || item.owner_id == user.id
     });
 
-    let alice = User { id: 1, is_admin: false };
-    let public_item = Item { is_public: true, owner_id: 99 };
-    let private_foreign = Item { is_public: false, owner_id: 99 };
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
+    let public_item = Item {
+        is_public: true,
+        owner_id: 99,
+    };
+    let private_foreign = Item {
+        is_public: false,
+        owner_id: 99,
+    };
 
     assert!(Gate::allows_async("read-item-sync", &alice, &public_item).await);
     assert!(!Gate::allows_async("read-item-sync", &alice, &private_foreign).await);
@@ -183,11 +207,24 @@ async fn gate_authorize_async_returns_unauthorized_when_denied() {
         async move { owner_id == user_id }
     });
 
-    let alice = User { id: 1, is_admin: false };
-    let foreign_item = Item { is_public: false, owner_id: 99 };
-    let owned_item = Item { is_public: false, owner_id: 1 };
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
+    let foreign_item = Item {
+        is_public: false,
+        owner_id: 99,
+    };
+    let owned_item = Item {
+        is_public: false,
+        owner_id: 1,
+    };
 
-    assert!(Gate::authorize_async("edit-item-async", &alice, &owned_item).await.is_ok());
+    assert!(
+        Gate::authorize_async("edit-item-async", &alice, &owned_item)
+            .await
+            .is_ok()
+    );
     assert!(matches!(
         Gate::authorize_async("edit-item-async", &alice, &foreign_item).await,
         Err(FrameworkError::Unauthorized)
@@ -209,12 +246,17 @@ fn init_policies_registers_gates_without_server_serve() {
     // Also safe to call again (idempotent).
     suprnova::authorization::init_policies();
 
-    let alice = User { id: 1, is_admin: false };
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
     let my_comment = Comment { author_id: 1 };
 
     // Gate wired up by #[policy(User, Comment)] above — must work.
-    assert!(Gate::allows("view-comment", &alice, &my_comment),
-        "init_policies() must register #[policy] gates without Server::serve");
+    assert!(
+        Gate::allows("view-comment", &alice, &my_comment),
+        "init_policies() must register #[policy] gates without Server::serve"
+    );
 }
 
 /// Without FIX 6, `UserProfile` becomes `"view-userprofile"` (no hyphen).
@@ -223,7 +265,10 @@ fn init_policies_registers_gates_without_server_serve() {
 fn policy_macro_kebab_cases_multi_word_resource() {
     suprnova::authorization::init_policies();
 
-    let alice = User { id: 1, is_admin: false };
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
     let mine = UserProfile { owner_id: 1 };
     let theirs = UserProfile { owner_id: 99 };
 
@@ -233,6 +278,8 @@ fn policy_macro_kebab_cases_multi_word_resource() {
     assert!(!Gate::allows("update-user-profile", &alice, &theirs));
 
     // The buggy flat-lowercase name must NOT exist.
-    assert!(!Gate::allows("view-userprofile", &alice, &mine),
-        "flat-lowercase action 'view-userprofile' must not be registered");
+    assert!(
+        !Gate::allows("view-userprofile", &alice, &mine),
+        "flat-lowercase action 'view-userprofile' must not be registered"
+    );
 }

@@ -20,7 +20,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput, Expr, Lit};
+use syn::{DeriveInput, Expr, Lit, parse_macro_input};
 
 /// Parsed `#[mail(...)]` attribute payload.
 #[derive(Default)]
@@ -59,14 +59,14 @@ fn parse_mail_attr(input: &DeriveInput) -> syn::Result<MailAttrs> {
             // Every supported key is a `key = "string literal"` pair.
             let value: Expr = nested.value()?.parse()?;
             let Expr::Lit(expr_lit) = &value else {
-                return Err(nested.error(format!(
-                    "`{key}` in #[mail(...)] expects a string literal"
-                )));
+                return Err(
+                    nested.error(format!("`{key}` in #[mail(...)] expects a string literal"))
+                );
             };
             let Lit::Str(s) = &expr_lit.lit else {
-                return Err(nested.error(format!(
-                    "`{key}` in #[mail(...)] expects a string literal"
-                )));
+                return Err(
+                    nested.error(format!("`{key}` in #[mail(...)] expects a string literal"))
+                );
             };
             let v = s.value();
 
@@ -249,8 +249,18 @@ pub fn derive_notification_mailable_impl(input: TokenStream) -> TokenStream {
 
     let subject_lit = attrs.subject.as_deref().expect("validated above");
 
-    let html_expr = body_expr(attrs.html.as_deref(), attrs.html_template.as_deref(), "html", &name_str);
-    let text_expr = body_expr(attrs.text.as_deref(), attrs.text_template.as_deref(), "text", &name_str);
+    let html_expr = body_expr(
+        attrs.html.as_deref(),
+        attrs.html_template.as_deref(),
+        "html",
+        &name_str,
+    );
+    let text_expr = body_expr(
+        attrs.text.as_deref(),
+        attrs.text_template.as_deref(),
+        "text",
+        &name_str,
+    );
     let from_init = from_expr(&attrs);
     let cc_init = address_list_expr(attrs.cc.as_deref());
     let bcc_init = address_list_expr(attrs.bcc.as_deref());

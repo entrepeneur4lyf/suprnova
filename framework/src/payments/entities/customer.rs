@@ -10,10 +10,7 @@
 
 use chrono::{DateTime, Utc};
 
-#[suprnova::model(
-    table = "payments_customers",
-    timestamps,
-)]
+#[suprnova::model(table = "payments_customers", timestamps)]
 pub struct Customer {
     pub id: i64,
     pub provider: String,
@@ -25,5 +22,5 @@ pub struct Customer {
     pub updated_at: DateTime<Utc>,
 }
 
-pub use customer::{ActiveModel, Column, Entity};
 pub use customer::Model;
+pub use customer::{ActiveModel, Column, Entity};

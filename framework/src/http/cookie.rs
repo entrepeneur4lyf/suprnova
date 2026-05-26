@@ -2,7 +2,7 @@
 //!
 //! Provides Laravel-like cookie API with secure defaults.
 
-use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
+use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -49,15 +49,13 @@ const COOKIE_ENCODE: &AsciiSet = &CONTROLS
     .add(b'}');
 
 /// SameSite cookie attribute
-#[derive(Clone, Debug, PartialEq)]
-#[derive(Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub enum SameSite {
     Strict,
     #[default]
     Lax,
     None,
 }
-
 
 /// Cookie options with secure defaults
 #[derive(Clone, Debug)]
@@ -271,10 +269,7 @@ pub fn parse_cookies(header: &str) -> HashMap<String, String> {
             let mut parts = part.splitn(2, '=');
             let name = parts.next()?.trim();
             let value = parts.next().unwrap_or("").trim();
-            Some((
-                url_decode(name),
-                url_decode(value),
-            ))
+            Some((url_decode(name), url_decode(value)))
         })
         .collect()
 }
@@ -312,10 +307,7 @@ fn url_decode(s: &str) -> String {
     // values. (Cookie spec doesn't strictly require `+` ↔ space, but
     // keeping the prior behaviour avoids surprising clients that
     // produced `+`-encoded values.)
-    let translated: String = s
-        .chars()
-        .map(|c| if c == '+' { ' ' } else { c })
-        .collect();
+    let translated: String = s.chars().map(|c| if c == '+' { ' ' } else { c }).collect();
     percent_decode_str(&translated)
         .decode_utf8_lossy()
         .into_owned()

@@ -31,10 +31,7 @@ async fn store_put_raw_none_ttl_means_no_expiration_in_memory() {
     };
     let store: Arc<dyn CacheStore> = Arc::new(InMemoryCache::with_config(&config));
 
-    store
-        .put_raw("k", "\"v\"", None)
-        .await
-        .expect("put_raw");
+    store.put_raw("k", "\"v\"", None).await.expect("put_raw");
 
     // After 1.2s — past the configured default — the key MUST still be
     // present. If the store substituted the default on None, this would

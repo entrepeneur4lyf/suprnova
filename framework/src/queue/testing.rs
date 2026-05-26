@@ -30,11 +30,15 @@ pub(crate) fn is_active() -> bool {
 }
 
 pub(crate) fn record<J: Job>(job: &J) -> Result<(), FrameworkError> {
-    let payload = serde_json::to_value(job)
-        .map_err(|e| FrameworkError::internal(format!("encode: {e}")))?;
+    let payload =
+        serde_json::to_value(job).map_err(|e| FrameworkError::internal(format!("encode: {e}")))?;
     let mut g = lock_fake();
     if let Some(store) = g.as_mut() {
-        store.pushed.entry(TypeId::of::<J>()).or_default().push(payload);
+        store
+            .pushed
+            .entry(TypeId::of::<J>())
+            .or_default()
+            .push(payload);
     }
     Ok(())
 }

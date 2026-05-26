@@ -50,15 +50,27 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(RememberTokens::UserId).string().not_null())
                     .col(ColumnDef::new(RememberTokens::Selector).string().not_null())
-                    .col(ColumnDef::new(RememberTokens::TokenHash).string().not_null())
-                    .col(ColumnDef::new(RememberTokens::ExpiresAt).timestamp().not_null())
+                    .col(
+                        ColumnDef::new(RememberTokens::TokenHash)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RememberTokens::ExpiresAt)
+                            .timestamp()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(RememberTokens::CreatedAt)
                             .timestamp()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
-                    .col(ColumnDef::new(RememberTokens::LastUsedAt).timestamp().null())
+                    .col(
+                        ColumnDef::new(RememberTokens::LastUsedAt)
+                            .timestamp()
+                            .null(),
+                    )
                     .to_owned(),
             )
             .await?;

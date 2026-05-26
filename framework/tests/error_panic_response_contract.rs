@@ -21,8 +21,8 @@
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -33,9 +33,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use suprnova::events::{ErrorOccurred, EventFacade, Listener};
 use suprnova::http::text;
-use suprnova::{
-    handle_request, FrameworkError, MiddlewareRegistry, Request, Router,
-};
+use suprnova::{FrameworkError, MiddlewareRegistry, Request, Router, handle_request};
 
 static ERROR_EVENT_FIRED: AtomicUsize = AtomicUsize::new(0);
 
@@ -68,11 +66,7 @@ async fn spawn_server(router: impl Into<Router>, accepts: usize) -> SocketAddr {
                 let svc = service_fn(move |req: hyper::Request<Incoming>| {
                     let router = router.clone();
                     let middleware = middleware.clone();
-                    async move {
-                        Ok::<_, Infallible>(
-                            handle_request(router, middleware, req).await,
-                        )
-                    }
+                    async move { Ok::<_, Infallible>(handle_request(router, middleware, req).await) }
                 });
                 let _ = hyper::server::conn::http1::Builder::new()
                     .serve_connection(io, svc)
@@ -121,9 +115,8 @@ async fn panicking_handler_emits_json_body_with_sanitised_message() {
     let (status, body) = send_get(addr, "/panic-json").await;
     assert_eq!(status.as_u16(), 500);
 
-    let parsed: serde_json::Value = serde_json::from_slice(&body).expect(
-        "panic response must be JSON via the FrameworkError -> HttpResponse path",
-    );
+    let parsed: serde_json::Value = serde_json::from_slice(&body)
+        .expect("panic response must be JSON via the FrameworkError -> HttpResponse path");
     assert_eq!(
         parsed["message"], "Internal Server Error",
         "wire body MUST use the sanitised `message` field; the raw \

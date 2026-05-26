@@ -33,8 +33,8 @@ async fn spawn() -> SocketAddr {
     tokio::spawn(async move {
         if let Ok((stream, _)) = listener.accept().await {
             let io = TokioIo::new(stream);
-            let svc =
-                service_fn(|hyper_req: hyper::Request<hyper::body::Incoming>| async move {
+            let svc = service_fn(
+                |hyper_req: hyper::Request<hyper::body::Incoming>| async move {
                     let req = Request::new(hyper_req);
                     let resp = match SignupRequest::extract(req).await {
                         Ok(_form) => {
@@ -47,7 +47,8 @@ async fn spawn() -> SocketAddr {
                         Err(e) => e.into(),
                     };
                     Ok::<_, Infallible>(resp.into_hyper())
-                });
+                },
+            );
             let _ = http1::Builder::new().serve_connection(io, svc).await;
         }
     });
@@ -61,10 +62,9 @@ async fn post_json(
 ) -> hyper::Response<Bytes> {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let io = TokioIo::new(stream);
-    let (mut sender, conn) =
-        hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
-            .await
-            .unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
+        .await
+        .unwrap();
     tokio::spawn(async move {
         let _ = conn.await;
     });
@@ -97,10 +97,7 @@ async fn precognition_success_returns_204() {
     .await;
     assert_eq!(resp.status(), 204);
     assert_eq!(resp.headers().get("Precognition").unwrap(), "true");
-    assert_eq!(
-        resp.headers().get("Precognition-Success").unwrap(),
-        "true"
-    );
+    assert_eq!(resp.headers().get("Precognition-Success").unwrap(), "true");
     assert_eq!(resp.headers().get("Vary").unwrap(), "Precognition");
 }
 

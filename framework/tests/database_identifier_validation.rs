@@ -16,9 +16,9 @@
 //! operator in rendered SQL: `get`, `count`, `insert`, `update`,
 //! `delete`.
 
+use suprnova::DB;
 use suprnova::eloquent::attrs::Attrs;
 use suprnova::testing::TestDatabase;
-use suprnova::DB;
 
 async fn fresh_db_with_table() -> TestDatabase {
     let db = TestDatabase::sqlite_memory().await.unwrap();
@@ -199,10 +199,7 @@ async fn operator_allowlist_accepts_canonical_comparisons() {
     let _db = fresh_db_with_table().await;
     // Each of these is on the allowlist.
     for op in ["=", "<>", "!=", "<", "<=", ">", ">=", "LIKE", "like"] {
-        let result = DB::table("audit_log")
-            .filter_op("id", op, 1)
-            .get()
-            .await;
+        let result = DB::table("audit_log").filter_op("id", op, 1).get().await;
         assert!(
             result.is_ok(),
             "operator {op:?} should pass the allowlist; got: {:?}",

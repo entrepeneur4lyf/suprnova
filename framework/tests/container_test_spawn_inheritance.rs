@@ -21,8 +21,8 @@
 //!    parent scope — the shared `Arc<RwLock<Container>>` is the same.
 
 use std::sync::Arc;
-use suprnova::testing::TestContainer;
 use suprnova::App;
+use suprnova::testing::TestContainer;
 
 trait Tagger: Send + Sync + 'static {
     fn tag(&self) -> &'static str;

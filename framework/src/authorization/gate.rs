@@ -31,9 +31,7 @@ impl Gate {
     /// Calling `allows` on an async-registered gate returns `false` (default
     /// deny). Use [`allows_async`] to invoke async gates correctly.
     pub fn allows<U: 'static, R: 'static>(action: &str, user: &U, resource: &R) -> bool {
-        global()
-            .invoke(action, user, resource)
-            .unwrap_or(false)
+        global().invoke(action, user, resource).unwrap_or(false)
     }
 
     /// Returns `true` when the gate denies the action.

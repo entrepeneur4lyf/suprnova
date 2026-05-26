@@ -4,7 +4,7 @@
 //! invariant that shutdown is safe to call when no providers are
 //! installed (the default-feature, no-endpoint configuration).
 
-use suprnova::{init_telemetry, LogConfig, OtelConfig};
+use suprnova::{LogConfig, OtelConfig, init_telemetry};
 
 #[tokio::test]
 async fn telemetry_guard_shutdown_is_safe_without_providers() {

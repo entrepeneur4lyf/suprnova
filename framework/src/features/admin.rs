@@ -17,7 +17,7 @@ use crate::error::FrameworkError;
 use crate::features::entity;
 use crate::features::events::{FeatureDeleted, FeatureUpdated};
 use sea_orm::{
-    sea_query::OnConflict, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder,
+    ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, sea_query::OnConflict,
 };
 use serde::Serialize;
 

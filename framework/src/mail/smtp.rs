@@ -5,7 +5,7 @@ use crate::mail::address::Address;
 use crate::mail::transport::{MailTransport, OutgoingMessage};
 use async_trait::async_trait;
 use lettre::message::{
-    header::ContentType, Attachment as LettreAttachment, Mailbox, Message, MultiPart, SinglePart,
+    Attachment as LettreAttachment, Mailbox, Message, MultiPart, SinglePart, header::ContentType,
 };
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
@@ -34,12 +34,7 @@ impl SmtpMailTransport {
 
     /// TLS-wrapped SMTP. Pass `465` for the canonical implicit-TLS port,
     /// or a non-default port for a custom relay.
-    pub fn tls(
-        host: &str,
-        port: u16,
-        user: &str,
-        password: &str,
-    ) -> Result<Self, FrameworkError> {
+    pub fn tls(host: &str, port: u16, user: &str, password: &str) -> Result<Self, FrameworkError> {
         let creds = Credentials::new(user.to_string(), password.to_string());
         let inner = AsyncSmtpTransport::<Tokio1Executor>::relay(host)
             .map_err(|e| FrameworkError::internal(format!("smtp tls relay: {e}")))?
@@ -90,7 +85,9 @@ impl MailTransport for SmtpMailTransport {
         Ok(())
     }
 
-    fn name(&self) -> &'static str { "smtp" }
+    fn name(&self) -> &'static str {
+        "smtp"
+    }
 }
 
 fn address_to_mailbox(a: &Address) -> Result<Mailbox, FrameworkError> {
@@ -124,15 +121,12 @@ fn build_body(msg: &OutgoingMessage) -> Result<MultiPart, FrameworkError> {
 
     let mut mixed = MultiPart::mixed().multipart(alternative);
     for att in &msg.attachments {
-        let ct: ContentType = att
-            .content_type
-            .parse()
-            .map_err(|e| {
-                FrameworkError::internal(format!(
-                    "smtp attachment content-type {}: {e}",
-                    att.content_type
-                ))
-            })?;
+        let ct: ContentType = att.content_type.parse().map_err(|e| {
+            FrameworkError::internal(format!(
+                "smtp attachment content-type {}: {e}",
+                att.content_type
+            ))
+        })?;
         let part = LettreAttachment::new(att.filename.clone()).body(att.content.clone(), ct);
         mixed = mixed.singlepart(part);
     }

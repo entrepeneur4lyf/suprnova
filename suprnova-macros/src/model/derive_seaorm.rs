@@ -98,9 +98,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     if pk_field_idents.is_empty() {
         return Err(syn::Error::new_spanned(
             &input.item.ident,
-            format!(
-                "#[model] struct must have a field named `{primary_key}` (the primary key)"
-            ),
+            format!("#[model] struct must have a field named `{primary_key}` (the primary key)"),
         ));
     }
 

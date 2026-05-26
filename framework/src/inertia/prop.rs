@@ -437,7 +437,7 @@ impl Prop {
         owner_struct_name: &str,
         field: &str,
     ) -> Result<Option<Value>, FrameworkError> {
-        use crate::data::{current_include_set, registry, IncludeError};
+        use crate::data::{IncludeError, current_include_set, registry};
 
         match self {
             Prop::Lazy(closure) => {
@@ -496,9 +496,7 @@ impl PartialFilter {
     /// Build a filter from the request and the response's component name.
     pub fn build<R: InertiaRequestExt + ?Sized>(req: &R, component: &str) -> Self {
         let partial_component = req.header("X-Inertia-Partial-Component");
-        let matched = partial_component
-            .map(|c| c == component)
-            .unwrap_or(false);
+        let matched = partial_component.map(|c| c == component).unwrap_or(false);
 
         if !matched {
             return Self::default();
@@ -534,9 +532,10 @@ impl PartialFilter {
         };
         if included
             && let Some(except) = &self.except
-                && except.iter().any(|k| k == key) {
-                    included = false;
-                }
+            && except.iter().any(|k| k == key)
+        {
+            included = false;
+        }
         included
     }
 
@@ -559,9 +558,10 @@ impl PartialFilter {
             return false;
         }
         if let Some(except) = &self.except
-            && except.iter().any(|k| k == key) {
-                return false;
-            }
+            && except.iter().any(|k| k == key)
+        {
+            return false;
+        }
         true
     }
 
@@ -578,11 +578,9 @@ impl PartialFilter {
             Prop::Always(_) => true,
             // EagerNone is an absent sentinel — never include it.
             Prop::EagerNone => false,
-            Prop::Eager(_)
-            | Prop::Lazy(_)
-            | Prop::Merge(_)
-            | Prop::Once(_)
-            | Prop::Scroll(_) => self.should_include_eager(key),
+            Prop::Eager(_) | Prop::Lazy(_) | Prop::Merge(_) | Prop::Once(_) | Prop::Scroll(_) => {
+                self.should_include_eager(key)
+            }
             Prop::Optional(_) | Prop::Defer(_) => self.should_include_optional(key),
         }
     }
@@ -601,9 +599,7 @@ mod tests {
     }
 
     fn failing_resolver() -> PropResolver {
-        Arc::new(|| {
-            Box::pin(async move { Err(FrameworkError::internal("resolver exploded")) })
-        })
+        Arc::new(|| Box::pin(async move { Err(FrameworkError::internal("resolver exploded")) }))
     }
 
     #[test]

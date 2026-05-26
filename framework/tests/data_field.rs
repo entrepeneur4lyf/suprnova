@@ -39,6 +39,8 @@ fn round_trip_null_emits_null() {
 
 #[test]
 fn round_trip_value() {
-    let p = Patch { bio: Field::Value("hi".into()) };
+    let p = Patch {
+        bio: Field::Value("hi".into()),
+    };
     assert_eq!(serde_json::to_string(&p).unwrap(), r#"{"bio":"hi"}"#);
 }

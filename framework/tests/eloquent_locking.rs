@@ -20,7 +20,7 @@
 //! | SQLite   | (no SQL, warn!)   | (no SQL, warn!)         |
 
 use sea_orm::DatabaseBackend;
-use suprnova::{model, Model};
+use suprnova::{Model, model};
 
 #[model(table = "t9_orders", timestamps = false)]
 pub struct T9Order {

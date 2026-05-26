@@ -14,9 +14,9 @@
 
 use serial_test::serial;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use suprnova::FrameworkError;
 use suprnova::async_trait;
 use suprnova::seed::{self, Seeder};
-use suprnova::FrameworkError;
 use tracing_test::traced_test;
 
 // Each seeder uses its own counter so tests can assert WHICH ran and
@@ -38,7 +38,9 @@ fn reset_all() {
 struct SeederA;
 #[async_trait]
 impl Seeder for SeederA {
-    fn name() -> &'static str { "SeederA" }
+    fn name() -> &'static str {
+        "SeederA"
+    }
     async fn run() -> Result<(), FrameworkError> {
         A_RAN.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -48,7 +50,9 @@ impl Seeder for SeederA {
 struct SeederB;
 #[async_trait]
 impl Seeder for SeederB {
-    fn name() -> &'static str { "SeederB" }
+    fn name() -> &'static str {
+        "SeederB"
+    }
     async fn run() -> Result<(), FrameworkError> {
         B_RAN.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -58,7 +62,9 @@ impl Seeder for SeederB {
 struct SeederC;
 #[async_trait]
 impl Seeder for SeederC {
-    fn name() -> &'static str { "SeederC" }
+    fn name() -> &'static str {
+        "SeederC"
+    }
     async fn run() -> Result<(), FrameworkError> {
         C_RAN.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -68,7 +74,9 @@ impl Seeder for SeederC {
 struct FailingSeeder;
 #[async_trait]
 impl Seeder for FailingSeeder {
-    fn name() -> &'static str { "FailingSeeder" }
+    fn name() -> &'static str {
+        "FailingSeeder"
+    }
     async fn run() -> Result<(), FrameworkError> {
         FAILS.fetch_add(1, Ordering::SeqCst);
         Err(FrameworkError::internal("synthetic seeder failure"))
@@ -80,7 +88,9 @@ impl Seeder for FailingSeeder {
 struct SeederBStub;
 #[async_trait]
 impl Seeder for SeederBStub {
-    fn name() -> &'static str { "SeederB" }
+    fn name() -> &'static str {
+        "SeederB"
+    }
     async fn run() -> Result<(), FrameworkError> {
         // Decrement to make the "replacement actually ran, not the
         // original" assertion symmetric.
@@ -114,7 +124,9 @@ async fn run_all_runs_seeders_in_registration_order() {
     struct OrderedA;
     #[async_trait]
     impl Seeder for OrderedA {
-        fn name() -> &'static str { "OrderedA" }
+        fn name() -> &'static str {
+            "OrderedA"
+        }
         async fn run() -> Result<(), FrameworkError> {
             ORDER.lock().unwrap().push("A");
             Ok(())
@@ -124,7 +136,9 @@ async fn run_all_runs_seeders_in_registration_order() {
     struct OrderedB;
     #[async_trait]
     impl Seeder for OrderedB {
-        fn name() -> &'static str { "OrderedB" }
+        fn name() -> &'static str {
+            "OrderedB"
+        }
         async fn run() -> Result<(), FrameworkError> {
             ORDER.lock().unwrap().push("B");
             Ok(())
@@ -134,7 +148,9 @@ async fn run_all_runs_seeders_in_registration_order() {
     struct OrderedC;
     #[async_trait]
     impl Seeder for OrderedC {
-        fn name() -> &'static str { "OrderedC" }
+        fn name() -> &'static str {
+            "OrderedC"
+        }
         async fn run() -> Result<(), FrameworkError> {
             ORDER.lock().unwrap().push("C");
             Ok(())

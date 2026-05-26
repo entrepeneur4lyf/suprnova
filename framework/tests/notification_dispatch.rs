@@ -1,10 +1,12 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use suprnova::notifications::{Channel, DynNotification, Notifiable, Notification, NotificationDispatcher};
+use std::sync::atomic::{AtomicU32, Ordering};
 use suprnova::FrameworkError;
+use suprnova::notifications::{
+    Channel, DynNotification, Notifiable, Notification, NotificationDispatcher,
+};
 use tracing_test::traced_test;
 
 static MAIL_HITS: AtomicU32 = AtomicU32::new(0);
@@ -130,7 +132,11 @@ async fn notification_skips_channels_without_a_route() {
         .await
         .unwrap();
 
-    assert_eq!(MAIL_HITS.load(Ordering::SeqCst), 1, "mail channel had a route");
+    assert_eq!(
+        MAIL_HITS.load(Ordering::SeqCst),
+        1,
+        "mail channel had a route"
+    );
     assert_eq!(
         DB_HITS.load(Ordering::SeqCst),
         0,
@@ -161,7 +167,11 @@ async fn notification_warns_when_declared_channel_is_unregistered() {
     dispatcher.notify(&recipient, &notification).await.unwrap();
 
     assert_eq!(MAIL_HITS.load(Ordering::SeqCst), 1, "mail still delivered");
-    assert_eq!(DB_HITS.load(Ordering::SeqCst), 0, "no db channel registered");
+    assert_eq!(
+        DB_HITS.load(Ordering::SeqCst),
+        0,
+        "no db channel registered"
+    );
 
     assert!(
         logs_contain("no channel registered"),
@@ -178,7 +188,9 @@ async fn notification_warns_when_declared_channel_is_unregistered() {
 struct FailingMailChannel;
 #[async_trait]
 impl Channel for FailingMailChannel {
-    fn name(&self) -> &'static str { "mail" }
+    fn name(&self) -> &'static str {
+        "mail"
+    }
     async fn deliver(
         &self,
         _route: &str,
@@ -230,7 +242,9 @@ struct AltMailChannelStub;
 static ALT_MAIL_HITS: AtomicU32 = AtomicU32::new(0);
 #[async_trait]
 impl Channel for AltMailChannelStub {
-    fn name(&self) -> &'static str { "mail" }
+    fn name(&self) -> &'static str {
+        "mail"
+    }
     async fn deliver(
         &self,
         _route: &str,
@@ -244,9 +258,15 @@ impl Channel for AltMailChannelStub {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct MailOnlyNotification;
 impl Notification for MailOnlyNotification {
-    fn notification_name() -> &'static str { "MailOnlyNotification" }
-    fn channels(&self) -> Vec<&'static str> { vec!["mail"] }
-    fn data(&self) -> serde_json::Value { serde_json::json!({}) }
+    fn notification_name() -> &'static str {
+        "MailOnlyNotification"
+    }
+    fn channels(&self) -> Vec<&'static str> {
+        vec!["mail"]
+    }
+    fn data(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
 }
 
 #[tokio::test]

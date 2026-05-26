@@ -25,8 +25,8 @@ use sea_orm_migration::MigratorTrait;
 use serde_json::json;
 use suprnova::handle_request;
 use suprnova::payments::{
-    entities::webhook_event, MockPaymentProvider, PaymentProvider, PaymentProviderRegistry,
-    SubscribeRequest, Subscription, webhook_routes,
+    MockPaymentProvider, PaymentProvider, PaymentProviderRegistry, SubscribeRequest, Subscription,
+    entities::webhook_event, webhook_routes,
 };
 use suprnova::testing::TestDatabase;
 use suprnova::{MiddlewareRegistry, Router};
@@ -67,9 +67,7 @@ async fn spawn_server(router: Router, accepts: usize) -> SocketAddr {
                 let svc = service_fn(move |req: hyper::Request<Incoming>| {
                     let router = router.clone();
                     let middleware = middleware.clone();
-                    async move {
-                        Ok::<_, Infallible>(handle_request(router, middleware, req).await)
-                    }
+                    async move { Ok::<_, Infallible>(handle_request(router, middleware, req).await) }
                 });
                 let _ = hyper::server::conn::http1::Builder::new()
                     .serve_connection(io, svc)
@@ -89,10 +87,9 @@ async fn send_webhook(
 ) -> (hyper::http::StatusCode, Bytes) {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let io = TokioIo::new(stream);
-    let (mut sender, conn) =
-        hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
-            .await
-            .unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
+        .await
+        .unwrap();
     tokio::spawn(async move {
         let _ = conn.await;
     });
@@ -179,23 +176,17 @@ async fn duplicate_webhook_deduped_and_returns_ok() {
     let path = format!("/webhooks/payments/{provider_name}");
 
     // First request — fresh event.
-    let (status1, body1) =
-        send_webhook(addr, &path, webhook_body.clone()).await;
+    let (status1, body1) = send_webhook(addr, &path, webhook_body.clone()).await;
     assert_eq!(
         status1.as_u16(),
         200,
         "first POST must return 200, got body: {}",
         String::from_utf8_lossy(&body1)
     );
-    assert_eq!(
-        body1.as_ref(),
-        b"ok",
-        "first POST must return body 'ok'"
-    );
+    assert_eq!(body1.as_ref(), b"ok", "first POST must return body 'ok'");
 
     // Second request — duplicate.
-    let (status2, body2) =
-        send_webhook(addr, &path, webhook_body.clone()).await;
+    let (status2, body2) = send_webhook(addr, &path, webhook_body.clone()).await;
     assert_eq!(
         status2.as_u16(),
         200,
@@ -240,8 +231,7 @@ async fn webhook_for_unknown_provider_returns_404() {
     let addr = spawn_server(router, 2).await;
 
     let body = Bytes::from(b"{\"id\":\"evt_1\",\"type\":\"test\"}".to_vec());
-    let (status, resp_body) =
-        send_webhook(addr, "/webhooks/payments/unregistered-xyz", body).await;
+    let (status, resp_body) = send_webhook(addr, "/webhooks/payments/unregistered-xyz", body).await;
     assert_eq!(
         status.as_u16(),
         404,

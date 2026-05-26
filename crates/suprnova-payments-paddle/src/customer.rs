@@ -34,7 +34,9 @@ impl CustomerStore for PaddleProvider {
     }
 
     async fn update_customer(&self, req: UpdateCustomerRequest) -> PaymentResult<CustomerRef> {
-        let mut builder = self.client().customer_update(req.provider_customer_id.clone());
+        let mut builder = self
+            .client()
+            .customer_update(req.provider_customer_id.clone());
         if let Some(email) = &req.email {
             builder.email(email.clone());
         }

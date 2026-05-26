@@ -11,9 +11,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
-use syn::{
-    parse_macro_input, punctuated::Punctuated, ImplItem, ItemImpl, Meta, Token, Type,
-};
+use syn::{ImplItem, ItemImpl, Meta, Token, Type, parse_macro_input, punctuated::Punctuated};
 
 /// Convert a PascalCase identifier to kebab-case.
 ///

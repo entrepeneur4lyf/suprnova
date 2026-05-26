@@ -34,13 +34,13 @@
 //!   is process-wide so subsequent calls are silent no-ops.
 
 use once_cell::sync::Lazy;
-use sea_orm_migration::prelude::*;
 use sea_orm_migration::MigratorTrait;
+use sea_orm_migration::prelude::*;
 use tokio::runtime::Runtime;
 
+use suprnova::Auth;
 use suprnova::http::cookie::Cookie;
 use suprnova::session::SessionConfig;
-use suprnova::Auth;
 
 /// Shared runtime — SQLx pools die with their creating runtime.
 static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
@@ -178,15 +178,27 @@ impl MigrationTrait for CreateRememberTokensTable {
                     )
                     .col(ColumnDef::new(RememberTokens::UserId).string().not_null())
                     .col(ColumnDef::new(RememberTokens::Selector).string().not_null())
-                    .col(ColumnDef::new(RememberTokens::TokenHash).string().not_null())
-                    .col(ColumnDef::new(RememberTokens::ExpiresAt).timestamp().not_null())
+                    .col(
+                        ColumnDef::new(RememberTokens::TokenHash)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RememberTokens::ExpiresAt)
+                            .timestamp()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(RememberTokens::CreatedAt)
                             .timestamp()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
-                    .col(ColumnDef::new(RememberTokens::LastUsedAt).timestamp().null())
+                    .col(
+                        ColumnDef::new(RememberTokens::LastUsedAt)
+                            .timestamp()
+                            .null(),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -323,7 +335,11 @@ fn login_remember_issues_cookie_and_persists_token() {
         // plaintext (22-char selector + '.' + 43-char verifier = 66
         // chars total).
         let plaintext = decode_remember_cookie(&pending);
-        assert_eq!(plaintext.len(), 66, "selector.verifier composite token expected");
+        assert_eq!(
+            plaintext.len(),
+            66,
+            "selector.verifier composite token expected"
+        );
         let (sel, ver) = plaintext
             .split_once('.')
             .expect("composite token must contain a '.' separator");
@@ -467,14 +483,18 @@ fn revoke_remember_tokens_clears_all_rows_for_user() {
         assert_eq!(removed, 2, "both rows must be removed");
         assert_eq!(count_tokens_for(user_id).await, 0);
 
-        assert!(suprnova::auth::remember::verify_and_rotate(&pt1, ttl_minutes)
-            .await
-            .expect("verify post-revoke pt1")
-            .is_none());
-        assert!(suprnova::auth::remember::verify_and_rotate(&pt2, ttl_minutes)
-            .await
-            .expect("verify post-revoke pt2")
-            .is_none());
+        assert!(
+            suprnova::auth::remember::verify_and_rotate(&pt1, ttl_minutes)
+                .await
+                .expect("verify post-revoke pt1")
+                .is_none()
+        );
+        assert!(
+            suprnova::auth::remember::verify_and_rotate(&pt2, ttl_minutes)
+                .await
+                .expect("verify post-revoke pt2")
+                .is_none()
+        );
     });
 }
 
@@ -643,14 +663,14 @@ fn remember_cookie_respects_secure_flag() {
     let secure_config = SessionConfig::default(); // cookie_secure = true
     let plaintext = "any-encrypted-plaintext";
     let max_age = std::time::Duration::from_secs(60 * 60); // 1 hour
-    let cookie = suprnova::session::middleware::create_remember_cookie(
-        &secure_config,
-        plaintext,
-        max_age,
-    )
-    .expect("encrypted cookie");
+    let cookie =
+        suprnova::session::middleware::create_remember_cookie(&secure_config, plaintext, max_age)
+            .expect("encrypted cookie");
     let header = cookie.to_header_value();
-    assert!(header.contains("Secure"), "production: cookie must be Secure");
+    assert!(
+        header.contains("Secure"),
+        "production: cookie must be Secure"
+    );
     assert!(header.contains("HttpOnly"));
     assert!(header.contains("SameSite=Lax"));
     assert!(
@@ -662,12 +682,9 @@ fn remember_cookie_respects_secure_flag() {
         cookie_secure: false,
         ..SessionConfig::default()
     };
-    let cookie = suprnova::session::middleware::create_remember_cookie(
-        &insecure_config,
-        plaintext,
-        max_age,
-    )
-    .expect("encrypted cookie");
+    let cookie =
+        suprnova::session::middleware::create_remember_cookie(&insecure_config, plaintext, max_age)
+            .expect("encrypted cookie");
     let header = cookie.to_header_value();
     assert!(
         !header.contains("Secure"),
@@ -700,8 +717,8 @@ fn middleware_hydrates_session_from_remember_cookie() {
     use hyper_util::rt::TokioIo;
     use std::convert::Infallible;
     use std::sync::Arc;
-    use suprnova::middleware::Middleware;
     use suprnova::Request;
+    use suprnova::middleware::Middleware;
     use tokio::io::AsyncWriteExt;
     use tokio::sync::oneshot;
 
@@ -877,8 +894,8 @@ fn middleware_clears_forged_remember_cookie() {
     use hyper_util::rt::TokioIo;
     use std::convert::Infallible;
     use std::sync::Arc;
-    use suprnova::middleware::Middleware;
     use suprnova::Request;
+    use suprnova::middleware::Middleware;
     use tokio::io::AsyncWriteExt;
     use tokio::sync::oneshot;
 
@@ -889,15 +906,12 @@ fn middleware_clears_forged_remember_cookie() {
         // ciphertext is valid, but the plaintext does not match any
         // hashed row. The middleware must reject AND clear.
         let forged_plaintext = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF";
-        let encrypted =
-            suprnova::Crypt::encrypt_string(forged_plaintext).expect("encrypt forged");
+        let encrypted = suprnova::Crypt::encrypt_string(forged_plaintext).expect("encrypt forged");
 
         let mut http_bytes = Vec::new();
         http_bytes.extend_from_slice(b"GET / HTTP/1.1\r\n");
         http_bytes.extend_from_slice(b"Host: localhost\r\n");
-        http_bytes.extend_from_slice(
-            format!("Cookie: remember_me={encrypted}\r\n").as_bytes(),
-        );
+        http_bytes.extend_from_slice(format!("Cookie: remember_me={encrypted}\r\n").as_bytes());
         http_bytes.extend_from_slice(b"Content-Length: 0\r\n\r\n");
 
         let (req_tx, req_rx) = oneshot::channel::<Request>();
@@ -915,9 +929,7 @@ fn middleware_clears_forged_remember_cookie() {
                 }
                 async {
                     std::future::pending::<()>().await;
-                    Ok::<_, Infallible>(hyper::Response::new(
-                        http_body_util::Empty::<Bytes>::new(),
-                    ))
+                    Ok::<_, Infallible>(hyper::Response::new(http_body_util::Empty::<Bytes>::new()))
                 }
             });
             let _ = http1::Builder::new()

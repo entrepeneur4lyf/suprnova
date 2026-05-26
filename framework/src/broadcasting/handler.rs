@@ -28,14 +28,14 @@
 //! Unknown channels always reject. Server-side `hub.publish()` calls
 //! bypass both gates entirely (server is already trusted).
 
+use crate::FrameworkError;
 use crate::broadcasting::channel::ChannelRegistry;
 use crate::broadcasting::hub::{BroadcastEnvelope, BroadcastHub};
 use crate::broadcasting::protocol::{ClientFrame, ServerFrame};
 use crate::http::Request;
 use crate::ws::{WebSocketHandler, WsSocket};
-use crate::FrameworkError;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -258,15 +258,15 @@ async fn handle_subscribe(
 
     // Collect presence bootstrap data (snapshot + member id + info) for use
     // after the forwarder is inserted so hub.subscribe() is already live.
-    let presence_bootstrap: Option<(Vec<Value>, String, Value)> = if let Some(pc) = ch.presence_info()
-    {
-        let existing = hub.list_members(channel).await;
-        let info = pc.member_info(req).await?;
-        let member_id = Uuid::new_v4().to_string();
-        Some((existing, member_id, info))
-    } else {
-        None
-    };
+    let presence_bootstrap: Option<(Vec<Value>, String, Value)> =
+        if let Some(pc) = ch.presence_info() {
+            let existing = hub.list_members(channel).await;
+            let info = pc.member_info(req).await?;
+            let member_id = Uuid::new_v4().to_string();
+            Some((existing, member_id, info))
+        } else {
+            None
+        };
 
     // Subscribe to the hub and spawn a forwarder.
     let mut rx = hub.subscribe(channel);

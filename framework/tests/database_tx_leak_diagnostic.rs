@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 
 use suprnova::error::FrameworkError;
 use suprnova::testing::TestDatabase;
-use suprnova::{TxHandle, DB};
+use suprnova::{DB, TxHandle};
 use tracing_test::traced_test;
 
 #[tokio::test]
@@ -95,11 +95,7 @@ async fn no_leak_means_no_zombie_error_log() {
     let _db = TestDatabase::sqlite_memory().await.unwrap();
 
     let result: Result<(), FrameworkError> = DB::transaction(|_tx| {
-        Box::pin(async move {
-            Err(FrameworkError::database(
-                "intentional failure with no leak",
-            ))
-        })
+        Box::pin(async move { Err(FrameworkError::database("intentional failure with no leak")) })
     })
     .await;
 

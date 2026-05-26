@@ -55,17 +55,17 @@
 //! posture above means this is a tightening, not a fix — the boot
 //! validation closes the actual exploit either way.
 
-pub mod key;
 pub(crate) mod aead;
+pub mod key;
 
 pub use key::EncryptionKey;
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use serde::{de::DeserializeOwned, Serialize};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use serde::{Serialize, de::DeserializeOwned};
 use std::sync::OnceLock;
 
-use crate::config::Environment;
 use crate::FrameworkError;
+use crate::config::Environment;
 
 /// Internal process-wide key ring. Public via the [`Crypt`] facade.
 ///
@@ -134,10 +134,7 @@ impl Crypt {
     ///
     /// Subsequent calls are a no-op and emit a `tracing::warn!`.
     pub fn init_with_keyring(current: EncryptionKey, previous: Vec<EncryptionKey>) {
-        if CRYPT_RING
-            .set(KeyRing { current, previous })
-            .is_err()
-        {
+        if CRYPT_RING.set(KeyRing { current, previous }).is_err() {
             tracing::warn!("Crypt::init called more than once; ignoring");
         }
     }
@@ -149,9 +146,7 @@ impl Crypt {
 
     fn ring() -> Result<&'static KeyRing, FrameworkError> {
         CRYPT_RING.get().ok_or_else(|| {
-            FrameworkError::internal(
-                "Crypt is not initialized — set APP_KEY before serving",
-            )
+            FrameworkError::internal("Crypt is not initialized — set APP_KEY before serving")
         })
     }
 
@@ -200,16 +195,15 @@ impl Crypt {
     ///
     /// Public surface: [`Crypt::decrypt_string`].
     #[doc(hidden)]
-    pub fn decrypt_string_inner(
-        wire: &str,
-    ) -> Result<(String, DecryptOrigin), FrameworkError> {
+    pub fn decrypt_string_inner(wire: &str) -> Result<(String, DecryptOrigin), FrameworkError> {
         let ring = Self::ring()?;
         let bytes = URL_SAFE_NO_PAD
             .decode(wire.trim())
             .map_err(|e| FrameworkError::internal(format!("Crypt base64 decode failed: {e}")))?;
         let (plain_bytes, origin) = decrypt_with_ring(ring, &bytes)?;
-        let plain = String::from_utf8(plain_bytes)
-            .map_err(|e| FrameworkError::internal(format!("Crypt decrypted bytes not UTF-8: {e}")))?;
+        let plain = String::from_utf8(plain_bytes).map_err(|e| {
+            FrameworkError::internal(format!("Crypt decrypted bytes not UTF-8: {e}"))
+        })?;
         Ok((plain, origin))
     }
 
@@ -368,7 +362,9 @@ pub fn resolve_boot_keyring(
 ///
 /// Any malformed entry is an error — see [`resolve_boot_keyring`].
 fn parse_previous_keys(raw: Option<&str>) -> Result<Vec<EncryptionKey>, FrameworkError> {
-    let Some(raw) = raw else { return Ok(Vec::new()); };
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Ok(Vec::new());
@@ -502,10 +498,7 @@ pub fn _test_install_key(key: EncryptionKey) -> bool {
 /// the `testing` feature is disabled.
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
-pub fn _test_install_keyring(
-    current: EncryptionKey,
-    previous: Vec<EncryptionKey>,
-) -> bool {
+pub fn _test_install_keyring(current: EncryptionKey, previous: Vec<EncryptionKey>) -> bool {
     CRYPT_RING.set(KeyRing { current, previous }).is_ok()
 }
 
@@ -523,10 +516,7 @@ pub fn _test_install_keyring(
 /// the `testing` feature is disabled.
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
-pub fn _test_encrypt_with(
-    key: &EncryptionKey,
-    plaintext: &str,
-) -> Result<String, FrameworkError> {
+pub fn _test_encrypt_with(key: &EncryptionKey, plaintext: &str) -> Result<String, FrameworkError> {
     let wire = aead::encrypt(key, plaintext.as_bytes())?;
     Ok(URL_SAFE_NO_PAD.encode(wire))
 }
@@ -574,9 +564,7 @@ mod boot_tests {
         // Unknown environments are treated production-like — anything
         // we don't explicitly recognize as a dev environment must not
         // silently downgrade.
-        assert!(
-            resolve_boot_key(&Environment::Custom("k8s".into()), None).is_err()
-        );
+        assert!(resolve_boot_key(&Environment::Custom("k8s".into()), None).is_err());
     }
 
     #[test]
@@ -624,8 +612,7 @@ mod boot_tests {
     fn dev_env_with_malformed_key_still_errors() {
         // Even in local, an explicit-but-bad key is an error — better
         // to fail at boot than silently mask a typo.
-        let err =
-            resolve_boot_key(&Environment::Local, Some("not-valid-base64!!!")).unwrap_err();
+        let err = resolve_boot_key(&Environment::Local, Some("not-valid-base64!!!")).unwrap_err();
         assert!(format!("{err}").contains("APP_KEY is set but invalid"));
     }
 
@@ -645,12 +632,8 @@ mod boot_tests {
         // "no previous keys" — same way `APP_KEY=` means unset.
         let app_key = EncryptionKey::generate().to_base64();
         for raw in ["", "   ", "  \t  "] {
-            let ring = resolve_boot_keyring(
-                &Environment::Production,
-                Some(&app_key),
-                Some(raw),
-            )
-            .expect("empty previous → ok");
+            let ring = resolve_boot_keyring(&Environment::Production, Some(&app_key), Some(raw))
+                .expect("empty previous → ok");
             assert!(ring.previous.is_empty(), "raw={raw:?}");
         }
     }
@@ -659,12 +642,8 @@ mod boot_tests {
     fn keyring_parses_single_previous_key() {
         let app_key = EncryptionKey::generate().to_base64();
         let prev = EncryptionKey::generate().to_base64();
-        let ring = resolve_boot_keyring(
-            &Environment::Production,
-            Some(&app_key),
-            Some(&prev),
-        )
-        .expect("single previous key parses");
+        let ring = resolve_boot_keyring(&Environment::Production, Some(&app_key), Some(&prev))
+            .expect("single previous key parses");
         assert_eq!(ring.previous.len(), 1);
     }
 
@@ -678,12 +657,8 @@ mod boot_tests {
         let k2 = EncryptionKey::generate().to_base64();
         let k3 = EncryptionKey::generate().to_base64();
         let combined = format!("{k1},{k2},{k3}");
-        let ring = resolve_boot_keyring(
-            &Environment::Production,
-            Some(&app_key),
-            Some(&combined),
-        )
-        .expect("3 previous keys parse");
+        let ring = resolve_boot_keyring(&Environment::Production, Some(&app_key), Some(&combined))
+            .expect("3 previous keys parse");
         assert_eq!(ring.previous.len(), 3);
     }
 
@@ -697,12 +672,8 @@ mod boot_tests {
         let k1 = EncryptionKey::generate().to_base64();
         let k2 = EncryptionKey::generate().to_base64();
         let combined = format!("{k1},,{k2},");
-        let ring = resolve_boot_keyring(
-            &Environment::Production,
-            Some(&app_key),
-            Some(&combined),
-        )
-        .expect("empty entries are tolerated");
+        let ring = resolve_boot_keyring(&Environment::Production, Some(&app_key), Some(&combined))
+            .expect("empty entries are tolerated");
         assert_eq!(ring.previous.len(), 2);
     }
 
@@ -714,12 +685,8 @@ mod boot_tests {
         let app_key = EncryptionKey::generate().to_base64();
         let good = EncryptionKey::generate().to_base64();
         let combined = format!("{good},not-valid-base64!!!");
-        let err = resolve_boot_keyring(
-            &Environment::Production,
-            Some(&app_key),
-            Some(&combined),
-        )
-        .expect_err("malformed previous entry must fail boot");
+        let err = resolve_boot_keyring(&Environment::Production, Some(&app_key), Some(&combined))
+            .expect_err("malformed previous entry must fail boot");
         let msg = format!("{err}");
         assert!(
             msg.contains("APP_KEY_PREVIOUS entry #1 is invalid"),
@@ -734,12 +701,8 @@ mod boot_tests {
         // fail closed even if APP_KEY_PREVIOUS is set — that's a
         // common misconfiguration during a botched rotation.
         let prev = EncryptionKey::generate().to_base64();
-        let err = resolve_boot_keyring(
-            &Environment::Production,
-            None,
-            Some(&prev),
-        )
-        .expect_err("no current key in prod must fail closed");
+        let err = resolve_boot_keyring(&Environment::Production, None, Some(&prev))
+            .expect_err("no current key in prod must fail closed");
         assert!(format!("{err}").contains("APP_KEY is required"));
     }
 
@@ -750,12 +713,8 @@ mod boot_tests {
         // shouldn't break just because the operator left
         // APP_KEY_PREVIOUS pointing at the last production key.
         let prev = EncryptionKey::generate().to_base64();
-        let ring = resolve_boot_keyring(
-            &Environment::Local,
-            None,
-            Some(&prev),
-        )
-        .expect("local with previous-only succeeds");
+        let ring = resolve_boot_keyring(&Environment::Local, None, Some(&prev))
+            .expect("local with previous-only succeeds");
         assert!(ring.is_current_generated());
         assert_eq!(ring.previous.len(), 1);
     }

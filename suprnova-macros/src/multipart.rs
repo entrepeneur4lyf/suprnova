@@ -15,7 +15,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Fields, LitStr, Type};
+use syn::{Data, DeriveInput, Fields, LitStr, Type, parse_macro_input};
 
 pub fn expand(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);

@@ -1,7 +1,7 @@
 //! Database configuration for suprnova framework
 
-use crate::config::{env, env_optional, Environment};
 use crate::FrameworkError;
+use crate::config::{Environment, env, env_optional};
 
 /// Database type enumeration
 #[derive(Debug, Clone, PartialEq)]

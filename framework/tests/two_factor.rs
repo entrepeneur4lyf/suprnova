@@ -165,24 +165,32 @@ async fn recovery_code_consume_is_single_use() {
     let second = &response.recovery_codes[1];
 
     // First consume succeeds.
-    assert!(TwoFactor::consume_recovery_code(&user, first)
-        .await
-        .unwrap());
+    assert!(
+        TwoFactor::consume_recovery_code(&user, first)
+            .await
+            .unwrap()
+    );
 
     // Same code cannot be consumed twice.
-    assert!(!TwoFactor::consume_recovery_code(&user, first)
-        .await
-        .unwrap());
+    assert!(
+        !TwoFactor::consume_recovery_code(&user, first)
+            .await
+            .unwrap()
+    );
 
     // A different code from the same set still works.
-    assert!(TwoFactor::consume_recovery_code(&user, second)
-        .await
-        .unwrap());
+    assert!(
+        TwoFactor::consume_recovery_code(&user, second)
+            .await
+            .unwrap()
+    );
 
     // A garbage code never works.
-    assert!(!TwoFactor::consume_recovery_code(&user, "000000-000000")
-        .await
-        .unwrap());
+    assert!(
+        !TwoFactor::consume_recovery_code(&user, "000000-000000")
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -221,11 +229,19 @@ async fn re_enroll_invalidates_old_recovery_codes_and_resets_confirmed() {
 
     // Old recovery codes can no longer be consumed.
     let stale = &first.recovery_codes[0];
-    assert!(!TwoFactor::consume_recovery_code(&user, stale).await.unwrap());
+    assert!(
+        !TwoFactor::consume_recovery_code(&user, stale)
+            .await
+            .unwrap()
+    );
 
     // New recovery codes still work.
     let fresh = &second.recovery_codes[0];
-    assert!(TwoFactor::consume_recovery_code(&user, fresh).await.unwrap());
+    assert!(
+        TwoFactor::consume_recovery_code(&user, fresh)
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -275,12 +291,12 @@ async fn disable_event_fires_only_on_real_transition() {
     ensure_crypt();
     let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use suprnova::FrameworkError;
     use suprnova::auth_flows::events::TwoFactorDisabled;
     use suprnova::events::{EventFacade, Listener};
-    use suprnova::FrameworkError;
 
     // Unique user id so this listener can filter out unrelated
     // TwoFactorDisabled dispatches from other tests sharing the

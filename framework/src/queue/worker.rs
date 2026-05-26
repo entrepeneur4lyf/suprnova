@@ -24,15 +24,16 @@
 
 use crate::error::FrameworkError;
 use crate::lock;
+use crate::queue::Job;
 use crate::queue::driver::QueueDriver;
 use crate::queue::retry::next_delay;
-use crate::queue::Job;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-type Dispatcher = Arc<dyn Fn(serde_json::Value) -> BoxFuture<'static, Result<(), FrameworkError>> + Send + Sync>;
+type Dispatcher =
+    Arc<dyn Fn(serde_json::Value) -> BoxFuture<'static, Result<(), FrameworkError>> + Send + Sync>;
 
 static REGISTRY: RwLock<Option<HashMap<String, Dispatcher>>> = RwLock::new(None);
 
@@ -45,13 +46,18 @@ pub fn register_job<J: Job>() {
         })
     });
     let mut g = lock::write(&REGISTRY).expect("queue registry poisoned");
-    g.get_or_insert_with(HashMap::new).insert(J::job_name().to_string(), f);
+    g.get_or_insert_with(HashMap::new)
+        .insert(J::job_name().to_string(), f);
 }
 
-pub async fn dispatch_by_name(name: &str, payload: serde_json::Value) -> Result<(), FrameworkError> {
+pub async fn dispatch_by_name(
+    name: &str,
+    payload: serde_json::Value,
+) -> Result<(), FrameworkError> {
     let dispatcher = {
         let g = lock::read(&REGISTRY)?;
-        let map = g.as_ref()
+        let map = g
+            .as_ref()
             .ok_or_else(|| FrameworkError::internal(format!("unknown job: {name}")))?;
         map.get(name)
             .cloned()
@@ -63,9 +69,14 @@ pub async fn dispatch_by_name(name: &str, payload: serde_json::Value) -> Result<
 /// Return all registered job names. Used by admin inspectors and
 /// `cargo run --bin app -- jobs:list` (Phase 6B).
 pub fn registered_job_names() -> Vec<String> {
-    lock::read(&REGISTRY).expect("queue registry poisoned")
+    lock::read(&REGISTRY)
+        .expect("queue registry poisoned")
         .as_ref()
-        .map(|m| { let mut v: Vec<_> = m.keys().cloned().collect(); v.sort(); v })
+        .map(|m| {
+            let mut v: Vec<_> = m.keys().cloned().collect();
+            v.sort();
+            v
+        })
         .unwrap_or_default()
 }
 
@@ -136,8 +147,8 @@ pub async fn run_worker(driver: Arc<dyn QueueDriver>, cfg: WorkerConfig) {
             }
             Err(e) => {
                 let is_timeout = e.to_string().contains("timed out after");
-                let exhausted = env.attempts >= env.max_tries
-                    || (is_timeout && env.fail_on_timeout);
+                let exhausted =
+                    env.attempts >= env.max_tries || (is_timeout && env.fail_on_timeout);
                 if exhausted {
                     tracing::error!(
                         job = %env.job_name,

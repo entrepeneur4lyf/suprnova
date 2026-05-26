@@ -1,7 +1,7 @@
 //! Multi-level `?include=` parse tree for JSON:API compound documents.
 
-use std::collections::HashMap;
 use crate::data::RequestIncludeSet;
+use std::collections::HashMap;
 
 /// Parsed tree representation of a multi-level `?include=` query.
 ///
@@ -25,10 +25,7 @@ impl IncludeTree {
         for path in &set.include {
             let mut node = &mut root;
             for segment in path.split('.') {
-                node = node
-                    .children
-                    .entry(segment.to_string())
-                    .or_default();
+                node = node.children.entry(segment.to_string()).or_default();
             }
         }
         root

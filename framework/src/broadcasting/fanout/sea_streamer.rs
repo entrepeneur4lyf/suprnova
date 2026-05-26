@@ -82,8 +82,8 @@
 //! the option is silently ignored by the non-stdio backends (each one has its
 //! own native cross-process behaviour).
 
-use crate::broadcasting::hub::{BroadcastEnvelope, BroadcastHub, InMemoryBroadcastHub};
 use crate::FrameworkError;
+use crate::broadcasting::hub::{BroadcastEnvelope, BroadcastHub, InMemoryBroadcastHub};
 use async_trait::async_trait;
 use sea_streamer::{
     Buffer, Consumer, ConsumerMode, ConsumerOptions, Message, Producer, SeaConnectOptions,
@@ -284,7 +284,10 @@ impl SeaStreamerBroadcastHub {
     /// event exactly once. Presence events round-trip intentionally.
     ///
     /// Uses the default presence TTL (60 s).
-    pub async fn new_loopback(streamer_uri: &str, stream_key: &str) -> Result<Self, FrameworkError> {
+    pub async fn new_loopback(
+        streamer_uri: &str,
+        stream_key: &str,
+    ) -> Result<Self, FrameworkError> {
         Self::connect(streamer_uri, stream_key, true, PRESENCE_TTL).await
     }
 
@@ -330,9 +333,7 @@ impl SeaStreamerBroadcastHub {
         });
 
         let streamer = SeaStreamer::connect(uri, connect_opts).await.map_err(|e| {
-            FrameworkError::internal(format!(
-                "SeaStreamerBroadcastHub: connect failed: {e}"
-            ))
+            FrameworkError::internal(format!("SeaStreamerBroadcastHub: connect failed: {e}"))
         })?;
 
         let producer = streamer
@@ -364,8 +365,7 @@ impl SeaStreamerBroadcastHub {
 
         let instance_id = Uuid::new_v4();
         let local = Arc::new(InMemoryBroadcastHub::new());
-        let cross_process_view: CrossProcessView =
-            Arc::new(AsyncRwLock::new(HashMap::new()));
+        let cross_process_view: CrossProcessView = Arc::new(AsyncRwLock::new(HashMap::new()));
         let local_members: Arc<AsyncRwLock<HashMap<(String, String), Value>>> =
             Arc::new(AsyncRwLock::new(HashMap::new()));
 
@@ -385,8 +385,13 @@ impl SeaStreamerBroadcastHub {
         let hb_instance_id = instance_id.to_string();
         let hb_local_members = Arc::clone(&local_members);
         let heartbeat_task = tokio::spawn(async move {
-            heartbeat_task(hb_producer, hb_instance_id, hb_local_members, heartbeat_interval)
-                .await;
+            heartbeat_task(
+                hb_producer,
+                hb_instance_id,
+                hb_local_members,
+                heartbeat_interval,
+            )
+            .await;
         });
 
         // Spawn the pruning task — drops MemberRecord entries whose last_seen
@@ -538,12 +543,13 @@ async fn apply_presence_event(view: &CrossProcessView, event: PresenceEvent) {
             info,
             ..
         } => {
-            map.entry(channel)
-                .or_default()
-                .insert((instance_id, member_id), MemberRecord {
+            map.entry(channel).or_default().insert(
+                (instance_id, member_id),
+                MemberRecord {
                     info,
                     last_seen: Instant::now(),
-                });
+                },
+            );
         }
         PresenceEvent::MemberRemoved {
             instance_id,
@@ -593,15 +599,17 @@ async fn heartbeat_task(
 /// hub instance produced them — including this hub's own instance_id, which
 /// is important for crash-recovery tests where a dropped hub's heartbeat
 /// task has been aborted.
-async fn prune_task(view: CrossProcessView, interval: std::time::Duration, ttl: std::time::Duration) {
+async fn prune_task(
+    view: CrossProcessView,
+    interval: std::time::Duration,
+    ttl: std::time::Duration,
+) {
     loop {
         tokio::time::sleep(interval).await;
         let now = Instant::now();
         let mut map = view.write().await;
         for ch_map in map.values_mut() {
-            ch_map.retain(|_, record| {
-                now.duration_since(record.last_seen) < ttl
-            });
+            ch_map.retain(|_, record| now.duration_since(record.last_seen) < ttl);
         }
         // Also remove empty channel entries.
         map.retain(|_, ch_map| !ch_map.is_empty());
@@ -702,28 +710,25 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
         //    consistency — callers don't need to wait for the round-trip.
         {
             let mut map = self.cross_process_view.write().await;
-            map.entry(channel.to_string())
-                .or_default()
-                .insert(
-                    (self.instance_id.to_string(), member_id.to_string()),
-                    MemberRecord {
-                        info: info.clone(),
-                        last_seen: Instant::now(),
-                    },
-                );
+            map.entry(channel.to_string()).or_default().insert(
+                (self.instance_id.to_string(), member_id.to_string()),
+                MemberRecord {
+                    info: info.clone(),
+                    last_seen: Instant::now(),
+                },
+            );
         }
 
         // 2. Keep the heartbeat snapshot in sync.
         {
             let mut local_members = self.local_members.write().await;
-            local_members.insert(
-                (channel.to_string(), member_id.to_string()),
-                info.clone(),
-            );
+            local_members.insert((channel.to_string(), member_id.to_string()), info.clone());
         }
 
         // 3. Also update the local hub so existing in-process APIs still work.
-        self.local.track_member(channel, member_id, info.clone()).await;
+        self.local
+            .track_member(channel, member_id, info.clone())
+            .await;
 
         // 4. Publish to the meta-channel so other processes update their views.
         //    In loopback/single-stream tests this round-trips back to us, but

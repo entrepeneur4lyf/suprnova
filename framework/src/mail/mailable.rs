@@ -19,12 +19,14 @@
 use crate::error::FrameworkError;
 use crate::mail::address::{Address, Attachment};
 use async_trait::async_trait;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 #[async_trait]
 pub trait Mailable: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// Stable name used in the queue envelope. Renaming breaks in-flight messages.
-    fn mailable_name() -> &'static str where Self: Sized;
+    fn mailable_name() -> &'static str
+    where
+        Self: Sized;
 
     /// Computed subject. Used as the rendered subject when
     /// [`subject_template_source`](Self::subject_template_source) returns
@@ -44,18 +46,28 @@ pub trait Mailable: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// rendering paths (subject / html / text) onto one consistent
     /// surface. The defaulted `None` keeps existing impls that only
     /// override `subject()` working unchanged.
-    fn subject_template_source(&self) -> Option<String> { None }
+    fn subject_template_source(&self) -> Option<String> {
+        None
+    }
 
     /// HTML template source (Tera syntax). Return None to skip HTML.
-    fn html_template_source(&self) -> Option<String> { None }
+    fn html_template_source(&self) -> Option<String> {
+        None
+    }
 
     /// Plain-text template source. Return None to skip plaintext.
-    fn text_template_source(&self) -> Option<String> { None }
+    fn text_template_source(&self) -> Option<String> {
+        None
+    }
 
     /// Override the global default `from` for this mailable.
-    fn from(&self) -> Option<Address> { None }
+    fn from(&self) -> Option<Address> {
+        None
+    }
 
-    fn attachments(&self) -> Vec<Attachment> { Vec::new() }
+    fn attachments(&self) -> Vec<Attachment> {
+        Vec::new()
+    }
 
     /// Render the subject. When `subject_template_source` returns `Some`,
     /// Tera-renders that template with `self` as the context; otherwise
@@ -75,13 +87,17 @@ pub trait Mailable: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// serialized fields as the context. Override if you need custom rendering
     /// (e.g., Markdown → HTML, or a pre-rendered string from elsewhere).
     fn render_html(&self) -> Result<Option<String>, FrameworkError> {
-        let Some(src) = self.html_template_source() else { return Ok(None); };
+        let Some(src) = self.html_template_source() else {
+            return Ok(None);
+        };
         render_with_self(self, &src, "html").map(Some)
     }
 
     /// Render the plaintext body. Same defaulting behavior as `render_html`.
     fn render_text(&self) -> Result<Option<String>, FrameworkError> {
-        let Some(src) = self.text_template_source() else { return Ok(None); };
+        let Some(src) = self.text_template_source() else {
+            return Ok(None);
+        };
         render_with_self(self, &src, "text").map(Some)
     }
 }

@@ -10,9 +10,7 @@
 
 mod common;
 
-use common::{
-    request_with_body, request_with_chunked_body, request_with_declared_length,
-};
+use common::{request_with_body, request_with_chunked_body, request_with_declared_length};
 use serde::Deserialize;
 use std::sync::Mutex;
 use suprnova::FormRequest;
@@ -118,13 +116,8 @@ async fn content_length_pre_check_rejects_without_reading_body() {
     // Declare 20 MiB in the header but send a 1 KiB body — pre-check fires
     // on the header alone, so the server never reads past the headers.
     let small_body = json_payload(1024);
-    let req = request_with_declared_length(
-        "/",
-        "application/json",
-        20 * 1024 * 1024,
-        &small_body,
-    )
-    .await;
+    let req =
+        request_with_declared_length("/", "application/json", 20 * 1024 * 1024, &small_body).await;
 
     let err = DefaultForm::extract(req)
         .await
@@ -177,13 +170,8 @@ async fn pre_check_message_includes_cap_bytes() {
     let _g = ReqBodyCapGuard::acquire();
 
     let small_body = json_payload(1024);
-    let req = request_with_declared_length(
-        "/",
-        "application/json",
-        20 * 1024 * 1024,
-        &small_body,
-    )
-    .await;
+    let req =
+        request_with_declared_length("/", "application/json", 20 * 1024 * 1024, &small_body).await;
 
     let err = DefaultForm::extract(req)
         .await
@@ -191,8 +179,7 @@ async fn pre_check_message_includes_cap_bytes() {
         .expect("pre-check should reject");
     let msg = format!("{err}");
     assert!(
-        msg.contains("request body exceeds")
-            && msg.contains(&format!("{}", 8 * 1024 * 1024)),
+        msg.contains("request body exceeds") && msg.contains(&format!("{}", 8 * 1024 * 1024)),
         "413 message must include cap bytes for diagnostics: {msg}"
     );
 }

@@ -3,7 +3,7 @@
 use super::macros::convert_route_params;
 use super::{BoxedHandler, RouteBuilder, Router};
 use crate::http::{Request, Response};
-use crate::middleware::{into_boxed, BoxedMiddleware, Middleware};
+use crate::middleware::{BoxedMiddleware, Middleware, into_boxed};
 use hyper::Method;
 use std::future::Future;
 use std::sync::Arc;

@@ -22,7 +22,9 @@ pub struct OutgoingMessage {
 #[async_trait]
 pub trait MailTransport: Send + Sync {
     async fn send(&self, msg: &OutgoingMessage) -> Result<(), FrameworkError>;
-    fn name(&self) -> &'static str { std::any::type_name::<Self>() }
+    fn name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 }
 
 /// Telemetry-wrapped send. Opens a `mail.send` info span carrying the

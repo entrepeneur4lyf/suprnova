@@ -3,8 +3,8 @@
 
 use proc_macro2::{Ident, Span, TokenStream};
 use syn::{
-    parse2, parse::Parse, parse::ParseStream, punctuated::Punctuated, token::Comma, Expr,
-    ItemStruct, LitBool, LitStr, Result, Token, Type,
+    Expr, ItemStruct, LitBool, LitStr, Result, Token, Type, parse::Parse, parse::ParseStream,
+    parse2, punctuated::Punctuated, token::Comma,
 };
 
 use super::observers::ObserversAttr;
@@ -565,9 +565,9 @@ impl ModelInput {
     /// once T7a wires the cast pipeline.
     #[allow(dead_code)]
     pub fn cast_for_field(&self, name: &str) -> Option<&Type> {
-        self.casts.iter().find_map(|(ident, ty)| {
-            if ident == name { Some(ty) } else { None }
-        })
+        self.casts
+            .iter()
+            .find_map(|(ident, ty)| if ident == name { Some(ty) } else { None })
     }
 }
 
@@ -629,9 +629,7 @@ fn classify_datetime(ty: &Type) -> DateTimeShape {
             let Some(tz_last) = tz_path.path.segments.last() else {
                 return DateTimeShape::Other;
             };
-            if tz_last.ident == "Utc"
-                && matches!(tz_last.arguments, syn::PathArguments::None)
-            {
+            if tz_last.ident == "Utc" && matches!(tz_last.arguments, syn::PathArguments::None) {
                 DateTimeShape::DateTime
             } else {
                 DateTimeShape::Other
@@ -677,7 +675,12 @@ pub fn to_snake(s: &str) -> String {
 /// Override with explicit `table = "..."` for irregulars.
 fn pluralize_snake(struct_name: &str) -> String {
     let snake = to_snake(struct_name);
-    if snake.ends_with('s') || snake.ends_with("ch") || snake.ends_with("sh") || snake.ends_with('x') || snake.ends_with('z') {
+    if snake.ends_with('s')
+        || snake.ends_with("ch")
+        || snake.ends_with("sh")
+        || snake.ends_with('x')
+        || snake.ends_with('z')
+    {
         format!("{snake}es")
     } else if snake.ends_with('y') && snake.len() > 1 {
         let stem = &snake[..snake.len() - 1];
@@ -743,7 +746,10 @@ impl Parse for ModelAttrs {
                     "key_type" => {
                         let lit = input.parse::<LitStr>()?;
                         out.key_type = Some(syn::parse_str::<Type>(&lit.value()).map_err(|e| {
-                            syn::Error::new(lit.span(), format!("invalid `key_type` Rust type: {e}"))
+                            syn::Error::new(
+                                lit.span(),
+                                format!("invalid `key_type` Rust type: {e}"),
+                            )
                         })?);
                     }
                     "auto_increment" => out.auto_increment = Some(input.parse::<LitBool>()?.value),
@@ -755,7 +761,9 @@ impl Parse for ModelAttrs {
                     "created_at" => out.created_at = Some(input.parse::<LitStr>()?.value()),
                     "updated_at" => out.updated_at = Some(input.parse::<LitStr>()?.value()),
                     "soft_deletes" => out.soft_deletes = Some(input.parse::<LitBool>()?.value),
-                    "soft_deletes_column" => out.soft_deletes_column = Some(input.parse::<LitStr>()?.value()),
+                    "soft_deletes_column" => {
+                        out.soft_deletes_column = Some(input.parse::<LitStr>()?.value())
+                    }
                     "appends" => out.appends = Some(parse_str_array(input)?),
                     "hidden" => out.hidden = Some(parse_str_array(input)?),
                     "visible" => out.visible = Some(parse_str_array(input)?),
@@ -773,7 +781,8 @@ impl Parse for ModelAttrs {
                         // `::std::any::type_name::<T>`.
                         let content;
                         syn::bracketed!(content in input);
-                        out.observers = Some(Punctuated::<Expr, Comma>::parse_terminated(&content)?);
+                        out.observers =
+                            Some(Punctuated::<Expr, Comma>::parse_terminated(&content)?);
                     }
                     other => {
                         return Err(syn::Error::new(
@@ -818,7 +827,9 @@ fn parse_casts_map(input: ParseStream) -> Result<Vec<(Ident, Type)>> {
         content.parse::<Token![=]>()?;
         let ty: Type = content.parse()?;
         entries.push((field, ty));
-        if content.is_empty() { break; }
+        if content.is_empty() {
+            break;
+        }
         content.parse::<Token![,]>()?;
     }
     Ok(entries)
@@ -1534,7 +1545,10 @@ mod tests {
         )
         .unwrap();
         assert!(!input.timestamps);
-        assert!(input.casts.is_empty(), "no auto-injected casts on disabled timestamps");
+        assert!(
+            input.casts.is_empty(),
+            "no auto-injected casts on disabled timestamps"
+        );
     }
 
     #[test]
@@ -1652,7 +1666,10 @@ mod tests {
             quote! { pub struct Comment { pub id: i64 } },
         )
         .unwrap();
-        assert_eq!(input.touches, vec!["post".to_string(), "author".to_string()]);
+        assert_eq!(
+            input.touches,
+            vec!["post".to_string(), "author".to_string()]
+        );
     }
 
     // ---- Generalised DateTime auto-inject (Phase 10A polish) -------------
@@ -1680,7 +1697,11 @@ mod tests {
             },
         )
         .unwrap();
-        let cast = input.casts.iter().find(|(i, _)| i == "last_seen_at").unwrap();
+        let cast = input
+            .casts
+            .iter()
+            .find(|(i, _)| i == "last_seen_at")
+            .unwrap();
         let ty_token = &cast.1;
         let ty = quote!(#ty_token).to_string();
         assert!(
@@ -1701,7 +1722,11 @@ mod tests {
             },
         )
         .unwrap();
-        let cast = input.casts.iter().find(|(i, _)| i == "last_seen_at").unwrap();
+        let cast = input
+            .casts
+            .iter()
+            .find(|(i, _)| i == "last_seen_at")
+            .unwrap();
         let ty_token = &cast.1;
         let ty = quote!(#ty_token).to_string();
         assert!(
@@ -1739,7 +1764,10 @@ mod tests {
         // And the cast list must contain exactly one entry for `stamp`
         // — no double-cast.
         let count = input.casts.iter().filter(|(i, _)| i == "stamp").count();
-        assert_eq!(count, 1, "expected exactly one cast for `stamp`, got {count}");
+        assert_eq!(
+            count, 1,
+            "expected exactly one cast for `stamp`, got {count}"
+        );
     }
 
     #[test]
@@ -1854,7 +1882,10 @@ mod tests {
         )
         .unwrap();
         let relations = input.relations.as_ref().unwrap();
-        assert!(relations.is_empty(), "empty body must parse to an empty Vec");
+        assert!(
+            relations.is_empty(),
+            "empty body must parse to an empty Vec"
+        );
     }
 
     #[test]
@@ -1869,8 +1900,14 @@ mod tests {
         )
         .unwrap();
         let opts = &input.relations.as_ref().unwrap()[0].options;
-        assert!(opts.iter().any(|o| matches!(o, RelationOpt::ForeignKey(k) if k == "owner_id")));
-        assert!(opts.iter().any(|o| matches!(o, RelationOpt::LocalKey(k) if k == "id")));
+        assert!(
+            opts.iter()
+                .any(|o| matches!(o, RelationOpt::ForeignKey(k) if k == "owner_id"))
+        );
+        assert!(
+            opts.iter()
+                .any(|o| matches!(o, RelationOpt::LocalKey(k) if k == "id"))
+        );
     }
 
     #[test]
@@ -1888,15 +1925,18 @@ mod tests {
         )
         .unwrap();
         let rel = &input.relations.as_ref().unwrap()[0];
-        assert!(rel.through.is_some(), "Pivot type required for BelongsToMany");
-        assert!(rel
-            .options
-            .iter()
-            .any(|o| matches!(o, RelationOpt::WithPivot(p) if p == &vec!["assigned_at".to_string()])));
-        assert!(rel
-            .options
-            .iter()
-            .any(|o| matches!(o, RelationOpt::WithTimestamps)));
+        assert!(
+            rel.through.is_some(),
+            "Pivot type required for BelongsToMany"
+        );
+        assert!(rel.options.iter().any(
+            |o| matches!(o, RelationOpt::WithPivot(p) if p == &vec!["assigned_at".to_string()])
+        ));
+        assert!(
+            rel.options
+                .iter()
+                .any(|o| matches!(o, RelationOpt::WithTimestamps))
+        );
     }
 
     #[test]
@@ -2121,15 +2161,20 @@ mod tests {
         .unwrap();
         let rel = &input.relations.as_ref().unwrap()[0];
         assert!(matches!(rel.kind, RelationKindAttr::HasManyThrough));
-        assert!(rel.through.is_some(), "HasManyThrough has an intermediate type");
-        assert!(rel
-            .options
-            .iter()
-            .any(|o| matches!(o, RelationOpt::FirstKey(k) if k == "country_id")));
-        assert!(rel
-            .options
-            .iter()
-            .any(|o| matches!(o, RelationOpt::SecondKey(k) if k == "user_id")));
+        assert!(
+            rel.through.is_some(),
+            "HasManyThrough has an intermediate type"
+        );
+        assert!(
+            rel.options
+                .iter()
+                .any(|o| matches!(o, RelationOpt::FirstKey(k) if k == "country_id"))
+        );
+        assert!(
+            rel.options
+                .iter()
+                .any(|o| matches!(o, RelationOpt::SecondKey(k) if k == "user_id"))
+        );
     }
 
     #[test]
@@ -2152,15 +2197,18 @@ mod tests {
         )
         .unwrap();
         let opts = &input.relations.as_ref().unwrap()[0].options;
-        assert!(opts
-            .iter()
-            .any(|o| matches!(o, RelationOpt::PivotTable(k) if k == "role_user")));
-        assert!(opts
-            .iter()
-            .any(|o| matches!(o, RelationOpt::PivotForeignKey(k) if k == "owner_id")));
-        assert!(opts
-            .iter()
-            .any(|o| matches!(o, RelationOpt::PivotRelatedKey(k) if k == "perm_id")));
+        assert!(
+            opts.iter()
+                .any(|o| matches!(o, RelationOpt::PivotTable(k) if k == "role_user"))
+        );
+        assert!(
+            opts.iter()
+                .any(|o| matches!(o, RelationOpt::PivotForeignKey(k) if k == "owner_id"))
+        );
+        assert!(
+            opts.iter()
+                .any(|o| matches!(o, RelationOpt::PivotRelatedKey(k) if k == "perm_id"))
+        );
     }
 
     #[test]

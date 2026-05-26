@@ -9,11 +9,11 @@ use serde_json::Value;
 use stripe_client_core::{RequestBuilder, StripeMethod};
 use stripe_shared::{PaymentIntent, PaymentIntentStatus, Refund};
 
+use suprnova::payments::traits::Payment;
 use suprnova::payments::{
     ChargeRequest, ChargeResult, Money, PaymentError, PaymentResult, PaymentStatus, RefundRequest,
     RefundResult,
 };
-use suprnova::payments::traits::Payment;
 
 use crate::StripeProvider;
 
@@ -129,9 +129,10 @@ fn pi_to_charge_result(
                 if let Some(url) = redirect_url {
                     r = ChargeResult::RedirectRequired {
                         provider_transaction_id: match &r {
-                            ChargeResult::RequiresClientAction { provider_transaction_id, .. } => {
-                                provider_transaction_id.clone()
-                            }
+                            ChargeResult::RequiresClientAction {
+                                provider_transaction_id,
+                                ..
+                            } => provider_transaction_id.clone(),
                             _ => unreachable!(),
                         },
                         url,
@@ -231,9 +232,7 @@ impl Payment for StripeProvider {
             .customize::<PaymentIntent>()
             .send(self.client())
             .await
-            .map_err(|e| {
-                PaymentError::Provider(format!("stripe payment_intents.capture: {e}"))
-            })?;
+            .map_err(|e| PaymentError::Provider(format!("stripe payment_intents.capture: {e}")))?;
 
         pi_to_charge_result(intent, self.publishable_key())
     }
@@ -272,16 +271,12 @@ impl Payment for StripeProvider {
                 let msg = format!("{e}");
                 // Stripe returns a 409 for intents already captured with a message
                 // containing "already succeeded" — surface that as Validation.
-                if msg.contains("already succeeded")
-                    || msg.contains("You cannot cancel")
-                {
+                if msg.contains("already succeeded") || msg.contains("You cannot cancel") {
                     PaymentError::Validation(format!(
                         "cannot void payment_intent {provider_transaction_id}: {msg}"
                     ))
                 } else {
-                    PaymentError::Provider(format!(
-                        "stripe payment_intents.cancel: {msg}"
-                    ))
+                    PaymentError::Provider(format!("stripe payment_intents.cancel: {msg}"))
                 }
             })?;
 
@@ -302,9 +297,7 @@ impl Payment for StripeProvider {
             .customize::<PaymentIntent>()
             .send(self.client())
             .await
-            .map_err(|e| {
-                PaymentError::Provider(format!("stripe payment_intents.retrieve: {e}"))
-            })?;
+            .map_err(|e| PaymentError::Provider(format!("stripe payment_intents.retrieve: {e}")))?;
 
         Ok(map_pi_status(&intent.status))
     }

@@ -7,13 +7,13 @@
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
 use std::sync::Arc;
+use suprnova::FrameworkError;
 use suprnova::mail::memory::InMemoryMailTransport;
 use suprnova::mail::{Address, Attachment, Mail};
 use suprnova::notifications::channels::mail::{
-    register_mail_renderer, MailChannel, MailRendering, NotificationMailable,
+    MailChannel, MailRendering, NotificationMailable, register_mail_renderer,
 };
 use suprnova::notifications::{Notifiable, Notification, NotificationDispatcher};
-use suprnova::FrameworkError;
 
 struct User {
     email: String,
@@ -72,8 +72,7 @@ async fn mail_channel_dispatches_via_registered_renderer_through_in_memory_trans
 
     register_mail_renderer::<HappyPath>();
 
-    let dispatcher =
-        NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
+    let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
 
     let recipient = User {
         email: "alice@example.org".into(),
@@ -140,8 +139,7 @@ async fn mail_channel_empty_body_guard_fires() {
 
     register_mail_renderer::<EmptyBody>();
 
-    let dispatcher =
-        NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
+    let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
 
     let err = dispatcher
         .notify(
@@ -207,8 +205,7 @@ async fn mail_channel_renderer_error_propagates() {
 
     register_mail_renderer::<RenderErr>();
 
-    let dispatcher =
-        NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
+    let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
 
     let err = dispatcher
         .notify(
@@ -257,8 +254,7 @@ async fn mail_channel_errors_on_unregistered_notification() {
     // renderer, not from a missing transport.
     Mail::set_transport(Arc::new(InMemoryMailTransport::new()));
 
-    let dispatcher =
-        NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
+    let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
 
     let err = dispatcher
         .notify(
@@ -332,8 +328,7 @@ async fn mail_channel_renderer_decode_failure_propagates() {
 
     register_mail_renderer::<DecodeFail>();
 
-    let dispatcher =
-        NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
+    let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
 
     let err = dispatcher
         .notify(
@@ -427,8 +422,7 @@ async fn register_mail_renderer_is_last_write_wins() {
     register_mail_renderer::<LastWriteWinsA>();
     register_mail_renderer::<LastWriteWinsB>();
 
-    let dispatcher =
-        NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
+    let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
 
     // Dispatch via A — but B's renderer should run because B was the
     // last write under the same notification name.
@@ -505,8 +499,7 @@ async fn mail_channel_threads_cc_bcc_reply_to_and_attachments_into_outgoing() {
 
     register_mail_renderer::<FullEnvelope>();
 
-    let dispatcher =
-        NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
+    let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
 
     dispatcher
         .notify(

@@ -332,8 +332,6 @@ impl Redirect {
         }
     }
 
-
-
     /// Add a query parameter
     pub fn query(mut self, key: &str, value: impl Into<String>) -> Self {
         self.query_params.push((key.to_string(), value.into()));
@@ -401,7 +399,8 @@ where
         .finish();
 
     let separator = if head.contains('?') { '&' } else { '?' };
-    let mut out = String::with_capacity(head.len() + 1 + encoded.len() + fragment.map_or(0, str::len));
+    let mut out =
+        String::with_capacity(head.len() + 1 + encoded.len() + fragment.map_or(0, str::len));
     out.push_str(head);
     out.push(separator);
     out.push_str(&encoded);
@@ -577,7 +576,10 @@ impl From<crate::error::FrameworkError> for HttpResponse {
                     "message": format!("Missing required parameter: {}", param_name),
                 })
             }
-            crate::error::FrameworkError::ValidationError { field, message: msg } => {
+            crate::error::FrameworkError::ValidationError {
+                field,
+                message: msg,
+            } => {
                 // Single-field validation error rendered in the same
                 // shape as `Validation(errors)` so consumers can parse
                 // both paths uniformly.
@@ -732,10 +734,7 @@ mod stream_tests {
             .header("Content-Type", "text/plain")
             .into_hyper();
 
-        assert_eq!(
-            resp.headers().get("Content-Type").unwrap(),
-            "text/plain"
-        );
+        assert_eq!(resp.headers().get("Content-Type").unwrap(), "text/plain");
         let collected = resp.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&collected[..], b"chunk1\nchunk2\n");
     }
@@ -805,10 +804,7 @@ mod header_validation_tests {
             .header("X-Custom-Header", "value-with-spaces and dashes")
             .into_hyper();
         assert_eq!(resp.status(), 200);
-        assert_eq!(
-            resp.headers().get("X-Request-Id").unwrap(),
-            "abc-123"
-        );
+        assert_eq!(resp.headers().get("X-Request-Id").unwrap(), "abc-123");
         assert_eq!(
             resp.headers().get("X-Custom-Header").unwrap(),
             "value-with-spaces and dashes"
@@ -841,10 +837,7 @@ mod precognition_response_tests {
         let hyper = resp.into_hyper();
         assert_eq!(hyper.status(), 204);
         assert_eq!(hyper.headers().get("Precognition").unwrap(), "true");
-        assert_eq!(
-            hyper.headers().get("Precognition-Success").unwrap(),
-            "true"
-        );
+        assert_eq!(hyper.headers().get("Precognition-Success").unwrap(), "true");
         assert_eq!(hyper.headers().get("Vary").unwrap(), "Precognition");
     }
 
@@ -852,8 +845,7 @@ mod precognition_response_tests {
     fn precognition_failure_returns_422_with_envelope_and_errors() {
         let mut errs = ValidationErrors::new();
         errs.add("email", "must be valid");
-        let resp: HttpResponse =
-            FrameworkError::PrecognitionFailure(errs).into();
+        let resp: HttpResponse = FrameworkError::PrecognitionFailure(errs).into();
         let hyper = resp.into_hyper();
         assert_eq!(hyper.status(), 422);
         assert_eq!(hyper.headers().get("Precognition").unwrap(), "true");

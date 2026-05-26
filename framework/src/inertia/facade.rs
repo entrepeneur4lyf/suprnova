@@ -85,9 +85,9 @@ impl Inertia {
     pub fn install(config: &InertiaConfig) {
         use crate::middleware::register_global_middleware;
         let version = config.version.clone();
-        register_global_middleware(
-            InertiaVersionMiddleware::with_resolver(move || version.resolve()),
-        );
+        register_global_middleware(InertiaVersionMiddleware::with_resolver(move || {
+            version.resolve()
+        }));
         register_global_middleware(Inertia303Middleware::new());
     }
 }

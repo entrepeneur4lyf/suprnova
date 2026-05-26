@@ -39,7 +39,7 @@ use app::models::users::User;
 use app::models::users::HasScope_active_User;
 use suprnova::eloquent::observers::bootstrap_observers;
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, Collection, FrameworkError, LengthAwarePaginator, Model, DB};
+use suprnova::{Collection, DB, FrameworkError, LengthAwarePaginator, Model, attrs};
 
 /// Install every `#[suprnova::observer(...)]` declared in the binary.
 /// The macro emits an `AtomicBool` gate per observer type so calling
@@ -159,11 +159,8 @@ async fn paginate_returns_inertia_ready_shape() {
         .unwrap();
     }
 
-    let page: LengthAwarePaginator<User> = User::query()
-        .order_by_asc("id")
-        .paginate(10)
-        .await
-        .unwrap();
+    let page: LengthAwarePaginator<User> =
+        User::query().order_by_asc("id").paginate(10).await.unwrap();
 
     assert_eq!(page.data.len(), 10);
     assert_eq!(page.total, 25);
@@ -240,11 +237,7 @@ async fn collection_pluck_extracts_emails() {
     // Builder::get → Collection<User>. The model-aware `pluck` walks
     // each row's macro-emitted `field_value` and deserialises the
     // column into the target type.
-    let users: Collection<User> = User::query()
-        .order_by_asc("id")
-        .get()
-        .await
-        .unwrap();
+    let users: Collection<User> = User::query().order_by_asc("id").get().await.unwrap();
     let emails: Collection<String> = users.pluck::<String>("email");
     let vec: Vec<String> = emails.into_vec();
     assert!(vec.contains(&"a@x.com".to_string()), "got: {vec:?}");

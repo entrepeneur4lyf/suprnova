@@ -23,8 +23,8 @@ use std::sync::{Arc, OnceLock};
 
 pub mod ceremony;
 
-use torii::seaorm::SeaORMRepositoryProvider;
 use torii::Torii;
+use torii::seaorm::SeaORMRepositoryProvider;
 use torii_core::repositories::{
     PasswordRepository, PasswordRepositoryProvider, UserRepository, UserRepositoryProvider,
 };
@@ -65,9 +65,9 @@ static PROVIDER: OnceLock<Arc<SeaORMRepositoryProvider>> = OnceLock::new();
 /// use [`find_user_by_email_lookup_only`] so failed attempts cannot silently
 /// create accounts. (Codex review finding #3.)
 pub(crate) async fn find_or_create_user_by_email(email: &str) -> Result<User, FrameworkError> {
-    let provider = PROVIDER
-        .get()
-        .ok_or_else(|| FrameworkError::internal("Torii not initialised. Call init_torii() first."))?;
+    let provider = PROVIDER.get().ok_or_else(|| {
+        FrameworkError::internal("Torii not initialised. Call init_torii() first.")
+    })?;
     provider
         .user()
         .find_or_create_by_email(email)
@@ -85,12 +85,10 @@ pub(crate) async fn find_or_create_user_by_email(email: &str) -> Result<User, Fr
 /// resend paths: it would silently create accounts from failed login
 /// attempts (account-enumeration / probing footgun, codex review
 /// finding #3).
-pub async fn find_user_by_email_lookup_only(
-    email: &str,
-) -> Result<Option<User>, FrameworkError> {
-    let provider = PROVIDER
-        .get()
-        .ok_or_else(|| FrameworkError::internal("Torii not initialised. Call init_torii() first."))?;
+pub async fn find_user_by_email_lookup_only(email: &str) -> Result<Option<User>, FrameworkError> {
+    let provider = PROVIDER.get().ok_or_else(|| {
+        FrameworkError::internal("Torii not initialised. Call init_torii() first.")
+    })?;
     provider
         .user()
         .find_by_email(email)
@@ -109,9 +107,9 @@ pub async fn find_user_by_email_lookup_only(
 /// you have a session-resolved user-id string and need the full torii
 /// [`User`] payload (e.g. `user.email` for a 2FA enrollment label).
 pub async fn find_user_by_id(user_id: &str) -> Result<Option<User>, FrameworkError> {
-    let provider = PROVIDER
-        .get()
-        .ok_or_else(|| FrameworkError::internal("Torii not initialised. Call init_torii() first."))?;
+    let provider = PROVIDER.get().ok_or_else(|| {
+        FrameworkError::internal("Torii not initialised. Call init_torii() first.")
+    })?;
     let id = UserId::new(user_id);
     provider
         .user()
@@ -153,9 +151,9 @@ pub async fn user_exists_by_email_test_only(email: &str) -> Result<bool, Framewo
 pub async fn password_hash_for_email_test_only(
     email: &str,
 ) -> Result<Option<String>, FrameworkError> {
-    let provider = PROVIDER
-        .get()
-        .ok_or_else(|| FrameworkError::internal("Torii not initialised. Call init_torii() first."))?;
+    let provider = PROVIDER.get().ok_or_else(|| {
+        FrameworkError::internal("Torii not initialised. Call init_torii() first.")
+    })?;
     // First find the user; if the user doesn't exist return None (no row means no hash).
     let user = match provider.user().find_by_email(email).await {
         Ok(Some(u)) => u,
@@ -163,7 +161,7 @@ pub async fn password_hash_for_email_test_only(
         Err(e) => {
             return Err(FrameworkError::internal(format!(
                 "password_hash_for_email_test_only find_by_email: {e}"
-            )))
+            )));
         }
     };
     provider
@@ -337,9 +335,7 @@ pub(crate) fn map_torii_error(e: torii::ToriiError) -> FrameworkError {
         },
         // Storage failures are genuine server faults (DB unreachable,
         // schema drift, etc.) — 500 internal is correct.
-        ToriiError::StorageError(msg) => {
-            FrameworkError::internal(format!("torii storage: {msg}"))
-        }
+        ToriiError::StorageError(msg) => FrameworkError::internal(format!("torii storage: {msg}")),
     }
 }
 
@@ -353,4 +349,3 @@ pub(crate) fn instance() -> Result<&'static Torii<SeaORMRepositoryProvider>, Fra
         .get()
         .ok_or_else(|| FrameworkError::internal("Torii not initialised. Call init_torii() first."))
 }
-

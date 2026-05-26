@@ -108,7 +108,8 @@ where
     /// the first call didn't already do.
     pub fn with_trashed(mut self) -> Self {
         let col = M::deleted_at_column();
-        self.where_terms.retain(|t| !matches!(t, WhereTerm::Null(c) if c == col));
+        self.where_terms
+            .retain(|t| !matches!(t, WhereTerm::Null(c) if c == col));
         self.global_scopes_disabled.push("soft_deletes");
         self
     }
@@ -118,7 +119,8 @@ where
     /// Idempotent.
     pub fn only_trashed(mut self) -> Self {
         let col = M::deleted_at_column();
-        self.where_terms.retain(|t| !matches!(t, WhereTerm::Null(c) if c == col));
+        self.where_terms
+            .retain(|t| !matches!(t, WhereTerm::Null(c) if c == col));
         // Avoid double-stamping NotNull on repeated calls.
         if !self
             .where_terms

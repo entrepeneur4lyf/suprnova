@@ -2,7 +2,7 @@
 
 use crate::error::FrameworkError;
 use async_trait::async_trait;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -12,7 +12,11 @@ pub enum BackoffSchedule {
     Fixed { secs: u64 },
     /// Exponential: `delay = min(base * 2^(attempts-1), cap)`, multiplied
     /// by a random factor in `[1 - jitter_ratio, 1 + jitter_ratio]`.
-    Exponential { base_secs: u64, cap_secs: u64, jitter_ratio: f32 },
+    Exponential {
+        base_secs: u64,
+        cap_secs: u64,
+        jitter_ratio: f32,
+    },
     /// Explicit schedule, one entry per attempt. If more attempts than
     /// entries, the last entry is reused.
     Sequence { secs: Vec<u64> },
@@ -21,7 +25,11 @@ pub enum BackoffSchedule {
 impl Default for BackoffSchedule {
     /// Suprnova's default: exponential, base 2s, cap 5min, ±25% jitter.
     fn default() -> Self {
-        Self::Exponential { base_secs: 2, cap_secs: 300, jitter_ratio: 0.25 }
+        Self::Exponential {
+            base_secs: 2,
+            cap_secs: 300,
+            jitter_ratio: 0.25,
+        }
     }
 }
 

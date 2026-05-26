@@ -9,7 +9,7 @@
 //! they do not pollute other tests in the workspace.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use suprnova::{command, console, FrameworkError};
+use suprnova::{FrameworkError, command, console};
 
 static HELLO_RAN: AtomicUsize = AtomicUsize::new(0);
 static HELLO_LAST_ARG_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -56,7 +56,10 @@ async fn macro_registers_command_with_provided_name_and_description() {
 #[tokio::test]
 async fn macro_omits_description_when_attribute_absent() {
     let entry = console::find("macro:no-desc").expect("macro:no-desc is registered");
-    assert_eq!(entry.description, "", "missing description defaults to empty string");
+    assert_eq!(
+        entry.description, "",
+        "missing description defaults to empty string"
+    );
 }
 
 #[tokio::test]

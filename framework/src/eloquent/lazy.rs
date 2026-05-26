@@ -63,9 +63,7 @@ impl<M> LazyCollection<M> {
     /// `async_stream::try_stream!`; user code rarely calls this — the
     /// public entry points are `Builder::lazy` / `lazy_by_id` /
     /// `cursor`.
-    pub fn boxed(
-        stream: impl Stream<Item = Result<M, FrameworkError>> + Send + 'static,
-    ) -> Self {
+    pub fn boxed(stream: impl Stream<Item = Result<M, FrameworkError>> + Send + 'static) -> Self {
         Self {
             inner: Box::pin(stream),
         }

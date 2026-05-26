@@ -16,8 +16,8 @@
 //!    callable on instances — proving the macro's signature filter is
 //!    strict.
 
-use suprnova::testing::TestDatabase;
 use suprnova::Model;
+use suprnova::testing::TestDatabase;
 
 #[suprnova::model(table = "t3_users")]
 pub struct T3User {
@@ -64,19 +64,15 @@ async fn fixture() -> TestDatabase {
     .await
     .unwrap();
 
-    T3User::create(
-        suprnova::attrs! { name: "alice", active: true, followers_count: 1000 },
-    )
-    .await
-    .unwrap();
+    T3User::create(suprnova::attrs! { name: "alice", active: true, followers_count: 1000 })
+        .await
+        .unwrap();
     T3User::create(suprnova::attrs! { name: "bob", active: true, followers_count: 50 })
         .await
         .unwrap();
-    T3User::create(
-        suprnova::attrs! { name: "carol", active: false, followers_count: 9000 },
-    )
-    .await
-    .unwrap();
+    T3User::create(suprnova::attrs! { name: "carol", active: false, followers_count: 9000 })
+        .await
+        .unwrap();
     T3User::create(suprnova::attrs! { name: "dave", active: false, followers_count: 10 })
         .await
         .unwrap();

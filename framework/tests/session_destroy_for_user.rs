@@ -11,11 +11,11 @@
 //! framework test doesn't need the example-app crate's migration
 //! registry.
 
-use sea_orm_migration::prelude::*;
 use sea_orm_migration::MigrationName;
+use sea_orm_migration::prelude::*;
+use std::time::Duration;
 use suprnova::session::{DatabaseSessionDriver, SessionData, SessionStore};
 use suprnova::testing::TestDatabase;
-use std::time::Duration;
 
 /// Migrator containing just the sessions table — matches the schema
 /// the example app installs in production via

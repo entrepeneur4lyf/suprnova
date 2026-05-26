@@ -85,8 +85,8 @@ impl InertiaRegistry {
     ///
     /// [`share_lazy`]: Self::share_lazy
     pub fn share_value<V: Serialize>(&self, key: impl Into<String>, value: V) {
-        let v = serde_json::to_value(&value)
-            .expect("App::inertia_share value must serialize cleanly");
+        let v =
+            serde_json::to_value(&value).expect("App::inertia_share value must serialize cleanly");
         self.upsert(key.into(), Prop::Eager(v));
     }
 
@@ -162,9 +162,7 @@ impl InertiaRegistry {
                 *slot = Some(provider);
             }
             Err(_) => {
-                tracing::error!(
-                    "Inertia shared trait slot lock poisoned; skipping registration."
-                );
+                tracing::error!("Inertia shared trait slot lock poisoned; skipping registration.");
             }
         }
     }
@@ -174,13 +172,16 @@ impl InertiaRegistry {
     /// resolver. Internal use by `InertiaResponse::resolve`.
     pub(crate) fn snapshot_static(&self) -> Result<Vec<(String, Prop)>, FrameworkError> {
         let reg = lock::read(&self.shares)?;
-        Ok(reg.iter()
+        Ok(reg
+            .iter()
             .map(|e| (e.key.clone(), e.prop.clone()))
             .collect())
     }
 
     /// Currently registered trait provider, if any. Internal use.
-    pub(crate) fn trait_provider(&self) -> Result<Option<Arc<dyn InertiaSharedData>>, FrameworkError> {
+    pub(crate) fn trait_provider(
+        &self,
+    ) -> Result<Option<Arc<dyn InertiaSharedData>>, FrameworkError> {
         Ok(lock::read(&self.provider)?.clone())
     }
 }
@@ -268,7 +269,10 @@ mod tests {
                 _req: &dyn InertiaRequestExt,
             ) -> Result<IndexMap<String, Prop>, FrameworkError> {
                 let mut m = IndexMap::new();
-                m.insert("auth".to_string(), Prop::Eager(Value::String("alice".into())));
+                m.insert(
+                    "auth".to_string(),
+                    Prop::Eager(Value::String("alice".into())),
+                );
                 Ok(m)
             }
         }

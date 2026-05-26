@@ -14,7 +14,7 @@
 
 use suprnova::eloquent::unguarded;
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, model, Model};
+use suprnova::{Model, attrs, model};
 
 #[model(table = "t6_users", timestamps = false, fillable = ["name", "email"])]
 pub struct T6User {
@@ -89,7 +89,10 @@ async fn guarded_blocks_listed_fields() {
     .expect("create");
 
     assert_eq!(post.title, "Hello");
-    assert_eq!(post.user_id, 0, "guarded user_id should fall through to DEFAULT 0");
+    assert_eq!(
+        post.user_id, 0,
+        "guarded user_id should fall through to DEFAULT 0"
+    );
 }
 
 #[tokio::test]
@@ -117,8 +120,7 @@ async fn unguarded_scope_does_not_leak() {
     migrate(&db).await;
 
     let inside = unguarded(|| async {
-        T6User::create(attrs! { name: "A", email: "a@x.com", admin: true })
-            .await
+        T6User::create(attrs! { name: "A", email: "a@x.com", admin: true }).await
     })
     .await
     .expect("inside scope");

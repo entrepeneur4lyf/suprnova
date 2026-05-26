@@ -37,7 +37,7 @@ use app::models::tags::Tag;
 use app::models::users::User;
 use app::models::videos::Video;
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, model, Model};
+use suprnova::{Model, attrs, model};
 
 /// Helper: a user named after the test. The user-side surface goes
 /// through the framework's `User::create` → `DB::connection()` path, so
@@ -115,12 +115,7 @@ async fn has_one_user_profile_returns_some_when_present() {
     .await
     .unwrap();
 
-    let p = u
-        .profile()
-        .first()
-        .await
-        .unwrap()
-        .expect("profile present");
+    let p = u.profile().first().await.unwrap().expect("profile present");
     assert_eq!(p.user_id, u.id, "profile.user_id must match parent.id");
     assert_eq!(p.bio, "loves rust", "fillable bio must round-trip");
 }
@@ -263,9 +258,11 @@ async fn morph_many_post_and_video_comments_filter_by_type() {
 
     let post_comments = post.comments().get().await.unwrap();
     assert_eq!(post_comments.len(), 2);
-    assert!(post_comments
-        .iter()
-        .all(|c| c.commentable_type == "post" && c.commentable_id == post.id));
+    assert!(
+        post_comments
+            .iter()
+            .all(|c| c.commentable_type == "post" && c.commentable_id == post.id)
+    );
 
     let video_comments = video.comments().get().await.unwrap();
     assert_eq!(video_comments.len(), 1);
@@ -379,7 +376,9 @@ async fn morph_to_many_post_and_video_tags_independent_attach() {
     })
     .await
     .unwrap();
-    let video = Video::create(attrs! { url: "/v/tagged.mp4" }).await.unwrap();
+    let video = Video::create(attrs! { url: "/v/tagged.mp4" })
+        .await
+        .unwrap();
 
     // ONE tag attached to BOTH parents — two pivot rows, distinct by
     // `taggable_type`. Confirms the polymorphic m2m surface lets a

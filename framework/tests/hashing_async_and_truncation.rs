@@ -81,7 +81,11 @@ async fn hash_async_round_trips_through_spawn_blocking() {
     let pw = "another correct horse";
     let h = hashing::hash_async(pw).await.expect("hash_async");
     assert!(hashing::verify_async(pw, &h).await.expect("verify_async"));
-    assert!(!hashing::verify_async("nope", &h).await.expect("verify_async"));
+    assert!(
+        !hashing::verify_async("nope", &h)
+            .await
+            .expect("verify_async")
+    );
 }
 
 #[tokio::test]
@@ -98,7 +102,9 @@ async fn verify_async_returns_false_for_oversized() {
     let pw = "fits in 72 bytes";
     let h = hashing::hash_async(pw).await.expect("hash_async");
     let oversized = "x".repeat(MAX_PASSWORD_BYTES + 1);
-    assert!(!hashing::verify_async(&oversized, &h)
-        .await
-        .expect("verify_async"));
+    assert!(
+        !hashing::verify_async(&oversized, &h)
+            .await
+            .expect("verify_async")
+    );
 }

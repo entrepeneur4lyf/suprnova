@@ -196,10 +196,8 @@ mod tests {
     #[tokio::test]
     async fn unguarded_bypasses_filter() {
         let f = Fillable::guarded(vec!["secret"]);
-        let inside = super::unguarded(|| async {
-            f.apply(attrs! { secret: "x", visible: 1 })
-        })
-        .await;
+        let inside =
+            super::unguarded(|| async { f.apply(attrs! { secret: "x", visible: 1 }) }).await;
         // Inside the scope, the denylist is ignored.
         assert!(inside.contains_key("secret"));
         assert!(inside.contains_key("visible"));

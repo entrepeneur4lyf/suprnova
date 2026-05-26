@@ -26,7 +26,10 @@ pub trait QueueDriver: Send + Sync {
     /// Pop the next available envelope, reserving it for `visibility_timeout`.
     /// Returns `None` if no message is available within a short driver-local
     /// poll budget. Drivers MAY block up to ~100ms.
-    async fn pop(&self, visibility_timeout: Duration) -> Result<Option<Reservation>, FrameworkError>;
+    async fn pop(
+        &self,
+        visibility_timeout: Duration,
+    ) -> Result<Option<Reservation>, FrameworkError>;
 
     /// Acknowledge successful completion of a reserved message. Drivers MUST
     /// be tolerant of unknown / already-acked tokens (idempotent).
@@ -42,7 +45,11 @@ pub trait QueueDriver: Send + Sync {
     /// causes infinite retry loops.
     ///
     /// Drivers MUST be tolerant of unknown / already-acked tokens (idempotent).
-    async fn nack(&self, token: &ReservationToken, requeue_delay: Duration) -> Result<(), FrameworkError>;
+    async fn nack(
+        &self,
+        token: &ReservationToken,
+        requeue_delay: Duration,
+    ) -> Result<(), FrameworkError>;
 
     /// Driver name for logs/admin. Default uses type name.
     fn name(&self) -> &'static str {

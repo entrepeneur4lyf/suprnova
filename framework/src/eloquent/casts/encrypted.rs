@@ -25,11 +25,11 @@
 
 use std::marker::PhantomData;
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 use super::{Cast, DynCast, IntoDynCast};
-use crate::error::FrameworkError;
 use crate::Crypt;
+use crate::error::FrameworkError;
 
 // ---- AsEncrypted ---------------------------------------------------------
 
@@ -44,13 +44,11 @@ impl Cast for AsEncrypted {
     type Storage = String;
 
     fn to_storage(v: &String) -> Result<String, FrameworkError> {
-        Crypt::encrypt_string(v)
-            .map_err(|e| FrameworkError::internal(format!("AsEncrypted: {e}")))
+        Crypt::encrypt_string(v).map_err(|e| FrameworkError::internal(format!("AsEncrypted: {e}")))
     }
 
     fn from_storage(s: &String) -> Result<String, FrameworkError> {
-        Crypt::decrypt_string(s)
-            .map_err(|e| FrameworkError::internal(format!("AsEncrypted: {e}")))
+        Crypt::decrypt_string(s).map_err(|e| FrameworkError::internal(format!("AsEncrypted: {e}")))
     }
 }
 
@@ -75,10 +73,7 @@ impl DynCast for AsEncryptedDyn {
         Ok(serde_json::Value::String(AsEncrypted::from_storage(&wire)?))
     }
 
-    fn to_storage_json(
-        &self,
-        v: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameworkError> {
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
         // Domain 7 audit D7-A — strict-validate. Critical for the
         // write path because a non-string input here used to be
         // silently encrypted as the empty string.
@@ -116,8 +111,9 @@ where
     type Storage = String;
 
     fn to_storage(v: &Vec<T>) -> Result<String, FrameworkError> {
-        let json = serde_json::to_string(v)
-            .map_err(|e| FrameworkError::validation("AsEncryptedArray", format!("serialize: {e}")))?;
+        let json = serde_json::to_string(v).map_err(|e| {
+            FrameworkError::validation("AsEncryptedArray", format!("serialize: {e}"))
+        })?;
         Crypt::encrypt_string(&json)
             .map_err(|e| FrameworkError::internal(format!("AsEncryptedArray encrypt: {e}")))
     }
@@ -155,16 +151,12 @@ where
         Ok(serde_json::to_value(decrypted).expect("Vec<T> serialises"))
     }
 
-    fn to_storage_json(
-        &self,
-        v: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameworkError> {
-        let parsed: Vec<T> = serde_json::from_value(v.clone()).map_err(|e| {
-            FrameworkError::validation("AsEncryptedArray", format!("dyn: {e}"))
-        })?;
-        Ok(serde_json::Value::String(AsEncryptedArray::<T>::to_storage(
-            &parsed,
-        )?))
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
+        let parsed: Vec<T> = serde_json::from_value(v.clone())
+            .map_err(|e| FrameworkError::validation("AsEncryptedArray", format!("dyn: {e}")))?;
+        Ok(serde_json::Value::String(
+            AsEncryptedArray::<T>::to_storage(&parsed)?,
+        ))
     }
 }
 
@@ -233,13 +225,9 @@ where
         Ok(serde_json::to_value(decrypted).expect("T serialises"))
     }
 
-    fn to_storage_json(
-        &self,
-        v: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameworkError> {
-        let parsed: T = serde_json::from_value(v.clone()).map_err(|e| {
-            FrameworkError::validation("AsEncryptedObject", format!("dyn: {e}"))
-        })?;
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
+        let parsed: T = serde_json::from_value(v.clone())
+            .map_err(|e| FrameworkError::validation("AsEncryptedObject", format!("dyn: {e}")))?;
         Ok(serde_json::Value::String(
             AsEncryptedObject::<T>::to_storage(&parsed)?,
         ))
@@ -309,10 +297,7 @@ where
         Ok(serde_json::to_value(decrypted.into_vec()).expect("Vec<T> serialises"))
     }
 
-    fn to_storage_json(
-        &self,
-        v: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameworkError> {
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
         let parsed: Vec<T> = serde_json::from_value(v.clone()).map_err(|e| {
             FrameworkError::validation("AsEncryptedCollection", format!("dyn: {e}"))
         })?;
@@ -396,10 +381,7 @@ impl DynCast for AsHashedDyn {
         Ok(v.clone())
     }
 
-    fn to_storage_json(
-        &self,
-        v: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameworkError> {
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
         // Domain 7 audit D7-A — was `v.as_str().unwrap_or("")` which
         // would silently bcrypt the empty string if user code routed a
         // non-string value through here (e.g. via a future `with_casts`

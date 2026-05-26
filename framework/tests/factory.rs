@@ -48,7 +48,11 @@ impl Factory for UserFactory {
 fn factory_make_produces_one_randomized_instance() {
     let user = UserFactory::new().make();
     assert!(!user.name.is_empty(), "name was populated");
-    assert!(user.email.contains('@'), "email looks like an email: {}", user.email);
+    assert!(
+        user.email.contains('@'),
+        "email looks like an email: {}",
+        user.email
+    );
     assert!(user.id > 0, "id is positive: {}", user.id);
     assert!(!user.admin, "default value pulled through from Dummy impl");
 }
@@ -140,9 +144,7 @@ fn sequence_under_concurrent_threads_returns_distinct_values() {
     let handles: Vec<_> = (0..THREADS)
         .map(|_| {
             let seq = seq.clone();
-            thread::spawn(move || {
-                (0..PER_THREAD).map(|_| seq.next()).collect::<Vec<_>>()
-            })
+            thread::spawn(move || (0..PER_THREAD).map(|_| seq.next()).collect::<Vec<_>>())
         })
         .collect();
 

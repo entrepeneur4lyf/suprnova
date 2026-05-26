@@ -9,7 +9,7 @@
 
 use chrono::NaiveDate;
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, model, Direction, Model};
+use suprnova::{Direction, Model, attrs, model};
 
 #[model(table = "t5_users", timestamps = false)]
 pub struct T5User {
@@ -64,14 +64,34 @@ async fn filter_and_db_where_produce_identical_sql() {
 async fn filter_op_handles_arbitrary_operator() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
-    T5User::create(attrs!(name: "A", email: "a@x.com", age: 17, active: true, role: "u", balance: 0.0)).await.unwrap();
-    T5User::create(attrs!(name: "B", email: "b@x.com", age: 25, active: true, role: "u", balance: 0.0)).await.unwrap();
-    T5User::create(attrs!(name: "C", email: "c@x.com", age: 30, active: true, role: "u", balance: 0.0)).await.unwrap();
+    T5User::create(
+        attrs!(name: "A", email: "a@x.com", age: 17, active: true, role: "u", balance: 0.0),
+    )
+    .await
+    .unwrap();
+    T5User::create(
+        attrs!(name: "B", email: "b@x.com", age: 25, active: true, role: "u", balance: 0.0),
+    )
+    .await
+    .unwrap();
+    T5User::create(
+        attrs!(name: "C", email: "c@x.com", age: 30, active: true, role: "u", balance: 0.0),
+    )
+    .await
+    .unwrap();
 
-    let adults = T5User::query().filter_op("age", ">=", 18).get().await.unwrap();
+    let adults = T5User::query()
+        .filter_op("age", ">=", 18)
+        .get()
+        .await
+        .unwrap();
     assert_eq!(adults.len(), 2);
 
-    let same = T5User::query().db_where_op("age", ">=", 18).get().await.unwrap();
+    let same = T5User::query()
+        .db_where_op("age", ">=", 18)
+        .get()
+        .await
+        .unwrap();
     assert_eq!(same.len(), 2);
 }
 
@@ -79,14 +99,34 @@ async fn filter_op_handles_arbitrary_operator() {
 async fn filter_in_and_where_in_match() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
-    T5User::create(attrs!(name: "A", email: "a@x.com", age: 20, active: true, role: "admin", balance: 0.0)).await.unwrap();
-    T5User::create(attrs!(name: "B", email: "b@x.com", age: 20, active: true, role: "user", balance: 0.0)).await.unwrap();
-    T5User::create(attrs!(name: "C", email: "c@x.com", age: 20, active: true, role: "moderator", balance: 0.0)).await.unwrap();
+    T5User::create(
+        attrs!(name: "A", email: "a@x.com", age: 20, active: true, role: "admin", balance: 0.0),
+    )
+    .await
+    .unwrap();
+    T5User::create(
+        attrs!(name: "B", email: "b@x.com", age: 20, active: true, role: "user", balance: 0.0),
+    )
+    .await
+    .unwrap();
+    T5User::create(
+        attrs!(name: "C", email: "c@x.com", age: 20, active: true, role: "moderator", balance: 0.0),
+    )
+    .await
+    .unwrap();
 
-    let admins_or_mods = T5User::query().filter_in("role", ["admin", "moderator"]).get().await.unwrap();
+    let admins_or_mods = T5User::query()
+        .filter_in("role", ["admin", "moderator"])
+        .get()
+        .await
+        .unwrap();
     assert_eq!(admins_or_mods.len(), 2);
 
-    let same = T5User::query().where_in("role", ["admin", "moderator"]).get().await.unwrap();
+    let same = T5User::query()
+        .where_in("role", ["admin", "moderator"])
+        .get()
+        .await
+        .unwrap();
     assert_eq!(same.len(), 2);
 }
 
@@ -94,7 +134,11 @@ async fn filter_in_and_where_in_match() {
 async fn filter_null_and_filter_not_null() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
-    T5User::create(attrs!(name: "A", email: "a@x.com", age: 20, active: true, role: "u", balance: 0.0)).await.unwrap();
+    T5User::create(
+        attrs!(name: "A", email: "a@x.com", age: 20, active: true, role: "u", balance: 0.0),
+    )
+    .await
+    .unwrap();
     T5User::create(attrs!(name: "B", email: "b@x.com", age: 20, active: true, role: "u", balance: 0.0, bio: "Hi")).await.unwrap();
 
     let no_bio = T5User::query().filter_null("bio").get().await.unwrap();
@@ -110,10 +154,18 @@ async fn filter_between_inclusive_range() {
     for age in [10, 18, 25, 30, 65] {
         T5User::create(attrs!(name: "X", email: format!("e{age}@x.com"), age: age, active: true, role: "u", balance: 0.0)).await.unwrap();
     }
-    let working_age = T5User::query().filter_between("age", 18..=64).get().await.unwrap();
+    let working_age = T5User::query()
+        .filter_between("age", 18..=64)
+        .get()
+        .await
+        .unwrap();
     assert_eq!(working_age.len(), 3);
 
-    let same = T5User::query().where_between("age", 18..=64).get().await.unwrap();
+    let same = T5User::query()
+        .where_between("age", 18..=64)
+        .get()
+        .await
+        .unwrap();
     assert_eq!(same.len(), 3);
 }
 
@@ -124,10 +176,18 @@ async fn filter_not_between_inverse_range() {
     for age in [10, 18, 25, 30, 65] {
         T5User::create(attrs!(name: "X", email: format!("e{age}@x.com"), age: age, active: true, role: "u", balance: 0.0)).await.unwrap();
     }
-    let outside = T5User::query().filter_not_between("age", 18..=64).get().await.unwrap();
+    let outside = T5User::query()
+        .filter_not_between("age", 18..=64)
+        .get()
+        .await
+        .unwrap();
     assert_eq!(outside.len(), 2);
 
-    let same = T5User::query().where_not_between("age", 18..=64).get().await.unwrap();
+    let same = T5User::query()
+        .where_not_between("age", 18..=64)
+        .get()
+        .await
+        .unwrap();
     assert_eq!(same.len(), 2);
 }
 
@@ -138,11 +198,19 @@ async fn filter_like_substring_match() {
     T5User::create(attrs!(name: "Alice", email: "a@example.com", age: 20, active: true, role: "u", balance: 0.0)).await.unwrap();
     T5User::create(attrs!(name: "Bob",   email: "b@other.com",   age: 20, active: true, role: "u", balance: 0.0)).await.unwrap();
 
-    let example_users = T5User::query().filter_like("email", "%@example.com").get().await.unwrap();
+    let example_users = T5User::query()
+        .filter_like("email", "%@example.com")
+        .get()
+        .await
+        .unwrap();
     assert_eq!(example_users.len(), 1);
     assert_eq!(example_users[0].name, "Alice");
 
-    let same = T5User::query().where_like("email", "%@example.com").get().await.unwrap();
+    let same = T5User::query()
+        .where_like("email", "%@example.com")
+        .get()
+        .await
+        .unwrap();
     assert_eq!(same.len(), 1);
 }
 
@@ -153,11 +221,19 @@ async fn filter_not_like_inverse_substring() {
     T5User::create(attrs!(name: "Alice", email: "a@example.com", age: 20, active: true, role: "u", balance: 0.0)).await.unwrap();
     T5User::create(attrs!(name: "Bob",   email: "b@other.com",   age: 20, active: true, role: "u", balance: 0.0)).await.unwrap();
 
-    let non_example = T5User::query().filter_not_like("email", "%@example.com").get().await.unwrap();
+    let non_example = T5User::query()
+        .filter_not_like("email", "%@example.com")
+        .get()
+        .await
+        .unwrap();
     assert_eq!(non_example.len(), 1);
     assert_eq!(non_example[0].name, "Bob");
 
-    let same = T5User::query().where_not_like("email", "%@example.com").get().await.unwrap();
+    let same = T5User::query()
+        .where_not_like("email", "%@example.com")
+        .get()
+        .await
+        .unwrap();
     assert_eq!(same.len(), 1);
 }
 
@@ -166,7 +242,11 @@ async fn or_filter_short_circuits_correctly() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
     T5User::create(attrs!(name: "Alice", email: "a@x.com", age: 18, active: false, role: "admin", balance: 0.0)).await.unwrap();
-    T5User::create(attrs!(name: "Bob",   email: "b@x.com", age: 21, active: true, role: "user",  balance: 0.0)).await.unwrap();
+    T5User::create(
+        attrs!(name: "Bob",   email: "b@x.com", age: 21, active: true, role: "user",  balance: 0.0),
+    )
+    .await
+    .unwrap();
     T5User::create(attrs!(name: "Eve",   email: "e@x.com", age: 30, active: false, role: "user",  balance: 0.0)).await.unwrap();
 
     let active_or_admins = T5User::query()
@@ -193,11 +273,19 @@ async fn order_by_asc_desc_random_raw() {
     for (name, age) in [("A", 10), ("B", 20), ("C", 30)] {
         T5User::create(attrs!(name: name, email: format!("{name}@x.com"), age: age, active: true, role: "u", balance: 0.0)).await.unwrap();
     }
-    let asc = T5User::query().order_by("age", Direction::Asc).get().await.unwrap();
+    let asc = T5User::query()
+        .order_by("age", Direction::Asc)
+        .get()
+        .await
+        .unwrap();
     assert_eq!(asc[0].name, "A");
     let desc = T5User::query().order_by_desc("age").get().await.unwrap();
     assert_eq!(desc[0].name, "C");
-    let by_raw = T5User::query().order_by_raw("age * -1").get().await.unwrap();
+    let by_raw = T5User::query()
+        .order_by_raw("age * -1")
+        .get()
+        .await
+        .unwrap();
     assert_eq!(by_raw[0].name, "C");
     // in_random_order — verify it runs without panic:
     let _ = T5User::query().in_random_order().get().await.unwrap();
@@ -221,20 +309,54 @@ async fn aggregates_count_sum_avg_min_max() {
 async fn exists_and_doesnt_exist() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
-    assert!(!T5User::query().filter("email", "a@x.com").exists().await.unwrap());
-    assert!(T5User::query().filter("email", "a@x.com").doesnt_exist().await.unwrap());
-    T5User::create(attrs!(name: "A", email: "a@x.com", age: 20, active: true, role: "u", balance: 0.0)).await.unwrap();
-    assert!(T5User::query().filter("email", "a@x.com").exists().await.unwrap());
+    assert!(
+        !T5User::query()
+            .filter("email", "a@x.com")
+            .exists()
+            .await
+            .unwrap()
+    );
+    assert!(
+        T5User::query()
+            .filter("email", "a@x.com")
+            .doesnt_exist()
+            .await
+            .unwrap()
+    );
+    T5User::create(
+        attrs!(name: "A", email: "a@x.com", age: 20, active: true, role: "u", balance: 0.0),
+    )
+    .await
+    .unwrap();
+    assert!(
+        T5User::query()
+            .filter("email", "a@x.com")
+            .exists()
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
 async fn typed_column_works_alongside_string() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
-    T5User::create(attrs!(name: "Alice", email: "a@x.com", age: 20, active: true, role: "u", balance: 0.0)).await.unwrap();
+    T5User::create(
+        attrs!(name: "Alice", email: "a@x.com", age: 20, active: true, role: "u", balance: 0.0),
+    )
+    .await
+    .unwrap();
 
-    let by_string = T5User::query().filter("email", "a@x.com").first().await.unwrap();
-    let by_typed = T5User::query().filter(t5_user::Column::Email, "a@x.com").first().await.unwrap();
+    let by_string = T5User::query()
+        .filter("email", "a@x.com")
+        .first()
+        .await
+        .unwrap();
+    let by_typed = T5User::query()
+        .filter(t5_user::Column::Email, "a@x.com")
+        .first()
+        .await
+        .unwrap();
 
     assert!(by_string.is_some());
     assert!(by_typed.is_some());
@@ -248,8 +370,20 @@ async fn limit_offset_and_take_skip_aliases() {
     for i in 0..5 {
         T5User::create(attrs!(name: "X", email: format!("e{i}@x.com"), age: 20, active: true, role: "u", balance: 0.0)).await.unwrap();
     }
-    let page_1 = T5User::query().order_by_asc("id").limit(2).offset(0).get().await.unwrap();
-    let page_2 = T5User::query().order_by_asc("id").take(2).skip(2).get().await.unwrap();
+    let page_1 = T5User::query()
+        .order_by_asc("id")
+        .limit(2)
+        .offset(0)
+        .get()
+        .await
+        .unwrap();
+    let page_2 = T5User::query()
+        .order_by_asc("id")
+        .take(2)
+        .skip(2)
+        .get()
+        .await
+        .unwrap();
     assert_eq!(page_1.len(), 2);
     assert_eq!(page_2.len(), 2);
     assert_ne!(page_1[0].id, page_2[0].id);
@@ -260,12 +394,22 @@ async fn pluck_and_pluck_keyed() {
     use std::collections::HashMap;
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
-    T5User::create(attrs!(name: "A", email: "a@x.com", age: 20, active: true, role: "u", balance: 0.0)).await.unwrap();
-    T5User::create(attrs!(name: "B", email: "b@x.com", age: 20, active: true, role: "u", balance: 0.0)).await.unwrap();
+    T5User::create(
+        attrs!(name: "A", email: "a@x.com", age: 20, active: true, role: "u", balance: 0.0),
+    )
+    .await
+    .unwrap();
+    T5User::create(
+        attrs!(name: "B", email: "b@x.com", age: 20, active: true, role: "u", balance: 0.0),
+    )
+    .await
+    .unwrap();
 
     let emails: Vec<String> = T5User::pluck::<String>("email").await.unwrap();
     assert_eq!(emails.len(), 2);
-    let keyed: HashMap<i64, String> = T5User::pluck_keyed::<i64, String>("id", "name").await.unwrap();
+    let keyed: HashMap<i64, String> = T5User::pluck_keyed::<i64, String>("id", "name")
+        .await
+        .unwrap();
     assert_eq!(keyed.len(), 2);
 }
 
@@ -273,9 +417,21 @@ async fn pluck_and_pluck_keyed() {
 async fn distinct_dedup() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
-    T5User::create(attrs!(name: "A", email: "a@x.com", age: 20, active: true, role: "admin", balance: 0.0)).await.unwrap();
-    T5User::create(attrs!(name: "B", email: "b@x.com", age: 20, active: true, role: "admin", balance: 0.0)).await.unwrap();
-    T5User::create(attrs!(name: "C", email: "c@x.com", age: 20, active: true, role: "user", balance: 0.0)).await.unwrap();
+    T5User::create(
+        attrs!(name: "A", email: "a@x.com", age: 20, active: true, role: "admin", balance: 0.0),
+    )
+    .await
+    .unwrap();
+    T5User::create(
+        attrs!(name: "B", email: "b@x.com", age: 20, active: true, role: "admin", balance: 0.0),
+    )
+    .await
+    .unwrap();
+    T5User::create(
+        attrs!(name: "C", email: "c@x.com", age: 20, active: true, role: "user", balance: 0.0),
+    )
+    .await
+    .unwrap();
     let roles: Vec<String> = T5User::query().distinct().pluck("role").await.unwrap();
     assert_eq!(roles.len(), 2);
 }
@@ -303,9 +459,15 @@ async fn to_sql_for_postgres_emits_dollar_placeholders() {
         .filter("active", true)
         .filter_op("age", ">=", 18)
         .to_sql_for(DbBackend::Postgres);
-    assert!(sql.contains("$1"), "expected $N placeholders for Postgres, got: {sql}");
+    assert!(
+        sql.contains("$1"),
+        "expected $N placeholders for Postgres, got: {sql}"
+    );
     assert!(sql.contains("$2"));
-    assert!(!sql.contains(" ? "), "Postgres rendering should not contain `?` placeholders");
+    assert!(
+        !sql.contains(" ? "),
+        "Postgres rendering should not contain `?` placeholders"
+    );
 }
 
 #[tokio::test]
@@ -330,18 +492,46 @@ async fn to_delete_sql_renders_delete_from_where() {
 async fn filter_not_and_filter_not_in() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
-    T5User::create(attrs!(name: "A", email: "a@x.com", age: 20, active: true, role: "admin", balance: 0.0)).await.unwrap();
-    T5User::create(attrs!(name: "B", email: "b@x.com", age: 20, active: true, role: "user", balance: 0.0)).await.unwrap();
-    T5User::create(attrs!(name: "C", email: "c@x.com", age: 20, active: true, role: "guest", balance: 0.0)).await.unwrap();
+    T5User::create(
+        attrs!(name: "A", email: "a@x.com", age: 20, active: true, role: "admin", balance: 0.0),
+    )
+    .await
+    .unwrap();
+    T5User::create(
+        attrs!(name: "B", email: "b@x.com", age: 20, active: true, role: "user", balance: 0.0),
+    )
+    .await
+    .unwrap();
+    T5User::create(
+        attrs!(name: "C", email: "c@x.com", age: 20, active: true, role: "guest", balance: 0.0),
+    )
+    .await
+    .unwrap();
 
-    let not_admins = T5User::query().filter_not("role", "admin").get().await.unwrap();
+    let not_admins = T5User::query()
+        .filter_not("role", "admin")
+        .get()
+        .await
+        .unwrap();
     assert_eq!(not_admins.len(), 2);
-    let not_admins_alias = T5User::query().where_not("role", "admin").get().await.unwrap();
+    let not_admins_alias = T5User::query()
+        .where_not("role", "admin")
+        .get()
+        .await
+        .unwrap();
     assert_eq!(not_admins_alias.len(), 2);
 
-    let not_user_or_guest = T5User::query().filter_not_in("role", ["user", "guest"]).get().await.unwrap();
+    let not_user_or_guest = T5User::query()
+        .filter_not_in("role", ["user", "guest"])
+        .get()
+        .await
+        .unwrap();
     assert_eq!(not_user_or_guest.len(), 1);
-    let same = T5User::query().where_not_in("role", ["user", "guest"]).get().await.unwrap();
+    let same = T5User::query()
+        .where_not_in("role", ["user", "guest"])
+        .get()
+        .await
+        .unwrap();
     assert_eq!(same.len(), 1);
 }
 
@@ -352,17 +542,37 @@ async fn filter_date_year_month_day() {
     T5User::create(attrs!(name: "A", email: "a@x.com", age: 20, active: true, role: "u", balance: 0.0, birthday: "1990-05-15")).await.unwrap();
     T5User::create(attrs!(name: "B", email: "b@x.com", age: 20, active: true, role: "u", balance: 0.0, birthday: "1985-05-15")).await.unwrap();
 
-    let by_year = T5User::query().filter_year("birthday", 1990).get().await.unwrap();
+    let by_year = T5User::query()
+        .filter_year("birthday", 1990)
+        .get()
+        .await
+        .unwrap();
     assert_eq!(by_year.len(), 1);
-    let by_year_alias = T5User::query().where_year("birthday", 1990).get().await.unwrap();
+    let by_year_alias = T5User::query()
+        .where_year("birthday", 1990)
+        .get()
+        .await
+        .unwrap();
     assert_eq!(by_year_alias.len(), 1);
 
-    let by_month = T5User::query().filter_month("birthday", 5).get().await.unwrap();
+    let by_month = T5User::query()
+        .filter_month("birthday", 5)
+        .get()
+        .await
+        .unwrap();
     assert_eq!(by_month.len(), 2);
-    let by_day = T5User::query().filter_day("birthday", 15).get().await.unwrap();
+    let by_day = T5User::query()
+        .filter_day("birthday", 15)
+        .get()
+        .await
+        .unwrap();
     assert_eq!(by_day.len(), 2);
 
-    let by_exact = T5User::query().filter_date("birthday", NaiveDate::from_ymd_opt(1990, 5, 15).unwrap()).get().await.unwrap();
+    let by_exact = T5User::query()
+        .filter_date("birthday", NaiveDate::from_ymd_opt(1990, 5, 15).unwrap())
+        .get()
+        .await
+        .unwrap();
     assert_eq!(by_exact.len(), 1);
 }
 
@@ -370,18 +580,38 @@ async fn filter_date_year_month_day() {
 async fn filter_column_and_filter_raw() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
-    T5User::create(attrs!(name: "A", email: "a@x.com", age: 20, active: true, role: "u", balance: 0.0)).await.unwrap();
+    T5User::create(
+        attrs!(name: "A", email: "a@x.com", age: 20, active: true, role: "u", balance: 0.0),
+    )
+    .await
+    .unwrap();
 
-    let by_raw = T5User::query().filter_raw("age = ?", vec![serde_json::json!(20)]).get().await.unwrap();
+    let by_raw = T5User::query()
+        .filter_raw("age = ?", vec![serde_json::json!(20)])
+        .get()
+        .await
+        .unwrap();
     assert_eq!(by_raw.len(), 1);
-    let same = T5User::query().where_raw("age = ?", vec![serde_json::json!(20)]).get().await.unwrap();
+    let same = T5User::query()
+        .where_raw("age = ?", vec![serde_json::json!(20)])
+        .get()
+        .await
+        .unwrap();
     assert_eq!(same.len(), 1);
 
     // filter_column compares two columns (always equal in our setup since
     // there's only one row; verify it runs without error).
-    let by_col = T5User::query().filter_column("age", "age").get().await.unwrap();
+    let by_col = T5User::query()
+        .filter_column("age", "age")
+        .get()
+        .await
+        .unwrap();
     assert_eq!(by_col.len(), 1);
-    let same_col = T5User::query().where_column("age", "age").get().await.unwrap();
+    let same_col = T5User::query()
+        .where_column("age", "age")
+        .get()
+        .await
+        .unwrap();
     assert_eq!(same_col.len(), 1);
 }
 
@@ -393,9 +623,15 @@ async fn union_postgres_placeholders_are_monotonic() {
     // version threads `n` through, yielding $1, $2, $3, $4 across the
     // combined statement.
     use sea_orm::DbBackend;
-    let first = T5User::query().filter("active", true).filter_op("age", ">=", 18);
-    let second = T5User::query().filter("role", "admin").filter_op("age", "<", 65);
-    let (sql, vals) = first.union(second).to_sql_with_bindings_for(DbBackend::Postgres);
+    let first = T5User::query()
+        .filter("active", true)
+        .filter_op("age", ">=", 18);
+    let second = T5User::query()
+        .filter("role", "admin")
+        .filter_op("age", "<", 65);
+    let (sql, vals) = first
+        .union(second)
+        .to_sql_with_bindings_for(DbBackend::Postgres);
     assert_eq!(vals.len(), 4);
     assert!(sql.contains("$1"), "got: {sql}");
     assert!(sql.contains("$2"), "got: {sql}");
@@ -404,9 +640,8 @@ async fn union_postgres_placeholders_are_monotonic() {
     // No `$1` placeholder should appear twice — that would mean the
     // inner SELECT restarted numbering. Count occurrences as a whole
     // word (i.e., not as part of `$10`, `$11`, ...).
-    let count_dollar_one = sql.matches(" $1 ").count()
-        + sql.matches("=$1").count()
-        + sql.matches(",$1").count();
+    let count_dollar_one =
+        sql.matches(" $1 ").count() + sql.matches("=$1").count() + sql.matches(",$1").count();
     assert!(count_dollar_one <= 1, "$1 appeared >1 times: {sql}");
 }
 
@@ -414,7 +649,11 @@ async fn union_postgres_placeholders_are_monotonic() {
 async fn union_combines_two_queries() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
-    T5User::create(attrs!(name: "Active", email: "a@x.com", age: 20, active: true, role: "user", balance: 0.0)).await.unwrap();
+    T5User::create(
+        attrs!(name: "Active", email: "a@x.com", age: 20, active: true, role: "user", balance: 0.0),
+    )
+    .await
+    .unwrap();
     T5User::create(attrs!(name: "Admin", email: "b@x.com", age: 20, active: false, role: "admin", balance: 0.0)).await.unwrap();
 
     let first = T5User::query().filter("active", true);

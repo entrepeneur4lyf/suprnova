@@ -54,16 +54,15 @@ async fn initial_html_visit_returns_shell_with_embedded_page_object() {
     let resp = InertiaResponse::new("Home")
         .with("title", "Welcome")
         .with("count", 42u32)
-        .resolve(&req).await.unwrap();
+        .resolve(&req)
+        .await
+        .unwrap();
 
     let hyper_resp = resp.into_hyper();
     assert_eq!(hyper_resp.status(), 200);
 
     let content_type = hyper_resp.headers().get("Content-Type").unwrap();
-    assert!(content_type
-        .to_str()
-        .unwrap()
-        .starts_with("text/html"));
+    assert!(content_type.to_str().unwrap().starts_with("text/html"));
 
     let vary = hyper_resp.headers().get("Vary").unwrap();
     assert_eq!(vary, "X-Inertia");
@@ -82,16 +81,20 @@ async fn inertia_xhr_visit_returns_json_page_object() {
     let req = MockReq::new("/users").inertia();
     let resp = InertiaResponse::new("Users")
         .with("users", serde_json::json!([{"id": 1, "name": "Alice"}]))
-        .resolve(&req).await.unwrap();
+        .resolve(&req)
+        .await
+        .unwrap();
 
     let hyper_resp = resp.into_hyper();
     assert_eq!(hyper_resp.status(), 200);
 
     let content_type = hyper_resp.headers().get("Content-Type").unwrap();
-    assert!(content_type
-        .to_str()
-        .unwrap()
-        .starts_with("application/json"));
+    assert!(
+        content_type
+            .to_str()
+            .unwrap()
+            .starts_with("application/json")
+    );
 
     assert_eq!(hyper_resp.headers().get("X-Inertia").unwrap(), "true");
     assert_eq!(hyper_resp.headers().get("Vary").unwrap(), "X-Inertia");
@@ -117,7 +120,9 @@ async fn partial_reload_with_only_filters_props_correctly() {
         .with("auth", serde_json::json!({"id": 1}))
         .with("users", serde_json::json!([]))
         .with("categories", serde_json::json!([]))
-        .resolve(&req).await.unwrap();
+        .resolve(&req)
+        .await
+        .unwrap();
 
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -139,7 +144,9 @@ async fn partial_reload_with_except_excludes_listed_props() {
     let resp = InertiaResponse::new("Users")
         .with("auth", serde_json::json!({"id": 1}))
         .with("users", serde_json::json!([]))
-        .resolve(&req).await.unwrap();
+        .resolve(&req)
+        .await
+        .unwrap();
 
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -160,7 +167,9 @@ async fn partial_reload_except_takes_precedence_over_only() {
     let resp = InertiaResponse::new("Users")
         .with("auth", serde_json::json!({"id": 1}))
         .with("users", serde_json::json!([]))
-        .resolve(&req).await.unwrap();
+        .resolve(&req)
+        .await
+        .unwrap();
 
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -182,7 +191,9 @@ async fn partial_reload_for_different_component_returns_all_props() {
     let resp = InertiaResponse::new("Users")
         .with("auth", serde_json::json!({"id": 1}))
         .with("users", serde_json::json!([]))
-        .resolve(&req).await.unwrap();
+        .resolve(&req)
+        .await
+        .unwrap();
 
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -202,7 +213,9 @@ async fn always_props_bypass_partial_reload_filter() {
     let resp = InertiaResponse::new("Users")
         .with("users", serde_json::json!([]))
         .always("flash", serde_json::json!({"msg": "saved"}))
-        .resolve(&req).await.unwrap();
+        .resolve(&req)
+        .await
+        .unwrap();
 
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -218,7 +231,9 @@ async fn html_shell_uses_per_response_title_override() {
     let req = MockReq::new("/home");
     let resp = InertiaResponse::new("Home")
         .title("My Custom Page")
-        .resolve(&req).await.unwrap();
+        .resolve(&req)
+        .await
+        .unwrap();
 
     let body = body_to_string(resp.into_hyper().into_body());
     assert!(body.contains("<title>My Custom Page</title>"));
@@ -231,7 +246,9 @@ async fn html_shell_uses_config_default_title_when_no_override() {
     let req = MockReq::new("/home");
     let resp = InertiaResponse::new("Home")
         .with_config(cfg)
-        .resolve(&req).await.unwrap();
+        .resolve(&req)
+        .await
+        .unwrap();
 
     let body = body_to_string(resp.into_hyper().into_body());
     assert!(body.contains("<title>Acme App</title>"));
@@ -243,7 +260,9 @@ async fn html_shell_for_react_includes_refresh_preamble() {
     let req = MockReq::new("/home");
     let resp = InertiaResponse::new("Home")
         .with_config(cfg)
-        .resolve(&req).await.unwrap();
+        .resolve(&req)
+        .await
+        .unwrap();
 
     let body = body_to_string(resp.into_hyper().into_body());
     assert!(body.contains("@react-refresh"));
@@ -257,7 +276,9 @@ async fn html_shell_for_svelte_omits_react_preamble() {
     let req = MockReq::new("/home");
     let resp = InertiaResponse::new("Home")
         .with_config(cfg)
-        .resolve(&req).await.unwrap();
+        .resolve(&req)
+        .await
+        .unwrap();
 
     let body = body_to_string(resp.into_hyper().into_body());
     assert!(!body.contains("@react-refresh"));
@@ -270,7 +291,9 @@ async fn html_shell_for_vue_omits_react_preamble() {
     let req = MockReq::new("/home");
     let resp = InertiaResponse::new("Home")
         .with_config(cfg)
-        .resolve(&req).await.unwrap();
+        .resolve(&req)
+        .await
+        .unwrap();
 
     let body = body_to_string(resp.into_hyper().into_body());
     assert!(!body.contains("@react-refresh"));
@@ -291,7 +314,9 @@ async fn production_html_shell_falls_back_to_legacy_paths_when_manifest_missing(
     let req = MockReq::new("/home");
     let resp = InertiaResponse::new("Home")
         .with_config(cfg)
-        .resolve(&req).await.unwrap();
+        .resolve(&req)
+        .await
+        .unwrap();
 
     let body = body_to_string(resp.into_hyper().into_body());
     assert!(body.contains("/assets/main.js"));
@@ -333,22 +358,32 @@ async fn production_html_shell_reads_vite_manifest_for_hashed_assets() {
     let req = MockReq::new("/home");
     let resp = InertiaResponse::new("Home")
         .with_config(cfg)
-        .resolve(&req).await.unwrap();
+        .resolve(&req)
+        .await
+        .unwrap();
 
     let body = body_to_string(resp.into_hyper().into_body());
     std::fs::remove_file(&manifest_path).ok();
 
     // Hashed entry file present
-    assert!(body.contains("/assets/main-Q9zSqcUL.js"),
-        "body should contain hashed entry; got: {body}");
+    assert!(
+        body.contains("/assets/main-Q9zSqcUL.js"),
+        "body should contain hashed entry; got: {body}"
+    );
     // Hashed CSS file present
-    assert!(body.contains("/assets/main-3R4lN-AT.css"),
-        "body should contain hashed CSS; got: {body}");
+    assert!(
+        body.contains("/assets/main-3R4lN-AT.css"),
+        "body should contain hashed CSS; got: {body}"
+    );
     // Module preload for the imported runtime chunk
-    assert!(body.contains("modulepreload"),
-        "body should contain modulepreload tag");
-    assert!(body.contains("/assets/runtime-DTQbz0Cz.js"),
-        "body should contain preloaded chunk; got: {body}");
+    assert!(
+        body.contains("modulepreload"),
+        "body should contain modulepreload tag"
+    );
+    assert!(
+        body.contains("/assets/runtime-DTQbz0Cz.js"),
+        "body should contain preloaded chunk; got: {body}"
+    );
     // Legacy hardcoded paths should NOT appear
     assert!(!body.contains("/assets/main.js"));
     assert!(!body.contains("/assets/main.css"));
@@ -380,13 +415,17 @@ async fn production_html_shell_respects_custom_assets_base_url() {
     let req = MockReq::new("/home");
     let resp = InertiaResponse::new("Home")
         .with_config(cfg)
-        .resolve(&req).await.unwrap();
+        .resolve(&req)
+        .await
+        .unwrap();
 
     let body = body_to_string(resp.into_hyper().into_body());
     std::fs::remove_file(&manifest_path).ok();
 
-    assert!(body.contains("/build/main-AAA.js"),
-        "custom base URL should prefix asset path; got: {body}");
+    assert!(
+        body.contains("/build/main-AAA.js"),
+        "custom base URL should prefix asset path; got: {body}"
+    );
     assert!(!body.contains("/assets/main"));
 }
 
@@ -396,7 +435,9 @@ async fn version_in_page_object_matches_configured_version() {
     let req = MockReq::new("/").inertia();
     let resp = InertiaResponse::new("Home")
         .with_config(cfg)
-        .resolve(&req).await.unwrap();
+        .resolve(&req)
+        .await
+        .unwrap();
 
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -425,7 +466,9 @@ async fn props_serialize_in_insertion_order_via_indexmap() {
         .with("zebra", 1)
         .with("apple", 2)
         .with("mango", 3)
-        .resolve(&req).await.unwrap();
+        .resolve(&req)
+        .await
+        .unwrap();
 
     let body = body_to_string(resp.into_hyper().into_body());
 
@@ -450,7 +493,10 @@ async fn version_conflict_response_carries_x_inertia_location() {
 #[tokio::test]
 async fn page_object_url_reflects_request_path() {
     let req = MockReq::new("/users/42/edit").inertia();
-    let resp = InertiaResponse::new("Users/Edit").resolve(&req).await.unwrap();
+    let resp = InertiaResponse::new("Users/Edit")
+        .resolve(&req)
+        .await
+        .unwrap();
 
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -462,7 +508,9 @@ async fn xhr_response_omits_html_shell_entirely() {
     let req = MockReq::new("/home").inertia();
     let resp = InertiaResponse::new("Home")
         .with("data", "value")
-        .resolve(&req).await.unwrap();
+        .resolve(&req)
+        .await
+        .unwrap();
 
     let body = body_to_string(resp.into_hyper().into_body());
     // JSON output should NOT contain any of the HTML shell markers.
@@ -533,7 +581,6 @@ async fn static_share_appears_in_every_inertia_response() {
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
 
     assert_eq!(page["props"]["appName"], "Suprnova");
-
 }
 
 #[tokio::test]
@@ -553,7 +600,6 @@ async fn user_props_override_static_shared_data() {
 
     // Per the precedence chain (static → trait → user), user wins on dups.
     assert_eq!(page["props"]["title"], "Page Title");
-
 }
 
 #[tokio::test]
@@ -652,10 +698,7 @@ async fn lazy_shared_resolves_only_when_partial_includes_key() {
 
     // Standard visit — resolver should run (Lazy is included on standard visits).
     let req = MockReq::new("/").inertia();
-    let _ = InertiaResponse::new("Home")
-        .resolve(&req)
-        .await
-        .unwrap();
+    let _ = InertiaResponse::new("Home").resolve(&req).await.unwrap();
     let after_step_1 = call_count.load(std::sync::atomic::Ordering::SeqCst);
     assert_eq!(after_step_1, 1, "standard visit should resolve lazy once");
 
@@ -664,10 +707,7 @@ async fn lazy_shared_resolves_only_when_partial_includes_key() {
         .inertia()
         .header("X-Inertia-Partial-Component", "Home")
         .header("X-Inertia-Partial-Data", "other_key");
-    let _ = InertiaResponse::new("Home")
-        .resolve(&req)
-        .await
-        .unwrap();
+    let _ = InertiaResponse::new("Home").resolve(&req).await.unwrap();
     let after_step_2 = call_count.load(std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         after_step_2, 1,
@@ -679,16 +719,12 @@ async fn lazy_shared_resolves_only_when_partial_includes_key() {
         .inertia()
         .header("X-Inertia-Partial-Component", "Home")
         .header("X-Inertia-Partial-Data", key);
-    let _ = InertiaResponse::new("Home")
-        .resolve(&req)
-        .await
-        .unwrap();
+    let _ = InertiaResponse::new("Home").resolve(&req).await.unwrap();
     let after_step_3 = call_count.load(std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         after_step_3, 2,
         "explicit partial-data request must invoke the resolver"
     );
-
 }
 
 #[tokio::test]
@@ -701,8 +737,7 @@ async fn trait_provider_runs_with_request_context() {
         async fn share(
             &self,
             req: &dyn suprnova::InertiaRequestExt,
-        ) -> Result<indexmap::IndexMap<String, suprnova::Prop>, suprnova::FrameworkError>
-        {
+        ) -> Result<indexmap::IndexMap<String, suprnova::Prop>, suprnova::FrameworkError> {
             let mut m = indexmap::IndexMap::new();
             // Per-request data: read a header to derive the prop.
             let auth_header = req.header("X-Auth-User").unwrap_or("anonymous");
@@ -728,7 +763,6 @@ async fn trait_provider_runs_with_request_context() {
     let body2 = body_to_string(resp2.into_hyper().into_body());
     let page2: serde_json::Value = serde_json::from_str(&body2).unwrap();
     assert_eq!(page2["props"]["auth"]["user"], "bob");
-
 }
 
 #[tokio::test]
@@ -743,8 +777,7 @@ async fn trait_share_overrides_static_share_but_user_overrides_both() {
         async fn share(
             &self,
             _req: &dyn suprnova::InertiaRequestExt,
-        ) -> Result<indexmap::IndexMap<String, suprnova::Prop>, suprnova::FrameworkError>
-        {
+        ) -> Result<indexmap::IndexMap<String, suprnova::Prop>, suprnova::FrameworkError> {
             let mut m = indexmap::IndexMap::new();
             m.insert(
                 "layer".to_string(),
@@ -771,7 +804,6 @@ async fn trait_share_overrides_static_share_but_user_overrides_both() {
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(page["props"]["layer"], "user");
-
 }
 
 #[tokio::test]
@@ -836,10 +868,12 @@ async fn optional_prop_excluded_on_standard_visit() {
 
     // Standard visit → optional NOT included AND NOT resolved.
     assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 0);
-    assert!(!page["props"]
-        .as_object()
-        .unwrap()
-        .contains_key("permissions"));
+    assert!(
+        !page["props"]
+            .as_object()
+            .unwrap()
+            .contains_key("permissions")
+    );
 }
 
 #[tokio::test]
@@ -881,7 +915,6 @@ async fn lazy_resolver_error_propagates_as_framework_error() {
     }
 }
 
-
 // ---- Tier 2: flash, deferred, merge, once ----
 
 #[tokio::test]
@@ -896,10 +929,7 @@ async fn flash_via_response_builder_emits_top_level_field() {
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(page["flash"]["toast"]["msg"], "saved");
     // Not under props.
-    assert!(!page["props"]
-        .as_object()
-        .unwrap()
-        .contains_key("flash"));
+    assert!(!page["props"].as_object().unwrap().contains_key("flash"));
 }
 
 #[tokio::test]
@@ -936,10 +966,12 @@ async fn defer_on_initial_visit_is_in_deferred_props_not_props() {
     // Resolver not called on initial visit.
     assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 0);
     // Not in props.
-    assert!(!page["props"]
-        .as_object()
-        .unwrap()
-        .contains_key("permissions"));
+    assert!(
+        !page["props"]
+            .as_object()
+            .unwrap()
+            .contains_key("permissions")
+    );
     // In deferredProps under "default" group.
     let deferred = page["deferredProps"].as_object().unwrap();
     let default_group = deferred["default"].as_array().unwrap();
@@ -1024,9 +1056,7 @@ async fn defer_rescue_catches_resolver_error() {
         .defer_with(
             "permissions",
             suprnova::DeferOptions::new().rescue(),
-            || async {
-                Err::<serde_json::Value, _>(suprnova::FrameworkError::internal("boom"))
-            },
+            || async { Err::<serde_json::Value, _>(suprnova::FrameworkError::internal("boom")) },
         )
         .resolve(&req)
         .await
@@ -1036,10 +1066,12 @@ async fn defer_rescue_catches_resolver_error() {
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
 
     // Prop omitted from props
-    assert!(!page["props"]
-        .as_object()
-        .unwrap()
-        .contains_key("permissions"));
+    assert!(
+        !page["props"]
+            .as_object()
+            .unwrap()
+            .contains_key("permissions")
+    );
     // But listed in rescuedProps
     assert_eq!(page["rescuedProps"], serde_json::json!(["permissions"]));
 }
@@ -1200,17 +1232,13 @@ async fn once_with_fresh_ignores_except_header() {
     let counter = call_count.clone();
 
     let resp = InertiaResponse::new("Billing")
-        .once_with(
-            "plans",
-            suprnova::OnceOptions::new().fresh(),
-            move || {
-                let c = counter.clone();
-                async move {
-                    c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    Ok::<_, suprnova::FrameworkError>(serde_json::json!([{"id": 99}]))
-                }
-            },
-        )
+        .once_with("plans", suprnova::OnceOptions::new().fresh(), move || {
+            let c = counter.clone();
+            async move {
+                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok::<_, suprnova::FrameworkError>(serde_json::json!([{"id": 99}]))
+            }
+        })
         .resolve(&req)
         .await
         .unwrap();
@@ -1230,9 +1258,7 @@ async fn once_with_as_key_uses_custom_cache_key() {
         .once_with(
             "memberRoles",
             suprnova::OnceOptions::new().as_key("roles"),
-            || async {
-                Ok::<_, suprnova::FrameworkError>(serde_json::json!(["admin", "member"]))
-            },
+            || async { Ok::<_, suprnova::FrameworkError>(serde_json::json!(["admin", "member"])) },
         )
         .resolve(&req)
         .await
@@ -1521,10 +1547,7 @@ async fn app_flash_persists_to_response_via_task_local() {
     suprnova::inertia::flash_scope_for_test(bag, async move {
         suprnova::App::flash("toast", serde_json::json!({"msg": "via App::flash"}));
 
-        let resp = InertiaResponse::new("Home")
-            .resolve(&req)
-            .await
-            .unwrap();
+        let resp = InertiaResponse::new("Home").resolve(&req).await.unwrap();
         let body = body_to_string(resp.into_hyper().into_body());
         let page: serde_json::Value = serde_json::from_str(&body).unwrap();
 
@@ -1798,8 +1821,8 @@ mod ssr_tests {
                 };
                 tokio::spawn(async move {
                     let io = TokioIo::new(stream);
-                    let svc =
-                        service_fn(|_req: hyper::Request<hyper::body::Incoming>| async move {
+                    let svc = service_fn(
+                        |_req: hyper::Request<hyper::body::Incoming>| async move {
                             let body = serde_json::json!({
                                 "head": ["<title>SSR Title</title>", "<meta name=\"ssr\" content=\"yes\">"],
                                 "body": "<main id=\"ssr\">SSR rendered content</main>",
@@ -1812,7 +1835,8 @@ mod ssr_tests {
                                     .body(Full::new(Bytes::from(payload)))
                                     .unwrap(),
                             )
-                        });
+                        },
+                    );
                     let _ = http1::Builder::new().serve_connection(io, svc).await;
                 });
             }
@@ -1968,8 +1992,7 @@ async fn scroll_initial_visit_emits_metadata_with_reset_true() {
     let obj = page.as_object().unwrap();
     assert!(!obj.contains_key("mergeProps") || obj["mergeProps"].as_array().unwrap().is_empty());
     assert!(
-        !obj.contains_key("prependProps")
-            || obj["prependProps"].as_array().unwrap().is_empty()
+        !obj.contains_key("prependProps") || obj["prependProps"].as_array().unwrap().is_empty()
     );
 }
 
@@ -2056,17 +2079,13 @@ async fn scroll_with_async_resolver_runs_closure() {
     let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counter = call_count.clone();
     let resp = InertiaResponse::new("Users/Index")
-        .scroll_with(
-            "users",
-            ScrollMetadata::new("page").current(1),
-            move || {
-                let c = counter.clone();
-                async move {
-                    c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    Ok::<_, suprnova::FrameworkError>(serde_json::json!([{"id": 1}]))
-                }
-            },
-        )
+        .scroll_with("users", ScrollMetadata::new("page").current(1), move || {
+            let c = counter.clone();
+            async move {
+                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok::<_, suprnova::FrameworkError>(serde_json::json!([{"id": 1}]))
+            }
+        })
         .resolve(&req)
         .await
         .unwrap();
@@ -2351,9 +2370,7 @@ async fn redirect_preserve_fragment_flashes_session_flag() {
 
     let slot = new_session_slot_for_test();
     session_scope_for_test(slot.clone(), async {
-        let _: suprnova::Response = Redirect::to("/article/new")
-            .preserve_fragment()
-            .into();
+        let _: suprnova::Response = Redirect::to("/article/new").preserve_fragment().into();
     })
     .await;
 
@@ -2644,10 +2661,9 @@ mod version_mw {
         // Build the request via hyper client.
         let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         let io = TokioIo::new(stream);
-        let (mut sender, conn) =
-            hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
-                .await
-                .unwrap();
+        let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
+            .await
+            .unwrap();
         tokio::spawn(async move {
             let _ = conn.await;
         });
@@ -2659,7 +2675,11 @@ mod version_mw {
         hyper::Response::from_parts(parts, collected.to_bytes())
     }
 
-    fn request(method: &str, version_header: Option<&str>, inertia: bool) -> hyper::Request<Empty<Bytes>> {
+    fn request(
+        method: &str,
+        version_header: Option<&str>,
+        inertia: bool,
+    ) -> hyper::Request<Empty<Bytes>> {
         let mut b = hyper::Request::builder()
             .method(method)
             .uri("http://localhost/users");

@@ -124,8 +124,7 @@ impl MemoryQueueDriver {
                 // Promote expired delayed jobs into the visible queue.
                 {
                     let mut dq = delayed2.lock().await;
-                    drain_delayed(&inner2, &mut dq)
-                        .expect("memory queue poisoned in reaper");
+                    drain_delayed(&inner2, &mut dq).expect("memory queue poisoned in reaper");
                     // Lock released here — before the sleep await.
                 }
 
@@ -133,8 +132,7 @@ impl MemoryQueueDriver {
                 // mutex, then poll synchronously (no await while lock held).
                 {
                     let mut dq = visibility2.lock().await;
-                    drain_expired(&inner2, &mut dq)
-                        .expect("memory queue poisoned in reaper");
+                    drain_expired(&inner2, &mut dq).expect("memory queue poisoned in reaper");
                     // Lock released here — before the sleep await.
                 }
 
@@ -166,16 +164,17 @@ impl QueueDriver for MemoryQueueDriver {
             g.visible.push_back(env);
         } else {
             // Compute delay on the Tokio virtual clock so paused-clock tests work.
-            let delay = (env.available_at - now)
-                .to_std()
-                .unwrap_or(Duration::ZERO);
+            let delay = (env.available_at - now).to_std().unwrap_or(Duration::ZERO);
             let mut dq = self.delayed.lock().await;
             dq.insert(env, delay);
         }
         Ok(())
     }
 
-    async fn pop(&self, visibility_timeout: Duration) -> Result<Option<Reservation>, FrameworkError> {
+    async fn pop(
+        &self,
+        visibility_timeout: Duration,
+    ) -> Result<Option<Reservation>, FrameworkError> {
         // Drain expired delayed jobs into the visible queue (Tokio virtual clock).
         {
             let mut dq = self.delayed.lock().await;
@@ -205,7 +204,10 @@ impl QueueDriver for MemoryQueueDriver {
                 .lock()
                 .await
                 .insert(token.clone(), visibility_timeout);
-            Ok(Some(Reservation { envelope: env, token }))
+            Ok(Some(Reservation {
+                envelope: env,
+                token,
+            }))
         } else {
             Ok(None)
         }

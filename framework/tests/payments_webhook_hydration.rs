@@ -23,14 +23,15 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, ActiveModelTrait};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use sea_orm_migration::MigratorTrait;
 use serde_json::json;
 use suprnova::handle_request;
 use suprnova::payments::{
+    MockPaymentProvider, PaymentProvider, PaymentProviderRegistry, SubscribeRequest, Subscription,
+    UpdateSubscriptionRequest,
     entities::{customer, subscription, subscription_item, transaction, webhook_event},
-    webhook_routes, MockPaymentProvider, PaymentProvider, PaymentProviderRegistry, SubscribeRequest,
-    Subscription, UpdateSubscriptionRequest,
+    webhook_routes,
 };
 use suprnova::testing::TestDatabase;
 use suprnova::{MiddlewareRegistry, Router};
@@ -69,9 +70,7 @@ async fn spawn_server(router: Router, accepts: usize) -> SocketAddr {
                 let svc = service_fn(move |req: hyper::Request<Incoming>| {
                     let router = router.clone();
                     let middleware = middleware.clone();
-                    async move {
-                        Ok::<_, Infallible>(handle_request(router, middleware, req).await)
-                    }
+                    async move { Ok::<_, Infallible>(handle_request(router, middleware, req).await) }
                 });
                 let _ = hyper::server::conn::http1::Builder::new()
                     .serve_connection(io, svc)
@@ -168,7 +167,6 @@ async fn sanity_seaorm_update_via_model_into_active_model() {
     assert_eq!(after.email, "second@example.com");
 }
 
-
 /// A `subscription.created` webhook arriving for a sub that exists in the
 /// provider should insert a row in `payments_subscriptions` + per-item rows
 /// in `payments_subscription_items`, hydrated from `Subscription::get`.
@@ -225,7 +223,10 @@ async fn subscription_created_webhook_hydrates_mirror_with_items() {
         .await
         .expect("db ok")
         .expect("audit row present");
-    assert_eq!(audit.neutral_event_kind.as_deref(), Some("subscription_created"));
+    assert_eq!(
+        audit.neutral_event_kind.as_deref(),
+        Some("subscription_created")
+    );
     assert!(audit.processed_at.is_some(), "processed_at must be set");
     assert!(audit.process_error.is_none(), "process_error must be empty");
 
@@ -583,7 +584,11 @@ async fn customer_updated_webhook_updates_existing_customer_row_only() {
         sk.as_u16(),
         String::from_utf8_lossy(&rb)
     );
-    assert_eq!(rb.as_ref(), b"ok", "expected 'ok', hydration may have failed");
+    assert_eq!(
+        rb.as_ref(),
+        b"ok",
+        "expected 'ok', hydration may have failed"
+    );
 
     let audit = webhook_event::Entity::find()
         .filter(webhook_event::Column::ProviderEventId.eq("evt_cust_updated_known"))
@@ -634,10 +639,7 @@ async fn customer_updated_webhook_updates_existing_customer_row_only() {
     );
 
     // Exactly one customer row total.
-    let all = customer::Entity::find()
-        .all(&*conn)
-        .await
-        .expect("db ok");
+    let all = customer::Entity::find().all(&*conn).await.expect("db ok");
     assert_eq!(all.len(), 1);
 }
 
@@ -668,7 +670,11 @@ async fn subscription_event_missing_id_returns_503_and_records_error() {
         .to_string(),
     );
     let (status, _) = send_webhook(addr, &path, body).await;
-    assert_eq!(status.as_u16(), 503, "missing subscription_id must surface as 503");
+    assert_eq!(
+        status.as_u16(),
+        503,
+        "missing subscription_id must surface as 503"
+    );
 
     let audit = webhook_event::Entity::find()
         .filter(webhook_event::Column::ProviderEventId.eq("evt_bad_sub_id"))
@@ -688,7 +694,10 @@ async fn subscription_event_missing_id_returns_503_and_records_error() {
         .all(&*conn)
         .await
         .expect("db ok");
-    assert!(subs.is_empty(), "no subscription row may exist after failed hydration");
+    assert!(
+        subs.is_empty(),
+        "no subscription row may exist after failed hydration"
+    );
 }
 
 /// Retrying a previously-failed event re-runs hydration. After the bad
@@ -723,7 +732,11 @@ async fn failed_hydration_retry_keeps_process_error_current() {
     let (s1, _) = send_webhook(addr, &path, body.clone()).await;
     assert_eq!(s1.as_u16(), 503);
     let (s2, _) = send_webhook(addr, &path, body).await;
-    assert_eq!(s2.as_u16(), 503, "retry must also fail (deterministic bad payload)");
+    assert_eq!(
+        s2.as_u16(),
+        503,
+        "retry must also fail (deterministic bad payload)"
+    );
 
     // Exactly one audit row — retry should NOT insert a second one.
     let rows = webhook_event::Entity::find()
@@ -764,7 +777,11 @@ async fn previously_failed_event_recovers_on_retry_when_provider_state_appears()
         .to_string(),
     );
     let (s1, _) = send_webhook(addr, &path, body.clone()).await;
-    assert_eq!(s1.as_u16(), 503, "first attempt must fail (provider has no sub yet)");
+    assert_eq!(
+        s1.as_u16(),
+        503,
+        "first attempt must fail (provider has no sub yet)"
+    );
 
     let audit = webhook_event::Entity::find()
         .filter(webhook_event::Column::ProviderEventId.eq("evt_recover_1"))
@@ -804,11 +821,16 @@ async fn previously_failed_event_recovers_on_retry_when_provider_state_appears()
 
     // Mirror row exists for the recovered event.
     let mirror = subscription::Entity::find()
-        .filter(subscription::Column::ProviderSubscriptionId.eq(sub.provider_subscription_id.clone()))
+        .filter(
+            subscription::Column::ProviderSubscriptionId.eq(sub.provider_subscription_id.clone()),
+        )
         .one(&*conn)
         .await
         .expect("db ok");
-    assert!(mirror.is_some(), "mirror row from recovered event must exist");
+    assert!(
+        mirror.is_some(),
+        "mirror row from recovered event must exist"
+    );
 
     // Original broken event's audit row still shows the failure — it remains
     // pending until the provider stops sending it. (Stripe gives up after 3

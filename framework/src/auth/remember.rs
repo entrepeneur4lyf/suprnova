@@ -124,7 +124,7 @@ pub const COOKIE_NAME: &str = "remember_me";
 /// hash matches a known verifier (used for the expired-token test).
 #[doc(hidden)]
 pub async fn generate_token() -> Result<(String, String, String), FrameworkError> {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
     // High-entropy OS randomness for both halves. `getrandom::fill`
     // is the direct binding to the OS RNG (e.g. `getrandom(2)` on

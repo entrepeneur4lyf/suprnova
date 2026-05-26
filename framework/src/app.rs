@@ -333,9 +333,10 @@ where
             let path = path.trim_start_matches("./");
 
             if let Some(parent) = Path::new(path).parent()
-                && !parent.as_os_str().is_empty() {
-                    std::fs::create_dir_all(parent).ok();
-                }
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::create_dir_all(parent).ok();
+            }
 
             if !Path::new(path).exists() {
                 std::fs::File::create(path).ok();
@@ -393,9 +394,7 @@ where
         println!("Database refreshed successfully!");
     }
 
-    async fn run_scheduler_daemon_internal(
-        bootstrap_fn: Option<BootstrapFn>,
-    ) {
+    async fn run_scheduler_daemon_internal(bootstrap_fn: Option<BootstrapFn>) {
         // Run bootstrap for scheduler context
         if let Some(bootstrap_fn) = bootstrap_fn {
             bootstrap_fn().await;
@@ -415,9 +414,7 @@ where
         eprintln!("Then register it in src/schedule.rs");
     }
 
-    async fn run_scheduled_tasks_internal(
-        bootstrap_fn: Option<BootstrapFn>,
-    ) {
+    async fn run_scheduled_tasks_internal(bootstrap_fn: Option<BootstrapFn>) {
         // Run bootstrap for scheduler context
         if let Some(bootstrap_fn) = bootstrap_fn {
             bootstrap_fn().await;
@@ -435,9 +432,7 @@ where
         eprintln!("Create a scheduled task with: suprnova make:task <name>");
     }
 
-    async fn run_workflow_worker_internal(
-        bootstrap_fn: Option<BootstrapFn>,
-    ) {
+    async fn run_workflow_worker_internal(bootstrap_fn: Option<BootstrapFn>) {
         // Audit fix: workflow workers must see the same Cache / Queue /
         // RateLimit / Mail drivers as the web server. Without this the
         // worker would silently default to in-memory queue + in-memory
@@ -474,8 +469,7 @@ where
     /// driver-bootstrap order in `Server::run` (telemetry / encryption
     /// keys / authorization init are subcommand-specific and stay out
     /// of this helper).
-    async fn bootstrap_runtime_drivers(
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn bootstrap_runtime_drivers() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         crate::cache::Cache::bootstrap().await?;
         crate::queue::bootstrap_from_env().await?;
         crate::rate_limit::bootstrap_from_env().await?;

@@ -182,7 +182,8 @@ impl InertiaResponse {
         prop: Prop,
     ) -> Self {
         self.props.insert(field.to_string(), prop);
-        self.lazy_owned.insert(field.to_string(), (owner_struct_name, field));
+        self.lazy_owned
+            .insert(field.to_string(), (owner_struct_name, field));
         self
     }
 
@@ -193,10 +194,7 @@ impl InertiaResponse {
     /// - `Eager` → inserted directly via the internal prop map (equivalent to `.with(key, value)`).
     /// - `LazyOwned` → routed through `prop_lazy_with_owner` so the
     ///   `?include=` + allowlist gate applies at resolution time.
-    pub fn from_data_props(
-        component: &'static str,
-        props: Vec<(String, PropEntry)>,
-    ) -> Self {
+    pub fn from_data_props(component: &'static str, props: Vec<(String, PropEntry)>) -> Self {
         let mut r = Self::new(component);
         for (k, entry) in props {
             match entry {
@@ -583,13 +581,11 @@ impl InertiaResponse {
         // flash (set by `Redirect::preserve_fragment()`) > false. The
         // session lookup is a no-op outside a `SessionMiddleware` scope.
         // `get_flash` removes the entry, so the flag is one-shot.
-        let flashed_preserve_fragment = crate::session::session_mut(|s| {
-            s.get_flash::<bool>("_inertia.preserve_fragment")
-        })
-        .flatten()
-        .unwrap_or(false);
-        let resolved_preserve_fragment =
-            preserve_fragment.unwrap_or(flashed_preserve_fragment);
+        let flashed_preserve_fragment =
+            crate::session::session_mut(|s| s.get_flash::<bool>("_inertia.preserve_fragment"))
+                .flatten()
+                .unwrap_or(false);
+        let resolved_preserve_fragment = preserve_fragment.unwrap_or(flashed_preserve_fragment);
 
         // Layer props in precedence order (later writes override earlier):
         //   1. Static shared registry  (App::inertia_share, App::inertia_share_lazy)
@@ -662,8 +658,7 @@ impl InertiaResponse {
         } else {
             // SSR runs only for HTML (non-XHR) visits. XHR is a JSON
             // page-object response and never needs prerender.
-            let ssr_result =
-                super::ssr::render(&config.ssr, req.path(), &page).await?;
+            let ssr_result = super::ssr::render(&config.ssr, req.path(), &page).await?;
             Ok(build_html_response(
                 &page,
                 &config,
@@ -696,8 +691,7 @@ impl InertiaResponse {
             resolve_props(props, filter, &[], &[], None, None, &lazy_owned, usize::MAX)
                 .await
                 .expect("test resolver should not fail");
-        let resolved_encrypt_history = encrypt_history
-            .unwrap_or(config.encrypt_history_default);
+        let resolved_encrypt_history = encrypt_history.unwrap_or(config.encrypt_history_default);
         // Test helper doesn't run inside a session scope, so we never
         // pick up a flashed flag here — only the explicit override.
         let resolved_preserve_fragment = preserve_fragment.unwrap_or(false);
@@ -838,10 +832,7 @@ async fn resolve_props(
     // all props resolve — see the bottom of this function. Doing it
     // post-resolution means a handler that injects errors via
     // `.with("errors", {...})` still gets correctly scoped.
-    materialized.insert(
-        "errors".to_string(),
-        Value::Object(serde_json::Map::new()),
-    );
+    materialized.insert("errors".to_string(), Value::Object(serde_json::Map::new()));
 
     let mut tasks: Vec<TaskFuture> = Vec::new();
 
@@ -928,11 +919,7 @@ async fn resolve_props(
                     // Initial visit (or partial-reload not requesting this
                     // key) — DON'T resolve; emit in deferredProps so the
                     // client knows to issue a follow-up XHR.
-                    metadata
-                        .deferred
-                        .entry(c.group)
-                        .or_default()
-                        .push(key);
+                    metadata.deferred.entry(c.group).or_default().push(key);
                 }
             }
             Prop::Merge(c) => {
@@ -988,9 +975,8 @@ async fn resolve_props(
                     Some(ts) => now_ms >= ts,
                     None => false,
                 };
-                let client_has_cached = !c.fresh
-                    && !server_expired
-                    && except_once.iter().any(|k| k == &c.cache_key);
+                let client_has_cached =
+                    !c.fresh && !server_expired && except_once.iter().any(|k| k == &c.cache_key);
                 if client_has_cached {
                     // Client already has the value cached — skip resolver
                     // but still emit metadata so the client confirms the
@@ -1156,7 +1142,10 @@ fn build_page_object(
     );
     page.insert("props".to_string(), Value::Object(materialized_props));
     page.insert("url".to_string(), Value::String(url));
-    page.insert("version".to_string(), Value::String(config.version.resolve()));
+    page.insert(
+        "version".to_string(),
+        Value::String(config.version.resolve()),
+    );
 
     // Per spec, `encryptHistory` / `clearHistory` / `preserveFragment`
     // are only emitted when `true`. Falsy values are omitted to keep
@@ -1191,7 +1180,14 @@ fn build_page_object(
     if !metadata.rescued.is_empty() {
         page.insert(
             "rescuedProps".to_string(),
-            Value::Array(metadata.rescued.iter().cloned().map(Value::String).collect()),
+            Value::Array(
+                metadata
+                    .rescued
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            ),
         );
     }
     if !metadata.merge.is_empty() {
@@ -1245,10 +1241,7 @@ fn build_page_object(
             .iter()
             .map(|(cache_key, entry)| {
                 let mut m = serde_json::Map::new();
-                m.insert(
-                    "prop".to_string(),
-                    Value::String(entry.prop_name.clone()),
-                );
+                m.insert("prop".to_string(), Value::String(entry.prop_name.clone()));
                 m.insert(
                     "expiresAt".to_string(),
                     entry
@@ -1355,8 +1348,9 @@ fn eager_resolver(value: Value) -> PropResolver {
 /// `Result<V, FrameworkError>` which surfaces as an Inertia JSON
 /// error envelope instead of a server-level 500.
 fn to_value_or_die<V: Serialize>(value: &V) -> Value {
-    serde_json::to_value(value)
-        .expect("InertiaResponse prop value must serialize cleanly; check the type's Serialize impl")
+    serde_json::to_value(value).expect(
+        "InertiaResponse prop value must serialize cleanly; check the type's Serialize impl",
+    )
 }
 
 fn build_json_response(page: &Value) -> HttpResponse {
@@ -1388,9 +1382,7 @@ fn build_html_response(
     // snippets (title, meta, etc.) and `body` as the prerendered app
     // shell. When present we add `data-server-rendered="true"` so the
     // client hydrates instead of re-rendering.
-    let ssr_head = ssr
-        .map(|s| s.head.join("\n"))
-        .unwrap_or_default();
+    let ssr_head = ssr.map(|s| s.head.join("\n")).unwrap_or_default();
     let ssr_body = ssr.map(|s| s.body.as_str()).unwrap_or("");
     let ssr_attr = if ssr.is_some() {
         " data-server-rendered=\"true\""
@@ -1485,10 +1477,7 @@ fn render_prod_head(config: &InertiaConfig) -> String {
     // `InertiaConfig::vite_manifest`.
     let base = config.assets_base_url.trim_end_matches('/');
     let entry = &config.entry_point;
-    if let Some(assets) = config
-        .vite_manifest()
-        .and_then(|m| m.resolve_entry(entry))
-    {
+    if let Some(assets) = config.vite_manifest().and_then(|m| m.resolve_entry(entry)) {
         let mut out = String::new();
         for css in &assets.css {
             out.push_str(&format!(

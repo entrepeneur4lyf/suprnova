@@ -4,17 +4,17 @@
 
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
+use suprnova::FrameworkError;
 use suprnova::broadcasting::{
     BroadcastingWsHandler, Channel, ChannelRegistry, InMemoryBroadcastHub, PresenceChannel,
 };
 use suprnova::http::Request;
 use suprnova::routing::Router;
-use suprnova::FrameworkError;
 use tokio::net::TcpListener;
-use tokio::time::{timeout, Duration as TokioDuration};
+use tokio::time::{Duration as TokioDuration, timeout};
 use tokio_tungstenite::tungstenite::Message;
 
 // ---------------------------------------------------------------------------
@@ -98,9 +98,8 @@ async fn spawn_presence_server() -> u16 {
 // Helpers
 // ---------------------------------------------------------------------------
 
-type WsStream = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn connect(url: &str) -> WsStream {
     tokio_tungstenite::connect_async(url).await.unwrap().0
@@ -124,11 +123,7 @@ async fn next_frame(ws: &mut WsStream) -> Value {
 }
 
 async fn subscribe(ws: &mut WsStream, channel: &str) {
-    send_json(
-        ws,
-        json!({ "action": "subscribe", "channel": channel }),
-    )
-    .await;
+    send_json(ws, json!({ "action": "subscribe", "channel": channel })).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -151,7 +146,10 @@ async fn presence_channel_emits_here_to_new_subscriber() {
 
     // Frame 1: Subscribed ack.
     let frame = next_frame(&mut alice).await;
-    assert_eq!(frame["action"], "subscribed", "expected subscribed, got {frame}");
+    assert_eq!(
+        frame["action"], "subscribed",
+        "expected subscribed, got {frame}"
+    );
     assert_eq!(frame["channel"], "presence.lobby");
 
     // Frame 2: presence.here snapshot.
@@ -167,7 +165,10 @@ async fn presence_channel_emits_here_to_new_subscriber() {
 
     // Frame 3: presence.joined for Alice herself (hub echo — self-join).
     let frame = next_frame(&mut alice).await;
-    assert_eq!(frame["event"], "presence.joined", "expected self-join, got {frame}");
+    assert_eq!(
+        frame["event"], "presence.joined",
+        "expected self-join, got {frame}"
+    );
 
     alice.close(None).await.unwrap();
 }
@@ -190,7 +191,10 @@ async fn presence_channel_broadcasts_joined_to_existing_subscribers() {
     // Drain Alice's own presence.joined (hub echoes the join to all
     // subscribers including the new subscriber themselves).
     let f = next_frame(&mut alice).await;
-    assert_eq!(f["event"], "presence.joined", "expected alice's own join, got {f}");
+    assert_eq!(
+        f["event"], "presence.joined",
+        "expected alice's own join, got {f}"
+    );
 
     // Bob subscribes second.
     let mut bob = connect(&url).await;
@@ -235,7 +239,10 @@ async fn presence_channel_broadcasts_left_on_disconnect() {
     let _ = next_frame(&mut alice).await; // presence.here (empty)
     // Drain Alice's own presence.joined.
     let f = next_frame(&mut alice).await;
-    assert_eq!(f["event"], "presence.joined", "expected alice's own join, got {f}");
+    assert_eq!(
+        f["event"], "presence.joined",
+        "expected alice's own join, got {f}"
+    );
 
     // Bob subscribes.
     let mut bob = connect(&url).await;
@@ -246,7 +253,10 @@ async fn presence_channel_broadcasts_left_on_disconnect() {
     let f = timeout(TokioDuration::from_secs(2), next_frame(&mut bob))
         .await
         .expect("bob receives own presence.joined within 2s");
-    assert_eq!(f["event"], "presence.joined", "expected bob's own join, got {f}");
+    assert_eq!(
+        f["event"], "presence.joined",
+        "expected bob's own join, got {f}"
+    );
 
     // Consume Alice's presence.joined for Bob.
     let joined = timeout(TokioDuration::from_secs(2), next_frame(&mut alice))

@@ -19,8 +19,8 @@
 //! happy path explicit.
 
 use suprnova::{
-    handler, json_response, Auth, FrameworkError, Image, MaxSize, MultipartRequest, Response,
-    Storage, UploadedFile,
+    Auth, FrameworkError, Image, MaxSize, MultipartRequest, Response, Storage, UploadedFile,
+    handler, json_response,
 };
 
 use crate::models::users::User;

@@ -32,7 +32,7 @@
 
 use suprnova::eloquent::Collection;
 use suprnova::testing::TestDatabase;
-use suprnova::{accessor, attrs, model, Model};
+use suprnova::{Model, accessor, attrs, model};
 
 // ---- Models -------------------------------------------------------------
 

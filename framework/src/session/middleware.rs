@@ -1,9 +1,9 @@
 //! Session middleware for suprnova framework
 
-use crate::http::cookie::{Cookie, SameSite};
-use crate::http::Response;
-use crate::middleware::{Middleware, Next};
 use crate::Request;
+use crate::http::Response;
+use crate::http::cookie::{Cookie, SameSite};
+use crate::middleware::{Middleware, Next};
 use async_trait::async_trait;
 use rand::RngExt;
 use std::sync::{Arc, Mutex};
@@ -182,10 +182,7 @@ impl SessionMiddleware {
     /// the error path is purely defensive. If it ever does fire, the
     /// middleware fails the request closed rather than emit a
     /// plaintext session id — codex review finding #1.
-    fn create_session_cookie(
-        &self,
-        session_id: &str,
-    ) -> Result<Cookie, crate::FrameworkError> {
+    fn create_session_cookie(&self, session_id: &str) -> Result<Cookie, crate::FrameworkError> {
         let base = Cookie::encrypted(&self.config.cookie_name, session_id)?;
         let mut cookie = base
             .http_only(self.config.cookie_http_only)
@@ -319,8 +316,7 @@ impl Middleware for SessionMiddleware {
         {
             match Cookie::read_encrypted(&raw_cookie) {
                 Ok(plaintext) => {
-                    let ttl_minutes =
-                        (self.config.remember_lifetime.as_secs() / 60) as i64;
+                    let ttl_minutes = (self.config.remember_lifetime.as_secs() / 60) as i64;
                     match crate::auth::remember::verify_and_rotate(&plaintext, ttl_minutes).await {
                         Ok(Some((user_id, new_plaintext))) => {
                             // Hydrate session. Mirrors `Auth::login`:

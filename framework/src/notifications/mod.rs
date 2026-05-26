@@ -20,8 +20,8 @@ pub use notify_job::SendNotificationJob;
 use crate::error::FrameworkError;
 use crate::lock;
 use async_trait::async_trait;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -147,11 +147,7 @@ impl NotificationDispatcher {
     /// not currently span). On completion the span records a
     /// `duration_ms` event so an observability backend can measure
     /// fan-out latency end-to-end.
-    pub async fn notify<N, R>(
-        &self,
-        recipient: &R,
-        notification: &N,
-    ) -> Result<(), FrameworkError>
+    pub async fn notify<N, R>(&self, recipient: &R, notification: &N) -> Result<(), FrameworkError>
     where
         N: Notification,
         R: Notifiable + ?Sized,
@@ -223,13 +219,11 @@ pub fn set_dispatcher(d: Arc<NotificationDispatcher>) {
 }
 
 pub(crate) fn dispatcher_for_queue() -> Result<Arc<NotificationDispatcher>, FrameworkError> {
-    lock::read(&DISPATCHER)?
-        .clone()
-        .ok_or_else(|| {
-            FrameworkError::internal(
-                "no NotificationDispatcher registered; call notifications::set_dispatcher(...)",
-            )
-        })
+    lock::read(&DISPATCHER)?.clone().ok_or_else(|| {
+        FrameworkError::internal(
+            "no NotificationDispatcher registered; call notifications::set_dispatcher(...)",
+        )
+    })
 }
 
 /// Register a notification type for queue dispatch. Call once at boot for
@@ -259,9 +253,9 @@ pub fn register_notification_factory<N: Notification>() {
 
 pub(crate) fn factory_for(name: &str) -> Result<NotificationFactory, FrameworkError> {
     let g = lock::read(&FACTORIES)?;
-    let map = g.as_ref().ok_or_else(|| {
-        FrameworkError::internal(format!("unknown notification: {name}"))
-    })?;
+    let map = g
+        .as_ref()
+        .ok_or_else(|| FrameworkError::internal(format!("unknown notification: {name}")))?;
     map.get(name)
         .copied()
         .ok_or_else(|| FrameworkError::internal(format!("unknown notification: {name}")))
@@ -281,10 +275,7 @@ impl Notify {
     /// Queue a notification for asynchronous delivery via the bound
     /// dispatcher. Pre-resolves the per-channel routes from `recipient` so
     /// the worker does not need a `Notifiable` handle at execute time.
-    pub async fn queue<N, R>(
-        recipient: &R,
-        notification: N,
-    ) -> Result<(), FrameworkError>
+    pub async fn queue<N, R>(recipient: &R, notification: N) -> Result<(), FrameworkError>
     where
         N: Notification,
         R: Notifiable + ?Sized,
@@ -296,9 +287,8 @@ impl Notify {
                 routes.insert((*c).to_string(), r);
             }
         }
-        let payload = serde_json::to_value(&notification).map_err(|e| {
-            FrameworkError::internal(format!("Notify::queue encode: {e}"))
-        })?;
+        let payload = serde_json::to_value(&notification)
+            .map_err(|e| FrameworkError::internal(format!("Notify::queue encode: {e}")))?;
         let job = SendNotificationJob {
             notifiable_route_per_channel: routes,
             notification_name: N::notification_name().to_string(),
@@ -312,10 +302,7 @@ impl Notify {
     /// bound dispatcher. Returns on the first channel error per the
     /// dispatcher contract — channels that already succeeded are not
     /// rolled back.
-    pub async fn send<N, R>(
-        recipient: &R,
-        notification: &N,
-    ) -> Result<(), FrameworkError>
+    pub async fn send<N, R>(recipient: &R, notification: &N) -> Result<(), FrameworkError>
     where
         N: Notification,
         R: Notifiable + ?Sized,

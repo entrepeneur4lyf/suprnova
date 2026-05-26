@@ -16,10 +16,18 @@ struct M {
 
 #[async_trait]
 impl Mailable for M {
-    fn mailable_name() -> &'static str { "M" }
-    fn subject(&self) -> String { "subj".into() }
-    fn html_template_source(&self) -> Option<String> { Some("<p>hi</p>".into()) }
-    fn from(&self) -> Option<Address> { Some("noreply@suprnova.dev".into()) }
+    fn mailable_name() -> &'static str {
+        "M"
+    }
+    fn subject(&self) -> String {
+        "subj".into()
+    }
+    fn html_template_source(&self) -> Option<String> {
+        Some("<p>hi</p>".into())
+    }
+    fn from(&self) -> Option<Address> {
+        Some("noreply@suprnova.dev".into())
+    }
 }
 
 #[tokio::test]
@@ -38,7 +46,10 @@ async fn resend_emits_v1_emails_request() {
 
     let transport = ResendMailTransport::with_endpoint("test-key", server.uri());
     Mail::set_transport(Arc::new(transport));
-    Mail::to("alice@example.org").send(M::default()).await.unwrap();
+    Mail::to("alice@example.org")
+        .send(M::default())
+        .await
+        .unwrap();
 
     let reqs = server.received_requests().await.unwrap();
     assert_eq!(reqs.len(), 1);
@@ -63,11 +74,17 @@ async fn resend_maps_api_error_to_framework_error() {
 
     let transport = ResendMailTransport::with_endpoint("test-key", server.uri());
     Mail::set_transport(Arc::new(transport));
-    let err = Mail::to("bad@example.org").send(M::default()).await.unwrap_err();
+    let err = Mail::to("bad@example.org")
+        .send(M::default())
+        .await
+        .unwrap_err();
     let s = format!("{err}");
     assert!(s.contains("Resend"), "error mentions provider: {s}");
     assert!(s.contains("422"), "error includes HTTP status: {s}");
-    assert!(s.contains("Invalid `to` field"), "error surfaces upstream body: {s}");
+    assert!(
+        s.contains("Invalid `to` field"),
+        "error surfaces upstream body: {s}"
+    );
 }
 
 // Attachment test: Resend's JSON shape uses
@@ -79,10 +96,18 @@ struct WithPdf {
 
 #[async_trait]
 impl Mailable for WithPdf {
-    fn mailable_name() -> &'static str { "WithPdf" }
-    fn subject(&self) -> String { "invoice".into() }
-    fn text_template_source(&self) -> Option<String> { Some("see attached".into()) }
-    fn from(&self) -> Option<Address> { Some("noreply@suprnova.dev".into()) }
+    fn mailable_name() -> &'static str {
+        "WithPdf"
+    }
+    fn subject(&self) -> String {
+        "invoice".into()
+    }
+    fn text_template_source(&self) -> Option<String> {
+        Some("see attached".into())
+    }
+    fn from(&self) -> Option<Address> {
+        Some("noreply@suprnova.dev".into())
+    }
     fn attachments(&self) -> Vec<suprnova::mail::Attachment> {
         vec![suprnova::mail::Attachment {
             filename: "invoice.pdf".into(),
@@ -104,7 +129,10 @@ async fn resend_encodes_attachments_as_base64_with_filename_and_content_type() {
 
     let transport = ResendMailTransport::with_endpoint("test-key", server.uri());
     Mail::set_transport(Arc::new(transport));
-    Mail::to("alice@example.org").send(WithPdf::default()).await.unwrap();
+    Mail::to("alice@example.org")
+        .send(WithPdf::default())
+        .await
+        .unwrap();
 
     let reqs = server.received_requests().await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();

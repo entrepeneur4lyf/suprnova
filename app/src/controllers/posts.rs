@@ -17,7 +17,7 @@
 //! `app/src/policies/post_policy.rs`.
 
 use serde::Deserialize;
-use suprnova::{attrs, Auth, FrameworkError, Gate, HttpResponse, Model, Request, Response};
+use suprnova::{Auth, FrameworkError, Gate, HttpResponse, Model, Request, Response, attrs};
 
 use crate::models::posts::Post;
 use crate::models::users::User;

@@ -69,10 +69,10 @@ use std::marker::PhantomData;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 
 use crate::database::DB;
-use crate::eloquent::collection::Collection;
-use crate::eloquent::model::{json_value_to_sea_value, Model};
-use crate::eloquent::relations::{Relation, RelationKind};
 use crate::eloquent::EloquentModel;
+use crate::eloquent::collection::Collection;
+use crate::eloquent::model::{Model, json_value_to_sea_value};
+use crate::eloquent::relations::{Relation, RelationKind};
 use crate::error::FrameworkError;
 
 /// Two-hop one-to-many relation from parent `A` through intermediate

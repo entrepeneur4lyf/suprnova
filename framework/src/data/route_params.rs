@@ -101,7 +101,10 @@ mod tests {
 
     #[test]
     fn i64_negative() {
-        assert_eq!(parse_i64("id", "-7").unwrap(), Value::Number((-7i64).into()));
+        assert_eq!(
+            parse_i64("id", "-7").unwrap(),
+            Value::Number((-7i64).into())
+        );
     }
 
     #[test]

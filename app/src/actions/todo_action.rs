@@ -5,9 +5,9 @@
 //! the create path, `Todo::all()` covers the listing path; the old
 //! `EntityExt` / `EntityExtMut` direct entity calls are gone.
 
+use suprnova::Model;
 use suprnova::attrs;
 use suprnova::injectable;
-use suprnova::Model;
 
 use crate::models::todos::Todo;
 

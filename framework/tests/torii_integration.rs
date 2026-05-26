@@ -20,13 +20,13 @@
 //! runs, regardless of parallel execution order.
 
 use once_cell::sync::Lazy;
-use sea_orm_migration::prelude::*;
 use sea_orm_migration::MigratorTrait;
+use sea_orm_migration::prelude::*;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
-use suprnova::torii_integration::{init_torii, middleware::BearerTokenMiddleware, ToriiConfig};
 use suprnova::Auth;
+use suprnova::torii_integration::{ToriiConfig, init_torii, middleware::BearerTokenMiddleware};
 
 /// One tokio runtime shared across every test in this file.
 static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
@@ -110,7 +110,11 @@ impl MigrationTrait for CreateAuthCeremonyTokensTable {
                             .not_null(),
                     )
                     .col(ColumnDef::new(AuthCeremonyTokens::Kind).string().not_null())
-                    .col(ColumnDef::new(AuthCeremonyTokens::Payload).text().not_null())
+                    .col(
+                        ColumnDef::new(AuthCeremonyTokens::Payload)
+                            .text()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(AuthCeremonyTokens::ExpiresAt)
                             .timestamp()
@@ -236,7 +240,10 @@ fn magic_link_send_returns_token() {
             .unwrap();
 
         assert!(!token.is_empty());
-        assert!(token.len() >= 16, "token should be a substantial random string");
+        assert!(
+            token.len() >= 16,
+            "token should be a substantial random string"
+        );
     });
 }
 
@@ -305,8 +312,7 @@ fn passkey_registration_ceremony_stored_in_session() {
                 .await
                 .expect("begin_registration should succeed");
 
-            suprnova::session::session()
-                .and_then(|s| s.get::<String>("passkey_reg"))
+            suprnova::session::session().and_then(|s| s.get::<String>("passkey_reg"))
         })
         .await
         .expect("begin_registration must store a ceremony selector under 'passkey_reg'");
@@ -417,45 +423,47 @@ fn passkey_finish_rejects_email_mismatch_with_session_state() {
         let bob = "bob-mismatch@example.com";
 
         let slot = suprnova::session::new_session_slot_for_test();
-        let (mismatch_err, second_call_err) = suprnova::session::session_scope_for_test(slot, async {
-            // Begin a registration ceremony bound to Alice's email.
-            Auth::passkey()
-                .begin_registration(alice)
-                .await
-                .expect("begin_registration should succeed");
+        let (mismatch_err, second_call_err) =
+            suprnova::session::session_scope_for_test(slot, async {
+                // Begin a registration ceremony bound to Alice's email.
+                Auth::passkey()
+                    .begin_registration(alice)
+                    .await
+                    .expect("begin_registration should succeed");
 
-            // Craft a syntactically-valid (but cryptographically fake)
-            // `RegisterPublicKeyCredential`. WebAuthn verification would
-            // reject it on signature grounds, but the email-mismatch check
-            // happens BEFORE webauthn touches the response — that's the
-            // entire point: the mismatch is caught without trusting the
-            // ceremony state at all.
-            let fake_response: RegisterPublicKeyCredential = serde_json::from_value(serde_json::json!({
-                "id": "AAAAAAA",
-                "rawId": "AAAAAAA",
-                "type": "public-key",
-                "response": {
-                    "attestationObject": "AAAAAAA",
-                    "clientDataJSON": "AAAAAAA"
-                },
-                "extensions": {}
-            }))
-            .expect("fake RegisterPublicKeyCredential JSON must deserialise");
+                // Craft a syntactically-valid (but cryptographically fake)
+                // `RegisterPublicKeyCredential`. WebAuthn verification would
+                // reject it on signature grounds, but the email-mismatch check
+                // happens BEFORE webauthn touches the response — that's the
+                // entire point: the mismatch is caught without trusting the
+                // ceremony state at all.
+                let fake_response: RegisterPublicKeyCredential =
+                    serde_json::from_value(serde_json::json!({
+                        "id": "AAAAAAA",
+                        "rawId": "AAAAAAA",
+                        "type": "public-key",
+                        "response": {
+                            "attestationObject": "AAAAAAA",
+                            "clientDataJSON": "AAAAAAA"
+                        },
+                        "extensions": {}
+                    }))
+                    .expect("fake RegisterPublicKeyCredential JSON must deserialise");
 
-            let first = Auth::passkey()
-                .finish_registration(bob, fake_response.clone())
-                .await
-                .expect_err("finish_registration with mismatched email must fail");
+                let first = Auth::passkey()
+                    .finish_registration(bob, fake_response.clone())
+                    .await
+                    .expect_err("finish_registration with mismatched email must fail");
 
-            // Second call: ceremony must be consumed → expect "not started or expired".
-            let second = Auth::passkey()
-                .finish_registration(alice, fake_response)
-                .await
-                .expect_err("second finish_registration must fail — ceremony already consumed");
+                // Second call: ceremony must be consumed → expect "not started or expired".
+                let second = Auth::passkey()
+                    .finish_registration(alice, fake_response)
+                    .await
+                    .expect_err("second finish_registration must fail — ceremony already consumed");
 
-            (first, second)
-        })
-        .await;
+                (first, second)
+            })
+            .await;
 
         assert_eq!(
             mismatch_err.status_code(),
@@ -510,22 +518,25 @@ fn passkey_finish_email_comparison_is_case_insensitive() {
                 .await
                 .expect("begin_registration should succeed");
 
-            let fake_response: RegisterPublicKeyCredential = serde_json::from_value(serde_json::json!({
-                "id": "AAAAAAA",
-                "rawId": "AAAAAAA",
-                "type": "public-key",
-                "response": {
-                    "attestationObject": "AAAAAAA",
-                    "clientDataJSON": "AAAAAAA"
-                },
-                "extensions": {}
-            }))
-            .expect("fake RegisterPublicKeyCredential JSON must deserialise");
+            let fake_response: RegisterPublicKeyCredential =
+                serde_json::from_value(serde_json::json!({
+                    "id": "AAAAAAA",
+                    "rawId": "AAAAAAA",
+                    "type": "public-key",
+                    "response": {
+                        "attestationObject": "AAAAAAA",
+                        "clientDataJSON": "AAAAAAA"
+                    },
+                    "extensions": {}
+                }))
+                .expect("fake RegisterPublicKeyCredential JSON must deserialise");
 
             Auth::passkey()
                 .finish_registration(finish_email, fake_response)
                 .await
-                .expect_err("finish must still fail — but on webauthn verification, not email mismatch")
+                .expect_err(
+                    "finish must still fail — but on webauthn verification, not email mismatch",
+                )
         })
         .await;
 
@@ -552,17 +563,18 @@ fn passkey_finish_missing_session_state_returns_400() {
     RT.block_on(async {
         let slot = suprnova::session::new_session_slot_for_test();
         let err = suprnova::session::session_scope_for_test(slot, async {
-            let fake_response: RegisterPublicKeyCredential = serde_json::from_value(serde_json::json!({
-                "id": "AAAAAAA",
-                "rawId": "AAAAAAA",
-                "type": "public-key",
-                "response": {
-                    "attestationObject": "AAAAAAA",
-                    "clientDataJSON": "AAAAAAA"
-                },
-                "extensions": {}
-            }))
-            .expect("fake RegisterPublicKeyCredential JSON must deserialise");
+            let fake_response: RegisterPublicKeyCredential =
+                serde_json::from_value(serde_json::json!({
+                    "id": "AAAAAAA",
+                    "rawId": "AAAAAAA",
+                    "type": "public-key",
+                    "response": {
+                        "attestationObject": "AAAAAAA",
+                        "clientDataJSON": "AAAAAAA"
+                    },
+                    "extensions": {}
+                }))
+                .expect("fake RegisterPublicKeyCredential JSON must deserialise");
 
             Auth::passkey()
                 .finish_registration("never-began@example.com", fake_response)
@@ -800,7 +812,10 @@ fn oauth_complete_rejects_when_state_doesnt_match_session_stored() {
         let slot = suprnova::session::new_session_slot_for_test();
         let result = suprnova::session::session_scope_for_test(slot, async {
             let state_a = Auth::oauth("github").begin().await.unwrap().state;
-            assert!(!state_a.is_empty(), "begin() must produce a non-empty state");
+            assert!(
+                !state_a.is_empty(),
+                "begin() must produce a non-empty state"
+            );
 
             // Forge a different state — must not match the stored state_a.
             Auth::oauth("github")
@@ -809,8 +824,8 @@ fn oauth_complete_rejects_when_state_doesnt_match_session_stored() {
         })
         .await;
 
-        let err = result
-            .expect_err("complete() must reject state that doesn't match the stored value");
+        let err =
+            result.expect_err("complete() must reject state that doesn't match the stored value");
         // Codex finding #7: CSRF mismatch is a caller error, must be 400.
         assert_eq!(
             err.status_code(),
@@ -850,14 +865,13 @@ fn oauth_begin_emits_pkce_challenge_and_stores_verifier_in_session() {
 
     RT.block_on(async {
         let slot = suprnova::session::new_session_slot_for_test();
-        let (url, stored_state) =
-            suprnova::session::session_scope_for_test(slot, async {
-                let kickoff = Auth::oauth("github").begin().await.unwrap();
-                let state: Option<String> = suprnova::session::session()
-                    .and_then(|s| s.get("oauth_state_github"));
-                (kickoff.authorization_url, state)
-            })
-            .await;
+        let (url, stored_state) = suprnova::session::session_scope_for_test(slot, async {
+            let kickoff = Auth::oauth("github").begin().await.unwrap();
+            let state: Option<String> =
+                suprnova::session::session().and_then(|s| s.get("oauth_state_github"));
+            (kickoff.authorization_url, state)
+        })
+        .await;
 
         assert!(
             url.contains("code_challenge="),
@@ -1241,7 +1255,9 @@ async fn build_request_async(auth_header: Option<&str>) -> suprnova::Request {
         client.write_all(http_bytes.as_bytes()).await.unwrap();
     }
 
-    req_rx.await.expect("server should have received the request")
+    req_rx
+        .await
+        .expect("server should have received the request")
 }
 
 /// `BearerTokenMiddleware` binds the session when a valid token is presented.
@@ -1285,9 +1301,8 @@ fn bearer_token_middleware_binds_session_when_token_valid() {
 
         let authenticated = suprnova::session::session_scope_for_test(slot, async {
             // Stub `next` that just returns OK without touching the session.
-            let next: suprnova::Next = Arc::new(|_req| {
-                Box::pin(async { Ok(suprnova::HttpResponse::text("ok")) })
-            });
+            let next: suprnova::Next =
+                Arc::new(|_req| Box::pin(async { Ok(suprnova::HttpResponse::text("ok")) }));
 
             let mw = BearerTokenMiddleware;
             use suprnova::Middleware;
@@ -1341,9 +1356,8 @@ fn bearer_middleware_stores_raw_user_id_not_hash() {
         let slot = suprnova::session::new_session_slot_for_test();
 
         let session_uid = suprnova::session::session_scope_for_test(slot, async {
-            let next: suprnova::Next = Arc::new(|_req| {
-                Box::pin(async { Ok(suprnova::HttpResponse::text("ok")) })
-            });
+            let next: suprnova::Next =
+                Arc::new(|_req| Box::pin(async { Ok(suprnova::HttpResponse::text("ok")) }));
 
             let mw = BearerTokenMiddleware;
             use suprnova::Middleware;
@@ -1375,19 +1389,17 @@ fn bearer_token_middleware_passes_through_when_token_invalid() {
 
         let slot = suprnova::session::new_session_slot_for_test();
 
-        let (authenticated, response_ok) =
-            suprnova::session::session_scope_for_test(slot, async {
-                let next: suprnova::Next = Arc::new(|_req| {
-                    Box::pin(async { Ok(suprnova::HttpResponse::text("ok")) })
-                });
+        let (authenticated, response_ok) = suprnova::session::session_scope_for_test(slot, async {
+            let next: suprnova::Next =
+                Arc::new(|_req| Box::pin(async { Ok(suprnova::HttpResponse::text("ok")) }));
 
-                let mw = BearerTokenMiddleware;
-                use suprnova::Middleware;
-                let response = mw.handle(request, next).await;
+            let mw = BearerTokenMiddleware;
+            use suprnova::Middleware;
+            let response = mw.handle(request, next).await;
 
-                (Auth::check(), response.is_ok())
-            })
-            .await;
+            (Auth::check(), response.is_ok())
+        })
+        .await;
 
         assert!(
             !authenticated,

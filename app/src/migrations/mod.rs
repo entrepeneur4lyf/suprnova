@@ -5,11 +5,11 @@ mod m20251208_200000_create_todos_table;
 mod m20251208_220000_create_sessions_table;
 mod m20251208_230000_create_remember_tokens_table;
 mod m20251208_240000_create_posts_table;
+mod m20251209_000000_create_auth_ceremony_tokens_table;
 mod m_2026_05_19_phase_10a_user_columns;
 mod m_2026_05_19_phase_10b_relations_schema;
 mod m_2026_05_20_phase_10b_profiles;
 mod m_2026_05_21_phase_10c_audit_log;
-mod m20251209_000000_create_auth_ceremony_tokens_table;
 
 pub struct Migrator;
 

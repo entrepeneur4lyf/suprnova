@@ -7,7 +7,7 @@ mod response;
 pub mod upload;
 
 pub use body::{collect_body, parse_form, parse_json};
-pub use cookie::{parse_cookies, Cookie, CookieOptions, SameSite};
+pub use cookie::{Cookie, CookieOptions, SameSite, parse_cookies};
 pub use extract::{FromParam, FromRequest};
 pub use form_request::FormRequest;
 pub use request::{BodyState, Request, RequestParts};

@@ -17,7 +17,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 
-use suprnova::data::{current_include_set, IncludeMiddleware, RequestIncludeSet};
+use suprnova::data::{IncludeMiddleware, RequestIncludeSet, current_include_set};
 use suprnova::middleware::Middleware;
 use suprnova::{HttpResponse, Next, Request};
 
@@ -92,11 +92,19 @@ async fn drive(
 #[tokio::test]
 async fn middleware_binds_include_set_for_handler() {
     let captured: Arc<Mutex<Option<RequestIncludeSet>>> = Arc::new(Mutex::new(None));
-    let resp = drive("http://localhost/items?include=author,tags&only=id", captured.clone()).await;
+    let resp = drive(
+        "http://localhost/items?include=author,tags&only=id",
+        captured.clone(),
+    )
+    .await;
 
     assert_eq!(resp.status(), 200);
 
-    let set = captured.lock().unwrap().take().expect("next was not called");
+    let set = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("next was not called");
     assert_eq!(set.include, vec!["author", "tags"]);
     assert_eq!(set.only.as_deref(), Some(["id".to_string()].as_slice()));
     assert!(set.exclude.is_empty());
@@ -110,8 +118,15 @@ async fn middleware_passes_through_empty_set() {
 
     assert_eq!(resp.status(), 200);
 
-    let set = captured.lock().unwrap().take().expect("next was not called");
-    assert!(set.is_empty(), "expected empty set for request with no query string, got {set:?}");
+    let set = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("next was not called");
+    assert!(
+        set.is_empty(),
+        "expected empty set for request with no query string, got {set:?}"
+    );
 }
 
 #[tokio::test]
@@ -129,7 +144,11 @@ async fn middleware_parses_array_form_via_hyper() {
 
     assert_eq!(resp.status(), 200);
 
-    let set = captured.lock().unwrap().take().expect("next was not called");
+    let set = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("next was not called");
     assert_eq!(set.include, vec!["author", "tags"]);
     assert!(set.exclude.is_empty());
     assert!(set.only.is_none());

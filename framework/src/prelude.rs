@@ -64,6 +64,6 @@ pub use crate::mail::{Address, Attachment, Mail, MailFake, Mailable};
 // (`Notifiable`, `Notification`, `NotificationMailable`) and the
 // rendering value used by the mail channel.
 pub use crate::notifications::channels::mail::{
-    register_mail_renderer, MailRendering, NotificationMailable,
+    MailRendering, NotificationMailable, register_mail_renderer,
 };
 pub use crate::notifications::{Notifiable, Notification, Notify};

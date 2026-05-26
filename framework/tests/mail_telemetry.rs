@@ -49,7 +49,9 @@ async fn successful_send_emits_mail_send_span_with_shape_fields() {
 
     Mail::to("alice@example.org")
         .cc("team@suprnova.dev")
-        .send(Greeting { name: "Alice".into() })
+        .send(Greeting {
+            name: "Alice".into(),
+        })
         .await
         .unwrap();
 
@@ -68,22 +70,10 @@ async fn successful_send_emits_mail_send_span_with_shape_fields() {
     );
 
     // Message-shape fields.
-    assert!(
-        logs_contain("to_count=1"),
-        "to_count must be captured"
-    );
-    assert!(
-        logs_contain("cc_count=1"),
-        "cc_count must be captured"
-    );
-    assert!(
-        logs_contain("has_html=true"),
-        "has_html must be captured"
-    );
-    assert!(
-        logs_contain("has_text=true"),
-        "has_text must be captured"
-    );
+    assert!(logs_contain("to_count=1"), "to_count must be captured");
+    assert!(logs_contain("cc_count=1"), "cc_count must be captured");
+    assert!(logs_contain("has_html=true"), "has_html must be captured");
+    assert!(logs_contain("has_text=true"), "has_text must be captured");
     assert!(
         logs_contain("attachment_count=0"),
         "attachment_count must be captured"
@@ -110,8 +100,8 @@ async fn failed_send_emits_warn_event_with_error_field() {
     // is the only way to exercise the warn path.
 
     use std::sync::Arc;
-    use suprnova::mail::{MailTransport, OutgoingMessage};
     use suprnova::FrameworkError;
+    use suprnova::mail::{MailTransport, OutgoingMessage};
 
     struct AlwaysFailTransport;
 
@@ -128,7 +118,9 @@ async fn failed_send_emits_warn_event_with_error_field() {
     Mail::set_transport(Arc::new(AlwaysFailTransport));
 
     let err = Mail::to("alice@example.org")
-        .send(Greeting { name: "Alice".into() })
+        .send(Greeting {
+            name: "Alice".into(),
+        })
         .await
         .unwrap_err();
     assert!(

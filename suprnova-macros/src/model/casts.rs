@@ -87,11 +87,7 @@ pub fn apply_arm(name: &str, ident: &syn::Ident, cast_ty: Option<&Type>) -> Toke
 /// A field that's both `mutators = [...]` and `casts = { ... }` keeps
 /// both — the mutator transforms the runtime value, the cast handles
 /// the storage shape.
-pub fn mutator_apply_arm(
-    name: &str,
-    ident: &syn::Ident,
-    cast_ty: Option<&Type>,
-) -> TokenStream {
+pub fn mutator_apply_arm(name: &str, ident: &syn::Ident, cast_ty: Option<&Type>) -> TokenStream {
     let setter = quote::format_ident!("set_{}", ident);
     let storage_apply = match cast_ty {
         Some(cast_ty) => quote! {

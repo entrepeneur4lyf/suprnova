@@ -42,11 +42,7 @@ pub mod heartbeat;
 /// `Err(_)` logs the error and closes with code 1011 (internal error).
 #[async_trait]
 pub trait WebSocketHandler: Send + Sync + 'static {
-    async fn handle(
-        &self,
-        socket: WsSocket,
-        request: Request,
-    ) -> Result<(), FrameworkError>;
+    async fn handle(&self, socket: WsSocket, request: Request) -> Result<(), FrameworkError>;
 }
 
 /// Per-route WebSocket configuration.
@@ -81,8 +77,7 @@ impl WsConfig {
     pub(crate) fn to_tungstenite_config(
         &self,
     ) -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
-        let mut cfg =
-            tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
+        let mut cfg = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
         cfg.max_message_size = Some(self.max_message_size);
         cfg.max_frame_size = Some(self.max_frame_size);
         cfg

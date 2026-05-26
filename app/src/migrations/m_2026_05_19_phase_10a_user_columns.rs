@@ -72,11 +72,7 @@ impl MigrationTrait for Migration {
             .alter_table(
                 Table::alter()
                     .table(Alias::new("users"))
-                    .add_column(
-                        ColumnDef::new(Alias::new("remember_token"))
-                            .string()
-                            .null(),
-                    )
+                    .add_column(ColumnDef::new(Alias::new("remember_token")).string().null())
                     .to_owned(),
             )
             .await?;

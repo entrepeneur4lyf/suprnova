@@ -117,12 +117,10 @@ impl Auth {
         // attribute does not "lie" about validity. Codex finding #13
         // required "expires-at matches token expiration."
         let config = crate::session::SessionConfig::from_env();
-        let max_age = std::time::Duration::from_secs(
-            (ttl_minutes.max(0) as u64).saturating_mul(60),
-        );
-        let cookie = crate::session::middleware::create_remember_cookie(
-            &config, &plaintext, max_age,
-        )?;
+        let max_age =
+            std::time::Duration::from_secs((ttl_minutes.max(0) as u64).saturating_mul(60));
+        let cookie =
+            crate::session::middleware::create_remember_cookie(&config, &plaintext, max_age)?;
         crate::session::middleware::push_pending_cookie(cookie);
 
         Ok(())
@@ -216,7 +214,9 @@ impl Auth {
     ///     // Authentication successful
     /// }
     /// ```
-    pub async fn attempt<F, Fut>(validator: F) -> Result<Option<String>, crate::error::FrameworkError>
+    pub async fn attempt<F, Fut>(
+        validator: F,
+    ) -> Result<Option<String>, crate::error::FrameworkError>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<Option<String>, crate::error::FrameworkError>>,
@@ -297,8 +297,8 @@ impl Auth {
     /// # Type Parameters
     ///
     /// * `T` - The concrete user type that implements `Authenticatable` and `Clone`
-    pub async fn user_as<T: Authenticatable + Clone>(
-    ) -> Result<Option<T>, crate::error::FrameworkError> {
+    pub async fn user_as<T: Authenticatable + Clone>()
+    -> Result<Option<T>, crate::error::FrameworkError> {
         let user = Self::user().await?;
         Ok(user.and_then(|u| u.as_any().downcast_ref::<T>().cloned()))
     }

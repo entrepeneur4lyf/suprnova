@@ -6,8 +6,8 @@
 use crate::logging::config::LogConfig;
 use crate::logging::init::install_base_subscriber;
 use std::env;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Environment-driven OpenTelemetry configuration.
 ///
@@ -48,8 +48,7 @@ impl OtelConfig {
                 Some(trimmed.to_string())
             }
         });
-        let service_name =
-            env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "suprnova".to_string());
+        let service_name = env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "suprnova".to_string());
         let service_version = env::var("OTEL_SERVICE_VERSION")
             .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
         let disabled = matches!(
@@ -122,8 +121,7 @@ impl TelemetryGuard {
     /// to the collector over HTTP. It is safe to call exactly once;
     /// subsequent calls are no-ops.
     pub async fn shutdown(self) {
-        if self.shutdown_called.swap(true, Ordering::SeqCst) {
-        }
+        if self.shutdown_called.swap(true, Ordering::SeqCst) {}
         #[cfg(feature = "otel")]
         {
             if let Some(provider) = &self.tracer_provider {
@@ -210,14 +208,14 @@ pub fn init_telemetry(log_config: LogConfig, otel_config: OtelConfig) -> Telemet
 fn init_telemetry_with_otel(log_config: LogConfig, otel_config: OtelConfig) -> TelemetryGuard {
     use crate::logging::config::LogFormat;
     use crate::logging::init::build_env_filter;
-    use opentelemetry::global;
     use opentelemetry::KeyValue;
+    use opentelemetry::global;
     use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
     use opentelemetry_otlp::WithExportConfig;
+    use opentelemetry_sdk::Resource;
     use opentelemetry_sdk::logs::SdkLoggerProvider;
     use opentelemetry_sdk::metrics::SdkMeterProvider;
     use opentelemetry_sdk::trace::SdkTracerProvider;
-    use opentelemetry_sdk::Resource;
     use opentelemetry_semantic_conventions::resource as semconv;
     use tracing_subscriber::fmt;
     use tracing_subscriber::layer::SubscriberExt;
@@ -229,7 +227,10 @@ fn init_telemetry_with_otel(log_config: LogConfig, otel_config: OtelConfig) -> T
     let resource = Resource::builder()
         .with_attributes(vec![
             KeyValue::new(semconv::SERVICE_NAME, otel_config.service_name.clone()),
-            KeyValue::new(semconv::SERVICE_VERSION, otel_config.service_version.clone()),
+            KeyValue::new(
+                semconv::SERVICE_VERSION,
+                otel_config.service_version.clone(),
+            ),
         ])
         .build();
 

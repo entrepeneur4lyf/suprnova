@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
 use suprnova::broadcasting::{
@@ -25,12 +25,7 @@ impl Channel for PublicChat {
     }
 
     /// Allow client-initiated publishes for standard chat events only.
-    async fn authorize_publish(
-        &self,
-        _req: &Request,
-        event: &str,
-        _data: &Value,
-    ) -> bool {
+    async fn authorize_publish(&self, _req: &Request, event: &str, _data: &Value) -> bool {
         event == "MessagePosted"
     }
 }
@@ -123,7 +118,9 @@ async fn read_server_frame(
 async fn subscribe_and_receive_event_round_trip() {
     let (port, hub) = spawn_broadcasting_server().await;
     let url = format!("ws://127.0.0.1:{port}/ws/broadcast");
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
 
     // Subscribe to public channel
     let sub = serde_json::to_string(&json!({
@@ -158,7 +155,9 @@ async fn subscribe_and_receive_event_round_trip() {
 async fn unauthorized_subscribe_returns_error_frame() {
     let (port, _hub) = spawn_broadcasting_server().await;
     let url = format!("ws://127.0.0.1:{port}/ws/broadcast");
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
 
     // Subscribe to private channel with no token
     let sub = serde_json::to_string(&json!({
@@ -179,32 +178,30 @@ async fn unauthorized_subscribe_returns_error_frame() {
 async fn unsubscribe_stops_event_delivery() {
     let (port, hub) = spawn_broadcasting_server().await;
     let url = format!("ws://127.0.0.1:{port}/ws/broadcast");
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
 
     // Subscribe
-    ws.send(
-        Message::text(
-            serde_json::to_string(&json!({
-                "action": "subscribe",
-                "channel": "chat.public"
-            }))
-            .unwrap(),
-        ),
-    )
+    ws.send(Message::text(
+        serde_json::to_string(&json!({
+            "action": "subscribe",
+            "channel": "chat.public"
+        }))
+        .unwrap(),
+    ))
     .await
     .unwrap();
     let _ = read_server_frame(&mut ws).await; // subscribed
 
     // Unsubscribe
-    ws.send(
-        Message::text(
-            serde_json::to_string(&json!({
-                "action": "unsubscribe",
-                "channel": "chat.public"
-            }))
-            .unwrap(),
-        ),
-    )
+    ws.send(Message::text(
+        serde_json::to_string(&json!({
+            "action": "unsubscribe",
+            "channel": "chat.public"
+        }))
+        .unwrap(),
+    ))
     .await
     .unwrap();
     let frame = read_server_frame(&mut ws).await;
@@ -223,8 +220,7 @@ async fn unsubscribe_stops_event_delivery() {
 
     // Wait a beat then confirm no event arrives.
     // 150ms is conservative — abort is near-instant.
-    let result =
-        tokio::time::timeout(Duration::from_millis(150), ws.next()).await;
+    let result = tokio::time::timeout(Duration::from_millis(150), ws.next()).await;
     assert!(
         result.is_err(),
         "should not receive an event after unsubscribe"
@@ -237,17 +233,17 @@ async fn unsubscribe_stops_event_delivery() {
 async fn unknown_channel_returns_error_frame() {
     let (port, _hub) = spawn_broadcasting_server().await;
     let url = format!("ws://127.0.0.1:{port}/ws/broadcast");
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
 
-    ws.send(
-        Message::text(
-            serde_json::to_string(&json!({
-                "action": "subscribe",
-                "channel": "nonexistent"
-            }))
-            .unwrap(),
-        ),
-    )
+    ws.send(Message::text(
+        serde_json::to_string(&json!({
+            "action": "subscribe",
+            "channel": "nonexistent"
+        }))
+        .unwrap(),
+    ))
     .await
     .unwrap();
 
@@ -262,7 +258,9 @@ async fn unknown_channel_returns_error_frame() {
 async fn client_publish_rejected_when_channel_denies() {
     let (port, _hub) = spawn_broadcasting_server().await;
     let url = format!("ws://127.0.0.1:{port}/ws/broadcast");
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
 
     // Subscribe to chat.no_publish (which has default authorize_publish = false).
     ws.send(Message::text(
@@ -362,7 +360,9 @@ async fn client_publish_allowed_when_channel_authorizes() {
 async fn client_publish_rejected_when_not_subscribed() {
     let (port, _hub) = spawn_broadcasting_server().await;
     let url = format!("ws://127.0.0.1:{port}/ws/broadcast");
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
 
     // Note: NO subscribe step. Jump straight to publish on chat.public,
     // which would have authorized "MessagePosted" if we had subscribed.
@@ -401,7 +401,9 @@ async fn client_publish_rejected_when_not_subscribed() {
 async fn client_publish_rejected_when_subscribed_to_different_channel() {
     let (port, _hub) = spawn_broadcasting_server().await;
     let url = format!("ws://127.0.0.1:{port}/ws/broadcast");
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
 
     // Subscribe to chat.no_publish (authorize_publish defaults to false anyway,
     // but that's fine — what we're testing is publish-to-different-channel).
@@ -449,7 +451,9 @@ async fn client_publish_rejected_when_subscribed_to_different_channel() {
 async fn client_publish_rejected_when_event_name_disallowed() {
     let (port, _hub) = spawn_broadcasting_server().await;
     let url = format!("ws://127.0.0.1:{port}/ws/broadcast");
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
 
     ws.send(Message::text(
         serde_json::to_string(&json!({

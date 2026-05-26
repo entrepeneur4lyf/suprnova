@@ -26,7 +26,7 @@
 
 use crate::error::FrameworkError;
 use crate::lock;
-use crate::mail::transport::{dispatch_with_telemetry, OutgoingMessage};
+use crate::mail::transport::{OutgoingMessage, dispatch_with_telemetry};
 use crate::mail::{Address, Attachment, Mail};
 use crate::notifications::{Channel, DynNotification, Notification};
 use async_trait::async_trait;
@@ -110,8 +110,7 @@ pub fn register_mail_renderer<N: NotificationMailable>() {
         })?;
         n.to_mail()
     };
-    let mut g = lock::write(&MAIL_RENDERERS)
-        .expect("mail renderer registry poisoned");
+    let mut g = lock::write(&MAIL_RENDERERS).expect("mail renderer registry poisoned");
     g.get_or_insert_with(HashMap::new)
         .insert(N::notification_name(), renderer);
 }

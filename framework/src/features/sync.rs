@@ -132,10 +132,7 @@ impl CompositeFeatureSync {
     /// crossing the slots (putting a cache in `data_sources`) breaks
     /// the staleness invariant the type is here to enforce. The
     /// argument names plus the module docs make the contract loud.
-    pub fn new(
-        data_sources: Vec<Arc<dyn FeatureSync>>,
-        caches: Vec<Arc<dyn FeatureSync>>,
-    ) -> Self {
+    pub fn new(data_sources: Vec<Arc<dyn FeatureSync>>, caches: Vec<Arc<dyn FeatureSync>>) -> Self {
         Self {
             data_sources,
             caches,
@@ -219,7 +216,10 @@ mod tests {
         let recorded = log.lock().unwrap().clone();
         assert_eq!(
             recorded,
-            vec!["db:flag-a:user:1".to_string(), "cache:flag-a:user:1".to_string()],
+            vec![
+                "db:flag-a:user:1".to_string(),
+                "cache:flag-a:user:1".to_string()
+            ],
             "data sources must complete before caches invalidate — \
              the db delay shouldn't let the cache run first",
         );

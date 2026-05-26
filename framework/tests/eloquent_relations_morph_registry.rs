@@ -13,7 +13,7 @@
 //!   round-trip).
 
 use std::any::TypeId;
-use suprnova::{find_morph_type, find_morph_type_by_id, morph_types, MorphTypeEntry};
+use suprnova::{MorphTypeEntry, find_morph_type, find_morph_type_by_id, morph_types};
 
 #[suprnova::model(table = "mr_posts", morph_type = "post")]
 pub struct MrPost {

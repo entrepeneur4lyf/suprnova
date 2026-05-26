@@ -6,8 +6,8 @@
 //! concatenated raw — which previously produced malformed redirects and
 //! parameter injection.
 
-use suprnova::routing::register_route_name;
 use suprnova::Redirect;
+use suprnova::routing::register_route_name;
 
 /// Extract the `Location` header from a `Response` produced by
 /// converting a `Redirect` (or `RedirectRouteBuilder`) into a
@@ -35,15 +35,15 @@ async fn redirect_encodes_space_and_ampersand_in_value() {
     let loc = location_of(resp);
 
     // `form_urlencoded` encodes spaces as `+` and `&` as `%26`.
-    assert_eq!(loc, "/dashboard?message=hello+world+%26+friends",
-               "got {loc}");
+    assert_eq!(
+        loc, "/dashboard?message=hello+world+%26+friends",
+        "got {loc}"
+    );
 }
 
 #[tokio::test]
 async fn redirect_encodes_equals_in_value() {
-    let resp: suprnova::Response = Redirect::to("/x")
-        .query("token", "a=b=c")
-        .into();
+    let resp: suprnova::Response = Redirect::to("/x").query("token", "a=b=c").into();
     let loc = location_of(resp);
 
     // `=` inside the value must be encoded so the receiver doesn't
@@ -53,22 +53,24 @@ async fn redirect_encodes_equals_in_value() {
 
 #[tokio::test]
 async fn redirect_encodes_unicode_value() {
-    let resp: suprnova::Response = Redirect::to("/u")
-        .query("name", "héllo")
-        .into();
+    let resp: suprnova::Response = Redirect::to("/u").query("name", "héllo").into();
     let loc = location_of(resp);
 
     // Multi-byte UTF-8 encodes per RFC 3986 — the character itself
     // must not appear raw in the Location header.
-    assert!(!loc.contains('é'), "unicode must be percent-encoded, got {loc}");
-    assert!(loc.contains("h%C3%A9llo"), "expected percent-encoded UTF-8, got {loc}");
+    assert!(
+        !loc.contains('é'),
+        "unicode must be percent-encoded, got {loc}"
+    );
+    assert!(
+        loc.contains("h%C3%A9llo"),
+        "expected percent-encoded UTF-8, got {loc}"
+    );
 }
 
 #[tokio::test]
 async fn redirect_encodes_special_chars_in_key() {
-    let resp: suprnova::Response = Redirect::to("/x")
-        .query("key&with=special", "v")
-        .into();
+    let resp: suprnova::Response = Redirect::to("/x").query("key&with=special", "v").into();
     let loc = location_of(resp);
 
     // Both `&` and `=` are URL-significant; both must be encoded
@@ -78,9 +80,7 @@ async fn redirect_encodes_special_chars_in_key() {
 
 #[tokio::test]
 async fn redirect_preserves_existing_query_string() {
-    let resp: suprnova::Response = Redirect::to("/search?q=foo")
-        .query("page", "2")
-        .into();
+    let resp: suprnova::Response = Redirect::to("/search?q=foo").query("page", "2").into();
     let loc = location_of(resp);
 
     // The new pair appends with `&`, the existing `q=foo` survives.
@@ -89,9 +89,7 @@ async fn redirect_preserves_existing_query_string() {
 
 #[tokio::test]
 async fn redirect_preserves_fragment_outside_query() {
-    let resp: suprnova::Response = Redirect::to("/page#section")
-        .query("p", "1")
-        .into();
+    let resp: suprnova::Response = Redirect::to("/page#section").query("p", "1").into();
     let loc = location_of(resp);
 
     // The fragment must land at the end, outside the query string —
@@ -104,7 +102,10 @@ async fn redirect_no_query_params_returns_location_unchanged() {
     let resp: suprnova::Response = Redirect::to("/clean").into();
     let loc = location_of(resp);
 
-    assert_eq!(loc, "/clean", "no query params must not append `?`, got {loc}");
+    assert_eq!(
+        loc, "/clean",
+        "no query params must not append `?`, got {loc}"
+    );
 }
 
 #[tokio::test]
@@ -123,10 +124,7 @@ async fn redirect_multiple_query_params_joined_with_ampersand() {
 async fn redirect_route_encodes_query_params() {
     // `RedirectRouteBuilder` has its own `build_url`; this proves it
     // uses the same encoder as `Redirect::to`.
-    register_route_name(
-        "_test_redirect_encoding_target",
-        "/test/encoded/target",
-    );
+    register_route_name("_test_redirect_encoding_target", "/test/encoded/target");
 
     let resp: suprnova::Response = Redirect::route("_test_redirect_encoding_target")
         .query("q", "hello world&friends")
@@ -143,10 +141,7 @@ async fn redirect_route_encodes_query_params() {
 async fn redirect_route_appends_to_existing_query_in_path() {
     // If a registered route somehow already carries a `?` in its
     // template path, the helper must append with `&`, not `?`.
-    register_route_name(
-        "_test_redirect_with_existing_query",
-        "/test/path?seed=42",
-    );
+    register_route_name("_test_redirect_with_existing_query", "/test/path?seed=42");
 
     let resp: suprnova::Response = Redirect::route("_test_redirect_with_existing_query")
         .query("page", "2")

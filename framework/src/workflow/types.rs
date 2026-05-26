@@ -1,8 +1,8 @@
 //! Workflow public types
 
 use crate::error::FrameworkError;
-use crate::workflow::store;
 use crate::workflow::WorkflowConfig;
+use crate::workflow::store;
 use serde::de::DeserializeOwned;
 use std::time::Duration;
 

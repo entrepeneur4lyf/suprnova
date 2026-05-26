@@ -23,8 +23,8 @@
 use serde::{Deserialize, Serialize};
 use suprnova::testing::TestDatabase;
 use suprnova::{
-    attrs, model, AsEncrypted, AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject,
-    AsHashed, Collection, Model,
+    AsEncrypted, AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject, AsHashed, Collection,
+    Model, attrs, model,
 };
 
 // ---- Test fixtures hoisted to module scope ------------------------------
@@ -304,11 +304,9 @@ async fn corrupt_ciphertext_yields_clear_error() {
     )
     .await
     .unwrap();
-    db.execute_unprepared(
-        "INSERT INTO t7c_corrupt (id, secret) VALUES (1, 'not-real-ciphertext')",
-    )
-    .await
-    .unwrap();
+    db.execute_unprepared("INSERT INTO t7c_corrupt (id, secret) VALUES (1, 'not-real-ciphertext')")
+        .await
+        .unwrap();
 
     // `find` calls `From<inner::Model>` which `.expect()`s the cast —
     // a panic propagates out of the awaited future as a join error.

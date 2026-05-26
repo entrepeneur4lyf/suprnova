@@ -58,7 +58,8 @@ pub fn assert_dispatched<E: Event>(pred: impl Fn(&E) -> bool) {
 pub fn assert_not_dispatched<E: Event>(pred: impl Fn(&E) -> bool) {
     let count = dispatched_count::<E>(pred);
     assert_eq!(
-        count, 0,
+        count,
+        0,
         "expected no matching {} to be dispatched, found {}",
         E::event_name(),
         count

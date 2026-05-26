@@ -1,11 +1,11 @@
 use std::sync::Arc;
 use std::time::Duration;
-use suprnova::{
-    container::App, delete, get, group, post, rate_limit::memory::InMemoryRateLimiter, routes, ws,
-    AuthMiddleware as SessionAuthMiddleware, RateLimitMiddleware, RateLimiter, SlidingWindowConfig,
-};
 use suprnova::broadcasting::{
     BroadcastHub, BroadcastingWsHandler, ChannelRegistry, InMemoryBroadcastHub,
+};
+use suprnova::{
+    AuthMiddleware as SessionAuthMiddleware, RateLimitMiddleware, RateLimiter, SlidingWindowConfig,
+    container::App, delete, get, group, post, rate_limit::memory::InMemoryRateLimiter, routes, ws,
 };
 
 use crate::broadcasting::{ChatChannel, UserRegisteredChannel};
@@ -21,8 +21,8 @@ use crate::ws as app_ws;
 /// router without running `bootstrap::register()`). This mirrors the
 /// pattern used by the rate-limit middleware.
 fn broadcasting_handler() -> BroadcastingWsHandler {
-    let hub: Arc<dyn BroadcastHub> = App::make::<dyn BroadcastHub>()
-        .unwrap_or_else(|| Arc::new(InMemoryBroadcastHub::new()));
+    let hub: Arc<dyn BroadcastHub> =
+        App::make::<dyn BroadcastHub>().unwrap_or_else(|| Arc::new(InMemoryBroadcastHub::new()));
     let registry: Arc<ChannelRegistry> = App::get::<Arc<ChannelRegistry>>().unwrap_or_else(|| {
         let mut r = ChannelRegistry::new();
         r.register(UserRegisteredChannel);

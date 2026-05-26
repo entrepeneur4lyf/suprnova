@@ -351,10 +351,7 @@ pub mod rules {
     }
     impl ContextualRule for RequiredWith {
         fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String> {
-            let other_present = ctx
-                .get(self.other)
-                .map(|v| !is_blank(v))
-                .unwrap_or(false);
+            let other_present = ctx.get(self.other).map(|v| !is_blank(v)).unwrap_or(false);
             if other_present && is_blank(value) {
                 Err(format!("required when {} is present", self.other))
             } else {
@@ -584,10 +581,7 @@ pub mod async_rules {
             if count == 0 {
                 Ok(())
             } else {
-                Err(format!(
-                    "{} already exists for {}",
-                    self.column, self.table
-                ))
+                Err(format!("{} already exists for {}", self.column, self.table))
             }
         }
     }
@@ -742,11 +736,6 @@ macro_rules! __validate_one_optional {
         );
     };
     ($errs:ident, $field:ident, $val:ident, $rule:expr) => {
-        $crate::validation::rule::Rule::check(
-            &$rule,
-            $val,
-            &mut $errs,
-            ::core::stringify!($field),
-        );
+        $crate::validation::rule::Rule::check(&$rule, $val, &mut $errs, ::core::stringify!($field));
     };
 }

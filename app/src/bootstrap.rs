@@ -26,15 +26,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use suprnova::broadcasting::{BroadcastHub, ChannelRegistry, InMemoryBroadcastHub};
+use suprnova::features::{FeatureMiddleware, bootstrap_database_cached};
+use suprnova::queue::worker::register_job;
 #[allow(unused_imports)]
 use suprnova::{
-    bind, global_middleware, singleton, App, EventFacade, FrameworkError, IncludeMiddleware,
-    Inertia, InertiaConfig, InertiaRequestExt, InertiaSharedData, Prop, S3Config, SessionConfig,
-    SessionMiddleware, Storage, SupervisorRegistry, UserProvider, DB,
+    App, DB, EventFacade, FrameworkError, IncludeMiddleware, Inertia, InertiaConfig,
+    InertiaRequestExt, InertiaSharedData, Prop, S3Config, SessionConfig, SessionMiddleware,
+    Storage, SupervisorRegistry, UserProvider, bind, global_middleware, singleton,
 };
-use suprnova::broadcasting::{BroadcastHub, ChannelRegistry, InMemoryBroadcastHub};
-use suprnova::features::{bootstrap_database_cached, FeatureMiddleware};
-use suprnova::queue::worker::register_job;
 
 use crate::broadcasting::{ChatChannel, UserRegisteredChannel};
 use crate::events::UserRegistered;

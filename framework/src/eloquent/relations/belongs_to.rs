@@ -22,10 +22,10 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use crate::eloquent::EloquentModel;
 use crate::eloquent::builder::Builder;
 use crate::eloquent::model::Model;
 use crate::eloquent::relations::{Relation, RelationKind};
-use crate::eloquent::EloquentModel;
 use crate::error::FrameworkError;
 
 /// Boxed builder-rewrite closure used by [`BelongsTo::with_trashed`] /
@@ -96,7 +96,6 @@ where
     /// PhantomData for the child type — see `HasOne::_phantom`.
     _phantom: PhantomData<fn() -> C>,
 }
-
 
 // The `P: Model` bound's where-clause is re-elaborated for the same
 // reason `Builder<M: Model>` and `HasOne<L, R>` do — `first()` calls

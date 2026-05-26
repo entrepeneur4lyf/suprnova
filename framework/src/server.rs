@@ -1,12 +1,12 @@
 use crate::cache::Cache;
 use crate::config::{Config, ServerConfig};
-use crate::lock;
 use crate::container::App;
 use crate::http::{HttpResponse, Request};
+use crate::lock;
 use crate::logging::{LogConfig, RequestIdMiddleware};
-use crate::middleware::{into_boxed, Middleware, MiddlewareChain, MiddlewareRegistry};
+use crate::middleware::{Middleware, MiddlewareChain, MiddlewareRegistry, into_boxed};
 use crate::routing::Router;
-use crate::telemetry::{init_telemetry, OtelConfig};
+use crate::telemetry::{OtelConfig, init_telemetry};
 use bytes::Bytes;
 use futures::FutureExt;
 use http_body_util::combinators::BoxBody;
@@ -388,8 +388,7 @@ impl Server {
                     ws_in_flight = in_flight,
                     "draining in-flight WebSocket handlers (max 5s)"
                 );
-                let ws_drain_deadline =
-                    tokio::time::sleep(std::time::Duration::from_secs(5));
+                let ws_drain_deadline = tokio::time::sleep(std::time::Duration::from_secs(5));
                 tokio::pin!(ws_drain_deadline);
                 loop {
                     tokio::select! {
@@ -415,10 +414,7 @@ impl Server {
         // Signal supervisors to exit cleanly, then drain their tasks.
         // This runs AFTER WS_TASKS so in-flight WebSocket connections get
         // their close frames before the process tears down background work.
-        crate::supervisor::SupervisorRegistry::shutdown(
-            std::time::Duration::from_secs(5),
-        )
-        .await;
+        crate::supervisor::SupervisorRegistry::shutdown(std::time::Duration::from_secs(5)).await;
 
         // Flush buffered telemetry before returning. Safe to call when
         // OTel is disabled — guard just no-ops.
@@ -431,14 +427,17 @@ impl Server {
 /// never resolves, so the `tokio::select!` arm stays parked.
 #[cfg(unix)]
 async fn wait_terminate() {
-    use tokio::signal::unix::{signal, SignalKind};
+    use tokio::signal::unix::{SignalKind, signal};
     match signal(SignalKind::terminate()) {
         Ok(mut sig) => {
             sig.recv().await;
         }
         Err(err) => {
-            tracing::warn!(?err, "failed to install SIGTERM handler; \
-                Ctrl-C is still honored");
+            tracing::warn!(
+                ?err,
+                "failed to install SIGTERM handler; \
+                Ctrl-C is still honored"
+            );
             std::future::pending::<()>().await;
         }
     }
@@ -472,7 +471,9 @@ pub async fn handle_request(
     // the request never reaches the HTTP routing path. If no ws_route
     // matches, fall through to normal HTTP routing so the path can
     // 404 like any other unrouted GET.
-    if hyper_tungstenite::is_upgrade_request(&req) && let Some(ws_match) = router.match_ws(&path) {
+    if hyper_tungstenite::is_upgrade_request(&req)
+        && let Some(ws_match) = router.match_ws(&path)
+    {
         return handle_ws_upgrade(req, ws_match).await;
     }
 
@@ -491,8 +492,6 @@ pub async fn handle_request(
     // is drained by `InertiaResponse::resolve` at response build time.
     let flash_bag = crate::inertia::flash::new_bag();
     let ssr_disabled = crate::inertia::ssr::new_disable_ssr_flag();
-
-    
 
     crate::inertia::flash::FLASH_BAG
         .scope(flash_bag, async move {
@@ -542,8 +541,7 @@ async fn handle_request_inner(
             // 3. Execute chain with handler, catching panics in middleware
             //    or handler so the client receives a proper 500 instead
             //    of a dropped connection.
-            let http_response =
-                execute_chain_safely(chain, request, handler, &method, path).await;
+            let http_response = execute_chain_safely(chain, request, handler, &method, path).await;
 
             // Mark the active tracing span as errored on 5xx so the
             // tracing-opentelemetry bridge translates it to OTel
@@ -672,26 +670,22 @@ async fn handle_ws_upgrade(
     let handler = ws_match.handler();
     let pattern = ws_match.pattern().to_string();
     let params: HashMap<String, String> = ws_match.params().clone();
-    let middleware_list: Vec<crate::middleware::BoxedMiddleware> =
-        ws_match.middleware().clone();
+    let middleware_list: Vec<crate::middleware::BoxedMiddleware> = ws_match.middleware().clone();
 
-    let config = ws_match
-        .config()
-        .cloned()
-        .unwrap_or_default();
+    let config = ws_match.config().cloned().unwrap_or_default();
     let heartbeat_interval = config.ping_interval;
     let tungstenite_config = config.to_tungstenite_config();
 
     // hyper_tungstenite::upgrade MUST come before Request::new because
     // it needs `&mut req` before we consume `req`.
-    let (response, websocket) =
-        match hyper_tungstenite::upgrade(&mut req, Some(tungstenite_config)) {
-            Ok(pair) => pair,
-            Err(e) => {
-                tracing::warn!(error = %e, route = %pattern, "websocket upgrade rejected");
-                return bad_request_text(&format!("websocket upgrade failed: {e}"));
-            }
-        };
+    let (response, websocket) = match hyper_tungstenite::upgrade(&mut req, Some(tungstenite_config))
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!(error = %e, route = %pattern, "websocket upgrade rejected");
+            return bad_request_text(&format!("websocket upgrade failed: {e}"));
+        }
+    };
 
     // Build the framework's Request from the upgrade request. The
     // body is empty for an upgrade request (RFC 6455); we still
@@ -744,11 +738,9 @@ async fn handle_ws_upgrade(
         // per-route middleware can't tear down the upgrading connection
         // task. On panic we abort the upgrade with 500 — same policy
         // as the HTTP request path (see `execute_chain_safely`).
-        let chain_response = match AssertUnwindSafe(
-            chain.execute(initial_request, terminator),
-        )
-        .catch_unwind()
-        .await
+        let chain_response = match AssertUnwindSafe(chain.execute(initial_request, terminator))
+            .catch_unwind()
+            .await
         {
             Ok(resp) => resp,
             Err(panic) => {

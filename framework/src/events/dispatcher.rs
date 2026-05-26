@@ -193,11 +193,11 @@ impl Event {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::{Event as EventTrait, Listener};
     use crate::FrameworkError;
+    use crate::events::{Event as EventTrait, Listener};
     use async_trait::async_trait;
-    use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
 
     #[derive(Debug, Clone)]
     struct Pinged {
@@ -222,7 +222,8 @@ mod tests {
     async fn dispatch_calls_registered_listener() {
         let d = EventDispatcher::new();
         let count = Arc::new(AtomicI64::new(0));
-        d.listen::<Pinged, _>(Arc::new(Counter(count.clone()))).await;
+        d.listen::<Pinged, _>(Arc::new(Counter(count.clone())))
+            .await;
         d.dispatch(Pinged { n: 5 }).await.unwrap();
         assert_eq!(count.load(Ordering::SeqCst), 5);
     }
@@ -270,7 +271,8 @@ mod tests {
     async fn queued_event_returns_before_listener_completes() {
         let d = EventDispatcher::new();
         let n = Arc::new(AtomicI64::new(0));
-        d.listen::<QueuedPing, _>(Arc::new(SlowCounter(n.clone()))).await;
+        d.listen::<QueuedPing, _>(Arc::new(SlowCounter(n.clone())))
+            .await;
         d.dispatch(QueuedPing).await.unwrap();
         // Immediately after dispatch returns, the slow listener has
         // not had time to complete (it sleeps 20ms).

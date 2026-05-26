@@ -12,7 +12,7 @@ pub mod worker;
 
 pub use database::DatabaseQueueDriver;
 pub use driver::{QueueDriver, Reservation, ReservationToken};
-pub use envelope::{Envelope, EnvelopeError, CURRENT_SCHEMA_VERSION};
+pub use envelope::{CURRENT_SCHEMA_VERSION, Envelope, EnvelopeError};
 pub use job::{BackoffSchedule, Job};
 pub use memory::MemoryQueueDriver;
 pub use redis::RedisQueueDriver;
@@ -59,10 +59,7 @@ impl Queue {
     }
 
     /// Convenience: push with a delay from `now`.
-    pub async fn later<J: Job>(
-        delay: std::time::Duration,
-        job: J,
-    ) -> Result<(), FrameworkError> {
+    pub async fn later<J: Job>(delay: std::time::Duration, job: J) -> Result<(), FrameworkError> {
         let available_at = Utc::now()
             + chrono::Duration::from_std(delay)
                 .map_err(|e| FrameworkError::internal(format!("delay overflow: {e}")))?;
@@ -78,11 +75,7 @@ impl Queue {
 
 pub(crate) fn current_driver() -> Result<Arc<dyn QueueDriver>, FrameworkError> {
     lock::read(&DRIVER)
-        .map_err(|_| {
-            FrameworkError::internal(
-                "queue driver registry lock poisoned",
-            )
-        })?
+        .map_err(|_| FrameworkError::internal("queue driver registry lock poisoned"))?
         .clone()
         .ok_or_else(|| {
             FrameworkError::internal(
@@ -112,26 +105,23 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
         "redis" => {
             let url = std::env::var("QUEUE_REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
-            let stream = std::env::var("QUEUE_REDIS_STREAM")
-                .unwrap_or_else(|_| "suprnova-queue".into());
-            let group =
-                std::env::var("QUEUE_REDIS_GROUP").unwrap_or_else(|_| "default".into());
-            let consumer = std::env::var("QUEUE_REDIS_CONSUMER")
-                .unwrap_or_else(|_| "consumer-1".into());
+            let stream =
+                std::env::var("QUEUE_REDIS_STREAM").unwrap_or_else(|_| "suprnova-queue".into());
+            let group = std::env::var("QUEUE_REDIS_GROUP").unwrap_or_else(|_| "default".into());
+            let consumer =
+                std::env::var("QUEUE_REDIS_CONSUMER").unwrap_or_else(|_| "consumer-1".into());
             let visibility = std::time::Duration::from_secs(
                 std::env::var("QUEUE_VISIBILITY_TIMEOUT_SECS")
                     .ok()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(60),
             );
-            let d =
-                redis::RedisQueueDriver::connect(&url, &stream, &group, &consumer, visibility)
-                    .await?;
+            let d = redis::RedisQueueDriver::connect(&url, &stream, &group, &consumer, visibility)
+                .await?;
             Queue::set_driver(Arc::new(d));
         }
         "database" => {
-            let table =
-                std::env::var("QUEUE_DB_TABLE").unwrap_or_else(|_| "jobs".into());
+            let table = std::env::var("QUEUE_DB_TABLE").unwrap_or_else(|_| "jobs".into());
             // Requires DB::init() (or DB::init_with(...)) to have been called first.
             let db = crate::database::DB::connection().map_err(|e| {
                 FrameworkError::internal(format!(

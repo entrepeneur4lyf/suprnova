@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use suprnova::data::{current_include_set, IncludeError, RequestIncludeSet, REQUEST_INCLUDE_SET};
+use suprnova::data::{IncludeError, REQUEST_INCLUDE_SET, RequestIncludeSet, current_include_set};
 
 #[test]
 fn parses_include() {
@@ -12,9 +12,7 @@ fn parses_include() {
 
 #[test]
 fn parses_all_four_keys() {
-    let s = RequestIncludeSet::from_query(
-        "include=a&exclude=b&only=c,d&except=e",
-    );
+    let s = RequestIncludeSet::from_query("include=a&exclude=b&only=c,d&except=e");
     assert_eq!(s.include, vec!["a"]);
     assert_eq!(s.exclude, vec!["b"]);
     assert_eq!(s.only, Some(vec!["c".into(), "d".into()]));
@@ -66,8 +64,14 @@ fn include_error_into_framework_error_produces_400() {
     let fw = err.into_framework_error();
     assert_eq!(fw.status_code(), 400);
     let msg = format!("{}", fw);
-    assert!(msg.contains("secret"), "message should name the offending field, got: {msg}");
-    assert!(msg.contains("author"), "message should list the allowed fields, got: {msg}");
+    assert!(
+        msg.contains("secret"),
+        "message should name the offending field, got: {msg}"
+    );
+    assert!(
+        msg.contains("author"),
+        "message should list the allowed fields, got: {msg}"
+    );
     assert!(msg.contains("tags"));
 }
 
@@ -88,7 +92,10 @@ async fn current_include_set_bound_returns_scoped_value() {
         .scope(bound.clone(), async { current_include_set() })
         .await;
     assert_eq!(observed.include, vec!["author"]);
-    assert!(Arc::ptr_eq(&observed, &bound), "should hand back the same Arc");
+    assert!(
+        Arc::ptr_eq(&observed, &bound),
+        "should hand back the same Arc"
+    );
 }
 
 // Codex review finding 9 — URL decoding ------------------------------
@@ -140,5 +147,8 @@ fn url_decoded_malformed_percent_is_lossy_not_panic() {
     // decode keeps them); the exclude value should still come through
     // cleanly.
     assert_eq!(s.exclude, vec!["baz"]);
-    assert!(!s.include.is_empty(), "malformed percent must not drop the pair");
+    assert!(
+        !s.include.is_empty(),
+        "malformed percent must not drop the pair"
+    );
 }

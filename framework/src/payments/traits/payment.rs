@@ -1,4 +1,6 @@
-use crate::payments::{ChargeRequest, ChargeResult, PaymentResult, PaymentStatus, RefundRequest, RefundResult};
+use crate::payments::{
+    ChargeRequest, ChargeResult, PaymentResult, PaymentStatus, RefundRequest, RefundResult,
+};
 use async_trait::async_trait;
 
 /// Optional trait for providers that expose server-side capture against a stored payment method.

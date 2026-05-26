@@ -47,7 +47,10 @@ async fn ses_emits_sigv4_signed_request() {
     let transport =
         SesMailTransport::with_endpoint("AKIATEST", "secret", "us-east-1", server.uri());
     Mail::set_transport(Arc::new(transport));
-    Mail::to("alice@example.org").send(M::default()).await.unwrap();
+    Mail::to("alice@example.org")
+        .send(M::default())
+        .await
+        .unwrap();
 
     let reqs = server.received_requests().await.unwrap();
     assert_eq!(reqs.len(), 1);
@@ -82,7 +85,10 @@ async fn ses_maps_4xx_to_framework_error() {
     let s = format!("{err}");
     assert!(s.contains("SES"), "error mentions provider: {s}");
     assert!(s.contains("400"), "error includes HTTP status: {s}");
-    assert!(s.contains("Email address is not verified"), "error surfaces upstream body: {s}");
+    assert!(
+        s.contains("Email address is not verified"),
+        "error surfaces upstream body: {s}"
+    );
 }
 
 // Attachments must ride the Raw MIME path — SES `Content.Simple` has no
@@ -94,10 +100,18 @@ struct MWithPdf {
 
 #[async_trait]
 impl Mailable for MWithPdf {
-    fn mailable_name() -> &'static str { "MWithPdf" }
-    fn subject(&self) -> String { "invoice".into() }
-    fn text_template_source(&self) -> Option<String> { Some("see attached".into()) }
-    fn from(&self) -> Option<Address> { Some("noreply@suprnova.dev".into()) }
+    fn mailable_name() -> &'static str {
+        "MWithPdf"
+    }
+    fn subject(&self) -> String {
+        "invoice".into()
+    }
+    fn text_template_source(&self) -> Option<String> {
+        Some("see attached".into())
+    }
+    fn from(&self) -> Option<Address> {
+        Some("noreply@suprnova.dev".into())
+    }
     fn attachments(&self) -> Vec<suprnova::mail::Attachment> {
         vec![suprnova::mail::Attachment {
             filename: "invoice.pdf".into(),
@@ -133,7 +147,10 @@ async fn ses_uses_raw_mime_when_attachments_present() {
 
     // Must use the Raw variant when attachments are present — Simple has
     // no attachment support and would silently drop them.
-    assert!(body["Content"]["Simple"].is_null(), "Simple variant must be absent: {body}");
+    assert!(
+        body["Content"]["Simple"].is_null(),
+        "Simple variant must be absent: {body}"
+    );
     let raw_b64 = body["Content"]["Raw"]["Data"]
         .as_str()
         .expect("Content.Raw.Data is a string");
@@ -148,10 +165,19 @@ async fn ses_uses_raw_mime_when_attachments_present() {
         mime_str.contains("Content-Disposition: attachment"),
         "MIME has attachment disposition: {mime_str}"
     );
-    assert!(mime_str.contains("invoice.pdf"), "MIME contains filename: {mime_str}");
-    assert!(mime_str.contains("application/pdf"), "MIME contains content-type: {mime_str}");
+    assert!(
+        mime_str.contains("invoice.pdf"),
+        "MIME contains filename: {mime_str}"
+    );
+    assert!(
+        mime_str.contains("application/pdf"),
+        "MIME contains content-type: {mime_str}"
+    );
     // Body and subject must still ride the MIME envelope too.
-    assert!(mime_str.contains("invoice"), "MIME contains subject: {mime_str}");
+    assert!(
+        mime_str.contains("invoice"),
+        "MIME contains subject: {mime_str}"
+    );
     assert!(
         mime_str.contains("see attached"),
         "MIME contains text body: {mime_str}"

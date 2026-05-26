@@ -3,9 +3,9 @@
 //! `__aggregate_relation`) return clear "no relation" errors for
 //! unknown names. T2-T7 add per-relation match arms.
 
+use suprnova::AggregateKind;
 use suprnova::model;
 use suprnova::testing::TestDatabase;
-use suprnova::AggregateKind;
 
 #[model(table = "dispatcher_users", relations = {})]
 pub struct DispatcherUser {

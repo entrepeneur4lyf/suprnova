@@ -260,13 +260,13 @@ impl<V: UploadValidator> UploadedFile<V> {
                     .map_err(|e| FrameworkError::internal(format!("storage write: {e}")))?;
             }
             UploadedFileBacking::Disk(temp) => {
-                let mut reader =
-                    tokio::fs::File::open(temp.path()).await.map_err(|e| {
-                        FrameworkError::internal(format!("open uploaded temp file: {e}"))
-                    })?;
-                let mut writer = disk.writer(path).await.map_err(|e| {
-                    FrameworkError::internal(format!("open storage writer: {e}"))
+                let mut reader = tokio::fs::File::open(temp.path()).await.map_err(|e| {
+                    FrameworkError::internal(format!("open uploaded temp file: {e}"))
                 })?;
+                let mut writer = disk
+                    .writer(path)
+                    .await
+                    .map_err(|e| FrameworkError::internal(format!("open storage writer: {e}")))?;
                 let mut buf = vec![0u8; STORE_AS_CHUNK_BYTES];
                 loop {
                     let n = reader.read(&mut buf).await.map_err(|e| {
@@ -435,9 +435,10 @@ where
                 }
             }
             Some((_, writer)) => {
-                writer.write_all(&chunk).await.map_err(|e| {
-                    FrameworkError::internal(format!("write upload tempfile: {e}"))
-                })?;
+                writer
+                    .write_all(&chunk)
+                    .await
+                    .map_err(|e| FrameworkError::internal(format!("write upload tempfile: {e}")))?;
             }
         }
 
@@ -514,11 +515,10 @@ where
             status_code: 400,
         })?
         .to_string();
-    let boundary =
-        multer::parse_boundary(&content_type).map_err(|e| FrameworkError::Domain {
-            message: format!("invalid multipart boundary: {e}"),
-            status_code: 400,
-        })?;
+    let boundary = multer::parse_boundary(&content_type).map_err(|e| FrameworkError::Domain {
+        message: format!("invalid multipart boundary: {e}"),
+        status_code: 400,
+    })?;
 
     let (_parts, body) = req.into_parts();
     // `BodyStream` would yield `Result<Frame<Bytes>, _>` and `Frame<Bytes>`

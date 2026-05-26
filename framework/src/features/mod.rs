@@ -44,7 +44,7 @@
 
 pub use featureflag::{
     context::Context,
-    evaluator::{set_global_default, try_set_global_default, Evaluator, EvaluatorRef},
+    evaluator::{Evaluator, EvaluatorRef, set_global_default, try_set_global_default},
     feature::Feature,
 };
 
@@ -59,8 +59,8 @@ pub mod migrations;
 pub mod sync;
 
 pub use bootstrap::{
-    bootstrap_database_cached, install_evaluator, is_installed, mark_installed,
-    BootstrappedFeatures,
+    BootstrappedFeatures, bootstrap_database_cached, install_evaluator, is_installed,
+    mark_installed,
 };
 pub use evaluators::cached::CachedEvaluator;
 pub use evaluators::database::DatabaseEvaluator;

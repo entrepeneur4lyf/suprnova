@@ -46,9 +46,9 @@ use crate::container::App;
 use crate::error::FrameworkError;
 use crate::features::sync::{CompositeFeatureSync, FeatureSync};
 use crate::features::{CachedEvaluator, DatabaseEvaluator};
-use featureflag::evaluator::{try_set_global_default, Evaluator};
-use std::sync::atomic::{AtomicBool, Ordering};
+use featureflag::evaluator::{Evaluator, try_set_global_default};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// Tracks whether an evaluator was installed via

@@ -10,7 +10,7 @@
 //! through `Self::with([...])`.
 
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, model, AggregateKind, Model};
+use suprnova::{AggregateKind, Model, attrs, model};
 
 #[model(table = "oto_users", relations = {
     profile: HasOne<OtoProfile>,
@@ -222,7 +222,12 @@ async fn has_one_custom_fk_lk_resolves() {
         .await
         .unwrap();
 
-    let loaded = owner.profile().first().await.unwrap().expect("profile present");
+    let loaded = owner
+        .profile()
+        .first()
+        .await
+        .unwrap()
+        .expect("profile present");
     assert_eq!(loaded.bio, "owner-bio");
 }
 
@@ -297,7 +302,9 @@ async fn belongs_to_eager_load_honours_with_default_for_null_fk() {
     let posts = OtoPost::with(["user"]).get().await.unwrap();
     assert_eq!(posts.len(), 2);
     for p in posts.iter() {
-        let parent = p.user_loaded().expect("with_default fires in eager path too");
+        let parent = p
+            .user_loaded()
+            .expect("with_default fires in eager path too");
         assert_eq!(parent.name, "Guest");
     }
 }
@@ -410,7 +417,10 @@ async fn has_one_aggregate_min_max_none_on_empty() {
         .__eager
         .get_aggregate::<Option<f64>>("profile_max_id")
         .expect("max cache populated as Option<f64>");
-    assert!(max.is_none(), "max over empty set should be None, got: {max:?}");
+    assert!(
+        max.is_none(),
+        "max over empty set should be None, got: {max:?}"
+    );
 }
 
 #[tokio::test]
@@ -440,7 +450,10 @@ async fn has_one_aggregate_min_max_some_on_nonempty() {
         .__eager
         .get_aggregate::<Option<f64>>("profile_min_id")
         .expect("min cache populated as Option<f64>");
-    assert!(min.is_some(), "min over non-empty must be Some, got: {min:?}");
+    assert!(
+        min.is_some(),
+        "min over non-empty must be Some, got: {min:?}"
+    );
     assert_eq!(min.unwrap(), p.id as f64);
 
     {

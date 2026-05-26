@@ -20,21 +20,14 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use suprnova::testing::TestDatabase;
 use suprnova::{
-    attrs, model, AsArray, AsArrayObject, AsBool, AsCollection, AsDate, AsDateTime, AsEnum, AsInt,
-    AsJson, AsObject, Collection, Model,
+    AsArray, AsArrayObject, AsBool, AsCollection, AsDate, AsDateTime, AsEnum, AsInt, AsJson,
+    AsObject, Collection, Model, attrs, model,
 };
 
 // ---- Test fixtures hoisted to module scope ------------------------------
 
 #[derive(
-    Serialize,
-    Deserialize,
-    Clone,
-    Debug,
-    PartialEq,
-    Default,
-    strum::EnumString,
-    strum::AsRefStr,
+    Serialize, Deserialize, Clone, Debug, PartialEq, Default, strum::EnumString, strum::AsRefStr,
 )]
 pub enum Role {
     #[default]
@@ -224,11 +217,10 @@ async fn as_array_object_preserves_string_keys() {
     )
     .await
     .unwrap();
-    let made = AoModel::create(
-        attrs! { labels: serde_json::json!({ "color": "blue", "size": "large" }) },
-    )
-    .await
-    .unwrap();
+    let made =
+        AoModel::create(attrs! { labels: serde_json::json!({ "color": "blue", "size": "large" }) })
+            .await
+            .unwrap();
     let read = AoModel::find(made.id).await.unwrap().unwrap();
     assert_eq!(read.labels.get("color"), Some(&"blue".to_string()));
     assert_eq!(read.labels.get("size"), Some(&"large".to_string()));
@@ -293,7 +285,10 @@ async fn with_casts_bypasses_static_casts_entirely() {
     // Baseline: without runtime casts, static AsBool fires and the
     // value round-trips correctly.
     let plain = OverrideModel::find(made.id).await.unwrap().unwrap();
-    assert!(plain.flag, "static cast should round-trip without with_casts");
+    assert!(
+        plain.flag,
+        "static cast should round-trip without with_casts"
+    );
 
     // With a runtime cast set on an unrelated column (`id` here), the
     // static cast pipeline is bypassed for ALL columns. The `flag`

@@ -6,7 +6,7 @@
 //! closures) so they can be `Arc`'d, named in stack traces, and
 //! shared across the dispatcher's storage.
 
-use suprnova::{async_trait, events::Listener, FrameworkError};
+use suprnova::{FrameworkError, async_trait, events::Listener};
 use tracing::info;
 
 use crate::events::UserRegistered;

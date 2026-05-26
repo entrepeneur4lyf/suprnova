@@ -3,7 +3,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, FnArg, ItemFn, Pat, ReturnType, Type};
+use syn::{FnArg, ItemFn, Pat, ReturnType, Type, parse_macro_input};
 
 pub fn workflow_impl(_attr: TokenStream, input: TokenStream) -> TokenStream {
     let input_fn = parse_macro_input!(input as ItemFn);
@@ -120,22 +120,12 @@ fn extract_result_ok_type(output: &ReturnType) -> Result<Type, syn::Error> {
 
                         let ok_ty = match ok {
                             syn::GenericArgument::Type(t) => t.clone(),
-                            _ => {
-                                return Err(syn::Error::new_spanned(
-                                    ok,
-                                    "Invalid ok type",
-                                ))
-                            }
+                            _ => return Err(syn::Error::new_spanned(ok, "Invalid ok type")),
                         };
 
                         let err_ty = match err {
                             syn::GenericArgument::Type(t) => t,
-                            _ => {
-                                return Err(syn::Error::new_spanned(
-                                    err,
-                                    "Invalid error type",
-                                ))
-                            }
+                            _ => return Err(syn::Error::new_spanned(err, "Invalid error type")),
                         };
 
                         if !is_framework_error(err_ty) {
@@ -167,9 +157,10 @@ fn extract_result_ok_type(output: &ReturnType) -> Result<Type, syn::Error> {
 
 fn is_framework_error(ty: &Type) -> bool {
     if let Type::Path(path) = ty
-        && let Some(last) = path.path.segments.last() {
-            return last.ident == "FrameworkError";
-        }
+        && let Some(last) = path.path.segments.last()
+    {
+        return last.ident == "FrameworkError";
+    }
     false
 }
 

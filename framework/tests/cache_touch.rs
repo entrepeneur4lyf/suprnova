@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
-use suprnova::cache::store::CacheStore;
 use suprnova::cache::InMemoryCache;
+use suprnova::cache::store::CacheStore;
 
 async fn fresh() -> Arc<dyn CacheStore> {
     Arc::new(InMemoryCache::with_prefix("t:"))
@@ -21,7 +21,11 @@ async fn touch_extends_ttl_without_changing_value() {
     tokio::time::sleep(Duration::from_millis(120)).await; // total 160ms; original ttl was 80ms
     assert!(s.has("k").await.unwrap(), "key kept alive by touch");
     let val: Option<String> = s.get_raw("k").await.unwrap();
-    assert_eq!(val.as_deref(), Some("{\"v\":1}"), "value unchanged by touch");
+    assert_eq!(
+        val.as_deref(),
+        Some("{\"v\":1}"),
+        "value unchanged by touch"
+    );
 }
 
 #[tokio::test]

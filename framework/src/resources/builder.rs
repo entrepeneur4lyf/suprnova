@@ -1,8 +1,8 @@
 //! JSON:API top-level document builder + resource-object renderer.
 
-use serde_json::{Map, Value};
-use super::trait_def::{IntoJsonResource, RelationshipValue};
 use super::fieldset::RequestFieldsetSet;
+use super::trait_def::{IntoJsonResource, RelationshipValue};
+use serde_json::{Map, Value};
 
 /// Builder for a JSON:API top-level document. Consumed by
 /// `Resource::single` / `Resource::collection` / `Resource::paginated`
@@ -55,8 +55,16 @@ impl JsonApiBuilder {
     /// (type, id) per JSON:API spec section 8.
     pub(crate) fn push_included(&mut self, resource: Value) {
         let key = (
-            resource.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            resource.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            resource
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            resource
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
         );
         if key.0.is_empty() || key.1.is_empty() {
             return;
@@ -69,8 +77,12 @@ impl JsonApiBuilder {
     pub fn build(self) -> Value {
         let mut doc = Map::new();
         match self.primary {
-            PrimaryData::Single(v) => { doc.insert("data".into(), v); }
-            PrimaryData::Collection(arr) => { doc.insert("data".into(), Value::Array(arr)); }
+            PrimaryData::Single(v) => {
+                doc.insert("data".into(), v);
+            }
+            PrimaryData::Collection(arr) => {
+                doc.insert("data".into(), Value::Array(arr));
+            }
         }
         if !self.included.is_empty() {
             doc.insert("included".into(), Value::Array(self.included));

@@ -55,13 +55,13 @@
 
 use crate::database::DB;
 use crate::error::FrameworkError;
-use crate::lock;
 use crate::features::entity::{
     self as features_entity, ActiveModel as FeatureActive, Entity as FeatureEntity,
 };
 use crate::features::fields::{TeamField, UserIdField};
 use crate::features::migrations::CreateFeaturesTable;
 use crate::features::sync::FeatureSync;
+use crate::lock;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -70,9 +70,7 @@ use featureflag::{
     evaluator::Evaluator,
     fields::Fields,
 };
-use sea_orm::{
-    sea_query::OnConflict, ActiveValue::Set, DatabaseConnection, EntityTrait,
-};
+use sea_orm::{ActiveValue::Set, DatabaseConnection, EntityTrait, sea_query::OnConflict};
 use sea_orm_migration::MigratorTrait;
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -325,9 +323,7 @@ impl Evaluator for DatabaseEvaluator {
             }
         }
         if let Some(team) = fields.get("team").and_then(|v| v.as_str()) {
-            context
-                .extensions_mut()
-                .insert(TeamField(team.to_string()));
+            context.extensions_mut().insert(TeamField(team.to_string()));
         }
     }
 }

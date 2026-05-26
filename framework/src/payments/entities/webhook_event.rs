@@ -26,5 +26,5 @@ pub struct WebhookEvent {
     pub process_error: Option<String>,
 }
 
-pub use webhook_event::{ActiveModel, Column, Entity};
 pub use webhook_event::Model;
+pub use webhook_event::{ActiveModel, Column, Entity};

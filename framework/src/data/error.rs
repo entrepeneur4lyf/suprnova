@@ -12,13 +12,13 @@ pub enum IncludeError {
 impl IncludeError {
     pub fn into_framework_error(self) -> FrameworkError {
         match self {
-            IncludeError::UnknownInclude { field, allowed } => FrameworkError::bad_request(
-                format!(
+            IncludeError::UnknownInclude { field, allowed } => {
+                FrameworkError::bad_request(format!(
                     "Unknown include `{}`. Allowed includes: [{}]",
                     field,
                     allowed.join(", ")
-                ),
-            ),
+                ))
+            }
         }
     }
 }

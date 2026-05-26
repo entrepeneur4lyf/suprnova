@@ -180,7 +180,12 @@ impl Pagination {
             }
         };
 
-        Ok(CursorPaginator::new(rows, per_page, next_cursor, prev_cursor))
+        Ok(CursorPaginator::new(
+            rows,
+            per_page,
+            next_cursor,
+            prev_cursor,
+        ))
     }
 }
 

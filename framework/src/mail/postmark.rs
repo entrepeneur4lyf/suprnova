@@ -62,7 +62,8 @@ mod tests {
     fn with_endpoint_appends_email_for_paths_that_only_contain_email_substring() {
         // Guard against the regression where `contains("/email")` would have
         // skipped the suffix for a base URL like `/email-archive/api`.
-        let t = PostmarkMailTransport::with_endpoint("tok", "https://example.com/email-archive/api");
+        let t =
+            PostmarkMailTransport::with_endpoint("tok", "https://example.com/email-archive/api");
         assert_eq!(t.endpoint, "https://example.com/email-archive/api/email");
     }
 }

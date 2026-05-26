@@ -16,8 +16,8 @@
 //!   tests that don't speak Inertia.
 
 use suprnova::{
-    json_response, CursorDirection, CursorPaginator, FrameworkError, HttpResponse, Inertia,
-    IntoInertiaScroll, Request, Response, ResponseExt,
+    CursorDirection, CursorPaginator, FrameworkError, HttpResponse, Inertia, IntoInertiaScroll,
+    Request, Response, ResponseExt, json_response,
 };
 
 use crate::props::UserProps;
@@ -46,9 +46,7 @@ fn query_param(qs: Option<&str>, key: &str) -> Option<String> {
 /// Decode the inbound cursor — typed `Value::BigInt` wire format —
 /// into a tuple of `(boundary id, direction)`. Returns `None` when
 /// the caller didn't pass a cursor (first page).
-fn decode_id_cursor(
-    raw: Option<&str>,
-) -> Result<Option<(i64, CursorDirection)>, FrameworkError> {
+fn decode_id_cursor(raw: Option<&str>) -> Result<Option<(i64, CursorDirection)>, FrameworkError> {
     match raw {
         None => Ok(None),
         Some(c) => {
@@ -85,10 +83,8 @@ fn build_page(qs: Option<&str>) -> Result<CursorPaginator<UserProps>, FrameworkE
         ),
         Some((boundary, CursorDirection::Prev)) => {
             // Back-scan: rows < boundary, DESC; then reverse to ASC.
-            let mut rows: Vec<UserProps> = all_users
-                .into_iter()
-                .filter(|u| u.id < boundary)
-                .collect();
+            let mut rows: Vec<UserProps> =
+                all_users.into_iter().filter(|u| u.id < boundary).collect();
             rows.reverse();
             (rows, CursorDirection::Prev)
         }
@@ -143,7 +139,12 @@ fn build_page(qs: Option<&str>) -> Result<CursorPaginator<UserProps>, FrameworkE
         }
     };
 
-    Ok(CursorPaginator::new(filtered, per_page, next_cursor, prev_cursor))
+    Ok(CursorPaginator::new(
+        filtered,
+        per_page,
+        next_cursor,
+        prev_cursor,
+    ))
 }
 
 /// `GET /api/users[?cursor=<opaque>][&per_page=N][&format=json]`

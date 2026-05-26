@@ -123,9 +123,8 @@ where
 /// these wrapping the type's runtime entry point. Stored inventory-
 /// wide; iterated by [`prune_all`] / [`prune_all_dry`] /
 /// [`prune_one`].
-pub type PrunerFn = fn(
-    dry_run: bool,
-) -> Pin<Box<dyn Future<Output = Result<u64, FrameworkError>> + Send>>;
+pub type PrunerFn =
+    fn(dry_run: bool) -> Pin<Box<dyn Future<Output = Result<u64, FrameworkError>> + Send>>;
 
 /// One row in the pruner registry. The macro submits these via
 /// `inventory::submit!`.

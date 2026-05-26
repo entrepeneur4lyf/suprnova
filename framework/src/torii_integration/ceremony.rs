@@ -18,8 +18,8 @@
 
 use chrono::Duration;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::database::DB;
 use crate::error::FrameworkError;

@@ -50,12 +50,12 @@ use std::sync::Arc;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
 
 use crate::database::transaction::ExecutorChoice;
+use crate::eloquent::EloquentModel;
 use crate::eloquent::attrs::Attrs;
 use crate::eloquent::builder::Builder;
 use crate::eloquent::collection::Collection;
-use crate::eloquent::model::{json_value_to_sea_value, Model};
+use crate::eloquent::model::{Model, json_value_to_sea_value};
 use crate::eloquent::relations::{Relation, RelationKind};
-use crate::eloquent::EloquentModel;
 use crate::error::FrameworkError;
 
 /// Boxed builder-rewrite closure for [`BelongsToMany::with_trashed`] /
@@ -316,30 +316,34 @@ where
         let backend = exec.backend();
         let id = related_id.into();
         match &exec {
-            ExecutorChoice::Tx(t) => attach_one(
-                t.as_ref(),
-                backend,
-                &self.pivot_table,
-                &self.pivot_foreign_key,
-                &self.pivot_related_key,
-                &self.parent_key_value,
-                &id,
-                extra,
-                self.with_timestamps,
-            )
-            .await,
-            ExecutorChoice::Pool(c) => attach_one(
-                c.inner(),
-                backend,
-                &self.pivot_table,
-                &self.pivot_foreign_key,
-                &self.pivot_related_key,
-                &self.parent_key_value,
-                &id,
-                extra,
-                self.with_timestamps,
-            )
-            .await,
+            ExecutorChoice::Tx(t) => {
+                attach_one(
+                    t.as_ref(),
+                    backend,
+                    &self.pivot_table,
+                    &self.pivot_foreign_key,
+                    &self.pivot_related_key,
+                    &self.parent_key_value,
+                    &id,
+                    extra,
+                    self.with_timestamps,
+                )
+                .await
+            }
+            ExecutorChoice::Pool(c) => {
+                attach_one(
+                    c.inner(),
+                    backend,
+                    &self.pivot_table,
+                    &self.pivot_foreign_key,
+                    &self.pivot_related_key,
+                    &self.parent_key_value,
+                    &id,
+                    extra,
+                    self.with_timestamps,
+                )
+                .await
+            }
         }
     }
 
@@ -356,26 +360,30 @@ where
         let backend = exec.backend();
         let id = related_id.into();
         match &exec {
-            ExecutorChoice::Tx(t) => detach_one(
-                t.as_ref(),
-                backend,
-                &self.pivot_table,
-                &self.pivot_foreign_key,
-                &self.pivot_related_key,
-                &self.parent_key_value,
-                &id,
-            )
-            .await,
-            ExecutorChoice::Pool(c) => detach_one(
-                c.inner(),
-                backend,
-                &self.pivot_table,
-                &self.pivot_foreign_key,
-                &self.pivot_related_key,
-                &self.parent_key_value,
-                &id,
-            )
-            .await,
+            ExecutorChoice::Tx(t) => {
+                detach_one(
+                    t.as_ref(),
+                    backend,
+                    &self.pivot_table,
+                    &self.pivot_foreign_key,
+                    &self.pivot_related_key,
+                    &self.parent_key_value,
+                    &id,
+                )
+                .await
+            }
+            ExecutorChoice::Pool(c) => {
+                detach_one(
+                    c.inner(),
+                    backend,
+                    &self.pivot_table,
+                    &self.pivot_foreign_key,
+                    &self.pivot_related_key,
+                    &self.parent_key_value,
+                    &id,
+                )
+                .await
+            }
         }
     }
 
@@ -462,8 +470,7 @@ where
         }
         let current_keys: HashSet<String> = current_map.keys().cloned().collect();
 
-        let target_keys: HashSet<String> =
-            target_ids.iter().map(|v| v.to_string()).collect();
+        let target_keys: HashSet<String> = target_ids.iter().map(|v| v.to_string()).collect();
 
         // attach_set = target - current
         let mut attach_set: Vec<serde_json::Value> = Vec::new();
@@ -630,7 +637,10 @@ where
 
         // Fetch the pivot rows attached to this parent.
         let pivot_rows: Vec<P> = P::query()
-            .filter(self.pivot_foreign_key.as_str(), self.parent_key_value.clone())
+            .filter(
+                self.pivot_foreign_key.as_str(),
+                self.parent_key_value.clone(),
+            )
             .get()
             .await?
             .into_vec();
@@ -827,10 +837,8 @@ async fn attach_one<C: ConnectionTrait>(
     //   FK columns first, then `extra` (skipping the FK columns if the
     //   user passed them, so the caller-provided overrides don't
     //   double-write), then timestamps if enabled.
-    let mut columns: Vec<String> = vec![
-        pivot_foreign_key.to_string(),
-        pivot_related_key.to_string(),
-    ];
+    let mut columns: Vec<String> =
+        vec![pivot_foreign_key.to_string(), pivot_related_key.to_string()];
     let mut values: Vec<sea_orm::Value> = vec![
         json_value_to_sea_value(parent_id),
         json_value_to_sea_value(related_id),

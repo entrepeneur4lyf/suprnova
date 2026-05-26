@@ -1,6 +1,6 @@
 use std::sync::Arc;
-use suprnova::cache::store::CacheStore;
 use suprnova::cache::InMemoryCache;
+use suprnova::cache::store::CacheStore;
 
 async fn fresh() -> Arc<dyn CacheStore> {
     Arc::new(InMemoryCache::with_prefix("test:"))
@@ -28,10 +28,7 @@ async fn tagged_writes_can_be_flushed_by_tag() {
 
     store.flush_tags(&["users"]).await.unwrap();
 
-    assert!(
-        !store.has("u:1").await.unwrap(),
-        "u:1 removed by tag flush"
-    );
+    assert!(!store.has("u:1").await.unwrap(), "u:1 removed by tag flush");
     assert!(
         !store.has("u:2").await.unwrap(),
         "u:2 removed by tag flush (it was tagged 'users')"

@@ -91,5 +91,7 @@ async fn delete_post_inner(req: Request) -> Result<HttpResponse, FrameworkError>
     Gate::authorize("delete-post", &current_user, &post)?;
     <Post as suprnova::eloquent::Model>::delete(post).await?;
 
-    Ok(HttpResponse::json(suprnova::serde_json::json!({ "deleted": true })))
+    Ok(HttpResponse::json(
+        suprnova::serde_json::json!({ "deleted": true }),
+    ))
 }

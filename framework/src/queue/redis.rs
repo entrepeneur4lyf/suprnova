@@ -53,12 +53,14 @@ use crate::queue::driver::{QueueDriver, Reservation, ReservationToken};
 use crate::queue::envelope::Envelope;
 use async_trait::async_trait;
 use chrono::Utc;
-use sea_streamer::{Buffer, Consumer, ConsumerOptions, Message, Producer, StreamKey, Streamer, StreamerUri};
+use sea_streamer::ConsumerMode;
+use sea_streamer::{
+    Buffer, Consumer, ConsumerOptions, Message, Producer, StreamKey, Streamer, StreamerUri,
+};
+use sea_streamer::{ConsumerGroup, ConsumerId};
 use sea_streamer_redis::{
     AutoCommit, AutoStreamReset, RedisConsumer, RedisConsumerOptions, RedisProducer, RedisStreamer,
 };
-use sea_streamer::ConsumerMode;
-use sea_streamer::{ConsumerGroup, ConsumerId};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Mutex;
@@ -173,7 +175,10 @@ impl QueueDriver for RedisQueueDriver {
     /// Note: `visibility_timeout` controls how long *this call* waits for a
     /// message. The XAUTOCLAIM idle window (how long an unacked message stays
     /// in the PEL before reclaim) is set at construction time and is unrelated.
-    async fn pop(&self, visibility_timeout: Duration) -> Result<Option<Reservation>, FrameworkError> {
+    async fn pop(
+        &self,
+        visibility_timeout: Duration,
+    ) -> Result<Option<Reservation>, FrameworkError> {
         // Poll in short probe windows so we return promptly when the queue is
         // empty AND honour the caller's deadline when a message is slow to arrive
         // (e.g. right after a push on a fresh stream/consumer-group).
@@ -193,7 +198,7 @@ impl QueueDriver for RedisQueueDriver {
                 Ok(Err(e)) => {
                     return Err(FrameworkError::internal(format!(
                         "redis consumer next error: {e}"
-                    )))
+                    )));
                 }
                 Ok(Ok(msg)) => break msg,
             }
@@ -203,13 +208,11 @@ impl QueueDriver for RedisQueueDriver {
         // Bind the Payload to a local so its borrow lives long enough.
         let payload = msg.message();
         let payload_bytes = payload.as_bytes();
-        let payload_str = std::str::from_utf8(payload_bytes).map_err(|e| {
-            FrameworkError::internal(format!("redis message not valid UTF-8: {e}"))
-        })?;
+        let payload_str = std::str::from_utf8(payload_bytes)
+            .map_err(|e| FrameworkError::internal(format!("redis message not valid UTF-8: {e}")))?;
 
-        let envelope = Envelope::from_json(payload_str).map_err(|e| {
-            FrameworkError::internal(format!("envelope decode error: {e}"))
-        })?;
+        let envelope = Envelope::from_json(payload_str)
+            .map_err(|e| FrameworkError::internal(format!("envelope decode error: {e}")))?;
 
         let token = ReservationToken(envelope.id);
 
@@ -289,8 +292,7 @@ impl QueueDriver for RedisQueueDriver {
 
         // Advance availability by the requested delay.
         let available_at = Utc::now()
-            + chrono::Duration::from_std(requeue_delay)
-                .unwrap_or(chrono::Duration::zero());
+            + chrono::Duration::from_std(requeue_delay).unwrap_or(chrono::Duration::zero());
         envelope.available_at = available_at;
 
         // Re-publish with the bumped envelope.
@@ -303,11 +305,9 @@ impl QueueDriver for RedisQueueDriver {
             .send_to(&self.stream_key, json.as_str())
             .map_err(|e| FrameworkError::internal(format!("redis nack re-publish error: {e}")))?;
 
-        send_fut
-            .await
-            .map_err(|e| {
-                FrameworkError::internal(format!("redis nack re-publish receipt error: {e}"))
-            })?;
+        send_fut.await.map_err(|e| {
+            FrameworkError::internal(format!("redis nack re-publish receipt error: {e}"))
+        })?;
 
         // Ack the original message so it leaves the PEL.
         self.consumer

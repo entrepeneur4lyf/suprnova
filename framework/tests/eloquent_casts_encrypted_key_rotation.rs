@@ -36,9 +36,7 @@
 use std::sync::OnceLock;
 
 use suprnova::testing::TestDatabase;
-use suprnova::{
-    crypto::DecryptOrigin, model, AsEncrypted, Crypt, EncryptionKey, Model,
-};
+use suprnova::{AsEncrypted, Crypt, EncryptionKey, Model, crypto::DecryptOrigin, model};
 
 // ---- One-shot ring installer -------------------------------------------
 
@@ -84,18 +82,15 @@ fn current_key_decrypts_and_reports_current_origin() {
 
     // Encrypt through the facade — uses current.
     let wire = Crypt::encrypt_string("rotation-payload-current").expect("encrypt");
-    let (plain, origin) =
-        Crypt::decrypt_string_inner(&wire).expect("decrypt with current key");
+    let (plain, origin) = Crypt::decrypt_string_inner(&wire).expect("decrypt with current key");
     assert_eq!(plain, "rotation-payload-current");
     assert_eq!(origin, DecryptOrigin::Current);
 
     // Sanity: the wire was actually produced under `current` — confirm
     // by minting an equivalent payload via the test helper directly.
-    let wire_via_helper = suprnova::crypto::_test_encrypt_with(
-        &keys.current,
-        "rotation-payload-current",
-    )
-    .expect("encrypt via helper");
+    let wire_via_helper =
+        suprnova::crypto::_test_encrypt_with(&keys.current, "rotation-payload-current")
+            .expect("encrypt via helper");
     let (_, helper_origin) =
         Crypt::decrypt_string_inner(&wire_via_helper).expect("decrypt helper-minted");
     assert_eq!(helper_origin, DecryptOrigin::Current);
@@ -111,8 +106,7 @@ fn previous_key_decrypts_and_reports_previous_origin() {
     let wire =
         suprnova::crypto::_test_encrypt_with(&keys.previous_oldest, "rotation-payload-legacy")
             .expect("encrypt under legacy key");
-    let (plain, origin) =
-        Crypt::decrypt_string_inner(&wire).expect("decrypt via fallback");
+    let (plain, origin) = Crypt::decrypt_string_inner(&wire).expect("decrypt via fallback");
     assert_eq!(plain, "rotation-payload-legacy");
     assert_eq!(
         origin,
@@ -127,9 +121,8 @@ fn ring_walks_full_previous_list_to_find_match() {
     // key (not the oldest) must still decrypt — proves the ring
     // doesn't stop at index 0.
     let keys = rotation_keys();
-    let wire =
-        suprnova::crypto::_test_encrypt_with(&keys.previous_middle, "two-step-rotation")
-            .expect("encrypt under middle previous key");
+    let wire = suprnova::crypto::_test_encrypt_with(&keys.previous_middle, "two-step-rotation")
+        .expect("encrypt under middle previous key");
     let (plain, origin) = Crypt::decrypt_string_inner(&wire).expect("decrypt");
     assert_eq!(plain, "two-step-rotation");
     assert_eq!(origin, DecryptOrigin::Previous(1));
@@ -183,8 +176,7 @@ fn encrypt_always_uses_current_even_when_previous_configured() {
     for i in 0..5 {
         let plaintext = format!("encrypt-current-{i}");
         let wire = Crypt::encrypt_string(&plaintext).expect("encrypt");
-        let (plain, origin) =
-            Crypt::decrypt_string_inner(&wire).expect("decrypt");
+        let (plain, origin) = Crypt::decrypt_string_inner(&wire).expect("decrypt");
         assert_eq!(plain, plaintext);
         assert_eq!(
             origin,
@@ -292,11 +284,8 @@ async fn model_save_re_encrypts_under_current_key() {
     .await
     .unwrap();
 
-    let legacy_wire = suprnova::crypto::_test_encrypt_with(
-        &keys.previous_oldest,
-        "re-encrypt-me",
-    )
-    .expect("encrypt under legacy key");
+    let legacy_wire = suprnova::crypto::_test_encrypt_with(&keys.previous_oldest, "re-encrypt-me")
+        .expect("encrypt under legacy key");
     db.execute_unprepared(&format!(
         "INSERT INTO rotation_enc (id, secret) VALUES (1, '{legacy_wire}')"
     ))

@@ -43,10 +43,15 @@ fn unsubscribe_frame_parses() {
 
 #[test]
 fn publish_frame_parses_with_event_and_data() {
-    let raw = r#"{"action":"publish","channel":"chat.42","event":"MessagePosted","data":{"text":"hi"}}"#;
+    let raw =
+        r#"{"action":"publish","channel":"chat.42","event":"MessagePosted","data":{"text":"hi"}}"#;
     let parsed: ClientFrame = serde_json::from_str(raw).unwrap();
     match parsed {
-        ClientFrame::Publish { channel, event, data } => {
+        ClientFrame::Publish {
+            channel,
+            event,
+            data,
+        } => {
             assert_eq!(channel, "chat.42");
             assert_eq!(event, "MessagePosted");
             assert_eq!(data["text"], "hi");
@@ -64,7 +69,9 @@ fn unknown_action_fails_to_parse() {
 
 #[test]
 fn subscribed_frame_serializes() {
-    let frame = ServerFrame::Subscribed { channel: "chat.42".into() };
+    let frame = ServerFrame::Subscribed {
+        channel: "chat.42".into(),
+    };
     let json = serde_json::to_string(&frame).unwrap();
     assert!(json.contains(r#""action":"subscribed""#), "got: {json}");
     assert!(json.contains(r#""channel":"chat.42""#));

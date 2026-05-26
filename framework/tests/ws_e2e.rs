@@ -10,11 +10,11 @@ use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
+use suprnova::FrameworkError;
 use suprnova::http::Request;
 use suprnova::middleware::MiddlewareRegistry;
 use suprnova::routing::Router;
 use suprnova::ws::{WebSocketHandler, WsSocket};
-use suprnova::FrameworkError;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -22,11 +22,7 @@ struct EchoHandler;
 
 #[async_trait]
 impl WebSocketHandler for EchoHandler {
-    async fn handle(
-        &self,
-        mut socket: WsSocket,
-        _req: Request,
-    ) -> Result<(), FrameworkError> {
+    async fn handle(&self, mut socket: WsSocket, _req: Request) -> Result<(), FrameworkError> {
         while let Some(text) = socket.recv_text().await? {
             socket.send_text(format!("echo: {text}")).await?;
         }
@@ -42,10 +38,7 @@ async fn spawn_test_server() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind free port");
-    let port = listener
-        .local_addr()
-        .expect("local_addr")
-        .port();
+    let port = listener.local_addr().expect("local_addr").port();
 
     tokio::spawn(async move {
         loop {
@@ -87,8 +80,9 @@ async fn echo_handler_round_trips_messages() {
     let port = spawn_test_server().await;
     let url = format!("ws://127.0.0.1:{port}/ws/echo");
 
-    let (mut ws, response) =
-        tokio_tungstenite::connect_async(&url).await.expect("connect to ws echo endpoint");
+    let (mut ws, response) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect to ws echo endpoint");
     assert_eq!(
         response.status(),
         101,
@@ -102,10 +96,7 @@ async fn echo_handler_round_trips_messages() {
         .await
         .expect("recv reply to hello")
         .expect("no error on hello reply");
-    assert_eq!(
-        reply.to_text().expect("reply is text"),
-        "echo: hello"
-    );
+    assert_eq!(reply.to_text().expect("reply is text"), "echo: hello");
 
     ws.send(Message::text("world")).await.expect("send world");
     let reply = ws
@@ -113,10 +104,7 @@ async fn echo_handler_round_trips_messages() {
         .await
         .expect("recv reply to world")
         .expect("no error on world reply");
-    assert_eq!(
-        reply.to_text().expect("reply is text"),
-        "echo: world"
-    );
+    assert_eq!(reply.to_text().expect("reply is text"), "echo: world");
 
     ws.close(None).await.expect("clean close");
 }
@@ -197,8 +185,9 @@ async fn idle_connection_survives_quiet_period_and_can_still_send() {
     let port = spawn_test_server().await;
     let url = format!("ws://127.0.0.1:{port}/ws/echo");
 
-    let (mut ws, _) =
-        tokio_tungstenite::connect_async(&url).await.expect("connect");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
 
     // Idle for >150ms — significantly longer than the spawn delay
     // and any plausible network blip but well under the 30s ping.

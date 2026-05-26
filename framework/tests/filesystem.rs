@@ -147,8 +147,8 @@ async fn streaming_copy_errors_on_missing_source_disk() {
 
 #[tokio::test]
 async fn register_fs_with_layer_applies_to_operator() {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     let _guard = Storage::fake();
     let tmp = tempfile::tempdir().expect("create tempdir");
@@ -169,13 +169,16 @@ async fn register_fs_with_layer_applies_to_operator() {
     // And the disk must still work end-to-end through the layered operator.
     let disk = Storage::disk("layered_fs").expect("registered layered fs disk");
     disk.write("hello.txt", "world").await.expect("write");
-    assert_eq!(disk.read("hello.txt").await.expect("read").to_vec(), b"world");
+    assert_eq!(
+        disk.read("hello.txt").await.expect("read").to_vec(),
+        b"world"
+    );
 }
 
 #[tokio::test]
 async fn register_memory_with_layer_composes() {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     let _guard = Storage::fake();
 
@@ -271,7 +274,10 @@ async fn register_with_logging_layer_composes_and_round_trips() {
     disk.write("file.txt", "logged-write")
         .await
         .expect("write through LoggingLayer succeeds");
-    let bytes = disk.read("file.txt").await.expect("read through LoggingLayer");
+    let bytes = disk
+        .read("file.txt")
+        .await
+        .expect("read through LoggingLayer");
     assert_eq!(&bytes.to_vec(), b"logged-write");
 }
 
@@ -286,7 +292,10 @@ async fn register_with_tracing_layer_composes_and_round_trips() {
     disk.write("file.txt", "traced-write")
         .await
         .expect("write through TracingLayer succeeds");
-    let bytes = disk.read("file.txt").await.expect("read through TracingLayer");
+    let bytes = disk
+        .read("file.txt")
+        .await
+        .expect("read through TracingLayer");
     assert_eq!(&bytes.to_vec(), b"traced-write");
 }
 
@@ -304,7 +313,10 @@ async fn register_with_timeout_layer_composes_and_round_trips() {
     disk.write("file.txt", "timed-write")
         .await
         .expect("write through TimeoutLayer succeeds within 30s");
-    let bytes = disk.read("file.txt").await.expect("read through TimeoutLayer");
+    let bytes = disk
+        .read("file.txt")
+        .await
+        .expect("read through TimeoutLayer");
     assert_eq!(&bytes.to_vec(), b"timed-write");
 }
 
@@ -319,15 +331,17 @@ async fn register_with_prometheus_client_layer_composes_and_round_trips() {
     // the registry; constructing it proves the feature flag works and the
     // crate's API is reachable. Different opendal 0.56 patch releases shape
     // this slightly differently — the builder pattern is the stable surface.
-    let layer = PrometheusClientLayer::builder()
-        .register(&mut registry);
+    let layer = PrometheusClientLayer::builder().register(&mut registry);
     Storage::register_memory_with("metered", move |op| op.layer(layer));
 
     let disk = Storage::disk("metered").expect("metered disk available");
     disk.write("file.txt", "metered-write")
         .await
         .expect("write through PrometheusClientLayer succeeds");
-    let bytes = disk.read("file.txt").await.expect("read through PrometheusClientLayer");
+    let bytes = disk
+        .read("file.txt")
+        .await
+        .expect("read through PrometheusClientLayer");
     assert_eq!(&bytes.to_vec(), b"metered-write");
 }
 
@@ -352,6 +366,9 @@ async fn register_with_full_production_layer_stack_round_trips() {
     disk.write("file.txt", "stacked-write")
         .await
         .expect("write through full layer stack succeeds");
-    let bytes = disk.read("file.txt").await.expect("read through full layer stack");
+    let bytes = disk
+        .read("file.txt")
+        .await
+        .expect("read through full layer stack");
     assert_eq!(&bytes.to_vec(), b"stacked-write");
 }

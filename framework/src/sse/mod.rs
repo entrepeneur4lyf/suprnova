@@ -165,9 +165,7 @@ mod tests {
 
     #[test]
     fn with_event_and_id_appear_before_data() {
-        let evt = SseEvent::data("payload")
-            .with_event("ping")
-            .with_id("42");
+        let evt = SseEvent::data("payload").with_event("ping").with_id("42");
         let s = std::str::from_utf8(&evt.to_wire()).unwrap().to_string();
         assert_eq!(s, "event: ping\nid: 42\ndata: payload\n\n");
     }

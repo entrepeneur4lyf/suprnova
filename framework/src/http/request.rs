@@ -1,6 +1,6 @@
+use super::ParamError;
 use super::body::{collect_body_with_cap, global_max_request_body_bytes, parse_form, parse_json};
 use super::cookie::parse_cookies;
-use super::ParamError;
 use crate::error::FrameworkError;
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
@@ -129,9 +129,7 @@ impl Request {
     /// }
     /// ```
     pub fn cookies(&self) -> HashMap<String, String> {
-        self.header("Cookie")
-            .map(parse_cookies)
-            .unwrap_or_default()
+        self.header("Cookie").map(parse_cookies).unwrap_or_default()
     }
 
     /// Get a specific cookie value by name

@@ -8,7 +8,7 @@
 
 use suprnova::eloquent::FirstOrCreate;
 use suprnova::testing::TestDatabase;
-use suprnova::{accessor, attrs, model, mutator, Model};
+use suprnova::{Model, accessor, attrs, model, mutator};
 
 // ---- Models -------------------------------------------------------------
 
@@ -41,9 +41,8 @@ impl T8User {
         &mut self,
         value: serde_json::Value,
     ) -> Result<(), suprnova::FrameworkError> {
-        let raw: String = serde_json::from_value(value).map_err(|e| {
-            suprnova::FrameworkError::validation("password", format!("{e}"))
-        })?;
+        let raw: String = serde_json::from_value(value)
+            .map_err(|e| suprnova::FrameworkError::validation("password", format!("{e}")))?;
         self.password = format!("hashed:{raw}");
         Ok(())
     }
@@ -87,13 +86,9 @@ pub struct T8Counter {
 
 impl T8Counter {
     #[mutator]
-    pub fn set_clicks(
-        &mut self,
-        value: serde_json::Value,
-    ) -> Result<(), suprnova::FrameworkError> {
-        let raw: i32 = serde_json::from_value(value).map_err(|e| {
-            suprnova::FrameworkError::validation("clicks", format!("{e}"))
-        })?;
+    pub fn set_clicks(&mut self, value: serde_json::Value) -> Result<(), suprnova::FrameworkError> {
+        let raw: i32 = serde_json::from_value(value)
+            .map_err(|e| suprnova::FrameworkError::validation("clicks", format!("{e}")))?;
         // Mutator transformation: double the incoming value so we can
         // observe the mutator fired even for an i32 field.
         self.clicks = raw * 2;

@@ -48,9 +48,9 @@ pub mod store;
 pub use config::SessionConfig;
 pub use driver::DatabaseSessionDriver;
 pub use middleware::{
-    auth_user_id, clear_auth_user, generate_csrf_token, generate_session_id,
+    SessionMiddleware, auth_user_id, clear_auth_user, generate_csrf_token, generate_session_id,
     get_csrf_token, invalidate_session, is_authenticated, regenerate_session_id, session,
-    session_mut, set_auth_user, SessionMiddleware,
+    session_mut, set_auth_user,
 };
 pub use store::{SessionData, SessionStore};
 
@@ -79,8 +79,7 @@ pub async fn destroy_all_for_user(user_id: &str) -> Result<u64, crate::error::Fr
 // shouldn't need these; they exist for unit/integration tests that
 // drive code paths reading the session without booting a full server.
 #[doc(hidden)]
-pub fn new_session_slot_for_test()
--> std::sync::Arc<std::sync::Mutex<Option<SessionData>>> {
+pub fn new_session_slot_for_test() -> std::sync::Arc<std::sync::Mutex<Option<SessionData>>> {
     std::sync::Arc::new(std::sync::Mutex::new(Some(SessionData::new(
         "test_session".to_string(),
         "test_csrf_token".to_string(),

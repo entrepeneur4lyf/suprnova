@@ -24,14 +24,14 @@ mod model_attribute;
 mod multipart;
 mod notification_mail;
 mod observer;
-mod scopes;
-mod suprnova_test;
+mod policy;
 mod redirect;
 mod request;
+mod scopes;
 mod service;
+mod suprnova_test;
 mod test_macro;
 mod utils;
-mod policy;
 mod workflow;
 mod workflow_step;
 

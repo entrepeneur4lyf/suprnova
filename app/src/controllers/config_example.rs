@@ -1,4 +1,4 @@
-use suprnova::{json_response, Config, Request, Response};
+use suprnova::{Config, Request, Response, json_response};
 
 use crate::config::{DatabaseConfig, MailConfig};
 

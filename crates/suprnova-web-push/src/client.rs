@@ -4,8 +4,11 @@
 use crate::error::WebPushError;
 use crate::payload::{ContentEncoding, Payload};
 use crate::vapid::VapidSigner;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE};
 use reqwest::Client;
+use reqwest::header::{
+    AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderName,
+    HeaderValue,
+};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -39,7 +42,11 @@ impl WebPushClient {
     }
 
     pub fn with_client(http: Client, signer: VapidSigner, subject: impl Into<String>) -> Self {
-        Self { http, signer, subject: subject.into() }
+        Self {
+            http,
+            signer,
+            subject: subject.into(),
+        }
     }
 
     pub async fn send(
@@ -71,12 +78,12 @@ impl WebPushClient {
             HeaderValue::from_str(&format!("p256ecdsa={pub_b64}"))
                 .map_err(|e| WebPushError::Internal(format!("crypto-key header: {e}")))?,
         );
-        headers.insert(
-            HeaderName::from_static("ttl"),
-            HeaderValue::from(ttl_secs),
-        );
+        headers.insert(HeaderName::from_static("ttl"), HeaderValue::from(ttl_secs));
         headers.insert(CONTENT_ENCODING, HeaderValue::from_static("aes128gcm"));
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
         headers.insert(CONTENT_LENGTH, HeaderValue::from(payload.body().len()));
 
         let resp = self
@@ -100,8 +107,8 @@ impl WebPushClient {
 }
 
 fn audience_of(endpoint: &str) -> Result<String, WebPushError> {
-    let url = Url::parse(endpoint)
-        .map_err(|e| WebPushError::Internal(format!("endpoint url: {e}")))?;
+    let url =
+        Url::parse(endpoint).map_err(|e| WebPushError::Internal(format!("endpoint url: {e}")))?;
     let mut out = format!("{}://{}", url.scheme(), url.host_str().unwrap_or(""));
     if let Some(p) = url.port() {
         out.push(':');

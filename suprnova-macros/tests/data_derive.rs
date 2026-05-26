@@ -1,7 +1,7 @@
 //! Compile-time + runtime tests of `#[derive(Data)]` macro expansion.
 
-use suprnova::data::Field;
 use suprnova::Data;
+use suprnova::data::Field;
 use validator::Validate;
 
 #[derive(Data, Validate, Debug)]
@@ -170,7 +170,11 @@ fn into_inertia_props_emits_owner_tagged_lazy() {
     assert!(names.contains(&"id"));
     assert!(names.contains(&"favorite_song"));
 
-    let song_entry = props.into_iter().find(|(k, _)| k == "favorite_song").unwrap().1;
+    let song_entry = props
+        .into_iter()
+        .find(|(k, _)| k == "favorite_song")
+        .unwrap()
+        .1;
     match song_entry {
         PropEntry::LazyOwned { owner, field, .. } => {
             // Owner is the fully-qualified type name now (audit HIGH #336).

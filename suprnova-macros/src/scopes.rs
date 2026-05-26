@@ -69,8 +69,8 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, parse_quote, FnArg, ImplItem, ImplItemFn, ItemImpl, Pat, PatIdent,
-    ReturnType, Type, Visibility,
+    FnArg, ImplItem, ImplItemFn, ItemImpl, Pat, PatIdent, ReturnType, Type, Visibility,
+    parse_macro_input, parse_quote,
 };
 
 /// Implementation of `#[suprnova::scopes(Model)]`.
@@ -127,7 +127,10 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
                 ScopeExpand::Rewrite(rewrite) => {
                     // The renamed `__scope_<name>` inner fn stays in the
                     // impl block. We append it plus the static helper.
-                    let ScopeRewrite { static_helper, module_items } = *rewrite;
+                    let ScopeRewrite {
+                        static_helper,
+                        module_items,
+                    } = *rewrite;
                     new_impl_items.push(ImplItem::Fn(f));
                     new_impl_items.push(ImplItem::Fn(static_helper));
                     module_emissions.push(module_items);

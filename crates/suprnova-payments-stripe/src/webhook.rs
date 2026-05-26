@@ -3,12 +3,12 @@
 //! Verifies Stripe's `t=<ts>,v1=<hex_sig>` signature format using HMAC-SHA256
 //! and parses the incoming event body into a `WebhookEvent`.
 
-use crate::{event_map::stripe_event_to_neutral, StripeProvider};
+use crate::{StripeProvider, event_map::stripe_event_to_neutral};
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use suprnova::payments::{
-    CustomerSnapshot, NeutralEventKind, PaymentError, PaymentResult, PaymentSnapshot, PayloadIds,
+    CustomerSnapshot, NeutralEventKind, PayloadIds, PaymentError, PaymentResult, PaymentSnapshot,
     WebhookContext, WebhookEvent, WebhookHandler,
 };
 
@@ -52,8 +52,9 @@ impl WebhookHandler for StripeProvider {
             }
         }
 
-        let timestamp = timestamp
-            .ok_or_else(|| PaymentError::WebhookSignature("missing timestamp in stripe-signature header".into()))?;
+        let timestamp = timestamp.ok_or_else(|| {
+            PaymentError::WebhookSignature("missing timestamp in stripe-signature header".into())
+        })?;
 
         if v1_sigs.is_empty() {
             return Err(PaymentError::WebhookSignature(
@@ -87,9 +88,8 @@ impl WebhookHandler for StripeProvider {
     /// `NeutralEventKind` via `stripe_event_to_neutral`. The full raw JSON
     /// is preserved in `raw_payload` for provider-specific handlers.
     fn parse_event(&self, body: &[u8]) -> PaymentResult<WebhookEvent> {
-        let raw: serde_json::Value = serde_json::from_slice(body).map_err(|e| {
-            PaymentError::Validation(format!("invalid stripe webhook body: {e}"))
-        })?;
+        let raw: serde_json::Value = serde_json::from_slice(body)
+            .map_err(|e| PaymentError::Validation(format!("invalid stripe webhook body: {e}")))?;
 
         let provider_event_id = raw
             .get("id")
@@ -135,8 +135,10 @@ impl WebhookHandler for StripeProvider {
                 | NeutralEventKind::SubscriptionCanceled,
             ) => {
                 ids.subscription_id = obj.get("id").and_then(|v| v.as_str()).map(String::from);
-                ids.customer_id =
-                    obj.get("customer").and_then(|v| v.as_str()).map(String::from);
+                ids.customer_id = obj
+                    .get("customer")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
             }
             Some(NeutralEventKind::CustomerCreated | NeutralEventKind::CustomerUpdated) => {
                 ids.customer_id = obj.get("id").and_then(|v| v.as_str()).map(String::from);
@@ -148,13 +150,17 @@ impl WebhookHandler for StripeProvider {
                 | NeutralEventKind::PaymentDisputed,
             ) => {
                 ids.transaction_id = obj.get("id").and_then(|v| v.as_str()).map(String::from);
-                ids.customer_id =
-                    obj.get("customer").and_then(|v| v.as_str()).map(String::from);
+                ids.customer_id = obj
+                    .get("customer")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
             }
             Some(NeutralEventKind::InvoicePaid | NeutralEventKind::InvoiceFailed) => {
                 ids.transaction_id = obj.get("id").and_then(|v| v.as_str()).map(String::from);
-                ids.customer_id =
-                    obj.get("customer").and_then(|v| v.as_str()).map(String::from);
+                ids.customer_id = obj
+                    .get("customer")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 ids.subscription_id = obj
                     .get("subscription")
                     .and_then(|v| v.as_str())
@@ -407,7 +413,10 @@ mod tests {
         assert_eq!(snap.amount_total_minor, 4242);
         assert_eq!(snap.currency, "USD", "currency must be uppercased");
         assert_eq!(snap.status, "succeeded");
-        assert!(snap.paid_at.is_some(), "PaymentSucceeded must parse `created` as paid_at");
+        assert!(
+            snap.paid_at.is_some(),
+            "PaymentSucceeded must parse `created` as paid_at"
+        );
     }
 
     #[test]
@@ -429,7 +438,10 @@ mod tests {
             }),
         );
         let snap = p.extract_payment_snapshot(&e).expect("snapshot present");
-        assert_eq!(snap.amount_total_minor, 12345, "amount_paid takes precedence");
+        assert_eq!(
+            snap.amount_total_minor, 12345,
+            "amount_paid takes precedence"
+        );
         assert_eq!(snap.amount_tax_minor, 234);
         assert_eq!(snap.currency, "EUR");
         assert_eq!(snap.provider_subscription_id.as_deref(), Some("sub_x"));

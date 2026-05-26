@@ -12,7 +12,10 @@ pub enum PaymentError {
     NotSupported(String),
 
     #[error("payment was declined: {reason}")]
-    Declined { reason: String, decline_code: Option<String> },
+    Declined {
+        reason: String,
+        decline_code: Option<String>,
+    },
 
     #[error("provider authentication failed: {0}")]
     Authentication(String),

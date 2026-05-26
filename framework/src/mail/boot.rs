@@ -4,6 +4,7 @@
 
 use crate::error::FrameworkError;
 use crate::lock;
+use crate::mail::Mail;
 use crate::mail::log::LogMailTransport;
 use crate::mail::mailgun::MailgunMailTransport;
 use crate::mail::memory::InMemoryMailTransport;
@@ -12,7 +13,6 @@ use crate::mail::resend::ResendMailTransport;
 use crate::mail::sendgrid::SendGridMailTransport;
 use crate::mail::ses::SesMailTransport;
 use crate::mail::smtp::SmtpMailTransport;
-use crate::mail::Mail;
 use std::sync::{Arc, RwLock};
 
 // `RwLock<Option<...>>` (not `OnceLock`) so successive bootstrap calls can
@@ -33,13 +33,11 @@ pub fn captured_in_memory() -> Option<Arc<InMemoryMailTransport>> {
 }
 
 fn set_memory_capture(t: Arc<InMemoryMailTransport>) {
-    *lock::write(&MEMORY_CAPTURE)
-        .expect("memory capture lock poisoned") = Some(t);
+    *lock::write(&MEMORY_CAPTURE).expect("memory capture lock poisoned") = Some(t);
 }
 
 fn clear_memory_capture() {
-    *lock::write(&MEMORY_CAPTURE)
-        .expect("memory capture lock poisoned") = None;
+    *lock::write(&MEMORY_CAPTURE).expect("memory capture lock poisoned") = None;
 }
 
 /// Read `MAIL_DRIVER` and bind the matching transport globally. Defaults to
@@ -74,8 +72,7 @@ pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
             Mail::set_transport(t);
         }
         "smtp" => {
-            let host =
-                std::env::var("MAIL_SMTP_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+            let host = std::env::var("MAIL_SMTP_HOST").unwrap_or_else(|_| "127.0.0.1".into());
             let port: u16 = std::env::var("MAIL_SMTP_PORT")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -92,9 +89,7 @@ pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
         }
         "postmark" => {
             let token = std::env::var("MAIL_POSTMARK_TOKEN").map_err(|_| {
-                FrameworkError::internal(
-                    "MAIL_POSTMARK_TOKEN is required for MAIL_DRIVER=postmark",
-                )
+                FrameworkError::internal("MAIL_POSTMARK_TOKEN is required for MAIL_DRIVER=postmark")
             })?;
             let transport = match std::env::var("MAIL_POSTMARK_ENDPOINT") {
                 Ok(ep) => PostmarkMailTransport::with_endpoint(token, ep),
@@ -104,17 +99,12 @@ pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
         }
         "ses" => {
             let key = std::env::var("MAIL_SES_ACCESS_KEY").map_err(|_| {
-                FrameworkError::internal(
-                    "MAIL_SES_ACCESS_KEY is required for MAIL_DRIVER=ses",
-                )
+                FrameworkError::internal("MAIL_SES_ACCESS_KEY is required for MAIL_DRIVER=ses")
             })?;
             let secret = std::env::var("MAIL_SES_SECRET_KEY").map_err(|_| {
-                FrameworkError::internal(
-                    "MAIL_SES_SECRET_KEY is required for MAIL_DRIVER=ses",
-                )
+                FrameworkError::internal("MAIL_SES_SECRET_KEY is required for MAIL_DRIVER=ses")
             })?;
-            let region =
-                std::env::var("MAIL_SES_REGION").unwrap_or_else(|_| "us-east-1".into());
+            let region = std::env::var("MAIL_SES_REGION").unwrap_or_else(|_| "us-east-1".into());
             let transport = match std::env::var("MAIL_SES_ENDPOINT") {
                 Ok(ep) => SesMailTransport::with_endpoint(key, secret, region, ep),
                 Err(_) => SesMailTransport::new(key, secret, region),
@@ -135,14 +125,10 @@ pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
         }
         "mailgun" => {
             let key = std::env::var("MAIL_MAILGUN_API_KEY").map_err(|_| {
-                FrameworkError::internal(
-                    "MAIL_MAILGUN_API_KEY is required for MAIL_DRIVER=mailgun",
-                )
+                FrameworkError::internal("MAIL_MAILGUN_API_KEY is required for MAIL_DRIVER=mailgun")
             })?;
             let domain = std::env::var("MAIL_MAILGUN_DOMAIN").map_err(|_| {
-                FrameworkError::internal(
-                    "MAIL_MAILGUN_DOMAIN is required for MAIL_DRIVER=mailgun",
-                )
+                FrameworkError::internal("MAIL_MAILGUN_DOMAIN is required for MAIL_DRIVER=mailgun")
             })?;
             let transport = match std::env::var("MAIL_MAILGUN_ENDPOINT") {
                 Ok(ep) => MailgunMailTransport::with_endpoint(key, domain, ep),
@@ -152,9 +138,7 @@ pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
         }
         "resend" => {
             let key = std::env::var("MAIL_RESEND_API_KEY").map_err(|_| {
-                FrameworkError::internal(
-                    "MAIL_RESEND_API_KEY is required for MAIL_DRIVER=resend",
-                )
+                FrameworkError::internal("MAIL_RESEND_API_KEY is required for MAIL_DRIVER=resend")
             })?;
             let transport = match std::env::var("MAIL_RESEND_ENDPOINT") {
                 Ok(ep) => ResendMailTransport::with_endpoint(key, ep),

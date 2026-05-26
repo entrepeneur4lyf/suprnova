@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serial_test::serial;
 use std::sync::Arc;
 use suprnova::notifications::channels::mail::MailChannel;
-use suprnova::notifications::{set_dispatcher, NotificationDispatcher};
+use suprnova::notifications::{NotificationDispatcher, set_dispatcher};
 use suprnova::prelude::*;
 use suprnova::serde_json;
 
@@ -108,8 +108,7 @@ async fn prelude_covers_typical_mail_and_notification_flow() {
     // Notification facade + Notifiable + Notification + NotificationMailable
     // + MailRendering + register_mail_renderer — all from prelude.
     register_mail_renderer::<PreludeOrderShipped>();
-    let dispatcher = NotificationDispatcher::new()
-        .register_channel(Arc::new(MailChannel::new()));
+    let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
     set_dispatcher(Arc::new(dispatcher));
 
     Notify::send(

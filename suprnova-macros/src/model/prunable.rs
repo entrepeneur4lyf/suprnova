@@ -20,7 +20,7 @@
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{parse2, ItemImpl, Result, Type};
+use syn::{ItemImpl, Result, Type, parse2};
 
 pub fn expand(item: TokenStream) -> Result<TokenStream> {
     let item_impl: ItemImpl = parse2(item)?;

@@ -10,8 +10,8 @@
 //! the capture buffer.
 
 use serial_test::serial;
-use suprnova::queue::testing::{assert_pushed, install_fake};
 use suprnova::SendMailJob;
+use suprnova::queue::testing::{assert_pushed, install_fake};
 
 #[tokio::test]
 #[serial]

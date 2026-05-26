@@ -51,9 +51,9 @@ use super::driver::{VectorDriver, VectorItem, VectorMatch};
 use crate::FrameworkError;
 use async_trait::async_trait;
 use qdrant_client::qdrant::{
-    point_id::PointIdOptions, points_selector::PointsSelectorOneOf, CountPointsBuilder,
-    CreateCollectionBuilder, DeletePointsBuilder, Distance, PointId, PointStruct, PointsIdsList,
-    QueryPointsBuilder, ScoredPoint, UpsertPointsBuilder, VectorParamsBuilder,
+    CountPointsBuilder, CreateCollectionBuilder, DeletePointsBuilder, Distance, PointId,
+    PointStruct, PointsIdsList, QueryPointsBuilder, ScoredPoint, UpsertPointsBuilder,
+    VectorParamsBuilder, point_id::PointIdOptions, points_selector::PointsSelectorOneOf,
 };
 use qdrant_client::{Payload, Qdrant, QdrantError};
 use std::collections::HashSet;
@@ -202,12 +202,9 @@ impl QdrantVectorDriver {
             SUPRNOVA_ID_PAYLOAD_KEY.to_string(),
             serde_json::Value::String(item.id.clone()),
         );
-        let payload: Payload = Payload::try_from(serde_json::Value::Object(payload_obj))
-            .map_err(|e| {
-                FrameworkError::internal(format!(
-                    "qdrant payload encode for '{}': {e}",
-                    item.id
-                ))
+        let payload: Payload =
+            Payload::try_from(serde_json::Value::Object(payload_obj)).map_err(|e| {
+                FrameworkError::internal(format!("qdrant payload encode for '{}': {e}", item.id))
             })?;
         Ok(PointStruct::new(point_id, item.embedding, payload))
     }
@@ -374,7 +371,9 @@ impl VectorDriver for QdrantVectorDriver {
         }
         let q_norm: f32 = query.iter().map(|x| x * x).sum::<f32>().sqrt();
         if q_norm == 0.0 {
-            return Err(FrameworkError::param("vector::similar query is zero-vector"));
+            return Err(FrameworkError::param(
+                "vector::similar query is zero-vector",
+            ));
         }
 
         let response = self
@@ -388,7 +387,11 @@ impl VectorDriver for QdrantVectorDriver {
             .await
             .map_err(|e| FrameworkError::internal(format!("qdrant query on '{store}': {e}")))?;
 
-        Ok(response.result.into_iter().map(Self::decode_match).collect())
+        Ok(response
+            .result
+            .into_iter()
+            .map(Self::decode_match)
+            .collect())
     }
 
     async fn delete(&self, store: &str, ids: Vec<String>) -> Result<(), FrameworkError> {
@@ -399,13 +402,13 @@ impl VectorDriver for QdrantVectorDriver {
         self.client
             .delete_points(
                 DeletePointsBuilder::new(store)
-                    .points(PointsSelectorOneOf::Points(PointsIdsList { ids: point_ids }))
+                    .points(PointsSelectorOneOf::Points(PointsIdsList {
+                        ids: point_ids,
+                    }))
                     .wait(true),
             )
             .await
-            .map_err(|e| {
-                FrameworkError::internal(format!("qdrant delete from '{store}': {e}"))
-            })?;
+            .map_err(|e| FrameworkError::internal(format!("qdrant delete from '{store}': {e}")))?;
         Ok(())
     }
 

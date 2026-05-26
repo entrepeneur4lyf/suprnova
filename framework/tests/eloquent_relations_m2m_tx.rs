@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use sea_orm::{ConnectOptions, ConnectionTrait, Database};
 use suprnova::container::testing::{TestContainer, TestContainerGuard};
-use suprnova::{attrs, model, DbConnection, FrameworkError, Model, DB};
+use suprnova::{DB, DbConnection, FrameworkError, Model, attrs, model};
 
 async fn fresh_multiconn_sqlite() -> (DbConnection, TestContainerGuard, tempfile::TempDir) {
     let guard = TestContainer::fake();

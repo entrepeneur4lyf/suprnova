@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use serial_test::serial;
 use std::sync::Arc;
 use suprnova::notifications::channels::webpush::WebPushChannel;
-use suprnova::notifications::{Channel, DynNotification, Notifiable, Notification, NotificationDispatcher};
+use suprnova::notifications::{
+    Channel, DynNotification, Notifiable, Notification, NotificationDispatcher,
+};
 use suprnova::web_push::{VapidKey, VapidSigner, WebPushClient};
 use tracing_test::traced_test;
 use wiremock::matchers::{method, path};

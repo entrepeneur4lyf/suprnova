@@ -115,7 +115,10 @@ impl TestDatabase {
         // will now get this test database
         TestContainer::singleton(conn.clone());
 
-        Ok(Self { conn, _guard: guard })
+        Ok(Self {
+            conn,
+            _guard: guard,
+        })
     }
 
     /// Get a reference to the underlying database connection
@@ -157,7 +160,10 @@ impl TestDatabase {
             .build();
         let conn = DbConnection::connect(&config).await?;
         TestContainer::singleton(conn.clone());
-        Ok(Self { conn, _guard: guard })
+        Ok(Self {
+            conn,
+            _guard: guard,
+        })
     }
 
     /// Execute a DDL / DML statement with no placeholders. Delegator over
@@ -165,7 +171,8 @@ impl TestDatabase {
     /// the trait nor reach through `self.conn()`.
     pub async fn execute_unprepared(&self, sql: &str) -> Result<(), FrameworkError> {
         use sea_orm::ConnectionTrait;
-        self.conn.inner()
+        self.conn
+            .inner()
             .execute_unprepared(sql)
             .await
             .map(|_| ())
@@ -182,7 +189,8 @@ impl TestDatabase {
         use sea_orm::ConnectionTrait;
         let backend = self.conn.inner().get_database_backend();
         let stmt = sea_orm::Statement::from_sql_and_values(backend, sql, bindings);
-        self.conn.inner()
+        self.conn
+            .inner()
             .query_one(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?
@@ -198,7 +206,8 @@ impl TestDatabase {
         use sea_orm::ConnectionTrait;
         let backend = self.conn.inner().get_database_backend();
         let stmt = sea_orm::Statement::from_sql_and_values(backend, sql, bindings);
-        self.conn.inner()
+        self.conn
+            .inner()
             .query_all(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))

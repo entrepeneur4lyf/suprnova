@@ -473,8 +473,8 @@ impl App {
     ///     // ...
     /// }
     /// ```
-    pub fn resolve<T: Any + Send + Sync + Clone + 'static>(
-    ) -> Result<T, crate::error::FrameworkError> {
+    pub fn resolve<T: Any + Send + Sync + Clone + 'static>()
+    -> Result<T, crate::error::FrameworkError> {
         Self::get::<T>().ok_or_else(crate::error::FrameworkError::service_not_found::<T>)
     }
 
@@ -486,8 +486,8 @@ impl App {
     /// ```rust,ignore
     /// let client: Arc<dyn HttpClient> = App::resolve_make::<dyn HttpClient>()?;
     /// ```
-    pub fn resolve_make<T: ?Sized + Send + Sync + 'static>(
-    ) -> Result<Arc<T>, crate::error::FrameworkError> {
+    pub fn resolve_make<T: ?Sized + Send + Sync + 'static>()
+    -> Result<Arc<T>, crate::error::FrameworkError> {
         Self::make::<T>().ok_or_else(crate::error::FrameworkError::service_not_found::<T>)
     }
 
@@ -597,8 +597,7 @@ impl App {
 
         // Fall back to the global container, lazy-initializing if necessary
         // so callers don't have to remember to call `App::init` first.
-        let container =
-            APP_CONTAINER.get_or_init(|| RwLock::new(Container::new()));
+        let container = APP_CONTAINER.get_or_init(|| RwLock::new(Container::new()));
         container.read().unwrap().inertia.clone()
     }
 
@@ -674,8 +673,7 @@ impl App {
     /// requires session-flash integration — see
     /// [`flash`](crate::inertia::flash) module docs.
     pub fn flash<V: serde::Serialize>(key: impl Into<String>, value: V) {
-        let v = serde_json::to_value(&value)
-            .expect("App::flash value must serialize cleanly");
+        let v = serde_json::to_value(&value).expect("App::flash value must serialize cleanly");
         crate::inertia::flash::push(key.into(), v);
     }
 

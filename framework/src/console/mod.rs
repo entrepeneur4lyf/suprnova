@@ -39,9 +39,8 @@ pub use typed::TypedCommand;
 /// fn-pointer-compatible boxed-future returned by every command
 /// handler. Receives the per-subcommand `ArgMatches` clap parsed
 /// from argv.
-pub type CommandHandler = fn(
-    &clap::ArgMatches,
-) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send>>;
+pub type CommandHandler =
+    fn(&clap::ArgMatches) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send>>;
 
 /// Registry entry submitted by `#[command]` / `#[derive(Command)]`.
 /// Each entry carries the invocation name, a human-readable
@@ -152,7 +151,9 @@ where
         if let Some(entry) = find(name) {
             lazy_init().await;
             let result = (entry.handler)(sub_matches).await;
-            if let Err(ref e) = result && !e.is_silent() {
+            if let Err(ref e) = result
+                && !e.is_silent()
+            {
                 eprintln!("error: {}", e.message());
             }
             return result;
@@ -214,13 +215,11 @@ pub fn collect_trailing_args(matches: &clap::ArgMatches) -> Vec<String> {
 /// flags through to the handler without clap intercepting them.
 #[doc(hidden)]
 pub fn raw_clap_builder(name: &'static str, description: &'static str) -> clap::Command {
-    clap::Command::new(name)
-        .about(description)
-        .arg(
-            clap::Arg::new("__suprnova_trailing_args")
-                .action(clap::ArgAction::Append)
-                .num_args(0..)
-                .trailing_var_arg(true)
-                .allow_hyphen_values(true),
-        )
+    clap::Command::new(name).about(description).arg(
+        clap::Arg::new("__suprnova_trailing_args")
+            .action(clap::ArgAction::Append)
+            .num_args(0..)
+            .trailing_var_arg(true)
+            .allow_hyphen_values(true),
+    )
 }

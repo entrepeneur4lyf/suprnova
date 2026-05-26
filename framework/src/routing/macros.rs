@@ -36,8 +36,8 @@ pub const fn validate_route_path(path: &'static str) -> &'static str {
     }
     path
 }
-use crate::middleware::{into_boxed, BoxedMiddleware, Middleware};
-use crate::routing::router::{register_route_name, BoxedHandler, Router};
+use crate::middleware::{BoxedMiddleware, Middleware, into_boxed};
+use crate::routing::router::{BoxedHandler, Router, register_route_name};
 use hyper::Method;
 use std::future::Future;
 use std::sync::Arc;
@@ -474,9 +474,7 @@ where
 /// ```
 #[macro_export]
 macro_rules! fallback {
-    ($handler:expr) => {{
-        $crate::__fallback_impl($handler)
-    }};
+    ($handler:expr) => {{ $crate::__fallback_impl($handler) }};
 }
 
 /// Internal implementation for fallback routes (used by the fallback! macro)
@@ -844,7 +842,10 @@ mod tests {
         );
 
         // Parameter at the end
-        assert_eq!(convert_route_params("/api/v1/:version"), "/api/v1/{version}");
+        assert_eq!(
+            convert_route_params("/api/v1/:version"),
+            "/api/v1/{version}"
+        );
     }
 
     // Helper for creating test handlers
@@ -871,8 +872,11 @@ mod tests {
     #[test]
     fn test_group_add_route() {
         // Test adding a route to a group
-        let group = GroupDef::__new_unchecked("/api")
-            .add(RouteDefBuilder::new(HttpMethod::Get, "/users", test_handler));
+        let group = GroupDef::__new_unchecked("/api").add(RouteDefBuilder::new(
+            HttpMethod::Get,
+            "/users",
+            test_handler,
+        ));
 
         assert_eq!(group.items.len(), 1);
         matches!(&group.items[0], GroupItem::Route(_));
@@ -893,9 +897,17 @@ mod tests {
         // Test adding both routes and nested groups
         let nested = GroupDef::__new_unchecked("/admin");
         let group = GroupDef::__new_unchecked("/api")
-            .add(RouteDefBuilder::new(HttpMethod::Get, "/users", test_handler))
+            .add(RouteDefBuilder::new(
+                HttpMethod::Get,
+                "/users",
+                test_handler,
+            ))
             .add(nested)
-            .add(RouteDefBuilder::new(HttpMethod::Post, "/users", test_handler));
+            .add(RouteDefBuilder::new(
+                HttpMethod::Post,
+                "/users",
+                test_handler,
+            ));
 
         assert_eq!(group.items.len(), 3);
         matches!(&group.items[0], GroupItem::Route(_));
@@ -906,8 +918,11 @@ mod tests {
     #[test]
     fn test_deep_nesting() {
         // Test deeply nested groups (3 levels)
-        let level3 = GroupDef::__new_unchecked("/level3")
-            .add(RouteDefBuilder::new(HttpMethod::Get, "/", test_handler));
+        let level3 = GroupDef::__new_unchecked("/level3").add(RouteDefBuilder::new(
+            HttpMethod::Get,
+            "/",
+            test_handler,
+        ));
 
         let level2 = GroupDef::__new_unchecked("/level2").add(level3);
 
@@ -929,8 +944,11 @@ mod tests {
     #[test]
     fn test_backward_compatibility_route_method() {
         // Test that the old .route() method still works
-        let group = GroupDef::__new_unchecked("/api")
-            .route(RouteDefBuilder::new(HttpMethod::Get, "/users", test_handler));
+        let group = GroupDef::__new_unchecked("/api").route(RouteDefBuilder::new(
+            HttpMethod::Get,
+            "/users",
+            test_handler,
+        ));
 
         assert_eq!(group.items.len(), 1);
         matches!(&group.items[0], GroupItem::Route(_));

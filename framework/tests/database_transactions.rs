@@ -17,9 +17,9 @@
 //! Each test wraps its body in `Box::pin(async move { ... })`.
 
 use chrono::{DateTime, Utc};
-use suprnova::testing::TestDatabase;
 use suprnova::FrameworkError;
-use suprnova::{attrs, model, Model, DB};
+use suprnova::testing::TestDatabase;
+use suprnova::{DB, Model, attrs, model};
 
 #[model(
     table = "t11_accounts",
@@ -274,10 +274,8 @@ async fn nested_db_transaction_is_rejected_at_runtime() {
 
     let outer: Result<(), FrameworkError> = DB::transaction(|_tx| {
         Box::pin(async move {
-            let inner = DB::transaction(|_t| {
-                Box::pin(async move { Ok::<(), FrameworkError>(()) })
-            })
-            .await;
+            let inner =
+                DB::transaction(|_t| Box::pin(async move { Ok::<(), FrameworkError>(()) })).await;
             assert!(inner.is_err(), "nested DB::transaction must error");
             let msg = format!("{}", inner.unwrap_err());
             assert!(
@@ -371,10 +369,9 @@ async fn create_with_tx_rolls_back_when_handle_dropped_without_commit() {
 
     {
         let tx = DB::begin_transaction().await.unwrap();
-        let _ =
-            T11Account::create_with_tx(&tx, attrs! { owner: "dave", balance: 1i64 })
-                .await
-                .unwrap();
+        let _ = T11Account::create_with_tx(&tx, attrs! { owner: "dave", balance: 1i64 })
+            .await
+            .unwrap();
         // Drop `tx` without calling commit — the SeaORM
         // DatabaseTransaction's Drop rolls back any uncommitted work.
         drop(tx);

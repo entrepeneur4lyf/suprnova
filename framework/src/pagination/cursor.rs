@@ -1,10 +1,10 @@
 //! Cursor paginator — keyset-style pagination with encrypted cursors.
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Serialize;
 
-use crate::crypto::Crypt;
 use crate::FrameworkError;
+use crate::crypto::Crypt;
 
 /// Direction a cursor advances in. The first page always uses
 /// [`CursorDirection::Next`] implicitly (the caller passes `None`).
@@ -172,9 +172,7 @@ impl<T> CursorPaginator<T> {
     /// even if `Crypt` is not initialized (which would itself be a
     /// boot bug). Any attempt to decode an unsigned base64 payload
     /// errors. Codex review finding #1.
-    pub fn decode_value(
-        wire: &str,
-    ) -> Result<(sea_orm::Value, CursorDirection), FrameworkError> {
+    pub fn decode_value(wire: &str) -> Result<(sea_orm::Value, CursorDirection), FrameworkError> {
         let json = Crypt::decrypt_string(wire)?;
         let payload: CursorPayload = serde_json::from_str(&json).map_err(|e| {
             FrameworkError::internal(format!("Cursor payload JSON decode failed: {e}"))
@@ -227,9 +225,7 @@ impl<T> CursorPaginator<T> {
 
 /// Convert a SeaORM `Value` into the cursor wire shape. Returns the
 /// variant discriminator string plus a JSON value.
-fn value_to_tagged_json(
-    v: &sea_orm::Value,
-) -> Result<(String, serde_json::Value), FrameworkError> {
+fn value_to_tagged_json(v: &sea_orm::Value) -> Result<(String, serde_json::Value), FrameworkError> {
     use sea_orm::Value;
     let pair: (&'static str, serde_json::Value) = match v {
         Value::Bool(Some(b)) => ("Bool", serde_json::json!(b)),
@@ -269,9 +265,7 @@ fn value_to_tagged_json(
         Value::ChronoDate(None) => ("ChronoDate", serde_json::Value::Null),
         Value::ChronoTime(Some(t)) => ("ChronoTime", serde_json::json!(t.to_string())),
         Value::ChronoTime(None) => ("ChronoTime", serde_json::Value::Null),
-        Value::ChronoDateTime(Some(dt)) => {
-            ("ChronoDateTime", serde_json::json!(dt.to_string()))
-        }
+        Value::ChronoDateTime(Some(dt)) => ("ChronoDateTime", serde_json::json!(dt.to_string())),
         Value::ChronoDateTime(None) => ("ChronoDateTime", serde_json::Value::Null),
         Value::ChronoDateTimeUtc(Some(dt)) => (
             "ChronoDateTimeUtc",
@@ -307,10 +301,7 @@ fn value_to_tagged_json(
 
 /// Inverse of [`value_to_tagged_json`]. Validates that JSON shape
 /// matches the claimed discriminator.
-fn tagged_json_to_value(
-    tag: &str,
-    v: serde_json::Value,
-) -> Result<sea_orm::Value, FrameworkError> {
+fn tagged_json_to_value(tag: &str, v: serde_json::Value) -> Result<sea_orm::Value, FrameworkError> {
     use sea_orm::Value;
     let bad = |what: &str| {
         FrameworkError::internal(format!(
@@ -351,7 +342,10 @@ fn tagged_json_to_value(
     }
 
     match tag {
-        "Bool" => v.as_bool().map(|b| Value::Bool(Some(b))).ok_or_else(|| bad("bool")),
+        "Bool" => v
+            .as_bool()
+            .map(|b| Value::Bool(Some(b)))
+            .ok_or_else(|| bad("bool")),
         "TinyInt" => v
             .as_i64()
             .and_then(|i| i8::try_from(i).ok())
@@ -367,7 +361,10 @@ fn tagged_json_to_value(
             .and_then(|i| i32::try_from(i).ok())
             .map(|i| Value::Int(Some(i)))
             .ok_or_else(|| bad("i32")),
-        "BigInt" => v.as_i64().map(|i| Value::BigInt(Some(i))).ok_or_else(|| bad("i64")),
+        "BigInt" => v
+            .as_i64()
+            .map(|i| Value::BigInt(Some(i)))
+            .ok_or_else(|| bad("i64")),
         "TinyUnsigned" => v
             .as_u64()
             .and_then(|i| u8::try_from(i).ok())
@@ -436,9 +433,7 @@ fn tagged_json_to_value(
             .as_str()
             .and_then(|s| {
                 chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
-                    .or_else(|_| {
-                        chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
-                    })
+                    .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f"))
                     .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
                     .ok()
             })
@@ -567,11 +562,10 @@ mod tests {
     fn value_datetime_utc_round_trip() {
         let _g = CURSOR_LOCK.lock().unwrap();
         ensure_key();
-        let dt: chrono::DateTime<chrono::Utc> = chrono::DateTime::parse_from_rfc3339(
-            "2026-05-14T18:30:00.123456789Z",
-        )
-        .unwrap()
-        .with_timezone(&chrono::Utc);
+        let dt: chrono::DateTime<chrono::Utc> =
+            chrono::DateTime::parse_from_rfc3339("2026-05-14T18:30:00.123456789Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc);
         let v = sea_orm::Value::ChronoDateTimeUtc(Some(Box::new(dt)));
         let wire = CursorPaginator::<i32>::encode_value(&v, CursorDirection::Next).unwrap();
         let (got, _dir) = CursorPaginator::<i32>::decode_value(&wire).unwrap();

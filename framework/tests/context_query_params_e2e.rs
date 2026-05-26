@@ -53,41 +53,38 @@ async fn drive_capturing_query_params(
         let io = TokioIo::new(stream);
         let mw = mw.clone();
         let server_captured = server_captured.clone();
-        let service = service_fn(
-            move |hyper_req: hyper::Request<hyper::body::Incoming>| {
-                let mw = mw.clone();
-                let server_captured = server_captured.clone();
-                async move {
-                    let req = suprnova::Request::new(hyper_req);
-                    let next: Next = Arc::new(move |_inner| {
-                        let server_captured = server_captured.clone();
-                        Box::pin(async move {
-                            // Inside the handler — the middleware should
-                            // have populated the context with the URL's
-                            // query parameters.
-                            let mut map = server_captured.lock().unwrap();
-                            for key in keys {
-                                map.insert(*key, Context::query_param(key));
-                            }
-                            Ok(HttpResponse::text("ok"))
-                        })
-                    });
-                    let response = mw.handle(req, next).await;
-                    let http = response.unwrap_or_else(|e| e);
-                    Ok::<_, Infallible>(http.into_hyper())
-                }
-            },
-        );
+        let service = service_fn(move |hyper_req: hyper::Request<hyper::body::Incoming>| {
+            let mw = mw.clone();
+            let server_captured = server_captured.clone();
+            async move {
+                let req = suprnova::Request::new(hyper_req);
+                let next: Next = Arc::new(move |_inner| {
+                    let server_captured = server_captured.clone();
+                    Box::pin(async move {
+                        // Inside the handler — the middleware should
+                        // have populated the context with the URL's
+                        // query parameters.
+                        let mut map = server_captured.lock().unwrap();
+                        for key in keys {
+                            map.insert(*key, Context::query_param(key));
+                        }
+                        Ok(HttpResponse::text("ok"))
+                    })
+                });
+                let response = mw.handle(req, next).await;
+                let http = response.unwrap_or_else(|e| e);
+                Ok::<_, Infallible>(http.into_hyper())
+            }
+        });
         let _ = http1::Builder::new().serve_connection(io, service).await;
     });
 
     // Send a real GET to the in-process server.
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let io = TokioIo::new(stream);
-    let (mut sender, conn) =
-        hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
-            .await
-            .unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
+        .await
+        .unwrap();
     tokio::spawn(async move {
         let _ = conn.await;
     });

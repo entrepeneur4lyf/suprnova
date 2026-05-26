@@ -33,9 +33,7 @@ pub(crate) fn get(name: &str) -> Result<Operator, FrameworkError> {
     guard
         .as_ref()
         .and_then(|m| m.get(name).cloned())
-        .ok_or_else(|| {
-            FrameworkError::internal(format!("storage disk '{name}' not registered"))
-        })
+        .ok_or_else(|| FrameworkError::internal(format!("storage disk '{name}' not registered")))
 }
 
 /// Wipe the registry. Only available under `cfg(test)` or with the `testing`

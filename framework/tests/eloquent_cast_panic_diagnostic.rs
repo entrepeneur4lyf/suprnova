@@ -20,10 +20,10 @@
 //! emitted code actually behaves the way the token-shape tests claim it
 //! does at runtime.
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use suprnova::eloquent::casts::Cast;
-use suprnova::{model, FrameworkError};
+use suprnova::{FrameworkError, model};
 
 /// A test-only cast that fails in BOTH directions. Used to assert the
 /// runtime panic shape on `From<inner::Model>` (read path) and
@@ -156,9 +156,5 @@ fn pre_audit_panic_message_no_longer_present() {
         "pre-audit panic message detected — Domain 5 M-D5-1 regression; got: {msg}",
     );
     // Sanity: the same path must not silently swallow the failure.
-    assert!(
-        !msg.is_empty(),
-        "panic payload must not be empty",
-    );
+    assert!(!msg.is_empty(), "panic payload must not be empty",);
 }
-

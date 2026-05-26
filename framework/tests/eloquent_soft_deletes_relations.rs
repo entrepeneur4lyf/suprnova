@@ -28,7 +28,7 @@
 use chrono::{DateTime, Utc};
 use suprnova::eloquent::SoftDeletes;
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, model, Model};
+use suprnova::{Model, attrs, model};
 
 // ---- Schema -------------------------------------------------------------
 
@@ -189,7 +189,11 @@ async fn with_trashed_collection_eager_loads_for_trashed_parents() {
     assert!(alive.is_empty(), "trashed parent not in default scope");
 
     // with_trashed: parent reappears, eager-load still works.
-    let all = SdRelUser::with_trashed().with(["posts"]).get().await.unwrap();
+    let all = SdRelUser::with_trashed()
+        .with(["posts"])
+        .get()
+        .await
+        .unwrap();
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].id, user_id);
     // Children are alive (we only trashed the parent).

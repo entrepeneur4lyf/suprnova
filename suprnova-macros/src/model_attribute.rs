@@ -43,7 +43,7 @@
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{parse2, ImplItemFn, Result};
+use syn::{ImplItemFn, Result, parse2};
 
 /// `#[accessor]` — marks `fn name(&self) -> T` as a readable Eloquent
 /// attribute. Emits the function unchanged; the model macro's

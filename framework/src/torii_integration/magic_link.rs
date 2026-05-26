@@ -69,14 +69,11 @@ impl MagicLinkAuth {
         // always carry the plaintext, so the `None` branch indicates a torii
         // contract violation (or a torii bug) and is mapped to an internal
         // error.
-        secure_token
-            .token()
-            .map(str::to_owned)
-            .ok_or_else(|| {
-                FrameworkError::internal(
-                    "torii magic_link send_link returned a token without plaintext",
-                )
-            })
+        secure_token.token().map(str::to_owned).ok_or_else(|| {
+            FrameworkError::internal(
+                "torii magic_link send_link returned a token without plaintext",
+            )
+        })
     }
 
     /// Consume a magic-link token, returning the authenticated user and a new session.

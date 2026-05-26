@@ -4,8 +4,8 @@
 
 use async_trait::async_trait;
 use std::sync::Arc;
-use suprnova::auth::{Authenticatable, UserProvider};
 use suprnova::FrameworkError;
+use suprnova::auth::{Authenticatable, UserProvider};
 
 use crate::models::users::User;
 

@@ -136,7 +136,12 @@ impl MailTransport for SendGridMailTransport {
         // surface a warn so the dropped recipients aren't invisible.
         let reply_to = msg.reply_to.first().map(to_sg);
         if msg.reply_to.len() > 1 {
-            let dropped: Vec<&str> = msg.reply_to.iter().skip(1).map(|a| a.email.as_str()).collect();
+            let dropped: Vec<&str> = msg
+                .reply_to
+                .iter()
+                .skip(1)
+                .map(|a| a.email.as_str())
+                .collect();
             tracing::warn!(
                 kept = %msg.reply_to[0].email,
                 dropped = ?dropped,
@@ -196,10 +201,7 @@ mod tests {
 
     #[test]
     fn with_endpoint_preserves_terminal_path() {
-        let t = SendGridMailTransport::with_endpoint(
-            "k",
-            "https://proxy.example.com/v3/mail/send",
-        );
+        let t = SendGridMailTransport::with_endpoint("k", "https://proxy.example.com/v3/mail/send");
         assert_eq!(t.endpoint, "https://proxy.example.com/v3/mail/send");
     }
 
@@ -207,10 +209,8 @@ mod tests {
     fn with_endpoint_trims_trailing_slash_before_suffix_check() {
         // `https://x/v3/mail/send/` must be detected as already-terminal
         // (after trim), not double-appended.
-        let t = SendGridMailTransport::with_endpoint(
-            "k",
-            "https://proxy.example.com/v3/mail/send/",
-        );
+        let t =
+            SendGridMailTransport::with_endpoint("k", "https://proxy.example.com/v3/mail/send/");
         assert_eq!(t.endpoint, "https://proxy.example.com/v3/mail/send");
     }
 
@@ -218,10 +218,8 @@ mod tests {
     fn with_endpoint_appends_for_paths_that_only_contain_send_substring() {
         // Regression: `contains("/v3/mail/send")` would have skipped a base
         // URL like `/v3/mail/send-archive/api`. `ends_with` is correct.
-        let t = SendGridMailTransport::with_endpoint(
-            "k",
-            "https://x.example/v3/mail/send-archive/api",
-        );
+        let t =
+            SendGridMailTransport::with_endpoint("k", "https://x.example/v3/mail/send-archive/api");
         assert_eq!(
             t.endpoint,
             "https://x.example/v3/mail/send-archive/api/v3/mail/send"

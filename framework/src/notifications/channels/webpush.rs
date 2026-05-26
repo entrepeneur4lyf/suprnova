@@ -57,12 +57,11 @@ impl Channel for WebPushChannel {
         notification: &dyn DynNotification,
     ) -> Result<(), FrameworkError> {
         let subscription: SubscriptionInfo = serde_json::from_str(route).map_err(|e| {
-            FrameworkError::internal(format!(
-                "WebPushChannel: subscription JSON decode: {e}"
-            ))
+            FrameworkError::internal(format!("WebPushChannel: subscription JSON decode: {e}"))
         })?;
-        let payload = serde_json::to_vec(&notification.data())
-            .map_err(|e| FrameworkError::internal(format!("WebPushChannel: payload encode: {e}")))?;
+        let payload = serde_json::to_vec(&notification.data()).map_err(|e| {
+            FrameworkError::internal(format!("WebPushChannel: payload encode: {e}"))
+        })?;
 
         match self
             .client

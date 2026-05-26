@@ -57,7 +57,9 @@ impl VectorDriver for MemoryVectorDriver {
         };
         let q_norm = norm(&query);
         if q_norm == 0.0 {
-            return Err(FrameworkError::param("vector::similar query is zero-vector"));
+            return Err(FrameworkError::param(
+                "vector::similar query is zero-vector",
+            ));
         }
         let mut scored: Vec<VectorMatch> = bucket
             .values()

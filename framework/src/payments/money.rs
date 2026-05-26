@@ -24,7 +24,10 @@ pub struct Money {
 impl Money {
     /// Construct from raw minor units (cents, pence, yen, etc.) and a currency.
     pub const fn from_minor_units(minor_units: i64, currency: Currency) -> Self {
-        Self { minor_units, currency }
+        Self {
+            minor_units,
+            currency,
+        }
     }
 
     /// Construct from a major-unit decimal amount (e.g. `12.34` USD → 1234 cents).
@@ -49,7 +52,10 @@ impl Money {
             .round()
             .to_i64()
             .expect("Money amount overflows i64 minor units");
-        Self { minor_units: minor, currency }
+        Self {
+            minor_units: minor,
+            currency,
+        }
     }
 
     /// The raw minor-unit value (cents, pence, yen, etc.).

@@ -5,9 +5,9 @@
 //! re-stating the recipient plumbing.
 
 use serde::{Deserialize, Serialize};
+use suprnova::FrameworkError;
 use suprnova::async_trait;
 use suprnova::mail::{Address, Mail, Mailable};
-use suprnova::FrameworkError;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct WelcomeEmail {

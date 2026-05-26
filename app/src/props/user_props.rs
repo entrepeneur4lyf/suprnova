@@ -76,7 +76,10 @@ mod tests {
             email: "valid@example.com".to_string(),
             name: String::new(),
         };
-        assert!(user.validate().is_err(), "empty name should fail validation");
+        assert!(
+            user.validate().is_err(),
+            "empty name should fail validation"
+        );
     }
 
     /// Prove validation works: malformed e-mail fails `#[validate(email)]`.
@@ -89,9 +92,6 @@ mod tests {
             email: "not-an-email".to_string(),
             name: "Ada".to_string(),
         };
-        assert!(
-            user.validate().is_err(),
-            "bad email should fail validation"
-        );
+        assert!(user.validate().is_err(), "bad email should fail validation");
     }
 }

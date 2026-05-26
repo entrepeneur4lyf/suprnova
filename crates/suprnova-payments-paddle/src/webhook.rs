@@ -5,13 +5,13 @@
 //! timestamp-skew tolerance. No manual HMAC code needed.
 
 use async_trait::async_trait;
-use paddle_rust_sdk::{webhooks::MaximumVariance, Paddle};
+use paddle_rust_sdk::{Paddle, webhooks::MaximumVariance};
 use suprnova::payments::{
-    CustomerSnapshot, NeutralEventKind, PaymentError, PaymentResult, PaymentSnapshot, PayloadIds,
+    CustomerSnapshot, NeutralEventKind, PayloadIds, PaymentError, PaymentResult, PaymentSnapshot,
     WebhookContext, WebhookEvent, WebhookHandler,
 };
 
-use crate::{event_map::paddle_event_to_neutral, PaddleProvider};
+use crate::{PaddleProvider, event_map::paddle_event_to_neutral};
 
 #[async_trait]
 impl WebhookHandler for PaddleProvider {
@@ -25,9 +25,8 @@ impl WebhookHandler for PaddleProvider {
             .to_str()
             .map_err(|_| PaymentError::WebhookSignature("non-ascii signature header".into()))?;
 
-        let body_str = std::str::from_utf8(ctx.body).map_err(|_| {
-            PaymentError::WebhookSignature("non-utf8 webhook body".into())
-        })?;
+        let body_str = std::str::from_utf8(ctx.body)
+            .map_err(|_| PaymentError::WebhookSignature("non-utf8 webhook body".into()))?;
 
         Paddle::unmarshal(
             body_str,
@@ -156,9 +155,7 @@ impl WebhookHandler for PaddleProvider {
                     .pointer("/details/totals/tax")
                     .and_then(|v| v.as_str())
                     .and_then(|s| s.parse::<i64>().ok())
-                    .or_else(|| {
-                        data.pointer("/details/totals/tax").and_then(|v| v.as_i64())
-                    })
+                    .or_else(|| data.pointer("/details/totals/tax").and_then(|v| v.as_i64()))
                     .unwrap_or(0);
                 let currency = data
                     .get("currency_code")

@@ -10,13 +10,11 @@
 //! — concurrent tests would clobber each other's bound connection.
 
 use fake::{Fake, Faker};
-use sea_orm::{
-    ConnectionTrait, Database, DbBackend, EntityTrait, Schema,
-};
+use sea_orm::{ConnectionTrait, Database, DbBackend, EntityTrait, Schema};
 use serial_test::serial;
-use suprnova::container::testing::TestContainer;
-use suprnova::factory::{persist_via_seaorm, Factory};
 use suprnova::DbConnection;
+use suprnova::container::testing::TestContainer;
+use suprnova::factory::{Factory, persist_via_seaorm};
 
 // Toy SeaORM entity used as the persist target. Mirrors the
 // `framework/tests/pagination.rs` pattern.
@@ -105,11 +103,7 @@ async fn factory_create_persists_through_db_connection_blanket_impl() {
     assert!(user.email.contains('@'));
 
     // The row really did land in the DB.
-    let row_count = toy_user::Entity::find()
-        .all(&conn)
-        .await
-        .unwrap()
-        .len();
+    let row_count = toy_user::Entity::find().all(&conn).await.unwrap().len();
     assert_eq!(row_count, 1, "exactly one row in toy_users");
 }
 
@@ -130,11 +124,7 @@ async fn factory_create_many_persists_n_rows() {
     let ids: std::collections::HashSet<_> = users.iter().map(|u| u.id).collect();
     assert_eq!(ids.len(), 7, "every persisted row has a distinct id");
 
-    let row_count = toy_user::Entity::find()
-        .all(&conn)
-        .await
-        .unwrap()
-        .len();
+    let row_count = toy_user::Entity::find().all(&conn).await.unwrap().len();
     assert_eq!(row_count, 7);
 }
 
@@ -177,10 +167,6 @@ async fn persist_via_seaorm_helper_persists_against_explicit_connection() {
     let inserted = persist_via_seaorm(m, &conn).await.unwrap();
     assert!(inserted.id > 0);
 
-    let row_count = toy_user::Entity::find()
-        .all(&conn)
-        .await
-        .unwrap()
-        .len();
+    let row_count = toy_user::Entity::find().all(&conn).await.unwrap().len();
     assert_eq!(row_count, 1);
 }

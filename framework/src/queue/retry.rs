@@ -17,7 +17,11 @@ pub fn next_delay(
     let attempts = attempts.max(1);
     match schedule {
         BackoffSchedule::Fixed { secs } => Duration::from_secs(*secs),
-        BackoffSchedule::Exponential { base_secs, cap_secs, jitter_ratio } => {
+        BackoffSchedule::Exponential {
+            base_secs,
+            cap_secs,
+            jitter_ratio,
+        } => {
             // delay = min(base * 2^(attempts-1), cap)
             let raw = (*base_secs as u128).saturating_mul(1u128 << (attempts - 1).min(63));
             let capped = raw.min(*cap_secs as u128) as u64;

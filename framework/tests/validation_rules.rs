@@ -14,10 +14,7 @@ fn required_passes_on_present() {
     let r = Required;
     assert!(r.passes("not empty").is_ok());
     assert!(r.passes("").is_err());
-    assert!(
-        r.passes("   ").is_err(),
-        "all-whitespace counts as empty"
-    );
+    assert!(r.passes("   ").is_err(), "all-whitespace counts as empty");
 }
 
 #[test]
@@ -226,10 +223,7 @@ fn boolean_accepts_common_truthy_falsy() {
 #[test]
 fn alpha_and_alphanum_check_character_classes() {
     assert!(Alpha.passes("hello").is_ok());
-    assert!(
-        Alpha.passes("héllo").is_ok(),
-        "unicode alphabetic accepted"
-    );
+    assert!(Alpha.passes("héllo").is_ok(), "unicode alphabetic accepted");
     assert!(Alpha.passes("hello42").is_err());
     assert!(Alpha.passes("").is_err());
 
@@ -415,7 +409,7 @@ fn validation_errors_into_result_returns_err_when_populated() {
 
 mod validate_macro {
     use suprnova::rules::{Email, Max, Min, Required, RequiredIf};
-    use suprnova::{validate, ValidationErrors};
+    use suprnova::{ValidationErrors, validate};
 
     struct UserForm {
         email: String,

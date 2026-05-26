@@ -59,9 +59,7 @@ pub async fn request_from_multipart(boundary: &str, body: Bytes) -> Request {
             // the closure its `Result<_, Infallible>` return type.
             async {
                 std::future::pending::<()>().await;
-                Ok::<_, Infallible>(hyper::Response::new(
-                    http_body_util::Empty::<Bytes>::new(),
-                ))
+                Ok::<_, Infallible>(hyper::Response::new(http_body_util::Empty::<Bytes>::new()))
             }
         });
         let _ = http1::Builder::new()
@@ -78,7 +76,9 @@ pub async fn request_from_multipart(boundary: &str, body: Bytes) -> Request {
         // duplex buffer (sized `content_length + 64 KiB`).
     }
 
-    req_rx.await.expect("server should have received the request")
+    req_rx
+        .await
+        .expect("server should have received the request")
 }
 
 /// Internal: build a `Request` from a hand-assembled HTTP/1.1 request
@@ -107,9 +107,7 @@ async fn request_from_http_bytes(http_bytes: Vec<u8>) -> Request {
             // Never resolve — see request_from_multipart for the rationale.
             async {
                 std::future::pending::<()>().await;
-                Ok::<_, Infallible>(hyper::Response::new(
-                    http_body_util::Empty::<Bytes>::new(),
-                ))
+                Ok::<_, Infallible>(hyper::Response::new(http_body_util::Empty::<Bytes>::new()))
             }
         });
         let _ = http1::Builder::new()
@@ -123,17 +121,15 @@ async fn request_from_http_bytes(http_bytes: Vec<u8>) -> Request {
         // Drop the client to signal EOF after the write completes.
     }
 
-    req_rx.await.expect("server should have received the request")
+    req_rx
+        .await
+        .expect("server should have received the request")
 }
 
 /// Build a POST `Request` for the given path with `Content-Type` and a
 /// body, declaring an honest `Content-Length`. Use this for the default
 /// "client sent a normal request" path.
-pub async fn request_with_body(
-    path: &str,
-    content_type: &str,
-    body: &[u8],
-) -> Request {
+pub async fn request_with_body(path: &str, content_type: &str, body: &[u8]) -> Request {
     let mut http_bytes = Vec::new();
     http_bytes.extend_from_slice(format!("POST {path} HTTP/1.1\r\n").as_bytes());
     http_bytes.extend_from_slice(b"Host: localhost\r\n");

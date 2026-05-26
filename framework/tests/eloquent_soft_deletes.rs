@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use suprnova::eloquent::{MassPrunable, Prunable};
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, model, Model};
+use suprnova::{Model, attrs, model};
 
 // ---- Soft deletes -------------------------------------------------------
 
@@ -63,7 +63,11 @@ async fn delete_marks_deleted_at_does_not_remove() {
     assert!(T10User::find(id).await.unwrap().is_none());
 
     // with_trashed sees it.
-    let trashed = T10User::with_trashed().filter("id", id).first().await.unwrap();
+    let trashed = T10User::with_trashed()
+        .filter("id", id)
+        .first()
+        .await
+        .unwrap();
     assert!(trashed.is_some());
     assert!(trashed.unwrap().deleted_at.is_some());
 }
@@ -77,12 +81,14 @@ async fn force_delete_actually_removes() {
         .unwrap();
     let id = u.id;
     u.force_delete().await.unwrap();
-    assert!(T10User::with_trashed()
-        .filter("id", id)
-        .first()
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        T10User::with_trashed()
+            .filter("id", id)
+            .first()
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -238,16 +244,20 @@ async fn prunable_runs_against_scope() {
         .await
         .unwrap();
     assert_eq!(pruned, Some(1), "expected 1 pruned, got {pruned:?}");
-    assert!(T10Session::query()
-        .filter("token", "current")
-        .exists()
-        .await
-        .unwrap());
-    assert!(!T10Session::query()
-        .filter("token", "old")
-        .exists()
-        .await
-        .unwrap());
+    assert!(
+        T10Session::query()
+            .filter("token", "current")
+            .exists()
+            .await
+            .unwrap()
+    );
+    assert!(
+        !T10Session::query()
+            .filter("token", "old")
+            .exists()
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -276,11 +286,13 @@ async fn prune_dry_run_does_not_delete() {
     assert_eq!(would_prune, Some(1));
 
     // Still present.
-    assert!(T10Session::query()
-        .filter("token", "old")
-        .exists()
-        .await
-        .unwrap());
+    assert!(
+        T10Session::query()
+            .filter("token", "old")
+            .exists()
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]

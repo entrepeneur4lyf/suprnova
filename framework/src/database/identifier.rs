@@ -58,9 +58,7 @@ const MAX_IDENT_LEN: usize = 128;
 /// identifier shape, or carries more than one `.` separator.
 pub fn validate_identifier(ident: &str) -> Result<&str, FrameworkError> {
     if ident.is_empty() {
-        return Err(FrameworkError::param(
-            "SQL identifier cannot be empty",
-        ));
+        return Err(FrameworkError::param("SQL identifier cannot be empty"));
     }
     if ident.len() > MAX_IDENT_LEN {
         return Err(FrameworkError::param(format!(
@@ -112,9 +110,19 @@ fn validate_segment(full: &str, segment: &str) -> Result<(), FrameworkError> {
 ///
 /// [`DbTableBuilder::filter_op`]: crate::database::DbTableBuilder::filter_op
 const ALLOWED_OPERATORS: &[&str] = &[
-    "=", "<>", "!=", "<", "<=", ">", ">=",
-    "LIKE", "NOT LIKE", "ILIKE", "NOT ILIKE",
-    "IS", "IS NOT",
+    "=",
+    "<>",
+    "!=",
+    "<",
+    "<=",
+    ">",
+    ">=",
+    "LIKE",
+    "NOT LIKE",
+    "ILIKE",
+    "NOT ILIKE",
+    "IS",
+    "IS NOT",
 ];
 
 /// Validate a SQL comparison operator against the allowlist.

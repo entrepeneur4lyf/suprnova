@@ -35,10 +35,10 @@
 use async_trait::async_trait;
 use torii::SessionToken;
 
+use crate::Request;
 use crate::http::Response;
 use crate::middleware::{Middleware, Next};
 use crate::session::set_auth_user;
-use crate::Request;
 
 use super::instance;
 
@@ -54,20 +54,21 @@ impl Middleware for BearerTokenMiddleware {
         // hyper's HeaderMap uses case-insensitive keys, so this handles
         // both "Authorization" and "authorization".
         if let Some(auth_header) = request.header("Authorization")
-            && let Some(token_str) = auth_header.strip_prefix("Bearer ") {
-                let token_str = token_str.trim();
-                if !token_str.is_empty() {
-                    // Attempt to look up the session in the global Torii instance.
-                    // Any failure (Torii not initialised, token invalid, session
-                    // expired / not found) is treated as "no session" — pass through.
-                    if let Ok(torii) = instance() {
-                        let session_token = SessionToken::from(token_str);
-                        if let Ok(session) = torii.get_session(&session_token).await {
-                            set_auth_user(session.user_id.as_str());
-                        }
+            && let Some(token_str) = auth_header.strip_prefix("Bearer ")
+        {
+            let token_str = token_str.trim();
+            if !token_str.is_empty() {
+                // Attempt to look up the session in the global Torii instance.
+                // Any failure (Torii not initialised, token invalid, session
+                // expired / not found) is treated as "no session" — pass through.
+                if let Ok(torii) = instance() {
+                    let session_token = SessionToken::from(token_str);
+                    if let Ok(session) = torii.get_session(&session_token).await {
+                        set_auth_user(session.user_id.as_str());
                     }
                 }
             }
+        }
 
         next(request).await
     }

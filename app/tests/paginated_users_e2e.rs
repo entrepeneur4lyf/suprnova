@@ -18,7 +18,7 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 
-use suprnova::{handle_request, EncryptionKey, MiddlewareRegistry};
+use suprnova::{EncryptionKey, MiddlewareRegistry, handle_request};
 
 /// Process-wide guard so the `Crypt::init` call below is a single,
 /// idempotent install across every test in this binary.
@@ -62,9 +62,7 @@ async fn spawn_app_server(max_connections: usize) -> SocketAddr {
                 let svc = service_fn(move |req: hyper::Request<Incoming>| {
                     let router = router.clone();
                     let middleware = middleware.clone();
-                    async move {
-                        Ok::<_, Infallible>(handle_request(router, middleware, req).await)
-                    }
+                    async move { Ok::<_, Infallible>(handle_request(router, middleware, req).await) }
                 });
                 let _ = hyper::server::conn::http1::Builder::new()
                     .serve_connection(io, svc)
@@ -86,10 +84,9 @@ async fn get(
 ) -> (hyper::http::StatusCode, hyper::HeaderMap, Bytes) {
     let stream_tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
     let io = TokioIo::new(stream_tcp);
-    let (mut sender, conn) =
-        hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
-            .await
-            .unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
+        .await
+        .unwrap();
     tokio::spawn(async move {
         let _ = conn.await;
     });
@@ -144,8 +141,14 @@ async fn inertia_path_emits_users_prop_and_scroll_metadata() {
     let arr = users.as_array().expect("props.users is the rows array");
     assert_eq!(arr.len(), 20, "first page returns 20 rows by default");
     // First and last row IDs sanity.
-    assert_eq!(arr.first().and_then(|r| r.get("id")), Some(&serde_json::json!(1)));
-    assert_eq!(arr.last().and_then(|r| r.get("id")), Some(&serde_json::json!(20)));
+    assert_eq!(
+        arr.first().and_then(|r| r.get("id")),
+        Some(&serde_json::json!(1))
+    );
+    assert_eq!(
+        arr.last().and_then(|r| r.get("id")),
+        Some(&serde_json::json!(20))
+    );
 
     // Scroll metadata: the Inertia v3 protocol attaches scroll info
     // under `scrollProps.<key>`. Confirm `next` cursor is set (we have
@@ -173,7 +176,10 @@ async fn inertia_path_emits_users_prop_and_scroll_metadata() {
         .or_else(|| users_scroll.get("previousPage"))
         .cloned()
         .unwrap_or(serde_json::Value::Null);
-    assert!(prev.is_null(), "first page must have no prev_cursor: {prev:?}");
+    assert!(
+        prev.is_null(),
+        "first page must have no prev_cursor: {prev:?}"
+    );
 }
 
 #[tokio::test]

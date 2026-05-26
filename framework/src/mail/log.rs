@@ -9,7 +9,9 @@ use async_trait::async_trait;
 pub struct LogMailTransport;
 
 impl LogMailTransport {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 #[async_trait]
@@ -24,5 +26,7 @@ impl MailTransport for LogMailTransport {
         );
         Ok(())
     }
-    fn name(&self) -> &'static str { "log" }
+    fn name(&self) -> &'static str {
+        "log"
+    }
 }

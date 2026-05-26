@@ -1,7 +1,7 @@
 //! Welcome-log job. Dispatched on user signup; just emits a tracing event.
 
 use serde::{Deserialize, Serialize};
-use suprnova::{async_trait, FrameworkError, Job};
+use suprnova::{FrameworkError, Job, async_trait};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct WelcomeLog {

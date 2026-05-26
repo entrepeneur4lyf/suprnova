@@ -26,8 +26,8 @@
 //! `select` (projection col) — and accepts the typical legitimate
 //! shapes (schema-qualified `users.id`, snake_case columns).
 
-use suprnova::testing::TestDatabase;
 use suprnova::Model;
+use suprnova::testing::TestDatabase;
 
 #[suprnova::model(table = "t338_builder_ident_users")]
 pub struct T338BuilderIdentUser {

@@ -12,9 +12,7 @@
 fn heartbeat_supervisor_is_registered() {
     // Force the supervisors module to be included — same guarantee the
     // binary gets from `lib.rs` declaring `pub mod supervisors`.
-    let _touch = std::hint::black_box(
-        app::supervisors::heartbeat::LogHeartbeat,
-    );
+    let _touch = std::hint::black_box(app::supervisors::heartbeat::LogHeartbeat);
 
     let names: Vec<&str> = suprnova::inventory::iter::<suprnova::SupervisorEntry>()
         .map(|e| (e.factory)().name())

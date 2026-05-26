@@ -14,9 +14,9 @@
 //! satisfies them with the same field set the manual impl produced.
 
 use serde::{Deserialize, Serialize};
-use suprnova::serde_json;
-use suprnova::NotificationMailable;
 use suprnova::Notification;
+use suprnova::NotificationMailable;
+use suprnova::serde_json;
 
 #[derive(Serialize, Deserialize, Debug, Clone, NotificationMailable)]
 #[mail(
@@ -24,7 +24,7 @@ use suprnova::Notification;
     html = "<p>Your order is on its way.</p><p>Tracking: <code>{{ tracking }}</code></p>",
     text = "Your order is on its way.\nTracking: {{ tracking }}",
     from = "orders@suprnova.dev",
-    from_name = "Suprnova Orders",
+    from_name = "Suprnova Orders"
 )]
 pub struct OrderShipped {
     pub tracking: String,

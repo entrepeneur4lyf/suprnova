@@ -32,7 +32,7 @@
 //! `belongs_to_many_aggregate_sum_over_related_column`).
 
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, model, AggregateKind, Model};
+use suprnova::{AggregateKind, Model, attrs, model};
 
 // ---- Default-keys two-hop chain -----------------------------------------
 
@@ -360,7 +360,9 @@ async fn has_many_through_count_uses_server_side_group_by() {
     migrate(&_db).await;
     let c1 = ThCountry::create(attrs! { name: "C1" }).await.unwrap();
     let c2 = ThCountry::create(attrs! { name: "C2" }).await.unwrap();
-    let c3 = ThCountry::create(attrs! { name: "C3-empty" }).await.unwrap();
+    let c3 = ThCountry::create(attrs! { name: "C3-empty" })
+        .await
+        .unwrap();
     let u1 = ThUser::create(attrs! { th_country_id: c1.id, name: "u1" })
         .await
         .unwrap();
@@ -550,7 +552,9 @@ async fn has_many_through_eager_load_distributes_by_parent() {
     migrate(&_db).await;
     let c1 = ThCountry::create(attrs! { name: "C1" }).await.unwrap();
     let c2 = ThCountry::create(attrs! { name: "C2" }).await.unwrap();
-    let c3 = ThCountry::create(attrs! { name: "C3-empty" }).await.unwrap();
+    let c3 = ThCountry::create(attrs! { name: "C3-empty" })
+        .await
+        .unwrap();
     let u1 = ThUser::create(attrs! { th_country_id: c1.id, name: "u1" })
         .await
         .unwrap();
@@ -567,15 +571,9 @@ async fn has_many_through_eager_load_distributes_by_parent() {
         .await
         .unwrap();
 
-    let loaded = ThCountry::query()
-        .with(["posts"])
-        .get()
-        .await
-        .unwrap();
-    let by_name: std::collections::HashMap<&str, &ThCountry> = loaded
-        .iter()
-        .map(|r| (r.name.as_str(), r))
-        .collect();
+    let loaded = ThCountry::query().with(["posts"]).get().await.unwrap();
+    let by_name: std::collections::HashMap<&str, &ThCountry> =
+        loaded.iter().map(|r| (r.name.as_str(), r)).collect();
 
     let c1_loaded = by_name.get("C1").unwrap();
     assert_eq!(c1_loaded.id, c1.id, "C1 round-trips through query");
@@ -719,11 +717,7 @@ async fn has_many_through_honours_second_local_key() {
 
     // Eager-load distribution (two-query strategy via Query 1's
     // SELECT CAST({slk} AS ...) AS __sn_b_id).
-    let loaded = SlkCompany::query()
-        .with(["devices"])
-        .get()
-        .await
-        .unwrap();
+    let loaded = SlkCompany::query().with(["devices"]).get().await.unwrap();
     let co_eager = loaded.iter().find(|x| x.id == co.id).unwrap();
     assert_eq!(co_eager.devices_loaded().len(), 2);
 }
@@ -769,8 +763,7 @@ async fn has_one_through_eager_load_distributes_single_row() {
         .unwrap();
 
     let loaded = HoUser::query().with(["profile"]).get().await.unwrap();
-    let by_id: std::collections::HashMap<i64, &HoUser> =
-        loaded.iter().map(|r| (r.id, r)).collect();
+    let by_id: std::collections::HashMap<i64, &HoUser> = loaded.iter().map(|r| (r.id, r)).collect();
     let u1_profile = by_id.get(&u1.id).unwrap().profile_loaded();
     assert!(u1_profile.is_some(), "u1 has a profile chain");
     assert_eq!(u1_profile.unwrap().bio, "Alice bio");
@@ -824,11 +817,9 @@ pub struct ThStrPost {
 }
 
 async fn migrate_str_through(db: &TestDatabase) {
-    db.execute_unprepared(
-        "CREATE TABLE th_str_owners (code TEXT PRIMARY KEY, name TEXT NOT NULL)",
-    )
-    .await
-    .unwrap();
+    db.execute_unprepared("CREATE TABLE th_str_owners (code TEXT PRIMARY KEY, name TEXT NOT NULL)")
+        .await
+        .unwrap();
     db.execute_unprepared(
         "CREATE TABLE th_str_intermediates (\
             id INTEGER PRIMARY KEY AUTOINCREMENT, \
@@ -856,16 +847,12 @@ async fn has_many_through_eager_load_with_string_parent_pk() {
     let db = TestDatabase::sqlite_memory().await.unwrap();
     migrate_str_through(&db).await;
 
-    db.execute_unprepared(
-        "INSERT INTO th_str_owners (code, name) VALUES ('A1', 'owner-A1')",
-    )
-    .await
-    .unwrap();
-    db.execute_unprepared(
-        "INSERT INTO th_str_owners (code, name) VALUES ('B2', 'owner-B2')",
-    )
-    .await
-    .unwrap();
+    db.execute_unprepared("INSERT INTO th_str_owners (code, name) VALUES ('A1', 'owner-A1')")
+        .await
+        .unwrap();
+    db.execute_unprepared("INSERT INTO th_str_owners (code, name) VALUES ('B2', 'owner-B2')")
+        .await
+        .unwrap();
     db.execute_unprepared(
         "INSERT INTO th_str_intermediates (id, th_str_owner_code) VALUES (1, 'A1')",
     )
@@ -895,15 +882,9 @@ async fn has_many_through_eager_load_with_string_parent_pk() {
     .await
     .unwrap();
 
-    let loaded = ThStrOwner::query()
-        .with(["posts"])
-        .get()
-        .await
-        .unwrap();
-    let by_code: std::collections::HashMap<&str, &ThStrOwner> = loaded
-        .iter()
-        .map(|r| (r.code.as_str(), r))
-        .collect();
+    let loaded = ThStrOwner::query().with(["posts"]).get().await.unwrap();
+    let by_code: std::collections::HashMap<&str, &ThStrOwner> =
+        loaded.iter().map(|r| (r.code.as_str(), r)).collect();
 
     let a1 = by_code.get("A1").expect("A1 round-trips through query");
     let a1_posts = a1.posts_loaded();

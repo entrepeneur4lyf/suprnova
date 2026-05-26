@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use suprnova::events::{EventFacade, Listener};
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, FrameworkError, Model};
+use suprnova::{FrameworkError, Model, attrs};
 
 // ---- Model 1: pure event-firing assertion --------------------------------
 
@@ -52,10 +52,7 @@ pub struct CountReplicating;
 
 #[async_trait]
 impl Listener<t13_post::events::Replicating> for CountReplicating {
-    async fn handle(
-        &self,
-        _event: &t13_post::events::Replicating,
-    ) -> Result<(), FrameworkError> {
+    async fn handle(&self, _event: &t13_post::events::Replicating) -> Result<(), FrameworkError> {
         REPLICATING_FIRED.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -66,10 +63,8 @@ async fn replicate_fires_replicating_event() {
     let db = TestDatabase::sqlite_memory().await.unwrap();
     create_posts_table(&db).await;
 
-    EventFacade::listen::<t13_post::events::Replicating, _>(std::sync::Arc::new(
-        CountReplicating,
-    ))
-    .await;
+    EventFacade::listen::<t13_post::events::Replicating, _>(std::sync::Arc::new(CountReplicating))
+        .await;
 
     let p = T13Post::create(attrs! { title: "original", author_id: 1 })
         .await

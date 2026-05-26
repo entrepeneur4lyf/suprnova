@@ -2,15 +2,15 @@ use serde::{Deserialize, Serialize};
 use serial_test::serial;
 use std::sync::Arc;
 use std::time::Duration;
+use suprnova::FrameworkError;
 use suprnova::async_trait;
 use suprnova::mail::memory::InMemoryMailTransport;
 use suprnova::mail::send_job::SendMailJob;
 use suprnova::mail::{Address, Mail, Mailable};
+use suprnova::queue::Queue;
 use suprnova::queue::driver::QueueDriver;
 use suprnova::queue::memory::MemoryQueueDriver;
-use suprnova::queue::worker::{register_job, run_worker, WorkerConfig};
-use suprnova::queue::Queue;
-use suprnova::FrameworkError;
+use suprnova::queue::worker::{WorkerConfig, register_job, run_worker};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct WelcomeMail {
@@ -167,13 +167,19 @@ struct OverriddenRenderMail;
 
 #[async_trait]
 impl Mailable for OverriddenRenderMail {
-    fn mailable_name() -> &'static str { "OverriddenRenderMail" }
-    fn subject(&self) -> String { "rendered".into() }
+    fn mailable_name() -> &'static str {
+        "OverriddenRenderMail"
+    }
+    fn subject(&self) -> String {
+        "rendered".into()
+    }
     // No template_source — relies entirely on the render override below.
     fn render_html(&self) -> Result<Option<String>, FrameworkError> {
         Ok(Some("<p>pre-rendered html, no template source</p>".into()))
     }
-    fn from(&self) -> Option<Address> { Some("noreply@suprnova.dev".into()) }
+    fn from(&self) -> Option<Address> {
+        Some("noreply@suprnova.dev".into())
+    }
 }
 
 #[tokio::test]

@@ -56,7 +56,10 @@ impl QueueDriver for DatabaseQueueDriver {
         Ok(())
     }
 
-    async fn pop(&self, visibility_timeout: Duration) -> Result<Option<Reservation>, FrameworkError> {
+    async fn pop(
+        &self,
+        visibility_timeout: Duration,
+    ) -> Result<Option<Reservation>, FrameworkError> {
         let now = Utc::now().timestamp();
         let token = Uuid::new_v4().to_string();
         let reserved_until = now + visibility_timeout.as_secs() as i64;

@@ -8,9 +8,9 @@
 //! actually invoked by the handler.
 
 use async_trait::async_trait;
-use suprnova::serde_json::Value;
 use suprnova::broadcasting::{Channel, PrivateChannel};
 use suprnova::http::Request;
+use suprnova::serde_json::Value;
 
 /// Private channel for chat rooms. Clients must pass
 /// `{"type":"subscribe","channel":"chat.lobby","data":{"token":"chat_..."}}`.
@@ -39,12 +39,7 @@ impl Channel for ChatChannel {
     /// Allow standard chat events from authenticated subscribers.
     /// The subscribe gate (`authorize`) already validated the token,
     /// so anyone past that point is permitted to send chat events.
-    async fn authorize_publish(
-        &self,
-        _req: &Request,
-        event: &str,
-        _data: &Value,
-    ) -> bool {
+    async fn authorize_publish(&self, _req: &Request, event: &str, _data: &Value) -> bool {
         matches!(event, "MessagePosted" | "Typing")
     }
 }

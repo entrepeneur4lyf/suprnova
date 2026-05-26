@@ -111,8 +111,7 @@ where
 /// invoked against `Builder<M>` of the matching type — `register`
 /// stores the closure under `TypeId::of::<M>()`, and `apply_to::<M>`
 /// looks it up under the same key.
-type ErasedApply =
-    Arc<dyn Fn(Box<dyn Any + Send>) -> Box<dyn Any + Send> + Send + Sync>;
+type ErasedApply = Arc<dyn Fn(Box<dyn Any + Send>) -> Box<dyn Any + Send> + Send + Sync>;
 
 struct PerModelScopes {
     /// `(TypeId of S, erased apply)` pairs in registration order so

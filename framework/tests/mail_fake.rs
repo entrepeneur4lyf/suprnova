@@ -40,7 +40,9 @@ async fn fake_captures_dispatched_messages_and_supports_basic_assertions() {
     let fake = Mail::fake();
 
     Mail::to("alice@example.org")
-        .send(Greeting { name: "Alice".into() })
+        .send(Greeting {
+            name: "Alice".into(),
+        })
         .await
         .unwrap();
     Mail::to("bob@example.org")
@@ -69,7 +71,9 @@ async fn fake_restores_previously_bound_transport_on_drop() {
     // Send through the prior transport so we can later verify it's
     // still the one in scope after the fake drops.
     Mail::to("prior@example.org")
-        .send(Greeting { name: "Prior".into() })
+        .send(Greeting {
+            name: "Prior".into(),
+        })
         .await
         .unwrap();
     assert_eq!(prior.captured().len(), 1, "prior transport recorded one");
@@ -78,7 +82,9 @@ async fn fake_restores_previously_bound_transport_on_drop() {
         let fake = Mail::fake();
         // While the fake is live, prior is shadowed.
         Mail::to("during@example.org")
-            .send(Greeting { name: "During".into() })
+            .send(Greeting {
+                name: "During".into(),
+            })
             .await
             .unwrap();
         fake.assert_sent_count(1);
@@ -92,7 +98,9 @@ async fn fake_restores_previously_bound_transport_on_drop() {
 
     // Prior transport is back — a fresh dispatch lands on it.
     Mail::to("after@example.org")
-        .send(Greeting { name: "After".into() })
+        .send(Greeting {
+            name: "After".into(),
+        })
         .await
         .unwrap();
     let prior_captured = prior.captured();
@@ -116,7 +124,9 @@ async fn fake_restores_absent_transport_on_drop() {
     {
         let _fake = Mail::fake();
         Mail::to("alice@example.org")
-            .send(Greeting { name: "Alice".into() })
+            .send(Greeting {
+                name: "Alice".into(),
+            })
             .await
             .unwrap();
         // Drops here.
@@ -125,7 +135,9 @@ async fn fake_restores_absent_transport_on_drop() {
     // After drop the transport slot must be `None` again, so the next
     // dispatch produces the "no mail transport configured" error.
     let err = Mail::to("alice@example.org")
-        .send(Greeting { name: "Alice".into() })
+        .send(Greeting {
+            name: "Alice".into(),
+        })
         .await
         .unwrap_err();
     let msg = format!("{err}");
@@ -160,7 +172,9 @@ async fn fake_restores_absent_transport_on_drop() {
 async fn fake_assert_sent_panics_when_no_match() {
     let fake = Mail::fake();
     Mail::to("alice@example.org")
-        .send(Greeting { name: "Alice".into() })
+        .send(Greeting {
+            name: "Alice".into(),
+        })
         .await
         .unwrap();
     fake.assert_sent(|m| m.subject == "this subject was never sent");
@@ -172,7 +186,9 @@ async fn fake_assert_sent_panics_when_no_match() {
 async fn fake_assert_not_sent_panics_when_match_exists() {
     let fake = Mail::fake();
     Mail::to("alice@example.org")
-        .send(Greeting { name: "Alice".into() })
+        .send(Greeting {
+            name: "Alice".into(),
+        })
         .await
         .unwrap();
     fake.assert_not_sent(|m| m.subject.contains("Alice"));
@@ -184,7 +200,9 @@ async fn fake_assert_not_sent_panics_when_match_exists() {
 async fn fake_assert_sent_count_panics_on_mismatch() {
     let fake = Mail::fake();
     Mail::to("alice@example.org")
-        .send(Greeting { name: "Alice".into() })
+        .send(Greeting {
+            name: "Alice".into(),
+        })
         .await
         .unwrap();
     fake.assert_sent_count(5);

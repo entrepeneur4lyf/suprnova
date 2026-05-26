@@ -32,19 +32,19 @@ use sea_orm::{
 // `Iterable` supertrait. Importing it explicitly so the call resolves
 // regardless of supertrait-method-resolution edge cases.
 use sea_orm::strum::IntoEnumIterator;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 // Direct `DB::connection()` calls have been replaced with
 // `crate::database::transaction::ExecutorChoice::resolve()` so every
 // Model CRUD path honours an active `DB::transaction` scope without
 // callers threading a tx handle through every method.
+use crate::eloquent::EloquentModel;
 use crate::eloquent::attrs::Attrs;
 use crate::eloquent::builder::Builder;
 use crate::eloquent::collection::Collection;
 use crate::eloquent::events::ModelEventHooks;
 use crate::eloquent::fillable::Fillable;
-use crate::eloquent::EloquentModel;
 use crate::error::FrameworkError;
 
 /// The Eloquent CRUD lifecycle. Auto-implemented for every
@@ -575,10 +575,7 @@ where
     /// UPDATE → `Updated` → `Saved`). Used with
     /// [`DB::begin_transaction`](crate::DB::begin_transaction) when the
     /// closure form doesn't fit the caller's control flow.
-    async fn save_with_tx(
-        &self,
-        tx: &crate::database::Transaction,
-    ) -> Result<(), FrameworkError> {
+    async fn save_with_tx(&self, tx: &crate::database::Transaction) -> Result<(), FrameworkError> {
         let attrs_value = serde_json::to_value(self).map_err(|e| {
             FrameworkError::internal(format!(
                 "save_with_tx: serialize self for Saving event: {e}"
@@ -645,10 +642,7 @@ where
     /// regardless. Use [`Self::force_delete_with_tx`] for symmetry
     /// when you want the operation to read as "definitely remove" at
     /// the call site.
-    async fn delete_with_tx(
-        self,
-        tx: &crate::database::Transaction,
-    ) -> Result<(), FrameworkError> {
+    async fn delete_with_tx(self, tx: &crate::database::Transaction) -> Result<(), FrameworkError> {
         Self::__dispatch_deleting(&self, false).await?;
 
         let snapshot = self.clone();
@@ -881,7 +875,9 @@ where
     // --- Hooks the macro-generated impl fills in ---
 
     /// Return this row's primary-key value (typed, for SeaORM lookups).
-    fn primary_key_value(&self) -> <<Self::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType;
+    fn primary_key_value(
+        &self,
+    ) -> <<Self::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType;
 
     /// Return this row's primary-key value as JSON (for `increment` /
     /// `decrement` SQL binding without exposing the typed PK to the
@@ -977,15 +973,15 @@ pub fn sea_value_to_json_loose(v: &sea_orm::Value) -> serde_json::Value {
         Value::ChronoDate(Some(d)) => J::String(d.to_string()),
         Value::ChronoTime(Some(t)) => J::String(t.to_string()),
         Value::ChronoDateTime(Some(dt)) => J::String(dt.to_string()),
-        Value::ChronoDateTimeUtc(Some(dt)) => J::String(
-            dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
-        ),
-        Value::ChronoDateTimeLocal(Some(dt)) => J::String(
-            dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
-        ),
-        Value::ChronoDateTimeWithTimeZone(Some(dt)) => J::String(
-            dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
-        ),
+        Value::ChronoDateTimeUtc(Some(dt)) => {
+            J::String(dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
+        }
+        Value::ChronoDateTimeLocal(Some(dt)) => {
+            J::String(dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
+        }
+        Value::ChronoDateTimeWithTimeZone(Some(dt)) => {
+            J::String(dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
+        }
         Value::Decimal(Some(d)) => J::String(d.to_string()),
         Value::BigDecimal(Some(d)) => J::String(d.to_string()),
         // Null variants (Some=None) or unsupported variants — emit
@@ -1017,8 +1013,7 @@ pub trait ReplicateExt: Sized {
 #[async_trait]
 pub trait FirstOrCreate: Model + Send + Sync
 where
-    Self: From<<Self::Entity as EntityTrait>::Model>
-        + crate::eloquent::EagerLoadDispatch,
+    Self: From<<Self::Entity as EntityTrait>::Model> + crate::eloquent::EagerLoadDispatch,
     <Self::Entity as EntityTrait>::Model: From<Self>
         + IntoActiveModel<<Self::Entity as EntityTrait>::ActiveModel>
         + sea_orm::FromQueryResult

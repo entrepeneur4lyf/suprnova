@@ -1,6 +1,6 @@
-use suprnova::payments::{Money, Currency};
 use rust_decimal::Decimal;
 use std::str::FromStr;
+use suprnova::payments::{Currency, Money};
 
 #[test]
 fn money_constructs_from_decimal_dollars() {

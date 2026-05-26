@@ -14,8 +14,8 @@
 //! collisions. The `Created` listener for `T1CreatedUser` only sees
 //! `T1CreatedUser` events; `T1CancelUser::create` is unaffected.
 
-use suprnova::eloquent::events::EventResult;
 use suprnova::Event;
+use suprnova::eloquent::events::EventResult;
 
 #[test]
 fn event_result_ok_is_not_cancelled() {
@@ -128,10 +128,10 @@ fn macro_emits_sixteen_event_structs() {
 
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use suprnova::eloquent::events::{listen_cancellable, CancellableListener};
+use suprnova::eloquent::events::{CancellableListener, listen_cancellable};
 use suprnova::events::{EventFacade, Listener};
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, FrameworkError, Model};
+use suprnova::{FrameworkError, Model, attrs};
 
 // `Created` listener counter for the create-dispatch test.
 static CREATED_FIRED: AtomicUsize = AtomicUsize::new(0);
@@ -147,7 +147,10 @@ pub struct CountCreatedT1;
 
 #[async_trait]
 impl Listener<t1_created_user::events::Created> for CountCreatedT1 {
-    async fn handle(&self, _event: &t1_created_user::events::Created) -> Result<(), FrameworkError> {
+    async fn handle(
+        &self,
+        _event: &t1_created_user::events::Created,
+    ) -> Result<(), FrameworkError> {
         CREATED_FIRED.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -295,8 +298,14 @@ pub struct CountDeletedT1;
 
 #[async_trait]
 impl Listener<t1_deleting_user::events::Deleted> for CountDeletedT1 {
-    async fn handle(&self, event: &t1_deleting_user::events::Deleted) -> Result<(), FrameworkError> {
-        assert!(!event.is_force, "non-force delete must report is_force=false");
+    async fn handle(
+        &self,
+        event: &t1_deleting_user::events::Deleted,
+    ) -> Result<(), FrameworkError> {
+        assert!(
+            !event.is_force,
+            "non-force delete must report is_force=false"
+        );
         DELETED_FIRED.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -305,7 +314,10 @@ impl Listener<t1_deleting_user::events::Deleted> for CountDeletedT1 {
 #[async_trait]
 impl CancellableListener<t1_deleting_user::events::Deleting> for CountDeletingT1 {
     async fn handle(&self, event: &t1_deleting_user::events::Deleting) -> EventResult {
-        assert!(!event.is_force, "non-force delete must report is_force=false");
+        assert!(
+            !event.is_force,
+            "non-force delete must report is_force=false"
+        );
         DELETING_FIRED.fetch_add(1, Ordering::SeqCst);
         EventResult::Ok
     }
@@ -329,7 +341,9 @@ async fn deleting_and_deleted_events_fire_on_hard_delete() {
     ))
     .await;
 
-    let u = T1DeletingUser::create(attrs! { email: "d@d.com" }).await.unwrap();
+    let u = T1DeletingUser::create(attrs! { email: "d@d.com" })
+        .await
+        .unwrap();
     DELETING_FIRED.store(0, Ordering::SeqCst);
     DELETED_FIRED.store(0, Ordering::SeqCst);
 
@@ -831,10 +845,7 @@ impl CancellableListener<t1_update_user::events::Updating> for CountUpdatingT1 {
 
 #[async_trait]
 impl Listener<t1_update_user::events::Updated> for RecordUpdatedT1 {
-    async fn handle(
-        &self,
-        event: &t1_update_user::events::Updated,
-    ) -> Result<(), FrameworkError> {
+    async fn handle(&self, event: &t1_update_user::events::Updated) -> Result<(), FrameworkError> {
         // OnceCell stores the FIRST update only — the static is reset
         // implicitly via the test ordering (one update per test).
         let _ = UPDATED_PREV_EMAIL.set(event.previous.email.clone());
@@ -934,9 +945,7 @@ static ORDER_LOG: tokio::sync::OnceCell<std::sync::Arc<tokio::sync::Mutex<Vec<u8
 
 async fn order_log() -> std::sync::Arc<tokio::sync::Mutex<Vec<u8>>> {
     ORDER_LOG
-        .get_or_init(|| async {
-            std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()))
-        })
+        .get_or_init(|| async { std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())) })
         .await
         .clone()
 }
@@ -946,10 +955,7 @@ pub struct OrderListenerB;
 
 #[async_trait]
 impl Listener<t1_order_user::events::Created> for OrderListenerA {
-    async fn handle(
-        &self,
-        _event: &t1_order_user::events::Created,
-    ) -> Result<(), FrameworkError> {
+    async fn handle(&self, _event: &t1_order_user::events::Created) -> Result<(), FrameworkError> {
         let log = order_log().await;
         log.lock().await.push(b'A');
         Ok(())
@@ -958,10 +964,7 @@ impl Listener<t1_order_user::events::Created> for OrderListenerA {
 
 #[async_trait]
 impl Listener<t1_order_user::events::Created> for OrderListenerB {
-    async fn handle(
-        &self,
-        _event: &t1_order_user::events::Created,
-    ) -> Result<(), FrameworkError> {
+    async fn handle(&self, _event: &t1_order_user::events::Created) -> Result<(), FrameworkError> {
         let log = order_log().await;
         log.lock().await.push(b'B');
         Ok(())
@@ -991,8 +994,7 @@ async fn listeners_fire_in_registration_order() {
 
     let recorded = log.lock().await.clone();
     assert_eq!(
-        recorded,
-        b"AB",
+        recorded, b"AB",
         "listeners must fire in the order they were registered"
     );
 }
@@ -1136,10 +1138,7 @@ async fn updating_cancel_aborts_update_row_unchanged() {
         .unwrap();
     let id = u.id;
 
-    let err = u
-        .update(attrs! { email: "after@x.com" })
-        .await
-        .unwrap_err();
+    let err = u.update(attrs! { email: "after@x.com" }).await.unwrap_err();
     assert!(format!("{err}").contains("updating vetoed"));
 
     let unchanged = T1UpdatingCancelUser::find(id).await.unwrap().unwrap();
@@ -1166,7 +1165,10 @@ async fn no_listener_fast_path_succeeds_silently() {
         .unwrap();
     assert_eq!(u.email, "quiet@x.com");
 
-    let u = u.update(attrs! { email: "still-quiet@x.com" }).await.unwrap();
+    let u = u
+        .update(attrs! { email: "still-quiet@x.com" })
+        .await
+        .unwrap();
     assert_eq!(u.email, "still-quiet@x.com");
 
     u.delete().await.unwrap();

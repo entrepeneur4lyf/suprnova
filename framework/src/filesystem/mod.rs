@@ -35,7 +35,7 @@ pub mod testing;
 pub use streaming::copy_between_disks;
 
 use crate::FrameworkError;
-use opendal::{services, Operator};
+use opendal::{Operator, services};
 use std::path::Path;
 
 /// Static facade for the named-disk storage system.
@@ -213,10 +213,7 @@ impl Storage {
     /// Register an S3 (or S3-compatible) disk.
     ///
     /// Equivalent to [`Storage::register_s3_with`] with an identity closure.
-    pub fn register_s3(
-        name: impl Into<String>,
-        config: S3Config,
-    ) -> Result<(), FrameworkError> {
+    pub fn register_s3(name: impl Into<String>, config: S3Config) -> Result<(), FrameworkError> {
         Self::register_s3_with(name, config, |op| op)
     }
 
@@ -322,10 +319,7 @@ impl Storage {
     /// Register a Google Cloud Storage disk.
     ///
     /// Equivalent to [`Storage::register_gcs_with`] with an identity closure.
-    pub fn register_gcs(
-        name: impl Into<String>,
-        config: GcsConfig,
-    ) -> Result<(), FrameworkError> {
+    pub fn register_gcs(name: impl Into<String>, config: GcsConfig) -> Result<(), FrameworkError> {
         Self::register_gcs_with(name, config, |op| op)
     }
 

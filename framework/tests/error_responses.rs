@@ -41,8 +41,7 @@ fn render(err: FrameworkError) -> (u16, Value) {
     // `HttpResponse` doesn't expose body bytes directly; we route it
     // through the hyper conversion that the server uses at runtime.
     let body = resp.body().to_vec();
-    let parsed: Value = serde_json::from_slice(&body)
-        .expect("error response body is always JSON");
+    let parsed: Value = serde_json::from_slice(&body).expect("error response body is always JSON");
     (status, parsed)
 }
 
@@ -168,7 +167,8 @@ fn internal_error_with_debug_exposes_debug_message_keeping_message_generic() {
     // be able to key on the detail field.
     assert_eq!(body["message"], "Internal Server Error");
     assert_eq!(
-        body["debug_message"], format!("Internal server error: {raw}"),
+        body["debug_message"],
+        format!("Internal server error: {raw}"),
         "debug_message should expose the full err.to_string() — got: {body}"
     );
 }
@@ -200,10 +200,7 @@ fn param_error_4xx_keeps_field_specific_message() {
 
     assert_eq!(status, 400);
     assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("priority"),
+        body["message"].as_str().unwrap().contains("priority"),
         "ParamError must preserve param name in message — got: {body}"
     );
 }
@@ -274,9 +271,7 @@ async fn request_id_propagates_into_error_body_when_scope_active() {
     let expected = id.as_str().to_string();
 
     let (_, body) = suprnova::logging::request_id::REQUEST_ID
-        .scope(id, async {
-            render(FrameworkError::internal("anything"))
-        })
+        .scope(id, async { render(FrameworkError::internal("anything")) })
         .await;
 
     assert_eq!(

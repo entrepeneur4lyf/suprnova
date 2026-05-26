@@ -3,7 +3,7 @@
 //! Configure global middleware in `bootstrap.rs` using the `global_middleware!` macro,
 //! or use `Server::middleware()` for manual configuration.
 
-use super::{into_boxed, BoxedMiddleware, Middleware};
+use super::{BoxedMiddleware, Middleware, into_boxed};
 use std::sync::{OnceLock, RwLock};
 
 /// Global middleware registry (populated via `global_middleware!` macro in bootstrap.rs)

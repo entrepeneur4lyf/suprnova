@@ -18,7 +18,7 @@ use serial_test::serial;
 use tokio::runtime::Runtime;
 
 use suprnova::auth_flows::PasswordReset;
-use suprnova::torii_integration::{init_torii, ToriiConfig};
+use suprnova::torii_integration::{ToriiConfig, init_torii};
 
 /// One tokio runtime shared across every test in this file.
 static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
@@ -79,12 +79,7 @@ fn reset_round_trip() {
         // Old password is rejected.
         assert!(
             suprnova::Auth::password()
-                .authenticate(
-                    "alice-reset@example.com",
-                    "longpassword123",
-                    None,
-                    None
-                )
+                .authenticate("alice-reset@example.com", "longpassword123", None, None)
                 .await
                 .is_err(),
             "old password must not authenticate after reset"
@@ -92,12 +87,7 @@ fn reset_round_trip() {
 
         // New password is accepted.
         suprnova::Auth::password()
-            .authenticate(
-                "alice-reset@example.com",
-                "freshpassword456",
-                None,
-                None,
-            )
+            .authenticate("alice-reset@example.com", "freshpassword456", None, None)
             .await
             .expect("new password must authenticate after reset");
 
@@ -169,12 +159,9 @@ fn send_link_silent_for_unknown_email() {
 
         // Anti-enumeration: send_link returns Ok(()) and dispatches
         // nothing when the email is not on file.
-        PasswordReset::send_link(
-            "ghost-reset@example.com",
-            "https://app.example.com/reset",
-        )
-        .await
-        .expect("send_link must return Ok(()) for unknown emails (anti-enumeration)");
+        PasswordReset::send_link("ghost-reset@example.com", "https://app.example.com/reset")
+            .await
+            .expect("send_link must return Ok(()) for unknown emails (anti-enumeration)");
 
         fake.assert_sent_count(0);
     });
@@ -208,8 +195,7 @@ fn complete_fires_password_changed_email() {
         // a fire-and-forget side-effect of complete(). Its subject is
         // "Your <APP_NAME> password was changed".
         fake.assert_sent(|m| {
-            m.to.iter()
-                .any(|a| a.email == "charlie-reset@example.com")
+            m.to.iter().any(|a| a.email == "charlie-reset@example.com")
                 && m.subject.contains("password was changed")
         });
     });

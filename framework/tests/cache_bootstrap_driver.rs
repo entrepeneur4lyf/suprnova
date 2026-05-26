@@ -14,7 +14,10 @@ use suprnova::cache::{CacheConfig, CacheDriver};
 fn cache_driver_parses_known_names_case_insensitively() {
     assert_eq!(CacheDriver::parse("memory").unwrap(), CacheDriver::Memory);
     assert_eq!(CacheDriver::parse("MEMORY").unwrap(), CacheDriver::Memory);
-    assert_eq!(CacheDriver::parse("In-Memory").unwrap(), CacheDriver::Memory);
+    assert_eq!(
+        CacheDriver::parse("In-Memory").unwrap(),
+        CacheDriver::Memory
+    );
     assert_eq!(CacheDriver::parse("inmemory").unwrap(), CacheDriver::Memory);
     assert_eq!(CacheDriver::parse("redis").unwrap(), CacheDriver::Redis);
     assert_eq!(CacheDriver::parse("REDIS").unwrap(), CacheDriver::Redis);

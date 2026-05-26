@@ -11,13 +11,13 @@
 //! .abort_handle()`) when the handler future resolves. See the
 //! `WsSocket::sender()` doc for the teardown contract.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{
-    protocol::{frame::coding::CloseCode, CloseFrame},
     Message,
+    protocol::{CloseFrame, frame::coding::CloseCode},
 };
 
 /// Drive periodic pings and enforce close-on-no-pong.

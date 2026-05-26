@@ -40,7 +40,7 @@
 //!   doesn't accidentally match by structural similarity.
 
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, model, Model};
+use suprnova::{Model, attrs, model};
 
 // The "blog_post" morph_type string is NOT one the old heuristic
 // emission would have produced for the type name `MorphBlogPost`.
@@ -171,9 +171,9 @@ async fn morph_to_dispatches_via_custom_morph_type_string() {
             assert_eq!(parent.id, a.id);
             assert_eq!(parent.title, "the future of rust");
         }
-        other => panic!(
-            "expected LegacyArticle variant for parent_type=\"blog_post\", got {other:?}"
-        ),
+        other => {
+            panic!("expected LegacyArticle variant for parent_type=\"blog_post\", got {other:?}")
+        }
     }
 }
 
@@ -183,7 +183,9 @@ async fn morph_to_dispatches_to_second_target_via_registry() {
     // ensuring the dispatcher doesn't bias toward the first arm.
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
-    let v = AncientVideo::create(attrs! { url: "old.mp4" }).await.unwrap();
+    let v = AncientVideo::create(attrs! { url: "old.mp4" })
+        .await
+        .unwrap();
     let c = P2Comment::create(attrs! {
         parent_id: v.id,
         parent_type: "media_clip",
@@ -197,9 +199,9 @@ async fn morph_to_dispatches_to_second_target_via_registry() {
             assert_eq!(parent.id, v.id);
             assert_eq!(parent.url, "old.mp4");
         }
-        other => panic!(
-            "expected AncientVideo variant for parent_type=\"media_clip\", got {other:?}"
-        ),
+        other => {
+            panic!("expected AncientVideo variant for parent_type=\"media_clip\", got {other:?}")
+        }
     }
 }
 

@@ -21,10 +21,7 @@
 
 use chrono::{DateTime, Utc};
 
-#[suprnova::model(
-    table = "features",
-    timestamps,
-)]
+#[suprnova::model(table = "features", timestamps)]
 pub struct Feature {
     pub id: i64,
     pub name: String,
@@ -43,5 +40,5 @@ pub struct Feature {
 // before T11. The user-facing `Feature` struct is also re-exported as
 // `Model` for backwards-compatibility with any code that referenced
 // `entity::Model` (the old hand-rolled name).
-pub use feature::{ActiveModel, Column, Entity};
 pub use feature::Model;
+pub use feature::{ActiveModel, Column, Entity};

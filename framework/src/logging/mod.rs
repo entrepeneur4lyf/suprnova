@@ -10,4 +10,4 @@ pub mod request_id;
 
 pub use config::{LogConfig, LogFormat};
 pub use init::init_subscriber;
-pub use request_id::{current_request_id, RequestId, RequestIdMiddleware, REQUEST_ID};
+pub use request_id::{REQUEST_ID, RequestId, RequestIdMiddleware, current_request_id};

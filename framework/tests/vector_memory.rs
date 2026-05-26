@@ -17,7 +17,10 @@ use suprnova::{MemoryVectorDriver, Vector, VectorItem};
 fn unique_store_name(tag: &str) -> String {
     // Each test uses a distinct store name so parallel runs don't
     // collide on the process-global VectorRegistry.
-    format!("p9a-{tag}-{}", std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos())
+    format!(
+        "p9a-{tag}-{}",
+        std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
+    )
 }
 
 #[tokio::test]
@@ -41,17 +44,28 @@ async fn upsert_same_id_replaces_existing_point() {
     Vector::register(name.clone(), Arc::new(MemoryVectorDriver::new()));
     let store = Vector::store(&name).unwrap();
     store
-        .upsert(vec![VectorItem::new("x", vec![1.0, 0.0], serde_json::json!({"v": 1}))])
+        .upsert(vec![VectorItem::new(
+            "x",
+            vec![1.0, 0.0],
+            serde_json::json!({"v": 1}),
+        )])
         .await
         .unwrap();
     store
-        .upsert(vec![VectorItem::new("x", vec![0.0, 1.0], serde_json::json!({"v": 2}))])
+        .upsert(vec![VectorItem::new(
+            "x",
+            vec![0.0, 1.0],
+            serde_json::json!({"v": 2}),
+        )])
         .await
         .unwrap();
     assert_eq!(store.count().await.unwrap(), 1, "same id must merge");
     let hits = store.similar(vec![0.0, 1.0], 1).await.unwrap();
     assert_eq!(hits[0].id, "x");
-    assert_eq!(hits[0].metadata["v"], 2, "metadata follows the new embedding");
+    assert_eq!(
+        hits[0].metadata["v"], 2,
+        "metadata follows the new embedding"
+    );
 }
 
 #[tokio::test]
@@ -128,7 +142,11 @@ async fn similar_with_zero_vector_query_errors() {
     Vector::register(name.clone(), Arc::new(MemoryVectorDriver::new()));
     let store = Vector::store(&name).unwrap();
     store
-        .upsert(vec![VectorItem::new("a", vec![1.0, 0.0], serde_json::json!({}))])
+        .upsert(vec![VectorItem::new(
+            "a",
+            vec![1.0, 0.0],
+            serde_json::json!({}),
+        )])
         .await
         .unwrap();
     let err = store.similar(vec![0.0, 0.0], 1).await.unwrap_err();

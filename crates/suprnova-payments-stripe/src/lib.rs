@@ -85,7 +85,11 @@ impl StripeProvider {
             .map_err(|_| "STRIPE_PUBLISHABLE_KEY env var not set".to_string())?;
         let webhook_signing_secret = std::env::var("STRIPE_WEBHOOK_SIGNING_SECRET")
             .map_err(|_| "STRIPE_WEBHOOK_SIGNING_SECRET env var not set".to_string())?;
-        Ok(Self::new(secret_key, publishable_key, webhook_signing_secret))
+        Ok(Self::new(
+            secret_key,
+            publishable_key,
+            webhook_signing_secret,
+        ))
     }
 
     /// Returns a reference to the underlying `stripe::Client`.

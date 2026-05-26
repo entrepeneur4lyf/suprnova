@@ -63,9 +63,7 @@ where
 {
     /// Create a new query builder for the entity
     pub fn new() -> Self {
-        Self {
-            select: E::find(),
-        }
+        Self { select: E::find() }
     }
 
     /// Add a filter condition

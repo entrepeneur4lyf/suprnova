@@ -25,7 +25,10 @@ async fn welcome_email_listener_returns_ok() {
     };
     // Listener is side-effect only (logs); the contract is that it
     // doesn't error on valid input.
-    listener.handle(&event).await.expect("listener should succeed");
+    listener
+        .handle(&event)
+        .await
+        .expect("listener should succeed");
 }
 
 #[tokio::test]
@@ -38,7 +41,10 @@ async fn broadcast_listener_forwards_event_to_subscriber() {
         user_id: 42,
         email: "bob@example.com".into(),
     };
-    listener.handle(&event).await.expect("listener should succeed");
+    listener
+        .handle(&event)
+        .await
+        .expect("listener should succeed");
 
     let envelope = tokio::time::timeout(Duration::from_millis(500), rx.recv())
         .await

@@ -43,8 +43,8 @@
 
 use std::sync::OnceLock;
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use uuid::Uuid;
 use webauthn_rs::prelude::{Passkey, Url, Webauthn, WebauthnBuilder};
 
@@ -348,8 +348,7 @@ impl PasskeyAuth {
         // torii's UserId is a prefixed ID (e.g. "usr_..."), not a UUID.
         // We derive a deterministic v5 UUID from it so webauthn always sees
         // the same user_unique_id for the same account.
-        let user_uuid =
-            Uuid::new_v5(&Uuid::NAMESPACE_URL, user.id.as_str().as_bytes());
+        let user_uuid = Uuid::new_v5(&Uuid::NAMESPACE_URL, user.id.as_str().as_bytes());
 
         // Get existing credentials so webauthn can exclude them.
         let existing: Vec<webauthn_rs::prelude::CredentialID> = instance()?
@@ -369,7 +368,9 @@ impl PasskeyAuth {
 
         let (ccr, pending_reg) = webauthn
             .start_passkey_registration(user_uuid, email, email, exclude)
-            .map_err(|e| FrameworkError::internal(format!("webauthn start_passkey_registration: {e:?}")))?;
+            .map_err(|e| {
+                FrameworkError::internal(format!("webauthn start_passkey_registration: {e:?}"))
+            })?;
 
         // Derive the human-readable challenge string from the raw challenge bytes.
         let challenge_str = URL_SAFE_NO_PAD.encode(&*ccr.public_key.challenge);
@@ -507,14 +508,16 @@ impl PasskeyAuth {
         // place to create accounts on miss (codex review finding #3): a
         // probing attacker who guesses email addresses could otherwise
         // silently provision accounts they don't own.
-        let user = find_user_by_email_lookup_only(email).await?.ok_or_else(|| {
-            FrameworkError::Domain {
-                // Generic message — do not confirm/deny user existence
-                // beyond what the protocol unavoidably reveals.
-                message: "passkey authentication failed".to_string(),
-                status_code: 401,
-            }
-        })?;
+        let user = find_user_by_email_lookup_only(email)
+            .await?
+            .ok_or_else(|| {
+                FrameworkError::Domain {
+                    // Generic message — do not confirm/deny user existence
+                    // beyond what the protocol unavoidably reveals.
+                    message: "passkey authentication failed".to_string(),
+                    status_code: 401,
+                }
+            })?;
 
         // Load stored passkeys.
         let stored_creds = instance()?
@@ -540,9 +543,14 @@ impl PasskeyAuth {
             })
             .collect::<Result<_, _>>()?;
 
-        let (rcr, pending_auth) = webauthn
-            .start_passkey_authentication(&passkeys)
-            .map_err(|e| FrameworkError::internal(format!("webauthn start_passkey_authentication: {e:?}")))?;
+        let (rcr, pending_auth) =
+            webauthn
+                .start_passkey_authentication(&passkeys)
+                .map_err(|e| {
+                    FrameworkError::internal(format!(
+                        "webauthn start_passkey_authentication: {e:?}"
+                    ))
+                })?;
 
         let challenge_str = URL_SAFE_NO_PAD.encode(&*rcr.public_key.challenge);
 
@@ -657,7 +665,9 @@ impl PasskeyAuth {
                     .passkey()
                     .delete_credential(&stored.credential_id)
                     .await
-                    .map_err(|e| FrameworkError::internal(format!("passkey: delete old credential: {e}")))?;
+                    .map_err(|e| {
+                        FrameworkError::internal(format!("passkey: delete old credential: {e}"))
+                    })?;
                 instance()?
                     .passkey()
                     .register_credential(
@@ -667,7 +677,9 @@ impl PasskeyAuth {
                         stored.name.clone(),
                     )
                     .await
-                    .map_err(|e| FrameworkError::internal(format!("passkey: update credential: {e}")))?;
+                    .map_err(|e| {
+                        FrameworkError::internal(format!("passkey: update credential: {e}"))
+                    })?;
                 updated = true;
                 break;
             }

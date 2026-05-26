@@ -47,7 +47,7 @@ pub use store::CacheStore;
 use crate::config::Config;
 use crate::container::App;
 use crate::error::FrameworkError;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -176,9 +176,8 @@ impl Cache {
         ttl: Option<Duration>,
     ) -> Result<(), FrameworkError> {
         let store = Self::store()?;
-        let json = serde_json::to_string(value).map_err(|e| {
-            FrameworkError::internal(format!("Cache serialize error: {}", e))
-        })?;
+        let json = serde_json::to_string(value)
+            .map_err(|e| FrameworkError::internal(format!("Cache serialize error: {}", e)))?;
         let effective_ttl = ttl.or_else(|| store.default_ttl());
         store.put_raw(key, &json, effective_ttl).await
     }
@@ -197,9 +196,8 @@ impl Cache {
     /// ```
     pub async fn forever<T: Serialize>(key: &str, value: &T) -> Result<(), FrameworkError> {
         let store = Self::store()?;
-        let json = serde_json::to_string(value).map_err(|e| {
-            FrameworkError::internal(format!("Cache serialize error: {}", e))
-        })?;
+        let json = serde_json::to_string(value)
+            .map_err(|e| FrameworkError::internal(format!("Cache serialize error: {}", e)))?;
         // Pass `None` literally so the store writes without any TTL.
         // Do NOT delegate to `Cache::put` — that would resolve the
         // facade default and make forever non-forever.
@@ -342,9 +340,8 @@ impl Cache {
         ttl: Option<Duration>,
     ) -> Result<(), FrameworkError> {
         let store = Self::store()?;
-        let json = serde_json::to_string(value).map_err(|e| {
-            FrameworkError::internal(format!("Cache serialize error: {e}"))
-        })?;
+        let json = serde_json::to_string(value)
+            .map_err(|e| FrameworkError::internal(format!("Cache serialize error: {e}")))?;
         store.tagged_put_raw(tags, key, &json, ttl).await
     }
 

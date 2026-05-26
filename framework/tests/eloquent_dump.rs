@@ -9,8 +9,8 @@
 //! they remain useful at REPL or in a test without `TestDatabase` —
 //! exactly the moments interactive debugging happens.
 
-use suprnova::testing::TestDatabase;
 use suprnova::Model;
+use suprnova::testing::TestDatabase;
 
 #[suprnova::model(table = "t14_dump_x")]
 pub struct T14X {
@@ -29,7 +29,7 @@ async fn dump_returns_builder_for_chaining() {
 
     let b = T14X::query()
         .filter("active", true)
-        .dump()                 // logs via tracing, returns self
+        .dump() // logs via tracing, returns self
         .order_by_desc("id")
         .limit(10);
 
@@ -39,7 +39,10 @@ async fn dump_returns_builder_for_chaining() {
         sql.contains("FROM \"t14_dump_x\"") || sql.contains("FROM t14_dump_x"),
         "post-dump builder still renders SQL: {sql}"
     );
-    assert!(sql.contains("ORDER BY"), "order_by survives after dump: {sql}");
+    assert!(
+        sql.contains("ORDER BY"),
+        "order_by survives after dump: {sql}"
+    );
 }
 
 #[test]

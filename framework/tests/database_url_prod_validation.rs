@@ -34,10 +34,7 @@ struct EnvSnapshot {
 impl EnvSnapshot {
     fn capture(keys: &[&'static str]) -> Self {
         Self {
-            keys: keys
-                .iter()
-                .map(|k| (*k, std::env::var(k).ok()))
-                .collect(),
+            keys: keys.iter().map(|k| (*k, std::env::var(k).ok())).collect(),
         }
     }
 }
@@ -86,9 +83,8 @@ fn production_with_default_source_refuses_silent_sqlite_fallback() {
     assert_eq!(cfg.url, DatabaseConfig::DEFAULT_SQLITE_URL);
 
     let result = cfg.validate_for_environment(&Environment::Production);
-    let err = result.expect_err(
-        "production + Default source MUST fail-closed; this is the audit fix",
-    );
+    let err =
+        result.expect_err("production + Default source MUST fail-closed; this is the audit fix");
     let msg = format!("{err}");
     assert!(
         msg.contains("DATABASE_URL is required"),
@@ -170,8 +166,9 @@ fn local_with_default_source_is_accepted() {
         .expect("Local + Default source must keep working — dev zero-setup posture");
     cfg.validate_for_environment(&Environment::Development)
         .expect("Development + Default source must keep working");
-    cfg.validate_for_environment(&Environment::Testing)
-        .expect("Testing + Default source must keep working — tests use sqlite::memory: or fresh files");
+    cfg.validate_for_environment(&Environment::Testing).expect(
+        "Testing + Default source must keep working — tests use sqlite::memory: or fresh files",
+    );
 }
 
 #[test]

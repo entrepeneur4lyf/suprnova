@@ -1,9 +1,9 @@
 //! JSON:API error envelope for `FrameworkError`.
 
-use bytes::Bytes;
-use serde_json::{json, Value};
 use crate::error::FrameworkError;
 use crate::http::HttpResponse;
+use bytes::Bytes;
+use serde_json::{Value, json};
 
 impl FrameworkError {
     /// Render a JSON:API `{"errors": [...]}` response envelope.
@@ -73,7 +73,6 @@ impl FrameworkError {
 
         let body = json!({ "errors": [Value::Object(err_obj)] });
         let bytes = serde_json::to_vec(&body).expect("JSON:API error encode infallible");
-        HttpResponse::bytes_body(Bytes::from(bytes), "application/vnd.api+json")
-            .status(status)
+        HttpResponse::bytes_body(Bytes::from(bytes), "application/vnd.api+json").status(status)
     }
 }

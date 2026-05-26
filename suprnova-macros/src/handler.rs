@@ -6,7 +6,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{parse_macro_input, FnArg, ItemFn, Pat, Type};
+use syn::{FnArg, ItemFn, Pat, Type, parse_macro_input};
 
 /// Parameter classification for extraction strategy
 enum ParamKind {
@@ -183,9 +183,11 @@ fn classify_param_type(ty: &Type) -> ParamKind {
 
             // Check for Model type (path ends with ::Model)
             if let Some(last_segment) = segments.last()
-                && last_segment.ident == "Model" && segments.len() >= 2 {
-                    return ParamKind::Model;
-                }
+                && last_segment.ident == "Model"
+                && segments.len() >= 2
+            {
+                return ParamKind::Model;
+            }
 
             // Default to FormRequest for other types
             ParamKind::FormRequest

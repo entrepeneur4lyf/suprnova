@@ -25,7 +25,7 @@ pub mod providers;
 pub mod repository;
 pub mod typed;
 
-pub use env::{env, env_optional, env_required, load_dotenv, Environment};
+pub use env::{Environment, env, env_optional, env_required, load_dotenv};
 pub use providers::{AppConfig, AppConfigBuilder, ServerConfig, ServerConfigBuilder};
 
 use std::path::Path;

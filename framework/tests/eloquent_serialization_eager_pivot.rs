@@ -31,7 +31,7 @@
 use std::sync::Arc;
 
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, model, EagerLoadCache, Model};
+use suprnova::{EagerLoadCache, Model, attrs, model};
 
 // ---- Models -------------------------------------------------------------
 //
@@ -140,9 +140,7 @@ async fn to_json_excludes_eager_and_pivot_fields() {
     };
 
     let v = u.to_array();
-    let obj = v
-        .as_object()
-        .expect("to_array must produce a JSON object");
+    let obj = v.as_object().expect("to_array must produce a JSON object");
 
     // Auto-injected fields must be absent.
     assert!(

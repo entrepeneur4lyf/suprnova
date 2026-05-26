@@ -17,7 +17,7 @@ use hyper_util::rt::TokioIo;
 use suprnova::http::text;
 use suprnova::rate_limit::memory::InMemoryRateLimiter;
 use suprnova::rate_limit::{RateLimitMiddleware, RateLimiter, SlidingWindowConfig};
-use suprnova::{handle_request, MiddlewareRegistry, Router};
+use suprnova::{MiddlewareRegistry, Router, handle_request};
 
 /// Spawn a test HTTP/1.1 server bound to an ephemeral port, dispatch
 /// up to `accepts` connections via `handle_request`, then exit.
@@ -42,9 +42,7 @@ async fn spawn_server(router: impl Into<Router>, accepts: usize) -> SocketAddr {
                 let svc = service_fn(move |req: hyper::Request<Incoming>| {
                     let router = router.clone();
                     let middleware = middleware.clone();
-                    async move {
-                        Ok::<_, Infallible>(handle_request(router, middleware, req).await)
-                    }
+                    async move { Ok::<_, Infallible>(handle_request(router, middleware, req).await) }
                 });
                 let _ = hyper::server::conn::http1::Builder::new()
                     .serve_connection(io, svc)
@@ -60,11 +58,12 @@ async fn spawn_server(router: impl Into<Router>, accepts: usize) -> SocketAddr {
 async fn get(addr: SocketAddr, path: &str) -> (u16, Option<String>) {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let io = TokioIo::new(stream);
-    let (mut sender, conn) =
-        hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
-            .await
-            .unwrap();
-    tokio::spawn(async move { let _ = conn.await; });
+    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
 
     let req = hyper::Request::builder()
         .method("GET")
@@ -97,9 +96,7 @@ async fn middleware_enforces_per_route_quota_and_returns_429_with_retry_after() 
         max_requests: 2,
         window: Duration::from_secs(60),
     };
-    let mw = RateLimitMiddleware::new(limiter, cfg, |req| {
-        format!("route:{}", req.path())
-    });
+    let mw = RateLimitMiddleware::new(limiter, cfg, |req| format!("route:{}", req.path()));
 
     let router = Router::new()
         .get("/ping", |_req| async { text("pong") })

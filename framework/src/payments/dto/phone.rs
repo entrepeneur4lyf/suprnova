@@ -28,9 +28,7 @@ impl PhoneNumber {
     pub fn new(value: impl AsRef<str>) -> Result<Self, PaymentError> {
         let raw = value.as_ref().trim();
         let digits = raw.strip_prefix('+').unwrap_or(raw);
-        if !(8..=15).contains(&digits.len())
-            || !digits.bytes().all(|byte| byte.is_ascii_digit())
-        {
+        if !(8..=15).contains(&digits.len()) || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err(PaymentError::InvalidPhoneNumber(raw.to_owned()));
         }
         Ok(Self(format!("+{digits}")))

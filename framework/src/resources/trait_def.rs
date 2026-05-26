@@ -1,7 +1,7 @@
 //! Core trait definitions for the JSON:API resource layer.
 
-use serde_json::Value;
 use super::include_tree::IncludeTree;
+use serde_json::Value;
 
 /// Implemented by `#[derive(Data)] #[json_resource("<type>")]` types.
 ///

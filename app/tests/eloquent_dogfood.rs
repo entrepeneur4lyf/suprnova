@@ -11,7 +11,7 @@ use app::models::posts::Post;
 use app::models::todos::Todo;
 use app::models::users::User;
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, Model};
+use suprnova::{Model, attrs};
 
 #[tokio::test]
 async fn user_lifecycle_end_to_end() {

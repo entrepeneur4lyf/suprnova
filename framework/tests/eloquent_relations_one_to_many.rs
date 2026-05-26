@@ -23,7 +23,7 @@
 //!   Empty groups fall back through the Sum|Avg vs Min|Max branch.
 
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, model, AggregateKind, Direction, Model};
+use suprnova::{AggregateKind, Direction, Model, attrs, model};
 
 #[model(table = "otm_users", relations = {
     posts: HasMany<OtmPost>,
@@ -149,12 +149,7 @@ async fn has_many_first_returns_one() {
         .await
         .unwrap();
 
-    let post = u
-        .posts()
-        .first()
-        .await
-        .unwrap()
-        .expect("post present");
+    let post = u.posts().first().await.unwrap().expect("post present");
     assert_eq!(post.title, "only");
 }
 
@@ -233,7 +228,10 @@ async fn has_many_latest_orders_desc_by_created_at() {
 
     let by_latest = u.posts().latest().get().await.unwrap();
     assert_eq!(by_latest.len(), 3);
-    assert_eq!(by_latest[0].title, "latest", "latest() must put newest first");
+    assert_eq!(
+        by_latest[0].title, "latest",
+        "latest() must put newest first"
+    );
     assert_eq!(by_latest[1].title, "middle");
     assert_eq!(by_latest[2].title, "first");
 }
@@ -256,7 +254,10 @@ async fn has_many_oldest_orders_asc_by_created_at() {
 
     let by_oldest = u.posts().oldest().get().await.unwrap();
     assert_eq!(by_oldest.len(), 3);
-    assert_eq!(by_oldest[0].title, "oldest", "oldest() must put oldest first");
+    assert_eq!(
+        by_oldest[0].title, "oldest",
+        "oldest() must put oldest first"
+    );
     assert_eq!(by_oldest[1].title, "middle");
     assert_eq!(by_oldest[2].title, "newest");
 }
@@ -555,7 +556,10 @@ async fn has_many_min_max_none_on_empty_group() {
         .__eager
         .get_aggregate::<Option<f64>>("posts_min_views")
         .expect("min cache populated as Option<f64>");
-    assert!(min.is_none(), "min over empty group must be None, got: {min:?}");
+    assert!(
+        min.is_none(),
+        "min over empty group must be None, got: {min:?}"
+    );
 
     {
         let mut refs: Vec<&mut OtmUser> = users.iter_mut().collect();

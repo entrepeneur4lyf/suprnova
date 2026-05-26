@@ -7,7 +7,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput, Fields, FieldsNamed};
+use syn::{DeriveInput, Fields, FieldsNamed, parse_macro_input};
 
 /// Check if a field has the #[inject] attribute
 fn has_inject_attr(field: &syn::Field) -> bool {

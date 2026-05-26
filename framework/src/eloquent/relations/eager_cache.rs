@@ -167,7 +167,8 @@ impl EagerLoadCache {
 
     /// Store a `with_count` aggregate.
     pub fn set_count(&mut self, name: &'static str, count: u64) {
-        self.rows.insert(name.to_string(), RelationCell::Count(count));
+        self.rows
+            .insert(name.to_string(), RelationCell::Count(count));
     }
 
     /// Read a `with_count` aggregate. Returns `None` if `with_count`

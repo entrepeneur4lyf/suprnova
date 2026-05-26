@@ -33,7 +33,7 @@ use suprnova::vector::driver::VectorDriver;
 use suprnova::{PineconeVectorDriver, VectorItem};
 
 use pinecone_sdk::models::Namespace;
-use prost_types::{value::Kind, Struct as PbStruct, Value as PbValue};
+use prost_types::{Struct as PbStruct, Value as PbValue, value::Kind};
 
 // ----------------------------------------------------------------------
 // Helpers
@@ -75,7 +75,11 @@ async fn delete_namespace(driver: &PineconeVectorDriver, index_name: &str, names
     let Ok(mut index) = driver.client().index(&description.host).await else {
         return;
     };
-    let _ = index.delete_all(&Namespace { name: namespace.to_string() }).await;
+    let _ = index
+        .delete_all(&Namespace {
+            name: namespace.to_string(),
+        })
+        .await;
 }
 
 // ----------------------------------------------------------------------
@@ -97,8 +101,8 @@ fn json_to_metadata_empty_object_yields_empty_struct() {
 
 #[test]
 fn json_to_metadata_rejects_non_object_non_null() {
-    let err = PineconeVectorDriver::json_to_metadata(serde_json::json!("a bare string"))
-        .unwrap_err();
+    let err =
+        PineconeVectorDriver::json_to_metadata(serde_json::json!("a bare string")).unwrap_err();
     assert!(
         format!("{err}").contains("JSON object or null"),
         "error names the constraint: {err}"
@@ -159,11 +163,15 @@ fn metadata_to_json_round_trip_preserves_pb_kinds() {
     let mut fields = std::collections::BTreeMap::new();
     fields.insert(
         "a_bool".to_string(),
-        PbValue { kind: Some(Kind::BoolValue(true)) },
+        PbValue {
+            kind: Some(Kind::BoolValue(true)),
+        },
     );
     fields.insert(
         "a_number".to_string(),
-        PbValue { kind: Some(Kind::NumberValue(4.25)) },
+        PbValue {
+            kind: Some(Kind::NumberValue(4.25)),
+        },
     );
     fields.insert(
         "a_string".to_string(),
@@ -173,7 +181,9 @@ fn metadata_to_json_round_trip_preserves_pb_kinds() {
     );
     fields.insert(
         "a_null".to_string(),
-        PbValue { kind: Some(Kind::NullValue(0)) },
+        PbValue {
+            kind: Some(Kind::NullValue(0)),
+        },
     );
     let pb = PbStruct { fields };
     let json = PineconeVectorDriver::metadata_to_json(Some(pb));
@@ -249,8 +259,7 @@ fn build_vector_rejects_non_object_metadata() {
 
 #[test]
 fn decode_match_passes_id_and_score_through() {
-    let m =
-        PineconeVectorDriver::decode_match_fields("my-id".to_string(), 0.93, None);
+    let m = PineconeVectorDriver::decode_match_fields("my-id".to_string(), 0.93, None);
     assert_eq!(m.id, "my-id");
     assert!((m.score - 0.93).abs() < 1e-6);
     assert_eq!(m.metadata, serde_json::Value::Null);
@@ -265,11 +274,8 @@ fn decode_match_with_metadata_yields_object() {
             kind: Some(Kind::StringValue("value".into())),
         },
     );
-    let m = PineconeVectorDriver::decode_match_fields(
-        "id".to_string(),
-        0.5,
-        Some(PbStruct { fields }),
-    );
+    let m =
+        PineconeVectorDriver::decode_match_fields("id".to_string(), 0.5, Some(PbStruct { fields }));
     assert_eq!(m.metadata["key"], "value");
 }
 
@@ -334,7 +340,11 @@ async fn upsert_with_zero_dim_first_item_errors_locally() {
     let err = driver
         .upsert(
             "never-reached",
-            vec![VectorItem::new("a", Vec::<f32>::new(), serde_json::json!({}))],
+            vec![VectorItem::new(
+                "a",
+                Vec::<f32>::new(),
+                serde_json::json!({}),
+            )],
         )
         .await
         .unwrap_err();
@@ -417,7 +427,11 @@ async fn integration_similar_returns_top_k_descending() {
             &index_name,
             vec![
                 VectorItem::new("perfect", vec![1.0, 0.0, 0.0, 0.0], serde_json::json!({})),
-                VectorItem::new("orthogonal", vec![0.0, 1.0, 0.0, 0.0], serde_json::json!({})),
+                VectorItem::new(
+                    "orthogonal",
+                    vec![0.0, 1.0, 0.0, 0.0],
+                    serde_json::json!({}),
+                ),
                 VectorItem::new("close", vec![0.9, 0.1, 0.0, 0.0], serde_json::json!({})),
             ],
         )

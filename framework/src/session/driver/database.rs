@@ -140,8 +140,8 @@ impl SessionStore for DatabaseSessionDriver {
     async fn gc(&self) -> Result<u64, FrameworkError> {
         let db = DB::connection()?;
 
-        let threshold =
-            chrono::Utc::now().naive_utc() - chrono::Duration::seconds(self.lifetime.as_secs() as i64);
+        let threshold = chrono::Utc::now().naive_utc()
+            - chrono::Duration::seconds(self.lifetime.as_secs() as i64);
 
         let result = sessions::Entity::delete_many()
             .filter(sessions::Column::LastActivity.lt(threshold))

@@ -1,9 +1,9 @@
 //! CSRF protection middleware
 
+use crate::Request;
 use crate::http::{HttpResponse, Response};
 use crate::middleware::{Middleware, Next};
 use crate::session::get_csrf_token;
-use crate::Request;
 use async_trait::async_trait;
 
 /// Maximum bytes we will buffer from a form-urlencoded request body to
@@ -158,13 +158,16 @@ impl Middleware for CsrfMiddleware {
         // URL-decodes values; the token is hex so decoding is a no-op,
         // but using the parser keeps us consistent with how `req.form()`
         // would later see the same body.
-        let token_field = url::form_urlencoded::parse(body)
-            .find_map(|(k, v)| if k == "_token" { Some(v.into_owned()) } else { None });
+        let token_field = url::form_urlencoded::parse(body).find_map(|(k, v)| {
+            if k == "_token" {
+                Some(v.into_owned())
+            } else {
+                None
+            }
+        });
 
         match token_field {
-            Some(token) if constant_time_compare(&token, &expected_token) => {
-                next(request).await
-            }
+            Some(token) if constant_time_compare(&token, &expected_token) => next(request).await,
             _ => reject_with_419(),
         }
     }
@@ -228,9 +231,9 @@ mod tests {
     //       this, the fix moved the bug instead of solving it)
     // ----------------------------------------------------------------
 
+    use crate::Request;
     use crate::session::middleware::SESSION_CONTEXT;
     use crate::session::store::SessionData;
-    use crate::Request;
     use http_body_util::{BodyExt, Empty, Full};
     use hyper::body::Bytes;
     use hyper::server::conn::http1;
@@ -262,55 +265,50 @@ mod tests {
             let io = TokioIo::new(stream);
             let server_captured = server_captured.clone();
             let expected_token = expected_token.clone();
-            let service = service_fn(
-                move |hyper_req: hyper::Request<hyper::body::Incoming>| {
-                    let server_captured = server_captured.clone();
-                    let expected_token = expected_token.clone();
-                    async move {
-                        // Install a session with the expected CSRF token.
-                        let mut session = SessionData::default();
-                        session.csrf_token = expected_token;
-                        let slot = Arc::new(Mutex::new(Some(session)));
+            let service = service_fn(move |hyper_req: hyper::Request<hyper::body::Incoming>| {
+                let server_captured = server_captured.clone();
+                let expected_token = expected_token.clone();
+                async move {
+                    // Install a session with the expected CSRF token.
+                    let mut session = SessionData::default();
+                    session.csrf_token = expected_token;
+                    let slot = Arc::new(Mutex::new(Some(session)));
 
-                        let response = SESSION_CONTEXT
-                            .scope(slot, async move {
-                                let req = Request::new(hyper_req);
-                                let mw = Arc::new(CsrfMiddleware::new());
-                                let next: Next = Arc::new(move |req| {
-                                    let server_captured = server_captured.clone();
-                                    Box::pin(async move {
-                                        // The handler reads the form body — this
-                                        // proves the CSRF middleware's body
-                                        // buffering keeps the body readable for
-                                        // downstream consumers.
-                                        let (_, bytes) = req.body_bytes().await?;
-                                        let mut map = server_captured.lock().unwrap();
-                                        for (k, v) in
-                                            url::form_urlencoded::parse(&bytes).into_owned()
-                                        {
-                                            map.insert(k, v);
-                                        }
-                                        Ok(HttpResponse::text("ok"))
-                                    })
-                                });
-                                mw.handle(req, next).await
-                            })
-                            .await;
+                    let response = SESSION_CONTEXT
+                        .scope(slot, async move {
+                            let req = Request::new(hyper_req);
+                            let mw = Arc::new(CsrfMiddleware::new());
+                            let next: Next = Arc::new(move |req| {
+                                let server_captured = server_captured.clone();
+                                Box::pin(async move {
+                                    // The handler reads the form body — this
+                                    // proves the CSRF middleware's body
+                                    // buffering keeps the body readable for
+                                    // downstream consumers.
+                                    let (_, bytes) = req.body_bytes().await?;
+                                    let mut map = server_captured.lock().unwrap();
+                                    for (k, v) in url::form_urlencoded::parse(&bytes).into_owned() {
+                                        map.insert(k, v);
+                                    }
+                                    Ok(HttpResponse::text("ok"))
+                                })
+                            });
+                            mw.handle(req, next).await
+                        })
+                        .await;
 
-                        let http = response.unwrap_or_else(|e| e);
-                        Ok::<_, Infallible>(http.into_hyper())
-                    }
-                },
-            );
+                    let http = response.unwrap_or_else(|e| e);
+                    Ok::<_, Infallible>(http.into_hyper())
+                }
+            });
             let _ = http1::Builder::new().serve_connection(io, service).await;
         });
 
         let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         let io = TokioIo::new(stream);
-        let (mut sender, conn) =
-            hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
-                .await
-                .unwrap();
+        let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
+            .await
+            .unwrap();
         tokio::spawn(async move {
             let _ = conn.await;
         });

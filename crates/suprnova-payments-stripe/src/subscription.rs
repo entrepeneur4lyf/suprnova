@@ -139,7 +139,10 @@ impl Subscription for StripeProvider {
         let items: Vec<ItemParam> = req
             .price_refs
             .iter()
-            .map(|p| ItemParam { price: p, quantity: 1 })
+            .map(|p| ItemParam {
+                price: p,
+                quantity: 1,
+            })
             .collect();
 
         let params = CreateSubscriptionParams {
@@ -216,9 +219,7 @@ impl Subscription for StripeProvider {
                 .customize::<StripeSubscription>()
                 .send(self.client())
                 .await
-                .map_err(|e| {
-                    PaymentError::Provider(format!("stripe subscriptions.cancel: {e}"))
-                })?;
+                .map_err(|e| PaymentError::Provider(format!("stripe subscriptions.cancel: {e}")))?;
             Ok(map_subscription(sub))
         }
     }

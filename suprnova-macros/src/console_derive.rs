@@ -36,7 +36,7 @@
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, DeriveInput, Expr, Lit};
+use syn::{DeriveInput, Expr, Lit, parse_macro_input};
 
 #[derive(Default)]
 struct ConsoleAttrs {

@@ -22,9 +22,9 @@
 
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, Ordering};
-use suprnova::eloquent::events::{listen_cancellable, CancellableListener, EventResult};
+use suprnova::eloquent::events::{CancellableListener, EventResult, listen_cancellable};
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, Model, DB};
+use suprnova::{DB, Model, attrs};
 
 #[suprnova::model(table = "t338_save_users")]
 pub struct T338SaveUser {
@@ -114,10 +114,8 @@ async fn save_with_tx_also_persists_listener_mutation() {
         RedactOnUpdating,
     ))
     .await;
-    listen_cancellable::<t338_save_user::events::Saving, _>(std::sync::Arc::new(
-        RecordSavingFired,
-    ))
-    .await;
+    listen_cancellable::<t338_save_user::events::Saving, _>(std::sync::Arc::new(RecordSavingFired))
+        .await;
     SAVE_LISTENER_FIRED.store(false, Ordering::SeqCst);
 
     // Bootstrap row outside the tx so we have a target.

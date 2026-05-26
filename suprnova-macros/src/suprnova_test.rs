@@ -5,7 +5,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, FnArg, ItemFn, Pat, Type};
+use syn::{FnArg, ItemFn, Pat, Type, parse_macro_input};
 
 /// Parse the macro attributes
 struct SuprnovaTestArgs {
@@ -48,9 +48,10 @@ impl syn::parse::Parse for SuprnovaTestArgs {
 /// Check if a type is `TestDatabase`
 fn is_test_database_type(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty
-        && let Some(segment) = type_path.path.segments.last() {
-            return segment.ident == "TestDatabase";
-        }
+        && let Some(segment) = type_path.path.segments.last()
+    {
+        return segment.ident == "TestDatabase";
+    }
     false
 }
 
@@ -59,9 +60,10 @@ fn find_db_param_name(func: &ItemFn) -> Option<syn::Ident> {
     for arg in &func.sig.inputs {
         if let FnArg::Typed(pat_type) = arg
             && is_test_database_type(&pat_type.ty)
-                && let Pat::Ident(pat_ident) = &*pat_type.pat {
-                    return Some(pat_ident.ident.clone());
-                }
+            && let Pat::Ident(pat_ident) = &*pat_type.pat
+        {
+            return Some(pat_ident.ident.clone());
+        }
     }
     None
 }

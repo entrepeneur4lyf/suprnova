@@ -27,7 +27,7 @@
 use crate::auth_flows::mail::EmailVerificationMail;
 use crate::error::FrameworkError;
 use crate::mail::Mail;
-use crate::torii_integration::{instance, User, UserId};
+use crate::torii_integration::{User, UserId, instance};
 use torii::SecureToken;
 
 /// Facade for email-verification token operations.
@@ -106,11 +106,9 @@ impl EmailVerification {
         // already committed; a downstream listener failure must not
         // surface as a verification failure to the caller. The
         // dispatcher itself logs listener errors via tracing.
-        let _ = crate::events::EventFacade::dispatch(
-            crate::auth_flows::events::EmailVerified {
-                user_id: user.id.to_string(),
-            },
-        )
+        let _ = crate::events::EventFacade::dispatch(crate::auth_flows::events::EmailVerified {
+            user_id: user.id.to_string(),
+        })
         .await;
 
         Ok(user)
@@ -138,11 +136,7 @@ impl EmailVerification {
                 )
             })?
             .to_string();
-        let url = format!(
-            "{}?token={}",
-            base_url.trim_end_matches('/'),
-            token_str
-        );
+        let url = format!("{}?token={}", base_url.trim_end_matches('/'), token_str);
 
         let to_address = user.email.clone();
         let mail = EmailVerificationMail {

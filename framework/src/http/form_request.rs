@@ -3,9 +3,9 @@
 //! Provides Laravel-like FormRequest pattern with automatic body parsing,
 //! validation, and authorization.
 
+use super::Request;
 use super::body::{parse_form, parse_json};
 use super::extract::FromRequest;
-use super::Request;
 use crate::error::{FrameworkError, ValidationErrors};
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;

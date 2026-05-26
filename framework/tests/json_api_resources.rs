@@ -4,8 +4,8 @@
 //! objects, compound document `included`, multi-level includes, unknown-
 //! include 400 rejection, collections, pagination, and error envelopes.
 
-use suprnova::{Data, Resource, Validate};
 use serde_json::Value;
+use suprnova::{Data, Resource, Validate};
 
 // ── Test resource types ───────────────────────────────────────────────────
 
@@ -58,8 +58,14 @@ fn make_post_with_author_and_tags() -> PostResource {
             posts: vec![],
         }),
         tags: vec![
-            TagResource { id: 100, name: "rust".into() },
-            TagResource { id: 101, name: "web".into() },
+            TagResource {
+                id: 100,
+                name: "rust".into(),
+            },
+            TagResource {
+                id: 101,
+                name: "web".into(),
+            },
         ],
     }
 }
@@ -111,7 +117,10 @@ async fn sparse_fieldsets_filter_attributes_per_type() {
     .await;
 
     assert!(
-        envelope["data"]["attributes"].as_object().unwrap().is_empty(),
+        envelope["data"]["attributes"]
+            .as_object()
+            .unwrap()
+            .is_empty(),
         "fields[users]=id produces empty attributes (id lives at data.id)"
     );
 }
@@ -214,7 +223,10 @@ async fn relationship_emitted_with_resource_identifier() {
     let resp = Resource::single(post).render().await.unwrap();
     let body: Value = serde_json::from_slice(resp.body()).unwrap();
 
-    assert_eq!(body["data"]["relationships"]["author"]["data"]["type"], "authors");
+    assert_eq!(
+        body["data"]["relationships"]["author"]["data"]["type"],
+        "authors"
+    );
     assert_eq!(body["data"]["relationships"]["author"]["data"]["id"], "7");
     let tags_arr = body["data"]["relationships"]["tags"]["data"]
         .as_array()
@@ -298,10 +310,12 @@ async fn unknown_include_returns_400_errors_envelope() {
 
     let errors = body["errors"].as_array().unwrap();
     assert_eq!(errors[0]["status"], "400");
-    assert!(errors[0]["detail"]
-        .as_str()
-        .unwrap()
-        .contains("forbidden_field"));
+    assert!(
+        errors[0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("forbidden_field")
+    );
 }
 
 #[tokio::test]
@@ -320,8 +334,16 @@ async fn included_omitted_when_no_request_include() {
 #[tokio::test]
 async fn collection_envelope() {
     let users = vec![
-        UserResource { id: 1, email: "a@e.com".into(), password: "x".into() },
-        UserResource { id: 2, email: "b@e.com".into(), password: "y".into() },
+        UserResource {
+            id: 1,
+            email: "a@e.com".into(),
+            password: "x".into(),
+        },
+        UserResource {
+            id: 2,
+            email: "b@e.com".into(),
+            password: "y".into(),
+        },
     ];
     let resp = Resource::collection(users).render().await.unwrap();
     let body: Value = serde_json::from_slice(resp.body()).unwrap();
@@ -336,11 +358,18 @@ async fn paginated_collection_emits_links_and_meta() {
     use suprnova::LengthAwarePaginator;
 
     let items = vec![
-        UserResource { id: 1, email: "a@e.com".into(), password: "x".into() },
-        UserResource { id: 2, email: "b@e.com".into(), password: "y".into() },
+        UserResource {
+            id: 1,
+            email: "a@e.com".into(),
+            password: "x".into(),
+        },
+        UserResource {
+            id: 2,
+            email: "b@e.com".into(),
+            password: "y".into(),
+        },
     ];
-    let paginator = LengthAwarePaginator::new(items, 47, 10, 2)
-        .with_base_url("/api/users");
+    let paginator = LengthAwarePaginator::new(items, 47, 10, 2).with_base_url("/api/users");
     let resp = Resource::paginated(paginator).render().await.unwrap();
     let body: Value = serde_json::from_slice(resp.body()).unwrap();
 
@@ -392,6 +421,8 @@ async fn bad_request_error_becomes_jsonapi_400_errors_envelope() {
     let body: Value = serde_json::from_slice(response.body()).unwrap();
     assert_eq!(body["errors"][0]["status"], "400");
     assert_eq!(body["errors"][0]["title"], "Bad request");
-    assert!(body["errors"][0].get("source").is_none(),
-        "non-validation errors have no source pointer");
+    assert!(
+        body["errors"][0].get("source").is_none(),
+        "non-validation errors have no source pointer"
+    );
 }

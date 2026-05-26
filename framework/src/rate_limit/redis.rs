@@ -4,8 +4,8 @@
 use crate::error::FrameworkError;
 use crate::rate_limit::{RateLimiter, SlidingWindowConfig};
 use async_trait::async_trait;
-use redis::aio::ConnectionManager;
 use redis::Script;
+use redis::aio::ConnectionManager;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -104,10 +104,7 @@ impl RateLimiter for RedisRateLimiter {
             .query_async(&mut conn)
             .await
             .map_err(|e| FrameworkError::internal(format!("rl range: {e}")))?;
-        let oldest_score = oldest
-            .first()
-            .map(|(_, s)| *s as i64)
-            .unwrap_or(now_ms);
+        let oldest_score = oldest.first().map(|(_, s)| *s as i64).unwrap_or(now_ms);
         let elapsed_ms = (now_ms - oldest_score).max(0);
         let remaining_ms = (window_ms - elapsed_ms).max(0) as u64;
         Ok(Some(Duration::from_millis(remaining_ms)))

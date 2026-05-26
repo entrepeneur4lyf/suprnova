@@ -21,7 +21,7 @@
 
 use chrono::{DateTime, Utc};
 use suprnova::testing::TestDatabase;
-use suprnova::{model, AsBool, Factory, Persistable};
+use suprnova::{AsBool, Factory, Persistable, model};
 
 // Eloquent-facing model with a runtime-shape `bool` field (cast to
 // storage as INTEGER via `AsBool`) and runtime-shape `DateTime<Utc>`

@@ -2,10 +2,10 @@
 //! invocation on upgrade, short-circuit on non-2xx response.
 
 use async_trait::async_trait;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use suprnova::http::{Request, Response};
-use suprnova::middleware::{into_boxed, Middleware, Next};
+use suprnova::middleware::{Middleware, Next, into_boxed};
 use suprnova::routing::Router;
 use suprnova::ws::{WebSocketHandler, WsSocket};
 use suprnova::{FrameworkError, HttpResponse};
@@ -67,11 +67,17 @@ fn ws_route_def_chained_middleware_surfaces_in_match() {
     let counter = Arc::new(AtomicUsize::new(0));
     // WsRouteDef::new is used directly (same shape as __ws_impl + ws! macro)
     let route_def = WsRouteDef::new("/ws/macro-protected", NoopHandler)
-        .middleware(CountingMiddleware { counter: counter.clone() })
+        .middleware(CountingMiddleware {
+            counter: counter.clone(),
+        })
         .middleware(Rejector);
     let router = route_def.register(Router::new());
     let m = router.match_ws("/ws/macro-protected").expect("matches");
-    assert_eq!(m.middleware().len(), 2, "two middleware attached via WsRouteDef chaining");
+    assert_eq!(
+        m.middleware().len(),
+        2,
+        "two middleware attached via WsRouteDef chaining"
+    );
 }
 
 #[test]

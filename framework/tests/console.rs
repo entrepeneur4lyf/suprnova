@@ -14,8 +14,8 @@
 //! avoid collisions with other tests in the binary.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use suprnova::console::{self, raw_clap_builder, collect_trailing_args, CommandEntry};
 use suprnova::FrameworkError;
+use suprnova::console::{self, CommandEntry, collect_trailing_args, raw_clap_builder};
 
 static GREET_INVOCATIONS: AtomicUsize = AtomicUsize::new(0);
 static LAST_GREET_ARG_LEN: AtomicUsize = AtomicUsize::new(0);
@@ -100,10 +100,7 @@ async fn dispatch_propagates_handler_errors() {
 
 #[tokio::test]
 async fn dispatch_returns_err_for_unknown_command() {
-    let argv = vec![
-        "console".to_string(),
-        "test:does-not-exist".to_string(),
-    ];
+    let argv = vec!["console".to_string(), "test:does-not-exist".to_string()];
 
     let err = console::dispatch_argv(argv).await.unwrap_err();
 

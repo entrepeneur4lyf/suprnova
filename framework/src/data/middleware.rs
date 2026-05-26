@@ -7,11 +7,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::Request;
 use crate::http::Response;
 use crate::middleware::{Middleware, Next};
-use crate::Request;
 
-use super::include_set::{RequestIncludeSet, REQUEST_INCLUDE_SET};
+use super::include_set::{REQUEST_INCLUDE_SET, RequestIncludeSet};
 
 /// Per-request middleware that parses `?include=`/`?exclude=`/`?only=`/
 /// `?except=` from the request URI and binds the resulting

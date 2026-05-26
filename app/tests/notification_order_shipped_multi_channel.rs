@@ -19,8 +19,8 @@
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use serial_test::serial;
 use std::sync::Arc;
-use suprnova::mail::memory::InMemoryMailTransport;
 use suprnova::mail::Mail;
+use suprnova::mail::memory::InMemoryMailTransport;
 use suprnova::notifications::{Notifiable, NotificationDispatcher, Notify};
 use suprnova::{DatabaseChannel, MailChannel};
 

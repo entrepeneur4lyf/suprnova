@@ -29,10 +29,7 @@ struct EnvGuard {
 
 impl EnvGuard {
     fn capture(keys: &[&'static str]) -> Self {
-        let saved = keys
-            .iter()
-            .map(|k| (*k, std::env::var(k).ok()))
-            .collect();
+        let saved = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
         Self { saved }
     }
 }
@@ -73,7 +70,10 @@ fn local_env_without_app_key_boots_and_installs_transient_key() {
     // transient dev key generated in this test, or with a key already
     // installed by an earlier test in the binary. Either way, the
     // encrypt path must work end-to-end.
-    assert!(Crypt::is_initialized(), "Crypt must be installed after boot");
+    assert!(
+        Crypt::is_initialized(),
+        "Crypt must be installed after boot"
+    );
     let wire = Crypt::encrypt_string("local-dev-payload").expect("encrypt works");
     let plain = Crypt::decrypt_string(&wire).expect("decrypt works");
     assert_eq!(plain, "local-dev-payload");

@@ -26,9 +26,9 @@
 //! error surface stays narrow, and "policy refused this operation"
 //! maps cleanly to HTTP 400 already.
 
+use crate::FrameworkError;
 use crate::eloquent::attrs::Attrs;
 use crate::events::{Event, EventFacade};
-use crate::FrameworkError;
 use async_trait::async_trait;
 use std::sync::Arc;
 

@@ -1,8 +1,8 @@
 //! Authentication middleware
 
+use crate::Request;
 use crate::http::{HttpResponse, Response};
 use crate::middleware::{Middleware, Next};
-use crate::Request;
 use async_trait::async_trait;
 
 use super::guard::Auth;

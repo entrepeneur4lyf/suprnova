@@ -22,7 +22,7 @@
 
 use serde::Deserialize;
 use suprnova::auth_flows::{TwoFactor, TwoFactorUser};
-use suprnova::torii_integration::{find_user_by_id, User as ToriiUser};
+use suprnova::torii_integration::{User as ToriiUser, find_user_by_id};
 use suprnova::{Auth, FrameworkError, HttpResponse, Request, Response};
 
 /// Body for `POST /auth/2fa/confirm` — form-urlencoded `code=...`.

@@ -16,10 +16,16 @@ fn address_from_tuple_carries_name() {
 
 #[test]
 fn address_display_renders_rfc5322_when_name_present() {
-    let a = Address { email: "a@b.c".into(), name: Some("Alice".into()) };
+    let a = Address {
+        email: "a@b.c".into(),
+        name: Some("Alice".into()),
+    };
     assert_eq!(a.to_string(), "Alice <a@b.c>");
 
-    let bare = Address { email: "a@b.c".into(), name: None };
+    let bare = Address {
+        email: "a@b.c".into(),
+        name: None,
+    };
     assert_eq!(bare.to_string(), "a@b.c");
 }
 

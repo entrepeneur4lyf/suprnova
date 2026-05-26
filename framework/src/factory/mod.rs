@@ -39,7 +39,7 @@
 mod persist;
 mod sequence;
 
-pub use persist::{persist_via_seaorm, Persistable};
+pub use persist::{Persistable, persist_via_seaorm};
 pub use sequence::Sequence;
 
 /// A factory produces randomized instances of `Model`. Each call to
@@ -129,7 +129,11 @@ impl<M> FactoryBuilder<M> {
     /// Each instance is independently randomized via a fresh call to
     /// `definition()`.
     pub fn make_many(self) -> Vec<M> {
-        let FactoryBuilder { count, overrides, factory_fn } = self;
+        let FactoryBuilder {
+            count,
+            overrides,
+            factory_fn,
+        } = self;
         (0..count)
             .map(|_| {
                 let mut model = factory_fn();

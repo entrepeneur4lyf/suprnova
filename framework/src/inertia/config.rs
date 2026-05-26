@@ -261,9 +261,7 @@ impl Default for SsrConfig {
 impl SsrConfig {
     /// Check whether the given request path is excluded from SSR.
     pub fn is_path_excluded(&self, path: &str) -> bool {
-        self.excluded_paths
-            .iter()
-            .any(|pat| glob_match(pat, path))
+        self.excluded_paths.iter().any(|pat| glob_match(pat, path))
     }
 }
 

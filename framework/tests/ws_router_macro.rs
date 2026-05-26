@@ -5,20 +5,16 @@
 //! calls `register()` to materialize the router.
 
 use async_trait::async_trait;
+use suprnova::FrameworkError;
 use suprnova::http::Request;
 use suprnova::ws::{WebSocketHandler, WsSocket};
-use suprnova::FrameworkError;
 
 #[derive(Clone)]
 pub struct NoopHandler;
 
 #[async_trait]
 impl WebSocketHandler for NoopHandler {
-    async fn handle(
-        &self,
-        _socket: WsSocket,
-        _request: Request,
-    ) -> Result<(), FrameworkError> {
+    async fn handle(&self, _socket: WsSocket, _request: Request) -> Result<(), FrameworkError> {
         Ok(())
     }
 }

@@ -1,8 +1,8 @@
 mod config;
 mod conversion_middleware;
 mod encrypt_middleware;
-pub(crate) mod flash;
 mod facade;
+pub(crate) mod flash;
 mod manifest;
 mod prop;
 mod response;
@@ -11,17 +11,17 @@ pub(crate) mod ssr;
 mod version_middleware;
 
 pub use config::{Frontend, InertiaConfig, SsrConfig, VersionResolver};
-pub use manifest::{ManifestEntry, ResolvedAssets, ViteManifest};
-pub use facade::Inertia;
-pub use ssr::SsrResponse;
 pub use conversion_middleware::Inertia303Middleware;
 pub use encrypt_middleware::EncryptHistoryMiddleware;
+pub use facade::Inertia;
+pub use manifest::{ManifestEntry, ResolvedAssets, ViteManifest};
 pub use prop::{
     DeferConfig, DeferOptions, InertiaRequestExt, MergeConfig, MergeStrategy, OnceConfig,
     OnceOptions, PartialFilter, Prop, PropFuture, PropResolver, ScrollConfig, ScrollMetadata,
 };
 pub use response::{InertiaResponse, IntoInertiaData, PropEntry};
 pub use shared::{InertiaRegistry, InertiaSharedData};
+pub use ssr::SsrResponse;
 pub use version_middleware::InertiaVersionMiddleware;
 
 // Test helpers for setting up a flash scope outside of a real server.

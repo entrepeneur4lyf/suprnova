@@ -3,11 +3,11 @@
 //!
 //! Run with `cargo test -p suprnova --test queue_redis -- --ignored`.
 
+use chrono::Utc;
 use std::time::Duration;
 use suprnova::queue::driver::QueueDriver;
 use suprnova::queue::redis::RedisQueueDriver;
-use suprnova::queue::{BackoffSchedule, Envelope, CURRENT_SCHEMA_VERSION};
-use chrono::Utc;
+use suprnova::queue::{BackoffSchedule, CURRENT_SCHEMA_VERSION, Envelope};
 use uuid::Uuid;
 
 fn env(name: &str) -> Envelope {

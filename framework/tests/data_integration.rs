@@ -46,8 +46,7 @@ pub struct TestArticleDtoT12 {
 // TCP-listener helpers (pattern from data_form_request.rs)
 // ---------------------------------------------------------------------------
 
-async fn spawn_and_capture()
--> (
+async fn spawn_and_capture() -> (
     SocketAddr,
     Arc<Mutex<Option<Result<TestArticleDtoT12, FrameworkError>>>>,
 ) {
@@ -61,17 +60,15 @@ async fn spawn_and_capture()
         if let Ok((stream, _)) = listener.accept().await {
             let io = TokioIo::new(stream);
             let captured_svc = captured_server.clone();
-            let svc = service_fn(
-                move |hyper_req: hyper::Request<hyper::body::Incoming>| {
-                    let captured_inner = captured_svc.clone();
-                    async move {
-                        let req = Request::new(hyper_req);
-                        let result = TestArticleDtoT12::extract(req).await;
-                        *captured_inner.lock().unwrap() = Some(result);
-                        Ok::<_, Infallible>(HttpResponse::text("ok").into_hyper())
-                    }
-                },
-            );
+            let svc = service_fn(move |hyper_req: hyper::Request<hyper::body::Incoming>| {
+                let captured_inner = captured_svc.clone();
+                async move {
+                    let req = Request::new(hyper_req);
+                    let result = TestArticleDtoT12::extract(req).await;
+                    *captured_inner.lock().unwrap() = Some(result);
+                    Ok::<_, Infallible>(HttpResponse::text("ok").into_hyper())
+                }
+            });
             let _ = http1::Builder::new().serve_connection(io, svc).await;
         }
     });
@@ -139,9 +136,7 @@ impl InertiaRequestExt for MockReq {
 }
 
 // Body reader helper
-async fn body_to_string(
-    body: http_body_util::combinators::BoxBody<Bytes, Infallible>,
-) -> String {
+async fn body_to_string(body: http_body_util::combinators::BoxBody<Bytes, Infallible>) -> String {
     use http_body_util::BodyExt;
     let bytes = body.collect().await.unwrap().to_bytes();
     String::from_utf8(bytes.to_vec()).unwrap()
@@ -334,10 +329,7 @@ pub struct PermissiveDtoT10 {
 
 /// Same spawn-and-capture pattern as `spawn_and_capture` but generic over
 /// the DTO so both the strict and permissive cases share one server harness.
-async fn spawn_and_capture_for<T>() -> (
-    SocketAddr,
-    Arc<Mutex<Option<Result<T, FrameworkError>>>>,
-)
+async fn spawn_and_capture_for<T>() -> (SocketAddr, Arc<Mutex<Option<Result<T, FrameworkError>>>>)
 where
     T: suprnova::FormRequest + Send + 'static,
 {
@@ -349,17 +341,15 @@ where
         if let Ok((stream, _)) = listener.accept().await {
             let io = TokioIo::new(stream);
             let captured_svc = captured_server.clone();
-            let svc = service_fn(
-                move |hyper_req: hyper::Request<hyper::body::Incoming>| {
-                    let captured_inner = captured_svc.clone();
-                    async move {
-                        let req = Request::new(hyper_req);
-                        let result = T::extract(req).await;
-                        *captured_inner.lock().unwrap() = Some(result);
-                        Ok::<_, Infallible>(HttpResponse::text("ok").into_hyper())
-                    }
-                },
-            );
+            let svc = service_fn(move |hyper_req: hyper::Request<hyper::body::Incoming>| {
+                let captured_inner = captured_svc.clone();
+                async move {
+                    let req = Request::new(hyper_req);
+                    let result = T::extract(req).await;
+                    *captured_inner.lock().unwrap() = Some(result);
+                    Ok::<_, Infallible>(HttpResponse::text("ok").into_hyper())
+                }
+            });
             let _ = http1::Builder::new().serve_connection(io, svc).await;
         }
     });
@@ -369,11 +359,7 @@ where
 #[tokio::test]
 async fn default_mode_rejects_unknown_key_with_422() {
     let (addr, captured) = spawn_and_capture_for::<StrictDtoT10>().await;
-    post_json(
-        addr,
-        serde_json::json!({ "name": "shawn", "typo": "oops" }),
-    )
-    .await;
+    post_json(addr, serde_json::json!({ "name": "shawn", "typo": "oops" })).await;
     tokio::task::yield_now().await;
 
     let result = captured

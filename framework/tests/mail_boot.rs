@@ -26,10 +26,18 @@ struct Ping {
 
 #[async_trait]
 impl Mailable for Ping {
-    fn mailable_name() -> &'static str { "Ping" }
-    fn subject(&self) -> String { "p".into() }
-    fn text_template_source(&self) -> Option<String> { Some("pong".into()) }
-    fn from(&self) -> Option<Address> { Some("noreply@suprnova.dev".into()) }
+    fn mailable_name() -> &'static str {
+        "Ping"
+    }
+    fn subject(&self) -> String {
+        "p".into()
+    }
+    fn text_template_source(&self) -> Option<String> {
+        Some("pong".into())
+    }
+    fn from(&self) -> Option<Address> {
+        Some("noreply@suprnova.dev".into())
+    }
 }
 
 /// Clear every env var this test file touches. Called at the start of each
@@ -70,7 +78,10 @@ async fn boot_default_binds_log_transport() {
     // The log transport is the documented default for "no MAIL_DRIVER set".
     // We assert behavior indirectly: a send must succeed (log transport
     // swallows it).
-    Mail::to("alice@example.org").send(Ping::default()).await.unwrap();
+    Mail::to("alice@example.org")
+        .send(Ping::default())
+        .await
+        .unwrap();
 
     Mail::clear_transport();
     clear_mail_env();
@@ -82,7 +93,9 @@ async fn boot_memory_driver_binds_in_memory_transport() {
     clear_mail_env();
     Mail::clear_transport();
     // SAFETY: serial test.
-    unsafe { std::env::set_var("MAIL_DRIVER", "memory"); }
+    unsafe {
+        std::env::set_var("MAIL_DRIVER", "memory");
+    }
 
     suprnova::mail::boot::bootstrap_from_env().unwrap();
 
@@ -94,7 +107,10 @@ async fn boot_memory_driver_binds_in_memory_transport() {
 
     // The capture handle must point at the same transport that's been bound
     // globally — verify by sending one message and reading it back.
-    Mail::to("alice@example.org").send(Ping::default()).await.unwrap();
+    Mail::to("alice@example.org")
+        .send(Ping::default())
+        .await
+        .unwrap();
     let messages = captured.unwrap().captured();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].subject, "p");
@@ -114,14 +130,21 @@ async fn boot_releases_memory_capture_when_switching_drivers() {
     Mail::clear_transport();
 
     // First memory bootstrap.
-    unsafe { std::env::set_var("MAIL_DRIVER", "memory"); }
+    unsafe {
+        std::env::set_var("MAIL_DRIVER", "memory");
+    }
     suprnova::mail::boot::bootstrap_from_env().unwrap();
     let first = suprnova::mail::boot::captured_in_memory().unwrap();
-    Mail::to("a@example.org").send(Ping::default()).await.unwrap();
+    Mail::to("a@example.org")
+        .send(Ping::default())
+        .await
+        .unwrap();
     assert_eq!(first.captured().len(), 1);
 
     // Switch to log — capture should clear.
-    unsafe { std::env::set_var("MAIL_DRIVER", "log"); }
+    unsafe {
+        std::env::set_var("MAIL_DRIVER", "log");
+    }
     suprnova::mail::boot::bootstrap_from_env().unwrap();
     assert!(
         suprnova::mail::boot::captured_in_memory().is_none(),
@@ -129,7 +152,9 @@ async fn boot_releases_memory_capture_when_switching_drivers() {
     );
 
     // Second memory bootstrap — a fresh handle (not the stale `first`).
-    unsafe { std::env::set_var("MAIL_DRIVER", "memory"); }
+    unsafe {
+        std::env::set_var("MAIL_DRIVER", "memory");
+    }
     suprnova::mail::boot::bootstrap_from_env().unwrap();
     let second = suprnova::mail::boot::captured_in_memory().unwrap();
     // The second handle has an empty buffer because it's a NEW transport.
@@ -203,7 +228,9 @@ async fn boot_postmark_driver_routes_via_endpoint_override() {
     Mail::clear_transport();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"MessageID":"x"})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"MessageID":"x"})),
+        )
         .mount(&server)
         .await;
 
@@ -214,9 +241,16 @@ async fn boot_postmark_driver_routes_via_endpoint_override() {
     }
     suprnova::mail::boot::bootstrap_from_env().unwrap();
 
-    Mail::to("alice@example.org").send(Ping::default()).await.unwrap();
+    Mail::to("alice@example.org")
+        .send(Ping::default())
+        .await
+        .unwrap();
     let reqs = server.received_requests().await.unwrap();
-    assert_eq!(reqs.len(), 1, "boot wired postmark to the override endpoint");
+    assert_eq!(
+        reqs.len(),
+        1,
+        "boot wired postmark to the override endpoint"
+    );
 
     Mail::clear_transport();
     clear_mail_env();
@@ -240,7 +274,10 @@ async fn boot_sendgrid_driver_routes_via_endpoint_override() {
     }
     suprnova::mail::boot::bootstrap_from_env().unwrap();
 
-    Mail::to("alice@example.org").send(Ping::default()).await.unwrap();
+    Mail::to("alice@example.org")
+        .send(Ping::default())
+        .await
+        .unwrap();
     let reqs = server.received_requests().await.unwrap();
     assert_eq!(reqs.len(), 1);
 
@@ -267,7 +304,10 @@ async fn boot_mailgun_driver_routes_via_endpoint_override() {
     }
     suprnova::mail::boot::bootstrap_from_env().unwrap();
 
-    Mail::to("alice@example.org").send(Ping::default()).await.unwrap();
+    Mail::to("alice@example.org")
+        .send(Ping::default())
+        .await
+        .unwrap();
     let reqs = server.received_requests().await.unwrap();
     assert_eq!(reqs.len(), 1);
 
@@ -293,7 +333,10 @@ async fn boot_resend_driver_routes_via_endpoint_override() {
     }
     suprnova::mail::boot::bootstrap_from_env().unwrap();
 
-    Mail::to("alice@example.org").send(Ping::default()).await.unwrap();
+    Mail::to("alice@example.org")
+        .send(Ping::default())
+        .await
+        .unwrap();
     let reqs = server.received_requests().await.unwrap();
     assert_eq!(reqs.len(), 1);
 
@@ -324,7 +367,10 @@ async fn boot_ses_driver_routes_via_endpoint_override() {
     }
     suprnova::mail::boot::bootstrap_from_env().unwrap();
 
-    Mail::to("alice@example.org").send(Ping::default()).await.unwrap();
+    Mail::to("alice@example.org")
+        .send(Ping::default())
+        .await
+        .unwrap();
     let reqs = server.received_requests().await.unwrap();
     assert_eq!(reqs.len(), 1);
 
@@ -337,11 +383,16 @@ async fn boot_ses_driver_routes_via_endpoint_override() {
 async fn boot_postmark_missing_token_returns_descriptive_error() {
     clear_mail_env();
     Mail::clear_transport();
-    unsafe { std::env::set_var("MAIL_DRIVER", "postmark"); }
+    unsafe {
+        std::env::set_var("MAIL_DRIVER", "postmark");
+    }
 
     let err = suprnova::mail::boot::bootstrap_from_env().unwrap_err();
     let s = format!("{err}");
-    assert!(s.contains("MAIL_POSTMARK_TOKEN"), "error names env var: {s}");
+    assert!(
+        s.contains("MAIL_POSTMARK_TOKEN"),
+        "error names env var: {s}"
+    );
     assert!(s.contains("postmark"), "error names driver: {s}");
 
     clear_mail_env();
@@ -360,7 +411,10 @@ async fn boot_ses_missing_secret_returns_descriptive_error() {
 
     let err = suprnova::mail::boot::bootstrap_from_env().unwrap_err();
     let s = format!("{err}");
-    assert!(s.contains("MAIL_SES_SECRET_KEY"), "error names env var: {s}");
+    assert!(
+        s.contains("MAIL_SES_SECRET_KEY"),
+        "error names env var: {s}"
+    );
     assert!(s.contains("ses"), "error names driver: {s}");
 
     clear_mail_env();
@@ -371,11 +425,16 @@ async fn boot_ses_missing_secret_returns_descriptive_error() {
 async fn boot_sendgrid_missing_key_returns_descriptive_error() {
     clear_mail_env();
     Mail::clear_transport();
-    unsafe { std::env::set_var("MAIL_DRIVER", "sendgrid"); }
+    unsafe {
+        std::env::set_var("MAIL_DRIVER", "sendgrid");
+    }
 
     let err = suprnova::mail::boot::bootstrap_from_env().unwrap_err();
     let s = format!("{err}");
-    assert!(s.contains("MAIL_SENDGRID_API_KEY"), "error names env var: {s}");
+    assert!(
+        s.contains("MAIL_SENDGRID_API_KEY"),
+        "error names env var: {s}"
+    );
     assert!(s.contains("sendgrid"), "error names driver: {s}");
 
     clear_mail_env();
@@ -394,7 +453,10 @@ async fn boot_mailgun_missing_domain_returns_descriptive_error() {
 
     let err = suprnova::mail::boot::bootstrap_from_env().unwrap_err();
     let s = format!("{err}");
-    assert!(s.contains("MAIL_MAILGUN_DOMAIN"), "error names env var: {s}");
+    assert!(
+        s.contains("MAIL_MAILGUN_DOMAIN"),
+        "error names env var: {s}"
+    );
     assert!(s.contains("mailgun"), "error names driver: {s}");
 
     clear_mail_env();
@@ -405,11 +467,16 @@ async fn boot_mailgun_missing_domain_returns_descriptive_error() {
 async fn boot_resend_missing_key_returns_descriptive_error() {
     clear_mail_env();
     Mail::clear_transport();
-    unsafe { std::env::set_var("MAIL_DRIVER", "resend"); }
+    unsafe {
+        std::env::set_var("MAIL_DRIVER", "resend");
+    }
 
     let err = suprnova::mail::boot::bootstrap_from_env().unwrap_err();
     let s = format!("{err}");
-    assert!(s.contains("MAIL_RESEND_API_KEY"), "error names env var: {s}");
+    assert!(
+        s.contains("MAIL_RESEND_API_KEY"),
+        "error names env var: {s}"
+    );
     assert!(s.contains("resend"), "error names driver: {s}");
 
     clear_mail_env();
@@ -421,7 +488,9 @@ async fn boot_resend_missing_key_returns_descriptive_error() {
 async fn boot_unknown_driver_falls_back_to_log_with_warning() {
     clear_mail_env();
     Mail::clear_transport();
-    unsafe { std::env::set_var("MAIL_DRIVER", "bogusdriver"); }
+    unsafe {
+        std::env::set_var("MAIL_DRIVER", "bogusdriver");
+    }
 
     suprnova::mail::boot::bootstrap_from_env().unwrap();
     assert!(
@@ -434,7 +503,10 @@ async fn boot_unknown_driver_falls_back_to_log_with_warning() {
     );
 
     // A subsequent send must succeed via the log fallback.
-    Mail::to("alice@example.org").send(Ping::default()).await.unwrap();
+    Mail::to("alice@example.org")
+        .send(Ping::default())
+        .await
+        .unwrap();
 
     Mail::clear_transport();
     clear_mail_env();

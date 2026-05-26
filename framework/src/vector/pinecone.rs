@@ -74,7 +74,7 @@ use async_trait::async_trait;
 use pinecone_sdk::models::{Namespace, Vector as PineconeVector};
 use pinecone_sdk::pinecone::data::Index;
 use pinecone_sdk::pinecone::{PineconeClient, PineconeClientConfig};
-use prost_types::{value::Kind, Struct as PbStruct, Value as PbValue};
+use prost_types::{Struct as PbStruct, Value as PbValue, value::Kind};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -121,9 +121,7 @@ impl PineconeVectorDriver {
 
     /// Bind this driver to a non-default namespace.
     pub fn with_namespace(mut self, name: impl Into<String>) -> Self {
-        self.namespace = Namespace {
-            name: name.into(),
-        };
+        self.namespace = Namespace { name: name.into() };
         self
     }
 
@@ -193,11 +191,7 @@ impl PineconeVectorDriver {
     /// `QueryResponse::matches` directly can still call this helper to
     /// keep id / score / metadata decoding consistent with the
     /// framework's contract.
-    pub fn decode_match_fields(
-        id: String,
-        score: f32,
-        metadata: Option<PbStruct>,
-    ) -> VectorMatch {
+    pub fn decode_match_fields(id: String, score: f32, metadata: Option<PbStruct>) -> VectorMatch {
         VectorMatch {
             id,
             score,
@@ -216,16 +210,15 @@ impl PineconeVectorDriver {
         if let Some(idx) = write.get(name) {
             return Ok(idx.clone());
         }
-        let description = self
-            .client
-            .describe_index(name)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("pinecone describe_index '{name}': {e}")))?;
-        let index = self
-            .client
-            .index(&description.host)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("pinecone open index '{name}' at host '{}': {e}", description.host)))?;
+        let description = self.client.describe_index(name).await.map_err(|e| {
+            FrameworkError::internal(format!("pinecone describe_index '{name}': {e}"))
+        })?;
+        let index = self.client.index(&description.host).await.map_err(|e| {
+            FrameworkError::internal(format!(
+                "pinecone open index '{name}' at host '{}': {e}",
+                description.host
+            ))
+        })?;
         let handle = Arc::new(Mutex::new(index));
         write.insert(name.to_string(), handle.clone());
         Ok(handle)
@@ -250,10 +243,9 @@ impl VectorDriver for PineconeVectorDriver {
             .collect::<Result<_, _>>()?;
         let handle = self.acquire_index(store).await?;
         let mut index = handle.lock().await;
-        index
-            .upsert(&vectors, &self.namespace)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("pinecone upsert into '{store}': {e}")))?;
+        index.upsert(&vectors, &self.namespace).await.map_err(|e| {
+            FrameworkError::internal(format!("pinecone upsert into '{store}': {e}"))
+        })?;
         Ok(())
     }
 
@@ -271,10 +263,14 @@ impl VectorDriver for PineconeVectorDriver {
         }
         let q_norm: f32 = query.iter().map(|x| x * x).sum::<f32>().sqrt();
         if q_norm == 0.0 {
-            return Err(FrameworkError::param("vector::similar query is zero-vector"));
+            return Err(FrameworkError::param(
+                "vector::similar query is zero-vector",
+            ));
         }
         let top_k = u32::try_from(k).map_err(|_| {
-            FrameworkError::param(format!("vector::similar k={k} exceeds Pinecone's u32 limit"))
+            FrameworkError::param(format!(
+                "vector::similar k={k} exceeds Pinecone's u32 limit"
+            ))
         })?;
 
         let handle = self.acquire_index(store).await?;
@@ -300,21 +296,18 @@ impl VectorDriver for PineconeVectorDriver {
         index
             .delete_by_id(&id_refs, &self.namespace)
             .await
-            .map_err(|e| FrameworkError::internal(format!("pinecone delete from '{store}': {e}")))?;
+            .map_err(|e| {
+                FrameworkError::internal(format!("pinecone delete from '{store}': {e}"))
+            })?;
         Ok(())
     }
 
     async fn count(&self, store: &str) -> Result<usize, FrameworkError> {
         let handle = self.acquire_index(store).await?;
         let mut index = handle.lock().await;
-        let stats = index
-            .describe_index_stats(None)
-            .await
-            .map_err(|e| {
-                FrameworkError::internal(format!(
-                    "pinecone describe_index_stats on '{store}': {e}"
-                ))
-            })?;
+        let stats = index.describe_index_stats(None).await.map_err(|e| {
+            FrameworkError::internal(format!("pinecone describe_index_stats on '{store}': {e}"))
+        })?;
         // Count is per-namespace: Pinecone returns a NamespaceSummary
         // keyed by name; the unnamed default namespace lives under
         // an empty-string key. Missing key == 0 vectors.
@@ -379,4 +372,3 @@ fn pb_value_to_json(v: PbValue) -> serde_json::Value {
         ),
     }
 }
-

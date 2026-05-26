@@ -59,10 +59,10 @@ use sea_orm::{
 use serde_json::Value;
 
 use crate::database::DB;
+use crate::eloquent::EloquentModel;
 use crate::eloquent::attrs::Attrs;
 use crate::eloquent::collection::Collection;
-use crate::eloquent::model::{json_value_to_sea_value, Model};
-use crate::eloquent::EloquentModel;
+use crate::eloquent::model::{Model, json_value_to_sea_value};
 use crate::error::FrameworkError;
 
 // ---- IntoColumn / IntoVal ------------------------------------------------
@@ -471,11 +471,7 @@ impl<M> Builder<M> {
         for c in &self.group_by {
             validate_identifier(c)?;
         }
-        for term in self
-            .where_terms
-            .iter()
-            .chain(self.having_terms.iter())
-        {
+        for term in self.where_terms.iter().chain(self.having_terms.iter()) {
             validate_where_term(term)?;
         }
         for o in &self.orders {
@@ -779,8 +775,11 @@ impl<M> Builder<M> {
     /// `!=`, ...). No operator validation — pass-through to SQL.
     #[doc(alias = "db_where_op")]
     pub fn filter_op(mut self, col: impl IntoColumn, op: &str, val: impl IntoVal) -> Self {
-        self.where_terms
-            .push(WhereTerm::Op(col.col_name(), op.to_string(), val.into_val()));
+        self.where_terms.push(WhereTerm::Op(
+            col.col_name(),
+            op.to_string(),
+            val.into_val(),
+        ));
         self
     }
 
@@ -1216,8 +1215,11 @@ impl<M> Builder<M> {
     /// `HAVING col <op> val` — arbitrary-operator filter on a grouped
     /// result.
     pub fn having_op(mut self, col: impl IntoColumn, op: &str, val: impl IntoVal) -> Self {
-        self.having_terms
-            .push(WhereTerm::Op(col.col_name(), op.to_string(), val.into_val()));
+        self.having_terms.push(WhereTerm::Op(
+            col.col_name(),
+            op.to_string(),
+            val.into_val(),
+        ));
         self
     }
 
@@ -1263,7 +1265,9 @@ impl<M> Builder<M> {
     /// Append one column to the SELECT list. If no `select` has been
     /// called yet, this initialises the list with just `col`.
     pub fn add_select(mut self, col: impl Into<String>) -> Self {
-        self.select_cols.get_or_insert_with(Vec::new).push(col.into());
+        self.select_cols
+            .get_or_insert_with(Vec::new)
+            .push(col.into());
         self
     }
 
@@ -2159,16 +2163,18 @@ where
         // `DatabaseConnection`.
         let raw_rows = match &exec {
             crate::database::transaction::ExecutorChoice::Tx(t) => {
-                <<M as EloquentModel>::Entity as sea_orm::EntityTrait>::Model
-                    ::find_by_statement(stmt)
-                    .all(t.as_ref())
-                    .await
+                <<M as EloquentModel>::Entity as sea_orm::EntityTrait>::Model::find_by_statement(
+                    stmt,
+                )
+                .all(t.as_ref())
+                .await
             }
             crate::database::transaction::ExecutorChoice::Pool(c) => {
-                <<M as EloquentModel>::Entity as sea_orm::EntityTrait>::Model
-                    ::find_by_statement(stmt)
-                    .all(c.inner())
-                    .await
+                <<M as EloquentModel>::Entity as sea_orm::EntityTrait>::Model::find_by_statement(
+                    stmt,
+                )
+                .all(c.inner())
+                .await
             }
         }
         .map_err(|e| FrameworkError::database(e.to_string()))?;
@@ -2186,9 +2192,7 @@ where
             let mut buf = Vec::with_capacity(raw_rows.len());
             for row in raw_rows {
                 let mut as_json = serde_json::to_value(&row).map_err(|e| {
-                    FrameworkError::database(format!(
-                        "serialise inner Model for runtime cast: {e}"
-                    ))
+                    FrameworkError::database(format!("serialise inner Model for runtime cast: {e}"))
                 })?;
                 if let serde_json::Value::Object(ref mut map) = as_json {
                     for (col, cast) in &runtime_casts {
@@ -2368,19 +2372,21 @@ where
         // Page phase — consumes `self` for the actual fetch.
         let rows: Vec<M> = self.limit(per_page).offset(offset).get().await?.into_vec();
 
-        let from = if rows.is_empty() { None } else { Some(offset + 1) };
+        let from = if rows.is_empty() {
+            None
+        } else {
+            Some(offset + 1)
+        };
         let to = if rows.is_empty() {
             None
         } else {
             Some(offset + rows.len() as u64)
         };
 
-        Ok(
-            crate::pagination::LengthAwarePaginator::with_window(
-                rows, total, per_page, page, from, to,
-            )
-            .with_page_name(page_param),
+        Ok(crate::pagination::LengthAwarePaginator::with_window(
+            rows, total, per_page, page, from, to,
         )
+        .with_page_name(page_param))
     }
 
     /// Simple paginate — no COUNT query.
@@ -2457,16 +2463,14 @@ where
         let mut q = q.order_by_asc(pk);
 
         if let Some(c) = &cursor_wire {
-            let (boundary, _dir) =
-                crate::pagination::CursorPaginator::<M>::decode_value(c)?;
+            let (boundary, _dir) = crate::pagination::CursorPaginator::<M>::decode_value(c)?;
             // Filter `pk > boundary`. Convert the typed SeaORM Value
             // back to JSON via `sea_value_to_json_loose`; the builder's
             // own `filter_op` pipeline rebinds it via
             // `json_value_to_sea_value` in the renderer. The intermediate
             // JSON form is fine for cursor PKs — every variant we care
             // about (Int / BigInt / Uuid / String) round-trips losslessly.
-            let boundary_json =
-                crate::eloquent::model::sea_value_to_json_loose(&boundary);
+            let boundary_json = crate::eloquent::model::sea_value_to_json_loose(&boundary);
             q = q.filter_op(pk, ">", boundary_json);
         }
 

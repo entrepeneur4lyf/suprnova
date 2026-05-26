@@ -66,8 +66,7 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
         "redis" => {
             let url = std::env::var("RATE_LIMIT_REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
-            let prefix = std::env::var("RATE_LIMIT_PREFIX")
-                .unwrap_or_else(|_| "suprnova:".into());
+            let prefix = std::env::var("RATE_LIMIT_PREFIX").unwrap_or_else(|_| "suprnova:".into());
             let d = redis::RedisRateLimiter::connect(&url, &prefix).await?;
             App::bind::<dyn RateLimiter>(std::sync::Arc::new(d));
         }
@@ -79,8 +78,8 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
     Ok(())
 }
 
-use crate::http::{HttpResponse, Response};
 use crate::Request;
+use crate::http::{HttpResponse, Response};
 use std::sync::Arc;
 
 /// HTTP middleware that enforces a sliding-window rate limit.

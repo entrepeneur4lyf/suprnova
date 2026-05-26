@@ -28,7 +28,7 @@
 //! read using the same helper.
 
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, model, Builder, Collection, Model};
+use suprnova::{Builder, Collection, Model, attrs, model};
 
 #[model(table = "eg_users", relations = {
     posts: HasMany<EgPost>,
@@ -120,21 +120,15 @@ async fn fixture() -> TestDatabase {
     let _p3 = EgPost::create(attrs! { eg_user_id: u2.id, title: "p3", views: 20i64 })
         .await
         .unwrap();
-    let _ = EgComment::create(
-        attrs! { eg_post_id: p1.id, eg_user_id: u1.id, body: "c1-p1" },
-    )
-    .await
-    .unwrap();
-    let _ = EgComment::create(
-        attrs! { eg_post_id: p1.id, eg_user_id: u1.id, body: "c2-p1" },
-    )
-    .await
-    .unwrap();
-    let _ = EgComment::create(
-        attrs! { eg_post_id: p2.id, eg_user_id: u1.id, body: "c1-p2" },
-    )
-    .await
-    .unwrap();
+    let _ = EgComment::create(attrs! { eg_post_id: p1.id, eg_user_id: u1.id, body: "c1-p1" })
+        .await
+        .unwrap();
+    let _ = EgComment::create(attrs! { eg_post_id: p1.id, eg_user_id: u1.id, body: "c2-p1" })
+        .await
+        .unwrap();
+    let _ = EgComment::create(attrs! { eg_post_id: p2.id, eg_user_id: u1.id, body: "c1-p2" })
+        .await
+        .unwrap();
     db
 }
 
@@ -175,10 +169,7 @@ async fn nested_three_levels() {
     // users -> posts -> comments -> author. Validates the recursion
     // peels one segment per step.
     let _db = fixture().await;
-    let users = EgUser::with(["posts.comments.author"])
-        .get()
-        .await
-        .unwrap();
+    let users = EgUser::with(["posts.comments.author"]).get().await.unwrap();
     let u1 = users.iter().find(|u| u.name == "u1").unwrap();
     let total_comments: usize = u1
         .posts_loaded()
@@ -250,10 +241,7 @@ async fn with_min_max() {
         .expect("min cache populated");
     assert!((min_opt.unwrap() - 5.0).abs() < 0.001);
 
-    let users_max = EgUser::with_max(("posts", "views"))
-        .get()
-        .await
-        .unwrap();
+    let users_max = EgUser::with_max(("posts", "views")).get().await.unwrap();
     let u1_max = users_max.iter().find(|u| u.name == "u1").unwrap();
     let max_opt: Option<f64> = *u1_max
         .__eager
@@ -326,11 +314,7 @@ async fn load_missing_per_row_loads_only_uncached_rows() {
         .get()
         .await
         .unwrap();
-    let u2_plain = EgUser::query()
-        .filter("name", "u2")
-        .get()
-        .await
-        .unwrap();
+    let u2_plain = EgUser::query().filter("name", "u2").get().await.unwrap();
     let mut combined: Vec<EgUser> = u1_with.into_vec();
     combined.extend(u2_plain.into_vec());
     let mut users: Collection<EgUser> = Collection::from(combined);
@@ -384,11 +368,7 @@ async fn load_missing_nested_partitions_at_every_level() {
     // directly so p2's stays empty.
     let mut combined: Vec<EgUser> = u1_with_posts.into_vec();
     // u2 plain (no posts).
-    let u2_plain = EgUser::query()
-        .filter("name", "u2")
-        .get()
-        .await
-        .unwrap();
+    let u2_plain = EgUser::query().filter("name", "u2").get().await.unwrap();
     combined.extend(u2_plain);
 
     // Cache comments on u1's p1 specifically. Reach through the
@@ -403,10 +383,7 @@ async fn load_missing_nested_partitions_at_every_level() {
             .__eager
             .get_many_mut::<EgPost>("posts")
             .expect("posts cached on u1");
-        let p1_refs: Vec<&mut EgPost> = posts
-            .iter_mut()
-            .filter(|p| p.title == "p1")
-            .collect();
+        let p1_refs: Vec<&mut EgPost> = posts.iter_mut().filter(|p| p.title == "p1").collect();
         let mut p1_refs = p1_refs;
         EgPost::__eager_load("comments", p1_refs.as_mut_slice(), db.inner(), None)
             .await
@@ -420,8 +397,7 @@ async fn load_missing_nested_partitions_at_every_level() {
         let p1 = posts.iter().find(|p| p.title == "p1").unwrap();
         let p2 = posts.iter().find(|p| p.title == "p2").unwrap();
         assert_eq!(p1.comments_loaded().len(), 2);
-        let res =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p2.comments_loaded()));
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p2.comments_loaded()));
         assert!(res.is_err(), "p2 comments should not be cached yet");
     }
 
@@ -470,9 +446,7 @@ async fn load_missing_recurses_into_loaded_head_to_fill_tail() {
     {
         let u1 = users.iter().find(|u| u.name == "u1").unwrap();
         let p = u1.posts_loaded().first().expect("posts loaded");
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            p.comments_loaded()
-        }));
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.comments_loaded()));
         assert!(res.is_err(), "comments should not be loaded yet");
     }
 
@@ -571,11 +545,7 @@ async fn static_helpers_match_query_chain() {
     // helpers — they should be equivalent to `Self::query().with_count(...)`.
     let _db = fixture().await;
     let via_static = EgUser::with_count(["posts"]).get().await.unwrap();
-    let via_chain = EgUser::query()
-        .with_count(["posts"])
-        .get()
-        .await
-        .unwrap();
+    let via_chain = EgUser::query().with_count(["posts"]).get().await.unwrap();
     let s = via_static.iter().find(|u| u.name == "u1").unwrap();
     let c = via_chain.iter().find(|u| u.name == "u1").unwrap();
     assert_eq!(s.posts_count(), c.posts_count());

@@ -68,10 +68,7 @@ async fn discriminator_subscribe_webhook_mirror_read_cancel() {
     assert_eq!(event.provider, "mock");
 
     // 5. Domain code reads subscription state
-    let fetched = provider
-        .get(&sub.provider_subscription_id)
-        .await
-        .unwrap();
+    let fetched = provider.get(&sub.provider_subscription_id).await.unwrap();
     assert_eq!(
         fetched.provider_subscription_id,
         sub.provider_subscription_id

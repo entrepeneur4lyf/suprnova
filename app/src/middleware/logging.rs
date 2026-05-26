@@ -1,6 +1,6 @@
 //! Logging middleware - logs all requests via the framework's `tracing` integration.
 
-use suprnova::{async_trait, current_request_id, Middleware, Next, Request, Response};
+use suprnova::{Middleware, Next, Request, Response, async_trait, current_request_id};
 
 /// Middleware that logs all incoming requests.
 ///

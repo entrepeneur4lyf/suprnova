@@ -22,7 +22,10 @@ struct Item {
 #[test]
 fn generic_struct_serializes() {
     let p: Paginated<Item> = Paginated {
-        items: vec![Item { id: 1, label: "x".into() }],
+        items: vec![Item {
+            id: 1,
+            label: "x".into(),
+        }],
         total: 1,
         meta: None,
     };
@@ -73,7 +76,10 @@ fn generic_with_lifetime_param_compiles() {
         pub inner: &'a T,
     }
 
-    let s = Item { id: 7, label: "k".into() };
+    let s = Item {
+        id: 7,
+        label: "k".into(),
+    };
     let b = Borrowed { inner: &s };
     let j = serde_json::to_value(&b).unwrap();
     assert_eq!(j["inner"]["id"], 7);
@@ -82,7 +88,10 @@ fn generic_with_lifetime_param_compiles() {
 #[test]
 fn two_distinct_instantiations_in_same_file_compile() {
     let with_item: Paginated<Item> = Paginated {
-        items: vec![Item { id: 1, label: "x".into() }],
+        items: vec![Item {
+            id: 1,
+            label: "x".into(),
+        }],
         total: 1,
         meta: None,
     };

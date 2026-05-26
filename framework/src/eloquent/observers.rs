@@ -48,10 +48,10 @@
 //! `#[model(observers = [...])]` validation pass + the multi-observer
 //! and cancel-from-observer tests.
 
+use crate::FrameworkError;
 use crate::eloquent::attrs::Attrs;
 use crate::eloquent::events::EventResult;
 use crate::eloquent::model::Model;
-use crate::FrameworkError;
 use async_trait::async_trait;
 
 /// Lifecycle observer for model `M`.
@@ -230,11 +230,7 @@ where
     /// BEFORE the replica is returned. `source` is the original;
     /// `replica` is the freshly built clone — listeners can mutate it
     /// in place (clear timestamps, reset flags, regenerate UUIDs, ...).
-    async fn replicating(
-        &self,
-        _source: &M,
-        _replica: &mut M,
-    ) -> Result<(), FrameworkError> {
+    async fn replicating(&self, _source: &M, _replica: &mut M) -> Result<(), FrameworkError> {
         Ok(())
     }
 

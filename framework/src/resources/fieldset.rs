@@ -23,9 +23,15 @@ impl RequestFieldsetSet {
         for (key_cow, val_cow) in url::form_urlencoded::parse(query.as_bytes()) {
             let key = key_cow.trim();
             // key must look like `fields[some_type]` after decoding.
-            let Some(rest) = key.strip_prefix("fields[") else { continue };
-            let Some(rtype) = rest.strip_suffix(']') else { continue };
-            if rtype.is_empty() { continue; }
+            let Some(rest) = key.strip_prefix("fields[") else {
+                continue;
+            };
+            let Some(rtype) = rest.strip_suffix(']') else {
+                continue;
+            };
+            if rtype.is_empty() {
+                continue;
+            }
             let fields: Vec<String> = val_cow
                 .split(',')
                 .map(|s| s.trim().to_string())
@@ -56,9 +62,7 @@ tokio::task_local! {
 /// Access the current request's `RequestFieldsetSet`. Returns an
 /// empty set when called outside an HTTP request scope.
 pub fn current_fieldset() -> RequestFieldsetSet {
-    REQUEST_FIELDSET
-        .try_with(|s| s.clone())
-        .unwrap_or_default()
+    REQUEST_FIELDSET.try_with(|s| s.clone()).unwrap_or_default()
 }
 
 /// Scope a `RequestFieldsetSet` around a future. Used in tests to

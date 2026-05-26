@@ -1,4 +1,4 @@
-use crate::config::env::{env, Environment};
+use crate::config::env::{Environment, env};
 
 /// Application configuration
 #[derive(Debug, Clone)]
@@ -137,6 +137,8 @@ mod tests {
     fn default_debug_is_false_in_production_staging_custom() {
         assert!(!default_debug_for_env(&Environment::Production));
         assert!(!default_debug_for_env(&Environment::Staging));
-        assert!(!default_debug_for_env(&Environment::Custom("k8s-prod".into())));
+        assert!(!default_debug_for_env(&Environment::Custom(
+            "k8s-prod".into()
+        )));
     }
 }

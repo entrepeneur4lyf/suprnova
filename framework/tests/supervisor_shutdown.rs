@@ -18,10 +18,10 @@
 //! The token-already-cancelled and empty-JoinSet paths are both covered within
 //! the single test by running `shutdown` twice.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use suprnova::supervisor::{supervisor_cancel_token, supervisor_tasks, SupervisorRegistry};
+use suprnova::supervisor::{SupervisorRegistry, supervisor_cancel_token, supervisor_tasks};
 
 /// Full shutdown lifecycle:
 ///
@@ -39,8 +39,8 @@ async fn shutdown_cancels_token_drains_tasks_and_is_idempotent() {
 
     // ── Phase 2: inject a sentinel cancel-aware task ─────────────────────────
     {
-        let sv_tasks = supervisor_tasks()
-            .expect("start_all must have initialised SUPERVISOR_TASKS");
+        let sv_tasks =
+            supervisor_tasks().expect("start_all must have initialised SUPERVISOR_TASKS");
         let cancel = supervisor_cancel_token()
             .expect("start_all must have initialised SUPERVISOR_CANCEL")
             .clone();
@@ -76,7 +76,10 @@ async fn shutdown_cancels_token_drains_tasks_and_is_idempotent() {
 
     // Token must be fired.
     let token = supervisor_cancel_token().expect("token must still exist");
-    assert!(token.is_cancelled(), "cancel token should be fired after shutdown");
+    assert!(
+        token.is_cancelled(),
+        "cancel token should be fired after shutdown"
+    );
 
     // Sentinel task must have observed the cancellation.
     assert!(
@@ -88,7 +91,10 @@ async fn shutdown_cancels_token_drains_tasks_and_is_idempotent() {
     {
         let sv_tasks = supervisor_tasks().unwrap();
         let guard = sv_tasks.lock().await;
-        assert!(guard.is_empty(), "JoinSet should be empty after shutdown drained all tasks");
+        assert!(
+            guard.is_empty(),
+            "JoinSet should be empty after shutdown drained all tasks"
+        );
     }
 
     // ── Phase 4: second shutdown — idempotent, no hang ───────────────────────

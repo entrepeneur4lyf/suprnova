@@ -10,7 +10,7 @@
 //! emit a relation method yet — only the accessors that read from
 //! `__eager` plus the inventory submission.
 
-use suprnova::{find_relation, model, relations, relations_of, RelationKind};
+use suprnova::{RelationKind, find_relation, model, relations, relations_of};
 
 #[model(table = "reg_users", relations = {
     profile: HasOne<RegProfile>,
@@ -81,8 +81,7 @@ fn relations_of_filters_by_parent_type() {
 
 #[test]
 fn find_relation_resolves_by_name() {
-    let entry =
-        find_relation::<RegUser>("posts").expect("RegUser::posts must be findable by name");
+    let entry = find_relation::<RegUser>("posts").expect("RegUser::posts must be findable by name");
     assert_eq!(entry.name, "posts");
     assert_eq!(entry.kind, RelationKind::HasMany);
     assert_eq!(entry.target_type_name, "RegPost");
@@ -91,7 +90,10 @@ fn find_relation_resolves_by_name() {
 #[test]
 fn find_relation_returns_none_for_unknown_name() {
     let entry = find_relation::<RegUser>("nope");
-    assert!(entry.is_none(), "unknown relation name must resolve to None");
+    assert!(
+        entry.is_none(),
+        "unknown relation name must resolve to None"
+    );
 }
 
 #[test]
@@ -99,10 +101,11 @@ fn relations_iter_includes_every_declaration() {
     // The global iterator must include both entries declared above
     // (alongside any other relations declared elsewhere in the test
     // binary — order is link-time-arbitrary).
-    let any_profile = relations()
-        .any(|r| r.parent_type_name == "RegUser" && r.name == "profile");
-    let any_posts = relations()
-        .any(|r| r.parent_type_name == "RegUser" && r.name == "posts");
-    assert!(any_profile, "global relations() must surface RegUser::profile");
+    let any_profile = relations().any(|r| r.parent_type_name == "RegUser" && r.name == "profile");
+    let any_posts = relations().any(|r| r.parent_type_name == "RegUser" && r.name == "posts");
+    assert!(
+        any_profile,
+        "global relations() must surface RegUser::profile"
+    );
     assert!(any_posts, "global relations() must surface RegUser::posts");
 }

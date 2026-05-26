@@ -76,12 +76,12 @@
 //! within the grace window. Supervisors that ignore the token get aborted
 //! after the deadline.
 
-use std::sync::{Arc, OnceLock};
+use crate::error::FrameworkError;
 use async_trait::async_trait;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use crate::error::FrameworkError;
 
 pub mod registry;
 pub use registry::SupervisorEntry;
@@ -198,7 +198,9 @@ impl SupervisorRegistry {
     pub async fn start_all() {
         // OnceLock::set silently fails if already initialized — idempotent.
         let _ = SUPERVISOR_TASKS.set(TokioMutex::new(JoinSet::new()));
-        let cancel = SUPERVISOR_CANCEL.get_or_init(CancellationToken::new).clone();
+        let cancel = SUPERVISOR_CANCEL
+            .get_or_init(CancellationToken::new)
+            .clone();
 
         let mut tasks_guard = SUPERVISOR_TASKS.get().unwrap().lock().await;
         for entry in inventory::iter::<SupervisorEntry> {
@@ -289,9 +291,7 @@ async fn run_with_restart(supervisor: Arc<dyn Supervisor>, cancel: CancellationT
         let outcome: Result<(), String> = match handle.await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(format!("{e}")),
-            Err(join_err) if join_err.is_panic() => {
-                Err(format!("panic: {:?}", join_err))
-            }
+            Err(join_err) if join_err.is_panic() => Err(format!("panic: {:?}", join_err)),
             Err(join_err) => Err(format!("join error: {:?}", join_err)),
         };
 
@@ -404,7 +404,11 @@ mod tests {
             counter: counter.clone(),
         });
         run_with_restart(sv, CancellationToken::new()).await;
-        assert_eq!(counter.load(Ordering::SeqCst), 1, "Never should run exactly once");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "Never should run exactly once"
+        );
     }
 
     struct PanickingSupervisor {
@@ -446,6 +450,9 @@ mod tests {
         handle.abort();
 
         let count = counter.load(Ordering::SeqCst);
-        assert!(count >= 2, "expected >= 2 runs after panic restart; got {count}");
+        assert!(
+            count >= 2,
+            "expected >= 2 runs after panic restart; got {count}"
+        );
     }
 }

@@ -15,8 +15,8 @@ use rust_decimal::Decimal;
 use std::str::FromStr;
 use suprnova::testing::TestDatabase;
 use suprnova::{
-    attrs, model, AsBool, AsDate, AsDateTime, AsDecimal, AsFloat, AsImmutableDate,
-    AsImmutableDateTime, AsInt, AsString, AsTimestamp, Model,
+    AsBool, AsDate, AsDateTime, AsDecimal, AsFloat, AsImmutableDate, AsImmutableDateTime, AsInt,
+    AsString, AsTimestamp, Model, attrs, model,
 };
 
 // ---- Models -------------------------------------------------------------
@@ -194,7 +194,9 @@ async fn as_decimal_rounds_to_n_places() {
     )
     .await
     .unwrap();
-    let made = OnlyDecimal::create(attrs! { amount: "9.99999" }).await.unwrap();
+    let made = OnlyDecimal::create(attrs! { amount: "9.99999" })
+        .await
+        .unwrap();
     let read = OnlyDecimal::find(made.id).await.unwrap().unwrap();
     assert_eq!(read.amount, Decimal::from_str("10.00").unwrap());
 }
@@ -234,7 +236,9 @@ async fn as_datetime_round_trips() {
     .await
     .unwrap();
     let when = chrono::Utc::now();
-    let made = OnlyDt::create(attrs! { t: when.to_rfc3339() }).await.unwrap();
+    let made = OnlyDt::create(attrs! { t: when.to_rfc3339() })
+        .await
+        .unwrap();
     let read = OnlyDt::find(made.id).await.unwrap().unwrap();
     assert!((read.t - when).num_milliseconds().abs() < 1000);
 }
@@ -247,7 +251,9 @@ async fn as_immutable_date_round_trips() {
     )
     .await
     .unwrap();
-    let made = OnlyImmDate::create(attrs! { d: "2026-05-19" }).await.unwrap();
+    let made = OnlyImmDate::create(attrs! { d: "2026-05-19" })
+        .await
+        .unwrap();
     let read = OnlyImmDate::find(made.id).await.unwrap().unwrap();
     assert_eq!(read.d, NaiveDate::from_ymd_opt(2026, 5, 19).unwrap());
 }
@@ -261,7 +267,9 @@ async fn as_immutable_datetime_round_trips() {
     .await
     .unwrap();
     let when = chrono::Utc::now();
-    let made = OnlyImmDt::create(attrs! { t: when.to_rfc3339() }).await.unwrap();
+    let made = OnlyImmDt::create(attrs! { t: when.to_rfc3339() })
+        .await
+        .unwrap();
     let read = OnlyImmDt::find(made.id).await.unwrap().unwrap();
     assert!((read.t - when).num_milliseconds().abs() < 1000);
 }
@@ -274,7 +282,9 @@ async fn as_timestamp_round_trips_epoch_seconds() {
     )
     .await
     .unwrap();
-    let made = OnlyTs::create(attrs! { epoch: 1715200000_i64 }).await.unwrap();
+    let made = OnlyTs::create(attrs! { epoch: 1715200000_i64 })
+        .await
+        .unwrap();
     let read = OnlyTs::find(made.id).await.unwrap().unwrap();
     assert_eq!(read.epoch, 1715200000);
 }

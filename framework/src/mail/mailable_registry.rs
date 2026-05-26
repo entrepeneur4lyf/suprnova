@@ -28,8 +28,7 @@ use std::sync::RwLock;
 /// `Arc<dyn Fn>` because registered factories are stateless and a function
 /// pointer keeps clone/copy ergonomics trivial. Bump to `Arc<dyn Fn>` if a
 /// future caller needs to capture state.
-pub(crate) type Factory =
-    fn(serde_json::Value) -> Result<Box<dyn AnyMailable>, FrameworkError>;
+pub(crate) type Factory = fn(serde_json::Value) -> Result<Box<dyn AnyMailable>, FrameworkError>;
 
 /// Object-safe view of [`Mailable`]. The blanket impl below forwards every
 /// method to the concrete `M`, including the Tera-backed `render_html` /
@@ -69,10 +68,7 @@ static REGISTRY: RwLock<Option<HashMap<String, Factory>>> = RwLock::new(None);
 pub fn register<M: Mailable>() {
     let factory: Factory = |payload| {
         let m: M = serde_json::from_value(payload).map_err(|e| {
-            FrameworkError::internal(format!(
-                "decode mailable {}: {e}",
-                M::mailable_name()
-            ))
+            FrameworkError::internal(format!("decode mailable {}: {e}", M::mailable_name()))
         })?;
         Ok(Box::new(m))
     };

@@ -27,11 +27,11 @@ use hyper_util::rt::TokioIo;
 use sea_orm_migration::MigratorTrait;
 use suprnova::http::cookie::Cookie;
 use suprnova::session::driver::database::DatabaseSessionDriver;
-use suprnova::session::{generate_csrf_token, generate_session_id, SessionData, SessionStore};
+use suprnova::session::{SessionData, SessionStore, generate_csrf_token, generate_session_id};
 use suprnova::{
-    attrs, bind, delete, get, group, handle_request, post,
     AuthMiddleware as SessionAuthMiddleware, EncryptionKey, MiddlewareRegistry, Model, Router,
-    SessionConfig, SessionMiddleware, UserProvider,
+    SessionConfig, SessionMiddleware, UserProvider, attrs, bind, delete, get, group,
+    handle_request, post,
 };
 use tokio::sync::Mutex;
 
@@ -108,8 +108,7 @@ async fn setup_app() -> TestApp {
     let session_config = SessionConfig::default().secure(false);
     let session_store: Arc<DatabaseSessionDriver> =
         Arc::new(DatabaseSessionDriver::new(session_config.lifetime));
-    let session_middleware =
-        SessionMiddleware::with_store(session_config, session_store.clone());
+    let session_middleware = SessionMiddleware::with_store(session_config, session_store.clone());
 
     let router = Arc::new(build_router());
     let middleware = Arc::new(MiddlewareRegistry::new().append(session_middleware));
@@ -134,9 +133,7 @@ async fn setup_app() -> TestApp {
                 let svc = service_fn(move |req: hyper::Request<Incoming>| {
                     let router = router.clone();
                     let middleware = middleware.clone();
-                    async move {
-                        Ok::<_, Infallible>(handle_request(router, middleware, req).await)
-                    }
+                    async move { Ok::<_, Infallible>(handle_request(router, middleware, req).await) }
                 });
                 let _ = hyper::server::conn::http1::Builder::new()
                     .serve_connection(io, svc)
@@ -193,10 +190,9 @@ async fn send_request(
 ) -> (hyper::http::StatusCode, Bytes) {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let io = TokioIo::new(stream);
-    let (mut sender, conn) =
-        hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
-            .await
-            .unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
+        .await
+        .unwrap();
     tokio::spawn(async move {
         let _ = conn.await;
     });
@@ -256,8 +252,7 @@ async fn create_post_inserts_real_row_owned_by_session_user() {
         std::str::from_utf8(&body).unwrap_or("<binary>")
     );
 
-    let json: serde_json::Value =
-        serde_json::from_slice(&body).expect("response is JSON");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
     assert!(json["id"].as_i64().unwrap() > 0, "id assigned by SQL");
     assert_eq!(
         json["author_id"].as_i64().unwrap(),
@@ -316,8 +311,7 @@ async fn list_public_posts_returns_only_public_rows() {
     // public GET does not inherit the POST's middleware.
     let (status, body) = send_request(app.addr, "GET", "/api/posts", None, None).await;
     assert_eq!(status.as_u16(), 200);
-    let json: serde_json::Value =
-        serde_json::from_slice(&body).expect("response is JSON");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
     let posts = json["posts"].as_array().expect("posts array");
 
     assert!(

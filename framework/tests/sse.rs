@@ -18,7 +18,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use suprnova::{sse::SseEvent, HttpResponse};
+use suprnova::{HttpResponse, sse::SseEvent};
 
 /// Spawn a one-shot server that emits three SSE events and shuts
 /// down after the first connection. Returns the bound address.
@@ -55,10 +55,9 @@ async fn spawn_sse_server() -> SocketAddr {
 async fn fetch(addr: SocketAddr) -> hyper::Response<Bytes> {
     let stream_tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
     let io = TokioIo::new(stream_tcp);
-    let (mut sender, conn) =
-        hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
-            .await
-            .unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
+        .await
+        .unwrap();
     tokio::spawn(async move {
         let _ = conn.await;
     });
@@ -133,10 +132,7 @@ async fn sse_response_emits_each_event_on_its_own_frame() {
     let s = std::str::from_utf8(resp.body()).unwrap();
     // Trailing terminator on the last event means split yields an
     // empty final segment we must drop.
-    let frames: Vec<&str> = s
-        .split("\n\n")
-        .filter(|f| !f.is_empty())
-        .collect();
+    let frames: Vec<&str> = s.split("\n\n").filter(|f| !f.is_empty()).collect();
     assert_eq!(frames.len(), 3, "expected 3 SSE frames, got: {:?}", frames);
 
     assert_eq!(frames[0], "data: hello");

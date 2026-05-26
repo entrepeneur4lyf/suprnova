@@ -44,7 +44,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, parse_str, ImplItem, ItemImpl, Path, Type};
+use syn::{ImplItem, ItemImpl, Path, Type, parse_macro_input, parse_str};
 
 /// Lifecycle methods that return `Result<(), FrameworkError>` and
 /// register through `EventFacade::listen`. Tuple is `(method_name,
@@ -151,12 +151,8 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
                 .into();
             }
         };
-        let adapter = emit_non_cancellable_adapter(
-            &observer_ident,
-            &module_path,
-            method,
-            &event_ident,
-        );
+        let adapter =
+            emit_non_cancellable_adapter(&observer_ident, &module_path, method, &event_ident);
         listener_emissions.push(adapter);
     }
 
@@ -175,12 +171,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
                 .into();
             }
         };
-        let adapter = emit_cancellable_adapter(
-            &observer_ident,
-            &module_path,
-            method,
-            &event_ident,
-        );
+        let adapter = emit_cancellable_adapter(&observer_ident, &module_path, method, &event_ident);
         listener_emissions.push(adapter);
     }
 
@@ -264,8 +255,7 @@ fn path_to_snake_module_path(model: &Path) -> TokenStream2 {
         .last()
         .expect("Path::parse guarantees at least one segment");
     let snake = to_snake(&last_seg.ident.to_string());
-    let snake_ident: syn::Ident =
-        syn::Ident::new(&snake, last_seg.ident.span());
+    let snake_ident: syn::Ident = syn::Ident::new(&snake, last_seg.ident.span());
 
     if segments.len() == 1 {
         // Preserve the leading `::` (absolute path) on the
@@ -359,9 +349,8 @@ fn emit_adapter_call(method: &str) -> TokenStream2 {
             obs.replicating(&event.source, &mut *replica).await
         },
         other => {
-            let msg = format!(
-                "internal error: unhandled non-cancellable observer method `{other}`"
-            );
+            let msg =
+                format!("internal error: unhandled non-cancellable observer method `{other}`");
             quote! { compile_error!(#msg) }
         }
     }
@@ -376,8 +365,7 @@ fn emit_cancellable_adapter(
     method: &str,
     event_ident: &syn::Ident,
 ) -> TokenStream2 {
-    let adapter_struct =
-        format_ident!("__{}_cancellable_adapter_{}", observer_ident, method);
+    let adapter_struct = format_ident!("__{}_cancellable_adapter_{}", observer_ident, method);
     let call_expr = emit_cancellable_adapter_call(method);
 
     quote! {
@@ -432,9 +420,7 @@ fn emit_cancellable_adapter_call(method: &str) -> TokenStream2 {
         // `Restoring` carries the model only.
         "restoring" => quote! { obs.restoring(&event.model).await },
         other => {
-            let msg = format!(
-                "internal error: unhandled cancellable observer method `{other}`"
-            );
+            let msg = format!("internal error: unhandled cancellable observer method `{other}`");
             quote! { compile_error!(#msg) }
         }
     }

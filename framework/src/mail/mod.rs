@@ -17,9 +17,9 @@ pub mod smtp;
 pub mod transport;
 
 pub use address::{Address, Attachment};
-pub use mailable::{register_mailable_factory, Mailable};
+pub use mailable::{Mailable, register_mailable_factory};
 pub use send_job::SendMailJob;
-pub use transport::{dispatch_with_telemetry, MailTransport, OutgoingMessage};
+pub use transport::{MailTransport, OutgoingMessage, dispatch_with_telemetry};
 
 use crate::error::FrameworkError;
 use crate::lock;
@@ -64,7 +64,10 @@ impl Mail {
         let previous = lock::write(&TRANSPORT)
             .expect("mail transport lock poisoned")
             .replace(transport.clone() as Arc<dyn MailTransport>);
-        MailFake { transport, previous }
+        MailFake {
+            transport,
+            previous,
+        }
     }
 
     pub(crate) fn current_transport() -> Result<Arc<dyn MailTransport>, FrameworkError> {
@@ -86,16 +89,32 @@ pub struct MailBuilder {
 }
 
 impl MailBuilder {
-    pub fn to(mut self, addr: impl Into<Address>) -> Self { self.to.push(addr.into()); self }
-    pub fn cc(mut self, addr: impl Into<Address>) -> Self { self.cc.push(addr.into()); self }
-    pub fn bcc(mut self, addr: impl Into<Address>) -> Self { self.bcc.push(addr.into()); self }
-    pub fn reply_to(mut self, addr: impl Into<Address>) -> Self { self.reply_to.push(addr.into()); self }
-    pub fn from(mut self, addr: impl Into<Address>) -> Self { self.from_override = Some(addr.into()); self }
+    pub fn to(mut self, addr: impl Into<Address>) -> Self {
+        self.to.push(addr.into());
+        self
+    }
+    pub fn cc(mut self, addr: impl Into<Address>) -> Self {
+        self.cc.push(addr.into());
+        self
+    }
+    pub fn bcc(mut self, addr: impl Into<Address>) -> Self {
+        self.bcc.push(addr.into());
+        self
+    }
+    pub fn reply_to(mut self, addr: impl Into<Address>) -> Self {
+        self.reply_to.push(addr.into());
+        self
+    }
+    pub fn from(mut self, addr: impl Into<Address>) -> Self {
+        self.from_override = Some(addr.into());
+        self
+    }
 
     /// Render `mailable` and dispatch to the bound transport.
     pub async fn send<M: Mailable>(self, mailable: M) -> Result<(), FrameworkError> {
         let transport = Mail::current_transport()?;
-        let from = self.from_override
+        let from = self
+            .from_override
             .or_else(|| mailable.from())
             .unwrap_or_else(|| Address::new("noreply@localhost"));
 
@@ -151,10 +170,7 @@ impl MailBuilder {
         crate::queue::Queue::later(delay, job).await
     }
 
-    fn build_send_job<M: Mailable>(
-        self,
-        mailable: M,
-    ) -> Result<SendMailJob, FrameworkError> {
+    fn build_send_job<M: Mailable>(self, mailable: M) -> Result<SendMailJob, FrameworkError> {
         // Match `MailBuilder::send`'s guard exactly: call the trait-level
         // `render_html`/`render_text` so a Mailable that overrides those
         // methods (e.g. produces a pre-rendered body without setting a

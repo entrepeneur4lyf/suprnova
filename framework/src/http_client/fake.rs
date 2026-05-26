@@ -83,12 +83,7 @@ struct CannedResponse {
 ///
 /// **Must be called inside a `Http::fake(|| async { ... })` scope.**
 /// Panics if no fake scope is active on the current task.
-pub fn fake_response(
-    method: &str,
-    url_substring: &str,
-    status: u16,
-    body: serde_json::Value,
-) {
+pub fn fake_response(method: &str, url_substring: &str, status: u16, body: serde_json::Value) {
     let bytes = serde_json::to_vec(&body).unwrap_or_default();
     with_state(|s| {
         s.canned.push(CannedResponse {

@@ -12,15 +12,15 @@
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
 use std::sync::Arc;
+use suprnova::FrameworkError;
 use suprnova::mail::Mail;
 use suprnova::notifications::channels::mail::{
-    register_mail_renderer, MailChannel, MailRendering, NotificationMailable,
+    MailChannel, MailRendering, NotificationMailable, register_mail_renderer,
 };
 use suprnova::notifications::{
-    set_dispatcher, Notifiable, Notification, NotificationDispatcher, Notify,
+    Notifiable, Notification, NotificationDispatcher, Notify, set_dispatcher,
 };
 use suprnova::serde_json;
-use suprnova::FrameworkError;
 use tracing_test::traced_test;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -70,8 +70,7 @@ async fn notify_send_emits_dispatch_span_wrapping_mail_send() {
     let _fake = Mail::fake();
     register_mail_renderer::<OrderReady>();
 
-    let dispatcher = NotificationDispatcher::new()
-        .register_channel(Arc::new(MailChannel::new()));
+    let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
     set_dispatcher(Arc::new(dispatcher));
 
     Notify::send(
@@ -106,10 +105,7 @@ async fn notify_send_emits_dispatch_span_wrapping_mail_send() {
         logs_contain("mail.send"),
         "mail.send span emitted inside the dispatch span"
     );
-    assert!(
-        logs_contain("mail sent"),
-        "mail success event present"
-    );
+    assert!(logs_contain("mail sent"), "mail success event present");
     assert!(
         logs_contain("duration_ms="),
         "duration_ms recorded on completion events"

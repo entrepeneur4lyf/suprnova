@@ -21,6 +21,6 @@ pub mod fanout;
 
 pub use broadcastable::{BroadcastListener, Broadcastable};
 pub use channel::{BoxedChannel, Channel, ChannelRegistry, PresenceChannel, PrivateChannel};
+pub use handler::BroadcastingWsHandler;
 pub use hub::{BroadcastEnvelope, BroadcastHub, InMemoryBroadcastHub};
 pub use protocol::{ClientFrame, ServerFrame};
-pub use handler::BroadcastingWsHandler;

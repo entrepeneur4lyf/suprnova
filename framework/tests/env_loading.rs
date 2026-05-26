@@ -15,7 +15,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use suprnova::config::{load_dotenv, Environment};
+use suprnova::config::{Environment, load_dotenv};
 
 /// Serialize the whole module: every test mutates `APP_ENV` etc.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -29,10 +29,7 @@ struct EnvSnapshot {
 
 impl EnvSnapshot {
     fn capture(keys: &[&'static str]) -> Self {
-        let captured = keys
-            .iter()
-            .map(|k| (*k, std::env::var(k).ok()))
-            .collect();
+        let captured = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
         Self { keys: captured }
     }
 }
@@ -209,11 +206,7 @@ fn env_specific_file_overrides_base_dotenv() {
         ".env",
         "APP_ENV=production\nDOTENV_TEST_OVERRIDE=from-base\n",
     );
-    write_env_file(
-        dir,
-        ".env.production",
-        "DOTENV_TEST_OVERRIDE=from-prod\n",
-    );
+    write_env_file(dir, ".env.production", "DOTENV_TEST_OVERRIDE=from-prod\n");
 
     load_dotenv(dir);
 

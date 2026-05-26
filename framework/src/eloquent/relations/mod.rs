@@ -51,7 +51,7 @@ pub use eager_cache::EagerLoadCache;
 pub use has_many::HasMany;
 pub use has_one::HasOne;
 pub use morph::{MorphMany, MorphOne, MorphTo};
-pub use morph_registry::{find_morph_type, find_morph_type_by_id, morph_types, MorphTypeEntry};
+pub use morph_registry::{MorphTypeEntry, find_morph_type, find_morph_type_by_id, morph_types};
 pub use morph_to_many::{MorphToMany, MorphedByMany};
 pub use through::{HasManyThrough, HasOneThrough};
 
@@ -397,10 +397,7 @@ pub trait EagerLoadDispatch: __sealed::Sealed + Sized {
     /// `self.__pivot = pivot;`. Not part of the user surface; the
     /// macro-emitted `pivot::<P>()` accessor is the read path users
     /// call.
-    fn set_pivot_arc(
-        &mut self,
-        pivot: Option<std::sync::Arc<dyn Any + Send + Sync>>,
-    );
+    fn set_pivot_arc(&mut self, pivot: Option<std::sync::Arc<dyn Any + Send + Sync>>);
 
     /// Whether the per-row `__eager` cache has a value for the named
     /// relation. Used by

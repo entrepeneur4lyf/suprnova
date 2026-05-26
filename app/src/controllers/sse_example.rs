@@ -16,7 +16,7 @@ use futures::StreamExt;
 use std::sync::Arc;
 use suprnova::broadcasting::BroadcastHub;
 use suprnova::container::App;
-use suprnova::{sse::SseEvent, HttpResponse, Request, Response};
+use suprnova::{HttpResponse, Request, Response, sse::SseEvent};
 use tokio_stream::wrappers::BroadcastStream;
 
 /// GET `/events/stream` — opens an SSE connection that emits one

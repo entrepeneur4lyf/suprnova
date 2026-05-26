@@ -97,7 +97,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{parse_macro_input, Data, DataStruct, DeriveInput, Field, Fields, Ident, Meta};
+use syn::{Data, DataStruct, DeriveInput, Field, Fields, Ident, Meta, parse_macro_input};
 
 /// Flavors of lazy resolution for a `#[data(lazy)]` field.
 ///
@@ -350,7 +350,10 @@ fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::
                     "#[json_resource(...)] requires a resource type as the first argument, e.g. #[json_resource(\"users\")]",
                 )
             })?;
-            opts.json_resource = Some(JsonResourceOptions { resource_type, id_field });
+            opts.json_resource = Some(JsonResourceOptions {
+                resource_type,
+                id_field,
+            });
         }
     }
     Ok(opts)
@@ -483,9 +486,7 @@ fn build_form_request(
             let field_ident = f.ident.as_ref().unwrap();
             let field_key = field_ident.to_string();
             // Use explicit name if provided, otherwise use the field name.
-            let resolved_name = param_spec
-                .clone()
-                .unwrap_or_else(|| field_key.clone());
+            let resolved_name = param_spec.clone().unwrap_or_else(|| field_key.clone());
 
             let parser = route_param_parser_path(classify_route_param_type(&f.ty));
             let optional = is_option_type(&f.ty);
@@ -721,7 +722,7 @@ fn parse_field_options(field: &Field) -> Result<FieldOptions, syn::Error> {
                 return Err(syn::Error::new_spanned(
                     attr,
                     "expected `#[data(...)]` with a parenthesised list",
-                ))
+                ));
             }
         };
         list.parse_nested_meta(|meta| {
@@ -810,9 +811,7 @@ fn build_into_inertia_props(
                 // qualified). Bare struct names would collide across modules
                 // and nondeterministically resolve the wrong allowlist.
                 let entry_construction = match flavor {
-                    LazyFlavor::Plain
-                    | LazyFlavor::Inertia
-                    | LazyFlavor::WhenLoaded => quote! {
+                    LazyFlavor::Plain | LazyFlavor::Inertia | LazyFlavor::WhenLoaded => quote! {
                         ::suprnova::inertia::PropEntry::LazyOwned {
                             owner: #qualified_name_expr,
                             field: #name,
@@ -968,8 +967,13 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
     // own extractor or use a separate input DTO without lazy fields.
     let has_lazy_fields = parsed.iter().any(|(_, o)| o.lazy.is_some());
 
-    let serialize_impl =
-        build_serialize(struct_name, &impl_generics, &ty_generics, where_clause, &parsed);
+    let serialize_impl = build_serialize(
+        struct_name,
+        &impl_generics,
+        &ty_generics,
+        where_clause,
+        &parsed,
+    );
     let deserialize_impl = if has_reference_fields || has_lazy_fields {
         proc_macro2::TokenStream::new()
     } else {
@@ -1003,7 +1007,14 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
     let form_request_impl = if is_generic || has_reference_fields || has_lazy_fields {
         proc_macro2::TokenStream::new()
     } else {
-        build_form_request(struct_name, &struct_opts, &impl_generics, &ty_generics, where_clause, &parsed)
+        build_form_request(
+            struct_name,
+            &struct_opts,
+            &impl_generics,
+            &ty_generics,
+            where_clause,
+            &parsed,
+        )
     };
 
     let into_inertia_props_impl = build_into_inertia_props(
@@ -1327,10 +1338,7 @@ fn build_into_json_resource(
         .iter()
         .filter(|(f, fo)| {
             let ident = f.ident.as_ref().unwrap();
-            !fo.input_only
-                && ident != &id_field
-                && !fo.allow_include
-                && fo.lazy.is_none()
+            !fo.input_only && ident != &id_field && !fo.allow_include && fo.lazy.is_none()
         })
         .map(|(f, _)| {
             let ident = f.ident.as_ref().unwrap();

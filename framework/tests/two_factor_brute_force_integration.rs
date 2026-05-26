@@ -28,7 +28,7 @@ use suprnova::auth_flows::two_factor::migration_replay::Migration as TwoFactorRe
 use suprnova::auth_flows::{BruteForce, TwoFactor, TwoFactorUser};
 use suprnova::container::App;
 use suprnova::database::DbConnection;
-use suprnova::torii_integration::{init_torii, ToriiConfig};
+use suprnova::torii_integration::{ToriiConfig, init_torii};
 use suprnova::{Crypt, EncryptionKey};
 
 /// One tokio runtime across every test in this file.
@@ -99,10 +99,18 @@ fn totp_code_for(otpauth_url: &str) -> String {
         .map(|(_, v)| v.into_owned())
         .expect("secret query param");
     let secret_bytes = Secret::Encoded(secret).to_bytes().expect("decode secret");
-    TOTP::new(Algorithm::SHA1, 6, 1, 30, secret_bytes, None, "label".into())
-        .expect("totp")
-        .generate_current()
-        .expect("generate")
+    TOTP::new(
+        Algorithm::SHA1,
+        6,
+        1,
+        30,
+        secret_bytes,
+        None,
+        "label".into(),
+    )
+    .expect("totp")
+    .generate_current()
+    .expect("generate")
 }
 
 #[test]
@@ -215,9 +223,7 @@ fn successful_2fa_verify_resets_failed_attempts() {
         for _ in 0..4 {
             let _ = TwoFactor::verify(&user, "000000").await.unwrap();
         }
-        let status_pre = BruteForce::get_lockout_status(user.email())
-            .await
-            .unwrap();
+        let status_pre = BruteForce::get_lockout_status(user.email()).await.unwrap();
         assert!(status_pre.failed_attempts >= 4);
         assert!(!status_pre.is_locked);
 
@@ -225,9 +231,7 @@ fn successful_2fa_verify_resets_failed_attempts() {
         let live = totp_code_for(&resp.otpauth_url);
         assert!(TwoFactor::verify(&user, &live).await.unwrap());
 
-        let status_post = BruteForce::get_lockout_status(user.email())
-            .await
-            .unwrap();
+        let status_post = BruteForce::get_lockout_status(user.email()).await.unwrap();
         assert_eq!(
             status_post.failed_attempts, 0,
             "successful verify must reset the failed-attempt counter"

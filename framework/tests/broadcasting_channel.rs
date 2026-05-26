@@ -6,9 +6,9 @@
 //! are replaced with static-property tests.
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
-use suprnova::broadcasting::{Channel, ChannelRegistry, PresenceChannel, PrivateChannel};
+use serde_json::{Value, json};
 use suprnova::FrameworkError;
+use suprnova::broadcasting::{Channel, ChannelRegistry, PresenceChannel, PrivateChannel};
 
 // ---------------------------------------------------------------------------
 // Concrete channel impls used across tests

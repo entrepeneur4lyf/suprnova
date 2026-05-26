@@ -26,7 +26,7 @@ pub use m_2026_05_22_000001_create_payments_tables::Migration as CreatePaymentsT
 /// Returns all payments migrations in order. Wire into your app's
 /// `Migrator::migrations()` to apply the payments schema.
 pub fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-    vec![
-        Box::new(m_2026_05_22_000001_create_payments_tables::Migration),
-    ]
+    vec![Box::new(
+        m_2026_05_22_000001_create_payments_tables::Migration,
+    )]
 }

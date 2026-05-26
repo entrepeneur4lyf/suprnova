@@ -8,10 +8,10 @@
 //! idempotent: a second call is a silent no-op.
 
 use super::config::{LogConfig, LogFormat};
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
 
 /// Build an [`EnvFilter`] from a config string, falling back to `"info"`
 /// on parse failure so a malformed env var never crashes boot.

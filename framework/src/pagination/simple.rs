@@ -85,7 +85,10 @@ mod tests {
     fn path_serializes_when_set() {
         let p = Paginator::new(vec![1, 2], 1, 10, true).with_path("/api/users");
         let json = serde_json::to_value(&p).unwrap();
-        assert_eq!(json.get("path").and_then(|v| v.as_str()), Some("/api/users"));
+        assert_eq!(
+            json.get("path").and_then(|v| v.as_str()),
+            Some("/api/users")
+        );
     }
 
     #[test]

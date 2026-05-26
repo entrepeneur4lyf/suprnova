@@ -74,8 +74,7 @@ impl SessionConfig {
             lifetime: Duration::from_secs(lifetime_minutes * 60),
             cookie_name: crate::env_optional("SESSION_COOKIE")
                 .unwrap_or_else(|| "suprnova_session".to_string()),
-            cookie_path: crate::env_optional("SESSION_PATH")
-                .unwrap_or_else(|| "/".to_string()),
+            cookie_path: crate::env_optional("SESSION_PATH").unwrap_or_else(|| "/".to_string()),
             cookie_secure,
             cookie_http_only: true, // Always true for security
             cookie_same_site: crate::env_optional("SESSION_SAME_SITE")

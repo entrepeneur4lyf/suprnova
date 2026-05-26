@@ -8,7 +8,7 @@
 
 use crate::error::FrameworkError;
 use crate::mail::mailable_registry;
-use crate::mail::{dispatch_with_telemetry, Address, Mail};
+use crate::mail::{Address, Mail, dispatch_with_telemetry};
 use crate::queue::Job;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

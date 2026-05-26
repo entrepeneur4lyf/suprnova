@@ -11,7 +11,7 @@
 //! avoid colliding with any future real `#[suprnova::model]`
 //! registrations (which would also flow through this same registry).
 
-use suprnova::eloquent::{models, ModelEntry};
+use suprnova::eloquent::{ModelEntry, models};
 
 inventory::submit! {
     ModelEntry {

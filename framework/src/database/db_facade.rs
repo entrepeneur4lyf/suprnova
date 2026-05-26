@@ -32,12 +32,12 @@
 //! and WHERE clause in UPDATE statements so each binding lines up with
 //! its corresponding position.
 
-use crate::database::dynamic_row::DynamicRow;
+use crate::FrameworkError;
 use crate::database::DB;
+use crate::database::dynamic_row::DynamicRow;
+use crate::eloquent::Collection;
 use crate::eloquent::attrs::Attrs;
 use crate::eloquent::builder::Direction;
-use crate::eloquent::Collection;
-use crate::FrameworkError;
 use sea_orm::{DbBackend, FromQueryResult, JsonValue, Statement, Value as SeaValue};
 
 /// Standalone query builder returned by
@@ -303,7 +303,9 @@ impl DbTableBuilder {
         let values: Vec<SeaValue> = cols
             .iter()
             .map(|c| {
-                let v = attrs.get(c).expect("key present in iter must be present in get");
+                let v = attrs
+                    .get(c)
+                    .expect("key present in iter must be present in get");
                 crate::eloquent::model::json_value_to_sea_value(v)
             })
             .collect();
@@ -624,9 +626,7 @@ impl DB {
         let exec =
             crate::database::transaction::ExecutorChoice::resolve_write(None, None, None).await?;
         match &exec {
-            crate::database::transaction::ExecutorChoice::Tx(t) => {
-                t.execute_unprepared(sql).await
-            }
+            crate::database::transaction::ExecutorChoice::Tx(t) => t.execute_unprepared(sql).await,
             crate::database::transaction::ExecutorChoice::Pool(c) => {
                 c.inner().execute_unprepared(sql).await
             }
@@ -679,12 +679,9 @@ impl DB {
         // even an explicit `_on` call cannot route around it because
         // it would split the atomicity contract. Resolve_read with the
         // override expresses exactly that precedence.
-        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
-            None,
-            Some(conn_name),
-            None,
-        )
-        .await?;
+        let exec =
+            crate::database::transaction::ExecutorChoice::resolve_read(None, Some(conn_name), None)
+                .await?;
         let backend = exec.backend();
         let stmt =
             Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());
@@ -721,9 +718,7 @@ impl DB {
         )
         .await?;
         match &exec {
-            crate::database::transaction::ExecutorChoice::Tx(t) => {
-                t.execute_unprepared(sql).await
-            }
+            crate::database::transaction::ExecutorChoice::Tx(t) => t.execute_unprepared(sql).await,
             crate::database::transaction::ExecutorChoice::Pool(c) => {
                 c.inner().execute_unprepared(sql).await
             }

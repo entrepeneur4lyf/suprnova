@@ -85,8 +85,8 @@
 use super::driver::{VectorDriver, VectorItem, VectorMatch};
 use crate::FrameworkError;
 use async_trait::async_trait;
-use sqlx::mysql::{MySqlPool, MySqlPoolOptions};
 use sqlx::Row;
+use sqlx::mysql::{MySqlPool, MySqlPoolOptions};
 use std::collections::HashSet;
 use std::fmt::Write;
 use std::sync::Arc;
@@ -269,11 +269,7 @@ impl MariaDbVectorDriver {
     /// Errors if `table` fails [`validate_store_name`] or `dim` is 0.
     ///
     /// [`validate_store_name`]: Self::validate_store_name
-    pub fn ensure_table_sql_for(
-        &self,
-        table: &str,
-        dim: usize,
-    ) -> Result<String, FrameworkError> {
+    pub fn ensure_table_sql_for(&self, table: &str, dim: usize) -> Result<String, FrameworkError> {
         Self::ensure_table_sql(table, dim, self.distance)
     }
 
@@ -384,9 +380,7 @@ impl MariaDbVectorDriver {
                     .map_err(|e| {
                         // Transient query failure — bubble out so the
                         // next call retries. Not cached.
-                        FrameworkError::internal(format!(
-                            "mariadb VERSION() query failed: {e}"
-                        ))
+                        FrameworkError::internal(format!("mariadb VERSION() query failed: {e}"))
                     })?;
                 // Server responded — the version check itself is
                 // deterministic and its result IS cached, sticky.
@@ -424,14 +418,15 @@ impl MariaDbVectorDriver {
         }
 
         let sql = format!("SHOW CREATE TABLE `{store}`");
-        let row: (String, String) = sqlx::query_as(&sql)
-            .fetch_one(&*self.pool)
-            .await
-            .map_err(|e| {
-                FrameworkError::internal(format!(
-                    "mariadb: SHOW CREATE TABLE for store '{store}' failed: {e}"
-                ))
-            })?;
+        let row: (String, String) =
+            sqlx::query_as(&sql)
+                .fetch_one(&*self.pool)
+                .await
+                .map_err(|e| {
+                    FrameworkError::internal(format!(
+                        "mariadb: SHOW CREATE TABLE for store '{store}' failed: {e}"
+                    ))
+                })?;
         let ddl = &row.1;
 
         let table_distance = match extract_vector_index_distance(ddl) {
@@ -509,18 +504,12 @@ fn check_mariadb_117(version: &str) -> Result<(), String> {
     let stripped = version.strip_prefix("5.5.5-").unwrap_or(version);
     let version_part = stripped.split('-').next().unwrap_or("");
     let mut parts = version_part.split('.');
-    let major: u32 = parts
-        .next()
-        .and_then(|s| s.parse().ok())
-        .ok_or_else(|| {
-            format!("mariadb vector driver: couldn't parse major version from '{version}'")
-        })?;
-    let minor: u32 = parts
-        .next()
-        .and_then(|s| s.parse().ok())
-        .ok_or_else(|| {
-            format!("mariadb vector driver: couldn't parse minor version from '{version}'")
-        })?;
+    let major: u32 = parts.next().and_then(|s| s.parse().ok()).ok_or_else(|| {
+        format!("mariadb vector driver: couldn't parse major version from '{version}'")
+    })?;
+    let minor: u32 = parts.next().and_then(|s| s.parse().ok()).ok_or_else(|| {
+        format!("mariadb vector driver: couldn't parse minor version from '{version}'")
+    })?;
     if major > 11 || (major == 11 && minor >= 7) {
         Ok(())
     } else {
@@ -571,8 +560,7 @@ impl VectorDriver for MariaDbVectorDriver {
 
         let mut iter = items.into_iter();
         loop {
-            let chunk: Vec<VectorItem> =
-                iter.by_ref().take(UPSERT_BATCH_SIZE).collect();
+            let chunk: Vec<VectorItem> = iter.by_ref().take(UPSERT_BATCH_SIZE).collect();
             if chunk.is_empty() {
                 break;
             }
@@ -588,8 +576,7 @@ impl VectorDriver for MariaDbVectorDriver {
 
             let mut q = sqlx::query(&sql);
             for item in chunk {
-                let vec_text =
-                    MariaDbVectorDriver::embedding_to_vec_text(&item.embedding)?;
+                let vec_text = MariaDbVectorDriver::embedding_to_vec_text(&item.embedding)?;
                 let metadata = match item.metadata {
                     serde_json::Value::Null => None,
                     v => Some(v),
@@ -643,9 +630,7 @@ impl VectorDriver for MariaDbVectorDriver {
             .fetch_all(&*self.pool)
             .await
             .map_err(|e| {
-                FrameworkError::internal(format!(
-                    "mariadb similar failed for store '{table}': {e}"
-                ))
+                FrameworkError::internal(format!("mariadb similar failed for store '{table}': {e}"))
             })?;
 
         let mut matches = Vec::with_capacity(rows.len());
@@ -702,9 +687,7 @@ impl VectorDriver for MariaDbVectorDriver {
                 q = q.bind(id);
             }
             q.execute(&mut *tx).await.map_err(|e| {
-                FrameworkError::internal(format!(
-                    "mariadb delete failed for store '{table}': {e}"
-                ))
+                FrameworkError::internal(format!("mariadb delete failed for store '{table}': {e}"))
             })?;
         }
 
@@ -718,9 +701,12 @@ impl VectorDriver for MariaDbVectorDriver {
         let table = MariaDbVectorDriver::validate_store_name(store)?;
         self.ensure_version().await?;
         let sql = format!("SELECT COUNT(*) AS n FROM `{table}`");
-        let row = sqlx::query(&sql).fetch_one(&*self.pool).await.map_err(|e| {
-            FrameworkError::internal(format!("mariadb count failed for store '{table}': {e}"))
-        })?;
+        let row = sqlx::query(&sql)
+            .fetch_one(&*self.pool)
+            .await
+            .map_err(|e| {
+                FrameworkError::internal(format!("mariadb count failed for store '{table}': {e}"))
+            })?;
         let n: i64 = row.try_get("n").map_err(|e| {
             FrameworkError::internal(format!("mariadb count: decode COUNT column: {e}"))
         })?;
@@ -854,8 +840,14 @@ mod version_check_tests {
     #[test]
     fn rejects_11_6() {
         let err = check_mariadb_117("11.6.2-MariaDB").unwrap_err();
-        assert!(err.contains("11.7+"), "error message should reference 11.7+: {err}");
-        assert!(err.contains("11.6"), "error message should echo the found version: {err}");
+        assert!(
+            err.contains("11.7+"),
+            "error message should reference 11.7+: {err}"
+        );
+        assert!(
+            err.contains("11.6"),
+            "error message should echo the found version: {err}"
+        );
     }
 
     #[test]

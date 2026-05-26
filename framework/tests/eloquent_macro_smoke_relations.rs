@@ -13,7 +13,7 @@
 //! without changes at every call site).
 
 use std::sync::Arc;
-use suprnova::{model, EagerLoadCache, Model};
+use suprnova::{EagerLoadCache, Model, model};
 
 #[model(table = "smoke_users", relations = {})]
 pub struct SmokeUser {
@@ -152,8 +152,7 @@ fn pivot_panics_with_distinct_message_on_wrong_type() {
     // caller asks for `MmTaggable`. The accessor must NOT direct them
     // to "load via BelongsToMany::get()" (the data is there); it must
     // tell them the requested type is wrong.
-    let pivot: Arc<dyn std::any::Any + Send + Sync> =
-        Arc::new(BtmRoleUserPivot { assigned_at: 1 });
+    let pivot: Arc<dyn std::any::Any + Send + Sync> = Arc::new(BtmRoleUserPivot { assigned_at: 1 });
     let u = SmokeUser {
         id: 11,
         name: "Frank".into(),

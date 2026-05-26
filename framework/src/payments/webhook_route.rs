@@ -21,14 +21,16 @@
 //!    `payments_webhook_events` before hydration begins — even failures
 //!    leave an audit trail.
 
-use crate::http::{text, HttpResponse, Response};
-use crate::payments::entities::{customer, subscription, subscription_item, transaction, webhook_event};
+use crate::Request;
+use crate::http::{HttpResponse, Response, text};
+use crate::payments::entities::{
+    customer, subscription, subscription_item, transaction, webhook_event,
+};
 use crate::payments::{
     CustomerSnapshot, NeutralEventKind, PaymentError, PaymentProvider, PaymentProviderRegistry,
     PaymentSnapshot, SubscriptionResult, SubscriptionStatus, WebhookContext, WebhookEvent,
 };
 use crate::routing::Router;
-use crate::Request;
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
@@ -326,7 +328,11 @@ where
                 .map_err(|e| PaymentError::Internal(format!("{e}")))?;
         }
         None => {
-            let canceled_at = if mark_canceled { Some(now.clone()) } else { None };
+            let canceled_at = if mark_canceled {
+                Some(now.clone())
+            } else {
+                None
+            };
             let am = subscription::ActiveModel {
                 provider: Set(provider.to_string()),
                 provider_subscription_id: Set(result.provider_subscription_id.clone()),
@@ -365,7 +371,9 @@ where
         .await
         .map_err(|e| PaymentError::Internal(format!("{e}")))?
         .ok_or_else(|| {
-            PaymentError::Internal("parent subscription vanished between upsert and item sync".into())
+            PaymentError::Internal(
+                "parent subscription vanished between upsert and item sync".into(),
+            )
         })?;
     let parent_id = parent.id;
 
@@ -595,9 +603,8 @@ async fn mark_failed(
 pub fn webhook_routes(db: Arc<DatabaseConnection>) -> Router {
     // The handler is a `Fn(Request) -> Future` closure that clones Arc per call.
     let db_for_handler = db;
-    Router::new().post(
-        "/webhooks/payments/{provider}",
-        move |req: Request| {
+    Router::new()
+        .post("/webhooks/payments/{provider}", move |req: Request| {
             let db = db_for_handler.clone();
             async move {
                 // Extract header map and remote addr before consuming the request body.
@@ -620,6 +627,6 @@ pub fn webhook_routes(db: Arc<DatabaseConnection>) -> Router {
                 };
                 handle_webhook_inner(&db, &provider_name, remote_addr_str, headers, body).await
             }
-        },
-    ).into()
+        })
+        .into()
 }

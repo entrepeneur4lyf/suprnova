@@ -75,8 +75,7 @@ fn is_safe_request_id(s: &str) -> bool {
     if s.is_empty() || s.len() > MAX_REQUEST_ID_LEN {
         return false;
     }
-    s.bytes()
-        .all(|b| b.is_ascii_graphic() && b != b' ')
+    s.bytes().all(|b| b.is_ascii_graphic() && b != b' ')
 }
 
 #[async_trait]
@@ -161,9 +160,10 @@ mod tests {
         let id = RequestId::new();
         assert_eq!(id.as_str().len(), 36);
         assert_eq!(id.as_str().chars().filter(|c| *c == '-').count(), 4);
-        assert!(id
-            .as_str()
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
+        assert!(
+            id.as_str()
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        );
     }
 }

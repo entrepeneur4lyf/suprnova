@@ -17,7 +17,11 @@ fn envelope_round_trips_through_json() {
         available_at: when,
         attempts: 0,
         max_tries: 3,
-        backoff: BackoffSchedule::Exponential { base_secs: 2, cap_secs: 300, jitter_ratio: 0.25 },
+        backoff: BackoffSchedule::Exponential {
+            base_secs: 2,
+            cap_secs: 300,
+            jitter_ratio: 0.25,
+        },
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
@@ -64,12 +68,19 @@ fn envelope_wire_format_is_frozen() {
         available_at: when,
         attempts: 0,
         max_tries: 3,
-        backoff: BackoffSchedule::Exponential { base_secs: 2, cap_secs: 300, jitter_ratio: 0.25 },
+        backoff: BackoffSchedule::Exponential {
+            base_secs: 2,
+            cap_secs: 300,
+            jitter_ratio: 0.25,
+        },
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
     };
     let json = serde_json::to_string(&env).unwrap();
     let expected = r#"{"schema_version":1,"id":"550e8400-e29b-41d4-a716-446655440000","job_name":"Frozen","payload":{"k":"v"},"dispatched_at":"2026-05-16T12:34:56Z","available_at":"2026-05-16T12:34:56Z","attempts":0,"max_tries":3,"backoff":{"kind":"exponential","base_secs":2,"cap_secs":300,"jitter_ratio":0.25},"timeout_secs":null,"fail_on_timeout":false,"idempotency_key":null}"#;
-    assert_eq!(json, expected, "FROZEN v1 envelope wire format must not drift");
+    assert_eq!(
+        json, expected,
+        "FROZEN v1 envelope wire format must not drift"
+    );
 }

@@ -92,8 +92,8 @@ impl ViteManifest {
                 e
             ))
         })?;
-        let entries: HashMap<String, ManifestEntry> = serde_json::from_slice(&bytes)
-            .map_err(|e| {
+        let entries: HashMap<String, ManifestEntry> =
+            serde_json::from_slice(&bytes).map_err(|e| {
                 FrameworkError::internal(format!(
                     "Vite manifest at {} is not valid JSON: {}",
                     path.display(),
@@ -123,12 +123,7 @@ impl ViteManifest {
         let mut visited = HashSet::new();
         visited.insert(entry.to_string());
         for dep in &root.imports {
-            self.collect_imports(
-                dep,
-                &mut resolved.preload,
-                &mut resolved.css,
-                &mut visited,
-            );
+            self.collect_imports(dep, &mut resolved.preload, &mut resolved.css, &mut visited);
         }
         Some(resolved)
     }
@@ -210,7 +205,10 @@ mod tests {
     fn collects_recursive_modulepreloads() {
         let m = fixture();
         let r = m.resolve_entry("src/main.ts").unwrap();
-        assert!(r.preload.contains(&"assets/chunk-shared-CCC.js".to_string()));
+        assert!(
+            r.preload
+                .contains(&"assets/chunk-shared-CCC.js".to_string())
+        );
         assert!(r.preload.contains(&"assets/chunk-deep-EEE.js".to_string()));
     }
 

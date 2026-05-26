@@ -4,13 +4,13 @@
 //! HTTP layer replaced by Suprnova's pinned `reqwest 0.13`. The crypto
 //! (VAPID + ECE) is identical to upstream — only the transport changed.
 
-pub mod error;
-pub mod vapid;
-pub mod ece;
-pub mod payload;
 pub mod client;
+pub mod ece;
+pub mod error;
+pub mod payload;
+pub mod vapid;
 
+pub use client::{PushResponse, SubscriptionInfo, WebPushClient};
 pub use error::WebPushError;
-pub use vapid::{VapidSigner, VapidKey, VapidClaims};
-pub use payload::{Payload, ContentEncoding};
-pub use client::{WebPushClient, SubscriptionInfo, PushResponse};
+pub use payload::{ContentEncoding, Payload};
+pub use vapid::{VapidClaims, VapidKey, VapidSigner};

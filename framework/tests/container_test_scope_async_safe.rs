@@ -25,8 +25,8 @@
 //!    this, but the precedence must be defined).
 
 use std::sync::Arc;
-use suprnova::testing::TestContainer;
 use suprnova::App;
+use suprnova::testing::TestContainer;
 
 trait Tagger: Send + Sync + 'static {
     fn tag(&self) -> &'static str;

@@ -16,7 +16,7 @@ use serial_test::serial;
 use tokio::runtime::Runtime;
 
 use suprnova::auth_flows::BruteForce;
-use suprnova::torii_integration::{init_torii, ToriiConfig};
+use suprnova::torii_integration::{ToriiConfig, init_torii};
 
 /// One tokio runtime shared across every test in this file.
 static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
@@ -227,7 +227,7 @@ use hyper_util::rt::TokioIo;
 
 use suprnova::auth_flows::LoginThrottleMiddleware;
 use suprnova::http::text;
-use suprnova::{handle_request, MiddlewareRegistry, Router};
+use suprnova::{MiddlewareRegistry, Router, handle_request};
 
 /// Spawn a test HTTP/1.1 server bound to an ephemeral port, dispatch
 /// up to `accepts` connections via `handle_request`, then exit.
@@ -252,9 +252,7 @@ async fn spawn_server(router: impl Into<Router>, accepts: usize) -> SocketAddr {
                 let svc = service_fn(move |req: hyper::Request<Incoming>| {
                     let router = router.clone();
                     let middleware = middleware.clone();
-                    async move {
-                        Ok::<_, Infallible>(handle_request(router, middleware, req).await)
-                    }
+                    async move { Ok::<_, Infallible>(handle_request(router, middleware, req).await) }
                 });
                 let _ = hyper::server::conn::http1::Builder::new()
                     .serve_connection(io, svc)
@@ -271,10 +269,9 @@ async fn spawn_server(router: impl Into<Router>, accepts: usize) -> SocketAddr {
 async fn post_login(addr: SocketAddr, email: Option<&str>) -> (u16, Option<String>) {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let io = TokioIo::new(stream);
-    let (mut sender, conn) =
-        hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
-            .await
-            .unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
+        .await
+        .unwrap();
     tokio::spawn(async move {
         let _ = conn.await;
     });
@@ -432,8 +429,7 @@ fn account_locked_fires_once_on_transition() {
                 .unwrap();
         }
 
-        let fires =
-            dispatched_count::<AccountLocked>(|e| e.email == "eve-bf@example.com");
+        let fires = dispatched_count::<AccountLocked>(|e| e.email == "eve-bf@example.com");
         assert_eq!(
             fires, 1,
             "AccountLocked must fire exactly once on the unlocked→locked transition, got {fires}"

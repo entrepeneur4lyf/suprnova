@@ -72,10 +72,7 @@ where
         Ok(serde_json::Value::String(parsed.as_ref().to_string()))
     }
 
-    fn to_storage_json(
-        &self,
-        v: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameworkError> {
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
         Ok(v.clone())
     }
 }

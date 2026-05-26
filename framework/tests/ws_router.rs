@@ -1,20 +1,16 @@
 //! `Router::ws` registration + path matching.
 
 use async_trait::async_trait;
+use suprnova::FrameworkError;
 use suprnova::http::Request;
 use suprnova::routing::Router;
 use suprnova::ws::{WebSocketHandler, WsSocket};
-use suprnova::FrameworkError;
 
 struct NoopHandler;
 
 #[async_trait]
 impl WebSocketHandler for NoopHandler {
-    async fn handle(
-        &self,
-        _socket: WsSocket,
-        _request: Request,
-    ) -> Result<(), FrameworkError> {
+    async fn handle(&self, _socket: WsSocket, _request: Request) -> Result<(), FrameworkError> {
         Ok(())
     }
 }
@@ -28,7 +24,9 @@ fn ws_route_registers_and_resolves_by_path() {
 #[test]
 fn ws_route_with_params_captures_segments() {
     let router = Router::new().ws("/ws/rooms/{id}", NoopHandler);
-    let m = router.match_ws("/ws/rooms/42").expect("matches with params");
+    let m = router
+        .match_ws("/ws/rooms/42")
+        .expect("matches with params");
     let params = m.params();
     assert_eq!(
         params.get("id").map(String::as_str),

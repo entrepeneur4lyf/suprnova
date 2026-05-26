@@ -36,7 +36,7 @@
 //!   even when Video has the same parent PK as Post.
 
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, model, AggregateKind, Model};
+use suprnova::{AggregateKind, Model, attrs, model};
 
 // Comment.commentable is polymorphic — points at MorphPost OR
 // MorphVideo. The relation lives on the morph-table side.
@@ -327,10 +327,12 @@ async fn morph_many_eager_load() {
     assert_eq!(posts.len(), 2);
     let p1_loaded = posts.iter().find(|p| p.id == p1.id).unwrap();
     assert_eq!(p1_loaded.comments_loaded().len(), 2);
-    assert!(p1_loaded
-        .comments_loaded()
-        .iter()
-        .all(|c| c.commentable_type == "post"));
+    assert!(
+        p1_loaded
+            .comments_loaded()
+            .iter()
+            .all(|c| c.commentable_type == "post")
+    );
     let p2_loaded = posts.iter().find(|p| p.id == p2.id).unwrap();
     assert_eq!(p2_loaded.comments_loaded().len(), 1);
 }
@@ -407,8 +409,13 @@ async fn morph_many_count_filters_by_morph_type() {
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
     let p1 = MorphPost::create(attrs! { title: "post1" }).await.unwrap();
-    let v1 = MorphVideo::create(attrs! { url: "vid1.mp4" }).await.unwrap();
-    assert_eq!(p1.id, v1.id, "test relies on collision of PKs across families");
+    let v1 = MorphVideo::create(attrs! { url: "vid1.mp4" })
+        .await
+        .unwrap();
+    assert_eq!(
+        p1.id, v1.id,
+        "test relies on collision of PKs across families"
+    );
     let _ = MorphComment::create(attrs! {
         commentable_id: p1.id,
         commentable_type: "post",
@@ -447,7 +454,9 @@ async fn morph_many_aggregate_via_server_side_group_by() {
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
     let p1 = MorphPost::create(attrs! { title: "p1" }).await.unwrap();
-    let v1 = MorphVideo::create(attrs! { url: "vid1.mp4" }).await.unwrap();
+    let v1 = MorphVideo::create(attrs! { url: "vid1.mp4" })
+        .await
+        .unwrap();
     assert_eq!(p1.id, v1.id);
     // Two post comments with views = 5 + 10. Sum = 15.
     _db.execute_unprepared(&format!(

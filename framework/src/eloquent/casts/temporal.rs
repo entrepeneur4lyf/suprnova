@@ -70,10 +70,7 @@ impl DynCast for AsDateDyn {
         Ok(serde_json::to_value(d).expect("NaiveDate serialises"))
     }
 
-    fn to_storage_json(
-        &self,
-        v: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameworkError> {
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
         Ok(v.clone())
     }
 }
@@ -125,10 +122,7 @@ impl DynCast for AsDateTimeDyn {
         Ok(serde_json::to_value(dt).expect("DateTime<Utc> serialises"))
     }
 
-    fn to_storage_json(
-        &self,
-        v: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameworkError> {
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
         Ok(v.clone())
     }
 }
@@ -246,10 +240,7 @@ impl DynCast for AsOptionalDateTimeDyn {
         }
     }
 
-    fn to_storage_json(
-        &self,
-        v: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameworkError> {
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
         Ok(v.clone())
     }
 }
@@ -290,10 +281,7 @@ impl DynCast for AsTimestampDyn {
         Ok(v.clone())
     }
 
-    fn to_storage_json(
-        &self,
-        v: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameworkError> {
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
         Ok(v.clone())
     }
 }

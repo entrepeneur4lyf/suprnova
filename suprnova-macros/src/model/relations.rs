@@ -26,7 +26,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::Result;
 
-use super::parse::{to_snake, ModelInput, RelationDecl, RelationKindAttr, RelationOpt};
+use super::parse::{ModelInput, RelationDecl, RelationKindAttr, RelationOpt, to_snake};
 
 /// Top-level entry point. Emits every relation-related artifact for
 /// the model (dispatchers + accessors + inventory submissions + the
@@ -1121,9 +1121,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             // pivot_related_key default: <snake(target_struct_name)>_id.
             let pivot_related = pivot_related_override(rel)
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    format!("{}_id", to_snake(&last_segment_name(target_ty)))
-                });
+                .unwrap_or_else(|| format!("{}_id", to_snake(&last_segment_name(target_ty))));
             // pivot_table: either the user-supplied literal, or — at
             // runtime — `<P as EloquentModel>::TABLE` so the pivot
             // struct's own `#[suprnova::model(table = "...")]` declaration
@@ -1228,9 +1226,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             // intermediate.
             let second_key = second_key_override(rel)
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    format!("{}_id", to_snake(&last_segment_name(through_ty)))
-                });
+                .unwrap_or_else(|| format!("{}_id", to_snake(&last_segment_name(through_ty))));
             // Local key (parent's PK column name). Defaults to the
             // model's declared primary_key. Honoured via the runtime
             // `.local_key(...)` setter so the metadata stays on the
@@ -1321,9 +1317,8 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                 RelationKindAttr::MorphOne => "MorphOne",
                 _ => unreachable!("guarded by outer match arm"),
             };
-            let doc_str = format!(
-                "Construct a `{doc_kind}` polymorphic relation builder for this row."
-            );
+            let doc_str =
+                format!("Construct a `{doc_kind}` polymorphic relation builder for this row.");
             Ok(quote! {
                 impl #struct_ident {
                     #[doc = #doc_str]
@@ -1593,9 +1588,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             // pivot_related_key default: <snake(target_struct)>_id.
             let pivot_related = pivot_related_override(rel)
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    format!("{}_id", to_snake(&last_segment_name(target_ty)))
-                });
+                .unwrap_or_else(|| format!("{}_id", to_snake(&last_segment_name(target_ty))));
             // pivot_table: user-supplied literal or `<P as
             // EloquentModel>::TABLE` at runtime.
             let pivot_table_expr: TokenStream = match pivot_table_override(rel) {
@@ -1680,14 +1673,13 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             })?;
 
             let morph_name = morph_name_or_default(rel);
-            let target_morph_type =
-                target_morph_type_override(rel).ok_or_else(|| {
-                    syn::Error::new_spanned(
-                        method_ident,
-                        "MorphedByMany requires `target_morph_type = \"...\"` \
+            let target_morph_type = target_morph_type_override(rel).ok_or_else(|| {
+                syn::Error::new_spanned(
+                    method_ident,
+                    "MorphedByMany requires `target_morph_type = \"...\"` \
                          (parse-time validation should reject this earlier)",
-                    )
-                })?;
+                )
+            })?;
             // pivot_foreign_key (pivot column → L=Tag): <snake(parent_struct)>_id.
             let pivot_fk = pivot_fk_override(rel)
                 .map(|s| s.to_string())
@@ -2074,9 +2066,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 .unwrap_or_else(|| format!("{}_id", to_snake(&parent_name)));
             let pivot_related = pivot_related_override(rel)
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    format!("{}_id", to_snake(&last_segment_name(target_ty)))
-                });
+                .unwrap_or_else(|| format!("{}_id", to_snake(&last_segment_name(target_ty))));
             // Two-query strategy:
             //
             // 1. Fetch all pivot rows whose FK points at any of the
@@ -2258,9 +2248,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 .unwrap_or_else(|| format!("{}_id", to_snake(&parent_name)));
             let second_key = second_key_override(rel)
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    format!("{}_id", to_snake(&last_segment_name(through_ty)))
-                });
+                .unwrap_or_else(|| format!("{}_id", to_snake(&last_segment_name(through_ty))));
             // Column on B matched by `second_key`. Defaults to "id";
             // overridable for intermediates declaring a non-`id` PK
             // via `second_local_key = "..."`. Query 1 below `SELECT`s
@@ -2619,9 +2607,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             let type_col = format!("{morph_name}_type");
             let pivot_related = pivot_related_override(rel)
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    format!("{}_id", to_snake(&last_segment_name(target_ty)))
-                });
+                .unwrap_or_else(|| format!("{}_id", to_snake(&last_segment_name(target_ty))));
             // Predicate extractor — `with_where` applies to the
             // RELATED-table query (Step 2), mirroring BelongsToMany.
             let pred_extractor = emit_predicate_extractor(target_ty);
@@ -2771,14 +2757,13 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 )
             })?;
             let morph_name = morph_name_or_default(rel);
-            let target_morph_type =
-                target_morph_type_override(rel).ok_or_else(|| {
-                    syn::Error::new_spanned(
-                        &rel.name,
-                        "MorphedByMany requires `target_morph_type = \"...\"` \
+            let target_morph_type = target_morph_type_override(rel).ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &rel.name,
+                    "MorphedByMany requires `target_morph_type = \"...\"` \
                          (parse-time validation should reject this earlier)",
-                    )
-                })?;
+                )
+            })?;
             let id_col = format!("{morph_name}_id");
             let type_col = format!("{morph_name}_type");
             let pivot_fk = pivot_fk_override(rel)
@@ -3376,9 +3361,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 .unwrap_or_else(|| format!("{}_id", to_snake(&parent_name)));
             let second_key = second_key_override(rel)
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    format!("{}_id", to_snake(&last_segment_name(through_ty)))
-                });
+                .unwrap_or_else(|| format!("{}_id", to_snake(&last_segment_name(through_ty))));
             // JOIN-target column on B. Defaults to `"id"`; overridable
             // via `second_local_key = "..."` for intermediates with a
             // non-`id` PK.
@@ -3778,14 +3761,13 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 )
             })?;
             let morph_name = morph_name_or_default(rel);
-            let target_morph_type =
-                target_morph_type_override(rel).ok_or_else(|| {
-                    syn::Error::new_spanned(
-                        &rel.name,
-                        "MorphedByMany requires `target_morph_type = \"...\"` \
+            let target_morph_type = target_morph_type_override(rel).ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &rel.name,
+                    "MorphedByMany requires `target_morph_type = \"...\"` \
                          (parse-time validation should reject this earlier)",
-                    )
-                })?;
+                )
+            })?;
             let type_col = format!("{morph_name}_type");
             let pivot_fk = pivot_fk_override(rel)
                 .map(|s| s.to_string())
@@ -4369,9 +4351,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                 .unwrap_or_else(|| format!("{}_id", to_snake(&parent_name)));
             let pivot_related = pivot_related_override(rel)
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    format!("{}_id", to_snake(&last_segment_name(target_ty)))
-                });
+                .unwrap_or_else(|| format!("{}_id", to_snake(&last_segment_name(target_ty))));
             // Related-side PK column. Defaults to `"id"`. When the user
             // declares `related_key = "uuid"` on the relation, the JOIN
             // reads `__sn_r.uuid = __sn_p.{rk}` instead of the broken
@@ -4579,9 +4559,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                 .unwrap_or_else(|| format!("{}_id", to_snake(&parent_name)));
             let second_key = second_key_override(rel)
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    format!("{}_id", to_snake(&last_segment_name(through_ty)))
-                });
+                .unwrap_or_else(|| format!("{}_id", to_snake(&last_segment_name(through_ty))));
             // JOIN-target column on B. Defaults to `"id"`; overridable
             // via `second_local_key = "..."` for intermediates with a
             // non-`id` PK.
@@ -4963,9 +4941,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
             let type_col = format!("{morph_name}_type");
             let pivot_related = pivot_related_override(rel)
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    format!("{}_id", to_snake(&last_segment_name(target_ty)))
-                });
+                .unwrap_or_else(|| format!("{}_id", to_snake(&last_segment_name(target_ty))));
             let related_pk = related_key_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "id".to_string());
@@ -5165,14 +5141,13 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                 )
             })?;
             let morph_name = morph_name_or_default(rel);
-            let target_morph_type =
-                target_morph_type_override(rel).ok_or_else(|| {
-                    syn::Error::new_spanned(
-                        &rel.name,
-                        "MorphedByMany requires `target_morph_type = \"...\"` \
+            let target_morph_type = target_morph_type_override(rel).ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &rel.name,
+                    "MorphedByMany requires `target_morph_type = \"...\"` \
                          (parse-time validation should reject this earlier)",
-                    )
-                })?;
+                )
+            })?;
             let id_col = format!("{morph_name}_id");
             let type_col = format!("{morph_name}_type");
             let pivot_fk = pivot_fk_override(rel)

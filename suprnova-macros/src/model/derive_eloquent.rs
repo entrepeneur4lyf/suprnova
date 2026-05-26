@@ -148,13 +148,16 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     // declare both a mutator and a cast; the mutator transforms the
     // runtime value, the cast handles the storage shape.
     let mutators_list = &input.mutators;
-    let apply_arms = field_idents.iter().zip(field_strs.iter()).map(|(ident, name)| {
-        if mutators_list.iter().any(|m| m == name) {
-            casts::mutator_apply_arm(name, ident, input.cast_for_field(name))
-        } else {
-            casts::apply_arm(name, ident, input.cast_for_field(name))
-        }
-    });
+    let apply_arms = field_idents
+        .iter()
+        .zip(field_strs.iter())
+        .map(|(ident, name)| {
+            if mutators_list.iter().any(|m| m == name) {
+                casts::mutator_apply_arm(name, ident, input.cast_for_field(name))
+            } else {
+                casts::apply_arm(name, ident, input.cast_for_field(name))
+            }
+        });
 
     let replicate_arms = field_idents
         .iter()
@@ -211,13 +214,14 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     // inner Model's Storage-typed field matches what `derive_seaorm`
     // emitted. Without this the ActiveModel write would type-check
     // against the user's Runtime type and miscompile.
-    let active_model_for_update_arms = field_idents
-        .iter()
-        .zip(field_strs.iter())
-        .map(|(ident, name)| {
-            let is_pk = name == pk_name;
-            casts::active_model_update_stmt(ident, is_pk, input.cast_for_field(name))
-        });
+    let active_model_for_update_arms =
+        field_idents
+            .iter()
+            .zip(field_strs.iter())
+            .map(|(ident, name)| {
+                let is_pk = name == pk_name;
+                casts::active_model_update_stmt(ident, is_pk, input.cast_for_field(name))
+            });
 
     // T7a — read-direction arm for `From<inner::Model> for UserStruct`.
     // Cast fields call `Cast::from_storage` to inflate the storage
@@ -249,8 +253,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     let visible_slice_opt: Option<&[String]> = input.visible.as_deref();
     let to_array_override =
         serialization::emit_to_array_override(&input.hidden, visible_slice_opt, &input.appends);
-    let append_accessor_dispatch =
-        serialization::emit_append_accessor_dispatch(&input.appends);
+    let append_accessor_dispatch = serialization::emit_append_accessor_dispatch(&input.appends);
 
     // T8 — `fill` body arms. Mutator-routed fields call
     // `self.set_<field>(value.clone())?`; non-mutator fields

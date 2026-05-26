@@ -351,13 +351,16 @@ impl OAuthAuth {
         match expected_state.as_deref() {
             None => {
                 return Err(FrameworkError::Domain {
-                    message: "OAuth state missing from session — flow not initiated or session expired".to_string(),
+                    message:
+                        "OAuth state missing from session — flow not initiated or session expired"
+                            .to_string(),
                     status_code: 400,
                 });
             }
             Some(expected) if expected != state => {
                 return Err(FrameworkError::Domain {
-                    message: "OAuth state mismatch — possible CSRF attack or expired flow".to_string(),
+                    message: "OAuth state mismatch — possible CSRF attack or expired flow"
+                        .to_string(),
                     status_code: 400,
                 });
             }
@@ -371,15 +374,15 @@ impl OAuthAuth {
         // (rows_affected == 1) and gets the payload; the other gets
         // `None` and rejects. ChatGPT audit `torii_integration` HIGH
         // #3 — replay race impossible by construction.
-        let payload: OAuthCeremonyPayload = super::ceremony::consume(
-            state,
-            super::ceremony::kind::OAUTH,
-        )
-        .await?
-        .ok_or_else(|| FrameworkError::Domain {
-            message: "OAuth state already consumed or expired — replay attempt or stale flow".to_string(),
-            status_code: 400,
-        })?;
+        let payload: OAuthCeremonyPayload =
+            super::ceremony::consume(state, super::ceremony::kind::OAUTH)
+                .await?
+                .ok_or_else(|| FrameworkError::Domain {
+                    message:
+                        "OAuth state already consumed or expired — replay attempt or stale flow"
+                            .to_string(),
+                    status_code: 400,
+                })?;
 
         // Best-effort clear the session pointer. The atomic consume
         // above is the single-use authority; this is janitorial.
@@ -441,20 +444,19 @@ impl OAuthAuth {
                 502
             };
             return Err(FrameworkError::Domain {
-                message: format!(
-                    "oauth token endpoint returned {provider_status}: {body}"
-                ),
+                message: format!("oauth token endpoint returned {provider_status}: {body}"),
                 status_code: outbound_status,
             });
         }
 
-        let token_data: TokenResponse = token_resp
-            .json()
-            .await
-            .map_err(|e| FrameworkError::Domain {
-                message: format!("oauth token response parse failed: {e}"),
-                status_code: 502,
-            })?;
+        let token_data: TokenResponse =
+            token_resp
+                .json()
+                .await
+                .map_err(|e| FrameworkError::Domain {
+                    message: format!("oauth token response parse failed: {e}"),
+                    status_code: 502,
+                })?;
 
         // Fetch the user's profile from the provider.
         let userinfo_resp = client
@@ -477,20 +479,19 @@ impl OAuthAuth {
                 502
             };
             return Err(FrameworkError::Domain {
-                message: format!(
-                    "oauth userinfo endpoint returned {provider_status}: {body}"
-                ),
+                message: format!("oauth userinfo endpoint returned {provider_status}: {body}"),
                 status_code: outbound_status,
             });
         }
 
-        let profile: ProviderProfile = userinfo_resp
-            .json()
-            .await
-            .map_err(|e| FrameworkError::Domain {
-                message: format!("oauth userinfo response parse failed: {e}"),
-                status_code: 502,
-            })?;
+        let profile: ProviderProfile =
+            userinfo_resp
+                .json()
+                .await
+                .map_err(|e| FrameworkError::Domain {
+                    message: format!("oauth userinfo response parse failed: {e}"),
+                    status_code: 502,
+                })?;
 
         // Resolve a stable provider-side identifier. If the provider
         // sent neither `sub` nor `id`, we cannot safely attribute the
@@ -520,12 +521,7 @@ impl OAuthAuth {
         // status code from `FrameworkError::internal` is correct.
         let user = torii
             .oauth()
-            .get_or_create_user(
-                &self.provider,
-                &provider_id,
-                &email,
-                profile.name.clone(),
-            )
+            .get_or_create_user(&self.provider, &provider_id, &email, profile.name.clone())
             .await
             .map_err(|e| FrameworkError::internal(format!("oauth get_or_create_user: {e}")))?;
 
@@ -556,7 +552,10 @@ impl OAuthAuth {
     /// Resolve endpoints for this provider given an already-fetched
     /// config. If the config supplies `endpoints_override`, those win;
     /// otherwise we look up the well-known endpoints table.
-    fn endpoints_for(&self, config: &OAuthProviderConfig) -> Result<ProviderEndpoints, FrameworkError> {
+    fn endpoints_for(
+        &self,
+        config: &OAuthProviderConfig,
+    ) -> Result<ProviderEndpoints, FrameworkError> {
         if let Some(override_) = &config.endpoints_override {
             return Ok(ProviderEndpoints {
                 authorize: override_.authorize.clone(),

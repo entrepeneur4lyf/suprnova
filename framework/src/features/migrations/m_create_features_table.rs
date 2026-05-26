@@ -64,22 +64,14 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(
-                        ColumnDef::new(Features::Name)
-                            .string_len(255)
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(Features::Name).string_len(255).not_null())
                     .col(
                         ColumnDef::new(Features::ScopeKey)
                             .string_len(255)
                             .not_null()
                             .default(""),
                     )
-                    .col(
-                        ColumnDef::new(Features::Enabled)
-                            .boolean()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(Features::Enabled).boolean().not_null())
                     .col(ColumnDef::new(Features::Description).text().null())
                     .col(ColumnDef::new(Features::UpdatedBy).string_len(255).null())
                     .col(

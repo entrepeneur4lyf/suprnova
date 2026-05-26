@@ -20,7 +20,7 @@
 
 use chrono::{DateTime, Utc};
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, model, Model, Touchable};
+use suprnova::{Model, Touchable, attrs, model};
 
 // ---- Models ------------------------------------------------------------
 
@@ -184,7 +184,10 @@ async fn touch_bumps_updated_at_without_other_changes() {
         reread.created_at, original_created,
         "touch() must NOT touch created_at"
     );
-    assert_eq!(reread.name, "Alice", "touch() must NOT change other columns");
+    assert_eq!(
+        reread.name, "Alice",
+        "touch() must NOT change other columns"
+    );
 }
 
 #[tokio::test]

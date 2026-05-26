@@ -60,9 +60,9 @@
 //! [`Model::save`]: crate::eloquent::Model::save
 //! [`Model::delete`]: crate::eloquent::Model::delete
 
+use crate::FrameworkError;
 use crate::database::config::DatabaseConfig;
 use crate::database::connection::DbConnection;
-use crate::FrameworkError;
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 
@@ -132,9 +132,9 @@ impl ConnectionRegistry {
     /// `Internal` error if the registry lock is poisoned.
     pub async fn get(name: &str) -> Result<DbConnection, FrameworkError> {
         let r = crate::lock::read(reg())?;
-        r.get(name).cloned().ok_or_else(|| {
-            FrameworkError::database(format!("connection '{name}' not registered"))
-        })
+        r.get(name)
+            .cloned()
+            .ok_or_else(|| FrameworkError::database(format!("connection '{name}' not registered")))
     }
 
     /// Whether `name` is registered. Used by the read-replica auto-
@@ -210,7 +210,9 @@ mod tests {
         // need for a follow-up `is_closed` check (the prior call to
         // that method was a tautology — it hardcoded `false`. See the
         // Domain 6 audit D6-3 note in `database/connection.rs`).
-        let _conn = ConnectionRegistry::get("unit_test_round_trip").await.unwrap();
+        let _conn = ConnectionRegistry::get("unit_test_round_trip")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

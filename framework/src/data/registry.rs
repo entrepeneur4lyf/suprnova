@@ -79,8 +79,7 @@ fn ensure_initialized() {
 /// will register a "ghost" entry that no real lookup will ever hit.
 pub fn register(struct_name: &'static str, fields: &'static [&'static str]) {
     ensure_initialized();
-    let mut map = lock::write(&REGISTRY)
-        .expect("data::registry REGISTRY write lock poisoned");
+    let mut map = lock::write(&REGISTRY).expect("data::registry REGISTRY write lock poisoned");
     map.insert(struct_name, fields.to_vec());
 }
 

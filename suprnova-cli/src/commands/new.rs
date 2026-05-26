@@ -566,18 +566,9 @@ mod tests {
     #[test]
     fn rejects_path_separators_and_traversal() {
         for bad in [
-            "../etc",
-            "foo/bar",
-            "foo\\bar",
-            "..",
-            "..foo",
-            "foo/..",
-            ".hidden",
+            "../etc", "foo/bar", "foo\\bar", "..", "..foo", "foo/..", ".hidden",
         ] {
-            assert!(
-                validate_project_name(bad).is_err(),
-                "should reject: {bad}"
-            );
+            assert!(validate_project_name(bad).is_err(), "should reject: {bad}");
         }
     }
 
@@ -594,18 +585,9 @@ mod tests {
     #[test]
     fn rejects_disallowed_characters() {
         for bad in [
-            "foo bar",
-            "foo!bar",
-            "foo@bar",
-            "foo.bar",
-            "foo:bar",
-            "foo;bar",
-            "foo`bar",
+            "foo bar", "foo!bar", "foo@bar", "foo.bar", "foo:bar", "foo;bar", "foo`bar",
         ] {
-            assert!(
-                validate_project_name(bad).is_err(),
-                "should reject: {bad}"
-            );
+            assert!(validate_project_name(bad).is_err(), "should reject: {bad}");
         }
     }
 

@@ -31,10 +31,8 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use suprnova::http::text;
-use suprnova::{
-    handle_request, MiddlewareRegistry, Request, Response, Router,
-};
 use suprnova::{Middleware, Next};
+use suprnova::{MiddlewareRegistry, Request, Response, Router, handle_request};
 
 /// Test middleware that records every request that passes through
 /// it under a stable tag. The handlers in these tests do NOT push to
@@ -80,9 +78,7 @@ async fn spawn_server(router: impl Into<Router>, accepts: usize) -> SocketAddr {
                 let svc = service_fn(move |req: hyper::Request<Incoming>| {
                     let router = router.clone();
                     let middleware = middleware.clone();
-                    async move {
-                        Ok::<_, Infallible>(handle_request(router, middleware, req).await)
-                    }
+                    async move { Ok::<_, Infallible>(handle_request(router, middleware, req).await) }
                 });
                 let _ = hyper::server::conn::http1::Builder::new()
                     .serve_connection(io, svc)
@@ -104,10 +100,9 @@ async fn send_request(
 ) -> (hyper::http::StatusCode, Bytes) {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let io = TokioIo::new(stream);
-    let (mut sender, conn) =
-        hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
-            .await
-            .unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
+        .await
+        .unwrap();
     tokio::spawn(async move {
         let _ = conn.await;
     });
@@ -217,8 +212,8 @@ async fn group_middleware_does_not_leak_to_sibling_routes_outside_group() {
     let tracker = group_calls.clone();
 
     // Public GET registered first, outside any group.
-    let router = get!("/api/posts", |_req: Request| async { text("listed") })
-        .register(Router::new());
+    let router =
+        get!("/api/posts", |_req: Request| async { text("listed") }).register(Router::new());
 
     // Auth-gated POST registered inside a group whose middleware
     // applies only to routes within it.

@@ -125,9 +125,8 @@ pub fn register_service_bindings() -> Result<(), FrameworkError> {
 pub fn register_singletons() -> Result<(), FrameworkError> {
     // Snapshot inventory into an owned vec so we can drain it across
     // multiple passes without reborrowing the iterator each round.
-    let mut pending: Vec<&'static SingletonEntry> = inventory::iter::<SingletonEntry>
-        .into_iter()
-        .collect();
+    let mut pending: Vec<&'static SingletonEntry> =
+        inventory::iter::<SingletonEntry>.into_iter().collect();
 
     if pending.is_empty() {
         return Ok(());

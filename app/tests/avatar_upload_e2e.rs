@@ -35,10 +35,10 @@ use hyper_util::rt::TokioIo;
 use sea_orm_migration::MigratorTrait;
 use suprnova::http::cookie::Cookie;
 use suprnova::session::driver::database::DatabaseSessionDriver;
-use suprnova::session::{generate_csrf_token, generate_session_id, SessionData, SessionStore};
+use suprnova::session::{SessionData, SessionStore, generate_csrf_token, generate_session_id};
 use suprnova::{
-    attrs, bind, group, handle_request, post, AuthMiddleware, EncryptionKey, MiddlewareRegistry,
-    Model, Router, SessionConfig, SessionMiddleware, Storage, UserProvider,
+    AuthMiddleware, EncryptionKey, MiddlewareRegistry, Model, Router, SessionConfig,
+    SessionMiddleware, Storage, UserProvider, attrs, bind, group, handle_request, post,
 };
 use tokio::sync::Mutex;
 
@@ -142,8 +142,7 @@ async fn setup_app() -> TestApp {
     let session_config = SessionConfig::default().secure(false);
     let session_store: Arc<DatabaseSessionDriver> =
         Arc::new(DatabaseSessionDriver::new(session_config.lifetime));
-    let session_middleware =
-        SessionMiddleware::with_store(session_config, session_store.clone());
+    let session_middleware = SessionMiddleware::with_store(session_config, session_store.clone());
 
     let router = Arc::new(build_router());
     let middleware = Arc::new(MiddlewareRegistry::new().append(session_middleware));
@@ -169,11 +168,7 @@ async fn setup_app() -> TestApp {
                 let svc = service_fn(move |req: hyper::Request<Incoming>| {
                     let router = router.clone();
                     let middleware = middleware.clone();
-                    async move {
-                        Ok::<_, Infallible>(
-                            handle_request(router, middleware, req).await,
-                        )
-                    }
+                    async move { Ok::<_, Infallible>(handle_request(router, middleware, req).await) }
                 });
                 let _ = hyper::server::conn::http1::Builder::new()
                     .serve_connection(io, svc)
@@ -274,10 +269,9 @@ async fn post_avatar(
 ) -> (hyper::http::StatusCode, hyper::HeaderMap, Bytes) {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let io = TokioIo::new(stream);
-    let (mut sender, conn) =
-        hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
-            .await
-            .unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
+        .await
+        .unwrap();
     tokio::spawn(async move {
         let _ = conn.await;
     });
@@ -322,8 +316,7 @@ async fn avatar_upload_stores_file_on_public_disk() {
         ],
     );
 
-    let (status, _headers, body) =
-        post_avatar(app.addr, body, "x", Some(&session_cookie)).await;
+    let (status, _headers, body) = post_avatar(app.addr, body, "x", Some(&session_cookie)).await;
     assert_eq!(status.as_u16(), 200, "upload should succeed");
 
     let json: serde_json::Value =
@@ -351,8 +344,7 @@ async fn avatar_upload_rejects_non_image() {
     let pdf = b"%PDF-1.4 lorem ipsum dolor sit amet".to_vec();
     let body = build_multipart_body("x", &[("avatar", Some("not.pdf"), &pdf)]);
 
-    let (status, _headers, _body) =
-        post_avatar(app.addr, body, "x", Some(&session_cookie)).await;
+    let (status, _headers, _body) = post_avatar(app.addr, body, "x", Some(&session_cookie)).await;
     assert_eq!(
         status.as_u16(),
         422,
@@ -375,4 +367,3 @@ async fn avatar_upload_requires_authentication() {
         "unauthenticated upload should be rejected by AuthMiddleware"
     );
 }
-

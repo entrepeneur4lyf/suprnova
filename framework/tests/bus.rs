@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
+use serial_test::serial;
 use std::sync::atomic::{AtomicI64, Ordering};
-use suprnova::bus::{Bus, Dispatched};
 use suprnova::bus::command::{Command, Handler};
 use suprnova::bus::testing::{assert_dispatched, install_fake};
-use suprnova::{async_trait, FrameworkError};
-use serial_test::serial;
+use suprnova::bus::{Bus, Dispatched};
+use suprnova::{FrameworkError, async_trait};
 
 static TOTAL: AtomicI64 = AtomicI64::new(0);
 
@@ -47,11 +47,7 @@ async fn bus_dispatch_runs_handler_inline() {
 async fn bus_chain_runs_sequentially_until_first_error() {
     TOTAL.store(0, Ordering::SeqCst);
     Bus::register::<AddCommand, _>(AddHandler);
-    let results = Bus::chain(vec![
-        AddCommand { a: 1, b: 1 },
-        AddCommand { a: 2, b: 2 },
-    ])
-    .await;
+    let results = Bus::chain(vec![AddCommand { a: 1, b: 1 }, AddCommand { a: 2, b: 2 }]).await;
     let outputs: Vec<i64> = results
         .into_iter()
         .filter_map(|r| r.ok().and_then(|d| d.executed()))

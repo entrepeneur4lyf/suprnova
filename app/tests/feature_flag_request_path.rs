@@ -39,11 +39,11 @@ use sea_orm_migration::MigratorTrait;
 use suprnova::container::App;
 use suprnova::features::sync::FeatureSync;
 use suprnova::features::{
-    admin, install_evaluator, CachedEvaluator, CompositeFeatureSync, DatabaseEvaluator,
-    FeatureMiddleware,
+    CachedEvaluator, CompositeFeatureSync, DatabaseEvaluator, FeatureMiddleware, admin,
+    install_evaluator,
 };
 use suprnova::http::text;
-use suprnova::{get, handle_request, routes, DbConnection, MiddlewareRegistry, Request, Response};
+use suprnova::{DbConnection, MiddlewareRegistry, Request, Response, get, handle_request, routes};
 use tokio::sync::Mutex;
 
 use app::features::NEW_CHECKOUT_FLOW;
@@ -150,9 +150,7 @@ async fn setup_app() -> TestApp {
                 let svc = service_fn(move |req: hyper::Request<Incoming>| {
                     let router = router.clone();
                     let middleware = middleware.clone();
-                    async move {
-                        Ok::<_, Infallible>(handle_request(router, middleware, req).await)
-                    }
+                    async move { Ok::<_, Infallible>(handle_request(router, middleware, req).await) }
                 });
                 let _ = hyper::server::conn::http1::Builder::new()
                     .serve_connection(io, svc)
@@ -168,10 +166,9 @@ async fn setup_app() -> TestApp {
 async fn get_flag_body(addr: SocketAddr) -> String {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let io = TokioIo::new(stream);
-    let (mut sender, conn) =
-        hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
-            .await
-            .unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
+        .await
+        .unwrap();
     tokio::spawn(async move {
         let _ = conn.await;
     });

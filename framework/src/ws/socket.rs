@@ -8,15 +8,15 @@
 
 use crate::error::FrameworkError;
 use futures_util::{SinkExt, StreamExt};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::{
-    protocol::{frame::coding::CloseCode, CloseFrame},
-    Message,
-};
 use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::{
+    Message,
+    protocol::{CloseFrame, frame::coding::CloseCode},
+};
 
 /// Channel depth between handler/heartbeat senders and the forwarder
 /// task. 32 is comfortably above the typical interleave (1 ping + a
@@ -47,10 +47,7 @@ enum Outbound {
 /// in the public API. We box the stream behind a trait object that
 /// exposes only `next()`.
 type ReceiverHalf = std::pin::Pin<
-    Box<
-        dyn futures_util::Stream<Item = tokio_tungstenite::tungstenite::Result<Message>>
-            + Send,
-    >,
+    Box<dyn futures_util::Stream<Item = tokio_tungstenite::tungstenite::Result<Message>> + Send>,
 >;
 
 impl WsSocket {

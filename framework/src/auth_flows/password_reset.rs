@@ -41,7 +41,7 @@
 use crate::auth_flows::mail::{PasswordChangedMail, PasswordResetMail};
 use crate::error::FrameworkError;
 use crate::mail::Mail;
-use crate::torii_integration::{instance, User};
+use crate::torii_integration::{User, instance};
 
 /// Facade for password-reset token operations.
 ///

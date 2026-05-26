@@ -55,9 +55,8 @@ fn when_loaded_helper_returns_lazy_when_relation_loaded() {
     };
     entity.relations_loaded.insert("songs".into());
 
-    let prop: Prop = suprnova::when_loaded!(&entity, "songs", || async {
-        serde_json::json!(["s1"])
-    });
+    let prop: Prop =
+        suprnova::when_loaded!(&entity, "songs", || async { serde_json::json!(["s1"]) });
     assert!(matches!(prop, Prop::Lazy(_)));
 }
 
@@ -66,8 +65,7 @@ fn when_loaded_helper_returns_eager_none_when_relation_unloaded() {
     let entity = FakeEntity {
         relations_loaded: Default::default(),
     };
-    let prop: Prop = suprnova::when_loaded!(&entity, "songs", || async {
-        serde_json::json!(["s1"])
-    });
+    let prop: Prop =
+        suprnova::when_loaded!(&entity, "songs", || async { serde_json::json!(["s1"]) });
     assert!(matches!(prop, Prop::EagerNone));
 }

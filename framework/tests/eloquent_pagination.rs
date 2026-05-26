@@ -20,7 +20,7 @@
 use chrono::{DateTime, Utc};
 use suprnova::context::Context;
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, model, CursorPaginator, LengthAwarePaginator, Model, Paginator};
+use suprnova::{CursorPaginator, LengthAwarePaginator, Model, Paginator, attrs, model};
 
 // ---- Fixture -----------------------------------------------------------
 
@@ -72,8 +72,7 @@ async fn fixture(n: usize) -> TestDatabase {
 #[tokio::test]
 async fn length_aware_paginate_includes_total() {
     let _db = fixture(25).await;
-    let page: LengthAwarePaginator<T7Article> =
-        T7Article::query().paginate(10).await.unwrap();
+    let page: LengthAwarePaginator<T7Article> = T7Article::query().paginate(10).await.unwrap();
 
     assert_eq!(page.data.len(), 10);
     assert_eq!(page.total, 25);
@@ -108,8 +107,7 @@ async fn length_aware_paginate_zero_per_page_errors() {
 #[tokio::test]
 async fn length_aware_paginate_empty_table_yields_no_window() {
     let _db = fixture(0).await;
-    let page: LengthAwarePaginator<T7Article> =
-        T7Article::query().paginate(10).await.unwrap();
+    let page: LengthAwarePaginator<T7Article> = T7Article::query().paginate(10).await.unwrap();
     assert_eq!(page.total, 0);
     assert_eq!(page.last_page, 0);
     assert_eq!(page.data.len(), 0);
@@ -152,10 +150,8 @@ async fn paginate_using_custom_param_reads_request_query() {
     let _db = fixture(25).await;
     Context::test_set_query("p", "2");
 
-    let page: LengthAwarePaginator<T7Article> = T7Article::query()
-        .paginate_using("p", 10)
-        .await
-        .unwrap();
+    let page: LengthAwarePaginator<T7Article> =
+        T7Article::query().paginate_using("p", 10).await.unwrap();
 
     assert_eq!(page.current_page, 2);
     assert_eq!(page.data.len(), 10);
@@ -195,10 +191,7 @@ async fn paginate_using_does_not_react_to_default_page_param() {
     let _db = fixture(25).await;
     Context::test_set_query("page", "2");
 
-    let page = T7Article::query()
-        .paginate_using("p", 10)
-        .await
-        .unwrap();
+    let page = T7Article::query().paginate_using("p", 10).await.unwrap();
 
     // `?p` is missing, so current_page falls back to 1 — proving the
     // custom param plumbing is wired correctly.
@@ -250,8 +243,7 @@ async fn cursor_paginate_threads_next_cursor() {
     let _db = fixture(25).await;
     Context::test_clear_query();
 
-    let page1: CursorPaginator<T7Article> =
-        T7Article::query().cursor_paginate(10).await.unwrap();
+    let page1: CursorPaginator<T7Article> = T7Article::query().cursor_paginate(10).await.unwrap();
     assert_eq!(page1.data.len(), 10);
     assert_eq!(page1.per_page, 10);
     assert!(page1.next_cursor.is_some());
@@ -260,8 +252,7 @@ async fn cursor_paginate_threads_next_cursor() {
     let cursor = page1.next_cursor.clone().unwrap();
     Context::test_set_query("cursor", &cursor);
 
-    let page2: CursorPaginator<T7Article> =
-        T7Article::query().cursor_paginate(10).await.unwrap();
+    let page2: CursorPaginator<T7Article> = T7Article::query().cursor_paginate(10).await.unwrap();
     assert_eq!(page2.data.len(), 10);
     assert!(page2.next_cursor.is_some());
     // Page 2 starts at the row strictly greater than page 1's last id.
@@ -282,8 +273,7 @@ async fn cursor_paginate_last_page_has_no_next_cursor() {
     assert!(page1.next_cursor.is_some());
     Context::test_set_query("cursor", page1.next_cursor.as_ref().unwrap());
 
-    let page2: CursorPaginator<T7Article> =
-        T7Article::query().cursor_paginate(10).await.unwrap();
+    let page2: CursorPaginator<T7Article> = T7Article::query().cursor_paginate(10).await.unwrap();
     assert_eq!(page2.data.len(), 5);
     assert!(page2.next_cursor.is_none());
 
@@ -318,8 +308,7 @@ async fn cursor_paginate_invalid_cursor_errors() {
 #[tokio::test]
 async fn length_aware_serializes_to_laravel_shape() {
     let _db = fixture(25).await;
-    let page: LengthAwarePaginator<T7Article> =
-        T7Article::query().paginate(10).await.unwrap();
+    let page: LengthAwarePaginator<T7Article> = T7Article::query().paginate(10).await.unwrap();
 
     let json = serde_json::to_value(&page).unwrap();
     let m = json.as_object().unwrap();
@@ -354,8 +343,7 @@ async fn simple_serializes_to_laravel_shape() {
 async fn cursor_serializes_with_only_active_cursor_fields() {
     let _db = fixture(25).await;
     Context::test_clear_query();
-    let page: CursorPaginator<T7Article> =
-        T7Article::query().cursor_paginate(10).await.unwrap();
+    let page: CursorPaginator<T7Article> = T7Article::query().cursor_paginate(10).await.unwrap();
 
     let json = serde_json::to_value(&page).unwrap();
     let m = json.as_object().unwrap();

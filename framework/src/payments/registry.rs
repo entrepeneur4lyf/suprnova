@@ -93,9 +93,7 @@ impl PaymentProviderRegistry {
         match crate::lock::read(ensure_built()) {
             Ok(map) => map.keys().copied().collect(),
             Err(_) => {
-                tracing::error!(
-                    "Payments registry lock poisoned; returning empty names list."
-                );
+                tracing::error!("Payments registry lock poisoned; returning empty names list.");
                 Vec::new()
             }
         }

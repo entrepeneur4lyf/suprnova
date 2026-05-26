@@ -22,7 +22,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use suprnova::{assert_not_sent, assert_sent, fake_response, Http};
+use suprnova::{Http, assert_not_sent, assert_sent, fake_response};
 
 /// Serializes every test that touches real-network IO or the
 /// `FAIL_ON_REAL_CALLS` flag. Pure-fake tests don't need to hold
@@ -185,7 +185,7 @@ async fn basic_auth_sets_auth_header() {
     let captured = cap.lock().unwrap().clone().unwrap();
     let auth = captured.authorization.as_deref().unwrap();
     assert!(auth.starts_with("Basic "));
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     let encoded = auth.strip_prefix("Basic ").unwrap();
     let decoded = String::from_utf8(STANDARD.decode(encoded).unwrap()).unwrap();
     assert_eq!(decoded, "alice:s3cret");
@@ -319,8 +319,7 @@ async fn spawn_canned(
                     *count.lock().unwrap() += 1;
                     let next = queue.lock().unwrap().pop();
                     // pop from end; reverse the input ordering when populating
-                    let (status, retry_after, body) =
-                        next.unwrap_or((200, None, "{}"));
+                    let (status, retry_after, body) = next.unwrap_or((200, None, "{}"));
                     let mut builder = hyper::Response::builder()
                         .status(status)
                         .header("content-type", "application/json");
@@ -328,7 +327,9 @@ async fn spawn_canned(
                         builder = builder.header("retry-after", secs.to_string());
                     }
                     Ok::<_, Infallible>(
-                        builder.body(Full::new(Bytes::from_static(body.as_bytes()))).unwrap(),
+                        builder
+                            .body(Full::new(Bytes::from_static(body.as_bytes())))
+                            .unwrap(),
                     )
                 }
             });
@@ -459,10 +460,10 @@ async fn into_inner_returns_err_for_fake_response() {
 #[tokio::test]
 async fn outbound_request_includes_traceparent_when_otel_context_active() {
     let _net = NETWORK_LOCK.lock().await;
+    use opentelemetry::Context;
     use opentelemetry::trace::{
         FutureExt as _, SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
     };
-    use opentelemetry::Context;
 
     // Install the W3C TraceContext propagator. Idempotent — safe even
     // if other tests in this run also called it.
@@ -471,8 +472,8 @@ async fn outbound_request_includes_traceparent_when_otel_context_active() {
     // Build a fully-specified OTel span context. We use deterministic
     // IDs so the test can assert that the wire `traceparent` carries
     // exactly the trace id we attached.
-    let trace_id = TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736")
-        .expect("hex trace id parses");
+    let trace_id =
+        TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736").expect("hex trace id parses");
     let span_id = SpanId::from_hex("00f067aa0ba902b7").expect("hex span id parses");
     let span_ctx = SpanContext::new(
         trace_id,
@@ -503,11 +504,27 @@ async fn outbound_request_includes_traceparent_when_otel_context_active() {
 
     // W3C format: `version-trace_id-parent_id-flags`, all hex.
     let parts: Vec<&str> = traceparent.split('-').collect();
-    assert_eq!(parts.len(), 4, "traceparent has 4 dash-separated parts, got {traceparent:?}");
+    assert_eq!(
+        parts.len(),
+        4,
+        "traceparent has 4 dash-separated parts, got {traceparent:?}"
+    );
     assert_eq!(parts[0], "00", "version must be 00, got {traceparent:?}");
-    assert_eq!(parts[1].len(), 32, "trace_id is 32 hex chars, got {traceparent:?}");
-    assert_eq!(parts[2].len(), 16, "span_id is 16 hex chars, got {traceparent:?}");
-    assert_eq!(parts[3].len(), 2, "flags is 2 hex chars, got {traceparent:?}");
+    assert_eq!(
+        parts[1].len(),
+        32,
+        "trace_id is 32 hex chars, got {traceparent:?}"
+    );
+    assert_eq!(
+        parts[2].len(),
+        16,
+        "span_id is 16 hex chars, got {traceparent:?}"
+    );
+    assert_eq!(
+        parts[3].len(),
+        2,
+        "flags is 2 hex chars, got {traceparent:?}"
+    );
 
     // The trace id we attached must show up on the wire.
     assert_eq!(

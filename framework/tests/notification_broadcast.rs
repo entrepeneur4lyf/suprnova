@@ -59,10 +59,7 @@ async fn broadcast_stub_emits_info_event_with_structured_fields() {
         logs_contain("PingNote"),
         "expected notification name in the log"
     );
-    assert!(
-        logs_contain("room.lobby"),
-        "expected route in the log"
-    );
+    assert!(logs_contain("room.lobby"), "expected route in the log");
     assert!(
         logs_contain("ping"),
         "expected the notification data payload in the log"

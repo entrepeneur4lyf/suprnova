@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use suprnova::queue::driver::QueueDriver;
 use suprnova::queue::memory::MemoryQueueDriver;
-use suprnova::{async_trait, FrameworkError, Job, Queue};
+use suprnova::{FrameworkError, Job, Queue, async_trait};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct ScheduledNote {

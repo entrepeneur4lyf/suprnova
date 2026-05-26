@@ -58,7 +58,10 @@ fn bind_if_absent_returns_true_on_first_call_false_after() {
     assert!(first, "first bind_if_absent must install and return true");
 
     let second = c.bind_if_absent::<dyn Echoer>(Arc::new(FakeEchoer));
-    assert!(!second, "second bind_if_absent must NOT install and return false");
+    assert!(
+        !second,
+        "second bind_if_absent must NOT install and return false"
+    );
 
     let resolved = c.make::<dyn Echoer>().expect("must resolve");
     assert_eq!(
@@ -138,9 +141,7 @@ fn app_singleton_if_absent_pre_boot_override_survives() {
 
     App::init();
     // Pre-install the value we want to keep.
-    let installed = App::singleton_if_absent(SurvivorState {
-        marker: "pre-boot",
-    });
+    let installed = App::singleton_if_absent(SurvivorState { marker: "pre-boot" });
     assert!(installed, "first install must succeed");
 
     // Now run boot_services — which would historically overwrite all

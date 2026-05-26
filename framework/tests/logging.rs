@@ -15,8 +15,8 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use suprnova::async_trait;
 use suprnova::http::{HttpResponse, Request, Response};
-use suprnova::logging::{current_request_id, RequestIdMiddleware};
-use suprnova::middleware::{into_boxed, MiddlewareChain, Middleware, Next};
+use suprnova::logging::{RequestIdMiddleware, current_request_id};
+use suprnova::middleware::{Middleware, MiddlewareChain, Next, into_boxed};
 
 /// A capture middleware that records the request id observed inside
 /// the chain (after RequestIdMiddleware has scoped it).
@@ -87,10 +87,9 @@ async fn spawn_with_request_id(captured: Arc<Mutex<Option<String>>>) -> SocketAd
 async fn get(addr: SocketAddr, headers: &[(&str, &str)]) -> hyper::Response<Bytes> {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let io = TokioIo::new(stream);
-    let (mut sender, conn) =
-        hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
-            .await
-            .unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
+        .await
+        .unwrap();
     tokio::spawn(async move {
         let _ = conn.await;
     });
@@ -201,7 +200,11 @@ async fn middleware_seeds_request_id_into_context_bag() {
         }
     });
 
-    let resp = get(addr, &[("X-Request-Id", "abc-context-seed-id-1234567890123456")]).await;
+    let resp = get(
+        addr,
+        &[("X-Request-Id", "abc-context-seed-id-1234567890123456")],
+    )
+    .await;
     assert_eq!(resp.status(), 200);
 
     let echoed = resp

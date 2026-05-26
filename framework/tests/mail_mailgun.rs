@@ -48,7 +48,10 @@ async fn mailgun_emits_form_encoded_request_with_basic_auth() {
 
     let transport = MailgunMailTransport::with_endpoint("test-key", "example.com", server.uri());
     Mail::set_transport(Arc::new(transport));
-    Mail::to("alice@example.org").send(M::default()).await.unwrap();
+    Mail::to("alice@example.org")
+        .send(M::default())
+        .await
+        .unwrap();
 
     let reqs = server.received_requests().await.unwrap();
     assert_eq!(reqs.len(), 1);
@@ -215,10 +218,18 @@ struct MWithTwoAttachments {
 
 #[async_trait]
 impl Mailable for MWithTwoAttachments {
-    fn mailable_name() -> &'static str { "MWithTwoAttachments" }
-    fn subject(&self) -> String { "bundle".into() }
-    fn text_template_source(&self) -> Option<String> { Some("two files attached".into()) }
-    fn from(&self) -> Option<Address> { Some("noreply@suprnova.dev".into()) }
+    fn mailable_name() -> &'static str {
+        "MWithTwoAttachments"
+    }
+    fn subject(&self) -> String {
+        "bundle".into()
+    }
+    fn text_template_source(&self) -> Option<String> {
+        Some("two files attached".into())
+    }
+    fn from(&self) -> Option<Address> {
+        Some("noreply@suprnova.dev".into())
+    }
     fn attachments(&self) -> Vec<suprnova::mail::Attachment> {
         vec![
             suprnova::mail::Attachment {
@@ -325,7 +336,10 @@ async fn mailgun_routes_to_eu_region_endpoint() {
     let transport =
         MailgunMailTransport::with_endpoint("test-key", "eu-tenant.example", server.uri());
     Mail::set_transport(Arc::new(transport));
-    Mail::to("bob@example.org").send(M::default()).await.unwrap();
+    Mail::to("bob@example.org")
+        .send(M::default())
+        .await
+        .unwrap();
 
     let reqs = server.received_requests().await.unwrap();
     assert_eq!(reqs.len(), 1);

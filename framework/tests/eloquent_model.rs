@@ -6,7 +6,7 @@
 //! resolves to this DB.
 
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, model, FirstOrCreate, Model};
+use suprnova::{FirstOrCreate, Model, attrs, model};
 
 #[model(table = "t4_users", timestamps = false)]
 pub struct T4User {
@@ -302,10 +302,7 @@ async fn replicate_into_other_model_resets_pk() {
         .await
         .unwrap();
 
-    let draft: T4UserDraft = alice
-        .replicate_into()
-        .await
-        .expect("replicate_into");
+    let draft: T4UserDraft = alice.replicate_into().await.expect("replicate_into");
 
     // PK reset on the replica even though the source had id > 0.
     assert_eq!(draft.id, 0);

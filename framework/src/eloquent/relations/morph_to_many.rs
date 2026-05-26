@@ -75,12 +75,12 @@ use std::sync::Arc;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
 
 use crate::database::transaction::ExecutorChoice;
+use crate::eloquent::EloquentModel;
 use crate::eloquent::attrs::Attrs;
 use crate::eloquent::builder::Builder;
 use crate::eloquent::collection::Collection;
-use crate::eloquent::model::{json_value_to_sea_value, Model};
+use crate::eloquent::model::{Model, json_value_to_sea_value};
 use crate::eloquent::relations::{Relation, RelationKind};
-use crate::eloquent::EloquentModel;
 use crate::error::FrameworkError;
 
 /// Boxed builder-rewrite closure for [`MorphToMany::with_trashed`] /
@@ -305,32 +305,36 @@ where
         let backend = exec.backend();
         let id = related_id.into();
         match &exec {
-            ExecutorChoice::Tx(t) => morph_attach_one(
-                t.as_ref(),
-                backend,
-                &self.pivot_table,
-                &self.morph_name,
-                &self.pivot_related_key,
-                &self.parent_key_value,
-                &self.parent_morph_type,
-                &id,
-                extra,
-                self.with_timestamps,
-            )
-            .await,
-            ExecutorChoice::Pool(c) => morph_attach_one(
-                c.inner(),
-                backend,
-                &self.pivot_table,
-                &self.morph_name,
-                &self.pivot_related_key,
-                &self.parent_key_value,
-                &self.parent_morph_type,
-                &id,
-                extra,
-                self.with_timestamps,
-            )
-            .await,
+            ExecutorChoice::Tx(t) => {
+                morph_attach_one(
+                    t.as_ref(),
+                    backend,
+                    &self.pivot_table,
+                    &self.morph_name,
+                    &self.pivot_related_key,
+                    &self.parent_key_value,
+                    &self.parent_morph_type,
+                    &id,
+                    extra,
+                    self.with_timestamps,
+                )
+                .await
+            }
+            ExecutorChoice::Pool(c) => {
+                morph_attach_one(
+                    c.inner(),
+                    backend,
+                    &self.pivot_table,
+                    &self.morph_name,
+                    &self.pivot_related_key,
+                    &self.parent_key_value,
+                    &self.parent_morph_type,
+                    &id,
+                    extra,
+                    self.with_timestamps,
+                )
+                .await
+            }
         }
     }
 
@@ -344,28 +348,32 @@ where
         let backend = exec.backend();
         let id = related_id.into();
         match &exec {
-            ExecutorChoice::Tx(t) => morph_detach_one(
-                t.as_ref(),
-                backend,
-                &self.pivot_table,
-                &self.morph_name,
-                &self.pivot_related_key,
-                &self.parent_key_value,
-                &self.parent_morph_type,
-                &id,
-            )
-            .await,
-            ExecutorChoice::Pool(c) => morph_detach_one(
-                c.inner(),
-                backend,
-                &self.pivot_table,
-                &self.morph_name,
-                &self.pivot_related_key,
-                &self.parent_key_value,
-                &self.parent_morph_type,
-                &id,
-            )
-            .await,
+            ExecutorChoice::Tx(t) => {
+                morph_detach_one(
+                    t.as_ref(),
+                    backend,
+                    &self.pivot_table,
+                    &self.morph_name,
+                    &self.pivot_related_key,
+                    &self.parent_key_value,
+                    &self.parent_morph_type,
+                    &id,
+                )
+                .await
+            }
+            ExecutorChoice::Pool(c) => {
+                morph_detach_one(
+                    c.inner(),
+                    backend,
+                    &self.pivot_table,
+                    &self.morph_name,
+                    &self.pivot_related_key,
+                    &self.parent_key_value,
+                    &self.parent_morph_type,
+                    &id,
+                )
+                .await
+            }
         }
     }
 
@@ -437,8 +445,7 @@ where
         }
         let current_keys: HashSet<String> = current_map.keys().cloned().collect();
 
-        let target_keys: HashSet<String> =
-            target_ids.iter().map(|v| v.to_string()).collect();
+        let target_keys: HashSet<String> = target_ids.iter().map(|v| v.to_string()).collect();
 
         let mut attach_set: Vec<serde_json::Value> = Vec::new();
         for v in target_ids.into_iter() {
@@ -948,10 +955,7 @@ where
         // typed `Builder<P>` path so casts on P's columns flow through
         // SeaORM's deserialiser correctly.
         let pivot_rows: Vec<P> = P::query()
-            .filter(
-                self.pivot_foreign_key.as_str(),
-                self.tag_key_value.clone(),
-            )
+            .filter(self.pivot_foreign_key.as_str(), self.tag_key_value.clone())
             .filter(
                 type_col.as_str(),
                 serde_json::Value::String(self.target_morph_type.clone()),
@@ -965,8 +969,7 @@ where
 
         // Pull morph-target IDs out of the pivot rows.
         let mut target_ids: Vec<serde_json::Value> = Vec::with_capacity(pivot_rows.len());
-        let mut seen_target: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut seen_target: std::collections::HashSet<String> = std::collections::HashSet::new();
         for pv in pivot_rows.iter() {
             let pj = serde_json::to_value(pv).unwrap_or(serde_json::Value::Null);
             if let Some(v) = pj.get(&id_col) {
@@ -993,10 +996,7 @@ where
         let mut by_target: HashMap<String, P> = HashMap::new();
         for pv in pivot_rows.into_iter() {
             let pj = serde_json::to_value(&pv).unwrap_or(serde_json::Value::Null);
-            let key = pj
-                .get(&id_col)
-                .map(|v| v.to_string())
-                .unwrap_or_default();
+            let key = pj.get(&id_col).map(|v| v.to_string()).unwrap_or_default();
             by_target.insert(key, pv);
         }
 
@@ -1246,11 +1246,7 @@ async fn morph_detach_one<C: ConnectionTrait>(
     let id_col = format!("{morph_name}_id");
     let type_col = format!("{morph_name}_type");
     let (ph1, ph2, ph3) = match backend {
-        DatabaseBackend::Postgres => (
-            "$1".to_string(),
-            "$2".to_string(),
-            "$3".to_string(),
-        ),
+        DatabaseBackend::Postgres => ("$1".to_string(), "$2".to_string(), "$3".to_string()),
         _ => ("?".to_string(), "?".to_string(), "?".to_string()),
     };
     let sql = format!(

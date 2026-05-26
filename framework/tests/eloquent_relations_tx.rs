@@ -42,7 +42,7 @@ use std::time::Duration;
 
 use sea_orm::{ConnectOptions, ConnectionTrait, Database};
 use suprnova::container::testing::{TestContainer, TestContainerGuard};
-use suprnova::{attrs, model, DbConnection, FrameworkError, Model, DB};
+use suprnova::{DB, DbConnection, FrameworkError, Model, attrs, model};
 
 /// Build a fresh multi-connection SQLite database against a per-test
 /// temp file with WAL journal mode. Returns the guard so the test
@@ -133,10 +133,8 @@ async fn has_many_with_count_inside_tx_sees_in_tx_inserts() {
     let user_id = u.id;
     let result: Result<(), FrameworkError> = DB::transaction(move |_tx| {
         Box::pin(async move {
-            let _ = Af1Post::create(
-                attrs! { af1_user_id: user_id, title: "in-tx", views: 20i64 },
-            )
-            .await?;
+            let _ = Af1Post::create(attrs! { af1_user_id: user_id, title: "in-tx", views: 20i64 })
+                .await?;
 
             let row = Af1User::query()
                 .filter("id", user_id)
@@ -163,7 +161,11 @@ async fn has_many_with_count_inside_tx_sees_in_tx_inserts() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(row.posts_count(), 1, "rollback must un-write the in-tx insert");
+    assert_eq!(
+        row.posts_count(),
+        1,
+        "rollback must un-write the in-tx insert"
+    );
 }
 
 #[tokio::test]
@@ -179,10 +181,8 @@ async fn has_many_with_sum_inside_tx_sees_in_tx_inserts() {
     let user_id = u.id;
     let result: Result<(), FrameworkError> = DB::transaction(move |_tx| {
         Box::pin(async move {
-            let _ = Af1Post::create(
-                attrs! { af1_user_id: user_id, title: "in-tx", views: 25i64 },
-            )
-            .await?;
+            let _ = Af1Post::create(attrs! { af1_user_id: user_id, title: "in-tx", views: 25i64 })
+                .await?;
 
             let row = Af1User::query()
                 .filter("id", user_id)
@@ -273,10 +273,8 @@ async fn belongs_to_many_with_count_inside_tx_sees_in_tx_attaches() {
     let t2_id = t2.id;
     let result: Result<(), FrameworkError> = DB::transaction(move |_tx| {
         Box::pin(async move {
-            let _ = Af1UserTag::create(
-                attrs! { af1_b2m_user_id: user_id, af1_tag_id: t2_id },
-            )
-            .await?;
+            let _ =
+                Af1UserTag::create(attrs! { af1_b2m_user_id: user_id, af1_tag_id: t2_id }).await?;
 
             let row = Af1B2mUser::query()
                 .filter("id", user_id)
@@ -364,7 +362,9 @@ async fn has_many_through_inside_tx_sees_in_tx_inserts() {
     let (conn, _guard, _tmp) = fresh_multiconn_sqlite().await;
     migrate_through(&conn).await;
 
-    let c = Af1Country::create(attrs! { name: "Argentina" }).await.unwrap();
+    let c = Af1Country::create(attrs! { name: "Argentina" })
+        .await
+        .unwrap();
     let a = Af1Author::create(attrs! { af1_country_id: c.id, name: "Borges" })
         .await
         .unwrap();
@@ -376,10 +376,7 @@ async fn has_many_through_inside_tx_sees_in_tx_inserts() {
     let author_id = a.id;
     let result: Result<(), FrameworkError> = DB::transaction(move |_tx| {
         Box::pin(async move {
-            let _ = Af1Article::create(
-                attrs! { af1_author_id: author_id, title: "in-tx" },
-            )
-            .await?;
+            let _ = Af1Article::create(attrs! { af1_author_id: author_id, title: "in-tx" }).await?;
 
             let row = Af1Country::query()
                 .filter("id", country_id)

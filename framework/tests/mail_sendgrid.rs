@@ -49,7 +49,10 @@ async fn sendgrid_emits_v3_mail_send_request() {
 
     let transport = SendGridMailTransport::with_endpoint("test-api-key", server.uri());
     Mail::set_transport(Arc::new(transport));
-    Mail::to("alice@example.org").send(M::default()).await.unwrap();
+    Mail::to("alice@example.org")
+        .send(M::default())
+        .await
+        .unwrap();
 
     let reqs = server.received_requests().await.unwrap();
     assert_eq!(reqs.len(), 1);
@@ -66,8 +69,14 @@ async fn sendgrid_emits_v3_mail_send_request() {
     assert!(contents.iter().any(|c| c["type"] == "text/html"));
 
     // RFC 1341 ordering: text/plain MUST precede text/html or v3 returns 400.
-    let plain_idx = contents.iter().position(|c| c["type"] == "text/plain").unwrap();
-    let html_idx = contents.iter().position(|c| c["type"] == "text/html").unwrap();
+    let plain_idx = contents
+        .iter()
+        .position(|c| c["type"] == "text/plain")
+        .unwrap();
+    let html_idx = contents
+        .iter()
+        .position(|c| c["type"] == "text/html")
+        .unwrap();
     assert!(
         plain_idx < html_idx,
         "text/plain must precede text/html for SendGrid RFC 1341 compliance: {contents:?}"

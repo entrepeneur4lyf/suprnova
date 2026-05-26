@@ -11,7 +11,10 @@ pub struct Address {
 
 impl Address {
     pub fn new(email: impl Into<String>) -> Self {
-        Self { email: email.into(), name: None }
+        Self {
+            email: email.into(),
+            name: None,
+        }
     }
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
@@ -20,24 +23,34 @@ impl Address {
 }
 
 impl From<&str> for Address {
-    fn from(s: &str) -> Self { Self::new(s) }
+    fn from(s: &str) -> Self {
+        Self::new(s)
+    }
 }
 
 impl From<String> for Address {
-    fn from(s: String) -> Self { Self::new(s) }
+    fn from(s: String) -> Self {
+        Self::new(s)
+    }
 }
 
 impl From<(String, String)> for Address {
     /// `(name, email)`
     fn from(t: (String, String)) -> Self {
-        Self { name: Some(t.0), email: t.1 }
+        Self {
+            name: Some(t.0),
+            email: t.1,
+        }
     }
 }
 
 impl From<(&str, &str)> for Address {
     /// `(name, email)`
     fn from(t: (&str, &str)) -> Self {
-        Self { name: Some(t.0.into()), email: t.1.into() }
+        Self {
+            name: Some(t.0.into()),
+            email: t.1.into(),
+        }
     }
 }
 
@@ -58,7 +71,15 @@ pub struct Attachment {
 }
 
 impl Attachment {
-    pub fn new(filename: impl Into<String>, content: Vec<u8>, content_type: impl Into<String>) -> Self {
-        Self { filename: filename.into(), content, content_type: content_type.into() }
+    pub fn new(
+        filename: impl Into<String>,
+        content: Vec<u8>,
+        content_type: impl Into<String>,
+    ) -> Self {
+        Self {
+            filename: filename.into(),
+            content,
+            content_type: content_type.into(),
+        }
     }
 }

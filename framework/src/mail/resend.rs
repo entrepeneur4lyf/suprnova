@@ -153,8 +153,7 @@ mod tests {
     fn with_endpoint_appends_for_paths_with_emails_substring() {
         // Regression: `contains("/emails")` would have skipped a base URL
         // like `/emails-archive/api`. `ends_with` is correct.
-        let t =
-            ResendMailTransport::with_endpoint("k", "https://x.example/emails-archive/api");
+        let t = ResendMailTransport::with_endpoint("k", "https://x.example/emails-archive/api");
         assert_eq!(t.endpoint, "https://x.example/emails-archive/api/emails");
     }
 }

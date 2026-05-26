@@ -99,8 +99,7 @@ impl TaskBuilder {
     /// # Panics
     /// Panics if the cron expression is invalid.
     pub fn cron(mut self, expression: &str) -> Self {
-        self.expression =
-            CronExpression::parse(expression).expect("Invalid cron expression");
+        self.expression = CronExpression::parse(expression).expect("Invalid cron expression");
         self
     }
 

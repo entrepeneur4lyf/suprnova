@@ -30,7 +30,7 @@ use serial_test::serial;
 use tokio::runtime::Runtime;
 
 use suprnova::auth_flows::EmailVerification;
-use suprnova::torii_integration::{init_torii, ToriiConfig};
+use suprnova::torii_integration::{ToriiConfig, init_torii};
 
 /// One tokio runtime shared across every test in this file.
 static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));

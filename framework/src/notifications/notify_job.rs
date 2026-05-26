@@ -10,7 +10,7 @@
 //! and skipped, matching the sync dispatch path's contract.
 
 use crate::error::FrameworkError;
-use crate::notifications::{dispatcher_for_queue, factory_for, DynNotification};
+use crate::notifications::{DynNotification, dispatcher_for_queue, factory_for};
 use crate::queue::Job;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

@@ -40,6 +40,8 @@ impl Default for EncryptHistoryMiddleware {
 #[async_trait]
 impl Middleware for EncryptHistoryMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
-        ENCRYPT_HISTORY.scope(true, async move { next(request).await }).await
+        ENCRYPT_HISTORY
+            .scope(true, async move { next(request).await })
+            .await
     }
 }

@@ -3,7 +3,7 @@
 //! Loaded from the `APP_KEY` environment variable in base64-url-no-pad
 //! form, or generated for development.
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 use crate::FrameworkError;
 

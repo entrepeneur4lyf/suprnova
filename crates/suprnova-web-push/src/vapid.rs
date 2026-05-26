@@ -16,7 +16,9 @@ pub struct VapidKey {
 
 impl VapidKey {
     pub fn generate() -> Self {
-        Self { inner: ES256KeyPair::generate() }
+        Self {
+            inner: ES256KeyPair::generate(),
+        }
     }
 
     pub fn from_pem(pem: &str) -> Result<Self, WebPushError> {
@@ -26,7 +28,8 @@ impl VapidKey {
     }
 
     pub fn to_pem(&self) -> Result<String, WebPushError> {
-        self.inner.to_pem()
+        self.inner
+            .to_pem()
             .map_err(|e| WebPushError::Vapid(format!("export PEM: {e}")))
     }
 
@@ -86,7 +89,10 @@ impl VapidSigner {
             .with_audience(audience)
             .with_subject(subject);
         claims.invalid_before = None;
-        let jwt = self.key.inner.sign(claims)
+        let jwt = self
+            .key
+            .inner
+            .sign(claims)
             .map_err(|e| WebPushError::Vapid(format!("JWT sign: {e}")))?;
         Ok(jwt)
     }

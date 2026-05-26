@@ -154,11 +154,8 @@ mod tests {
 
     #[test]
     fn with_endpoint_supports_eu() {
-        let t = MailgunMailTransport::with_endpoint(
-            "k",
-            "example.com",
-            "https://api.eu.mailgun.net",
-        );
+        let t =
+            MailgunMailTransport::with_endpoint("k", "example.com", "https://api.eu.mailgun.net");
         assert_eq!(t.endpoint, "https://api.eu.mailgun.net");
         assert_eq!(
             t.url(),
@@ -171,11 +168,8 @@ mod tests {
         // `https://api.eu.mailgun.net/` (with trailing slash) must be
         // normalised to the no-slash form so the join doesn't produce
         // `//v3/...`.
-        let t = MailgunMailTransport::with_endpoint(
-            "k",
-            "example.com",
-            "https://api.eu.mailgun.net/",
-        );
+        let t =
+            MailgunMailTransport::with_endpoint("k", "example.com", "https://api.eu.mailgun.net/");
         assert_eq!(t.endpoint, "https://api.eu.mailgun.net");
         assert_eq!(
             t.url(),

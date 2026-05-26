@@ -1,14 +1,15 @@
-use std::time::Duration;
-use sea_orm::{Database, ConnectionTrait};
-use suprnova::queue::driver::QueueDriver;
-use suprnova::queue::database::DatabaseQueueDriver;
-use suprnova::queue::{Envelope, BackoffSchedule, CURRENT_SCHEMA_VERSION};
 use chrono::Utc;
+use sea_orm::{ConnectionTrait, Database};
+use std::time::Duration;
+use suprnova::queue::database::DatabaseQueueDriver;
+use suprnova::queue::driver::QueueDriver;
+use suprnova::queue::{BackoffSchedule, CURRENT_SCHEMA_VERSION, Envelope};
 use uuid::Uuid;
 
 async fn fresh_db() -> sea_orm::DatabaseConnection {
     let db = Database::connect("sqlite::memory:").await.unwrap();
-    db.execute_unprepared(r"
+    db.execute_unprepared(
+        r"
         CREATE TABLE jobs (
             id TEXT PRIMARY KEY,
             job_name TEXT NOT NULL,
@@ -19,10 +20,13 @@ async fn fresh_db() -> sea_orm::DatabaseConnection {
             attempts INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER NOT NULL
         )
-    ").await.unwrap();
-    db.execute_unprepared(
-        "CREATE INDEX idx_jobs_available_at ON jobs(available_at)"
-    ).await.unwrap();
+    ",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared("CREATE INDEX idx_jobs_available_at ON jobs(available_at)")
+        .await
+        .unwrap();
     db
 }
 
@@ -89,5 +93,8 @@ async fn database_driver_nack_bumps_attempts() {
     d.nack(&r1.token, Duration::from_millis(0)).await.unwrap();
 
     let r2 = d.pop(Duration::from_secs(60)).await.unwrap().unwrap();
-    assert_eq!(r2.envelope.attempts, 1, "nack must bump attempts (per trait contract)");
+    assert_eq!(
+        r2.envelope.attempts, 1,
+        "nack must bump attempts (per trait contract)"
+    );
 }

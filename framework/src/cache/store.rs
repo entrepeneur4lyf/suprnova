@@ -84,7 +84,11 @@ pub trait CacheStore: Send + Sync {
     /// Try to acquire a distributed lock for `key` with a TTL. On success,
     /// returns `Ok(Some(token))` where `token` is the ownership token needed
     /// for `release_lock` / `refresh_lock`. On contention, returns `Ok(None)`.
-    async fn acquire_lock(&self, key: &str, ttl: Duration) -> Result<Option<String>, FrameworkError>;
+    async fn acquire_lock(
+        &self,
+        key: &str,
+        ttl: Duration,
+    ) -> Result<Option<String>, FrameworkError>;
 
     /// Release a lock only if the supplied token matches the stored owner.
     /// Returns `true` if the lock was released; `false` if it was held by
@@ -93,7 +97,12 @@ pub trait CacheStore: Send + Sync {
 
     /// Extend the TTL of a lock only if the supplied token matches the stored
     /// owner. Returns `true` if the TTL was extended; `false` otherwise.
-    async fn refresh_lock(&self, key: &str, token: &str, ttl: Duration) -> Result<bool, FrameworkError>;
+    async fn refresh_lock(
+        &self,
+        key: &str,
+        token: &str,
+        ttl: Duration,
+    ) -> Result<bool, FrameworkError>;
 
     /// Refresh the TTL of an existing key without changing its value.
     /// Returns `true` if the key existed (and wasn't expired) and was

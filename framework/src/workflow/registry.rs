@@ -5,7 +5,8 @@ use std::future::Future;
 use std::pin::Pin;
 
 /// Boxed workflow runner
-pub type WorkflowRunner = fn(&str) -> Pin<Box<dyn Future<Output = Result<String, FrameworkError>> + Send>>;
+pub type WorkflowRunner =
+    fn(&str) -> Pin<Box<dyn Future<Output = Result<String, FrameworkError>> + Send>>;
 
 /// Inventory entry for a workflow
 pub struct WorkflowEntry {

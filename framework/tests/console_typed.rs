@@ -15,14 +15,14 @@
 //! Tests share three statics that record what the `typed:greet`
 //! handler saw on its last run, so they must be `#[serial]`.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::OnceLock;
 use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use clap::Parser;
 use serial_test::serial;
-use suprnova::{console, Command, FrameworkError, TypedCommand};
+use suprnova::{Command, FrameworkError, TypedCommand, console};
 
 static GREET_RAN: AtomicUsize = AtomicUsize::new(0);
 static LAST_GREET_TARGET: OnceLock<Mutex<String>> = OnceLock::new();
@@ -72,8 +72,7 @@ impl TypedCommand for TypedRequire {
 
 #[tokio::test]
 async fn typed_command_is_registered_via_derive() {
-    let entry =
-        console::find("typed:greet").expect("derive(Command) auto-registered typed:greet");
+    let entry = console::find("typed:greet").expect("derive(Command) auto-registered typed:greet");
     assert_eq!(entry.name, "typed:greet");
     assert_eq!(entry.description, "Greet someone (typed)");
 }

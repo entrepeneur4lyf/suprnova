@@ -213,10 +213,8 @@ impl ExecutorChoice {
             return Ok(ExecutorChoice::Pool(DB::named(name).await?));
         }
         // Step 5: read replica if registered.
-        if crate::database::ConnectionRegistry::has(
-            crate::database::READ_REPLICA_CONNECTION_NAME,
-        )
-        .await
+        if crate::database::ConnectionRegistry::has(crate::database::READ_REPLICA_CONNECTION_NAME)
+            .await
         {
             return Ok(ExecutorChoice::Pool(
                 DB::named(crate::database::READ_REPLICA_CONNECTION_NAME).await?,
@@ -360,13 +358,10 @@ impl ExecutorChoice {
     ) -> Result<<A::Entity as sea_orm::EntityTrait>::Model, sea_orm::DbErr>
     where
         A: sea_orm::ActiveModelTrait + sea_orm::ActiveModelBehavior + Send + 'static,
-        <A::Entity as sea_orm::EntityTrait>::Model:
-            Send + sea_orm::IntoActiveModel<A>,
+        <A::Entity as sea_orm::EntityTrait>::Model: Send + sea_orm::IntoActiveModel<A>,
     {
         match self {
-            ExecutorChoice::Tx(t) => {
-                <A as sea_orm::ActiveModelTrait>::insert(am, t.as_ref()).await
-            }
+            ExecutorChoice::Tx(t) => <A as sea_orm::ActiveModelTrait>::insert(am, t.as_ref()).await,
             ExecutorChoice::Pool(c) => {
                 <A as sea_orm::ActiveModelTrait>::insert(am, c.inner()).await
             }
@@ -382,13 +377,10 @@ impl ExecutorChoice {
     ) -> Result<<A::Entity as sea_orm::EntityTrait>::Model, sea_orm::DbErr>
     where
         A: sea_orm::ActiveModelTrait + sea_orm::ActiveModelBehavior + Send + 'static,
-        <A::Entity as sea_orm::EntityTrait>::Model:
-            Send + sea_orm::IntoActiveModel<A>,
+        <A::Entity as sea_orm::EntityTrait>::Model: Send + sea_orm::IntoActiveModel<A>,
     {
         match self {
-            ExecutorChoice::Tx(t) => {
-                <A as sea_orm::ActiveModelTrait>::update(am, t.as_ref()).await
-            }
+            ExecutorChoice::Tx(t) => <A as sea_orm::ActiveModelTrait>::update(am, t.as_ref()).await,
             ExecutorChoice::Pool(c) => {
                 <A as sea_orm::ActiveModelTrait>::update(am, c.inner()).await
             }
@@ -398,17 +390,12 @@ impl ExecutorChoice {
     /// Delete an active model. Routes through the active transaction
     /// or the pool depending on the variant.
     #[doc(hidden)]
-    pub async fn delete_active<A>(
-        &self,
-        am: A,
-    ) -> Result<sea_orm::DeleteResult, sea_orm::DbErr>
+    pub async fn delete_active<A>(&self, am: A) -> Result<sea_orm::DeleteResult, sea_orm::DbErr>
     where
         A: sea_orm::ActiveModelTrait + sea_orm::ActiveModelBehavior + Send + 'static,
     {
         match self {
-            ExecutorChoice::Tx(t) => {
-                <A as sea_orm::ActiveModelTrait>::delete(am, t.as_ref()).await
-            }
+            ExecutorChoice::Tx(t) => <A as sea_orm::ActiveModelTrait>::delete(am, t.as_ref()).await,
             ExecutorChoice::Pool(c) => {
                 <A as sea_orm::ActiveModelTrait>::delete(am, c.inner()).await
             }
@@ -554,9 +541,7 @@ impl DB {
         // top-level transaction on a pooled connection that's
         // independent of the outer scope — silently corrupting the
         // composition semantics callers expect.
-        let nested = CURRENT_TX
-            .try_with(|t| t.is_some())
-            .unwrap_or(false);
+        let nested = CURRENT_TX.try_with(|t| t.is_some()).unwrap_or(false);
         if nested {
             return Err(FrameworkError::database(
                 "nested DB::transaction is not supported; use tx.savepoint(name) for nested rollback",
@@ -742,9 +727,7 @@ impl DB {
 /// whether to retry.
 fn is_deadlock(e: &FrameworkError) -> bool {
     let msg = format!("{e}");
-    msg.contains("40001")
-        || msg.contains("40P01")
-        || msg.to_lowercase().contains("deadlock")
+    msg.contains("40001") || msg.contains("40P01") || msg.to_lowercase().contains("deadlock")
 }
 
 #[cfg(test)]
@@ -775,7 +758,9 @@ mod tests {
         assert!(!is_deadlock(&FrameworkError::database(
             "ERROR: relation \"users\" does not exist"
         )));
-        assert!(!is_deadlock(&FrameworkError::database("connection refused")));
+        assert!(!is_deadlock(&FrameworkError::database(
+            "connection refused"
+        )));
         assert!(!is_deadlock(&FrameworkError::internal("oops")));
     }
 }

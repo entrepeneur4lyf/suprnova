@@ -115,9 +115,7 @@ async fn mailable_without_subject_template_source_uses_subject_verbatim() {
     let fake = Mail::fake();
 
     Mail::to("bob@example.org")
-        .send(PlainSubject {
-            user: "bob".into(),
-        })
+        .send(PlainSubject { user: "bob".into() })
         .await
         .unwrap();
 

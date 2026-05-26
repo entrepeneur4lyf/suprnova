@@ -8,7 +8,7 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
-use syn::{parse_macro_input, Ident, ItemTrait, Path, Token};
+use syn::{Ident, ItemTrait, Path, Token, parse_macro_input};
 
 /// Parsed arguments from the service attribute
 struct ServiceArgs {
@@ -50,7 +50,7 @@ impl Parse for ServiceArgs {
                         return Err(syn::Error::new(
                             name.span(),
                             format!("unknown parameter '{}', expected 'impl' or 'fake'", name),
-                        ))
+                        ));
                     }
                 }
 

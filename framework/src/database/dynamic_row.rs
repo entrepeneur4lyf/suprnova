@@ -73,46 +73,47 @@ impl DynamicRow {
     /// Read an `i64` column. Errors if the column is missing or the
     /// stored value is not an integer.
     pub fn get_int(&self, key: &str) -> Result<i64, FrameworkError> {
-        let v = self.0.get(key).ok_or_else(|| {
-            FrameworkError::param(format!("column '{key}' not found in row"))
-        })?;
-        v.as_i64().ok_or_else(|| {
-            FrameworkError::param(format!("column '{key}' is not an int: {v}"))
-        })
+        let v = self
+            .0
+            .get(key)
+            .ok_or_else(|| FrameworkError::param(format!("column '{key}' not found in row")))?;
+        v.as_i64()
+            .ok_or_else(|| FrameworkError::param(format!("column '{key}' is not an int: {v}")))
     }
 
     /// Read a `String` column. Errors if the column is missing or the
     /// stored value is not a string.
     pub fn get_string(&self, key: &str) -> Result<String, FrameworkError> {
-        let v = self.0.get(key).ok_or_else(|| {
-            FrameworkError::param(format!("column '{key}' not found in row"))
-        })?;
-        v.as_str().map(String::from).ok_or_else(|| {
-            FrameworkError::param(format!("column '{key}' is not a string: {v}"))
-        })
+        let v = self
+            .0
+            .get(key)
+            .ok_or_else(|| FrameworkError::param(format!("column '{key}' not found in row")))?;
+        v.as_str()
+            .map(String::from)
+            .ok_or_else(|| FrameworkError::param(format!("column '{key}' is not a string: {v}")))
     }
 
     /// Read a `bool` column. Errors if the column is missing or the
     /// stored value is not a boolean.
     pub fn get_bool(&self, key: &str) -> Result<bool, FrameworkError> {
-        let v = self.0.get(key).ok_or_else(|| {
-            FrameworkError::param(format!("column '{key}' not found in row"))
-        })?;
-        v.as_bool().ok_or_else(|| {
-            FrameworkError::param(format!("column '{key}' is not a bool: {v}"))
-        })
+        let v = self
+            .0
+            .get(key)
+            .ok_or_else(|| FrameworkError::param(format!("column '{key}' not found in row")))?;
+        v.as_bool()
+            .ok_or_else(|| FrameworkError::param(format!("column '{key}' is not a bool: {v}")))
     }
 
     /// Read a `f64` column. Errors if the column is missing or the
     /// stored value is not a number. Integer values are accepted and
     /// coerced (matches `serde_json::Value::as_f64`).
     pub fn get_float(&self, key: &str) -> Result<f64, FrameworkError> {
-        let v = self.0.get(key).ok_or_else(|| {
-            FrameworkError::param(format!("column '{key}' not found in row"))
-        })?;
-        v.as_f64().ok_or_else(|| {
-            FrameworkError::param(format!("column '{key}' is not a number: {v}"))
-        })
+        let v = self
+            .0
+            .get(key)
+            .ok_or_else(|| FrameworkError::param(format!("column '{key}' not found in row")))?;
+        v.as_f64()
+            .ok_or_else(|| FrameworkError::param(format!("column '{key}' is not a number: {v}")))
     }
 
     /// Read the raw JSON value for a column. Useful when you want the
@@ -164,9 +165,10 @@ impl DynamicRow {
                 "column '{key}' not found in row"
             ))),
             Some(Value::Null) => Ok(None),
-            Some(v) => v.as_i64().map(Some).ok_or_else(|| {
-                FrameworkError::param(format!("column '{key}' is not an int: {v}"))
-            }),
+            Some(v) => v
+                .as_i64()
+                .map(Some)
+                .ok_or_else(|| FrameworkError::param(format!("column '{key}' is not an int: {v}"))),
         }
     }
 }

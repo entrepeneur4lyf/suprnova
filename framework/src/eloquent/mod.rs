@@ -36,18 +36,18 @@ pub use casts::{
     AsTimestamp, Cast, DynCast, IntoDynCast,
 };
 pub use collection::Collection;
-pub use fillable::{unguarded, Fillable};
+pub use fillable::{Fillable, unguarded};
 pub use lazy::LazyCollection;
 pub use model::{FirstOrCreate, Model, ReplicateExt};
 pub use prunable::{
-    prune_all, prune_all_dry, prune_one, pruners, MassPrunable, Prunable, PrunerEntry, PrunerFn,
+    MassPrunable, Prunable, PrunerEntry, PrunerFn, prune_all, prune_all_dry, prune_one, pruners,
 };
-pub use registry::{find_model_by_table, models, ModelEntry};
+pub use registry::{ModelEntry, find_model_by_table, models};
 pub use relations::{
-    aggregate_cache_key, find_morph_type, find_morph_type_by_id, find_relation, morph_types,
-    relations, relations_of, AggregateKind, BelongsTo, BelongsToMany, EagerLoadCache,
-    EagerLoadDispatch, HasMany, HasManyThrough, HasOne, HasOneThrough, MorphMany, MorphOne,
-    MorphTo, MorphToMany, MorphTypeEntry, MorphedByMany, Relation, RelationEntry, RelationKind,
+    AggregateKind, BelongsTo, BelongsToMany, EagerLoadCache, EagerLoadDispatch, HasMany,
+    HasManyThrough, HasOne, HasOneThrough, MorphMany, MorphOne, MorphTo, MorphToMany,
+    MorphTypeEntry, MorphedByMany, Relation, RelationEntry, RelationKind, aggregate_cache_key,
+    find_morph_type, find_morph_type_by_id, find_relation, morph_types, relations, relations_of,
 };
 pub use scopes::{GlobalScope, ScopeRegistry};
 pub use soft_deletes::SoftDeletes;

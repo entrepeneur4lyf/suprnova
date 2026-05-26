@@ -28,7 +28,7 @@ use chrono::{DateTime, Utc};
 use serial_test::serial;
 use suprnova::database::ConnectionRegistry;
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, model, Model, DB};
+use suprnova::{DB, Model, attrs, model};
 
 #[model(
     table = "t12_users",
@@ -153,11 +153,7 @@ async fn read_replica_routes_read_queries() {
     // `on_write_connection` opts back to primary even though replica
     // is registered.
     let users = T12User::on_write_connection().get().await.unwrap();
-    assert_eq!(
-        users.len(),
-        1,
-        "on_write_connection routes back to primary"
-    );
+    assert_eq!(users.len(), 1, "on_write_connection routes back to primary");
     assert_eq!(users[0].email, "primary@x.com");
 }
 
@@ -415,17 +411,10 @@ async fn db_facade_named_connection_escapes() {
     .await
     .unwrap();
     assert_eq!(rows.len(), 1, "select_on returned one row");
-    assert_eq!(
-        rows[0].get("label").and_then(|v| v.as_str()),
-        Some("hello")
-    );
+    assert_eq!(rows[0].get("label").and_then(|v| v.as_str()), Some("hello"));
 
     // Primary doesn't have the t12_aux table.
-    let primary_attempt = DB::select(
-        "SELECT id FROM t12_aux",
-        Vec::<sea_orm::Value>::new(),
-    )
-    .await;
+    let primary_attempt = DB::select("SELECT id FROM t12_aux", Vec::<sea_orm::Value>::new()).await;
     assert!(
         primary_attempt.is_err(),
         "primary has no t12_aux table; raw select should error"

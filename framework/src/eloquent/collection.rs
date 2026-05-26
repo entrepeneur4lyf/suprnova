@@ -31,8 +31,8 @@ use serde_json::Value;
 
 use crate::eloquent::builder::EagerSpec;
 use crate::eloquent::model::Model;
-use crate::eloquent::relations::eager::load_missing_path;
 use crate::eloquent::relations::EagerLoadDispatch;
+use crate::eloquent::relations::eager::load_missing_path;
 use crate::error::FrameworkError;
 
 /// Thin wrapper around `Vec<T>`. Derefs to `&[T]` so all slice methods

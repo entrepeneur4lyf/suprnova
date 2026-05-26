@@ -17,7 +17,7 @@
 
 #![cfg(feature = "otel")]
 
-use suprnova::{init_telemetry, LogConfig, Metrics, OtelConfig};
+use suprnova::{LogConfig, Metrics, OtelConfig, init_telemetry};
 
 #[tokio::test]
 #[ignore = "requires a live OTLP collector reachable at OTEL_EXPORTER_OTLP_ENDPOINT"]

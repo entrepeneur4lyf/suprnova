@@ -10,10 +10,10 @@ use crate::mail::address::Address;
 use crate::mail::http_provider::{err, shared_client};
 use crate::mail::transport::{MailTransport, OutgoingMessage};
 use async_trait::async_trait;
-use aws_sigv4::http_request::{sign, SignableBody, SignableRequest, SigningSettings};
+use aws_sigv4::http_request::{SignableBody, SignableRequest, SigningSettings, sign};
 use aws_sigv4::sign::v4::SigningParams;
 use lettre::message::{
-    header::ContentType, Attachment as LettreAttachment, Mailbox, Message, MultiPart, SinglePart,
+    Attachment as LettreAttachment, Mailbox, Message, MultiPart, SinglePart, header::ContentType,
 };
 use serde::Serialize;
 use std::time::SystemTime;
@@ -183,7 +183,8 @@ fn build_mime(msg: &OutgoingMessage) -> Result<Vec<u8>, FrameworkError> {
                 att.content_type
             ))
         })?;
-        mixed = mixed.singlepart(LettreAttachment::new(att.filename.clone()).body(att.content.clone(), ct));
+        mixed = mixed
+            .singlepart(LettreAttachment::new(att.filename.clone()).body(att.content.clone(), ct));
     }
 
     let email = builder
@@ -338,10 +339,7 @@ mod tests {
             "us-west-2",
             "https://proxy.example/v2/email/outbound-emails",
         );
-        assert_eq!(
-            t.endpoint,
-            "https://proxy.example/v2/email/outbound-emails"
-        );
+        assert_eq!(t.endpoint, "https://proxy.example/v2/email/outbound-emails");
     }
 
     #[test]

@@ -99,9 +99,7 @@ pub fn drain() -> serde_json::Map<String, Value> {
                 entries.into_iter().collect()
             }
             Err(_) => {
-                tracing::error!(
-                    "Inertia flash bag lock poisoned; returning empty drain."
-                );
+                tracing::error!("Inertia flash bag lock poisoned; returning empty drain.");
                 serde_json::Map::new()
             }
         })

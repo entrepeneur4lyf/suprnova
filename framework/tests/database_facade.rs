@@ -7,7 +7,7 @@
 
 use serde_json::json;
 use suprnova::testing::TestDatabase;
-use suprnova::{DynamicRow, DB};
+use suprnova::{DB, DynamicRow};
 
 // ---------- DynamicRow ---------------------------------------------------
 

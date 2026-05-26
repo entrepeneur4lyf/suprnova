@@ -45,9 +45,7 @@ impl Subscription for PaddleProvider {
                 .send()
                 .await
                 .map_err(|e| {
-                    PaymentError::Provider(format!(
-                        "paddle subscription_cancel (cape): {e}"
-                    ))
+                    PaymentError::Provider(format!("paddle subscription_cancel (cape): {e}"))
                 })?;
             return Ok(map_paddle_subscription(&resp.data));
         }
@@ -160,4 +158,3 @@ fn map_subscription_with_include(
     // alias with public fields), the compiler will point us at the right path.
     map_paddle_subscription(&s.subscription)
 }
-

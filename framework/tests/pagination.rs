@@ -30,8 +30,8 @@ fn ensure_crypt() {
 
 // Toy in-memory SQLite entity used by the integration tests.
 mod toy {
-    use sea_orm::entity::prelude::*;
     use sea_orm::DeriveEntityModel;
+    use sea_orm::entity::prelude::*;
     use serde::{Deserialize, Serialize};
 
     #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
@@ -171,8 +171,14 @@ async fn pagination_cursor_emits_prev_cursor_on_page_2() {
     )
     .await
     .unwrap();
-    assert!(page1.prev_cursor.is_none(), "first page must have no prev_cursor");
-    let next1 = page1.next_cursor.clone().expect("page 1 should have a next cursor");
+    assert!(
+        page1.prev_cursor.is_none(),
+        "first page must have no prev_cursor"
+    );
+    let next1 = page1
+        .next_cursor
+        .clone()
+        .expect("page 1 should have a next cursor");
     let page1_ids: Vec<i32> = page1.data.iter().map(|r| r.id).collect();
     assert_eq!(page1_ids, (1..=10).collect::<Vec<i32>>());
 
@@ -187,7 +193,10 @@ async fn pagination_cursor_emits_prev_cursor_on_page_2() {
     .unwrap();
     let page2_ids: Vec<i32> = page2.data.iter().map(|r| r.id).collect();
     assert_eq!(page2_ids, (11..=20).collect::<Vec<i32>>());
-    let prev2 = page2.prev_cursor.clone().expect("page 2 must emit a prev_cursor");
+    let prev2 = page2
+        .prev_cursor
+        .clone()
+        .expect("page 2 must emit a prev_cursor");
 
     // Following page 2's prev_cursor takes us back to page 1's rows.
     let back = Pagination::cursor::<toy::Entity, toy::Column>(

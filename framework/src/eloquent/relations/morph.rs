@@ -28,11 +28,11 @@
 
 use std::marker::PhantomData;
 
+use crate::eloquent::EloquentModel;
 use crate::eloquent::builder::{Builder, Direction, IntoColumn, IntoVal};
 use crate::eloquent::collection::Collection;
 use crate::eloquent::model::Model;
 use crate::eloquent::relations::{Relation, RelationKind};
-use crate::eloquent::EloquentModel;
 use crate::error::FrameworkError;
 
 /// One-to-many morph relation from parent `L` to children `R`. The

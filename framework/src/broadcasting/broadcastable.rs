@@ -11,9 +11,9 @@
 //! publishes the event's JSON serialization on every channel named by
 //! `broadcast_on(&self)`.
 
+use crate::FrameworkError;
 use crate::broadcasting::hub::{BroadcastEnvelope, BroadcastHub};
 use crate::events::{Event, Listener};
-use crate::FrameworkError;
 use async_trait::async_trait;
 use serde::Serialize;
 use std::marker::PhantomData;
@@ -59,9 +59,8 @@ impl<E: Broadcastable> Listener<E> for BroadcastListener<E> {
         if channels.is_empty() {
             return Ok(());
         }
-        let data = serde_json::to_value(event).map_err(|e| {
-            FrameworkError::internal(format!("Broadcastable serde failed: {e}"))
-        })?;
+        let data = serde_json::to_value(event)
+            .map_err(|e| FrameworkError::internal(format!("Broadcastable serde failed: {e}")))?;
         let event_name = event.broadcast_event_name().to_string();
         for channel in channels {
             self.hub

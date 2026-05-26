@@ -445,10 +445,7 @@ async fn soft_deletes_and_global_scopes_coexist() {
     // without_global_scopes() drops the typed registry scope only —
     // the soft-delete filter still applies. Expect both live rows
     // (both tenants), but NOT the trashed tenant-1 row.
-    let no_typed_scopes = T4SoftArticle::without_global_scopes()
-        .get()
-        .await
-        .unwrap();
+    let no_typed_scopes = T4SoftArticle::without_global_scopes().get().await.unwrap();
     assert_eq!(no_typed_scopes.len(), 2);
     let mut titles: Vec<_> = no_typed_scopes.iter().map(|r| r.title.clone()).collect();
     titles.sort();
@@ -499,8 +496,6 @@ async fn find_and_all_bypass_global_scopes() {
 
     // find_many() also bypasses scopes — returns rows for both
     // tenants when PKs span them.
-    let many = T4Pk::find_many([row1.id, row2.id, row3.id])
-        .await
-        .unwrap();
+    let many = T4Pk::find_many([row1.id, row2.id, row3.id]).await.unwrap();
     assert_eq!(many.len(), 3);
 }

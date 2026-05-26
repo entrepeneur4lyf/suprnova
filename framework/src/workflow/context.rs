@@ -3,11 +3,11 @@
 use crate::error::FrameworkError;
 use crate::workflow::store;
 use crate::workflow::types::StepStatus;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::future::Future;
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Duration;
 
 #[derive(Clone)]
@@ -71,30 +71,32 @@ impl WorkflowContext {
 
         if let Some(existing) = store::load_step(workflow_id, step_index, step_name).await? {
             if let Some(status) = StepStatus::from_str(&existing.status)
-                && status == StepStatus::Succeeded {
-                    let output_json = existing.output.ok_or_else(|| {
-                        FrameworkError::internal("Step output missing for succeeded step")
-                    })?;
-                    let value = serde_json::from_str(&output_json).map_err(|e| {
-                        FrameworkError::internal(format!(
-                            "Workflow step output deserialize error: {}",
-                            e
-                        ))
-                    })?;
-                    store::refresh_lock(workflow_id, self.inner.lock_timeout).await?;
-                    return Ok(value);
-                }
+                && status == StepStatus::Succeeded
+            {
+                let output_json = existing.output.ok_or_else(|| {
+                    FrameworkError::internal("Step output missing for succeeded step")
+                })?;
+                let value = serde_json::from_str(&output_json).map_err(|e| {
+                    FrameworkError::internal(format!(
+                        "Workflow step output deserialize error: {}",
+                        e
+                    ))
+                })?;
+                store::refresh_lock(workflow_id, self.inner.lock_timeout).await?;
+                return Ok(value);
+            }
 
             store::update_step_running(existing, &input_json).await?;
         } else {
             if let Some(other) = store::load_step_by_index(workflow_id, step_index).await?
-                && other.step_name != step_name {
-                    return Err(FrameworkError::internal(format!(
-                        "Workflow step mismatch at index {}: expected '{}', found '{}'. \
+                && other.step_name != step_name
+            {
+                return Err(FrameworkError::internal(format!(
+                    "Workflow step mismatch at index {}: expected '{}', found '{}'. \
                          Workflow steps must be deterministic.",
-                        step_index, step_name, other.step_name
-                    )));
-                }
+                    step_index, step_name, other.step_name
+                )));
+            }
             store::insert_step_running(workflow_id, step_index, step_name, &input_json).await?;
         }
 
@@ -105,10 +107,7 @@ impl WorkflowContext {
         match result {
             Ok(value) => {
                 let output_json = serde_json::to_string(&value).map_err(|e| {
-                    FrameworkError::internal(format!(
-                        "Workflow step output serialize error: {}",
-                        e
-                    ))
+                    FrameworkError::internal(format!("Workflow step output serialize error: {}", e))
                 })?;
                 if let Some(step) = store::load_step(workflow_id, step_index, step_name).await? {
                     store::mark_step_succeeded(step.id, &output_json).await?;
@@ -140,10 +139,7 @@ impl WorkflowContext {
         T: Serialize + DeserializeOwned + Send + 'static,
     {
         let input_json = serde_json::to_string(args).map_err(|e| {
-            FrameworkError::internal(format!(
-                "Workflow step input serialize error: {}",
-                e
-            ))
+            FrameworkError::internal(format!("Workflow step input serialize error: {}", e))
         })?;
 
         self.run_step_with_input(step_name, input_json, f).await

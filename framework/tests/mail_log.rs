@@ -13,10 +13,18 @@ struct Ping {
 
 #[async_trait]
 impl Mailable for Ping {
-    fn mailable_name() -> &'static str { "Ping" }
-    fn subject(&self) -> String { "ping".into() }
-    fn text_template_source(&self) -> Option<String> { Some("pong".into()) }
-    fn from(&self) -> Option<Address> { Some("noreply@suprnova.dev".into()) }
+    fn mailable_name() -> &'static str {
+        "Ping"
+    }
+    fn subject(&self) -> String {
+        "ping".into()
+    }
+    fn text_template_source(&self) -> Option<String> {
+        Some("pong".into())
+    }
+    fn from(&self) -> Option<Address> {
+        Some("noreply@suprnova.dev".into())
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -24,8 +32,12 @@ struct EmptyBody;
 
 #[async_trait]
 impl Mailable for EmptyBody {
-    fn mailable_name() -> &'static str { "EmptyBody" }
-    fn subject(&self) -> String { "nope".into() }
+    fn mailable_name() -> &'static str {
+        "EmptyBody"
+    }
+    fn subject(&self) -> String {
+        "nope".into()
+    }
 }
 
 #[tokio::test]
@@ -34,7 +46,9 @@ impl Mailable for EmptyBody {
 async fn log_transport_emits_event_with_message_fields() {
     Mail::set_transport(Arc::new(LogMailTransport::new()));
     Mail::to("alice@example.org")
-        .send(Ping { msg: "hello".into() })
+        .send(Ping {
+            msg: "hello".into(),
+        })
         .await
         .unwrap();
     assert!(logs_contain("mail (log driver): would send"));
@@ -52,7 +66,12 @@ async fn mailbuilder_rejects_mailable_without_any_body() {
         .await
         .unwrap_err();
     let msg = format!("{err}");
-    assert!(msg.contains("EmptyBody"), "error mentions the Mailable name: {msg}");
-    assert!(msg.contains("text_template_source") || msg.contains("html_template_source"),
-        "error suggests which methods to implement: {msg}");
+    assert!(
+        msg.contains("EmptyBody"),
+        "error mentions the Mailable name: {msg}"
+    );
+    assert!(
+        msg.contains("text_template_source") || msg.contains("html_template_source"),
+        "error suggests which methods to implement: {msg}"
+    );
 }

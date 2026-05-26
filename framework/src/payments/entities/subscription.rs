@@ -22,5 +22,5 @@ pub struct Subscription {
     pub updated_at: DateTime<Utc>,
 }
 
-pub use subscription::{ActiveModel, Column, Entity};
 pub use subscription::Model;
+pub use subscription::{ActiveModel, Column, Entity};

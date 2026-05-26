@@ -199,11 +199,17 @@ mod tests {
             x: Field<Option<String>>,
         }
 
-        let with_value_none = Holder { x: Field::Value(None) };
+        let with_value_none = Holder {
+            x: Field::Value(None),
+        };
         let json = serde_json::to_string(&with_value_none).unwrap();
         assert_eq!(json, r#"{"x":null}"#);
 
         let back: Holder = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.x, Field::Null, "Value(None) round-trips through JSON as Null — known limitation");
+        assert_eq!(
+            back.x,
+            Field::Null,
+            "Value(None) round-trips through JSON as Null — known limitation"
+        );
     }
 }

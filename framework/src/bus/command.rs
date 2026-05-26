@@ -2,7 +2,7 @@
 
 use crate::error::FrameworkError;
 use async_trait::async_trait;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 #[async_trait]
 pub trait Command: Serialize + DeserializeOwned + Send + Sync + 'static {

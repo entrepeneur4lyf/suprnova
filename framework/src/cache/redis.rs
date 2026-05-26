@@ -1,7 +1,7 @@
 //! Redis-backed cache implementation
 
 use async_trait::async_trait;
-use redis::{aio::ConnectionManager, AsyncCommands, Client};
+use redis::{AsyncCommands, Client, aio::ConnectionManager};
 use std::time::Duration;
 
 use super::config::CacheConfig;
@@ -20,9 +20,8 @@ pub struct RedisCache {
 impl RedisCache {
     /// Create a new Redis cache connection
     pub async fn connect(config: &CacheConfig) -> Result<Self, FrameworkError> {
-        let client = Client::open(config.url.as_str()).map_err(|e| {
-            FrameworkError::internal(format!("Redis connection error: {}", e))
-        })?;
+        let client = Client::open(config.url.as_str())
+            .map_err(|e| FrameworkError::internal(format!("Redis connection error: {}", e)))?;
 
         let conn = ConnectionManager::new(client).await.map_err(|e| {
             FrameworkError::internal(format!("Redis connection manager error: {}", e))
@@ -52,9 +51,10 @@ impl CacheStore for RedisCache {
         let mut conn = self.conn.clone();
         let key = self.prefixed_key(key);
 
-        let value: Option<String> = conn.get(&key).await.map_err(|e| {
-            FrameworkError::internal(format!("Cache get error: {}", e))
-        })?;
+        let value: Option<String> = conn
+            .get(&key)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("Cache get error: {}", e)))?;
 
         Ok(value)
     }
@@ -93,9 +93,10 @@ impl CacheStore for RedisCache {
         let mut conn = self.conn.clone();
         let key = self.prefixed_key(key);
 
-        let exists: bool = conn.exists(&key).await.map_err(|e| {
-            FrameworkError::internal(format!("Cache exists error: {}", e))
-        })?;
+        let exists: bool = conn
+            .exists(&key)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("Cache exists error: {}", e)))?;
 
         Ok(exists)
     }
@@ -104,9 +105,10 @@ impl CacheStore for RedisCache {
         let mut conn = self.conn.clone();
         let key = self.prefixed_key(key);
 
-        let deleted: i64 = conn.del(&key).await.map_err(|e| {
-            FrameworkError::internal(format!("Cache delete error: {}", e))
-        })?;
+        let deleted: i64 = conn
+            .del(&key)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("Cache delete error: {}", e)))?;
 
         Ok(deleted > 0)
     }
@@ -124,9 +126,9 @@ impl CacheStore for RedisCache {
             .map_err(|e| FrameworkError::internal(format!("Cache flush scan error: {}", e)))?;
 
         if !keys.is_empty() {
-            conn.del::<_, ()>(keys)
-                .await
-                .map_err(|e| FrameworkError::internal(format!("Cache flush delete error: {}", e)))?;
+            conn.del::<_, ()>(keys).await.map_err(|e| {
+                FrameworkError::internal(format!("Cache flush delete error: {}", e))
+            })?;
         }
 
         Ok(())
@@ -136,9 +138,10 @@ impl CacheStore for RedisCache {
         let mut conn = self.conn.clone();
         let key = self.prefixed_key(key);
 
-        let value: i64 = conn.incr(&key, amount).await.map_err(|e| {
-            FrameworkError::internal(format!("Cache increment error: {}", e))
-        })?;
+        let value: i64 = conn
+            .incr(&key, amount)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("Cache increment error: {}", e)))?;
 
         Ok(value)
     }
@@ -147,9 +150,10 @@ impl CacheStore for RedisCache {
         let mut conn = self.conn.clone();
         let key = self.prefixed_key(key);
 
-        let value: i64 = conn.decr(&key, amount).await.map_err(|e| {
-            FrameworkError::internal(format!("Cache decrement error: {}", e))
-        })?;
+        let value: i64 = conn
+            .decr(&key, amount)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("Cache decrement error: {}", e)))?;
 
         Ok(value)
     }
@@ -207,14 +211,16 @@ impl CacheStore for RedisCache {
                 .arg(&tag_key)
                 .query_async::<()>(&mut conn)
                 .await
-                .map_err(|e| {
-                    FrameworkError::internal(format!("Cache tag-index delete: {e}"))
-                })?;
+                .map_err(|e| FrameworkError::internal(format!("Cache tag-index delete: {e}")))?;
         }
         Ok(())
     }
 
-    async fn acquire_lock(&self, key: &str, ttl: Duration) -> Result<Option<String>, FrameworkError> {
+    async fn acquire_lock(
+        &self,
+        key: &str,
+        ttl: Duration,
+    ) -> Result<Option<String>, FrameworkError> {
         let mut conn = self.conn.clone();
         let pkey = format!("{}lock:{}", self.prefix, key);
         let token = uuid::Uuid::new_v4().to_string();
@@ -250,7 +256,12 @@ impl CacheStore for RedisCache {
         Ok(removed == 1)
     }
 
-    async fn refresh_lock(&self, key: &str, token: &str, ttl: Duration) -> Result<bool, FrameworkError> {
+    async fn refresh_lock(
+        &self,
+        key: &str,
+        token: &str,
+        ttl: Duration,
+    ) -> Result<bool, FrameworkError> {
         let mut conn = self.conn.clone();
         let pkey = format!("{}lock:{}", self.prefix, key);
         // Atomically: if GET key == token then EXPIRE key ttl, else return 0

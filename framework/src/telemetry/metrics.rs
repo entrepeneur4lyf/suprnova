@@ -18,9 +18,9 @@
 
 #[cfg(feature = "otel")]
 mod real {
+    use opentelemetry::KeyValue;
     use opentelemetry::global;
     use opentelemetry::metrics::{Counter, Gauge, Histogram};
-    use opentelemetry::KeyValue;
     use std::sync::Arc;
 
     /// Build a fresh instrument handle on every call. We intentionally

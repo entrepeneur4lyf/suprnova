@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
+use serial_test::serial;
 use std::sync::atomic::{AtomicI64, Ordering};
 use suprnova::queue::testing::{assert_pushed, install_fake};
-use suprnova::{async_trait, FrameworkError, Job, Queue};
-use serial_test::serial;
+use suprnova::{FrameworkError, Job, Queue, async_trait};
 
 static SEEN: AtomicI64 = AtomicI64::new(0);
 

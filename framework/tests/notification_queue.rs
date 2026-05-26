@@ -2,18 +2,18 @@ use async_trait::async_trait;
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use suprnova::notifications::channels::database::DatabaseChannel;
 use suprnova::notifications::notify_job::SendNotificationJob;
 use suprnova::notifications::{
     Channel, DynNotification, Notifiable, Notification, NotificationDispatcher,
 };
+use suprnova::queue::Queue;
 use suprnova::queue::driver::QueueDriver;
 use suprnova::queue::memory::MemoryQueueDriver;
-use suprnova::queue::worker::{register_job, run_worker, WorkerConfig};
-use suprnova::queue::Queue;
+use suprnova::queue::worker::{WorkerConfig, register_job, run_worker};
 use suprnova::{FrameworkError, Notify};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -125,10 +125,7 @@ async fn notification_queue_dispatches_through_queue_and_lands_in_db() {
         .await
         .unwrap()
         .expect("row present");
-    assert_eq!(
-        row.try_get_by_index::<String>(0).unwrap(),
-        "OrderShipped"
-    );
+    assert_eq!(row.try_get_by_index::<String>(0).unwrap(), "OrderShipped");
     assert_eq!(row.try_get_by_index::<String>(1).unwrap(), "users");
     assert_eq!(row.try_get_by_index::<String>(2).unwrap(), "7");
     let data_json: String = row.try_get_by_index(3).unwrap();
@@ -197,8 +194,7 @@ async fn notify_send_delivers_synchronously_through_bound_dispatcher() {
     // to the bound dispatcher in-process with no queue round-trip.
     SEND_HITS.store(0, Ordering::SeqCst);
 
-    let dispatcher = NotificationDispatcher::new()
-        .register_channel(Arc::new(CountingChannel));
+    let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(CountingChannel));
     suprnova::notifications::set_dispatcher(Arc::new(dispatcher));
 
     Notify::send(

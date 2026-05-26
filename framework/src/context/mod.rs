@@ -11,7 +11,7 @@
 //! choose not to install a scope all keep working without panics.
 
 use dashmap::DashMap;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::HashMap;

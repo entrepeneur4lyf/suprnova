@@ -12,8 +12,8 @@
 //! model seeds. We follow that here rather than expose two
 //! independent seeders that the bootstrap must order correctly.
 
-use suprnova::async_trait;
 use suprnova::FrameworkError;
+use suprnova::async_trait;
 use suprnova::{Factory, Seeder};
 
 use crate::factories::{PostFactory, UserFactory};

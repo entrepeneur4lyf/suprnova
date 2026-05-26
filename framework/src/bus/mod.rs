@@ -30,9 +30,9 @@ impl<T> Dispatched<T> {
     pub fn unwrap_executed(self) -> T {
         match self {
             Dispatched::Executed(v) => v,
-            Dispatched::Captured => panic!(
-                "expected Dispatched::Executed but got Captured (fake mode active?)"
-            ),
+            Dispatched::Captured => {
+                panic!("expected Dispatched::Executed but got Captured (fake mode active?)")
+            }
         }
     }
 
@@ -135,9 +135,9 @@ impl Bus {
             let map = g
                 .as_ref()
                 .ok_or_else(|| FrameworkError::internal("Bus: no handlers registered"))?;
-            map.get(&TypeId::of::<C>())
-                .cloned()
-                .ok_or_else(|| FrameworkError::internal(format!("Bus: no handler for {}", C::command_name())))?
+            map.get(&TypeId::of::<C>()).cloned().ok_or_else(|| {
+                FrameworkError::internal(format!("Bus: no handler for {}", C::command_name()))
+            })?
         };
         let payload = serde_json::to_value(&cmd)
             .map_err(|e| FrameworkError::internal(format!("Bus encode: {e}")))?;
@@ -148,7 +148,9 @@ impl Bus {
     }
 
     /// Run commands sequentially, stopping on (and including) the first error.
-    pub async fn chain<C: Command + Clone>(cmds: Vec<C>) -> Vec<Result<Dispatched<C::Output>, FrameworkError>>
+    pub async fn chain<C: Command + Clone>(
+        cmds: Vec<C>,
+    ) -> Vec<Result<Dispatched<C::Output>, FrameworkError>>
     where
         C::Output: serde::Serialize + serde::de::DeserializeOwned,
     {
@@ -165,7 +167,9 @@ impl Bus {
     }
 
     /// Run commands concurrently and collect results in input order.
-    pub async fn batch<C: Command + Clone>(cmds: Vec<C>) -> Vec<Result<Dispatched<C::Output>, FrameworkError>>
+    pub async fn batch<C: Command + Clone>(
+        cmds: Vec<C>,
+    ) -> Vec<Result<Dispatched<C::Output>, FrameworkError>>
     where
         C::Output: serde::Serialize + serde::de::DeserializeOwned,
     {

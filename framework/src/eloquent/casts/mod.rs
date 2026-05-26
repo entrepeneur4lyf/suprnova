@@ -60,18 +60,13 @@ pub trait Cast: Send + Sync {
 pub trait DynCast: Send + Sync {
     /// Convert a raw storage value into the in-memory shape (e.g.
     /// decode a JSON column into a `serde_json::Value`).
-    fn from_storage_json(
-        &self,
-        v: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameworkError>;
+    fn from_storage_json(&self, v: &serde_json::Value)
+    -> Result<serde_json::Value, FrameworkError>;
 
     /// Convert an in-memory value into its storage shape (e.g. encode
     /// a `serde_json::Value` back into a JSON string for the
     /// underlying TEXT column).
-    fn to_storage_json(
-        &self,
-        v: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameworkError>;
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError>;
 }
 
 /// Bridges a statically-typed `Cast` to its `DynCast` shadow. Users

@@ -30,10 +30,10 @@ use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
+use suprnova::FrameworkError;
 use suprnova::http::Request;
 use suprnova::routing::Router;
 use suprnova::ws::{WebSocketHandler, WsSocket};
-use suprnova::FrameworkError;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 

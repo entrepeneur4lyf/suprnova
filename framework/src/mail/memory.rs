@@ -11,7 +11,9 @@ pub struct InMemoryMailTransport {
 }
 
 impl InMemoryMailTransport {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Snapshot of every message sent through this transport.
     pub fn captured(&self) -> Vec<OutgoingMessage> {
@@ -27,8 +29,13 @@ impl InMemoryMailTransport {
 #[async_trait]
 impl MailTransport for InMemoryMailTransport {
     async fn send(&self, msg: &OutgoingMessage) -> Result<(), FrameworkError> {
-        self.sent.lock().unwrap_or_else(|e| e.into_inner()).push(msg.clone());
+        self.sent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(msg.clone());
         Ok(())
     }
-    fn name(&self) -> &'static str { "in-memory" }
+    fn name(&self) -> &'static str {
+        "in-memory"
+    }
 }

@@ -46,7 +46,12 @@ fn macro_registers_model_in_inventory() {
     assert_eq!(entry.primary_key, "id");
 }
 
-#[model(table = "uuid_things", primary_key = "uid", key_type = "String", auto_increment = false)]
+#[model(
+    table = "uuid_things",
+    primary_key = "uid",
+    key_type = "String",
+    auto_increment = false
+)]
 pub struct UuidThing {
     pub uid: String,
     pub label: String,

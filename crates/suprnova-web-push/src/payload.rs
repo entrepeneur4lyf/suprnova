@@ -31,8 +31,12 @@ pub struct Payload {
 }
 
 impl Payload {
-    pub fn body(&self) -> &[u8] { &self.body }
-    pub fn content_encoding(&self) -> ContentEncoding { self.content_encoding }
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+    pub fn content_encoding(&self) -> ContentEncoding {
+        self.content_encoding
+    }
 
     /// Encrypt `plaintext` for the given subscriber. `p256dh_b64url` and
     /// `auth_b64url` come from the browser's `PushSubscription.getKey('p256dh')`
@@ -58,11 +62,12 @@ impl Payload {
             .map_err(|e| WebPushError::Encryption(format!("auth base64: {e}")))?;
 
         let body = match encoding {
-            ContentEncoding::Aes128Gcm => {
-                ece::encrypt(&p256dh, &auth, plaintext)
-                    .map_err(|e| WebPushError::Encryption(format!("ece: {e}")))?
-            }
+            ContentEncoding::Aes128Gcm => ece::encrypt(&p256dh, &auth, plaintext)
+                .map_err(|e| WebPushError::Encryption(format!("ece: {e}")))?,
         };
-        Ok(Self { body, content_encoding: encoding })
+        Ok(Self {
+            body,
+            content_encoding: encoding,
+        })
     }
 }

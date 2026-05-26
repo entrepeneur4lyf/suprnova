@@ -24,11 +24,11 @@
 
 use std::marker::PhantomData;
 
+use crate::eloquent::EloquentModel;
 use crate::eloquent::builder::{Builder, IntoColumn, IntoVal};
 use crate::eloquent::collection::Collection;
 use crate::eloquent::model::Model;
 use crate::eloquent::relations::{Relation, RelationKind};
-use crate::eloquent::EloquentModel;
 use crate::error::FrameworkError;
 
 /// One-to-one relation from parent `L` to child `R`. Constructed by

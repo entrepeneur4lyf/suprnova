@@ -89,8 +89,5 @@ async fn mailable_render_error_is_framework_error() {
         .await
         .unwrap_err();
     let s = format!("{err}");
-    assert!(
-        s.contains("template") || s.contains("Tera"),
-        "got: {s}"
-    );
+    assert!(s.contains("template") || s.contains("Tera"), "got: {s}");
 }

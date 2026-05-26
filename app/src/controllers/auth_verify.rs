@@ -86,7 +86,5 @@ async fn verify_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
     // shape of the inner function composes cleanly (the `From<Redirect>`
     // impl produces a `Response = Result<HttpResponse, HttpResponse>`,
     // not what we need here).
-    Ok(HttpResponse::new()
-        .status(302)
-        .header("Location", "/"))
+    Ok(HttpResponse::new().status(302).header("Location", "/"))
 }

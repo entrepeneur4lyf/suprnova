@@ -43,7 +43,9 @@ async fn multipart_parses_two_fields_via_helper() {
         ],
     );
     let req = request_from_multipart("test", body).await;
-    let payload = parse_multipart_streaming(req, |_, _, _| Ok(())).await.unwrap();
+    let payload = parse_multipart_streaming(req, |_, _, _| Ok(()))
+        .await
+        .unwrap();
     let names: Vec<&str> = payload.fields.iter().map(|(n, _)| n.as_str()).collect();
     assert!(names.contains(&"avatar"));
     assert!(names.contains(&"caption"));
@@ -135,8 +137,9 @@ struct CappedGallery {
 
 #[tokio::test]
 async fn vec_count_cap_rejects_when_over_max() {
-    let parts: Vec<(&str, Option<&str>, &[u8])> =
-        (0..5).map(|_| ("photos", Some("a.bin"), &b"data"[..])).collect();
+    let parts: Vec<(&str, Option<&str>, &[u8])> = (0..5)
+        .map(|_| ("photos", Some("a.bin"), &b"data"[..]))
+        .collect();
     let body = build_multipart_body("test", &parts);
     let req = request_from_multipart("test", body).await;
     let err = CappedGallery::from_request(req)
@@ -152,8 +155,9 @@ async fn vec_count_cap_rejects_when_over_max() {
 
 #[tokio::test]
 async fn vec_count_cap_accepts_at_max() {
-    let parts: Vec<(&str, Option<&str>, &[u8])> =
-        (0..3).map(|_| ("photos", Some("a.bin"), &b"data"[..])).collect();
+    let parts: Vec<(&str, Option<&str>, &[u8])> = (0..3)
+        .map(|_| ("photos", Some("a.bin"), &b"data"[..]))
+        .collect();
     let body = build_multipart_body("test", &parts);
     let req = request_from_multipart("test", body).await;
     let form = CappedGallery::from_request(req).await.unwrap();
@@ -162,8 +166,9 @@ async fn vec_count_cap_accepts_at_max() {
 
 #[tokio::test]
 async fn vec_count_cap_accepts_below_max() {
-    let parts: Vec<(&str, Option<&str>, &[u8])> =
-        (0..2).map(|_| ("photos", Some("a.bin"), &b"data"[..])).collect();
+    let parts: Vec<(&str, Option<&str>, &[u8])> = (0..2)
+        .map(|_| ("photos", Some("a.bin"), &b"data"[..]))
+        .collect();
     let body = build_multipart_body("test", &parts);
     let req = request_from_multipart("test", body).await;
     let form = CappedGallery::from_request(req).await.unwrap();
@@ -178,9 +183,8 @@ struct CappedTags {
 
 #[tokio::test]
 async fn text_vec_count_cap_rejects_when_over_max() {
-    let parts: Vec<(&str, Option<&str>, &[u8])> = (0..6)
-        .map(|_| ("tags", None, &b"hello"[..]))
-        .collect();
+    let parts: Vec<(&str, Option<&str>, &[u8])> =
+        (0..6).map(|_| ("tags", None, &b"hello"[..])).collect();
     let body = build_multipart_body("test", &parts);
     let req = request_from_multipart("test", body).await;
     let err = CappedTags::from_request(req)
@@ -196,9 +200,8 @@ async fn text_vec_count_cap_rejects_when_over_max() {
 
 #[tokio::test]
 async fn text_vec_count_cap_accepts_at_max() {
-    let parts: Vec<(&str, Option<&str>, &[u8])> = (0..4)
-        .map(|_| ("tags", None, &b"x"[..]))
-        .collect();
+    let parts: Vec<(&str, Option<&str>, &[u8])> =
+        (0..4).map(|_| ("tags", None, &b"x"[..])).collect();
     let body = build_multipart_body("test", &parts);
     let req = request_from_multipart("test", body).await;
     let form = CappedTags::from_request(req).await.unwrap();
@@ -237,8 +240,8 @@ async fn derive_rejects_unparseable_text_field() {
 #[derive(MultipartRequest)]
 #[multipart(custom_hooks)]
 #[allow(dead_code)] // `file` exists to exercise the macro's required-file
-                    // path; the test never reaches it because `authorize`
-                    // short-circuits with Unauthorized before parsing.
+// path; the test never reaches it because `authorize`
+// short-circuits with Unauthorized before parsing.
 struct GuardedUpload {
     #[field("file")]
     file: UploadedFile,

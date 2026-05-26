@@ -16,10 +16,18 @@ struct Bing {
 
 #[async_trait]
 impl Mailable for Bing {
-    fn mailable_name() -> &'static str { "Bing" }
-    fn subject(&self) -> String { "subj".into() }
-    fn text_template_source(&self) -> Option<String> { Some("body".into()) }
-    fn from(&self) -> Option<Address> { Some(("Suprnova", "noreply@suprnova.dev").into()) }
+    fn mailable_name() -> &'static str {
+        "Bing"
+    }
+    fn subject(&self) -> String {
+        "subj".into()
+    }
+    fn text_template_source(&self) -> Option<String> {
+        Some("body".into())
+    }
+    fn from(&self) -> Option<Address> {
+        Some(("Suprnova", "noreply@suprnova.dev").into())
+    }
 }
 
 #[tokio::test]
@@ -41,7 +49,10 @@ async fn postmark_emits_correct_http_request() {
 
     let transport = PostmarkMailTransport::with_endpoint("test-token", server.uri());
     Mail::set_transport(Arc::new(transport));
-    Mail::to("alice@example.org").send(Bing::default()).await.unwrap();
+    Mail::to("alice@example.org")
+        .send(Bing::default())
+        .await
+        .unwrap();
 
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 1);
@@ -66,11 +77,17 @@ async fn postmark_maps_api_error_to_framework_error() {
 
     let transport = PostmarkMailTransport::with_endpoint("test-token", server.uri());
     Mail::set_transport(Arc::new(transport));
-    let err = Mail::to("blocked@example.org").send(Bing::default()).await.unwrap_err();
+    let err = Mail::to("blocked@example.org")
+        .send(Bing::default())
+        .await
+        .unwrap_err();
     let s = format!("{err}");
     assert!(s.contains("Postmark"), "error mentions provider: {s}");
     assert!(s.contains("422"), "error includes HTTP status: {s}");
-    assert!(s.contains("Inactive recipient"), "error surfaces upstream body: {s}");
+    assert!(
+        s.contains("Inactive recipient"),
+        "error surfaces upstream body: {s}"
+    );
 }
 
 // Attachment test: shared HTTP-provider attachment shape (SES/SendGrid/Resend reuse it).
@@ -81,10 +98,18 @@ struct WithPdf {
 
 #[async_trait]
 impl Mailable for WithPdf {
-    fn mailable_name() -> &'static str { "WithPdf" }
-    fn subject(&self) -> String { "invoice".into() }
-    fn text_template_source(&self) -> Option<String> { Some("see attached".into()) }
-    fn from(&self) -> Option<Address> { Some("noreply@suprnova.dev".into()) }
+    fn mailable_name() -> &'static str {
+        "WithPdf"
+    }
+    fn subject(&self) -> String {
+        "invoice".into()
+    }
+    fn text_template_source(&self) -> Option<String> {
+        Some("see attached".into())
+    }
+    fn from(&self) -> Option<Address> {
+        Some("noreply@suprnova.dev".into())
+    }
     fn attachments(&self) -> Vec<suprnova::mail::Attachment> {
         vec![suprnova::mail::Attachment {
             filename: "invoice.pdf".into(),
@@ -100,13 +125,18 @@ async fn postmark_encodes_attachments_as_base64_with_filename_and_content_type()
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/email"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "MessageID": "x" })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "MessageID": "x" })),
+        )
         .mount(&server)
         .await;
 
     let transport = PostmarkMailTransport::with_endpoint("test-token", server.uri());
     Mail::set_transport(Arc::new(transport));
-    Mail::to("alice@example.org").send(WithPdf::default()).await.unwrap();
+    Mail::to("alice@example.org")
+        .send(WithPdf::default())
+        .await
+        .unwrap();
 
     let reqs = server.received_requests().await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();

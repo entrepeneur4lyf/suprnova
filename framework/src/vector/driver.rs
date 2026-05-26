@@ -16,11 +16,7 @@ pub struct VectorItem {
 }
 
 impl VectorItem {
-    pub fn new(
-        id: impl Into<String>,
-        embedding: Vec<f32>,
-        metadata: serde_json::Value,
-    ) -> Self {
+    pub fn new(id: impl Into<String>, embedding: Vec<f32>, metadata: serde_json::Value) -> Self {
         Self {
             id: id.into(),
             embedding,

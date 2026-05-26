@@ -2,7 +2,7 @@
 //! multiple subscribers, channel isolation, unsubscribe.
 
 use serde_json::json;
-use suprnova::broadcasting::{BroadcastHub, BroadcastEnvelope, InMemoryBroadcastHub};
+use suprnova::broadcasting::{BroadcastEnvelope, BroadcastHub, InMemoryBroadcastHub};
 
 #[tokio::test]
 async fn publish_to_subscribed_channel_delivers_envelope() {
@@ -35,12 +35,17 @@ async fn publish_to_unsubscribed_channel_is_ignored_by_other_subscribers() {
     })
     .await;
 
-    let presence_msg = presence_rx.recv().await.expect("presence subscriber receives");
+    let presence_msg = presence_rx
+        .recv()
+        .await
+        .expect("presence subscriber receives");
     assert_eq!(presence_msg.event, "MemberJoined");
 
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
     assert!(
-        timeout(Duration::from_millis(50), chat_rx.recv()).await.is_err(),
+        timeout(Duration::from_millis(50), chat_rx.recv())
+            .await
+            .is_err(),
         "chat subscriber should not receive presence-channel events"
     );
 }
@@ -60,7 +65,8 @@ async fn unsubscribe_via_drop_releases_slot() {
         channel: "chat.42".into(),
         event: "Tick".into(),
         data: json!({}),
-    }).await;
+    })
+    .await;
     tokio::task::yield_now().await;
 
     assert_eq!(hub.subscriber_count("chat.42"), 1);

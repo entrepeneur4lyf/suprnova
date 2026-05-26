@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use suprnova::eloquent::attrs::Attrs;
 use suprnova::eloquent::events::EventResult;
 use suprnova::eloquent::observers::Observer;
-use suprnova::{model, FrameworkError, Model as _};
+use suprnova::{FrameworkError, Model as _, model};
 
 // ---- Model under test ---------------------------------------------------
 
@@ -167,7 +167,9 @@ async fn bootstrap_observers_drains_inventory_cleanly() {
 async fn observer_types_reexport_at_crate_root() {
     // These four items must be reachable from `suprnova::`. The use
     // statements compile-fail if any name is missing.
-    use suprnova::{bootstrap_observers, Observer as ObserverAlias, ObserverEntry, ObserverInstallFuture};
+    use suprnova::{
+        Observer as ObserverAlias, ObserverEntry, ObserverInstallFuture, bootstrap_observers,
+    };
 
     let _ = bootstrap_observers; // fn pointer is Send
     let _: Option<&ObserverEntry> = None;
@@ -230,11 +232,7 @@ pub struct OnlyUpdatesObserver;
 #[suprnova::observer(T2User)]
 #[async_trait]
 impl Observer<T2User> for OnlyUpdatesObserver {
-    async fn updated(
-        &self,
-        _previous: &T2User,
-        _current: &T2User,
-    ) -> Result<(), FrameworkError> {
+    async fn updated(&self, _previous: &T2User, _current: &T2User) -> Result<(), FrameworkError> {
         UPDATED_OBSERVER_FIRES.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }

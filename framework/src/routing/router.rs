@@ -1,9 +1,9 @@
 use crate::http::{Request, Response};
-use crate::middleware::{into_boxed, BoxedMiddleware, Middleware};
+use crate::middleware::{BoxedMiddleware, Middleware, into_boxed};
 use crate::ws::BoxedWebSocketHandler;
 use hyper::Method;
 use matchit::Router as MatchitRouter;
-use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -199,7 +199,12 @@ pub struct Router {
     /// optional_ws_config)` so the per-route middleware chain and
     /// optional `WsConfig` override can be recovered by `match_ws`
     /// and used in `handle_ws_upgrade`.
-    ws_routes: MatchitRouter<(String, BoxedWebSocketHandler, Vec<BoxedMiddleware>, Option<crate::ws::WsConfig>)>,
+    ws_routes: MatchitRouter<(
+        String,
+        BoxedWebSocketHandler,
+        Vec<BoxedMiddleware>,
+        Option<crate::ws::WsConfig>,
+    )>,
     /// Middleware assignments: (method, path) -> boxed middleware instances.
     ///
     /// Keying by `(Method, String)` rather than path alone prevents
@@ -560,10 +565,7 @@ impl Router {
     ) -> Router {
         let converted = crate::routing::macros::convert_route_params(path);
         self.ws_routes
-            .insert(
-                &converted,
-                (converted.clone(), handler, middleware, config),
-            )
+            .insert(&converted, (converted.clone(), handler, middleware, config))
             .unwrap_or_else(|e| panic!("Failed to register WS route '{path}': {e}"));
         self
     }
@@ -836,10 +838,7 @@ mod tests {
         let _ = Router::new()
             .get("/users/{id}", h)
             .name("users.show.encoding");
-        let url = route(
-            "users.show.encoding",
-            &[("id", "../../etc/passwd")],
-        );
+        let url = route("users.show.encoding", &[("id", "../../etc/passwd")]);
         assert_eq!(
             url.as_deref(),
             Some("/users/..%2F..%2Fetc%2Fpasswd"),
@@ -854,10 +853,7 @@ mod tests {
         let _ = Router::new()
             .get("/posts/{slug}", h)
             .name("posts.show.frag");
-        let url = route(
-            "posts.show.frag",
-            &[("slug", "x?evil=1#hash&y=2")],
-        );
+        let url = route("posts.show.frag", &[("slug", "x?evil=1#hash&y=2")]);
         assert_eq!(
             url.as_deref(),
             Some("/posts/x%3Fevil%3D1%23hash%26y%3D2"),
@@ -873,14 +869,8 @@ mod tests {
         let _ = Router::new()
             .get("/posts/{slug}", h)
             .name("posts.show.safe");
-        let url = route(
-            "posts.show.safe",
-            &[("slug", "hello-world_42.html~tilde")],
-        );
-        assert_eq!(
-            url.as_deref(),
-            Some("/posts/hello-world_42.html~tilde"),
-        );
+        let url = route("posts.show.safe", &[("slug", "hello-world_42.html~tilde")]);
+        assert_eq!(url.as_deref(), Some("/posts/hello-world_42.html~tilde"),);
     }
 
     /// F7: registering the same name to a different path panics. Two
@@ -914,12 +904,10 @@ mod tests {
         let _ = Router::new()
             .get("/redirect/{target}", h)
             .name("redirect.target");
-        let params: HashMap<String, String> = [(
-            "target".to_string(),
-            "https://evil.example/".to_string(),
-        )]
-        .into_iter()
-        .collect();
+        let params: HashMap<String, String> =
+            [("target".to_string(), "https://evil.example/".to_string())]
+                .into_iter()
+                .collect();
         let url = route_with_params("redirect.target", &params);
         assert_eq!(
             url.as_deref(),
@@ -934,9 +922,7 @@ mod tests {
     /// re-encoded form contains the original placeholder unchanged.
     #[test]
     fn route_leaves_unfilled_placeholders_in_place() {
-        let _ = Router::new()
-            .get("/{a}/{b}", h)
-            .name("two.params.test");
+        let _ = Router::new().get("/{a}/{b}", h).name("two.params.test");
         let url = route("two.params.test", &[("a", "x")]);
         assert_eq!(url, Some("/x/{b}".to_string()));
     }

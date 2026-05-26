@@ -145,10 +145,7 @@ fn collection_key_by_with_indexes_by_closure_key() {
         id: i64,
         name: &'static str,
     }
-    let c = Collection::from_vec(vec![
-        User { id: 1, name: "a" },
-        User { id: 2, name: "b" },
-    ]);
+    let c = Collection::from_vec(vec![User { id: 1, name: "a" }, User { id: 2, name: "b" }]);
     let by_id = c.key_by_with(|u| u.id);
     assert_eq!(by_id.get(&1).unwrap().name, "a");
     assert_eq!(by_id.get(&2).unwrap().name, "b");

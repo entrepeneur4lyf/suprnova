@@ -3,12 +3,12 @@
 
 use async_trait::async_trait;
 use std::time::Duration;
+use suprnova::FrameworkError;
 use suprnova::http::Request;
-use suprnova::middleware::{into_boxed, Middleware, Next};
 use suprnova::http::Response;
+use suprnova::middleware::{Middleware, Next, into_boxed};
 use suprnova::routing::Router;
 use suprnova::ws::{WebSocketHandler, WsConfig, WsSocket};
-use suprnova::FrameworkError;
 
 struct NoopHandler;
 
@@ -105,8 +105,8 @@ fn ws_macro_config_chain_threads_through() {
 }
 
 mod ws_macro_config_then_middleware {
-    use super::PassthroughMiddleware;
     use super::NoopHandler;
+    use super::PassthroughMiddleware;
     use std::time::Duration;
     use suprnova::ws::WsConfig;
     use suprnova::{routes, ws};
@@ -128,8 +128,8 @@ fn ws_macro_config_before_middleware_composes() {
 }
 
 mod ws_macro_middleware_then_config {
-    use super::PassthroughMiddleware;
     use super::NoopHandler;
+    use super::PassthroughMiddleware;
     use std::time::Duration;
     use suprnova::ws::WsConfig;
     use suprnova::{routes, ws};

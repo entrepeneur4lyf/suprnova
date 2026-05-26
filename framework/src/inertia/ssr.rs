@@ -82,9 +82,8 @@ pub(crate) async fn render(
         return Ok(None);
     }
 
-    let body = serde_json::to_vec(page).map_err(|e| {
-        FrameworkError::internal(format!("SSR page serialization failed: {e}"))
-    })?;
+    let body = serde_json::to_vec(page)
+        .map_err(|e| FrameworkError::internal(format!("SSR page serialization failed: {e}")))?;
     let url = format!("{}/render", config.url.trim_end_matches('/'));
 
     let result = post_json(&url, body, config.timeout, config.max_response_bytes).await;
@@ -92,9 +91,7 @@ pub(crate) async fn render(
         Ok(resp) => Ok(Some(resp)),
         Err(e) => {
             if config.throw_on_error {
-                Err(FrameworkError::internal(format!(
-                    "SSR render failed: {e}"
-                )))
+                Err(FrameworkError::internal(format!("SSR render failed: {e}")))
             } else {
                 let msg = format!(
                     "SSR worker unreachable at {} ({}); falling back to CSR",
@@ -157,8 +154,8 @@ async fn post_json(
     max_response_bytes: usize,
 ) -> Result<SsrResponse, String> {
     use http_body_util::{BodyExt, Full, Limited};
-    use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
     use hyper::Request;
+    use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
 
     let parsed = hyper::Uri::try_from(url).map_err(|e| format!("invalid url: {e}"))?;
 
@@ -209,8 +206,7 @@ async fn post_json(
         .await
         .map_err(|e| format!("read body: {e}"))?;
     let bytes = collected.to_bytes();
-    serde_json::from_slice::<SsrResponse>(&bytes)
-        .map_err(|e| format!("deserialize response: {e}"))
+    serde_json::from_slice::<SsrResponse>(&bytes).map_err(|e| format!("deserialize response: {e}"))
 }
 
 #[cfg(test)]

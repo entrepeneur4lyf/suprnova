@@ -164,9 +164,7 @@ impl GateRegistry {
         let entry_result: EntryResult = match self.gates.read() {
             Ok(gates) => match gates.get(&key) {
                 Some(GateEntry::Sync(f)) => Some(Ok(f(user as &dyn Any, resource as &dyn Any))),
-                Some(GateEntry::Async(f)) => {
-                    Some(Err(f(user as &dyn Any, resource as &dyn Any)))
-                }
+                Some(GateEntry::Async(f)) => Some(Err(f(user as &dyn Any, resource as &dyn Any))),
                 None => None,
             },
             Err(_) => {

@@ -23,15 +23,15 @@
 //! 4. Fire again, observe the count stays where it was — listener
 //!    cleared.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use suprnova::FrameworkError;
 use suprnova::eloquent::events::{
-    dispatch_cancellable, listen_cancellable, CancellableListener, EventResult,
+    CancellableListener, EventResult, dispatch_cancellable, listen_cancellable,
 };
 use suprnova::events::Event;
 use suprnova::testing::TestDatabase;
-use suprnova::FrameworkError;
 
 // ---- Cancellable listener registry --------------------------------------
 
@@ -112,7 +112,9 @@ async fn event_dispatcher_clears_on_demand() {
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     suprnova::events::EventFacade::listen::<Af4Tick, _>(Arc::new(Af4TickListener)).await;
 
-    suprnova::events::EventFacade::dispatch(Af4Tick).await.unwrap();
+    suprnova::events::EventFacade::dispatch(Af4Tick)
+        .await
+        .unwrap();
     assert_eq!(
         AF4_TICK_FIRES.load(Ordering::SeqCst),
         1,
@@ -121,7 +123,9 @@ async fn event_dispatcher_clears_on_demand() {
 
     suprnova::events::EventDispatcher::clear_global();
 
-    suprnova::events::EventFacade::dispatch(Af4Tick).await.unwrap();
+    suprnova::events::EventFacade::dispatch(Af4Tick)
+        .await
+        .unwrap();
     assert_eq!(
         AF4_TICK_FIRES.load(Ordering::SeqCst),
         1,

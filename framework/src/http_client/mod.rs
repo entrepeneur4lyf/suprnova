@@ -31,8 +31,8 @@
 pub(crate) mod fake;
 
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -40,7 +40,7 @@ use serde::Serialize;
 
 use crate::FrameworkError;
 
-pub use fake::{assert_not_sent, assert_sent, fake_response, RecordedRequest};
+pub use fake::{RecordedRequest, assert_not_sent, assert_sent, fake_response};
 
 /// Process-global flag flipped by [`Http::fail_on_real_calls`]. When
 /// `true`, [`RequestBuilder::send`] refuses to hit the real network
@@ -376,7 +376,7 @@ impl RequestBuilder {
     /// Attach HTTP Basic auth. `password` is optional — `None` produces
     /// `user:`.
     pub fn basic_auth(self, user: impl AsRef<str>, password: Option<&str>) -> Self {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
         let credential = format!("{}:{}", user.as_ref(), password.unwrap_or(""));
         let encoded = STANDARD.encode(credential);
         self.header("Authorization", format!("Basic {}", encoded))
@@ -448,17 +448,19 @@ impl RequestBuilder {
                 Ok(resp) => {
                     let status = resp.status();
                     let is_transient = (500..600).contains(&status);
-                    if is_transient && attempt < max_attempts
-                        && let Some(p) = policy {
-                            let backoff = backoff_for(attempt, p.base_backoff);
-                            let wait = if status == 503 {
-                                std::cmp::max(backoff, retry_after_from(&resp))
-                            } else {
-                                backoff
-                            };
-                            tokio::time::sleep(wait).await;
-                            continue;
-                        }
+                    if is_transient
+                        && attempt < max_attempts
+                        && let Some(p) = policy
+                    {
+                        let backoff = backoff_for(attempt, p.base_backoff);
+                        let wait = if status == 503 {
+                            std::cmp::max(backoff, retry_after_from(&resp))
+                        } else {
+                            backoff
+                        };
+                        tokio::time::sleep(wait).await;
+                        continue;
+                    }
                     return Ok(resp);
                 }
                 Err(e) => {
@@ -521,8 +523,8 @@ async fn build_and_send(builder: &RequestBuilder) -> Result<ClientResponse, Fram
 /// keeps the code path safe to run unconditionally on every request.
 #[cfg(feature = "otel")]
 fn inject_w3c_trace_context(request: &mut reqwest::Request) {
-    use opentelemetry::global;
     use crate::telemetry::propagation::HeaderInjector;
+    use opentelemetry::global;
 
     let cx = opentelemetry::Context::current();
     let mut injector = HeaderInjector(request.headers_mut());
@@ -561,7 +563,11 @@ pub struct ClientResponse(ClientResponseInner);
 
 enum ClientResponseInner {
     Real(reqwest::Response),
-    Fake { status: u16, headers: Vec<(String, String)>, body: Bytes },
+    Fake {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: Bytes,
+    },
 }
 
 impl ClientResponse {
@@ -570,7 +576,11 @@ impl ClientResponse {
     }
 
     pub(crate) fn fake(status: u16, headers: Vec<(String, String)>, body: Bytes) -> Self {
-        Self(ClientResponseInner::Fake { status, headers, body })
+        Self(ClientResponseInner::Fake {
+            status,
+            headers,
+            body,
+        })
     }
 
     /// Response status code.
@@ -642,11 +652,9 @@ impl ClientResponse {
     pub fn into_inner(self) -> Result<reqwest::Response, FrameworkError> {
         match self.0 {
             ClientResponseInner::Real(r) => Ok(r),
-            ClientResponseInner::Fake { .. } => {
-                Err(FrameworkError::internal(
-                    "into_inner is not available on fake responses",
-                ))
-            }
+            ClientResponseInner::Fake { .. } => Err(FrameworkError::internal(
+                "into_inner is not available on fake responses",
+            )),
         }
     }
 }

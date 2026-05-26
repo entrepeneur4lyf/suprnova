@@ -18,7 +18,7 @@
 //!   (aggregate).
 
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, model, AggregateKind, Model};
+use suprnova::{AggregateKind, Model, attrs, model};
 
 #[model(table = "btm_users", relations = {
     roles: BelongsToMany<BtmRole, BtmRoleUserPivot> {
@@ -133,10 +133,7 @@ async fn belongs_to_many_sync_attaches_missing_and_detaches_extra() {
     u.roles().attach(r2.id).await.unwrap();
 
     // After sync([r2, r3]): r1 detached, r2 stays, r3 attached.
-    u.roles()
-        .sync([r2.id, r3.id])
-        .await
-        .unwrap();
+    u.roles().sync([r2.id, r3.id]).await.unwrap();
     let after: Vec<i64> = u
         .roles()
         .get()
@@ -196,9 +193,7 @@ async fn belongs_to_many_attach_idempotent_or_explicit() {
     let result1 = u.roles().attach(r.id).await;
     let result2 = u.roles().attach(r.id).await;
     assert!(result1.is_ok(), "first attach must succeed");
-    let err = result2.expect_err(
-        "second attach must violate UNIQUE(btm_user_id, btm_role_id)",
-    );
+    let err = result2.expect_err("second attach must violate UNIQUE(btm_user_id, btm_role_id)");
     // Pin the error MESSAGE — a generic "table not found" would
     // satisfy `is_err()` but wouldn't prove the contract that the
     // UNIQUE constraint is what rejected the duplicate. SQLite's
@@ -698,7 +693,12 @@ async fn belongs_to_many_custom_pivot_keys_resolve() {
 // runtime via `.related_pk(...)`. This test pins that wiring
 // end-to-end.
 
-#[suprnova::model(table = "btm_uuid_things", primary_key = "uuid", key_type = "String", auto_increment = false)]
+#[suprnova::model(
+    table = "btm_uuid_things",
+    primary_key = "uuid",
+    key_type = "String",
+    auto_increment = false
+)]
 pub struct BtmUuidThing {
     pub uuid: String,
     pub weight: i64,
@@ -753,16 +753,12 @@ async fn belongs_to_many_respects_custom_related_pk() {
     let db = TestDatabase::sqlite_memory().await.unwrap();
     migrate_uuid(&db).await;
     let u = BtmUuidUser::create(attrs! { name: "alice" }).await.unwrap();
-    db.execute_unprepared(
-        "INSERT INTO btm_uuid_things (uuid, weight) VALUES ('thing-1', 10)",
-    )
-    .await
-    .unwrap();
-    db.execute_unprepared(
-        "INSERT INTO btm_uuid_things (uuid, weight) VALUES ('thing-2', 25)",
-    )
-    .await
-    .unwrap();
+    db.execute_unprepared("INSERT INTO btm_uuid_things (uuid, weight) VALUES ('thing-1', 10)")
+        .await
+        .unwrap();
+    db.execute_unprepared("INSERT INTO btm_uuid_things (uuid, weight) VALUES ('thing-2', 25)")
+        .await
+        .unwrap();
     db.execute_unprepared(&format!(
         "INSERT INTO btm_uuid_pivot (btm_uuid_user_id, btm_uuid_thing_uuid) \
          VALUES ({}, 'thing-1')",

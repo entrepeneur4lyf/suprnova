@@ -25,7 +25,7 @@
 //!    appears even though it isn't in the visible allowlist. Same
 //!    bypass mechanism, mirrored for the allowlist path.
 
-use suprnova::{accessor, model, Model};
+use suprnova::{Model, accessor, model};
 
 // ---- Models -------------------------------------------------------------
 

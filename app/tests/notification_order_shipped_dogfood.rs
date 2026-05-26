@@ -14,9 +14,9 @@
 //! driver.
 
 use serial_test::serial;
+use suprnova::SendNotificationJob;
 use suprnova::notifications::{Notifiable, Notify};
 use suprnova::queue::testing::{assert_pushed, install_fake};
-use suprnova::SendNotificationJob;
 
 struct FakeUser;
 
@@ -47,7 +47,10 @@ async fn order_shipped_queues_send_notification_job() {
     assert_pushed::<SendNotificationJob>(|job| {
         job.notification_name == "OrderShipped"
             && job.channels.iter().any(|c| c == "database")
-            && job.notifiable_route_per_channel.get("database").map(String::as_str)
+            && job
+                .notifiable_route_per_channel
+                .get("database")
+                .map(String::as_str)
                 == Some("user-42")
             && job.notification_payload["tracking"] == "1Z999AA10123456784"
     });

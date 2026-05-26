@@ -6,7 +6,7 @@
 
 use suprnova::ws::WsSocket;
 use tokio::io::duplex;
-use tokio_tungstenite::{tungstenite::protocol::Role, WebSocketStream};
+use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
 
 #[tokio::test]
 async fn ws_socket_round_trips_text_messages() {
@@ -32,7 +32,9 @@ async fn ws_socket_round_trips_text_messages() {
     let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
     use futures_util::{SinkExt, StreamExt};
     client
-        .send(tokio_tungstenite::tungstenite::Message::Text("hello".into()))
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            "hello".into(),
+        ))
         .await
         .unwrap();
     let reply = client.next().await.unwrap().unwrap();

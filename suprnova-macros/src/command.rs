@@ -24,7 +24,7 @@
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{parse::Parser, punctuated::Punctuated, Expr, ItemFn, Lit, Meta, Token};
+use syn::{Expr, ItemFn, Lit, Meta, Token, parse::Parser, punctuated::Punctuated};
 
 #[derive(Default)]
 struct CommandAttrs {
@@ -100,12 +100,9 @@ pub fn command_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     if input_fn.sig.asyncness.is_none() {
-        return syn::Error::new_spanned(
-            input_fn.sig.fn_token,
-            "#[command] requires an async fn",
-        )
-        .to_compile_error()
-        .into();
+        return syn::Error::new_spanned(input_fn.sig.fn_token, "#[command] requires an async fn")
+            .to_compile_error()
+            .into();
     }
 
     let Some(name) = attrs.name else {

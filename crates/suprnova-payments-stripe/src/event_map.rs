@@ -67,7 +67,10 @@ mod tests {
 
     #[test]
     fn unknown_event_returns_none() {
-        assert_eq!(stripe_event_to_neutral("radar.early_fraud_warning.created"), None);
+        assert_eq!(
+            stripe_event_to_neutral("radar.early_fraud_warning.created"),
+            None
+        );
         assert_eq!(stripe_event_to_neutral("payout.created"), None);
         assert_eq!(stripe_event_to_neutral(""), None);
     }

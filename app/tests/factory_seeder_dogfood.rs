@@ -19,9 +19,9 @@ use app::seeders::BaseSeeder;
 use sea_orm::{Database, EntityTrait, PaginatorTrait};
 use sea_orm_migration::MigratorTrait;
 use serial_test::serial;
+use suprnova::DbConnection;
 use suprnova::container::testing::TestContainer;
 use suprnova::seed;
-use suprnova::DbConnection;
 
 #[tokio::test]
 #[serial]
@@ -43,7 +43,9 @@ async fn base_seeder_creates_50_users_and_200_posts() {
 
     // Register and run the dogfood seeder.
     seed::register::<BaseSeeder>();
-    seed::run_all().await.expect("BaseSeeder runs to completion");
+    seed::run_all()
+        .await
+        .expect("BaseSeeder runs to completion");
 
     // Verify the row counts.
     let user_count = app::models::users::Entity::find()

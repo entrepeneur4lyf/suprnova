@@ -32,7 +32,10 @@ struct CreateUserDto {
 /// Spawn a one-shot server that calls `CreateUserDto::extract`, captures the
 /// `Result`, then returns a stub 200. The captured result is asserted by the
 /// calling test after the round-trip.
-async fn spawn_and_capture() -> (SocketAddr, Arc<Mutex<Option<Result<CreateUserDto, FrameworkError>>>>) {
+async fn spawn_and_capture() -> (
+    SocketAddr,
+    Arc<Mutex<Option<Result<CreateUserDto, FrameworkError>>>>,
+) {
     let captured: Arc<Mutex<Option<Result<CreateUserDto, FrameworkError>>>> =
         Arc::new(Mutex::new(None));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -43,19 +46,15 @@ async fn spawn_and_capture() -> (SocketAddr, Arc<Mutex<Option<Result<CreateUserD
         if let Ok((stream, _)) = listener.accept().await {
             let io = TokioIo::new(stream);
             let captured_svc = captured_server.clone();
-            let svc = service_fn(
-                move |hyper_req: hyper::Request<hyper::body::Incoming>| {
-                    let captured_inner = captured_svc.clone();
-                    async move {
-                        let req = Request::new(hyper_req);
-                        let result = CreateUserDto::extract(req).await;
-                        *captured_inner.lock().unwrap() = Some(result);
-                        Ok::<_, Infallible>(
-                            HttpResponse::text("ok").into_hyper(),
-                        )
-                    }
-                },
-            );
+            let svc = service_fn(move |hyper_req: hyper::Request<hyper::body::Incoming>| {
+                let captured_inner = captured_svc.clone();
+                async move {
+                    let req = Request::new(hyper_req);
+                    let result = CreateUserDto::extract(req).await;
+                    *captured_inner.lock().unwrap() = Some(result);
+                    Ok::<_, Infallible>(HttpResponse::text("ok").into_hyper())
+                }
+            });
             let _ = http1::Builder::new().serve_connection(io, svc).await;
         }
     });
@@ -99,7 +98,11 @@ async fn data_struct_extracts_as_form_request() {
     // boundary, but a brief yield ensures the spawned task stores the result).
     tokio::task::yield_now().await;
 
-    let result = captured.lock().unwrap().take().expect("server did not process request");
+    let result = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("server did not process request");
     let dto = result.unwrap();
     assert_eq!(dto.email, "ada@example.com");
     assert_eq!(dto.password, "secretkey");
@@ -116,7 +119,11 @@ async fn data_struct_form_request_rejects_invalid_payload() {
 
     tokio::task::yield_now().await;
 
-    let result = captured.lock().unwrap().take().expect("server did not process request");
+    let result = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("server did not process request");
     let err = result.unwrap_err();
     assert_eq!(
         err.status_code(),
@@ -172,17 +179,15 @@ async fn spawn_and_capture_admin() -> (
         if let Ok((stream, _)) = listener.accept().await {
             let io = TokioIo::new(stream);
             let captured_svc = captured_server.clone();
-            let svc = service_fn(
-                move |hyper_req: hyper::Request<hyper::body::Incoming>| {
-                    let captured_inner = captured_svc.clone();
-                    async move {
-                        let req = Request::new(hyper_req);
-                        let result = AdminDtoT11::extract(req).await;
-                        *captured_inner.lock().unwrap() = Some(result);
-                        Ok::<_, Infallible>(HttpResponse::text("ok").into_hyper())
-                    }
-                },
-            );
+            let svc = service_fn(move |hyper_req: hyper::Request<hyper::body::Incoming>| {
+                let captured_inner = captured_svc.clone();
+                async move {
+                    let req = Request::new(hyper_req);
+                    let result = AdminDtoT11::extract(req).await;
+                    *captured_inner.lock().unwrap() = Some(result);
+                    Ok::<_, Infallible>(HttpResponse::text("ok").into_hyper())
+                }
+            });
             let _ = http1::Builder::new().serve_connection(io, svc).await;
         }
     });

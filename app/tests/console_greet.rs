@@ -18,12 +18,12 @@
 //! cover the binary-equivalent path.
 
 use app::commands::greet::Greet;
-use suprnova::{console, TypedCommand};
+use suprnova::{TypedCommand, console};
 
 #[tokio::test]
 async fn greet_is_registered_via_derive() {
-    let entry = console::find("greet")
-        .expect("greet must be registered when app::commands is linked");
+    let entry =
+        console::find("greet").expect("greet must be registered when app::commands is linked");
     assert_eq!(entry.name, "greet");
     assert_eq!(entry.description, "Print a friendly greeting");
 }

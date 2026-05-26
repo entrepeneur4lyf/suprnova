@@ -16,7 +16,7 @@
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use syn::{punctuated::Punctuated, token::Comma, Expr, Ident};
+use syn::{Expr, Ident, punctuated::Punctuated, token::Comma};
 
 use super::parse::to_snake;
 
@@ -274,9 +274,8 @@ fn emit_observe_call_non_cancellable(method: &str) -> TokenStream {
             // Unreachable on the closed 11-method set — `NON_CANCELLABLE_METHODS`
             // is the lone source. A compile_error! here means the
             // method table grew without an arm update.
-            let msg = format!(
-                "internal error: unhandled non-cancellable observer method `{other}`",
-            );
+            let msg =
+                format!("internal error: unhandled non-cancellable observer method `{other}`",);
             quote! { compile_error!(#msg) }
         }
     }
@@ -301,9 +300,7 @@ fn emit_observe_call_cancellable(method: &str) -> TokenStream {
         "deleting" => quote! { obs.deleting(&event.model, event.is_force).await },
         "restoring" => quote! { obs.restoring(&event.model).await },
         other => {
-            let msg = format!(
-                "internal error: unhandled cancellable observer method `{other}`",
-            );
+            let msg = format!("internal error: unhandled cancellable observer method `{other}`",);
             quote! { compile_error!(#msg) }
         }
     }

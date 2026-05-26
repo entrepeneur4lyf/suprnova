@@ -129,5 +129,6 @@ fn webhook_verify_accepts_valid_signature() {
         headers: &headers,
         remote_addr: None,
     };
-    p.verify(&ctx).expect("valid HMAC-SHA256 signature must verify");
+    p.verify(&ctx)
+        .expect("valid HMAC-SHA256 signature must verify");
 }

@@ -1,6 +1,6 @@
 //! Authentication middleware - checks for Authorization header
 
-use suprnova::{async_trait, HttpResponse, Middleware, Next, Request, Response};
+use suprnova::{HttpResponse, Middleware, Next, Request, Response, async_trait};
 
 /// Middleware that requires an Authorization header
 pub struct AuthMiddleware;

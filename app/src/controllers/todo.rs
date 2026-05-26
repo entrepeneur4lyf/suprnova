@@ -1,4 +1,4 @@
-use suprnova::{json_response, App, Request, Response, ResponseExt};
+use suprnova::{App, Request, Response, ResponseExt, json_response};
 
 use crate::actions::todo_action::{CreateRandomTodoAction, ListTodosAction};
 

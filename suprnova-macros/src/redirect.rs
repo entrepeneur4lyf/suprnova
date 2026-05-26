@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
 use std::path::{Path, PathBuf};
-use syn::{parse::Parse, parse::ParseStream, parse_macro_input, LitStr};
+use syn::{LitStr, parse::Parse, parse::ParseStream, parse_macro_input};
 
 use crate::utils::levenshtein_distance;
 
@@ -113,9 +113,10 @@ fn find_similar_route(target: &str, available: &[String]) -> Option<String> {
         let distance = levenshtein_distance(&target_lower, &route.to_lowercase());
         let threshold = std::cmp::max(2, target.len() / 3);
         if distance <= threshold
-            && (best_match.is_none() || distance < best_match.as_ref().unwrap().1) {
-                best_match = Some((route.clone(), distance));
-            }
+            && (best_match.is_none() || distance < best_match.as_ref().unwrap().1)
+        {
+            best_match = Some((route.clone(), distance));
+        }
     }
 
     best_match.map(|(name, _)| name)

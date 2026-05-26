@@ -132,8 +132,8 @@ pub async fn claim_next_workflow(
         ));
     }
 
-    let lock_until = Utc::now().naive_utc()
-        + ChronoDuration::seconds(config.lock_timeout_secs as i64);
+    let lock_until =
+        Utc::now().naive_utc() + ChronoDuration::seconds(config.lock_timeout_secs as i64);
 
     let sql = r#"
         UPDATE workflows
@@ -169,11 +169,21 @@ pub async fn claim_next_workflow(
         .map_err(|e| FrameworkError::database(e.to_string()))?;
 
     if let Some(row) = row {
-        let id: i64 = row.try_get("", "id").map_err(|e| FrameworkError::database(e.to_string()))?;
-        let name: String = row.try_get("", "name").map_err(|e| FrameworkError::database(e.to_string()))?;
-        let input: String = row.try_get("", "input").map_err(|e| FrameworkError::database(e.to_string()))?;
-        let attempts: i32 = row.try_get("", "attempts").map_err(|e| FrameworkError::database(e.to_string()))?;
-        let max_attempts: i32 = row.try_get("", "max_attempts").map_err(|e| FrameworkError::database(e.to_string()))?;
+        let id: i64 = row
+            .try_get("", "id")
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let name: String = row
+            .try_get("", "name")
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let input: String = row
+            .try_get("", "input")
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let attempts: i32 = row
+            .try_get("", "attempts")
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let max_attempts: i32 = row
+            .try_get("", "max_attempts")
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
 
         Ok(Some(ClaimedWorkflow {
             id,
@@ -240,7 +250,11 @@ pub async fn mark_succeeded(id: i64, output: &str) -> Result<(), FrameworkError>
 }
 
 /// Requeue workflow for retry
-pub async fn requeue(id: i64, error: &str, next_run_at: chrono::NaiveDateTime) -> Result<(), FrameworkError> {
+pub async fn requeue(
+    id: i64,
+    error: &str,
+    next_run_at: chrono::NaiveDateTime,
+) -> Result<(), FrameworkError> {
     let db = DB::connection()?;
     let now = Utc::now().naive_utc();
 

@@ -17,7 +17,7 @@ use std::any::Any;
 use suprnova::eloquent::attrs::Attrs;
 use suprnova::eloquent::events::EventResult;
 use suprnova::eloquent::observers::Observer;
-use suprnova::{model, Authenticatable, FrameworkError};
+use suprnova::{Authenticatable, FrameworkError, model};
 
 #[model(
     table = "users",

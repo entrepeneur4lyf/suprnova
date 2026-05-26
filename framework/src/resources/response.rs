@@ -1,12 +1,12 @@
 //! `Resource` facade and `JsonApiResponse` pending response type.
 
-use bytes::Bytes;
-use crate::data::current_include_set;
-use crate::http::HttpResponse;
-use super::trait_def::{IntoJsonResource, IncludeResolutionError};
+use super::builder::{JsonApiBuilder, render_resource_object};
 use super::fieldset::current_fieldset;
 use super::include_tree::IncludeTree;
-use super::builder::{JsonApiBuilder, render_resource_object};
+use super::trait_def::{IncludeResolutionError, IntoJsonResource};
+use crate::data::current_include_set;
+use crate::http::HttpResponse;
+use bytes::Bytes;
 
 /// Pending JSON:API response. Calling `.render()` resolves the
 /// envelope against the current request's include-set + fieldset.
@@ -33,7 +33,10 @@ impl JsonApiResponse {
         let body = builder.build();
         let bytes = serde_json::to_vec(&body)
             .map_err(|e| crate::FrameworkError::internal(format!("JSON:API encode: {e}")))?;
-        Ok(HttpResponse::bytes_body(Bytes::from(bytes), "application/vnd.api+json"))
+        Ok(HttpResponse::bytes_body(
+            Bytes::from(bytes),
+            "application/vnd.api+json",
+        ))
     }
 }
 

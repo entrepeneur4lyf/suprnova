@@ -248,11 +248,9 @@ async fn cached_chain_sees_upsert_without_manual_reload_or_ttl_wait() {
     use sea_orm_migration::MigratorTrait;
     use std::sync::Arc;
     use std::time::Duration;
-    use suprnova::features::sync::FeatureSync;
-    use suprnova::features::{
-        admin, CachedEvaluator, CompositeFeatureSync, DatabaseEvaluator,
-    };
     use suprnova::features::migrations::CreateFeaturesTable;
+    use suprnova::features::sync::FeatureSync;
+    use suprnova::features::{CachedEvaluator, CompositeFeatureSync, DatabaseEvaluator, admin};
     use suprnova::testing::{TestContainer, TestDatabase};
 
     struct TestMigrator;
@@ -322,11 +320,9 @@ async fn cached_chain_sees_admin_delete_without_manual_reload() {
     use sea_orm_migration::MigratorTrait;
     use std::sync::Arc;
     use std::time::Duration;
-    use suprnova::features::sync::FeatureSync;
-    use suprnova::features::{
-        admin, CachedEvaluator, CompositeFeatureSync, DatabaseEvaluator,
-    };
     use suprnova::features::migrations::CreateFeaturesTable;
+    use suprnova::features::sync::FeatureSync;
+    use suprnova::features::{CachedEvaluator, CompositeFeatureSync, DatabaseEvaluator, admin};
     use suprnova::testing::{TestContainer, TestDatabase};
 
     struct TestMigrator;
@@ -357,7 +353,9 @@ async fn cached_chain_sees_admin_delete_without_manual_reload() {
     });
 
     // Seed: flag enabled globally.
-    admin::upsert("preview", "", true, None, None).await.unwrap();
+    admin::upsert("preview", "", true, None, None)
+        .await
+        .unwrap();
     assert_eq!(
         cached.is_enabled("preview", &ctx),
         Some(true),
@@ -388,11 +386,9 @@ async fn cached_chain_handles_scoped_override_then_delete() {
     use sea_orm_migration::MigratorTrait;
     use std::sync::Arc;
     use std::time::Duration;
-    use suprnova::features::sync::FeatureSync;
-    use suprnova::features::{
-        admin, CachedEvaluator, CompositeFeatureSync, DatabaseEvaluator,
-    };
     use suprnova::features::migrations::CreateFeaturesTable;
+    use suprnova::features::sync::FeatureSync;
+    use suprnova::features::{CachedEvaluator, CompositeFeatureSync, DatabaseEvaluator, admin};
     use suprnova::testing::{TestContainer, TestDatabase};
 
     struct TestMigrator;

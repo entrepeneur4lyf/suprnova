@@ -68,11 +68,11 @@ pub struct CronExpression {
 
 #[derive(Debug, Clone)]
 enum CronField {
-    Any,               // *
-    Value(u32),        // 5
-    Range(u32, u32),   // 1-5
-    Step(u32),         // */5
-    List(Vec<u32>),    // 1,3,5
+    Any,                // *
+    Value(u32),         // 5
+    Range(u32, u32),    // 1-5
+    Step(u32),          // */5
+    List(Vec<u32>),     // 1,3,5
     StepFrom(u32, u32), // 5/10 (start at 5, every 10)
 }
 
@@ -83,7 +83,9 @@ impl CronField {
             CronField::Value(v) => *v == value,
             CronField::Range(start, end) => value >= *start && value <= *end,
             CronField::Step(step) => value.is_multiple_of(*step),
-            CronField::StepFrom(start, step) => value >= *start && (value - start).is_multiple_of(*step),
+            CronField::StepFrom(start, step) => {
+                value >= *start && (value - start).is_multiple_of(*step)
+            }
             CronField::List(values) => values.contains(&value),
         }
     }
@@ -138,12 +140,9 @@ impl CronField {
         }
 
         // Handle single value
-        let value: u32 = s
-            .parse()
-            .map_err(|_| format!("Invalid value in '{}'", s))?;
+        let value: u32 = s.parse().map_err(|_| format!("Invalid value in '{}'", s))?;
         Ok(CronField::Value(value))
     }
-
 }
 
 impl std::fmt::Display for CronField {
@@ -206,7 +205,9 @@ impl CronExpression {
             && self.hour.matches(now.hour())
             && self.day_of_month.matches(now.day())
             && self.month.matches(now.month())
-            && self.day_of_week.matches(now.weekday().num_days_from_sunday())
+            && self
+                .day_of_week
+                .matches(now.weekday().num_days_from_sunday())
     }
 
     /// Get the raw cron expression string
@@ -218,18 +219,15 @@ impl CronExpression {
     pub fn at(mut self, time: &str) -> Self {
         let parts: Vec<&str> = time.split(':').collect();
         if parts.len() == 2
-            && let (Ok(hour), Ok(minute)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
-                self.hour = CronField::Value(hour);
-                self.minute = CronField::Value(minute);
-                self.raw = format!(
-                    "{} {} {} {} {}",
-                    minute,
-                    hour,
-                    self.day_of_month,
-                    self.month,
-                    self.day_of_week,
-                );
-            }
+            && let (Ok(hour), Ok(minute)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>())
+        {
+            self.hour = CronField::Value(hour);
+            self.minute = CronField::Value(minute);
+            self.raw = format!(
+                "{} {} {} {} {}",
+                minute, hour, self.day_of_month, self.month, self.day_of_week,
+            );
+        }
         self
     }
 

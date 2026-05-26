@@ -17,10 +17,18 @@ struct LiveHello {
 
 #[async_trait]
 impl Mailable for LiveHello {
-    fn mailable_name() -> &'static str { "LiveHello" }
-    fn subject(&self) -> String { "live-test".into() }
-    fn text_template_source(&self) -> Option<String> { Some("hello".into()) }
-    fn from(&self) -> Option<Address> { Some("noreply@suprnova.dev".into()) }
+    fn mailable_name() -> &'static str {
+        "LiveHello"
+    }
+    fn subject(&self) -> String {
+        "live-test".into()
+    }
+    fn text_template_source(&self) -> Option<String> {
+        Some("hello".into())
+    }
+    fn from(&self) -> Option<Address> {
+        Some("noreply@suprnova.dev".into())
+    }
 }
 
 #[ignore = "requires a real SMTP server (Mailpit at 127.0.0.1:1025 by default)"]
@@ -34,7 +42,9 @@ async fn smtp_transport_sends_through_live_server() {
     let transport = SmtpMailTransport::unencrypted(&host, port).unwrap();
     Mail::set_transport(Arc::new(transport));
     Mail::to("recipient@example.org")
-        .send(LiveHello { msg: "hello".into() })
+        .send(LiveHello {
+            msg: "hello".into(),
+        })
         .await
         .unwrap();
 }

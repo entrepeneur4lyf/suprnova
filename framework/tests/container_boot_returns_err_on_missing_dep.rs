@@ -9,8 +9,8 @@
 //! `tests/*.rs` file becomes its own binary, so the broken entry is
 //! scoped to this test.
 
-use suprnova::container::provider::SingletonEntry;
 use suprnova::App;
+use suprnova::container::provider::SingletonEntry;
 
 /// A type that is intentionally never `App::singleton`-installed. The
 /// broken-entry registration below tries to `App::resolve` it; that
@@ -38,8 +38,7 @@ fn broken_register() -> Result<(), String> {
 #[test]
 fn boot_returns_err_with_descriptive_message_when_dep_unresolvable() {
     App::init();
-    let err = App::boot_services()
-        .expect_err("boot must Err when a singleton's dep is missing");
+    let err = App::boot_services().expect_err("boot must Err when a singleton's dep is missing");
 
     let msg = format!("{err}");
 

@@ -12,7 +12,10 @@ fn charge_result_completed_roundtrip() {
     assert_eq!(json["kind"], "completed");
     let back: ChargeResult = serde_json::from_value(json).unwrap();
     match back {
-        ChargeResult::Completed { provider_transaction_id, .. } => {
+        ChargeResult::Completed {
+            provider_transaction_id,
+            ..
+        } => {
             assert_eq!(provider_transaction_id, "txn_123");
         }
         _ => panic!("wrong variant"),
@@ -65,7 +68,10 @@ fn payment_method_card_round_trip() {
 
 #[test]
 fn subscription_status_serializes_snake_case() {
-    assert_eq!(serde_json::to_value(SubscriptionStatus::PastDue).unwrap(), serde_json::json!("past_due"));
+    assert_eq!(
+        serde_json::to_value(SubscriptionStatus::PastDue).unwrap(),
+        serde_json::json!("past_due")
+    );
 }
 
 // Phase 12.1 — Mobile Money + status fidelity additions ---------------------
@@ -81,9 +87,18 @@ fn phone_number_validates_and_normalizes_e164() {
 
 #[test]
 fn phone_number_rejects_invalid_input() {
-    assert!(matches!(PhoneNumber::new("123"), Err(PaymentError::InvalidPhoneNumber(_))));
-    assert!(matches!(PhoneNumber::new("+abc1234567"), Err(PaymentError::InvalidPhoneNumber(_))));
-    assert!(matches!(PhoneNumber::new(""), Err(PaymentError::InvalidPhoneNumber(_))));
+    assert!(matches!(
+        PhoneNumber::new("123"),
+        Err(PaymentError::InvalidPhoneNumber(_))
+    ));
+    assert!(matches!(
+        PhoneNumber::new("+abc1234567"),
+        Err(PaymentError::InvalidPhoneNumber(_))
+    ));
+    assert!(matches!(
+        PhoneNumber::new(""),
+        Err(PaymentError::InvalidPhoneNumber(_))
+    ));
     assert!(matches!(
         PhoneNumber::new("+12345678901234567890"),
         Err(PaymentError::InvalidPhoneNumber(_))
@@ -107,9 +122,18 @@ fn country_code_normalizes_to_uppercase() {
 
 #[test]
 fn country_code_rejects_invalid_input() {
-    assert!(matches!(CountryCode::new("ZMB"), Err(PaymentError::InvalidCountryCode(_))));
-    assert!(matches!(CountryCode::new("Z"), Err(PaymentError::InvalidCountryCode(_))));
-    assert!(matches!(CountryCode::new("12"), Err(PaymentError::InvalidCountryCode(_))));
+    assert!(matches!(
+        CountryCode::new("ZMB"),
+        Err(PaymentError::InvalidCountryCode(_))
+    ));
+    assert!(matches!(
+        CountryCode::new("Z"),
+        Err(PaymentError::InvalidCountryCode(_))
+    ));
+    assert!(matches!(
+        CountryCode::new("12"),
+        Err(PaymentError::InvalidCountryCode(_))
+    ));
 }
 
 #[test]
@@ -139,7 +163,9 @@ fn payment_method_mobile_money_round_trip() {
 
 #[test]
 fn mobile_money_operator_custom_variant_round_trip() {
-    let op = MobileMoneyOperator::Custom { identifier: "tigopesa".into() };
+    let op = MobileMoneyOperator::Custom {
+        identifier: "tigopesa".into(),
+    };
     let j = serde_json::to_value(&op).unwrap();
     assert_eq!(j["kind"], "custom");
     assert_eq!(j["identifier"], "tigopesa");
@@ -163,7 +189,9 @@ fn payment_method_stablecoin_round_trip() {
 
 #[test]
 fn stablecoin_custom_variant_round_trip() {
-    let a = StablecoinAsset::Custom { ticker: "PYUSD".into() };
+    let a = StablecoinAsset::Custom {
+        ticker: "PYUSD".into(),
+    };
     let j = serde_json::to_value(&a).unwrap();
     assert_eq!(j["kind"], "custom");
     assert_eq!(j["ticker"], "PYUSD");
@@ -184,7 +212,10 @@ fn session_payload_mobile_money_prompt_round_trip() {
     assert_eq!(j["operator"]["kind"], "mtn_momo");
     let back: SessionPayload = serde_json::from_value(j).unwrap();
     match back {
-        SessionPayload::MobileMoneyPrompt { provider_transaction_id, .. } => {
+        SessionPayload::MobileMoneyPrompt {
+            provider_transaction_id,
+            ..
+        } => {
             assert_eq!(provider_transaction_id, "txn_lp_001");
         }
         _ => panic!("wrong variant"),
@@ -193,9 +224,24 @@ fn session_payload_mobile_money_prompt_round_trip() {
 
 #[test]
 fn payment_status_expanded_variants_serialize_snake_case() {
-    assert_eq!(serde_json::to_value(PaymentStatus::Created).unwrap(), serde_json::json!("created"));
-    assert_eq!(serde_json::to_value(PaymentStatus::RequiresAction).unwrap(), serde_json::json!("requires_action"));
-    assert_eq!(serde_json::to_value(PaymentStatus::Processing).unwrap(), serde_json::json!("processing"));
-    assert_eq!(serde_json::to_value(PaymentStatus::Authorized).unwrap(), serde_json::json!("authorized"));
-    assert_eq!(serde_json::to_value(PaymentStatus::Expired).unwrap(), serde_json::json!("expired"));
+    assert_eq!(
+        serde_json::to_value(PaymentStatus::Created).unwrap(),
+        serde_json::json!("created")
+    );
+    assert_eq!(
+        serde_json::to_value(PaymentStatus::RequiresAction).unwrap(),
+        serde_json::json!("requires_action")
+    );
+    assert_eq!(
+        serde_json::to_value(PaymentStatus::Processing).unwrap(),
+        serde_json::json!("processing")
+    );
+    assert_eq!(
+        serde_json::to_value(PaymentStatus::Authorized).unwrap(),
+        serde_json::json!("authorized")
+    );
+    assert_eq!(
+        serde_json::to_value(PaymentStatus::Expired).unwrap(),
+        serde_json::json!("expired")
+    );
 }

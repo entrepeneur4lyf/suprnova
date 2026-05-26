@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::ConnectionTrait;
 use suprnova::eloquent::{MassPrunable, Prunable};
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, model, Builder, Model};
+use suprnova::{Builder, Model, attrs, model};
 
 #[model(
     table = "p12_users",
@@ -122,8 +122,12 @@ async fn prunable_leaves_related_posts_orphaned_by_default() {
     migrate(&db).await;
 
     let u = P12User::create(attrs! { name: "alice" }).await.unwrap();
-    let _ = P12Post::create(attrs! { p12_user_id: u.id, title: "p1" }).await.unwrap();
-    let _ = P12Post::create(attrs! { p12_user_id: u.id, title: "p2" }).await.unwrap();
+    let _ = P12Post::create(attrs! { p12_user_id: u.id, title: "p1" })
+        .await
+        .unwrap();
+    let _ = P12Post::create(attrs! { p12_user_id: u.id, title: "p2" })
+        .await
+        .unwrap();
 
     PRUNING_HOOK_FIRES.store(0, Ordering::SeqCst);
 
@@ -154,8 +158,12 @@ async fn mass_prunable_skips_per_row_pruning_hook() {
     let db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&db).await;
 
-    let _ = P12AuditLog::create(attrs! { message: "one" }).await.unwrap();
-    let _ = P12AuditLog::create(attrs! { message: "two" }).await.unwrap();
+    let _ = P12AuditLog::create(attrs! { message: "one" })
+        .await
+        .unwrap();
+    let _ = P12AuditLog::create(attrs! { message: "two" })
+        .await
+        .unwrap();
 
     PRUNING_HOOK_FIRES.store(0, Ordering::SeqCst);
 
@@ -194,8 +202,12 @@ async fn pruning_hook_can_cascade_when_user_implements_it() {
     migrate(&db).await;
 
     let u = P12User::create(attrs! { name: "alice" }).await.unwrap();
-    let _ = P12Post::create(attrs! { p12_user_id: u.id, title: "p1" }).await.unwrap();
-    let _ = P12Post::create(attrs! { p12_user_id: u.id, title: "p2" }).await.unwrap();
+    let _ = P12Post::create(attrs! { p12_user_id: u.id, title: "p1" })
+        .await
+        .unwrap();
+    let _ = P12Post::create(attrs! { p12_user_id: u.id, title: "p2" })
+        .await
+        .unwrap();
 
     // The recommended cascade — delete children via the user's own
     // code before / during pruning. Real apps would put this in the
@@ -209,5 +221,8 @@ async fn pruning_hook_can_cascade_when_user_implements_it() {
     .unwrap();
 
     let surviving = P12Post::query().get().await.unwrap();
-    assert!(surviving.is_empty(), "user-implemented cascade cleared children");
+    assert!(
+        surviving.is_empty(),
+        "user-implemented cascade cleared children"
+    );
 }

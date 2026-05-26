@@ -52,10 +52,9 @@ fn url_safe_no_padding() {
     ensure_key();
     // Encrypt enough data that the base64 output covers multiple
     // alphabet positions; padding would show up at the end.
-    let wire = Crypt::encrypt_string(
-        "the quick brown fox jumps over the lazy dog -- multiple times",
-    )
-    .unwrap();
+    let wire =
+        Crypt::encrypt_string("the quick brown fox jumps over the lazy dog -- multiple times")
+            .unwrap();
     assert!(!wire.contains('+'));
     assert!(!wire.contains('/'));
     assert!(!wire.contains('='));

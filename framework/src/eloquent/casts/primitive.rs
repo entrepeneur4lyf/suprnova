@@ -55,26 +55,30 @@ impl DynCast for AsBoolDyn {
         // Domain 7 audit D7-A — strict-validate the input shape so a
         // misconfigured column produces a clear "expected integer, got
         // <value>" message instead of silently coercing to `false`.
-        let n = v.as_i64().or_else(|| v.as_u64().map(|x| x as i64)).ok_or_else(|| {
-            FrameworkError::validation(
-                "AsBool",
-                format!("dyn from_storage: expected integer, got {v:?}"),
-            )
-        })?;
+        let n = v
+            .as_i64()
+            .or_else(|| v.as_u64().map(|x| x as i64))
+            .ok_or_else(|| {
+                FrameworkError::validation(
+                    "AsBool",
+                    format!("dyn from_storage: expected integer, got {v:?}"),
+                )
+            })?;
         Ok(serde_json::Value::Bool(n != 0))
     }
 
-    fn to_storage_json(
-        &self,
-        v: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameworkError> {
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
         let b = v.as_bool().ok_or_else(|| {
             FrameworkError::validation(
                 "AsBool",
                 format!("dyn to_storage: expected boolean, got {v:?}"),
             )
         })?;
-        Ok(serde_json::Value::Number(if b { 1.into() } else { 0.into() }))
+        Ok(serde_json::Value::Number(if b {
+            1.into()
+        } else {
+            0.into()
+        }))
     }
 }
 
@@ -123,10 +127,7 @@ impl DynCast for AsInt64Dyn {
         Ok(serde_json::Value::Number(n.into()))
     }
 
-    fn to_storage_json(
-        &self,
-        v: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameworkError> {
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
         Ok(v.clone())
     }
 }
@@ -175,10 +176,7 @@ impl DynCast for AsFloatDyn {
         Ok(serde_json::json!(f))
     }
 
-    fn to_storage_json(
-        &self,
-        v: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameworkError> {
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
         Ok(v.clone())
     }
 }
@@ -219,10 +217,7 @@ impl DynCast for AsStringDyn {
         Ok(v.clone())
     }
 
-    fn to_storage_json(
-        &self,
-        v: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameworkError> {
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
         Ok(v.clone())
     }
 }
@@ -278,10 +273,7 @@ impl<const P: u32> DynCast for AsDecimalDyn<P> {
         Ok(serde_json::Value::String(d.to_string()))
     }
 
-    fn to_storage_json(
-        &self,
-        v: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameworkError> {
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
         Ok(v.clone())
     }
 }

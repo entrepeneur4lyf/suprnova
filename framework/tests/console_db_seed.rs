@@ -7,10 +7,10 @@
 
 use serial_test::serial;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use suprnova::FrameworkError;
 use suprnova::async_trait;
 use suprnova::console;
 use suprnova::seed::{self, Seeder};
-use suprnova::FrameworkError;
 use tracing_test::traced_test;
 
 static SEEDER_RAN: AtomicUsize = AtomicUsize::new(0);
@@ -48,7 +48,9 @@ async fn db_seed_runs_every_registered_seeder() {
     seed::register::<RecordingSeeder>();
 
     let argv = vec!["console".to_string(), "db:seed".to_string()];
-    console::dispatch_argv(argv).await.expect("db:seed succeeds");
+    console::dispatch_argv(argv)
+        .await
+        .expect("db:seed succeeds");
 
     assert_eq!(
         SEEDER_RAN.load(Ordering::SeqCst),

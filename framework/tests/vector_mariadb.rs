@@ -37,10 +37,7 @@ fn unreachable_driver() -> MariaDbVectorDriver {
 }
 
 fn unique_table(tag: &str) -> String {
-    format!(
-        "p9b_{tag}_{}",
-        UNIX_EPOCH.elapsed().unwrap().as_nanos()
-    )
+    format!("p9b_{tag}_{}", UNIX_EPOCH.elapsed().unwrap().as_nanos())
 }
 
 fn mariadb_url_or_skip(test_name: &str) -> Option<String> {
@@ -75,10 +72,7 @@ fn distance_index_clause_is_lowercase_keyword() {
 
 #[test]
 fn distance_fn_name_matches_mariadb_builtins() {
-    assert_eq!(
-        MariaDbDistance::Cosine.fn_name(),
-        "VEC_DISTANCE_COSINE"
-    );
+    assert_eq!(MariaDbDistance::Cosine.fn_name(), "VEC_DISTANCE_COSINE");
     assert_eq!(
         MariaDbDistance::Euclidean.fn_name(),
         "VEC_DISTANCE_EUCLIDEAN"
@@ -206,8 +200,7 @@ fn embedding_to_vec_text_handles_scientific_notation() {
     // The exact string is Rust-version-dependent for tiny floats but
     // must be JSON-number-shaped: digits-then-optional-exponent.
     // We assert the pieces by parsing back through serde_json.
-    let parsed: serde_json::Value = serde_json::from_str(&out)
-        .expect("output must be valid JSON");
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("output must be valid JSON");
     let arr = parsed.as_array().expect("must be a JSON array");
     assert_eq!(arr.len(), 2);
     assert!(arr[0].is_number());
@@ -260,13 +253,19 @@ fn embedding_to_vec_text_output_is_valid_json_array() {
 #[test]
 fn cosine_score_d0_is_one() {
     let s = MariaDbVectorDriver::score_from_distance(MariaDbDistance::Cosine, 0.0);
-    assert!((s - 1.0).abs() < 1e-6, "cosine d=0 should map to 1.0, got {s}");
+    assert!(
+        (s - 1.0).abs() < 1e-6,
+        "cosine d=0 should map to 1.0, got {s}"
+    );
 }
 
 #[test]
 fn cosine_score_d1_is_half() {
     let s = MariaDbVectorDriver::score_from_distance(MariaDbDistance::Cosine, 1.0);
-    assert!((s - 0.5).abs() < 1e-6, "cosine d=1 should map to 0.5, got {s}");
+    assert!(
+        (s - 0.5).abs() < 1e-6,
+        "cosine d=1 should map to 0.5, got {s}"
+    );
 }
 
 #[test]
@@ -306,13 +305,19 @@ fn euclidean_score_d1_is_half() {
 #[test]
 fn euclidean_score_d9_is_one_tenth() {
     let s = MariaDbVectorDriver::score_from_distance(MariaDbDistance::Euclidean, 9.0);
-    assert!((s - 0.1).abs() < 1e-6, "euclidean d=9 should map to 0.1, got {s}");
+    assert!(
+        (s - 0.1).abs() < 1e-6,
+        "euclidean d=9 should map to 0.1, got {s}"
+    );
 }
 
 #[test]
 fn euclidean_score_large_d_approaches_zero() {
     let s = MariaDbVectorDriver::score_from_distance(MariaDbDistance::Euclidean, 1e9);
-    assert!(s < 1e-6, "large euclidean distance should approach 0, got {s}");
+    assert!(
+        s < 1e-6,
+        "large euclidean distance should approach 0, got {s}"
+    );
     assert!(s >= 0.0, "score should never go negative");
 }
 
@@ -348,8 +353,8 @@ fn score_is_monotone_decreasing_in_distance() {
 
 #[test]
 fn ensure_table_sql_cosine_shape() {
-    let sql = MariaDbVectorDriver::ensure_table_sql("documents", 1536, MariaDbDistance::Cosine)
-        .unwrap();
+    let sql =
+        MariaDbVectorDriver::ensure_table_sql("documents", 1536, MariaDbDistance::Cosine).unwrap();
     assert!(sql.contains("CREATE TABLE IF NOT EXISTS `documents`"));
     assert!(sql.contains("id VARCHAR(255) NOT NULL PRIMARY KEY"));
     assert!(sql.contains("embedding VECTOR(1536) NOT NULL"));
@@ -484,7 +489,10 @@ async fn upsert_rejects_array_metadata() {
         .upsert("documents", vec![item])
         .await
         .expect_err("array metadata must be rejected");
-    assert!(err.to_string().contains("metadata must be a JSON object or null"));
+    assert!(
+        err.to_string()
+            .contains("metadata must be a JSON object or null")
+    );
 }
 
 #[tokio::test]
@@ -528,7 +536,9 @@ async fn integration_version_check_passes_on_117() {
     };
     let driver = MariaDbVectorDriver::from_url(&url).unwrap();
     // First call runs SELECT VERSION() and caches.
-    let out = driver.count("does_not_exist_table_used_to_trigger_version_check").await;
+    let out = driver
+        .count("does_not_exist_table_used_to_trigger_version_check")
+        .await;
     // We expect failure because the table doesn't exist — but the
     // error must be a SQL error, NOT a version-rejection error. If
     // the server is < 11.7 the test would fail here with the
@@ -830,8 +840,7 @@ async fn integration_metadata_roundtrips_object_and_null() {
         .await
         .expect("CREATE TABLE");
 
-    let nested =
-        serde_json::json!({"label": "alpha", "tags": ["a", "b"], "score": 0.42, "nested": {"k": "v"}});
+    let nested = serde_json::json!({"label": "alpha", "tags": ["a", "b"], "score": 0.42, "nested": {"k": "v"}});
     driver
         .upsert(
             &table,
@@ -947,8 +956,14 @@ async fn integration_similar_errors_on_distance_mismatch() {
         .await
         .expect_err("similar must reject distance mismatch");
     let msg = err.to_string();
-    assert!(msg.contains("DISTANCE=cosine"), "should name table's distance: {msg}");
-    assert!(msg.contains("Euclidean"), "should name driver's distance: {msg}");
+    assert!(
+        msg.contains("DISTANCE=cosine"),
+        "should name table's distance: {msg}"
+    );
+    assert!(
+        msg.contains("Euclidean"),
+        "should name driver's distance: {msg}"
+    );
     assert!(
         msg.contains("full table scan"),
         "should explain the failure mode: {msg}"
@@ -995,9 +1010,15 @@ async fn integration_similar_passes_distance_match_caches_after_first_call() {
         .unwrap();
 
     // First call: runs ensure_store_distance, populates cache.
-    let _ = driver.similar(&table, vec![1.0, 0.0, 0.0], 1).await.unwrap();
+    let _ = driver
+        .similar(&table, vec![1.0, 0.0, 0.0], 1)
+        .await
+        .unwrap();
     // Second call: cache hit, no extra SHOW CREATE TABLE.
-    let _ = driver.similar(&table, vec![1.0, 0.0, 0.0], 1).await.unwrap();
+    let _ = driver
+        .similar(&table, vec![1.0, 0.0, 0.0], 1)
+        .await
+        .unwrap();
 
     drop_table(&driver, &table).await;
 }

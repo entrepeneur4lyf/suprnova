@@ -125,7 +125,9 @@ impl WorkflowWorker {
                     let config = self.config.clone();
                     let worker_id = self.worker_id.clone();
                     tokio::spawn(async move {
-                        if let Err(err) = process_claimed_workflow(claimed, config, &worker_id).await {
+                        if let Err(err) =
+                            process_claimed_workflow(claimed, config, &worker_id).await
+                        {
                             eprintln!("Workflow execution error: {}", err);
                         }
                         drop(permit);
@@ -158,14 +160,9 @@ async fn process_claimed_workflow(
         }
     };
 
-    let ctx = WorkflowContext::new(
-        claimed.id,
-        Duration::from_secs(config.lock_timeout_secs),
-    );
+    let ctx = WorkflowContext::new(claimed.id, Duration::from_secs(config.lock_timeout_secs));
 
-    let result = ctx
-        .enter(async { (entry.run)(&claimed.input).await })
-        .await;
+    let result = ctx.enter(async { (entry.run)(&claimed.input).await }).await;
 
     match result {
         Ok(output) => {
@@ -214,8 +211,8 @@ mod tests {
     use super::*;
     use crate::testing::TestDatabase;
     use sea_orm_migration::prelude::*;
-    use suprnova_macros::{workflow, workflow_step};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use suprnova_macros::{workflow, workflow_step};
 
     static ALWAYS_CALLS: AtomicUsize = AtomicUsize::new(0);
     static FLAKY_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -262,12 +259,17 @@ mod tests {
         let ctx_inner = ctx.clone();
         let _ = ctx
             .enter(async move {
-                ctx_inner.run_step_with_input("cache-step", serde_json::to_string(&()).unwrap(), || async {
-                    CACHE_CALLS.fetch_add(1, Ordering::SeqCst);
-                    Ok::<_, FrameworkError>(42)
-                })
-                .await
-                .unwrap()
+                ctx_inner
+                    .run_step_with_input(
+                        "cache-step",
+                        serde_json::to_string(&()).unwrap(),
+                        || async {
+                            CACHE_CALLS.fetch_add(1, Ordering::SeqCst);
+                            Ok::<_, FrameworkError>(42)
+                        },
+                    )
+                    .await
+                    .unwrap()
             })
             .await;
 
@@ -275,12 +277,17 @@ mod tests {
         let ctx2_inner = ctx2.clone();
         let value = ctx2
             .enter(async move {
-                ctx2_inner.run_step_with_input("cache-step", serde_json::to_string(&()).unwrap(), || async {
-                    CACHE_CALLS.fetch_add(1, Ordering::SeqCst);
-                    Ok::<_, FrameworkError>(99)
-                })
-                .await
-                .unwrap()
+                ctx2_inner
+                    .run_step_with_input(
+                        "cache-step",
+                        serde_json::to_string(&()).unwrap(),
+                        || async {
+                            CACHE_CALLS.fetch_add(1, Ordering::SeqCst);
+                            Ok::<_, FrameworkError>(99)
+                        },
+                    )
+                    .await
+                    .unwrap()
             })
             .await;
 
@@ -295,12 +302,9 @@ mod tests {
         FLAKY_CALLS.store(0, Ordering::SeqCst);
 
         let input = serde_json::to_string(&()).unwrap();
-        let handle = start_named(
-            &format!("{}::{}", module_path!(), "test_workflow"),
-            &input,
-        )
-        .await
-        .expect("start workflow");
+        let handle = start_named(&format!("{}::{}", module_path!(), "test_workflow"), &input)
+            .await
+            .expect("start workflow");
 
         let claimed = store::mark_running(handle.id(), "test-worker", Duration::from_secs(30))
             .await
@@ -480,7 +484,11 @@ mod tests {
                                 .big_integer()
                                 .not_null(),
                         )
-                        .col(ColumnDef::new(WorkflowSteps::StepIndex).integer().not_null())
+                        .col(
+                            ColumnDef::new(WorkflowSteps::StepIndex)
+                                .integer()
+                                .not_null(),
+                        )
                         .col(ColumnDef::new(WorkflowSteps::StepName).string().not_null())
                         .col(ColumnDef::new(WorkflowSteps::Status).string().not_null())
                         .col(ColumnDef::new(WorkflowSteps::Input).text().not_null())
@@ -500,7 +508,11 @@ mod tests {
                                 .default(Expr::current_timestamp()),
                         )
                         .col(ColumnDef::new(WorkflowSteps::StartedAt).timestamp().null())
-                        .col(ColumnDef::new(WorkflowSteps::CompletedAt).timestamp().null())
+                        .col(
+                            ColumnDef::new(WorkflowSteps::CompletedAt)
+                                .timestamp()
+                                .null(),
+                        )
                         .to_owned(),
                 )
                 .await?;

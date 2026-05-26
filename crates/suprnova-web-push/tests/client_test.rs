@@ -4,7 +4,8 @@ use suprnova_web_push::{
 use wiremock::matchers::{header_exists, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-const RECEIVER_P256DH: &str = "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4";
+const RECEIVER_P256DH: &str =
+    "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4";
 const RECEIVER_AUTH: &str = "BTBZMqHH6r4Tts7J_aSIgg";
 
 fn sub_for(server: &MockServer) -> SubscriptionInfo {
@@ -56,7 +57,10 @@ async fn client_maps_410_to_subscription_gone() {
         .send(&sub_for(&server), b"hi", ContentEncoding::Aes128Gcm, 60)
         .await
         .unwrap_err();
-    assert!(matches!(err, WebPushError::SubscriptionGone), "got: {err:?}");
+    assert!(
+        matches!(err, WebPushError::SubscriptionGone),
+        "got: {err:?}"
+    );
 }
 
 #[tokio::test]

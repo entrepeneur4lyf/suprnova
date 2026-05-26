@@ -261,7 +261,10 @@ mod tests {
     fn path_serializes_when_set() {
         let p = LengthAwarePaginator::new(vec![1, 2], 20, 10, 1).with_path("/api/users");
         let json = serde_json::to_value(&p).unwrap();
-        assert_eq!(json.get("path").and_then(|v| v.as_str()), Some("/api/users"));
+        assert_eq!(
+            json.get("path").and_then(|v| v.as_str()),
+            Some("/api/users")
+        );
     }
 
     #[test]

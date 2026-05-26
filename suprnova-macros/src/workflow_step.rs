@@ -3,7 +3,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, FnArg, ItemFn, Pat, ReturnType, Type};
+use syn::{FnArg, ItemFn, Pat, ReturnType, Type, parse_macro_input};
 
 pub fn workflow_step_impl(_attr: TokenStream, input: TokenStream) -> TokenStream {
     let input_fn = parse_macro_input!(input as ItemFn);
@@ -107,12 +107,7 @@ fn ensure_result_framework_error(output: &ReturnType) -> Result<(), syn::Error> 
 
                         let err_ty = match err {
                             syn::GenericArgument::Type(t) => t,
-                            _ => {
-                                return Err(syn::Error::new_spanned(
-                                    err,
-                                    "Invalid error type",
-                                ))
-                            }
+                            _ => return Err(syn::Error::new_spanned(err, "Invalid error type")),
                         };
 
                         if !is_framework_error(err_ty) {
@@ -144,9 +139,10 @@ fn ensure_result_framework_error(output: &ReturnType) -> Result<(), syn::Error> 
 
 fn is_framework_error(ty: &Type) -> bool {
     if let Type::Path(path) = ty
-        && let Some(last) = path.path.segments.last() {
-            return last.ident == "FrameworkError";
-        }
+        && let Some(last) = path.path.segments.last()
+    {
+        return last.ident == "FrameworkError";
+    }
     false
 }
 

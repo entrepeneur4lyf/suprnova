@@ -27,7 +27,7 @@
 
 use std::marker::PhantomData;
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 use super::{Cast, DynCast, IntoDynCast};
 use crate::error::FrameworkError;
@@ -84,10 +84,7 @@ where
         Ok(serde_json::to_value(parsed).expect("Vec<T> serialises"))
     }
 
-    fn to_storage_json(
-        &self,
-        v: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameworkError> {
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
         Ok(serde_json::Value::String(v.to_string()))
     }
 }
@@ -147,10 +144,7 @@ where
         Ok(serde_json::to_value(parsed).expect("T serialises"))
     }
 
-    fn to_storage_json(
-        &self,
-        v: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameworkError> {
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
         Ok(serde_json::Value::String(v.to_string()))
     }
 }
@@ -217,10 +211,7 @@ where
         Ok(serde_json::to_value(parsed).expect("Vec<T> serialises"))
     }
 
-    fn to_storage_json(
-        &self,
-        v: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameworkError> {
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
         Ok(serde_json::Value::String(v.to_string()))
     }
 }
@@ -281,10 +272,7 @@ where
         Ok(serde_json::to_value(parsed).expect("T serialises"))
     }
 
-    fn to_storage_json(
-        &self,
-        v: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameworkError> {
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
         Ok(serde_json::Value::String(v.to_string()))
     }
 }
@@ -324,9 +312,7 @@ where
             .map_err(|e| FrameworkError::validation("AsArrayObject", format!("{e}")))
     }
 
-    fn from_storage(
-        s: &String,
-    ) -> Result<indexmap::IndexMap<String, T>, FrameworkError> {
+    fn from_storage(s: &String) -> Result<indexmap::IndexMap<String, T>, FrameworkError> {
         serde_json::from_str(s)
             .map_err(|e| FrameworkError::validation("AsArrayObject", format!("{e}")))
     }
@@ -354,10 +340,7 @@ where
         Ok(serde_json::to_value(parsed).expect("IndexMap serialises"))
     }
 
-    fn to_storage_json(
-        &self,
-        v: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameworkError> {
+    fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
         Ok(serde_json::Value::String(v.to_string()))
     }
 }

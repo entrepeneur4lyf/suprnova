@@ -22,7 +22,7 @@
 //! Option<f64> / None empty.
 
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, model, AggregateKind, Model};
+use suprnova::{AggregateKind, Model, attrs, model};
 
 #[model(table = "mm_tags", relations = {
     posts: MorphedByMany<MmPost, MmTaggable> {
@@ -161,7 +161,10 @@ async fn morph_to_many_detach_does_not_touch_other_family() {
 
     // Same primary-key value across two morph families is the worst
     // case — assert the detach only removed the matching type.
-    assert_eq!(p.id, v.id, "test relies on Post.id == Video.id sharing values");
+    assert_eq!(
+        p.id, v.id,
+        "test relies on Post.id == Video.id sharing values"
+    );
 
     p.tags().detach(t.id).await.unwrap();
     assert_eq!(p.tags().get().await.unwrap().len(), 0);
@@ -219,14 +222,31 @@ async fn morph_to_many_sync_does_not_leak_across_families() {
     // Must NOT touch the video's attachments.
     p.tags().sync([t2.id]).await.unwrap();
 
-    let p_tags: Vec<i64> = p.tags().get().await.unwrap().into_iter().map(|r| r.id).collect();
+    let p_tags: Vec<i64> = p
+        .tags()
+        .get()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
     assert_eq!(p_tags, vec![t2.id]);
 
-    let mut v_tags: Vec<i64> = v.tags().get().await.unwrap().into_iter().map(|r| r.id).collect();
+    let mut v_tags: Vec<i64> = v
+        .tags()
+        .get()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
     v_tags.sort();
     let mut expected = vec![t1.id, t2.id];
     expected.sort();
-    assert_eq!(v_tags, expected, "video attachments must not be touched by post.sync()");
+    assert_eq!(
+        v_tags, expected,
+        "video attachments must not be touched by post.sync()"
+    );
 }
 
 // ---- MorphedByMany inverse direction -----------------------------------
@@ -310,11 +330,8 @@ async fn morph_to_many_eager_load() {
 /// `with_count(["..."])` builder method lives on top of this hook;
 /// driving the hook lets us pin the count contract before T9 lands the
 /// surface sugar.
-async fn dispatch_count<M>(
-    rows: &mut [M],
-    relation: &str,
-    db: &sea_orm::DatabaseConnection,
-) where
+async fn dispatch_count<M>(rows: &mut [M], relation: &str, db: &sea_orm::DatabaseConnection)
+where
     M: suprnova::eloquent::EagerLoadDispatch,
 {
     let mut refs: Vec<&mut M> = rows.iter_mut().collect();
@@ -349,12 +366,8 @@ async fn morph_to_many_eager_load_excludes_other_family() {
     migrate(&_db).await;
     let p = MmPost::create(attrs! { title: "p" }).await.unwrap();
     let v = MmVideo::create(attrs! { url: "v" }).await.unwrap();
-    let t_post = MmTag::create(attrs! { name: "post-only" })
-        .await
-        .unwrap();
-    let t_video = MmTag::create(attrs! { name: "video-only" })
-        .await
-        .unwrap();
+    let t_post = MmTag::create(attrs! { name: "post-only" }).await.unwrap();
+    let t_video = MmTag::create(attrs! { name: "video-only" }).await.unwrap();
     p.tags().attach(t_post.id).await.unwrap();
     v.tags().attach(t_video.id).await.unwrap();
 
@@ -479,10 +492,8 @@ async fn morph_to_many_count_via_server_side_group_by() {
 
     let mut posts = MmPost::query().get().await.unwrap();
     dispatch_count(&mut posts, "tags", _db.conn()).await;
-    let by_id: std::collections::HashMap<i64, u64> = posts
-        .iter()
-        .map(|p| (p.id, p.tags_count()))
-        .collect();
+    let by_id: std::collections::HashMap<i64, u64> =
+        posts.iter().map(|p| (p.id, p.tags_count())).collect();
     assert_eq!(by_id.get(&p1.id), Some(&2));
     assert_eq!(by_id.get(&p2.id), Some(&1));
 }
@@ -549,7 +560,10 @@ async fn morph_to_many_aggregate_min_max_returns_option() {
                 .copied()
         })
         .unwrap_or(None);
-    assert!(empty_min.is_none(), "empty min must be None, got {empty_min:?}");
+    assert!(
+        empty_min.is_none(),
+        "empty min must be None, got {empty_min:?}"
+    );
 
     // Now attach two tags and re-run Max.
     let t1 = MmTag::create(attrs! { name: "t1" }).await.unwrap();
@@ -595,10 +609,8 @@ async fn morphed_by_many_count_via_server_side_group_by() {
 
     let mut tags = MmTag::query().get().await.unwrap();
     dispatch_count(&mut tags, "posts", _db.conn()).await;
-    let by_id: std::collections::HashMap<i64, u64> = tags
-        .iter()
-        .map(|t| (t.id, t.posts_count()))
-        .collect();
+    let by_id: std::collections::HashMap<i64, u64> =
+        tags.iter().map(|t| (t.id, t.posts_count())).collect();
     assert_eq!(by_id.get(&t1.id), Some(&2));
     assert_eq!(by_id.get(&t2.id), Some(&1));
 }

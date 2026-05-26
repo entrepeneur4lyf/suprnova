@@ -15,9 +15,7 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use suprnova::http::text;
-use suprnova::{
-    handle_request, Middleware, MiddlewareRegistry, Next, Request, Response, Router,
-};
+use suprnova::{Middleware, MiddlewareRegistry, Next, Request, Response, Router, handle_request};
 
 // ── test fixtures ──────────────────────────────────────────────────────────
 
@@ -37,7 +35,10 @@ struct PanickingMiddlewareString;
 #[async_trait]
 impl Middleware for PanickingMiddlewareString {
     async fn handle(&self, _request: Request, _next: Next) -> Response {
-        panic!("{}", String::from("intentional test panic — String payload"));
+        panic!(
+            "{}",
+            String::from("intentional test panic — String payload")
+        );
     }
 }
 
@@ -64,9 +65,7 @@ async fn spawn_server(router: impl Into<Router>, accepts: usize) -> SocketAddr {
                 let svc = service_fn(move |req: hyper::Request<Incoming>| {
                     let router = router.clone();
                     let middleware = middleware.clone();
-                    async move {
-                        Ok::<_, Infallible>(handle_request(router, middleware, req).await)
-                    }
+                    async move { Ok::<_, Infallible>(handle_request(router, middleware, req).await) }
                 });
                 let _ = hyper::server::conn::http1::Builder::new()
                     .serve_connection(io, svc)
@@ -78,16 +77,12 @@ async fn spawn_server(router: impl Into<Router>, accepts: usize) -> SocketAddr {
     addr
 }
 
-async fn send_get(
-    addr: SocketAddr,
-    path: &str,
-) -> (hyper::http::StatusCode, Bytes) {
+async fn send_get(addr: SocketAddr, path: &str) -> (hyper::http::StatusCode, Bytes) {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let io = TokioIo::new(stream);
-    let (mut sender, conn) =
-        hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
-            .await
-            .unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
+        .await
+        .unwrap();
     tokio::spawn(async move {
         let _ = conn.await;
     });
@@ -134,11 +129,11 @@ async fn panicking_middleware_translates_to_500() {
         "panicking middleware must yield 500, got body: {}",
         String::from_utf8_lossy(&body),
     );
-    let parsed: serde_json::Value = serde_json::from_slice(&body).expect(
-        "panic response must be valid JSON via the FrameworkError -> HttpResponse path",
-    );
+    let parsed: serde_json::Value = serde_json::from_slice(&body)
+        .expect("panic response must be valid JSON via the FrameworkError -> HttpResponse path");
     assert_eq!(
-        parsed["message"], "Internal Server Error",
+        parsed["message"],
+        "Internal Server Error",
         "panic body must carry the sanitised 5xx message; got: {}",
         String::from_utf8_lossy(&body),
     );

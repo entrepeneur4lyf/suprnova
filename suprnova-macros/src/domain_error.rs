@@ -6,7 +6,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput, Expr, Lit, Meta};
+use syn::{DeriveInput, Expr, Lit, Meta, parse_macro_input};
 
 /// Parse the attributes from #[domain_error(status = 404, message = "...")]
 struct DomainErrorAttrs {

@@ -6,8 +6,8 @@
 //! the framework's event surface (Phase 1) and as the integration
 //! point that the `/events/stream` SSE handler subscribes to.
 
-use suprnova::broadcasting::Broadcastable;
 use suprnova::Event;
+use suprnova::broadcasting::Broadcastable;
 
 /// Fired when a new user finishes registration. Carries enough
 /// identity to drive welcome emails, audit trails, and the SSE

@@ -6,7 +6,7 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
-use syn::{braced, LitStr, Token};
+use syn::{LitStr, Token, braced};
 
 /// Convert a string to snake_case for module/function names
 fn to_snake_case(name: &str) -> String {
@@ -26,9 +26,11 @@ fn to_snake_case(name: &str) -> String {
                 prev_is_uppercase = false;
             }
         } else if (c.is_whitespace() || c == '-' || c == '_')
-            && !result.ends_with('_') && !result.is_empty() {
-                result.push('_');
-            }
+            && !result.ends_with('_')
+            && !result.is_empty()
+        {
+            result.push('_');
+        }
     }
 
     // Remove trailing underscore

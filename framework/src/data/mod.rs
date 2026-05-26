@@ -13,6 +13,8 @@ mod when_loaded;
 
 pub use error::IncludeError;
 pub use field::Field;
-pub use include_set::{current_include_set, scope_include_set, RequestIncludeSet, REQUEST_INCLUDE_SET};
+pub use include_set::{
+    REQUEST_INCLUDE_SET, RequestIncludeSet, current_include_set, scope_include_set,
+};
 pub use middleware::IncludeMiddleware;
 pub use when_loaded::IsRelationLoaded;

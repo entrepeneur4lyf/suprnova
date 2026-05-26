@@ -179,8 +179,8 @@ pub fn emit_append_accessor_dispatch(appends: &[String]) -> TokenStream {
     }
 
     let arms = appends.iter().map(|name| {
-        let method: syn::Ident = syn::parse_str(name)
-            .expect("accessor name parses as a Rust ident");
+        let method: syn::Ident =
+            syn::parse_str(name).expect("accessor name parses as a Rust ident");
         let name_str = name.clone();
         quote! {
             #name_str => ::core::option::Option::Some(

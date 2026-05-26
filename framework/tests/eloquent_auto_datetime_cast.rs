@@ -24,7 +24,7 @@
 
 use chrono::{DateTime, Utc};
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, model, Model};
+use suprnova::{Model, attrs, model};
 
 // `last_seen_at: DateTime<Utc>` is NOT one of the framework-managed
 // timestamp columns; the auto-inject only fires because the field's

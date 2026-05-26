@@ -24,10 +24,10 @@
 
 use crate::payments::{
     Checkout, CreateCustomerRequest, CustomerRef, CustomerSnapshot, CustomerStore,
-    NeutralEventKind, PaymentError, PaymentProvider, PaymentResult, PaymentSnapshot, PayloadIds,
-    SessionPayload, StartSessionRequest, SubscribeRequest, Subscription,
-    SubscriptionItemSnapshot, SubscriptionResult, SubscriptionStatus, UpdateCustomerRequest,
-    UpdateSubscriptionRequest, WebhookContext, WebhookEvent, WebhookHandler,
+    NeutralEventKind, PayloadIds, PaymentError, PaymentProvider, PaymentResult, PaymentSnapshot,
+    SessionPayload, StartSessionRequest, SubscribeRequest, Subscription, SubscriptionItemSnapshot,
+    SubscriptionResult, SubscriptionStatus, UpdateCustomerRequest, UpdateSubscriptionRequest,
+    WebhookContext, WebhookEvent, WebhookHandler,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -215,9 +215,8 @@ impl WebhookHandler for MockPaymentProvider {
     }
 
     fn parse_event(&self, body: &[u8]) -> PaymentResult<WebhookEvent> {
-        let raw: serde_json::Value = serde_json::from_slice(body).map_err(|e| {
-            PaymentError::Validation(format!("invalid mock webhook body: {e}"))
-        })?;
+        let raw: serde_json::Value = serde_json::from_slice(body)
+            .map_err(|e| PaymentError::Validation(format!("invalid mock webhook body: {e}")))?;
         let provider_event_type = raw
             .get("type")
             .and_then(|v| v.as_str())
@@ -265,8 +264,10 @@ impl WebhookHandler for MockPaymentProvider {
                 | NeutralEventKind::SubscriptionCanceled,
             ) => {
                 ids.subscription_id = obj.get("id").and_then(|v| v.as_str()).map(String::from);
-                ids.customer_id =
-                    obj.get("customer").and_then(|v| v.as_str()).map(String::from);
+                ids.customer_id = obj
+                    .get("customer")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
             }
             Some(NeutralEventKind::CustomerCreated | NeutralEventKind::CustomerUpdated) => {
                 ids.customer_id = obj.get("id").and_then(|v| v.as_str()).map(String::from);
@@ -280,8 +281,10 @@ impl WebhookHandler for MockPaymentProvider {
                 | NeutralEventKind::InvoiceFailed,
             ) => {
                 ids.transaction_id = obj.get("id").and_then(|v| v.as_str()).map(String::from);
-                ids.customer_id =
-                    obj.get("customer").and_then(|v| v.as_str()).map(String::from);
+                ids.customer_id = obj
+                    .get("customer")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 ids.subscription_id = obj
                     .get("subscription")
                     .and_then(|v| v.as_str())

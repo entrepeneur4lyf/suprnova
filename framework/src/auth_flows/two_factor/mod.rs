@@ -90,9 +90,7 @@ impl TwoFactor {
     ///
     /// Re-enrolling on an unconfirmed (pending) row is allowed — the
     /// prior enrollment never became authoritative.
-    pub async fn enroll<U: TwoFactorUser>(
-        user: &U,
-    ) -> Result<EnrollmentResponse, FrameworkError> {
+    pub async fn enroll<U: TwoFactorUser>(user: &U) -> Result<EnrollmentResponse, FrameworkError> {
         if Self::is_enabled(user).await? {
             return Err(FrameworkError::domain(
                 "2FA is already enabled for this account; call re_enroll with a valid TOTP or recovery code as proof to rotate the secret",
@@ -210,10 +208,7 @@ impl TwoFactor {
     ///
     /// - `FrameworkError::domain(.., 401)` if no row exists for this
     ///   user, or if the supplied code does not match.
-    pub async fn confirm<U: TwoFactorUser>(
-        user: &U,
-        code: &str,
-    ) -> Result<(), FrameworkError> {
+    pub async fn confirm<U: TwoFactorUser>(user: &U, code: &str) -> Result<(), FrameworkError> {
         let secret_b32 = load_secret(user.user_id())
             .await?
             .ok_or_else(|| FrameworkError::domain("no pending 2FA enrollment", 401))?;
@@ -263,10 +258,7 @@ impl TwoFactor {
     /// brute-force of the TOTP search space. Successful verifies
     /// reset the failed-attempt counter via
     /// [`crate::auth_flows::BruteForce::reset_attempts`].
-    pub async fn verify<U: TwoFactorUser>(
-        user: &U,
-        code: &str,
-    ) -> Result<bool, FrameworkError> {
+    pub async fn verify<U: TwoFactorUser>(user: &U, code: &str) -> Result<bool, FrameworkError> {
         let db = DB::connection()?;
         let Some(row) = entity::Entity::find_by_id(user.user_id().to_string())
             .one(db.inner())
@@ -301,9 +293,10 @@ impl TwoFactor {
             let mut active: entity::ActiveModel = row.into();
             active.last_used_timestep = Set(Some(current_timestep));
             active.updated_at = Set(chrono::Utc::now());
-            active.update(db.inner()).await.map_err(|e| {
-                FrameworkError::internal(format!("two_factor update: {e}"))
-            })?;
+            active
+                .update(db.inner())
+                .await
+                .map_err(|e| FrameworkError::internal(format!("two_factor update: {e}")))?;
             reset_2fa_failures(user.email()).await;
         } else {
             record_2fa_failure(user.email()).await;
@@ -493,9 +486,7 @@ async fn record_2fa_failure(email: &str) {
 /// as [`record_2fa_failure`].
 async fn reset_2fa_failures(email: &str) {
     if let Err(e) = crate::auth_flows::BruteForce::reset_attempts(email).await {
-        tracing::debug!(
-            "BruteForce::reset_attempts skipped for 2FA success on {email}: {e}"
-        );
+        tracing::debug!("BruteForce::reset_attempts skipped for 2FA success on {email}: {e}");
     }
 }
 
@@ -507,16 +498,8 @@ fn check_code(secret_b32: &str, code: &str) -> Result<bool, FrameworkError> {
     let secret_bytes = Secret::Encoded(secret_b32.into())
         .to_bytes()
         .map_err(|e| FrameworkError::internal(format!("decode totp secret: {e}")))?;
-    let totp = TOTP::new(
-        Algorithm::SHA1,
-        6,
-        1,
-        30,
-        secret_bytes,
-        None,
-        "user".into(),
-    )
-    .map_err(|e| FrameworkError::internal(format!("totp new: {e}")))?;
+    let totp = TOTP::new(Algorithm::SHA1, 6, 1, 30, secret_bytes, None, "user".into())
+        .map_err(|e| FrameworkError::internal(format!("totp new: {e}")))?;
     totp.check_current(code)
         .map_err(|e| FrameworkError::internal(format!("totp check: {e}")))
 }

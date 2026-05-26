@@ -87,15 +87,11 @@ impl Checkout for StripeProvider {
                         .send(self.client())
                         .await
                         .map_err(|e| {
-                            PaymentError::Provider(format!(
-                                "stripe payment_intents.create: {e}"
-                            ))
+                            PaymentError::Provider(format!("stripe payment_intents.create: {e}"))
                         })?;
 
                 let client_secret = intent.client_secret.ok_or_else(|| {
-                    PaymentError::Provider(
-                        "PaymentIntent missing client_secret on create".into(),
-                    )
+                    PaymentError::Provider("PaymentIntent missing client_secret on create".into())
                 })?;
 
                 Ok(SessionPayload::StripeElements {
@@ -108,7 +104,10 @@ impl Checkout for StripeProvider {
                 let line_items: Vec<LineItem> = req
                     .price_refs
                     .iter()
-                    .map(|p| LineItem { price: p, quantity: 1 })
+                    .map(|p| LineItem {
+                        price: p,
+                        quantity: 1,
+                    })
                     .collect();
 
                 if line_items.is_empty() {
@@ -132,9 +131,7 @@ impl Checkout for StripeProvider {
                         .send(self.client())
                         .await
                         .map_err(|e| {
-                            PaymentError::Provider(format!(
-                                "stripe checkout.sessions.create: {e}"
-                            ))
+                            PaymentError::Provider(format!("stripe checkout.sessions.create: {e}"))
                         })?;
 
                 let url = session.url.ok_or_else(|| {

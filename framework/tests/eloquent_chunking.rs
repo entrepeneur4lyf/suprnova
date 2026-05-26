@@ -13,7 +13,7 @@
 
 use chrono::{DateTime, Utc};
 use suprnova::testing::TestDatabase;
-use suprnova::{attrs, model, Collection, Model};
+use suprnova::{Collection, Model, attrs, model};
 
 // ---- Fixture -----------------------------------------------------------
 
@@ -305,9 +305,7 @@ async fn lazy_respects_where_clauses() {
     // clone. Without that, `lazy()` would silently return every row.
     let _db = fixture(10).await;
 
-    let mut stream = T8Order::query()
-        .filter_op("amount", ">=", 50_i64)
-        .lazy();
+    let mut stream = T8Order::query().filter_op("amount", ">=", 50_i64).lazy();
     let mut amounts: Vec<i64> = Vec::new();
     while let Some(item) = stream.next().await {
         let order = item.expect("lazy row");
@@ -373,7 +371,10 @@ async fn lazy_with_eager_load_yields_error() {
     let _db = fixture(5).await;
 
     let mut stream = T8Order::query().with(["nonexistent"]).lazy();
-    let first = stream.next().await.expect("stream yields at least one item");
+    let first = stream
+        .next()
+        .await
+        .expect("stream yields at least one item");
     let err = first.expect_err("lazy must surface eager-load rejection");
 
     let msg = format!("{err}");

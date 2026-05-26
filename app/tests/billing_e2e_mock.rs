@@ -1,6 +1,6 @@
+use app::payments::BillableUser;
 use std::sync::Arc;
 use suprnova::payments::*;
-use app::payments::BillableUser;
 
 #[tokio::test]
 async fn billing_e2e_mock_discriminator() {

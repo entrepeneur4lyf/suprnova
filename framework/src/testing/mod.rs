@@ -26,7 +26,7 @@ mod expect;
 
 pub use crate::container::testing::{TestContainer, TestContainerGuard};
 pub use crate::database::testing::TestDatabase;
-pub use expect::{set_current_test_name, Expect};
+pub use expect::{Expect, set_current_test_name};
 
 use crate::crypto::EncryptionKey;
 

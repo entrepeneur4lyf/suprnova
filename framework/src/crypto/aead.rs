@@ -5,8 +5,8 @@
 //! giving ~2^48 safe encryptions under a single key.
 
 use aes_gcm::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
     Aes256Gcm,
+    aead::{Aead, AeadCore, KeyInit, OsRng},
 };
 
 use super::key::EncryptionKey;
@@ -16,10 +16,7 @@ const NONCE_LEN: usize = 12;
 
 /// Encrypt `plaintext` under `key`. Returns the on-wire bytes:
 /// `nonce || ciphertext_with_tag`.
-pub(crate) fn encrypt(
-    key: &EncryptionKey,
-    plaintext: &[u8],
-) -> Result<Vec<u8>, FrameworkError> {
+pub(crate) fn encrypt(key: &EncryptionKey, plaintext: &[u8]) -> Result<Vec<u8>, FrameworkError> {
     let cipher = Aes256Gcm::new(key.as_bytes().into());
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
     let ciphertext = cipher
@@ -34,10 +31,7 @@ pub(crate) fn encrypt(
 /// Decrypt on-wire bytes (`nonce || ciphertext_with_tag`) under `key`.
 /// Any tampering — flipped bit, wrong key, truncated nonce — yields an
 /// error.
-pub(crate) fn decrypt(
-    key: &EncryptionKey,
-    wire: &[u8],
-) -> Result<Vec<u8>, FrameworkError> {
+pub(crate) fn decrypt(key: &EncryptionKey, wire: &[u8]) -> Result<Vec<u8>, FrameworkError> {
     if wire.len() < NONCE_LEN + 16 {
         return Err(FrameworkError::internal(
             "AEAD wire too short (need nonce + 16-byte tag)",

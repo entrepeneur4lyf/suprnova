@@ -44,7 +44,10 @@ fn resolve_reads_env_into_typed_struct_with_defaults() {
     let cfg: MailConfig = Config::resolve().expect("resolve from env");
     assert_eq!(cfg.mail_driver, "smtp");
     assert_eq!(cfg.mail_host, "smtp.example.com");
-    assert_eq!(cfg.mail_port, 587, "missing field falls through to serde default");
+    assert_eq!(
+        cfg.mail_port, 587,
+        "missing field falls through to serde default"
+    );
 
     clear_env(&["MAIL_DRIVER", "MAIL_HOST", "MAIL_PORT"]);
 }
@@ -101,8 +104,7 @@ fn resolve_prefixed_strips_prefix_before_mapping() {
     set_env("DB_PORT", "5432");
     // DB_SSL omitted → default false.
 
-    let cfg: PrefixedDbConfig =
-        Config::resolve_prefixed("DB_").expect("resolve with DB_ prefix");
+    let cfg: PrefixedDbConfig = Config::resolve_prefixed("DB_").expect("resolve with DB_ prefix");
     assert_eq!(cfg.host, "db.example.com");
     assert_eq!(cfg.port, 5432);
     assert!(!cfg.ssl, "missing field uses serde default");
