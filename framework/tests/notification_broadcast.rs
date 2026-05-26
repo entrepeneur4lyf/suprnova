@@ -1,22 +1,21 @@
-//! BroadcastChannelStub — verifies the stub emits a structured info log.
+//! BroadcastChannel (production gate #374) — verifies the channel publishes
+//! to the container-bound `BroadcastHub`, and fails closed when none is bound.
 //!
-//! Phase 5B ships the broadcast channel as a logging stub; real WebSocket
-//! fan-out arrives in Phase 7B (on top of the Phase 7A WebSocket
-//! transport). Until then, the test below pins the contract that lets the
-//! stub stand in for the real implementation:
+//! Phase 7B shipped the `BroadcastHub`; the channel (formerly a logging stub
+//! that silently returned `Ok(())`) now publishes each notification to the
+//! hub as a `BroadcastEnvelope`. The route returned by the `Notifiable` is the
+//! broadcast channel name, the notification's type name is the event, and its
+//! `data()` is the payload.
 //!
-//! 1. `Channel::name()` returns `"broadcast"` so notifications declaring
-//!    `"broadcast"` resolve through the dispatcher today without warning.
-//! 2. `Channel::deliver()` always returns `Ok(())` — the stub never
-//!    short-circuits a multi-channel notification.
-//! 3. Every delivery emits a `tracing::info` event carrying enough
-//!    structured context (channel, route, notification name, data) for
-//!    operators to audit what *would* have been broadcast.
+//! Both tests run inside their own `TestContainer::scope` so they are
+//! order-independent and immune to any sibling test that binds a hub globally.
 
 use serde::{Deserialize, Serialize};
-use suprnova::notifications::channels::broadcast::BroadcastChannelStub;
+use std::sync::Arc;
+use suprnova::broadcasting::{BroadcastHub, InMemoryBroadcastHub};
+use suprnova::notifications::channels::broadcast::BroadcastChannel;
 use suprnova::notifications::{Channel, Notification};
-use tracing_test::traced_test;
+use suprnova::testing::TestContainer;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct PingNote;
@@ -34,34 +33,48 @@ impl Notification for PingNote {
 }
 
 #[tokio::test]
-#[traced_test]
-async fn broadcast_stub_emits_info_event_with_structured_fields() {
-    let channel = BroadcastChannelStub::new();
-    assert_eq!(channel.name(), "broadcast");
+async fn deliver_publishes_to_the_bound_hub() {
+    TestContainer::scope(async {
+        let hub = Arc::new(InMemoryBroadcastHub::new());
+        // Subscribe BEFORE delivering so the publish is observable.
+        let mut rx = hub.subscribe("room.lobby");
+        TestContainer::bind::<dyn BroadcastHub>(hub.clone());
 
-    // The "route" for broadcast is whatever the Notifiable returns — for a
-    // future WebSocket transport this will typically be a channel name
-    // (`"user.42"`, `"room.lobby"`, etc.). The stub just logs it.
-    channel
-        .deliver("room.lobby", &PingNote)
-        .await
-        .expect("stub delivery is infallible");
+        let channel = BroadcastChannel::new();
+        assert_eq!(channel.name(), "broadcast");
+        channel
+            .deliver("room.lobby", &PingNote)
+            .await
+            .expect("delivery must succeed when a BroadcastHub is bound");
 
-    assert!(
-        logs_contain("broadcast channel stub"),
-        "expected the stub's info message"
-    );
-    assert!(
-        logs_contain("broadcast"),
-        "expected channel=\"broadcast\" field in the log"
-    );
-    assert!(
-        logs_contain("PingNote"),
-        "expected notification name in the log"
-    );
-    assert!(logs_contain("room.lobby"), "expected route in the log");
-    assert!(
-        logs_contain("ping"),
-        "expected the notification data payload in the log"
-    );
+        let env = rx
+            .try_recv()
+            .expect("the subscriber must receive the published envelope");
+        assert_eq!(env.channel, "room.lobby", "route becomes the channel name");
+        assert_eq!(env.event, "PingNote", "event is the notification type name");
+        assert_eq!(
+            env.data,
+            serde_json::json!({ "title": "ping", "body": "hello" }),
+            "payload is the notification's data()"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn deliver_fails_closed_when_no_hub_bound() {
+    TestContainer::scope(async {
+        // Empty scope — no BroadcastHub bound. The pre-fix stub returned
+        // Ok(()) here, silently dropping the notification; that was the bug.
+        let channel = BroadcastChannel::new();
+        let err = channel
+            .deliver("room.lobby", &PingNote)
+            .await
+            .expect_err("delivery must fail closed when no hub is bound, not silently succeed");
+        assert!(
+            err.to_string().contains("BroadcastHub"),
+            "the error must name the missing dependency; got: {err}"
+        );
+    })
+    .await;
 }

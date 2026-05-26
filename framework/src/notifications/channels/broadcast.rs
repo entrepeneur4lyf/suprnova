@@ -1,32 +1,48 @@
-//! Broadcast notification channel (stub).
+//! Broadcast notification channel.
 //!
-//! Phase 7B will replace this with real WebSocket fan-out. For Phase 5B the
-//! channel is wired but its [`Channel::deliver`] implementation only emits
-//! a `tracing::info` event — no WebSocket transport exists yet (Phase 7A
-//! delivers that). Registering this stub today lets notifications declare
-//! `"broadcast"` alongside `"mail"` / `"database"` / `"webpush"` without
-//! the dispatcher logging an unregistered-channel warning, and the
-//! structured fields on the info event give operators a paper trail of
-//! every notification that *would* have been broadcast.
+//! Delivers a notification to WebSocket subscribers by publishing it to the
+//! application's [`BroadcastHub`] (Phase 7B). The per-recipient
+//! `route_for("broadcast")` value is the broadcast channel name, the
+//! notification's type name is the event, and its `data()` is the payload.
 
+use crate::broadcasting::{BroadcastEnvelope, BroadcastHub};
+use crate::container::App;
 use crate::error::FrameworkError;
 use crate::notifications::{Channel, DynNotification};
 use async_trait::async_trait;
 
-/// Stub broadcast channel — logs delivery instead of fanning out to
-/// WebSocket subscribers. Replaced by a real implementation in Phase 7B
-/// once the WebSocket transport (Phase 7A) lands.
+/// Broadcast channel — publishes notifications to the application's
+/// [`BroadcastHub`] so WebSocket subscribers receive them in real time.
+///
+/// The hub is resolved from the container at delivery time
+/// (`App::make::<dyn BroadcastHub>()`), the same way the WS handler and SSE
+/// bridge obtain it. Bind one at boot with
+/// `App::bind::<dyn BroadcastHub>(Arc::clone(&hub))`.
+///
+/// # Dispatch semantics (load-bearing — do not "simplify" back to `Ok`)
+///
+/// [`Channel::deliver`] returns `Err` when **no** `BroadcastHub` is bound in
+/// the container. The [`crate::notifications`] dispatcher breaks on the first
+/// channel error, so this short-circuits the rest of the notification's
+/// channels — **by design**. A notification that declares `"broadcast"` in an
+/// app that never wired a hub is a misconfiguration that must surface, not be
+/// silently dropped. (This type was previously a stub that returned `Ok(())`
+/// without delivering anything; that silent success was the bug being fixed.)
+///
+/// When a hub **is** bound — the normal case — `deliver` publishes and
+/// returns `Ok(())`, so broadcast never short-circuits a correctly-configured
+/// app. Publishing to a channel with zero live subscribers is not an error.
 #[derive(Default)]
-pub struct BroadcastChannelStub;
+pub struct BroadcastChannel;
 
-impl BroadcastChannelStub {
+impl BroadcastChannel {
     pub fn new() -> Self {
         Self
     }
 }
 
 #[async_trait]
-impl Channel for BroadcastChannelStub {
+impl Channel for BroadcastChannel {
     fn name(&self) -> &'static str {
         "broadcast"
     }
@@ -36,13 +52,25 @@ impl Channel for BroadcastChannelStub {
         route: &str,
         notification: &dyn DynNotification,
     ) -> Result<(), FrameworkError> {
-        tracing::info!(
-            channel = "broadcast",
-            route = %route,
-            notification = %notification.name(),
-            data = %notification.data(),
-            "broadcast channel stub — WebSocket transport lands in Phase 7B"
+        let hub = App::make::<dyn BroadcastHub>().ok_or_else(|| {
+            FrameworkError::internal(
+                "broadcast notification channel requires a BroadcastHub bound in the \
+                 container — call `App::bind::<dyn BroadcastHub>(Arc::clone(&hub))` at boot, \
+                 or drop \"broadcast\" from the notification's channels()",
+            )
+        })?;
+
+        let envelope = BroadcastEnvelope {
+            channel: route.to_string(),
+            event: notification.name().to_string(),
+            data: notification.data(),
+        };
+        tracing::debug!(
+            channel = %envelope.channel,
+            event = %envelope.event,
+            "publishing broadcast notification to hub"
         );
+        hub.publish(envelope).await;
         Ok(())
     }
 }

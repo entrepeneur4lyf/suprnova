@@ -271,7 +271,7 @@ pub use eloquent::observers::{
 };
 // `casts!` macro is `#[macro_export]` in eloquent/casts/mod.rs — re-exported
 // at the crate root automatically. No `pub use` needed here.
-pub use notifications::channels::broadcast::BroadcastChannelStub;
+pub use notifications::channels::broadcast::BroadcastChannel;
 pub use notifications::channels::database::DatabaseChannel;
 pub use notifications::channels::mail::{
     MailChannel, MailRendering, NotificationMailable, register_mail_renderer,
