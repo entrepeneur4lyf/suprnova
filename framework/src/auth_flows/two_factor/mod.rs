@@ -32,7 +32,10 @@ use crate::auth_flows::events::{TwoFactorDisabled, TwoFactorEnrolled};
 use crate::crypto::Crypt;
 use crate::database::DB;
 use crate::error::FrameworkError;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, EntityTrait, QueryFilter,
+};
 use totp_rs::{Algorithm, Secret, TOTP};
 
 const ISSUER_ENV: &str = "APP_NAME";
@@ -248,6 +251,17 @@ impl TwoFactor {
     /// the next timestep; for the typical "verify once per login"
     /// flow this is invisible.
     ///
+    /// The timestep claim is atomic. The stamp is written with a
+    /// conditional `UPDATE ... WHERE last_used_timestep IS NULL OR
+    /// last_used_timestep < :current`, and the verify only succeeds
+    /// when that statement affects exactly one row. Two concurrent
+    /// verifies in the same timestep therefore cannot both win: the
+    /// first flips the column, the second's predicate no longer
+    /// matches and it is treated as a replay. A plain read-modify-write
+    /// would be a TOCTOU race — both verifies read the pre-stamp row,
+    /// both validate the same code, both stamp — that silently defeats
+    /// the guard under concurrency.
+    ///
     /// # Brute-force throttling
     ///
     /// Failed verifies are recorded against the user's email via
@@ -275,33 +289,57 @@ impl TwoFactor {
         if let Some(last) = row.last_used_timestep
             && current_timestep <= last
         {
-            // Within or before the timestep the user last successfully
-            // verified at — refuse to accept ANY code, even one that
-            // would structurally validate. Closes the in-window replay
-            // window. Counted as a failed attempt — replays from an
-            // observer should trip the lockout.
+            // Fast-path replay rejection: this user already verified at
+            // or after the current timestep, so refuse ANY code without
+            // even decrypting the secret. This is an optimization and a
+            // UX nicety, NOT the authoritative guard — under concurrency
+            // two verifies can both read the pre-stamp row and pass here.
+            // The atomic claim below is what actually closes the race.
+            // Counted as a failed attempt — replays from an observer
+            // should trip the lockout.
             record_2fa_failure(user.email()).await;
             return Ok(false);
         }
 
         let secret_b32 = Crypt::decrypt_string(&row.secret)?;
-        let matched = check_code(&secret_b32, code)?;
-        if matched {
-            // Persist the timestep so the same code (or any other
-            // structurally-valid code in this window) can't be
-            // replayed within this 30-second slot.
-            let mut active: entity::ActiveModel = row.into();
-            active.last_used_timestep = Set(Some(current_timestep));
-            active.updated_at = Set(chrono::Utc::now());
-            active
-                .update(db.inner())
-                .await
-                .map_err(|e| FrameworkError::internal(format!("two_factor update: {e}")))?;
-            reset_2fa_failures(user.email()).await;
-        } else {
+        if !check_code(&secret_b32, code)? {
             record_2fa_failure(user.email()).await;
+            return Ok(false);
         }
-        Ok(matched)
+
+        // Atomically claim this timestep. The conditional WHERE turns
+        // check-and-stamp into a single statement: the first verify in a
+        // given timestep flips `last_used_timestep` to `current`, and any
+        // concurrent verify's predicate (`< current`) no longer matches,
+        // so it affects zero rows. This is what makes the replay guard
+        // hold under concurrency — the previous read-modify-write let two
+        // racing verifies both stamp and both succeed (a TOCTOU race).
+        let claim = entity::Entity::update_many()
+            .col_expr(
+                entity::Column::LastUsedTimestep,
+                Expr::value(current_timestep),
+            )
+            .col_expr(entity::Column::UpdatedAt, Expr::value(chrono::Utc::now()))
+            .filter(entity::Column::UserId.eq(user.user_id()))
+            .filter(
+                Condition::any()
+                    .add(entity::Column::LastUsedTimestep.is_null())
+                    .add(entity::Column::LastUsedTimestep.lt(current_timestep)),
+            )
+            .exec(db.inner())
+            .await
+            .map_err(|e| FrameworkError::internal(format!("two_factor replay claim: {e}")))?;
+
+        if claim.rows_affected == 0 {
+            // A concurrent verify in the same timestep beat us to the
+            // claim. Identical outcome to a sequential replay: reject and
+            // count it as a failed attempt.
+            record_2fa_failure(user.email()).await;
+            return Ok(false);
+        }
+
+        reset_2fa_failures(user.email()).await;
+        Ok(true)
     }
 
     /// Try to consume one recovery code. Returns `true` if a code

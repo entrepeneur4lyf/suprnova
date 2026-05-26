@@ -440,6 +440,63 @@ async fn verify_rejects_replay_within_same_timestep() {
     );
 }
 
+// Regression gate for the verify replay *race* (not just sequential
+// replay, which `verify_rejects_replay_within_same_timestep` covers).
+//
+// `tokio::join!` polls all five verifies on this one task — `tokio::spawn`
+// is deliberately avoided because the DB connection is task-local and a
+// spawned task would not inherit it. The single-connection test pool
+// serves their `find` queries FIFO, so all five read
+// `last_used_timestep = NULL` and clear the fast-path pre-check *before*
+// any of them reaches the stamping UPDATE. That is precisely the TOCTOU
+// window: the old read-modify-write returned five `true`s here, because
+// each task independently stamped the row. The atomic conditional UPDATE
+// lets only the first claimant flip the column; the other four match zero
+// rows and return `false`. So this asserts exactly-one-success, which is
+// a hard fail for the pre-fix code on any backend.
+#[tokio::test]
+async fn concurrent_verifies_in_same_timestep_elect_one_winner() {
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    ensure_crypt();
+
+    let user = FakeUser {
+        id: "race-uid".into(),
+        email: "race@example.com".into(),
+    };
+
+    let response = TwoFactor::enroll(&user).await.unwrap();
+    TwoFactor::confirm(&user, &totp_code_for(&response.otpauth_url))
+        .await
+        .unwrap();
+
+    let live = totp_code_for(&response.otpauth_url);
+    let (r1, r2, r3, r4, r5) = tokio::join!(
+        TwoFactor::verify(&user, &live),
+        TwoFactor::verify(&user, &live),
+        TwoFactor::verify(&user, &live),
+        TwoFactor::verify(&user, &live),
+        TwoFactor::verify(&user, &live),
+    );
+
+    let results = [r1, r2, r3, r4, r5];
+    assert!(
+        results.iter().all(Result::is_ok),
+        "no concurrent verify should error: {results:?}"
+    );
+    let successes = results.iter().filter(|r| matches!(r, Ok(true))).count();
+    assert_eq!(
+        successes, 1,
+        "exactly one concurrent verify may claim the timestep; got {successes} in {results:?}"
+    );
+
+    // The timestep is now claimed, so a later verify with the same code
+    // in the same window is rejected like any other replay.
+    assert!(
+        !TwoFactor::verify(&user, &live).await.unwrap(),
+        "post-race verify of the same code in the same timestep must be rejected"
+    );
+}
+
 #[tokio::test]
 async fn enroll_errors_when_2fa_already_confirmed() {
     let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
