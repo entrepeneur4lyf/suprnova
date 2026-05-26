@@ -270,8 +270,10 @@ mod tests {
                 let expected_token = expected_token.clone();
                 async move {
                     // Install a session with the expected CSRF token.
-                    let mut session = SessionData::default();
-                    session.csrf_token = expected_token;
+                    let session = SessionData {
+                        csrf_token: expected_token,
+                        ..Default::default()
+                    };
                     let slot = Arc::new(Mutex::new(Some(session)));
 
                     let response = SESSION_CONTEXT

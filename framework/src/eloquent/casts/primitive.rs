@@ -304,8 +304,7 @@ mod tests {
         let dyn_cast = AsBool::into_dyn();
         let err = dyn_cast
             .from_storage_json(&json!("true"))
-            .err()
-            .expect("non-integer input must reject");
+            .expect_err("non-integer input must reject");
         let msg = format!("{err}");
         assert!(
             msg.contains("AsBool") && msg.contains("expected integer"),
@@ -318,8 +317,7 @@ mod tests {
         let dyn_cast = AsBool::into_dyn();
         let err = dyn_cast
             .to_storage_json(&json!(1))
-            .err()
-            .expect("non-boolean input must reject");
+            .expect_err("non-boolean input must reject");
         let msg = format!("{err}");
         assert!(
             msg.contains("AsBool") && msg.contains("expected boolean"),
@@ -332,8 +330,7 @@ mod tests {
         let dyn_cast = <AsDecimal<4> as IntoDynCast>::into_dyn();
         let err = dyn_cast
             .from_storage_json(&json!(42))
-            .err()
-            .expect("non-string input must reject (was silently coerced to '0')");
+            .expect_err("non-string input must reject (was silently coerced to '0')");
         let msg = format!("{err}");
         assert!(
             msg.contains("AsDecimal") && msg.contains("expected JSON string"),

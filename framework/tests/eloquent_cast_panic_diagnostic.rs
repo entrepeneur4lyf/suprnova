@@ -83,7 +83,7 @@ fn from_storage_panic_includes_field_name_and_source_error() {
     };
 
     let result = catch_unwind(AssertUnwindSafe(|| CastPanicCanary::from(inner)));
-    let payload = result.err().expect(
+    let payload = result.expect_err(
         "From<cast_panic_canary::Model> for CastPanicCanary must panic when the cast fails",
     );
     let msg = panic_message_of(payload);
@@ -119,7 +119,7 @@ fn to_storage_panic_includes_field_name_and_source_error() {
     };
 
     let result = catch_unwind(AssertUnwindSafe(|| cast_panic_canary::Model::from(user)));
-    let payload = result.err().expect(
+    let payload = result.expect_err(
         "From<CastPanicCanary> for cast_panic_canary::Model must panic when the cast fails",
     );
     let msg = panic_message_of(payload);
@@ -150,7 +150,7 @@ fn pre_audit_panic_message_no_longer_present() {
         payload: "anything".to_string(),
     };
     let result = catch_unwind(AssertUnwindSafe(|| CastPanicCanary::from(inner)));
-    let msg = panic_message_of(result.err().expect("must panic"));
+    let msg = panic_message_of(result.expect_err("must panic"));
     assert!(
         !msg.contains("corrupt data in database column\""),
         "pre-audit panic message detected — Domain 5 M-D5-1 regression; got: {msg}",

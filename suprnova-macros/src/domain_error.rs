@@ -231,18 +231,16 @@ mod tests {
 
     fn ok_attrs(src: &str) -> DomainErrorAttrs {
         let tokens: proc_macro2::TokenStream = src.parse().expect("test attr parses as tokens");
-        // The proc-macro / proc-macro2 boundary needs `.into()` to
-        // round-trip the tokens. `parse_attrs` expects
-        // `proc_macro::TokenStream` because that's what the macro
-        // entry point delivers; tests construct a `proc_macro2`
-        // stream and convert. The two are interchangeable inside a
-        // proc-macro crate.
-        parse_attrs(tokens.into()).expect("attrs parse")
+        // `parse_attrs` takes a `proc_macro2::TokenStream` (aliased
+        // `TokenStream2`), which is exactly what the tests build — no
+        // conversion needed. The real macro entry point is what bridges
+        // `proc_macro::TokenStream` into `proc_macro2` before calling in.
+        parse_attrs(tokens).expect("attrs parse")
     }
 
     fn err_attrs(src: &str) -> String {
         let tokens: proc_macro2::TokenStream = src.parse().expect("test attr parses as tokens");
-        parse_attrs(tokens.into())
+        parse_attrs(tokens)
             .err()
             .expect("attrs must reject")
             .to_string()
