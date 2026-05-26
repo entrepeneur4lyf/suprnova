@@ -70,8 +70,8 @@ impl Notification for InlineBoth {
 #[serial]
 async fn derive_inline_html_and_text() {
     let fake = Mail::fake();
-    register_mail_renderer::<InlineBoth>();
-    set_dispatcher(Arc::new(
+    let _ = register_mail_renderer::<InlineBoth>();
+    let _ = set_dispatcher(Arc::new(
         NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new())),
     ));
 
@@ -131,8 +131,8 @@ impl Notification for TextOnlyOrder {
 #[serial]
 async fn derive_text_only_with_from_and_from_name() {
     let fake = Mail::fake();
-    register_mail_renderer::<TextOnlyOrder>();
-    set_dispatcher(Arc::new(
+    let _ = register_mail_renderer::<TextOnlyOrder>();
+    let _ = set_dispatcher(Arc::new(
         NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new())),
     ));
 
@@ -187,8 +187,8 @@ impl Notification for AuditNotice {
 #[serial]
 async fn derive_cc_bcc_reply_to_lists_thread_through() {
     let fake = Mail::fake();
-    register_mail_renderer::<AuditNotice>();
-    set_dispatcher(Arc::new(
+    let _ = register_mail_renderer::<AuditNotice>();
+    let _ = set_dispatcher(Arc::new(
         NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new())),
     ));
 
@@ -247,8 +247,8 @@ impl Notification for FileTemplated {
 #[serial]
 async fn derive_html_and_text_templates_via_include_str() {
     let fake = Mail::fake();
-    register_mail_renderer::<FileTemplated>();
-    set_dispatcher(Arc::new(
+    let _ = register_mail_renderer::<FileTemplated>();
+    let _ = set_dispatcher(Arc::new(
         NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new())),
     ));
 
@@ -304,8 +304,8 @@ impl Notification for HtmlOnly {
 #[serial]
 async fn derive_html_only_leaves_text_none() {
     let fake = Mail::fake();
-    register_mail_renderer::<HtmlOnly>();
-    set_dispatcher(Arc::new(
+    let _ = register_mail_renderer::<HtmlOnly>();
+    let _ = set_dispatcher(Arc::new(
         NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new())),
     ));
 
@@ -361,8 +361,8 @@ impl Notification for TrailingWhitespace {
 #[serial]
 async fn derive_address_list_trims_whitespace_and_skips_empties() {
     let fake = Mail::fake();
-    register_mail_renderer::<TrailingWhitespace>();
-    set_dispatcher(Arc::new(
+    let _ = register_mail_renderer::<TrailingWhitespace>();
+    let _ = set_dispatcher(Arc::new(
         NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new())),
     ));
 

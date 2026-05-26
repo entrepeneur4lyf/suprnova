@@ -214,8 +214,13 @@ static FACTORIES: RwLock<Option<HashMap<String, NotificationFactory>>> = RwLock:
 
 /// Bind a dispatcher for queued and `Notify::send` delivery. Replaces any
 /// previously-bound dispatcher (last-write-wins).
-pub fn set_dispatcher(d: Arc<NotificationDispatcher>) {
-    *lock::write(&DISPATCHER).expect("notification dispatcher lock poisoned") = Some(d);
+///
+/// Returns [`FrameworkError::internal`] if the dispatcher registry lock is
+/// poisoned (a prior writer panicked) rather than panicking — the crate-wide
+/// write-poison policy lives in [`crate::lock`].
+pub fn set_dispatcher(d: Arc<NotificationDispatcher>) -> Result<(), FrameworkError> {
+    *lock::write(&DISPATCHER)? = Some(d);
+    Ok(())
 }
 
 pub(crate) fn dispatcher_for_queue() -> Result<Arc<NotificationDispatcher>, FrameworkError> {
@@ -236,7 +241,7 @@ pub(crate) fn dispatcher_for_queue() -> Result<Arc<NotificationDispatcher>, Fram
 /// Re-registering the same name silently replaces the existing factory
 /// (last-write-wins) — matches the mailable registry and the dispatcher's
 /// channel registration.
-pub fn register_notification_factory<N: Notification>() {
+pub fn register_notification_factory<N: Notification>() -> Result<(), FrameworkError> {
     let factory: NotificationFactory = |payload| {
         let n: N = serde_json::from_value(payload).map_err(|e| {
             FrameworkError::internal(format!(
@@ -246,9 +251,10 @@ pub fn register_notification_factory<N: Notification>() {
         })?;
         Ok(Box::new(n))
     };
-    let mut g = lock::write(&FACTORIES).expect("notification factory lock poisoned");
+    let mut g = lock::write(&FACTORIES)?;
     g.get_or_insert_with(HashMap::new)
         .insert(N::notification_name().to_string(), factory);
+    Ok(())
 }
 
 pub(crate) fn factory_for(name: &str) -> Result<NotificationFactory, FrameworkError> {

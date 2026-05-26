@@ -107,9 +107,9 @@ async fn prelude_covers_typical_mail_and_notification_flow() {
 
     // Notification facade + Notifiable + Notification + NotificationMailable
     // + MailRendering + register_mail_renderer — all from prelude.
-    register_mail_renderer::<PreludeOrderShipped>();
+    let _ = register_mail_renderer::<PreludeOrderShipped>();
     let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
-    set_dispatcher(Arc::new(dispatcher));
+    let _ = set_dispatcher(Arc::new(dispatcher));
 
     Notify::send(
         &PreludeCustomer {
@@ -161,7 +161,7 @@ fn every_prelude_symbol_is_reachable() {
     // Function pointers — proves the items are reachable.
     fn _functions() {
         let _: fn() = || {
-            register_mail_renderer::<PreludeOrderShipped>();
+            let _ = register_mail_renderer::<PreludeOrderShipped>();
         };
     }
     // Traits in scope — referenced via where-clauses.

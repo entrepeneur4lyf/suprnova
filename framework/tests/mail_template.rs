@@ -34,7 +34,7 @@ impl Mailable for WelcomeMail {
 #[serial]
 async fn mailable_renders_html_and_text_with_tera() {
     let transport = Arc::new(InMemoryMailTransport::new());
-    Mail::set_transport(transport.clone());
+    let _ = Mail::set_transport(transport.clone());
 
     Mail::to("alice@example.org")
         .send(WelcomeMail {
@@ -82,7 +82,7 @@ async fn mailable_render_error_is_framework_error() {
     }
 
     let transport = Arc::new(InMemoryMailTransport::new());
-    Mail::set_transport(transport.clone());
+    let _ = Mail::set_transport(transport.clone());
 
     let err = Mail::to("alice@example.org")
         .send(BadTemplate)

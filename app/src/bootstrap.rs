@@ -129,7 +129,8 @@ pub async fn register() {
     // re-hydrate it from a `SendMailJob` envelope, and register
     // `SendMailJob` itself as a worker-dispatchable job. Both calls are
     // idempotent (last-write-wins) per the framework's registry contract.
-    suprnova::mail::register_mailable_factory::<crate::mail::welcome::WelcomeEmail>();
+    suprnova::mail::register_mailable_factory::<crate::mail::welcome::WelcomeEmail>()
+        .expect("register at boot");
     register_job::<suprnova::mail::send_job::SendMailJob>();
 
     // Phase 5B Task 20 — notifications dogfood.
@@ -140,7 +141,8 @@ pub async fn register() {
     // auto-derived from `N: Notification`'s `Deserialize` impl.
     suprnova::notifications::register_notification_factory::<
         crate::notifications::order_shipped::OrderShipped,
-    >();
+    >()
+    .expect("register at boot");
     register_job::<suprnova::notifications::notify_job::SendNotificationJob>();
 
     // Phase 6A T7 — factory + seeder dogfood. Registers `BaseSeeder`

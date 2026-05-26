@@ -51,9 +51,9 @@ impl Mailable for EmptyBodyMail {
 #[serial]
 async fn mail_queue_dispatches_through_queue_and_send_job_renders_via_transport() {
     let capture = Arc::new(InMemoryMailTransport::new());
-    Mail::set_transport(capture.clone());
+    let _ = Mail::set_transport(capture.clone());
 
-    suprnova::mail::register_mailable_factory::<WelcomeMail>();
+    let _ = suprnova::mail::register_mailable_factory::<WelcomeMail>();
     register_job::<SendMailJob>();
 
     let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
@@ -98,7 +98,7 @@ async fn mail_queue_rejects_mailable_without_any_body_at_push_time() {
     // Defense layer 1: MailBuilder::queue's empty-body guard must fire
     // before any envelope is created. The queue driver stays empty.
     let capture = Arc::new(InMemoryMailTransport::new());
-    Mail::set_transport(capture.clone());
+    let _ = Mail::set_transport(capture.clone());
 
     let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
     Queue::set_driver(driver.clone());
@@ -136,7 +136,7 @@ async fn mail_queue_unregistered_mailable_surfaces_unknown_error_from_job() {
     // A transport must be bound — handle resolves the transport AFTER
     // the registry lookup, but we still set one to keep failure modes
     // unambiguous.
-    Mail::set_transport(Arc::new(InMemoryMailTransport::new()));
+    let _ = Mail::set_transport(Arc::new(InMemoryMailTransport::new()));
 
     let job = SendMailJob {
         to: vec!["alice@example.org".into()],
@@ -186,9 +186,9 @@ impl Mailable for OverriddenRenderMail {
 #[serial]
 async fn mail_queue_accepts_mailable_that_overrides_render_without_template_source() {
     let capture = Arc::new(InMemoryMailTransport::new());
-    Mail::set_transport(capture.clone());
+    let _ = Mail::set_transport(capture.clone());
 
-    suprnova::mail::register_mailable_factory::<OverriddenRenderMail>();
+    let _ = suprnova::mail::register_mailable_factory::<OverriddenRenderMail>();
     register_job::<SendMailJob>();
 
     let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());

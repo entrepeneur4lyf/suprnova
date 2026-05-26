@@ -46,7 +46,7 @@ async fn ses_emits_sigv4_signed_request() {
 
     let transport =
         SesMailTransport::with_endpoint("AKIATEST", "secret", "us-east-1", server.uri());
-    Mail::set_transport(Arc::new(transport));
+    let _ = Mail::set_transport(Arc::new(transport));
     Mail::to("alice@example.org")
         .send(M::default())
         .await
@@ -77,7 +77,7 @@ async fn ses_maps_4xx_to_framework_error() {
 
     let transport =
         SesMailTransport::with_endpoint("AKIATEST", "secret", "us-east-1", server.uri());
-    Mail::set_transport(Arc::new(transport));
+    let _ = Mail::set_transport(Arc::new(transport));
     let err = Mail::to("u@unverified.example")
         .send(M::default())
         .await
@@ -135,7 +135,7 @@ async fn ses_uses_raw_mime_when_attachments_present() {
 
     let transport =
         SesMailTransport::with_endpoint("AKIATEST", "secret", "us-east-1", server.uri());
-    Mail::set_transport(Arc::new(transport));
+    let _ = Mail::set_transport(Arc::new(transport));
     Mail::to("alice@example.org")
         .send(MWithPdf::default())
         .await

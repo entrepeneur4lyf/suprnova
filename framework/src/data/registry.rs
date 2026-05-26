@@ -28,7 +28,6 @@
 //! Bare struct names (`"AlbumDto"`) will silently miss every lookup —
 //! the registry treats them as a different key entirely.
 
-use crate::lock;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -50,7 +49,7 @@ inventory::collect!(AllowedIncludes);
 fn ensure_initialized() {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
-        let mut map = lock::write(&REGISTRY).expect("data::registry REGISTRY write lock poisoned");
+        let mut map = REGISTRY.write().unwrap_or_else(|e| e.into_inner());
         for entry in inventory::iter::<AllowedIncludes> {
             map.insert(entry.struct_name, entry.fields.to_vec());
         }
@@ -79,7 +78,7 @@ fn ensure_initialized() {
 /// will register a "ghost" entry that no real lookup will ever hit.
 pub fn register(struct_name: &'static str, fields: &'static [&'static str]) {
     ensure_initialized();
-    let mut map = lock::write(&REGISTRY).expect("data::registry REGISTRY write lock poisoned");
+    let mut map = REGISTRY.write().unwrap_or_else(|e| e.into_inner());
     map.insert(struct_name, fields.to_vec());
 }
 
@@ -88,8 +87,9 @@ pub fn register(struct_name: &'static str, fields: &'static [&'static str]) {
 /// [module docs](self) for the key shape.
 pub fn is_allowed(struct_name: &str, field: &str) -> bool {
     ensure_initialized();
-    lock::read(&REGISTRY)
-        .expect("data::registry REGISTRY read lock poisoned")
+    REGISTRY
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
         .get(struct_name)
         .map(|fields| fields.contains(&field))
         .unwrap_or(false)
@@ -101,8 +101,9 @@ pub fn is_allowed(struct_name: &str, field: &str) -> bool {
 /// key shape.
 pub fn allowed_for(struct_name: &str) -> Vec<&'static str> {
     ensure_initialized();
-    lock::read(&REGISTRY)
-        .expect("data::registry REGISTRY read lock poisoned")
+    REGISTRY
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
         .get(struct_name)
         .cloned()
         .unwrap_or_default()

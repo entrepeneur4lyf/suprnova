@@ -30,7 +30,7 @@ impl Mailable for Hello {
 #[serial]
 async fn in_memory_transport_captures_outgoing_messages() {
     let transport = Arc::new(InMemoryMailTransport::new());
-    Mail::set_transport(transport.clone());
+    let _ = Mail::set_transport(transport.clone());
 
     Mail::to("alice@example.org")
         .send(Hello {
@@ -51,7 +51,7 @@ async fn in_memory_transport_captures_outgoing_messages() {
 #[tokio::test]
 #[serial]
 async fn mail_send_errors_when_no_transport_bound() {
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     let err = Mail::to("alice@example.org")
         .send(Hello {
             name: "Alice".into(),

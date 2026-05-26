@@ -48,7 +48,7 @@ async fn postmark_emits_correct_http_request() {
         .await;
 
     let transport = PostmarkMailTransport::with_endpoint("test-token", server.uri());
-    Mail::set_transport(Arc::new(transport));
+    let _ = Mail::set_transport(Arc::new(transport));
     Mail::to("alice@example.org")
         .send(Bing::default())
         .await
@@ -76,7 +76,7 @@ async fn postmark_maps_api_error_to_framework_error() {
         .await;
 
     let transport = PostmarkMailTransport::with_endpoint("test-token", server.uri());
-    Mail::set_transport(Arc::new(transport));
+    let _ = Mail::set_transport(Arc::new(transport));
     let err = Mail::to("blocked@example.org")
         .send(Bing::default())
         .await
@@ -132,7 +132,7 @@ async fn postmark_encodes_attachments_as_base64_with_filename_and_content_type()
         .await;
 
     let transport = PostmarkMailTransport::with_endpoint("test-token", server.uri());
-    Mail::set_transport(Arc::new(transport));
+    let _ = Mail::set_transport(Arc::new(transport));
     Mail::to("alice@example.org")
         .send(WithPdf::default())
         .await

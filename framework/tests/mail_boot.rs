@@ -71,7 +71,7 @@ fn clear_mail_env() {
 #[serial]
 async fn boot_default_binds_log_transport() {
     clear_mail_env();
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
 
     suprnova::mail::boot::bootstrap_from_env().unwrap();
 
@@ -83,7 +83,7 @@ async fn boot_default_binds_log_transport() {
         .await
         .unwrap();
 
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     clear_mail_env();
 }
 
@@ -91,7 +91,7 @@ async fn boot_default_binds_log_transport() {
 #[serial]
 async fn boot_memory_driver_binds_in_memory_transport() {
     clear_mail_env();
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     // SAFETY: serial test.
     unsafe {
         std::env::set_var("MAIL_DRIVER", "memory");
@@ -115,7 +115,7 @@ async fn boot_memory_driver_binds_in_memory_transport() {
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].subject, "p");
 
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     clear_mail_env();
 }
 
@@ -127,7 +127,7 @@ async fn boot_releases_memory_capture_when_switching_drivers() {
     // `clear_memory_capture()` at the top of `bootstrap_from_env` must fix
     // this — verify the captured handle is fresh across switches.
     clear_mail_env();
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
 
     // First memory bootstrap.
     unsafe {
@@ -164,7 +164,7 @@ async fn boot_releases_memory_capture_when_switching_drivers() {
         "fresh memory bootstrap must produce an empty buffer"
     );
 
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     clear_mail_env();
 }
 
@@ -175,7 +175,7 @@ async fn boot_smtp_driver_binds_unencrypted_when_creds_absent() {
     // bootstrap path runs without error when MAIL_DRIVER=smtp and no creds
     // are set (falls through to unencrypted local-dev mode).
     clear_mail_env();
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     unsafe {
         std::env::set_var("MAIL_DRIVER", "smtp");
         std::env::set_var("MAIL_SMTP_HOST", "127.0.0.1");
@@ -184,7 +184,7 @@ async fn boot_smtp_driver_binds_unencrypted_when_creds_absent() {
 
     suprnova::mail::boot::bootstrap_from_env().unwrap();
 
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     clear_mail_env();
 }
 
@@ -200,7 +200,7 @@ async fn boot_smtp_driver_threads_port_into_authenticated_starttls() {
     // building the transport must succeed — the lettre builder validates
     // the host + port shape at construction time.
     clear_mail_env();
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     unsafe {
         std::env::set_var("MAIL_DRIVER", "smtp");
         std::env::set_var("MAIL_SMTP_HOST", "smtp.example.com");
@@ -211,7 +211,7 @@ async fn boot_smtp_driver_threads_port_into_authenticated_starttls() {
 
     suprnova::mail::boot::bootstrap_from_env().unwrap();
 
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     clear_mail_env();
 }
 
@@ -225,7 +225,7 @@ async fn boot_smtp_driver_threads_port_into_authenticated_starttls() {
 #[serial]
 async fn boot_postmark_driver_routes_via_endpoint_override() {
     clear_mail_env();
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(
@@ -252,7 +252,7 @@ async fn boot_postmark_driver_routes_via_endpoint_override() {
         "boot wired postmark to the override endpoint"
     );
 
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     clear_mail_env();
 }
 
@@ -260,7 +260,7 @@ async fn boot_postmark_driver_routes_via_endpoint_override() {
 #[serial]
 async fn boot_sendgrid_driver_routes_via_endpoint_override() {
     clear_mail_env();
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(202))
@@ -281,7 +281,7 @@ async fn boot_sendgrid_driver_routes_via_endpoint_override() {
     let reqs = server.received_requests().await.unwrap();
     assert_eq!(reqs.len(), 1);
 
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     clear_mail_env();
 }
 
@@ -289,7 +289,7 @@ async fn boot_sendgrid_driver_routes_via_endpoint_override() {
 #[serial]
 async fn boot_mailgun_driver_routes_via_endpoint_override() {
     clear_mail_env();
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"x"})))
@@ -311,7 +311,7 @@ async fn boot_mailgun_driver_routes_via_endpoint_override() {
     let reqs = server.received_requests().await.unwrap();
     assert_eq!(reqs.len(), 1);
 
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     clear_mail_env();
 }
 
@@ -319,7 +319,7 @@ async fn boot_mailgun_driver_routes_via_endpoint_override() {
 #[serial]
 async fn boot_resend_driver_routes_via_endpoint_override() {
     clear_mail_env();
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"x"})))
@@ -340,7 +340,7 @@ async fn boot_resend_driver_routes_via_endpoint_override() {
     let reqs = server.received_requests().await.unwrap();
     assert_eq!(reqs.len(), 1);
 
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     clear_mail_env();
 }
 
@@ -348,7 +348,7 @@ async fn boot_resend_driver_routes_via_endpoint_override() {
 #[serial]
 async fn boot_ses_driver_routes_via_endpoint_override() {
     clear_mail_env();
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(
@@ -374,7 +374,7 @@ async fn boot_ses_driver_routes_via_endpoint_override() {
     let reqs = server.received_requests().await.unwrap();
     assert_eq!(reqs.len(), 1);
 
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     clear_mail_env();
 }
 
@@ -382,7 +382,7 @@ async fn boot_ses_driver_routes_via_endpoint_override() {
 #[serial]
 async fn boot_postmark_missing_token_returns_descriptive_error() {
     clear_mail_env();
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     unsafe {
         std::env::set_var("MAIL_DRIVER", "postmark");
     }
@@ -402,7 +402,7 @@ async fn boot_postmark_missing_token_returns_descriptive_error() {
 #[serial]
 async fn boot_ses_missing_secret_returns_descriptive_error() {
     clear_mail_env();
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     unsafe {
         std::env::set_var("MAIL_DRIVER", "ses");
         std::env::set_var("MAIL_SES_ACCESS_KEY", "AKIATEST");
@@ -424,7 +424,7 @@ async fn boot_ses_missing_secret_returns_descriptive_error() {
 #[serial]
 async fn boot_sendgrid_missing_key_returns_descriptive_error() {
     clear_mail_env();
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     unsafe {
         std::env::set_var("MAIL_DRIVER", "sendgrid");
     }
@@ -444,7 +444,7 @@ async fn boot_sendgrid_missing_key_returns_descriptive_error() {
 #[serial]
 async fn boot_mailgun_missing_domain_returns_descriptive_error() {
     clear_mail_env();
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     unsafe {
         std::env::set_var("MAIL_DRIVER", "mailgun");
         std::env::set_var("MAIL_MAILGUN_API_KEY", "key");
@@ -466,7 +466,7 @@ async fn boot_mailgun_missing_domain_returns_descriptive_error() {
 #[serial]
 async fn boot_resend_missing_key_returns_descriptive_error() {
     clear_mail_env();
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     unsafe {
         std::env::set_var("MAIL_DRIVER", "resend");
     }
@@ -487,7 +487,7 @@ async fn boot_resend_missing_key_returns_descriptive_error() {
 #[serial]
 async fn boot_unknown_driver_falls_back_to_log_with_warning() {
     clear_mail_env();
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     unsafe {
         std::env::set_var("MAIL_DRIVER", "bogusdriver");
     }
@@ -508,7 +508,7 @@ async fn boot_unknown_driver_falls_back_to_log_with_warning() {
         .await
         .unwrap();
 
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     clear_mail_env();
 }
 
@@ -524,11 +524,11 @@ async fn boot_unknown_driver_falls_back_to_log_with_warning() {
 #[serial]
 fn bootstrap_from_env_is_callable_from_sync_context() {
     clear_mail_env();
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
 
     // No `.await`, no tokio runtime — proves the signature is synchronous.
     suprnova::mail::boot::bootstrap_from_env().unwrap();
 
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
     clear_mail_env();
 }

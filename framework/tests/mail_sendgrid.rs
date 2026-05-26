@@ -48,7 +48,7 @@ async fn sendgrid_emits_v3_mail_send_request() {
         .await;
 
     let transport = SendGridMailTransport::with_endpoint("test-api-key", server.uri());
-    Mail::set_transport(Arc::new(transport));
+    let _ = Mail::set_transport(Arc::new(transport));
     Mail::to("alice@example.org")
         .send(M::default())
         .await
@@ -98,7 +98,7 @@ async fn sendgrid_maps_api_error_to_framework_error() {
         .await;
 
     let transport = SendGridMailTransport::with_endpoint("test-api-key", server.uri());
-    Mail::set_transport(Arc::new(transport));
+    let _ = Mail::set_transport(Arc::new(transport));
     let err = Mail::to("not-an-email")
         .send(M::default())
         .await
@@ -151,7 +151,7 @@ async fn sendgrid_encodes_attachments_as_base64_with_filename_and_content_type()
         .await;
 
     let transport = SendGridMailTransport::with_endpoint("test-api-key", server.uri());
-    Mail::set_transport(Arc::new(transport));
+    let _ = Mail::set_transport(Arc::new(transport));
     Mail::to("alice@example.org")
         .send(MWithPdf::default())
         .await
@@ -184,7 +184,7 @@ async fn sendgrid_warns_when_multiple_reply_to_addresses_are_truncated() {
         .await;
 
     let transport = SendGridMailTransport::with_endpoint("test-api-key", server.uri());
-    Mail::set_transport(Arc::new(transport));
+    let _ = Mail::set_transport(Arc::new(transport));
 
     Mail::to("alice@example.org")
         .reply_to("first@reply.example")

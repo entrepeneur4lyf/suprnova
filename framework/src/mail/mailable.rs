@@ -125,6 +125,6 @@ fn render_with_self<M: Mailable>(
 /// Re-registering the same name silently replaces the existing factory
 /// (last-write-wins) — matches the queue worker registry and the
 /// notification dispatcher's channel registration.
-pub fn register_mailable_factory<M: Mailable>() {
-    crate::mail::mailable_registry::register::<M>();
+pub fn register_mailable_factory<M: Mailable>() -> Result<(), FrameworkError> {
+    crate::mail::mailable_registry::register::<M>()
 }

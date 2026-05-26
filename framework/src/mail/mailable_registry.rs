@@ -65,16 +65,17 @@ static REGISTRY: RwLock<Option<HashMap<String, Factory>>> = RwLock::new(None);
 /// Register `M` under its `mailable_name`. Last-write-wins: re-registering
 /// the same name silently replaces the factory (matches the queue worker
 /// registry and the dispatcher channel registry).
-pub fn register<M: Mailable>() {
+pub fn register<M: Mailable>() -> Result<(), FrameworkError> {
     let factory: Factory = |payload| {
         let m: M = serde_json::from_value(payload).map_err(|e| {
             FrameworkError::internal(format!("decode mailable {}: {e}", M::mailable_name()))
         })?;
         Ok(Box::new(m))
     };
-    let mut g = lock::write(&REGISTRY).expect("mailable registry poisoned");
+    let mut g = lock::write(&REGISTRY)?;
     g.get_or_insert_with(HashMap::new)
         .insert(M::mailable_name().to_string(), factory);
+    Ok(())
 }
 
 /// Decode a payload using the factory registered under `name`. Returns

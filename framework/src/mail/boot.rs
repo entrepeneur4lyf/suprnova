@@ -27,17 +27,19 @@ static MEMORY_CAPTURE: RwLock<Option<Arc<InMemoryMailTransport>>> = RwLock::new(
 /// tests can inspect captured messages. Returns `None` after a switch to
 /// any non-memory driver.
 pub fn captured_in_memory() -> Option<Arc<InMemoryMailTransport>> {
-    lock::read(&MEMORY_CAPTURE)
-        .expect("memory capture lock poisoned")
-        .clone()
+    // Read accessor: degrade to `None` on a poisoned lock rather than
+    // panicking (crate-wide read-poison policy — see `crate::lock`).
+    lock::read(&MEMORY_CAPTURE).ok().and_then(|g| g.clone())
 }
 
-fn set_memory_capture(t: Arc<InMemoryMailTransport>) {
-    *lock::write(&MEMORY_CAPTURE).expect("memory capture lock poisoned") = Some(t);
+fn set_memory_capture(t: Arc<InMemoryMailTransport>) -> Result<(), FrameworkError> {
+    *lock::write(&MEMORY_CAPTURE)? = Some(t);
+    Ok(())
 }
 
-fn clear_memory_capture() {
-    *lock::write(&MEMORY_CAPTURE).expect("memory capture lock poisoned") = None;
+fn clear_memory_capture() -> Result<(), FrameworkError> {
+    *lock::write(&MEMORY_CAPTURE)? = None;
+    Ok(())
 }
 
 /// Read `MAIL_DRIVER` and bind the matching transport globally. Defaults to
@@ -59,17 +61,17 @@ pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
     // Release any previous in-memory capture handle BEFORE matching, so
     // toggling `memory → postmark → memory` always exposes a fresh buffer
     // for the subsequent memory bootstrap.
-    clear_memory_capture();
+    clear_memory_capture()?;
 
     let driver = std::env::var("MAIL_DRIVER").unwrap_or_else(|_| "log".into());
     match driver.as_str() {
         "log" => {
-            Mail::set_transport(Arc::new(LogMailTransport::new()));
+            Mail::set_transport(Arc::new(LogMailTransport::new()))?;
         }
         "memory" => {
             let t = Arc::new(InMemoryMailTransport::new());
-            set_memory_capture(t.clone());
-            Mail::set_transport(t);
+            set_memory_capture(t.clone())?;
+            Mail::set_transport(t)?;
         }
         "smtp" => {
             let host = std::env::var("MAIL_SMTP_HOST").unwrap_or_else(|_| "127.0.0.1".into());
@@ -85,7 +87,7 @@ pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
                 (Some(u), Some(p)) => SmtpMailTransport::starttls(&host, port, &u, &p)?,
                 _ => SmtpMailTransport::unencrypted(&host, port)?,
             };
-            Mail::set_transport(Arc::new(transport));
+            Mail::set_transport(Arc::new(transport))?;
         }
         "postmark" => {
             let token = std::env::var("MAIL_POSTMARK_TOKEN").map_err(|_| {
@@ -95,7 +97,7 @@ pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
                 Ok(ep) => PostmarkMailTransport::with_endpoint(token, ep),
                 Err(_) => PostmarkMailTransport::new(token),
             };
-            Mail::set_transport(Arc::new(transport));
+            Mail::set_transport(Arc::new(transport))?;
         }
         "ses" => {
             let key = std::env::var("MAIL_SES_ACCESS_KEY").map_err(|_| {
@@ -109,7 +111,7 @@ pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
                 Ok(ep) => SesMailTransport::with_endpoint(key, secret, region, ep),
                 Err(_) => SesMailTransport::new(key, secret, region),
             };
-            Mail::set_transport(Arc::new(transport));
+            Mail::set_transport(Arc::new(transport))?;
         }
         "sendgrid" => {
             let key = std::env::var("MAIL_SENDGRID_API_KEY").map_err(|_| {
@@ -121,7 +123,7 @@ pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
                 Ok(ep) => SendGridMailTransport::with_endpoint(key, ep),
                 Err(_) => SendGridMailTransport::new(key),
             };
-            Mail::set_transport(Arc::new(transport));
+            Mail::set_transport(Arc::new(transport))?;
         }
         "mailgun" => {
             let key = std::env::var("MAIL_MAILGUN_API_KEY").map_err(|_| {
@@ -134,7 +136,7 @@ pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
                 Ok(ep) => MailgunMailTransport::with_endpoint(key, domain, ep),
                 Err(_) => MailgunMailTransport::new(key, domain),
             };
-            Mail::set_transport(Arc::new(transport));
+            Mail::set_transport(Arc::new(transport))?;
         }
         "resend" => {
             let key = std::env::var("MAIL_RESEND_API_KEY").map_err(|_| {
@@ -144,11 +146,11 @@ pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
                 Ok(ep) => ResendMailTransport::with_endpoint(key, ep),
                 Err(_) => ResendMailTransport::new(key),
             };
-            Mail::set_transport(Arc::new(transport));
+            Mail::set_transport(Arc::new(transport))?;
         }
         other => {
             tracing::warn!(driver = %other, "unknown MAIL_DRIVER, falling back to log");
-            Mail::set_transport(Arc::new(LogMailTransport::new()));
+            Mail::set_transport(Arc::new(LogMailTransport::new()))?;
         }
     }
     Ok(())

@@ -45,7 +45,7 @@ async fn resend_emits_v1_emails_request() {
         .await;
 
     let transport = ResendMailTransport::with_endpoint("test-key", server.uri());
-    Mail::set_transport(Arc::new(transport));
+    let _ = Mail::set_transport(Arc::new(transport));
     Mail::to("alice@example.org")
         .send(M::default())
         .await
@@ -73,7 +73,7 @@ async fn resend_maps_api_error_to_framework_error() {
         .await;
 
     let transport = ResendMailTransport::with_endpoint("test-key", server.uri());
-    Mail::set_transport(Arc::new(transport));
+    let _ = Mail::set_transport(Arc::new(transport));
     let err = Mail::to("bad@example.org")
         .send(M::default())
         .await
@@ -128,7 +128,7 @@ async fn resend_encodes_attachments_as_base64_with_filename_and_content_type() {
         .await;
 
     let transport = ResendMailTransport::with_endpoint("test-key", server.uri());
-    Mail::set_transport(Arc::new(transport));
+    let _ = Mail::set_transport(Arc::new(transport));
     Mail::to("alice@example.org")
         .send(WithPdf::default())
         .await

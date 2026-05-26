@@ -66,7 +66,7 @@ async fn fake_restores_previously_bound_transport_on_drop() {
     // Bind a distinct transport BEFORE faking so we can confirm
     // restoration after drop.
     let prior = Arc::new(InMemoryMailTransport::new());
-    Mail::set_transport(prior.clone());
+    let _ = Mail::set_transport(prior.clone());
 
     // Send through the prior transport so we can later verify it's
     // still the one in scope after the fake drops.
@@ -112,14 +112,14 @@ async fn fake_restores_previously_bound_transport_on_drop() {
     assert_eq!(prior_captured[1].to[0].email, "after@example.org");
 
     // Clean up so subsequent tests don't see prior bound.
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
 }
 
 #[tokio::test]
 #[serial]
 async fn fake_restores_absent_transport_on_drop() {
     // Start with no transport bound.
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
 
     {
         let _fake = Mail::fake();

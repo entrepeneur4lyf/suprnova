@@ -47,7 +47,7 @@ async fn mailgun_emits_form_encoded_request_with_basic_auth() {
         .await;
 
     let transport = MailgunMailTransport::with_endpoint("test-key", "example.com", server.uri());
-    Mail::set_transport(Arc::new(transport));
+    let _ = Mail::set_transport(Arc::new(transport));
     Mail::to("alice@example.org")
         .send(M::default())
         .await
@@ -74,7 +74,7 @@ async fn mailgun_maps_4xx_to_framework_error() {
         .await;
 
     let transport = MailgunMailTransport::with_endpoint("test-key", "example.com", server.uri());
-    Mail::set_transport(Arc::new(transport));
+    let _ = Mail::set_transport(Arc::new(transport));
     let err = Mail::to("not-an-email")
         .send(M::default())
         .await
@@ -133,7 +133,7 @@ async fn mailgun_uses_multipart_form_data_when_attachments_present() {
         .await;
 
     let transport = MailgunMailTransport::with_endpoint("test-key", "example.com", server.uri());
-    Mail::set_transport(Arc::new(transport));
+    let _ = Mail::set_transport(Arc::new(transport));
     Mail::to("alice@example.org")
         .send(MWithPdf::default())
         .await
@@ -260,7 +260,7 @@ async fn mailgun_carries_all_attachments_in_repeated_multipart_parts() {
         .await;
 
     let transport = MailgunMailTransport::with_endpoint("test-key", "example.com", server.uri());
-    Mail::set_transport(Arc::new(transport));
+    let _ = Mail::set_transport(Arc::new(transport));
     Mail::to("alice@example.org")
         .send(MWithTwoAttachments::default())
         .await
@@ -335,7 +335,7 @@ async fn mailgun_routes_to_eu_region_endpoint() {
     // and built `<host>/v3/<domain>/messages` exactly.
     let transport =
         MailgunMailTransport::with_endpoint("test-key", "eu-tenant.example", server.uri());
-    Mail::set_transport(Arc::new(transport));
+    let _ = Mail::set_transport(Arc::new(transport));
     Mail::to("bob@example.org")
         .send(M::default())
         .await

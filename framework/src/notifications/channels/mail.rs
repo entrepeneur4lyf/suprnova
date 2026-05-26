@@ -103,16 +103,17 @@ static MAIL_RENDERERS: RwLock<Option<HashMap<&'static str, MailRendererFn>>> = R
 /// Re-registering the same name silently replaces the existing
 /// renderer (last-write-wins) — matches the notification factory
 /// registry and the dispatcher's channel registration.
-pub fn register_mail_renderer<N: NotificationMailable>() {
+pub fn register_mail_renderer<N: NotificationMailable>() -> Result<(), FrameworkError> {
     let renderer: MailRendererFn = |payload| {
         let n: N = serde_json::from_value(payload).map_err(|e| {
             FrameworkError::internal(format!("decode {}: {e}", N::notification_name()))
         })?;
         n.to_mail()
     };
-    let mut g = lock::write(&MAIL_RENDERERS).expect("mail renderer registry poisoned");
+    let mut g = lock::write(&MAIL_RENDERERS)?;
     g.get_or_insert_with(HashMap::new)
         .insert(N::notification_name(), renderer);
+    Ok(())
 }
 
 fn renderer_for(name: &str) -> Result<MailRendererFn, FrameworkError> {

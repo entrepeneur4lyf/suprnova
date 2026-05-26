@@ -68,10 +68,10 @@ impl Notifiable for Customer {
 #[serial]
 async fn notify_send_emits_dispatch_span_wrapping_mail_send() {
     let _fake = Mail::fake();
-    register_mail_renderer::<OrderReady>();
+    let _ = register_mail_renderer::<OrderReady>();
 
     let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
-    set_dispatcher(Arc::new(dispatcher));
+    let _ = set_dispatcher(Arc::new(dispatcher));
 
     Notify::send(
         &Customer {
@@ -122,7 +122,7 @@ async fn notify_send_unregistered_channel_warn_lives_under_dispatch_span() {
     let _fake = Mail::fake();
 
     let dispatcher = NotificationDispatcher::new(); // no channels
-    set_dispatcher(Arc::new(dispatcher));
+    let _ = set_dispatcher(Arc::new(dispatcher));
 
     Notify::send(
         &Customer {

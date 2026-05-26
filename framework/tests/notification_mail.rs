@@ -68,9 +68,9 @@ async fn mail_channel_dispatches_via_registered_renderer_through_in_memory_trans
     // so we can read the captured-message buffer post-dispatch without
     // racing against the next test's `set_transport`.
     let transport = Arc::new(InMemoryMailTransport::new());
-    Mail::set_transport(transport.clone());
+    let _ = Mail::set_transport(transport.clone());
 
-    register_mail_renderer::<HappyPath>();
+    let _ = register_mail_renderer::<HappyPath>();
 
     let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
 
@@ -135,9 +135,9 @@ async fn mail_channel_empty_body_guard_fires() {
     // future reorder of the guard / transport-lookup could silently
     // change which error surfaces.
     let transport = Arc::new(InMemoryMailTransport::new());
-    Mail::set_transport(transport.clone());
+    let _ = Mail::set_transport(transport.clone());
 
-    register_mail_renderer::<EmptyBody>();
+    let _ = register_mail_renderer::<EmptyBody>();
 
     let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
 
@@ -201,9 +201,9 @@ async fn mail_channel_renderer_error_propagates() {
     // Same precaution as above — bind a transport so the test pins
     // renderer-error propagation rather than masking it with a
     // missing-transport error.
-    Mail::set_transport(Arc::new(InMemoryMailTransport::new()));
+    let _ = Mail::set_transport(Arc::new(InMemoryMailTransport::new()));
 
-    register_mail_renderer::<RenderErr>();
+    let _ = register_mail_renderer::<RenderErr>();
 
     let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
 
@@ -252,7 +252,7 @@ impl Notification for Unregistered {
 async fn mail_channel_errors_on_unregistered_notification() {
     // Bind a transport so we know any error is from the missing
     // renderer, not from a missing transport.
-    Mail::set_transport(Arc::new(InMemoryMailTransport::new()));
+    let _ = Mail::set_transport(Arc::new(InMemoryMailTransport::new()));
 
     let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
 
@@ -324,9 +324,9 @@ impl NotificationMailable for DecodeFail {
 #[tokio::test]
 #[serial]
 async fn mail_channel_renderer_decode_failure_propagates() {
-    Mail::set_transport(Arc::new(InMemoryMailTransport::new()));
+    let _ = Mail::set_transport(Arc::new(InMemoryMailTransport::new()));
 
-    register_mail_renderer::<DecodeFail>();
+    let _ = register_mail_renderer::<DecodeFail>();
 
     let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
 
@@ -417,10 +417,10 @@ impl NotificationMailable for LastWriteWinsB {
 #[serial]
 async fn register_mail_renderer_is_last_write_wins() {
     let transport = Arc::new(InMemoryMailTransport::new());
-    Mail::set_transport(transport.clone());
+    let _ = Mail::set_transport(transport.clone());
 
-    register_mail_renderer::<LastWriteWinsA>();
-    register_mail_renderer::<LastWriteWinsB>();
+    let _ = register_mail_renderer::<LastWriteWinsA>();
+    let _ = register_mail_renderer::<LastWriteWinsB>();
 
     let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
 
@@ -495,9 +495,9 @@ impl NotificationMailable for FullEnvelope {
 #[serial]
 async fn mail_channel_threads_cc_bcc_reply_to_and_attachments_into_outgoing() {
     let transport = Arc::new(InMemoryMailTransport::new());
-    Mail::set_transport(transport.clone());
+    let _ = Mail::set_transport(transport.clone());
 
-    register_mail_renderer::<FullEnvelope>();
+    let _ = register_mail_renderer::<FullEnvelope>();
 
     let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
 

@@ -77,16 +77,16 @@ async fn fresh_db() -> DatabaseConnection {
 async fn order_shipped_dispatches_to_mail_and_database() {
     // Bind globals.
     let transport = Arc::new(InMemoryMailTransport::new());
-    Mail::set_transport(transport.clone());
+    let _ = Mail::set_transport(transport.clone());
 
     let db = fresh_db().await;
 
-    suprnova::register_mail_renderer::<OrderShipped>();
+    let _ = suprnova::register_mail_renderer::<OrderShipped>();
 
     let dispatcher = NotificationDispatcher::new()
         .register_channel(Arc::new(MailChannel::new()))
         .register_channel(Arc::new(DatabaseChannel::new(db.clone(), "users")));
-    suprnova::notifications::set_dispatcher(Arc::new(dispatcher));
+    let _ = suprnova::notifications::set_dispatcher(Arc::new(dispatcher));
 
     // One Notify::send — fans out across both registered channels.
     Notify::send(

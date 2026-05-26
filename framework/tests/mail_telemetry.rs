@@ -115,7 +115,7 @@ async fn failed_send_emits_warn_event_with_error_field() {
         }
     }
 
-    Mail::set_transport(Arc::new(AlwaysFailTransport));
+    let _ = Mail::set_transport(Arc::new(AlwaysFailTransport));
 
     let err = Mail::to("alice@example.org")
         .send(Greeting {
@@ -149,5 +149,5 @@ async fn failed_send_emits_warn_event_with_error_field() {
         "error message must be on the failure event"
     );
 
-    Mail::clear_transport();
+    let _ = Mail::clear_transport();
 }

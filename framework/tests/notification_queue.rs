@@ -74,9 +74,9 @@ async fn notification_queue_dispatches_through_queue_and_lands_in_db() {
     let db = fresh_db().await;
     let dispatcher = NotificationDispatcher::new()
         .register_channel(Arc::new(DatabaseChannel::new(db.clone(), "users")));
-    suprnova::notifications::set_dispatcher(Arc::new(dispatcher));
+    let _ = suprnova::notifications::set_dispatcher(Arc::new(dispatcher));
 
-    suprnova::notifications::register_notification_factory::<OrderShipped>();
+    let _ = suprnova::notifications::register_notification_factory::<OrderShipped>();
     register_job::<SendNotificationJob>();
 
     let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
@@ -148,7 +148,7 @@ async fn notification_queue_unregistered_notification_surfaces_unknown_error_fro
     // The dispatcher binding is required by handle() before the factory
     // lookup runs — bind a minimal one so the assertion targets the
     // factory error, not the missing-dispatcher error.
-    suprnova::notifications::set_dispatcher(Arc::new(NotificationDispatcher::new()));
+    let _ = suprnova::notifications::set_dispatcher(Arc::new(NotificationDispatcher::new()));
 
     let job = SendNotificationJob {
         notifiable_route_per_channel: HashMap::new(),
@@ -195,7 +195,7 @@ async fn notify_send_delivers_synchronously_through_bound_dispatcher() {
     SEND_HITS.store(0, Ordering::SeqCst);
 
     let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(CountingChannel));
-    suprnova::notifications::set_dispatcher(Arc::new(dispatcher));
+    let _ = suprnova::notifications::set_dispatcher(Arc::new(dispatcher));
 
     Notify::send(
         &User { id: 42 },

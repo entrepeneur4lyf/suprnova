@@ -31,11 +31,13 @@ static TRANSPORT: RwLock<Option<Arc<dyn MailTransport>>> = RwLock::new(None);
 pub struct Mail;
 
 impl Mail {
-    pub fn set_transport(transport: Arc<dyn MailTransport>) {
-        *lock::write(&TRANSPORT).expect("mail transport lock poisoned") = Some(transport);
+    pub fn set_transport(transport: Arc<dyn MailTransport>) -> Result<(), FrameworkError> {
+        *lock::write(&TRANSPORT)? = Some(transport);
+        Ok(())
     }
-    pub fn clear_transport() {
-        *lock::write(&TRANSPORT).expect("mail transport lock poisoned") = None;
+    pub fn clear_transport() -> Result<(), FrameworkError> {
+        *lock::write(&TRANSPORT)? = None;
+        Ok(())
     }
 
     pub fn to(addr: impl Into<Address>) -> MailBuilder {

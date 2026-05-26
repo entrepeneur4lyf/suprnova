@@ -44,7 +44,7 @@ impl Mailable for EmptyBody {
 #[serial]
 #[traced_test]
 async fn log_transport_emits_event_with_message_fields() {
-    Mail::set_transport(Arc::new(LogMailTransport::new()));
+    let _ = Mail::set_transport(Arc::new(LogMailTransport::new()));
     Mail::to("alice@example.org")
         .send(Ping {
             msg: "hello".into(),
@@ -60,7 +60,7 @@ async fn log_transport_emits_event_with_message_fields() {
 #[tokio::test]
 #[serial]
 async fn mailbuilder_rejects_mailable_without_any_body() {
-    Mail::set_transport(Arc::new(LogMailTransport::new()));
+    let _ = Mail::set_transport(Arc::new(LogMailTransport::new()));
     let err = Mail::to("alice@example.org")
         .send(EmptyBody)
         .await
