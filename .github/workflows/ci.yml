@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # Fast gates that should fail loud on any regression. Style + lint
+  # gate runs first because it returns in seconds; nothing else is
+  # worth checking on a branch that doesn't pass these.
+  lint:
+    name: fmt + clippy (strict)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-lint
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libsqlite3-dev libpq-dev
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # Functional gate — workspace test suite on the default feature set.
+  # The vector-pinecone feature is exercised separately in test-features
+  # because it pulls a dep chain with active RustSec advisories
+  # (production gate #370).
+  test:
+    name: cargo test --workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-test
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libsqlite3-dev libpq-dev
+
+      - name: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
+
+  # Exercise the opt-in features so feature-gated code can't silently
+  # rot.
+  test-features:
+    name: cargo test --features (opt-in modules)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-test-features
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libsqlite3-dev libpq-dev
+
+      - name: cargo test --features vector-pinecone
+        run: cargo test -p suprnova --features vector-pinecone --no-fail-fast
+
+      - name: cargo test --features broadcasting-fanout
+        run: cargo test -p suprnova --features broadcasting-fanout --no-fail-fast
+
+  # Security gate. `.cargo/audit.toml` defines documented ignores for
+  # advisories whose dep paths are feature-gated off in the default
+  # build (see production gate #370).
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-audit
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: cargo audit
+        run: cargo audit
