@@ -82,29 +82,59 @@ use crate::Request;
 use crate::http::{HttpResponse, Response};
 use std::sync::Arc;
 
+/// How [`RateLimitMiddleware`] reacts when the rate-limiter *backend* itself
+/// errors — e.g. Redis is unreachable — as opposed to a request legitimately
+/// exceeding its quota.
+///
+/// This is distinct from the over-quota path (always HTTP 429). A backend
+/// error means the limiter could not make a decision at all, so the
+/// middleware must choose between availability and the limit's guarantee.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackendErrorPolicy {
+    /// Pass the request through when the backend errors. Prioritizes
+    /// availability: a limiter outage does not take down the API. This is
+    /// the default, matching most public-API expectations. The error is
+    /// logged at `warn` so the outage is still visible.
+    #[default]
+    FailOpen,
+    /// Reject the request with HTTP 503 (`Retry-After: 1`) when the backend
+    /// errors. Prioritizes the limit's guarantee: for sensitive routes
+    /// (login, password reset, payments) letting unbounded traffic through
+    /// during a limiter outage is worse than briefly returning 503. The
+    /// error is logged at `error`.
+    FailClosed,
+}
+
 /// HTTP middleware that enforces a sliding-window rate limit.
 ///
 /// The bucket key is determined by a caller-supplied closure, making it
 /// trivial to rate-limit per-route, per-IP, per-user, or any composite.
 ///
-/// On rejection the middleware short-circuits with HTTP 429 and a
-/// `Retry-After` header (seconds until the oldest slot expires). On a
-/// backend error it fails-open — the request is passed through — to
-/// avoid taking down the API when Redis has a hiccup.
+/// On rejection (the caller is over quota) the middleware short-circuits with
+/// HTTP 429 and a `Retry-After` header (seconds until the oldest slot
+/// expires).
+///
+/// When the *backend* errors (e.g. Redis is unreachable) the response is
+/// governed by [`BackendErrorPolicy`], chosen via
+/// [`RateLimitMiddleware::on_backend_error`]. The default is
+/// [`BackendErrorPolicy::FailOpen`] (pass through, log a warning); sensitive
+/// routes can opt into [`BackendErrorPolicy::FailClosed`] (HTTP 503).
 ///
 /// # Example
 ///
 /// ```rust,ignore
 /// use std::sync::Arc;
 /// use std::time::Duration;
-/// use suprnova::rate_limit::{RateLimitMiddleware, SlidingWindowConfig};
+/// use suprnova::rate_limit::{BackendErrorPolicy, RateLimitMiddleware, SlidingWindowConfig};
 /// use suprnova::rate_limit::memory::InMemoryRateLimiter;
 ///
 /// let limiter = Arc::new(InMemoryRateLimiter::new());
 /// let cfg = SlidingWindowConfig { max_requests: 100, window: Duration::from_secs(60) };
 /// let mw = RateLimitMiddleware::new(limiter, cfg, |req| {
 ///     format!("route:{}", req.path())
-/// });
+/// })
+/// // Opt sensitive routes into fail-closed (HTTP 503 if the backend is down):
+/// .on_backend_error(BackendErrorPolicy::FailClosed);
 /// ```
 pub struct RateLimitMiddleware<F>
 where
@@ -113,6 +143,7 @@ where
     limiter: Arc<dyn RateLimiter>,
     config: SlidingWindowConfig,
     key_fn: F,
+    on_backend_error: BackendErrorPolicy,
 }
 
 impl<F> RateLimitMiddleware<F>
@@ -129,7 +160,19 @@ where
             limiter,
             config,
             key_fn,
+            on_backend_error: BackendErrorPolicy::default(),
         }
+    }
+
+    /// Choose how the middleware reacts to a rate-limiter *backend* error
+    /// (e.g. Redis is unreachable), as distinct from a request being over its
+    /// quota. Defaults to [`BackendErrorPolicy::FailOpen`].
+    ///
+    /// Use [`BackendErrorPolicy::FailClosed`] on sensitive routes where letting
+    /// unbounded traffic through during a limiter outage is unacceptable.
+    pub fn on_backend_error(mut self, policy: BackendErrorPolicy) -> Self {
+        self.on_backend_error = policy;
+        self
     }
 }
 
@@ -156,9 +199,33 @@ where
                     .status(429)
                     .header("retry-after", secs.to_string()))
             }
-            // Fail-open: a backend error (e.g. Redis down) must not
-            // take down the API — pass the request through.
-            Err(_) => next(request).await,
+            // The limiter backend itself errored (e.g. Redis unreachable) —
+            // it could not make a decision. Behavior is governed by the
+            // configured `BackendErrorPolicy`. Either way the error is now
+            // logged (it was previously swallowed silently): `warn` when
+            // failing open since it self-limits to backend outages, `error`
+            // when failing closed since that path actively rejects live
+            // traffic.
+            Err(e) => match self.on_backend_error {
+                BackendErrorPolicy::FailOpen => {
+                    tracing::warn!(
+                        error = %e,
+                        key = %key,
+                        "rate limiter backend error; failing open (request passed through)"
+                    );
+                    next(request).await
+                }
+                BackendErrorPolicy::FailClosed => {
+                    tracing::error!(
+                        error = %e,
+                        key = %key,
+                        "rate limiter backend error; failing closed with 503"
+                    );
+                    Err(HttpResponse::text("503 Service Unavailable")
+                        .status(503)
+                        .header("retry-after", "1"))
+                }
+            },
         }
     }
 }
