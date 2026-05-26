@@ -109,6 +109,8 @@ QDRANT_URL=http://localhost:6334 cargo test -p suprnova --test vector_qdrant -- 
 
 ### Pinecone — `PineconeVectorDriver`
 
+> **Feature-gated — off by default.** Enable with `cargo build --features vector-pinecone` (or add `features = ["vector-pinecone"]` under the `suprnova` dep in your `Cargo.toml`). The gate exists because `pinecone-sdk 0.1.2` (the latest on crates.io) pins `tonic 0.11.0`, which pulls four active rustls-webpki RustSec advisories (`RUSTSEC-2026-0049`, `-0098`, `-0099`, `-0104`). Default builds stay clean; consumers who need Pinecone opt in explicitly and accept the dep chain.
+
 Talks to Pinecone over gRPC via the official `pinecone-sdk` crate.
 
 ```rust

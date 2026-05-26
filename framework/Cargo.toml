@@ -133,8 +133,15 @@ qrcode = "0.14"
 featureflag = { version = "0.0.3", features = ["feature-registry", "futures"] }
 async-stream = "0.3.6"
 qdrant-client = "1.18.0"
-pinecone-sdk = "0.1.2"
-prost-types = "0.12"
+# Pinecone driver dependencies — feature-gated behind `vector-pinecone`.
+# As of pinecone-sdk 0.1.2 (latest on crates.io), the SDK pins
+# `tonic 0.11.0 → tokio-rustls 0.25.0 → rustls 0.22.4 → rustls-webpki 0.102.8`,
+# which has four active RustSec advisories (RUSTSEC-2026-0049, -0098,
+# -0099, -0104). Making the dep optional means `cargo audit` is clean
+# on the default feature set; consumers who need Pinecone opt in
+# explicitly and accept the dep chain. See production-gate #370.
+pinecone-sdk = { version = "0.1.2", optional = true }
+prost-types = { version = "0.12", optional = true }
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "mysql", "json"] }
 iso_currency = { version = "0.5.3", features = ["with-serde"] }
 percent-encoding = "2.3.2"
@@ -158,6 +165,12 @@ otel = [
 # queue/redis driver). This feature gates only the fanout module itself,
 # keeping the public API surface opt-in.
 broadcasting-fanout = []
+# Enables the Pinecone vector driver. Off by default because the
+# upstream `pinecone-sdk 0.1.2` pulls `tonic 0.11.0` which has four
+# active rustls-webpki RustSec advisories. Consumers who need Pinecone
+# enable this feature explicitly; Qdrant + MariaDB + Memory drivers
+# stay first-class without it. See `docs/core/vector.md`.
+vector-pinecone = ["dep:pinecone-sdk", "dep:prost-types"]
 
 [dev-dependencies]
 # Smoke test for the `opendal::layers::PrometheusClientLayer` feature.

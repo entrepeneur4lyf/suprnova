@@ -1,6 +1,13 @@
 //! Phase 9A — Pinecone vector driver tests.
 //!
+//! Requires `--features vector-pinecone` because the Pinecone driver
+//! is feature-gated (production gate #370 — pinecone-sdk pulls four
+//! active rustls-webpki CVEs through tonic 0.11.0).
+//!
 //! Two layers (same pattern as `vector_qdrant.rs`):
+
+#![cfg(feature = "vector-pinecone")]
+
 //!
 //! 1. **Pure-function tests** (always run) — JSON ↔ protobuf
 //!    metadata round-trips, field decode, the trait's short-circuit

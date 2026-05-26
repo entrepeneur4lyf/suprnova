@@ -196,10 +196,12 @@ pub use seed::Seeder;
 pub use console::{dispatch_argv, CommandEntry, CommandHandler, TypedCommand};
 pub use supervisor::{RestartPolicy, Supervisor, SupervisorEntry, SupervisorRegistry};
 pub use vector::{
-    MariaDbDistance, MariaDbVectorDriver, MemoryVectorDriver, PineconeVectorDriver,
-    QdrantDistance, QdrantVectorDriver, Vector, VectorDriver, VectorItem, VectorMatch,
-    VectorRegistry, VectorStore, SUPRNOVA_ID_PAYLOAD_KEY,
+    MariaDbDistance, MariaDbVectorDriver, MemoryVectorDriver, QdrantDistance, QdrantVectorDriver,
+    Vector, VectorDriver, VectorItem, VectorMatch, VectorRegistry, VectorStore,
+    SUPRNOVA_ID_PAYLOAD_KEY,
 };
+#[cfg(feature = "vector-pinecone")]
+pub use vector::PineconeVectorDriver;
 // Phase 12 — payments. Money + Currency are the foundational primitives;
 // every payment DTO builds on them. Re-exported at the crate root so
 // consumers write `suprnova::Money` / `suprnova::Currency`.

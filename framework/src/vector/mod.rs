@@ -30,6 +30,7 @@
 pub mod driver;
 pub mod mariadb;
 pub mod memory;
+#[cfg(feature = "vector-pinecone")]
 pub mod pinecone;
 pub mod qdrant;
 pub mod registry;
@@ -37,6 +38,7 @@ pub mod registry;
 pub use driver::{VectorDriver, VectorItem, VectorMatch};
 pub use mariadb::{MariaDbDistance, MariaDbVectorDriver};
 pub use memory::MemoryVectorDriver;
+#[cfg(feature = "vector-pinecone")]
 pub use pinecone::PineconeVectorDriver;
 pub use qdrant::{QdrantDistance, QdrantVectorDriver, SUPRNOVA_ID_PAYLOAD_KEY};
 pub use registry::{VectorRegistry, VectorStore};

@@ -1,8 +1,42 @@
 [advisories]
 ignore = [
+    # rsa 0.9.10 — Marvin timing attack (RUSTSEC-2023-0071).
     # No fixed upgrade is available as of 2026-05-23. The remaining
     # production-relevant path is sqlx-mysql, which is required for
     # Suprnova's first-class MySQL support. Revisit when rsa/sqlx/SeaORM
     # publish a compatible fixed chain.
     "RUSTSEC-2023-0071",
+
+    # ------------------------------------------------------------------
+    # rustls-webpki 0.102.8 — 4 advisories via `pinecone-sdk 0.1.2`
+    # ------------------------------------------------------------------
+    # All four of these advisories enter the dependency graph EXCLUSIVELY
+    # through `pinecone-sdk 0.1.2 -> tonic 0.11.0 -> tokio-rustls 0.25.0
+    # -> rustls 0.22.4 -> rustls-webpki 0.102.8`. pinecone-sdk 0.1.2 is
+    # the latest version published to crates.io (no upstream upgrade
+    # available).
+    #
+    # WHY THIS IS SAFE FOR THE DEFAULT BUILD:
+    # `pinecone-sdk` is now feature-gated behind the `vector-pinecone`
+    # cargo feature (see framework/Cargo.toml). The feature is OFF by
+    # default — consumers running `cargo build` / `cargo run` get a
+    # binary that does NOT include any code from pinecone-sdk, tonic
+    # 0.11.0, rustls 0.22.4, or rustls-webpki 0.102.8. The Qdrant +
+    # MariaDB + Memory drivers stay first-class without the feature.
+    #
+    # Consumers who explicitly opt in to `vector-pinecone` accept the
+    # vulnerable dep chain — `docs/core/vector.md` calls this out.
+    #
+    # `cargo audit` reads `Cargo.lock`, which resolves the union of all
+    # workspace features (including optional ones), so the advisories
+    # show up even when the binary doesn't link them. These ignores
+    # compensate for that tooling gap. Revisit when:
+    # - `pinecone-sdk` publishes a release using `tonic 0.12+`, or
+    # - we replace `pinecone-sdk` with a hand-rolled REST client.
+    #
+    # See production gate #370.
+    "RUSTSEC-2026-0049",  # CRL Distribution Point matching logic
+    "RUSTSEC-2026-0098",  # Name constraints for URI names
+    "RUSTSEC-2026-0099",  # Wildcard name constraint acceptance
+    "RUSTSEC-2026-0104",  # Reachable panic in CRL parsing
 ]
