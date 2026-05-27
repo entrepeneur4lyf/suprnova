@@ -121,7 +121,7 @@ pub use bus::{Bus, Dispatched};
 pub use console::{CommandEntry, CommandHandler, TypedCommand, dispatch_argv};
 pub use cors::{AllowedHeaders, AllowedOrigins, CorsConfig, CorsMiddleware};
 pub use error::{AppError, FrameworkError, HttpError, ValidationErrors};
-pub use events::{ErrorOccurred, Event, EventDispatcher, EventFacade, Listener};
+pub use events::{ErrorOccurred, Event, EventDispatcher, EventFacade, Listener, QueuedListener};
 pub use factory::{Factory, FactoryBuilder, Persistable, Sequence, persist_via_seaorm};
 pub use filesystem::{AzBlobConfig, GcsConfig, S3Config, Storage, copy_between_disks};
 pub use hashing::{DEFAULT_COST as HASH_DEFAULT_COST, hash, needs_rehash, verify};

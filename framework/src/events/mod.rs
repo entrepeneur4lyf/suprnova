@@ -30,10 +30,12 @@
 
 mod builtins;
 mod dispatcher;
+mod queued_listener;
 pub mod testing;
 
 pub use builtins::ErrorOccurred;
 pub use dispatcher::{Event as EventFacade, EventDispatcher};
+pub use queued_listener::QueuedListener;
 
 use crate::FrameworkError;
 use async_trait::async_trait;
