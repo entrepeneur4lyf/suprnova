@@ -241,3 +241,26 @@ async fn health_endpoint_echoes_a_fresh_request_id_when_none_supplied() {
     assert_eq!(echoed.len(), 36, "fresh id should be a UUID v4");
     assert_eq!(echoed.chars().filter(|c| *c == '-').count(), 4);
 }
+
+/// An unrouted path with no registered fallback hits the static 404, which
+/// still runs the RequestId + global middleware chain — so the 404 must
+/// carry `X-Request-Id`, keeping even not-found traffic correlatable.
+#[tokio::test]
+async fn default_404_echoes_request_id() {
+    let addr = spawn_server(router(), MiddlewareRegistry::new(), 1).await;
+
+    let (status, headers, _body) = request(
+        addr,
+        "GET",
+        "/no-such-route",
+        &[("X-Request-Id", "notfound-probe-id-7")],
+    )
+    .await;
+
+    assert_eq!(status, 404);
+    assert_eq!(
+        headers.get("x-request-id").map(String::as_str),
+        Some("notfound-probe-id-7"),
+        "the static 404 must echo X-Request-Id"
+    );
+}
