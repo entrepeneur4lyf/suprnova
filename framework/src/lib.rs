@@ -143,7 +143,7 @@ pub use http_client::{
     ClientResponse, FailOnRealCallsGuard, Http, RecordedRequest, RequestBuilder, assert_not_sent,
     assert_sent, fake_response,
 };
-pub use idempotency::{Idempotency, Idempotent};
+pub use idempotency::{Idempotency, Idempotent, Replay};
 pub use inertia::{
     DeferConfig, DeferOptions, EncryptHistoryMiddleware, Frontend, Inertia, Inertia303Middleware,
     InertiaConfig, InertiaRegistry, InertiaRequestExt, InertiaResponse, InertiaSharedData,
