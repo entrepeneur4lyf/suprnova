@@ -789,6 +789,113 @@ fn add_de_lifetime(g: &syn::Generics) -> syn::Generics {
     g
 }
 
+/// Build the `out.push((name, PropEntry::...))` statement for one field of
+/// a `#[derive(Data)]` struct.
+///
+/// Lazy flavors (`#[data(lazy(...))]`) never serialize eagerly, so they emit
+/// the same token regardless of `fallible`. The eager (default) case
+/// serializes the field to a `serde_json::Value` up front:
+///
+/// - `fallible = false` → panics on `Serialize` failure, naming
+///   `Struct::field` + the source error (Domain 5 M-D5-9). Backs the
+///   infallible `__into_inertia_props` escape hatch (`Inertia::data`).
+/// - `fallible = true`  → propagates the failure as `FrameworkError::internal`
+///   via `?`, with the same diagnostic shape. Backs `__try_into_inertia_props`
+///   (`Inertia::try_data`), so a bad `Serialize` impl becomes a recoverable
+///   error off the HTTP path (queue workers, the scheduler, CLI) where the
+///   request-level panic to 500 net does not apply.
+fn build_prop_entry(
+    f: &Field,
+    opts: &FieldOptions,
+    struct_name_str: &str,
+    qualified_name_expr: &TokenStream2,
+    fallible: bool,
+) -> TokenStream2 {
+    let ident = f.ident.as_ref().unwrap();
+    let name = ident.to_string();
+
+    if let Some(flavor) = &opts.lazy {
+        // Audit HIGH #336: `owner` is the FULLY-QUALIFIED type name so
+        // include-allowlist lookups match the registry key (also fully
+        // qualified). Bare struct names would collide across modules
+        // and nondeterministically resolve the wrong allowlist.
+        let entry_construction = match flavor {
+            LazyFlavor::Plain | LazyFlavor::Inertia | LazyFlavor::WhenLoaded => quote! {
+                ::suprnova::inertia::PropEntry::LazyOwned {
+                    owner: #qualified_name_expr,
+                    field: #name,
+                    prop: self.#ident,
+                }
+            },
+            LazyFlavor::Deferred => quote! {
+                ::suprnova::inertia::PropEntry::DeferredOwned {
+                    owner: #qualified_name_expr,
+                    field: #name,
+                    prop: self.#ident,
+                }
+            },
+            LazyFlavor::Closure => quote! {
+                ::suprnova::inertia::PropEntry::ClosureOwned {
+                    owner: #qualified_name_expr,
+                    field: #name,
+                    prop: self.#ident,
+                }
+            },
+        };
+        quote! {
+            out.push((
+                #name.to_string(),
+                #entry_construction,
+            ));
+        }
+    } else if fallible {
+        // __try_into_inertia_props — propagate the serialize failure as a
+        // FrameworkError via `?` instead of panicking. Same diagnostic
+        // shape (Struct::field + source error) as the infallible path's panic.
+        quote! {
+            out.push((
+                #name.to_string(),
+                ::suprnova::inertia::PropEntry::Eager(
+                    ::suprnova::serde_json::to_value(&self.#ident)
+                        .map_err(|__suprnova_ser_err| ::suprnova::FrameworkError::internal(::std::format!(
+                            "__try_into_inertia_props: serde_json::to_value failed for \
+                             field `{}::{}`: {} (the field's Serialize impl returned \
+                             Err - check for invalid float/NaN, broken custom \
+                             serializer, or unsupported type)",
+                            #struct_name_str,
+                            #name,
+                            __suprnova_ser_err,
+                        )))?,
+                ),
+            ));
+        }
+    } else {
+        // Domain 5 audit M-D5-9 - emitted panic names the struct + field so
+        // operators can pinpoint which `serde_json::to_value` failed in
+        // production logs. Matches the diagnostic shape M-D5-1 introduced on
+        // the cast-failure path. RETAINED as the infallible escape hatch
+        // (`Inertia::data`); `__try_into_inertia_props` / `Inertia::try_data`
+        // is the fallible sibling for callers off the HTTP request lifecycle.
+        quote! {
+            out.push((
+                #name.to_string(),
+                ::suprnova::inertia::PropEntry::Eager(
+                    ::suprnova::serde_json::to_value(&self.#ident)
+                        .unwrap_or_else(|__suprnova_ser_err| ::std::panic!(
+                            "__into_inertia_props: serde_json::to_value failed for \
+                             field `{}::{}`: {} (the field's Serialize impl returned \
+                             Err - check for invalid float/NaN, broken custom \
+                             serializer, or unsupported type)",
+                            #struct_name_str,
+                            #name,
+                            __suprnova_ser_err,
+                        )),
+                ),
+            ));
+        }
+    }
+}
+
 fn build_into_inertia_props(
     struct_name: &Ident,
     struct_name_str: &str,
@@ -798,75 +905,19 @@ fn build_into_inertia_props(
     where_clause: Option<&syn::WhereClause>,
     parsed: &[(&Field, FieldOptions)],
 ) -> TokenStream2 {
+    // Two parallel entry lists: the infallible (panicking) escape hatch and
+    // the `?`-propagating fallible sibling. They differ only in the eager
+    // (default) serialize arm; lazy flavors are identical. See
+    // `build_prop_entry`.
     let entries: Vec<TokenStream2> = parsed
         .iter()
         .filter(|(_, o)| !o.input_only)
-        .map(|(f, opts)| {
-            let ident = f.ident.as_ref().unwrap();
-            let name = ident.to_string();
-
-            if let Some(flavor) = &opts.lazy {
-                // Audit HIGH #336: `owner` is the FULLY-QUALIFIED type name so
-                // include-allowlist lookups match the registry key (also fully
-                // qualified). Bare struct names would collide across modules
-                // and nondeterministically resolve the wrong allowlist.
-                let entry_construction = match flavor {
-                    LazyFlavor::Plain | LazyFlavor::Inertia | LazyFlavor::WhenLoaded => quote! {
-                        ::suprnova::inertia::PropEntry::LazyOwned {
-                            owner: #qualified_name_expr,
-                            field: #name,
-                            prop: self.#ident,
-                        }
-                    },
-                    LazyFlavor::Deferred => quote! {
-                        ::suprnova::inertia::PropEntry::DeferredOwned {
-                            owner: #qualified_name_expr,
-                            field: #name,
-                            prop: self.#ident,
-                        }
-                    },
-                    LazyFlavor::Closure => quote! {
-                        ::suprnova::inertia::PropEntry::ClosureOwned {
-                            owner: #qualified_name_expr,
-                            field: #name,
-                            prop: self.#ident,
-                        }
-                    },
-                };
-                quote! {
-                    out.push((
-                        #name.to_string(),
-                        #entry_construction,
-                    ));
-                }
-            } else {
-                // Domain 5 audit M-D5-9 — emitted panic now names the
-                // struct + field so operators can pinpoint which
-                // `serde_json::to_value` failed in production logs.
-                // Matches the diagnostic shape M-D5-1 introduced on
-                // the cast-failure path. Keeps the panic (vs. ? + Result)
-                // because the trait `IntoInertiaProps` is infallible by
-                // signature and changing that would ripple to every
-                // Inertia render call site.
-                quote! {
-                    out.push((
-                        #name.to_string(),
-                        ::suprnova::inertia::PropEntry::Eager(
-                            ::suprnova::serde_json::to_value(&self.#ident)
-                                .unwrap_or_else(|__suprnova_ser_err| ::std::panic!(
-                                    "__into_inertia_props: serde_json::to_value failed for \
-                                     field `{}::{}`: {} (the field's Serialize impl returned \
-                                     Err — check for invalid float/NaN, broken custom \
-                                     serializer, or unsupported type)",
-                                    #struct_name_str,
-                                    #name,
-                                    __suprnova_ser_err,
-                                )),
-                        ),
-                    ));
-                }
-            }
-        })
+        .map(|(f, opts)| build_prop_entry(f, opts, struct_name_str, qualified_name_expr, false))
+        .collect();
+    let try_entries: Vec<TokenStream2> = parsed
+        .iter()
+        .filter(|(_, o)| !o.input_only)
+        .map(|(f, opts)| build_prop_entry(f, opts, struct_name_str, qualified_name_expr, true))
         .collect();
 
     quote! {
@@ -877,11 +928,32 @@ fn build_into_inertia_props(
                 #(#entries)*
                 out
             }
+
+            #[doc(hidden)]
+            pub fn __try_into_inertia_props(
+                self,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<(String, ::suprnova::inertia::PropEntry)>,
+                ::suprnova::FrameworkError,
+            > {
+                let mut out = ::std::vec::Vec::new();
+                #(#try_entries)*
+                ::core::result::Result::Ok(out)
+            }
         }
 
         impl #impl_generics ::suprnova::inertia::IntoInertiaData for #struct_name #ty_generics #where_clause {
             fn __into_inertia_props(self) -> ::std::vec::Vec<(String, ::suprnova::inertia::PropEntry)> {
                 <Self>::__into_inertia_props(self)
+            }
+
+            fn __try_into_inertia_props(
+                self,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<(String, ::suprnova::inertia::PropEntry)>,
+                ::suprnova::FrameworkError,
+            > {
+                <Self>::__try_into_inertia_props(self)
             }
         }
     }

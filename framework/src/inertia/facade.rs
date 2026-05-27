@@ -1,6 +1,7 @@
 //! `Inertia` static facade — Laravel-style entrypoint for the most
 //! common Inertia helpers.
 
+use crate::FrameworkError;
 use crate::pagination::IntoInertiaScroll;
 
 use super::config::InertiaConfig;
@@ -45,6 +46,25 @@ impl Inertia {
         T: IntoInertiaData,
     {
         InertiaResponse::from_data_props(component, dto.__into_inertia_props())
+    }
+
+    /// Fallible sibling of [`data`](Self::data): returns
+    /// `Err(FrameworkError)` (naming the offending field) if a DTO field's
+    /// `Serialize` impl fails, instead of panicking.
+    ///
+    /// On the HTTP request path the panicking [`data`](Self::data) is fine —
+    /// the panic-recovery middleware converts it to a 500. Prefer `try_data`
+    /// when building an Inertia response off that path (queue workers,
+    /// scheduled tasks, CLI) where no panic net applies, or whenever you
+    /// want to handle the serialization failure explicitly.
+    pub fn try_data<T>(component: &'static str, dto: T) -> Result<InertiaResponse, FrameworkError>
+    where
+        T: IntoInertiaData,
+    {
+        Ok(InertiaResponse::from_data_props(
+            component,
+            dto.__try_into_inertia_props()?,
+        ))
     }
 
     /// Install the standard Inertia protocol middleware globally.

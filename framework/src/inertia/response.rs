@@ -57,6 +57,22 @@ pub enum PropEntry {
 /// manually.
 pub trait IntoInertiaData {
     fn __into_inertia_props(self) -> Vec<(String, PropEntry)>;
+
+    /// Fallible sibling of [`__into_inertia_props`](Self::__into_inertia_props):
+    /// returns `Err(FrameworkError)` naming the offending field if a field's
+    /// `Serialize` impl fails, instead of panicking.
+    ///
+    /// `#[derive(Data)]` overrides this with `?`-propagating per-field
+    /// serialization. The default delegates to the infallible method, so a
+    /// hand-written impl keeps working (its serialization happens there).
+    /// Reach this through [`Inertia::try_data`](crate::Inertia::try_data)
+    /// rather than calling it directly.
+    fn __try_into_inertia_props(self) -> Result<Vec<(String, PropEntry)>, FrameworkError>
+    where
+        Self: Sized,
+    {
+        Ok(self.__into_inertia_props())
+    }
 }
 
 /// Builder for Inertia.js page responses.
@@ -433,6 +449,86 @@ impl InertiaResponse {
         let v = to_value_or_die(&value);
         self.flash.insert(key.into(), v);
         self
+    }
+
+    // ---- Fallible (try_*) prop builders -------------------------------
+    //
+    // Each mirrors the infallible eager-prop method above but returns
+    // `Err(FrameworkError)` (naming the prop key) instead of panicking when
+    // the value's `Serialize` impl fails. The infallible siblings stay as
+    // ergonomic escape hatches: on the HTTP request path a panic is caught
+    // by the panic-recovery middleware and converted to a 500. Prefer the
+    // `try_*` form when building responses off that path (queue workers, the
+    // scheduler, CLI) where no such net exists, or whenever you want to
+    // handle a serialization failure explicitly. Closes the Codex MEDIUM
+    // "infallible public surfaces convert recoverable errors into panics".
+
+    /// Fallible sibling of [`with`](Self::with).
+    pub fn try_with<V: Serialize>(
+        mut self,
+        key: impl Into<String>,
+        value: V,
+    ) -> Result<Self, FrameworkError> {
+        let key = key.into();
+        let v = to_value_or_err(&key, &value)?;
+        self.props.insert(key, Prop::Eager(v));
+        Ok(self)
+    }
+
+    /// Fallible sibling of [`always`](Self::always).
+    pub fn try_always<V: Serialize>(
+        mut self,
+        key: impl Into<String>,
+        value: V,
+    ) -> Result<Self, FrameworkError> {
+        let key = key.into();
+        let v = to_value_or_err(&key, &value)?;
+        self.props.insert(key, Prop::Always(v));
+        Ok(self)
+    }
+
+    /// Fallible sibling of [`merge_with`](Self::merge_with). The convenience
+    /// wrappers ([`merge`](Self::merge), [`deep_merge`](Self::deep_merge),
+    /// etc.) delegate to the infallible `merge_with`; use this when the
+    /// merged value's serialization may fail.
+    pub fn try_merge_with<V: Serialize>(
+        mut self,
+        key: impl Into<String>,
+        value: V,
+        strategy: MergeStrategy,
+    ) -> Result<Self, FrameworkError> {
+        let key = key.into();
+        let v = to_value_or_err(&key, &value)?;
+        let resolver = eager_resolver(v);
+        self.props
+            .insert(key, Prop::Merge(MergeConfig { resolver, strategy }));
+        Ok(self)
+    }
+
+    /// Fallible sibling of [`scroll`](Self::scroll). For an async-resolved
+    /// scroll value, [`scroll_with`](Self::scroll_with) is already fallible.
+    pub fn try_scroll<V: Serialize>(
+        self,
+        key: impl Into<String>,
+        metadata: ScrollMetadata,
+        value: V,
+    ) -> Result<Self, FrameworkError> {
+        let key = key.into();
+        let v = to_value_or_err(&key, &value)?;
+        let resolver = eager_resolver(v);
+        Ok(self.attach_scroll(key, metadata, resolver))
+    }
+
+    /// Fallible sibling of [`flash`](Self::flash).
+    pub fn try_flash<V: Serialize>(
+        mut self,
+        key: impl Into<String>,
+        value: V,
+    ) -> Result<Self, FrameworkError> {
+        let key = key.into();
+        let v = to_value_or_err(&key, &value)?;
+        self.flash.insert(key, v);
+        Ok(self)
     }
 
     /// Force history encryption on or off for this response. Overrides
@@ -1343,14 +1439,31 @@ fn eager_resolver(value: Value) -> PropResolver {
 ///
 /// The panic is caught by the request-level panic-recovery middleware
 /// (`framework/src/middleware/chain.rs`, Domain 2 M1) and converted to
-/// a 500 response, so the process stays up. For runtime-fallible
-/// values use [`InertiaResponse::lazy`] — its resolver returns
-/// `Result<V, FrameworkError>` which surfaces as an Inertia JSON
-/// error envelope instead of a server-level 500.
+/// a 500 response, so the process stays up. To handle serialization
+/// failure explicitly — required off the HTTP path, where no panic net
+/// exists — use the fallible sibling of the builder method
+/// ([`try_with`](InertiaResponse::try_with),
+/// [`try_always`](InertiaResponse::try_always), etc.), which returns
+/// `Result<Self, FrameworkError>`. [`InertiaResponse::lazy`] is an
+/// alternative for values resolved asynchronously, though it also moves
+/// the prop onto the partial-reload-gated lazy protocol.
 fn to_value_or_die<V: Serialize>(value: &V) -> Value {
     serde_json::to_value(value).expect(
         "InertiaResponse prop value must serialize cleanly; check the type's Serialize impl",
     )
+}
+
+/// Fallible counterpart of [`to_value_or_die`]: serialize an eager prop
+/// value to `Value`, returning a [`FrameworkError`] that names `key`
+/// instead of panicking on `Serialize` failure. Backs the `try_*` builder
+/// methods ([`InertiaResponse::try_with`] and siblings).
+fn to_value_or_err<V: Serialize>(key: &str, value: &V) -> Result<Value, FrameworkError> {
+    serde_json::to_value(value).map_err(|e| {
+        FrameworkError::internal(format!(
+            "InertiaResponse prop `{key}` failed to serialize: {e} \
+             (the value's Serialize impl returned Err)"
+        ))
+    })
 }
 
 fn build_json_response(page: &Value) -> HttpResponse {
