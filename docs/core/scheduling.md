@@ -15,10 +15,16 @@ suprnova make:task CleanupLogs
 ```
 
 This command will:
-1. Create `src/tasks/cleanup_logs_task.rs` with a task stub
-2. Create `src/tasks/mod.rs` if it doesn't exist
-3. Create `src/schedule.rs` for registering tasks
-4. Create `src/bin/schedule.rs` scheduler binary
+1. Create `src/tasks/cleanup_logs_task.rs` with a working task stub
+2. Create `src/tasks/mod.rs` if it doesn't exist, re-exporting the task
+3. Create `src/schedule.rs` for registering tasks, if it doesn't exist
+4. Declare `pub mod schedule;` and `pub mod tasks;` in `src/lib.rs`
+5. Wire `.schedule(<crate>::schedule::register)` into your application
+   builder in `cmd/main.rs` (or `src/main.rs` for the API starter)
+
+Steps 2–5 are idempotent, so re-running `make:task` repairs wiring that was
+removed by hand. The scheduler runs inside your application binary — there is
+no separate scheduler executable to build or deploy.
 
 ```bash Examples
 # Creates CleanupLogsTask in src/tasks/cleanup_logs_task.rs
@@ -33,26 +39,48 @@ suprnova make:task BackupDatabaseTask
 
 ```rust Generated File
 //! CleanupLogsTask scheduled task
+//!
+//! Created with `suprnova make:task cleanup_logs_task`.
+
+use std::time::Instant;
 
 use async_trait::async_trait;
 use suprnova::{Task, TaskResult};
 
-/// CleanupLogsTask - A scheduled task
+/// CleanupLogsTask - A scheduled task.
 ///
-/// Register this task in `src/schedule.rs` with the fluent API.
+/// Register the task in `src/schedule.rs` with the fluent API; the skeleton
+/// below times its own run and prints a structured log line on each
+/// invocation so it works end-to-end the first time you wire it up.
 pub struct CleanupLogsTask;
 
 impl CleanupLogsTask {
+    /// Create a new instance of this task.
     pub fn new() -> Self {
         Self
+    }
+}
+
+impl Default for CleanupLogsTask {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[async_trait]
 impl Task for CleanupLogsTask {
     async fn handle(&self) -> TaskResult {
-        // TODO: Implement your task logic here
-        println!("Running CleanupLogsTask...");
+        let started_at = Instant::now();
+        println!("[CleanupLogsTask] task started");
+
+        // Replace this with the real job. The skeleton ships as a
+        // no-op success so the task can be scheduled and observed
+        // before the implementation is filled in.
+
+        println!(
+            "[CleanupLogsTask] task finished in {} ms",
+            started_at.elapsed().as_millis(),
+        );
         Ok(())
     }
 }
@@ -325,23 +353,10 @@ suprnova schedule:list
 
 Output:
 ```
-Scheduled Tasks:
-==========================================================================================
-Name                           Schedule                       Description
-------------------------------------------------------------------------------------------
-cleanup:logs                   0 3 * * *                      Removes logs older than 30 days
-send:reminders                 0 9 * * *                      Sends daily reminder emails
-backup:database                0 0 * * 0                      Weekly database backup
-==========================================================================================
-Total: 3 task(s)
-```
-
-### Run Specific Task
-
-Run a specific task by name:
-
-```bash
-cargo run --bin schedule -- run-task cleanup:logs
+Registered scheduled tasks:
+  cleanup:logs [0 3 * * *] — Removes logs older than 30 days
+  send:reminders [0 9 * * *] — Sends daily reminder emails
+  backup:database [0 0 * * 0] — Weekly database backup
 ```
 
 ## Production Setup
@@ -420,16 +435,16 @@ The recommended file structure for scheduled tasks:
 ```
 src/
 ├── tasks/
-│   ├── mod.rs              # Re-export all tasks
+│   ├── mod.rs              # Re-exports all tasks (auto-updated by make:task)
 │   ├── cleanup_logs_task.rs
 │   ├── send_reminders_task.rs
 │   └── backup_database_task.rs
-├── schedule.rs             # Register tasks
-├── bin/
-│   └── schedule.rs         # Scheduler binary
+├── schedule.rs             # Registers tasks (run by the schedule:* commands)
 ├── bootstrap.rs
 ├── routes.rs
-└── main.rs
+└── lib.rs                  # Declares `pub mod schedule;` + `pub mod tasks;`
+cmd/
+└── main.rs                 # Calls `.schedule(<crate>::schedule::register)`
 ```
 
 **src/tasks/mod.rs:**

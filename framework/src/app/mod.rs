@@ -653,9 +653,10 @@ where
         }
         println!("Registered scheduled tasks:");
         for entry in schedule.tasks() {
+            let expr = entry.expression.expression();
             match &entry.description {
-                Some(desc) => println!("  {} [{:?}] — {desc}", entry.name, entry.expression),
-                None => println!("  {} [{:?}]", entry.name, entry.expression),
+                Some(desc) => println!("  {} [{expr}] — {desc}", entry.name),
+                None => println!("  {} [{expr}]", entry.name),
             }
         }
     }
