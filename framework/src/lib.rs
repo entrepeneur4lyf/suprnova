@@ -44,6 +44,7 @@ pub mod sse;
 pub mod supervisor;
 pub mod telemetry;
 pub mod testing;
+pub mod timeout;
 pub mod torii_integration;
 pub mod validation;
 pub mod vector;
@@ -185,6 +186,7 @@ pub use telemetry::{
     CounterHandle, GaugeHandle, HistogramHandle, Metrics, OtelConfig, TelemetryGuard,
     init_telemetry,
 };
+pub use timeout::TimeoutMiddleware;
 pub use validation::rule::{
     AsyncRule, ContextualRule, FormContext, Rule, Unique, async_rules, rules,
     rules::{

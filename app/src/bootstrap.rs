@@ -53,6 +53,16 @@ pub async fn register() {
     // Global middleware (runs on every request in registration order)
     global_middleware!(middleware::LoggingMiddleware);
 
+    // Request deadline: a 30s ceiling on time-to-response so a slow handler
+    // or hung query cannot hold a connection open indefinitely. Placed right
+    // after logging (so timed-out 503s are still logged on the way out) and
+    // ahead of the rest of the stack so it bounds session/feature/handler
+    // work. Streaming responses (SSE) and WebSocket upgrades are exempt by
+    // design — see `suprnova::timeout`. A per-route
+    // `.middleware(TimeoutMiddleware::seconds(n))` tightens this for a
+    // specific endpoint.
+    global_middleware!(suprnova::TimeoutMiddleware::default());
+
     // Phase 3: scope `?include=` and `?fields[type]=` from the query string
     // into task-local state so JSON:API resource handlers can read them.
     global_middleware!(IncludeMiddleware);

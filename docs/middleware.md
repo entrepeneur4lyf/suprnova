@@ -208,6 +208,50 @@ Request → Global MW → Group MW → Route MW → Handler
 Response ← Global MW ← Group MW ← Route MW ← Handler
 ```
 
+## Request Timeouts
+
+`TimeoutMiddleware` is a built-in middleware that bounds how long a handler may take to **produce a response**. A slow handler or a hung database query can otherwise hold a connection open indefinitely; the timeout returns `503 Service Unavailable` once the deadline is exceeded.
+
+### Installing the timeout
+
+Install it globally for a process-wide ceiling (the default is 30 seconds), or per-route to tighten a specific endpoint.
+
+```rust
+// src/bootstrap.rs — a 30s ceiling on every HTTP route
+use suprnova::{global_middleware, TimeoutMiddleware};
+
+pub async fn register() {
+    global_middleware!(TimeoutMiddleware::default()); // 30 seconds
+    // ... other global middleware
+}
+```
+
+```rust
+// Tighten a single endpoint to 5 seconds
+use suprnova::{Router, TimeoutMiddleware};
+
+Router::new()
+    .get("/report", heavy_report_handler)
+    .middleware(TimeoutMiddleware::seconds(5));
+```
+
+`TimeoutMiddleware::new(duration)` accepts any `Duration`; `TimeoutMiddleware::seconds(n)` is shorthand for whole seconds.
+
+### Global is a ceiling; per-route tightens
+
+Global middleware runs **outside** route middleware, so a global timeout is an outer ceiling and a per-route timeout can only make a route *stricter* — the shorter deadline fires first. To let one route run *longer* than the global default, either raise the global value or scope the global middleware to a route group that excludes that endpoint.
+
+### Streaming responses and WebSockets are exempt
+
+The deadline bounds *time-to-response* — the moment your handler returns its `HttpResponse` — not how long the body streams afterwards:
+
+- **SSE and streaming responses** (`HttpResponse::sse(...)`, `HttpResponse::stream_bytes(...)`) are naturally exempt. The handler returns immediately with a lazy body that the server drains afterwards, so a long-lived event stream is never cut off by the timeout.
+- **WebSocket upgrades** (requests carrying `Upgrade: websocket`) are skipped explicitly and never armed.
+
+### Cancel safety
+
+When the deadline elapses the in-flight handler is **cancelled** — its future is dropped at the current `.await` point. Anything held across that point is released by its `Drop` impl, so open transactions roll back and locks release. Work you moved off the request with `tokio::spawn` is detached and will **not** be cancelled, so keep handlers cancel-safe.
+
 ## Practical Examples
 
 ### CORS Middleware
@@ -339,3 +383,4 @@ pub use cors::CorsMiddleware;
 | Group middleware | `.middleware(MyMiddleware)` on route group |
 | Short-circuit | Return `Err(HttpResponse::...)` without calling `next()` |
 | Continue chain | Call `next(request).await` |
+| Request timeout | `global_middleware!(TimeoutMiddleware::default())` (global ceiling) or `.middleware(TimeoutMiddleware::seconds(n))` (per route) |
