@@ -470,6 +470,29 @@ impl Auth {
         request_state::via_remember()
     }
 
+    /// Set the current user for this request **without** persisting to the
+    /// session — the in-memory equivalent of [`once`](Self::once). Mirrors
+    /// Laravel's `Auth::setUser($user)`.
+    ///
+    /// After this call, [`id`](Self::id) / [`check`](Self::check) /
+    /// [`user`](Self::user) reflect `user` for the remainder of the request.
+    /// The request-scoped current user is shared by every guard, so the facade
+    /// writes it directly — no [`AuthManager`] needed (the same manager-free
+    /// fast path as `id`/`check`/`guest`).
+    pub fn set_user(user: Arc<dyn Authenticatable>) {
+        request_state::set_current_user(user);
+    }
+
+    /// Whether a user has already been resolved for this request, without
+    /// triggering provider resolution. Mirrors Laravel's `Auth::hasUser()`.
+    ///
+    /// `true` after a `login`/`once`/`set_user` or a prior `user()` lookup;
+    /// `false` when only a session id is present but no user has been fetched.
+    /// Reads the request-scoped state directly (manager-free).
+    pub fn has_user() -> bool {
+        request_state::has_current_user()
+    }
+
     // ── Torii-backed authentication providers ──────────────────────────────────
 
     /// Access password-based authentication operations.
@@ -638,5 +661,21 @@ mod tests {
             .err()
             .expect("attempt without a manager must error");
         assert!(err.to_string().contains("AuthManager"), "got: {err}");
+    }
+
+    // `set_user`/`has_user` write+read the request-scoped current user directly
+    // (manager-free); `Auth::id` then sees it because it consults request_state
+    // ahead of the session. Needs only a request scope — no manager, no events.
+    #[tokio::test]
+    async fn set_user_and_has_user_round_trip_in_request_scope() {
+        request_state::request_state_scope_for_test(async {
+            assert!(!Auth::has_user());
+            assert_eq!(Auth::id(), None);
+
+            Auth::set_user(Arc::new(TestUser));
+            assert!(Auth::has_user());
+            assert_eq!(Auth::id(), Some("7".to_string()));
+        })
+        .await;
     }
 }

@@ -76,7 +76,7 @@ pub use eloquent_provider::EloquentUserProvider;
 pub use generic_user::GenericUser;
 pub use guard::Auth;
 pub use manager::AuthManager;
-pub use middleware::{AuthMiddleware, GuestMiddleware};
+pub use middleware::{AuthMiddleware, BasicAuthMiddleware, GuestMiddleware};
 pub use provider::UserProvider;
 pub use session_guard::SessionGuard;
 pub use token_guard::TokenGuard;
