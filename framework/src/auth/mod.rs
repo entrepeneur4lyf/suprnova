@@ -53,7 +53,9 @@
 pub mod authenticatable;
 pub mod config;
 pub mod contract;
+pub mod database_provider;
 pub mod events;
+pub mod generic_user;
 pub mod guard;
 pub mod manager;
 pub mod middleware;
@@ -66,6 +68,8 @@ pub mod token_guard;
 pub use authenticatable::Authenticatable;
 pub use config::{AuthConfig, GuardConfig, GuardDriver};
 pub use contract::{Credentials, Guard, StatefulGuard};
+pub use database_provider::DatabaseUserProvider;
+pub use generic_user::GenericUser;
 pub use guard::Auth;
 pub use manager::AuthManager;
 pub use middleware::{AuthMiddleware, GuestMiddleware};
