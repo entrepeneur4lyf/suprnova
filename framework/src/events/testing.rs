@@ -1,25 +1,40 @@
 //! `Event::fake()` — replaces the global dispatcher with one that
-//! records dispatched events instead of invoking listeners. The
-//! returned guard restores listener invocation on drop.
+//! records dispatched events instead of invoking listeners.
+//!
+//! `install_fake()` acquires a process-wide serialization mutex for the
+//! lifetime of the returned `EventFakeGuard`, so parallel `#[tokio::test]`s
+//! that fake events run one at a time and cannot clobber each other's
+//! recorded-events store. This mirrors [`crate::queue::testing`]. The
+//! single shared `FAKE` store means nested `Event::fake()` on one task is
+//! unsupported (it would deadlock on the serializer) — fake exactly once
+//! per test.
 
 use super::Event;
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 #[derive(Default)]
 struct FakeStore {
     recorded: HashMap<TypeId, Vec<Box<dyn Any + Send + Sync>>>,
 }
 
+/// Process-wide serializer: only one test may hold the event fake at a time.
+static FAKE_SERIAL: Mutex<()> = Mutex::new(());
 static FAKE: Mutex<Option<FakeStore>> = Mutex::new(None);
 
+/// Poison-safe access to the fake store (never aborts the process on a
+/// poisoned mutex — a panicking test must not take the whole suite down).
+fn lock_fake() -> MutexGuard<'static, Option<FakeStore>> {
+    FAKE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub(crate) fn is_active() -> bool {
-    FAKE.lock().unwrap().is_some()
+    lock_fake().is_some()
 }
 
 pub(crate) fn record<E: Event>(event: E) {
-    if let Some(store) = FAKE.lock().unwrap().as_mut() {
+    if let Some(store) = lock_fake().as_mut() {
         store
             .recorded
             .entry(TypeId::of::<E>())
@@ -28,18 +43,26 @@ pub(crate) fn record<E: Event>(event: E) {
     }
 }
 
-/// Replace the global dispatcher with a fake. Returns a guard that
-/// removes the fake on drop, restoring real listener invocation.
+/// Replace the global dispatcher with a fake. Returns a guard that removes
+/// the fake on drop, restoring real listener invocation.
+///
+/// The guard holds a process-wide serialization lock so parallel
+/// `#[tokio::test]`s using the fake run one at a time; it releases on drop.
+/// (Tests therefore no longer need their own serializing mutex around
+/// `Event::fake()`.)
 pub fn install_fake() -> EventFakeGuard {
-    *FAKE.lock().unwrap() = Some(FakeStore::default());
-    EventFakeGuard
+    let serial = FAKE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    *lock_fake() = Some(FakeStore::default());
+    EventFakeGuard { _serial: serial }
 }
 
-pub struct EventFakeGuard;
+pub struct EventFakeGuard {
+    _serial: MutexGuard<'static, ()>,
+}
 
 impl Drop for EventFakeGuard {
     fn drop(&mut self) {
-        *FAKE.lock().unwrap() = None;
+        *lock_fake() = None;
     }
 }
 
@@ -68,7 +91,7 @@ pub fn assert_not_dispatched<E: Event>(pred: impl Fn(&E) -> bool) {
 
 /// Count dispatched events of type `E` matching `pred`.
 pub fn dispatched_count<E: Event>(pred: impl Fn(&E) -> bool) -> usize {
-    let guard = FAKE.lock().unwrap();
+    let guard = lock_fake();
     let store = guard
         .as_ref()
         .expect("Event::fake() must be active to read dispatched_count");
@@ -89,13 +112,9 @@ pub fn dispatched_count<E: Event>(pred: impl Fn(&E) -> bool) -> usize {
 mod tests {
     use super::*;
     use crate::events::EventFacade;
-    use tokio::sync::Mutex;
 
-    // Tests in this module share the global `FAKE` store, so they
-    // need to run serially to avoid cross-test contamination. Use
-    // `tokio::sync::Mutex` so the guard can be safely held across
-    // `.await` points.
-    static TEST_LOCK: Mutex<()> = Mutex::const_new(());
+    // No manual serialization needed: `EventFacade::fake()` holds the
+    // process-wide `FAKE_SERIAL` lock for the duration of each test.
 
     #[derive(Debug, Clone)]
     struct Noted {
@@ -109,7 +128,6 @@ mod tests {
 
     #[tokio::test]
     async fn fake_records_dispatched_events_and_does_not_call_listeners() {
-        let _serial = TEST_LOCK.lock().await;
         let _guard = EventFacade::fake();
         EventFacade::dispatch(Noted { note: "hi".into() })
             .await
@@ -124,7 +142,6 @@ mod tests {
 
     #[tokio::test]
     async fn dispatched_count_works() {
-        let _serial = TEST_LOCK.lock().await;
         let _guard = EventFacade::fake();
         EventFacade::dispatch(Noted { note: "a".into() })
             .await
