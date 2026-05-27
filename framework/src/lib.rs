@@ -156,6 +156,7 @@ pub use inertia::{
 };
 pub use logging::{
     LogConfig, LogFormat, RequestId, RequestIdMiddleware, current_request_id, init_subscriber,
+    spawn_with_request_id,
 };
 pub use middleware::{
     Middleware, MiddlewareFuture, MiddlewareRegistry, Next, register_global_middleware,

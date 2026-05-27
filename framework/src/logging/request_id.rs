@@ -8,6 +8,7 @@
 //! error logs, jobs, and event payloads can read it by name.
 
 use std::fmt;
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 /// A request id: lowercase hyphenated UUID v4.
@@ -50,6 +51,38 @@ tokio::task_local! {
 /// jobs, tests that didn't install the middleware, etc.).
 pub fn current_request_id() -> Option<RequestId> {
     REQUEST_ID.try_with(|id| id.clone()).ok()
+}
+
+/// Spawn `future` onto the Tokio runtime, propagating the current
+/// request id into the new task.
+///
+/// `tokio::spawn` starts a task with empty task-locals, so a handler that
+/// spawns background work loses `current_request_id()` — the spawned
+/// work's logs and any id-derived correlation would be orphaned from the
+/// request that triggered them. This helper captures the caller's request
+/// id and re-scopes it for the spawned future, and attaches the current
+/// `tracing` span so the spawned task's events inherit `request_id` the
+/// same way in-request events do. Use it for background side effects,
+/// queued event tasks, and audit logging kicked off mid-request.
+///
+/// With no active request id (called outside a request) the future is
+/// spawned as-is, exactly like a bare `tokio::spawn`.
+///
+/// Note: only the request id and tracing span follow the task — the
+/// request `Context` bag (query params, flash) deliberately does not,
+/// since background work is not serving the originating HTTP request.
+pub fn spawn_with_request_id<F>(future: F) -> JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    match current_request_id() {
+        Some(id) => {
+            let span = tracing::Span::current();
+            tokio::spawn(REQUEST_ID.scope(id, future).instrument(span))
+        }
+        None => tokio::spawn(future),
+    }
 }
 
 use crate::http::{Request, Response};
@@ -231,6 +264,51 @@ mod tests {
             id.as_str()
                 .chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_with_request_id_propagates_into_the_spawned_task() {
+        use std::sync::{Arc, Mutex};
+
+        let captured = Arc::new(Mutex::new(None::<String>));
+        let sink = captured.clone();
+
+        let id = RequestId::from_string("spawn-propagation-id-555");
+        REQUEST_ID
+            .scope(id, async move {
+                // Background work spawned mid-request must still observe the id.
+                let handle = spawn_with_request_id(async move {
+                    *sink.lock().unwrap() = current_request_id().map(|r| r.as_str().to_string());
+                });
+                handle.await.unwrap();
+            })
+            .await;
+
+        assert_eq!(
+            captured.lock().unwrap().as_deref(),
+            Some("spawn-propagation-id-555"),
+            "the spawned task must inherit the caller's request id"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_with_request_id_outside_a_scope_carries_no_id() {
+        use std::sync::{Arc, Mutex};
+
+        // Seed with a sentinel so we can tell "set to None" from "never ran".
+        let captured = Arc::new(Mutex::new(Some("sentinel".to_string())));
+        let sink = captured.clone();
+
+        let handle = spawn_with_request_id(async move {
+            *sink.lock().unwrap() = current_request_id().map(|r| r.as_str().to_string());
+        });
+        handle.await.unwrap();
+
+        assert_eq!(
+            captured.lock().unwrap().as_deref(),
+            None,
+            "with no active request id, the spawned task gets none (bare spawn)"
         );
     }
 }
