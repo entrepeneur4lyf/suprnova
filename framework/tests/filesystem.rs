@@ -7,7 +7,7 @@
 
 use opendal::layers::RetryLayer;
 use suprnova::filesystem::streaming::copy_between_disks;
-use suprnova::{S3Config, Storage};
+use suprnova::{AzBlobConfig, GcsConfig, S3Config, Storage};
 
 #[tokio::test]
 async fn memory_disk_round_trip() {
@@ -371,4 +371,55 @@ async fn register_with_full_production_layer_stack_round_trips() {
         .await
         .expect("read through full layer stack");
     assert_eq!(&bytes.to_vec(), b"stacked-write");
+}
+
+// ---------------------------------------------------------------------------
+// Registration input validation — required fields are rejected early with a
+// clear error instead of failing late on first I/O.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn register_s3_rejects_empty_bucket() {
+    let _guard = Storage::fake();
+    let err = Storage::register_s3("empty_s3", S3Config::default()).unwrap_err();
+    assert!(
+        format!("{err}").contains("bucket"),
+        "S3 registration must reject an empty bucket, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn register_gcs_rejects_empty_bucket() {
+    let _guard = Storage::fake();
+    let err = Storage::register_gcs("empty_gcs", GcsConfig::default()).unwrap_err();
+    assert!(
+        format!("{err}").contains("bucket"),
+        "GCS registration must reject an empty bucket, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn register_azblob_rejects_missing_required_fields() {
+    let _guard = Storage::fake();
+    let err = Storage::register_azblob("empty_az", AzBlobConfig::default()).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("container") || msg.contains("account"),
+        "Azure Blob registration must reject missing required fields, got: {msg}"
+    );
+}
+
+// Non-UTF-8 roots are rejected rather than silently mangled by a lossy
+// conversion. Unix-only: constructing a non-UTF-8 path is platform-specific.
+#[cfg(unix)]
+#[tokio::test]
+async fn register_fs_rejects_non_utf8_root() {
+    use std::os::unix::ffi::OsStrExt;
+    let _guard = Storage::fake();
+    let bad = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xffnon-utf8"));
+    let err = Storage::register_fs("bad_root", bad).unwrap_err();
+    assert!(
+        format!("{err}").contains("UTF-8"),
+        "non-UTF-8 fs root must be rejected, got: {err}"
+    );
 }

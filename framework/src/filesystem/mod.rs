@@ -163,8 +163,13 @@ impl Storage {
         root: impl AsRef<Path>,
         layer_fn: impl FnOnce(Operator) -> Operator,
     ) -> Result<(), FrameworkError> {
-        let root_str = root.as_ref().to_string_lossy();
-        let builder = services::Fs::default().root(&root_str);
+        // Reject non-UTF-8 roots rather than silently mangling them with a
+        // lossy conversion (which could root the disk at the wrong directory).
+        let root_str = root
+            .as_ref()
+            .to_str()
+            .ok_or_else(|| FrameworkError::internal("storage fs root path is not valid UTF-8"))?;
+        let builder = services::Fs::default().root(root_str);
         // `PathGuardLayer` is applied to the raw FS operator before the user's
         // `layer_fn` runs, so the traversal guard sits closest to the backend
         // and the caller's own layers (retry, logging, tracing) wrap it. The
@@ -259,6 +264,11 @@ impl Storage {
         config: S3Config,
         layer_fn: impl FnOnce(Operator) -> Operator,
     ) -> Result<(), FrameworkError> {
+        if config.bucket.trim().is_empty() {
+            return Err(FrameworkError::internal(
+                "S3 storage config requires a non-empty `bucket`",
+            ));
+        }
         let mut builder = services::S3::default().bucket(&config.bucket);
         if let Some(region) = config.region.as_deref() {
             builder = builder.region(region);
@@ -304,6 +314,14 @@ impl Storage {
         config: AzBlobConfig,
         layer_fn: impl FnOnce(Operator) -> Operator,
     ) -> Result<(), FrameworkError> {
+        if config.container.trim().is_empty()
+            || config.account_name.trim().is_empty()
+            || config.account_key.trim().is_empty()
+        {
+            return Err(FrameworkError::internal(
+                "Azure Blob storage config requires non-empty `container`, `account_name`, and `account_key`",
+            ));
+        }
         let mut builder = services::Azblob::default()
             .container(&config.container)
             .account_name(&config.account_name)
@@ -340,6 +358,11 @@ impl Storage {
         config: GcsConfig,
         layer_fn: impl FnOnce(Operator) -> Operator,
     ) -> Result<(), FrameworkError> {
+        if config.bucket.trim().is_empty() {
+            return Err(FrameworkError::internal(
+                "GCS storage config requires a non-empty `bucket`",
+            ));
+        }
         let mut builder = services::Gcs::default().bucket(&config.bucket);
         if let Some(credential) = config.credential.as_deref() {
             builder = builder.credential(credential);
