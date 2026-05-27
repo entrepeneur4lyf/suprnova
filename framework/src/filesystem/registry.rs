@@ -8,6 +8,14 @@
 //! Internally we use an `RwLock<Option<HashMap<...>>>` so the static can be
 //! constructed in const context (stable since Rust 1.63) without `OnceLock`
 //! gymnastics. The `Option` lets the testing helper wipe state between tests.
+//!
+//! The registry is process-global. Disks are meant to be registered once at
+//! boot; re-registering a name replaces the previous operator and emits a
+//! `warn!` (an accidental duplicate could swap a production disk for a
+//! local/memory one). Tests that exercise disks in parallel must isolate
+//! through [`crate::filesystem::Storage::fake`], whose guard serializes against
+//! other fake users and resets the registry on drop — calling `register_*`
+//! directly from multiple parallel tests races on this global state.
 
 use crate::FrameworkError;
 use opendal::Operator;
@@ -17,12 +25,24 @@ use std::sync::RwLock;
 static REGISTRY: RwLock<Option<HashMap<String, Operator>>> = RwLock::new(None);
 
 /// Register an `Operator` under `name`, replacing any previous registration.
+///
+/// Disks are meant to be registered once at boot. Replacing an existing name
+/// emits a `warn!` because it is almost always accidental (a duplicate name in
+/// config, or a re-bootstrap) and can swap a production disk for a different
+/// backend. The replacement still happens — this is a signal, not a hard error,
+/// so legitimate re-registration (e.g. `Storage::fake` setup) keeps working.
 pub(crate) fn register(name: impl Into<String>, op: Operator) {
+    let name = name.into();
     let mut guard = REGISTRY
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let map = guard.get_or_insert_with(HashMap::new);
-    map.insert(name.into(), op);
+    if map.insert(name.clone(), op).is_some() {
+        tracing::warn!(
+            disk = %name,
+            "storage disk re-registered; the previously registered operator for this name was replaced"
+        );
+    }
 }
 
 /// Fetch a registered `Operator` by name.
@@ -44,4 +64,40 @@ pub(crate) fn reset() {
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     *guard = None;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opendal::services;
+
+    // These tests share the process-global `REGISTRY`. They use unique names
+    // and never call `reset()`, so parallel execution cannot wipe an entry
+    // between the two `register` calls below (which would mask the warn).
+    fn memory_op() -> Operator {
+        Operator::new(services::Memory::default())
+            .expect("opendal memory service is infallible")
+            .finish()
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn re_registering_an_existing_name_warns() {
+        register("registry_dup_warn_probe", memory_op());
+        register("registry_dup_warn_probe", memory_op());
+        assert!(
+            logs_contain("re-registered"),
+            "replacing an already-registered disk name must emit a warn"
+        );
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn first_registration_of_a_name_does_not_warn() {
+        register("registry_fresh_no_warn_probe", memory_op());
+        assert!(
+            !logs_contain("re-registered"),
+            "a first-time disk registration must not warn"
+        );
+    }
 }
