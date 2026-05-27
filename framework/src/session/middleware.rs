@@ -334,6 +334,12 @@ impl Middleware for SessionMiddleware {
                             session.csrf_token = generate_csrf_token();
                             session.dirty = true;
 
+                            // Mark this request as authenticated via the
+                            // remember-me cookie so `StatefulGuard::via_remember`
+                            // reports it. No-op when no auth request-state
+                            // scope is installed.
+                            crate::auth::request_state::set_via_remember(true);
+
                             // Queue the rotated cookie. Its Max-Age
                             // mirrors the new row's TTL so the
                             // browser stops sending it the moment
@@ -505,12 +511,17 @@ pub fn get_csrf_token() -> Option<String> {
 
 /// Helper to check if user is authenticated
 pub fn is_authenticated() -> bool {
-    session().map(|s| s.user_id.is_some()).unwrap_or(false)
+    auth_user_id().is_some()
 }
 
 /// Helper to get the authenticated user ID
+///
+/// Consults the request-scoped auth state first (so a `once` /
+/// `set_user` authentication that was never written to the session is
+/// still visible to `Auth::id()`), then falls back to the persisted
+/// session user.
 pub fn auth_user_id() -> Option<String> {
-    session().and_then(|s| s.user_id)
+    crate::auth::request_state::current_user_id().or_else(|| session().and_then(|s| s.user_id))
 }
 
 /// Helper to set the authenticated user

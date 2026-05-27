@@ -71,6 +71,19 @@ pub trait Guard: Send + Sync {
     /// Validate credentials against the guard's user provider without logging in.
     async fn validate(&self, credentials: &Credentials) -> Result<bool, FrameworkError>;
 
+    /// Set the current user for this request **without** persisting to the
+    /// session — the in-memory equivalent of `once_using_id`. Mirrors
+    /// Laravel's `setUser($user)` (a `GuardHelpers` method surfaced on the
+    /// base contract). After this call, `user()`/`id()`/`has_user()` reflect
+    /// `user` for the remainder of the request.
+    async fn set_user(&self, user: Arc<dyn Authenticatable>);
+
+    /// Whether a user instance has already been resolved for this request,
+    /// without triggering provider resolution. Mirrors Laravel's `hasUser()`:
+    /// `true` after a `login`/`once`/`set_user` or a prior `user()` lookup,
+    /// `false` when only a session id is present but no user has been fetched.
+    async fn has_user(&self) -> bool;
+
     /// Whether a user is currently authenticated. Defaults to `id().is_some()`.
     async fn check(&self) -> Result<bool, FrameworkError> {
         Ok(self.id().await?.is_some())
@@ -86,28 +99,53 @@ pub trait Guard: Send + Sync {
 ///
 /// Session-style guards implement this; stateless token guards implement only
 /// [`Guard`].
+///
+/// The fallible methods that "find a user and authenticate them" return
+/// `Result<Option<Arc<dyn Authenticatable>>, _>`: `Ok(Some(user))` on success,
+/// `Ok(None)` when no user matched (bad credentials or unknown id), and `Err`
+/// only for an underlying failure (database, hashing). This is the Rust-native
+/// shape of Laravel's `Authenticatable|false` return — the caller gets the
+/// resolved user, and the id is one field away via
+/// [`Authenticatable::get_auth_identifier`].
 #[async_trait]
 pub trait StatefulGuard: Guard {
     /// Validate credentials and, on success, log the user in (persisting to the
-    /// session). Returns the authenticated user's id. Mirrors Laravel's
-    /// `attempt($credentials, $remember)`.
+    /// session, optionally issuing a remember-me token). Returns the
+    /// authenticated user. Mirrors Laravel's `attempt($credentials, $remember)`.
     async fn attempt(
         &self,
         credentials: &Credentials,
         remember: bool,
-    ) -> Result<Option<String>, FrameworkError>;
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError>;
 
     /// Validate credentials and authenticate for the CURRENT request only
     /// (no session persistence). Mirrors Laravel's `once($credentials)`.
     async fn once(&self, credentials: &Credentials) -> Result<bool, FrameworkError>;
 
-    /// Log a user in by their identifier, optionally issuing a remember-me
-    /// token. Mirrors Laravel's `loginUsingId($id, $remember)`.
-    async fn login_using_id(&self, id: &str, remember: bool) -> Result<(), FrameworkError>;
+    /// Log a known user in (persist to the session, optionally issuing a
+    /// remember-me token). Mirrors Laravel's `login($user, $remember)`.
+    async fn login(
+        &self,
+        user: Arc<dyn Authenticatable>,
+        remember: bool,
+    ) -> Result<(), FrameworkError>;
 
-    /// Authenticate by id for the current request only. Mirrors Laravel's
-    /// `onceUsingId($id)`.
-    async fn once_using_id(&self, id: &str) -> Result<(), FrameworkError>;
+    /// Log a user in by their identifier, optionally issuing a remember-me
+    /// token. Returns the user, or `None` if the provider has no such id.
+    /// Mirrors Laravel's `loginUsingId($id, $remember)`.
+    async fn login_using_id(
+        &self,
+        id: &str,
+        remember: bool,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError>;
+
+    /// Authenticate by id for the current request only (no session
+    /// persistence). Returns the user, or `None` if the provider has no such
+    /// id. Mirrors Laravel's `onceUsingId($id)`.
+    async fn once_using_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError>;
 
     /// Whether the current user was authenticated via a remember-me cookie
     /// (rather than an active session) this request. Mirrors `viaRemember()`.

@@ -67,7 +67,10 @@ pub use app::paths::{
     storage_path, use_config_path, use_database_path, use_lang_path, use_public_path,
     use_resource_path, use_storage_path,
 };
-pub use auth::{Auth, AuthMiddleware, Authenticatable, GuestMiddleware, UserProvider};
+pub use auth::{
+    Auth, AuthMiddleware, Authenticatable, Credentials, Guard, GuestMiddleware, SessionGuard,
+    StatefulGuard, UserProvider,
+};
 pub use authorization::{Gate, Policy};
 pub use cache::{Cache, CacheConfig, CacheStore, InMemoryCache, LockGuard, RedisCache};
 pub use config::{AppConfig, Config, Environment, ServerConfig, env, env_optional, env_required};

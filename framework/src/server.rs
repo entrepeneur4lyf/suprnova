@@ -497,7 +497,17 @@ pub async fn handle_request(
         .scope(flash_bag, async move {
             crate::inertia::ssr::DISABLE_SSR
                 .scope(ssr_disabled, async move {
-                    handle_request_inner(router, middleware_registry, req, method, &path).await
+                    // Per-request auth state (resolved user cache + via-remember
+                    // flag), guard-agnostic so token-only requests without a
+                    // session can still use `set_user` / `once` / `has_user`.
+                    crate::auth::request_state::scope(handle_request_inner(
+                        router,
+                        middleware_registry,
+                        req,
+                        method,
+                        &path,
+                    ))
+                    .await
                 })
                 .await
         })

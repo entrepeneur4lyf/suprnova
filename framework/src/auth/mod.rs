@@ -52,13 +52,17 @@
 
 pub mod authenticatable;
 pub mod contract;
+pub mod events;
 pub mod guard;
 pub mod middleware;
 pub mod provider;
 pub mod remember;
+pub mod request_state;
+pub mod session_guard;
 
 pub use authenticatable::Authenticatable;
 pub use contract::{Credentials, Guard, StatefulGuard};
 pub use guard::Auth;
 pub use middleware::{AuthMiddleware, GuestMiddleware};
 pub use provider::UserProvider;
+pub use session_guard::SessionGuard;
