@@ -32,7 +32,7 @@ pub(crate) mod fake;
 
 use std::future::Future;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -55,6 +55,17 @@ pub use fake::{RecordedRequest, assert_not_sent, assert_sent, fake_response};
 static FAIL_ON_REAL_CALLS: AtomicBool = AtomicBool::new(false);
 
 static REQWEST_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+/// Default cap on a buffered outbound response body (25 MiB). A slow or
+/// malicious upstream can otherwise stream an unbounded body into memory
+/// via `ClientResponse::json`/`text`/`bytes`. Override globally with
+/// [`Http::set_max_response_bytes`] or per request with
+/// [`RequestBuilder::max_response_bytes`].
+pub(crate) const DEFAULT_MAX_RESPONSE_BODY_BYTES: usize = 25 * 1024 * 1024;
+
+/// Process-global response-body cap. `0` means "unset" — readers fall
+/// back to [`DEFAULT_MAX_RESPONSE_BODY_BYTES`].
+static MAX_RESPONSE_BODY_BYTES: AtomicUsize = AtomicUsize::new(0);
 
 fn client() -> &'static reqwest::Client {
     REQWEST_CLIENT.get_or_init(|| {
@@ -169,6 +180,25 @@ impl Http {
     /// `true` when [`Self::fail_on_real_calls`] is active.
     pub fn is_guarded() -> bool {
         FAIL_ON_REAL_CALLS.load(Ordering::SeqCst)
+    }
+
+    /// Set the process-global cap on a buffered outbound response body
+    /// (`ClientResponse::json`/`text`/`bytes`). Bounds memory pressure
+    /// from a slow or malicious upstream streaming a very large body.
+    /// Set once at boot; per-request overrides via
+    /// [`RequestBuilder::max_response_bytes`].
+    pub fn set_max_response_bytes(limit: usize) {
+        MAX_RESPONSE_BODY_BYTES.store(limit, Ordering::SeqCst);
+    }
+
+    /// The effective process-global response-body cap — the value set by
+    /// [`Self::set_max_response_bytes`], or
+    /// [`DEFAULT_MAX_RESPONSE_BODY_BYTES`] (25 MiB) if unset.
+    pub fn max_response_bytes() -> usize {
+        match MAX_RESPONSE_BODY_BYTES.load(Ordering::SeqCst) {
+            0 => DEFAULT_MAX_RESPONSE_BODY_BYTES,
+            n => n,
+        }
     }
 
     /// Spawn a task that inherits the calling task's fake state.
@@ -330,8 +360,15 @@ pub struct RequestBuilder {
     pub(crate) url: String,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) body: Option<Body>,
+    /// Set when [`RequestBuilder::json`]/[`RequestBuilder::form`] fail to
+    /// serialize the value. [`RequestBuilder::send`] surfaces it as an
+    /// error instead of sending a body that silently degraded to `null`.
+    pub(crate) body_error: Option<String>,
     pub(crate) timeout: Option<Duration>,
     pub(crate) retry: Option<RetryPolicy>,
+    /// Per-request response-body cap; falls back to the process-global
+    /// default ([`Http::max_response_bytes`]) when `None`.
+    pub(crate) max_response_bytes: Option<usize>,
 }
 
 impl RequestBuilder {
@@ -341,8 +378,10 @@ impl RequestBuilder {
             url,
             headers: Vec::new(),
             body: None,
+            body_error: None,
             timeout: None,
             retry: None,
+            max_response_bytes: None,
         }
     }
 
@@ -356,16 +395,22 @@ impl RequestBuilder {
     /// Send the body as JSON. Replaces any previously-set body. Sets
     /// `Content-Type: application/json` automatically on the wire.
     pub fn json<T: Serialize>(mut self, value: &T) -> Self {
-        let v = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
-        self.body = Some(Body::Json(v));
+        match serde_json::to_value(value) {
+            Ok(v) => self.body = Some(Body::Json(v)),
+            // Record the failure rather than silently sending `null`;
+            // `send` turns this into an error before any request goes out.
+            Err(e) => self.body_error = Some(format!("Http::json body serialization failed: {e}")),
+        }
         self
     }
 
     /// Send the body as `application/x-www-form-urlencoded`. The value
     /// must serialize to a JSON object — keys become form fields.
     pub fn form<T: Serialize>(mut self, value: &T) -> Self {
-        let v = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
-        self.body = Some(Body::Form(v));
+        match serde_json::to_value(value) {
+            Ok(v) => self.body = Some(Body::Form(v)),
+            Err(e) => self.body_error = Some(format!("Http::form body serialization failed: {e}")),
+        }
         self
     }
 
@@ -380,6 +425,14 @@ impl RequestBuilder {
     /// shared client.
     pub fn timeout(mut self, dur: Duration) -> Self {
         self.timeout = Some(dur);
+        self
+    }
+
+    /// Cap the response body this request will buffer (via
+    /// `ClientResponse::json`/`text`/`bytes`), overriding the
+    /// process-global [`Http::max_response_bytes`] for this one request.
+    pub fn max_response_bytes(mut self, limit: usize) -> Self {
+        self.max_response_bytes = Some(limit);
         self
     }
 
@@ -455,6 +508,16 @@ impl RequestBuilder {
     /// failures and 5xx responses are retried with exponential
     /// backoff (see [`Self::retry`] for the rules).
     pub async fn send(self) -> Result<ClientResponse, FrameworkError> {
+        // Surface a json()/form() serialization failure recorded on the
+        // builder instead of sending a body that silently degraded to null.
+        if let Some(err) = &self.body_error {
+            return Err(FrameworkError::internal(err.clone()));
+        }
+        // Cap applied to whatever body the returned response buffers.
+        let effective_max = self
+            .max_response_bytes
+            .unwrap_or_else(Http::max_response_bytes);
+
         let policy = self.retry;
         let max_attempts = policy.map(|p| p.max_attempts).unwrap_or(1);
         // A request is eligible for retry only when a policy is set AND
@@ -510,7 +573,7 @@ impl RequestBuilder {
                         tokio::time::sleep(wait).await;
                         continue;
                     }
-                    return Ok(resp);
+                    return Ok(resp.with_max_bytes(effective_max));
                 }
                 Err(e) => {
                     if let Some(p) = policy.filter(|_| attempt < max_attempts) {
@@ -639,8 +702,12 @@ fn retry_after_from(resp: &ClientResponse) -> Duration {
 }
 
 /// Outbound response. Wraps `reqwest::Response` (real) or in-memory
-/// bytes (fake).
-pub struct ClientResponse(ClientResponseInner);
+/// bytes (fake). `max_bytes` caps how much body `json`/`text`/`bytes`
+/// will buffer.
+pub struct ClientResponse {
+    inner: ClientResponseInner,
+    max_bytes: usize,
+}
 
 enum ClientResponseInner {
     Real(reqwest::Response),
@@ -653,20 +720,33 @@ enum ClientResponseInner {
 
 impl ClientResponse {
     pub(crate) fn real(resp: reqwest::Response) -> Self {
-        Self(ClientResponseInner::Real(resp))
+        Self {
+            inner: ClientResponseInner::Real(resp),
+            max_bytes: DEFAULT_MAX_RESPONSE_BODY_BYTES,
+        }
     }
 
     pub(crate) fn fake(status: u16, headers: Vec<(String, String)>, body: Bytes) -> Self {
-        Self(ClientResponseInner::Fake {
-            status,
-            headers,
-            body,
-        })
+        Self {
+            inner: ClientResponseInner::Fake {
+                status,
+                headers,
+                body,
+            },
+            max_bytes: DEFAULT_MAX_RESPONSE_BODY_BYTES,
+        }
+    }
+
+    /// Set the response-body cap. Called by [`RequestBuilder::send`] with
+    /// the request's effective limit.
+    pub(crate) fn with_max_bytes(mut self, max: usize) -> Self {
+        self.max_bytes = max;
+        self
     }
 
     /// Response status code.
     pub fn status(&self) -> u16 {
-        match &self.0 {
+        match &self.inner {
             ClientResponseInner::Real(r) => r.status().as_u16(),
             ClientResponseInner::Fake { status, .. } => *status,
         }
@@ -674,7 +754,7 @@ impl ClientResponse {
 
     /// Look up a response header by name. Case-insensitive.
     pub fn header(&self, name: &str) -> Option<String> {
-        match &self.0 {
+        match &self.inner {
             ClientResponseInner::Real(r) => r
                 .headers()
                 .get(name)
@@ -686,58 +766,96 @@ impl ClientResponse {
         }
     }
 
-    /// Read the full body and parse as JSON.
+    /// Read the full body and parse as JSON, enforcing the response-body
+    /// cap (see [`Http::set_max_response_bytes`] /
+    /// [`RequestBuilder::max_response_bytes`]).
     pub async fn json<T: serde::de::DeserializeOwned>(self) -> Result<T, FrameworkError> {
-        match self.0 {
-            ClientResponseInner::Real(r) => r
-                .json()
-                .await
-                .map_err(|e| FrameworkError::internal(format!("Http json decode failed: {e}"))),
-            ClientResponseInner::Fake { body, .. } => serde_json::from_slice(&body)
-                .map_err(|e| FrameworkError::internal(format!("Http json decode failed: {e}"))),
-        }
+        let max = self.max_bytes;
+        let bytes = match self.inner {
+            ClientResponseInner::Real(r) => read_capped(r, max).await?,
+            ClientResponseInner::Fake { body, .. } => check_fake_within_cap(body, max)?,
+        };
+        serde_json::from_slice(&bytes)
+            .map_err(|e| FrameworkError::internal(format!("Http json decode failed: {e}")))
     }
 
-    /// Read the full body as UTF-8 text.
+    /// Read the full body as UTF-8 text, enforcing the response-body cap.
     pub async fn text(self) -> Result<String, FrameworkError> {
-        match self.0 {
-            ClientResponseInner::Real(r) => r
-                .text()
-                .await
-                .map_err(|e| FrameworkError::internal(format!("Http text decode failed: {e}"))),
-            ClientResponseInner::Fake { body, .. } => String::from_utf8(body.to_vec())
-                .map_err(|e| FrameworkError::internal(format!("Http body not UTF-8: {e}"))),
-        }
+        let max = self.max_bytes;
+        let bytes = match self.inner {
+            ClientResponseInner::Real(r) => read_capped(r, max).await?,
+            ClientResponseInner::Fake { body, .. } => check_fake_within_cap(body, max)?,
+        };
+        String::from_utf8(bytes.to_vec())
+            .map_err(|e| FrameworkError::internal(format!("Http body not UTF-8: {e}")))
     }
 
-    /// Read the full body as bytes.
+    /// Read the full body as bytes, enforcing the response-body cap.
     pub async fn bytes(self) -> Result<Bytes, FrameworkError> {
-        match self.0 {
-            ClientResponseInner::Real(r) => r
-                .bytes()
-                .await
-                .map_err(|e| FrameworkError::internal(format!("Http bytes failed: {e}"))),
-            ClientResponseInner::Fake { body, .. } => Ok(body),
+        let max = self.max_bytes;
+        match self.inner {
+            ClientResponseInner::Real(r) => read_capped(r, max).await,
+            ClientResponseInner::Fake { body, .. } => check_fake_within_cap(body, max),
         }
     }
 
     /// Unwrap to the underlying `reqwest::Response`. This is an
     /// escape hatch for callers that need to reach for a `reqwest`
     /// API we don't expose (streaming bodies, redirect policy
-    /// inspection, etc.).
+    /// inspection, etc.). The response-body cap does NOT apply once you
+    /// take the raw response — you own the read from there.
     ///
     /// Returns `Err(FrameworkError::internal(...))` if the response
     /// was produced by [`Http::fake`] — there is no underlying
     /// `reqwest::Response` in that case. Real responses are returned
     /// via `Ok`.
     pub fn into_inner(self) -> Result<reqwest::Response, FrameworkError> {
-        match self.0 {
+        match self.inner {
             ClientResponseInner::Real(r) => Ok(r),
             ClientResponseInner::Fake { .. } => Err(FrameworkError::internal(
                 "into_inner is not available on fake responses",
             )),
         }
     }
+}
+
+/// Buffer a reqwest response body, rejecting it once it exceeds `max`
+/// bytes. A declared `Content-Length` over the cap is rejected before any
+/// body is read; the streaming loop then enforces the cap against the
+/// actual bytes (Content-Length can be absent or lie).
+async fn read_capped(resp: reqwest::Response, max: usize) -> Result<Bytes, FrameworkError> {
+    if let Some(len) = resp.content_length()
+        && len > max as u64
+    {
+        return Err(FrameworkError::internal(format!(
+            "Http response body exceeds the {max}-byte cap (Content-Length {len})"
+        )));
+    }
+    let mut resp = resp;
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| FrameworkError::internal(format!("Http body read failed: {e}")))?
+    {
+        if buf.len() + chunk.len() > max {
+            return Err(FrameworkError::internal(format!(
+                "Http response body exceeds the {max}-byte cap"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(Bytes::from(buf))
+}
+
+/// Enforce the response-body cap on an in-memory fake body.
+fn check_fake_within_cap(body: Bytes, max: usize) -> Result<Bytes, FrameworkError> {
+    if body.len() > max {
+        return Err(FrameworkError::internal(format!(
+            "Http response body exceeds the {max}-byte cap"
+        )));
+    }
+    Ok(body)
 }
 
 #[cfg(test)]

@@ -480,6 +480,72 @@ async fn retry_non_idempotent_opts_post_into_retries() {
 }
 
 #[tokio::test]
+async fn json_serialize_failure_surfaces_as_error_not_null() {
+    use std::collections::HashMap;
+    // serde_json can't represent a map with a non-string (tuple) key, so
+    // `to_value` fails. That must surface as an error, not a `null` body.
+    let bad: HashMap<(i32, i32), i32> = [((1, 2), 3)].into_iter().collect();
+    Http::fake(|| async {
+        let err = Http::post("https://x.test/y")
+            .json(&bad)
+            .send()
+            .await
+            .err()
+            .expect("a serialization failure must surface as an error");
+        assert!(
+            err.to_string().contains("serialization failed"),
+            "expected a serialization error, got: {err}"
+        );
+        // The request must never have gone out.
+        assert_not_sent(|_| true);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn response_body_cap_rejects_oversized_fake_body() {
+    Http::fake(|| async {
+        // ~2 KB fake body, 100-byte per-request cap → reading errors.
+        let big = "x".repeat(2048);
+        fake_response("GET", "/big", 200, serde_json::json!({ "data": big }));
+        let err = Http::get("https://x.test/big")
+            .max_response_bytes(100)
+            .send()
+            .await
+            .expect("send succeeds; the cap is enforced at read time")
+            .bytes()
+            .await
+            .expect_err("an oversized body must be rejected by the cap");
+        assert!(
+            err.to_string().contains("cap"),
+            "expected a cap error, got: {err}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn response_body_cap_rejects_oversized_real_body() {
+    let _net = NETWORK_LOCK.lock().await;
+    // A real server returns a 5 KB body; a 1 KB cap rejects it.
+    let big: &'static str = Box::leak("x".repeat(5000).into_boxed_str());
+    let (addr, _count) = spawn_canned(vec![(200, None, big)]).await;
+    let url = format!("http://{}/x", addr);
+    let err = Http::get(&url)
+        .max_response_bytes(1000)
+        .send()
+        .await
+        .expect("send")
+        .bytes()
+        .await
+        .expect_err("an oversized real body must be rejected by the cap");
+    assert!(
+        err.to_string().contains("cap"),
+        "expected a cap error, got: {err}"
+    );
+}
+
+#[tokio::test]
 async fn into_inner_returns_err_for_fake_response() {
     Http::fake(|| async {
         fake_response("GET", "/x", 200, serde_json::json!({"ok": true}));
