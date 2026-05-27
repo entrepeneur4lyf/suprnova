@@ -19,13 +19,14 @@
 //! }
 //! ```
 
-use crate::{Config, Router, Server};
+use crate::{Config, Router, Schedule, Server};
 use clap::{Parser, Subcommand};
 use sea_orm_migration::prelude::*;
 use std::env;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
+use std::time::Duration;
 
 pub mod maintenance;
 pub mod paths;
@@ -35,6 +36,9 @@ type BootstrapFn = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> 
 
 /// Boxed callback run once after the server boots its services.
 type BootedFn = Box<dyn FnOnce()>;
+
+/// Boxed function that registers the application's scheduled tasks.
+type ScheduleFn = Box<dyn FnOnce(&mut Schedule) + Send>;
 
 /// CLI structure for suprnova applications
 #[derive(Parser)]
@@ -128,6 +132,7 @@ where
     config_fn: Option<Box<dyn FnOnce()>>,
     bootstrap_fn: Option<BootstrapFn>,
     routes_fn: Option<Box<dyn FnOnce() -> Router + Send>>,
+    schedule_fn: Option<ScheduleFn>,
     booted_fns: Vec<BootedFn>,
     _migrator: std::marker::PhantomData<M>,
 }
@@ -148,6 +153,7 @@ impl Application<NoMigrator> {
             config_fn: None,
             bootstrap_fn: None,
             routes_fn: None,
+            schedule_fn: None,
             booted_fns: Vec::new(),
             _migrator: std::marker::PhantomData,
         }
@@ -251,6 +257,27 @@ where
         self
     }
 
+    /// Register the application's scheduled tasks.
+    ///
+    /// The function receives a mutable [`Schedule`] to add tasks to; it is run
+    /// by the `schedule:work` (daemon), `schedule:run` (run-due-once), and
+    /// `schedule:list` subcommands. Without it, those commands report that no
+    /// tasks are registered.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// Application::new()
+    ///     .schedule(schedule::register)
+    /// ```
+    pub fn schedule<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(&mut Schedule) + Send + 'static,
+    {
+        self.schedule_fn = Some(Box::new(f));
+        self
+    }
+
     /// Configure the migrator type for database migrations
     ///
     /// # Example
@@ -267,6 +294,7 @@ where
             config_fn: self.config_fn,
             bootstrap_fn: self.bootstrap_fn,
             routes_fn: self.routes_fn,
+            schedule_fn: self.schedule_fn,
             booted_fns: self.booted_fns,
             _migrator: std::marker::PhantomData,
         }
@@ -300,6 +328,7 @@ where
             config_fn,
             bootstrap_fn,
             routes_fn,
+            schedule_fn,
             booted_fns,
             _migrator,
         } = self;
@@ -335,13 +364,13 @@ where
                 Self::fresh_migrations::<M>().await;
             }
             Some(Commands::ScheduleWork) => {
-                Self::run_scheduler_daemon_internal(bootstrap_fn).await;
+                Self::run_scheduler_daemon_internal(bootstrap_fn, schedule_fn).await;
             }
             Some(Commands::ScheduleRun) => {
-                Self::run_scheduled_tasks_internal(bootstrap_fn).await;
+                Self::run_scheduled_tasks_internal(bootstrap_fn, schedule_fn).await;
             }
             Some(Commands::ScheduleList) => {
-                Self::list_scheduled_tasks().await;
+                Self::list_scheduled_tasks(schedule_fn).await;
             }
             Some(Commands::WorkflowWork) => {
                 Self::run_workflow_worker_internal(bootstrap_fn).await;
@@ -451,7 +480,10 @@ where
 
         sea_orm::Database::connect(&database_url)
             .await
-            .expect("Failed to connect to database")
+            .unwrap_or_else(|e| {
+                eprintln!("suprnova: failed to connect to the database: {e}");
+                std::process::exit(1);
+            })
     }
 
     async fn run_migrations_silent<Migrator: MigratorTrait>() {
@@ -464,74 +496,168 @@ where
     async fn run_migrations<Migrator: MigratorTrait>() {
         println!("Running migrations...");
         let db = Self::get_database_connection().await;
-        Migrator::up(&db, None)
-            .await
-            .expect("Failed to run migrations");
+        if let Err(e) = Migrator::up(&db, None).await {
+            eprintln!("suprnova: migration failed: {e}");
+            std::process::exit(1);
+        }
         println!("Migrations completed successfully!");
     }
 
     async fn show_migration_status<Migrator: MigratorTrait>() {
         println!("Migration status:");
         let db = Self::get_database_connection().await;
-        Migrator::status(&db)
-            .await
-            .expect("Failed to get migration status");
+        if let Err(e) = Migrator::status(&db).await {
+            eprintln!("suprnova: failed to read migration status: {e}");
+            std::process::exit(1);
+        }
     }
 
     async fn rollback_migrations<Migrator: MigratorTrait>(steps: u32) {
         println!("Rolling back {} migration(s)...", steps);
         let db = Self::get_database_connection().await;
-        Migrator::down(&db, Some(steps))
-            .await
-            .expect("Failed to rollback migrations");
+        if let Err(e) = Migrator::down(&db, Some(steps)).await {
+            eprintln!("suprnova: rollback failed: {e}");
+            std::process::exit(1);
+        }
         println!("Rollback completed successfully!");
     }
 
     async fn fresh_migrations<Migrator: MigratorTrait>() {
         println!("WARNING: Dropping all tables and re-running migrations...");
         let db = Self::get_database_connection().await;
-        Migrator::fresh(&db)
-            .await
-            .expect("Failed to refresh database");
+        if let Err(e) = Migrator::fresh(&db).await {
+            eprintln!("suprnova: database refresh failed: {e}");
+            std::process::exit(1);
+        }
         println!("Database refreshed successfully!");
     }
 
-    async fn run_scheduler_daemon_internal(bootstrap_fn: Option<BootstrapFn>) {
-        // Run bootstrap for scheduler context
+    /// Build the application's [`Schedule`] by running the registered
+    /// `schedule_fn` (if any) against a fresh schedule.
+    fn build_schedule(schedule_fn: Option<ScheduleFn>) -> Schedule {
+        let mut schedule = Schedule::new();
+        if let Some(f) = schedule_fn {
+            f(&mut schedule);
+        }
+        schedule
+    }
+
+    /// `schedule:work`: run the scheduler as a long-lived daemon.
+    ///
+    /// The first tick is aligned to the next minute boundary, then due tasks
+    /// are evaluated once per minute (matching Laravel's per-minute cron
+    /// evaluation). Boots the runtime drivers + the app's `bootstrap_fn` first
+    /// so tasks can resolve services; stops on Ctrl-C.
+    async fn run_scheduler_daemon_internal(
+        bootstrap_fn: Option<BootstrapFn>,
+        schedule_fn: Option<ScheduleFn>,
+    ) {
+        if let Err(e) = Self::bootstrap_runtime_drivers().await {
+            eprintln!("suprnova: scheduler bootstrap error: {e}");
+            std::process::exit(1);
+        }
         if let Some(bootstrap_fn) = bootstrap_fn {
             bootstrap_fn().await;
         }
+        let schedule = Self::build_schedule(schedule_fn);
 
         println!("==============================================");
         println!("  suprnova Scheduler Daemon");
         println!("==============================================");
-        println!();
-        println!("  Note: Create tasks with `suprnova make:task <name>`");
-        println!("  Press Ctrl+C to stop");
-        println!();
+        println!(
+            "  {} task(s) registered. Press Ctrl+C to stop.",
+            schedule.len()
+        );
         println!("==============================================");
 
-        eprintln!("Scheduler daemon is not yet configured.");
-        eprintln!("Create a scheduled task with: suprnova make:task <name>");
-        eprintln!("Then register it in src/schedule.rs");
+        // Align the first tick to the next minute boundary, then tick once a
+        // minute. Cron expressions are evaluated against the wall clock at each
+        // tick, so alignment keeps a `* * * * *` task firing at :00.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let until_next_minute = Duration::from_secs(60 - (now.as_secs() % 60))
+            .saturating_sub(Duration::from_nanos(now.subsec_nanos() as u64));
+        let mut tick = tokio::time::interval_at(
+            tokio::time::Instant::now() + until_next_minute,
+            Duration::from_secs(60),
+        );
+        // A task run that overruns a minute must not trigger a catch-up burst
+        // that re-evaluates the same wall-clock minute (double-firing tasks);
+        // skip missed ticks and resume on the next aligned boundary.
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    for (name, result) in schedule.run_due_tasks().await {
+                        if let Err(e) = result {
+                            eprintln!("suprnova: scheduled task '{name}' failed: {e}");
+                        }
+                    }
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    println!("suprnova: scheduler shutting down.");
+                    break;
+                }
+            }
+        }
     }
 
-    async fn run_scheduled_tasks_internal(bootstrap_fn: Option<BootstrapFn>) {
-        // Run bootstrap for scheduler context
+    /// `schedule:run`: evaluate and run the due tasks once, then exit. Exits
+    /// non-zero if any task failed.
+    async fn run_scheduled_tasks_internal(
+        bootstrap_fn: Option<BootstrapFn>,
+        schedule_fn: Option<ScheduleFn>,
+    ) {
+        if let Err(e) = Self::bootstrap_runtime_drivers().await {
+            eprintln!("suprnova: scheduler bootstrap error: {e}");
+            std::process::exit(1);
+        }
         if let Some(bootstrap_fn) = bootstrap_fn {
             bootstrap_fn().await;
         }
+        let schedule = Self::build_schedule(schedule_fn);
 
-        println!("Running scheduled tasks...");
-        eprintln!("Scheduler is not yet configured.");
-        eprintln!("Create a scheduled task with: suprnova make:task <name>");
+        println!("Running due scheduled tasks...");
+        let results = schedule.run_due_tasks().await;
+        if results.is_empty() {
+            println!("No tasks were due.");
+            return;
+        }
+        let mut failed = false;
+        for (name, result) in results {
+            match result {
+                Ok(()) => println!("  ✓ {name}"),
+                Err(e) => {
+                    eprintln!("  ✗ {name}: {e}");
+                    failed = true;
+                }
+            }
+        }
+        if failed {
+            std::process::exit(1);
+        }
     }
 
-    async fn list_scheduled_tasks() {
+    /// `schedule:list`: print every registered task and its cron expression.
+    async fn list_scheduled_tasks(schedule_fn: Option<ScheduleFn>) {
+        let schedule = Self::build_schedule(schedule_fn);
+        if schedule.is_empty() {
+            println!("No scheduled tasks registered.");
+            println!(
+                "Define tasks in src/schedule.rs and wire it with \
+                 `Application::schedule(schedule::register)`."
+            );
+            return;
+        }
         println!("Registered scheduled tasks:");
-        println!();
-        eprintln!("No scheduled tasks registered.");
-        eprintln!("Create a scheduled task with: suprnova make:task <name>");
+        for entry in schedule.tasks() {
+            match &entry.description {
+                Some(desc) => println!("  {} [{:?}] — {desc}", entry.name, entry.expression),
+                None => println!("  {} [{:?}]", entry.name, entry.expression),
+            }
+        }
     }
 
     async fn run_workflow_worker_internal(bootstrap_fn: Option<BootstrapFn>) {
