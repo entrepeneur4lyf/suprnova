@@ -249,7 +249,22 @@ impl CronExpression {
     /// `1..=59` value, or fall back to [`Self::hourly`] / similar
     /// helpers for coarser intervals.
     pub fn every_n_minutes(n: u32) -> Self {
-        Self::parse(&format!("*/{} * * * *", n)).unwrap()
+        Self::try_every_n_minutes(n)
+            .expect("every_n_minutes: step `n` must be in the cron minute range 1..=59")
+    }
+
+    /// Fallible sibling of [`every_n_minutes`](Self::every_n_minutes): returns
+    /// `Err` instead of panicking when `n` is outside `1..=59`. (The infallible
+    /// helper's `# Panics` contract was previously unenforced — the cron parser
+    /// accepts any `u32` without range-checking — so a bad step silently
+    /// produced a never-firing schedule; this validates the contract.)
+    pub fn try_every_n_minutes(n: u32) -> Result<Self, String> {
+        if !(1..=59).contains(&n) {
+            return Err(format!(
+                "every_n_minutes: step `n` must be in 1..=59, got {n}"
+            ));
+        }
+        Self::parse(&format!("*/{} * * * *", n))
     }
 
     /// Every hour at minute 0: `0 * * * *`
@@ -264,7 +279,18 @@ impl CronExpression {
     /// Panics if `minute` is outside `0..=59`. Cron minute field accepts
     /// 0 through 59 inclusive.
     pub fn hourly_at(minute: u32) -> Self {
-        Self::parse(&format!("{} * * * *", minute)).unwrap()
+        Self::try_hourly_at(minute).expect("hourly_at: `minute` must be in 0..=59")
+    }
+
+    /// Fallible sibling of [`hourly_at`](Self::hourly_at): returns `Err`
+    /// instead of panicking when `minute` is outside `0..=59`.
+    pub fn try_hourly_at(minute: u32) -> Result<Self, String> {
+        if minute > 59 {
+            return Err(format!(
+                "hourly_at: `minute` must be in 0..=59, got {minute}"
+            ));
+        }
+        Self::parse(&format!("{} * * * *", minute))
     }
 
     /// Daily at midnight: `0 0 * * *`
@@ -274,23 +300,38 @@ impl CronExpression {
 
     /// Daily at specific time: `M H * * *`
     ///
-    /// `time` is a `HH:MM` string (24-hour clock). Non-numeric segments
-    /// fall back to `0` via `parse().unwrap_or(0)`; segments that ARE
-    /// numeric but out-of-range hit the underlying cron parser.
+    /// `time` is a `HH:MM` string (24-hour clock). Lenient parsing: a string
+    /// that is not exactly two `:`-separated segments falls back to
+    /// [`daily`](Self::daily); a non-numeric segment is treated as `0`.
     ///
     /// # Panics
     ///
-    /// Panics if either segment is numeric but out of cron range
-    /// (hour `0..=23`, minute `0..=59`). Pass a well-formed `"HH:MM"`
-    /// to avoid the panic — e.g. `"09:30"` or `"23:00"`.
+    /// Panics if either numeric segment is out of cron range (hour `0..=23`,
+    /// minute `0..=59`). Pass a well-formed `"HH:MM"` to avoid the panic —
+    /// e.g. `"09:30"` or `"23:00"` — or use [`try_daily_at`](Self::try_daily_at).
     pub fn daily_at(time: &str) -> Self {
+        Self::try_daily_at(time)
+            .expect("daily_at: HH:MM segments must be in cron range (hour 0..=23, minute 0..=59)")
+    }
+
+    /// Fallible sibling of [`daily_at`](Self::daily_at): returns `Err` instead
+    /// of panicking when a numeric `HH:MM` segment is out of range. Mirrors
+    /// `daily_at`'s lenient parsing otherwise (non-`HH:MM` → [`daily`](Self::daily),
+    /// non-numeric segment → `0`).
+    pub fn try_daily_at(time: &str) -> Result<Self, String> {
         let parts: Vec<&str> = time.split(':').collect();
         if parts.len() == 2 {
-            let hour = parts[0].parse().unwrap_or(0);
-            let minute = parts[1].parse().unwrap_or(0);
-            Self::parse(&format!("{} {} * * *", minute, hour)).unwrap()
+            let hour: u32 = parts[0].parse().unwrap_or(0);
+            let minute: u32 = parts[1].parse().unwrap_or(0);
+            if hour > 23 {
+                return Err(format!("daily_at: hour `{hour}` must be in 0..=23"));
+            }
+            if minute > 59 {
+                return Err(format!("daily_at: minute `{minute}` must be in 0..=59"));
+            }
+            Self::parse(&format!("{} {} * * *", minute, hour))
         } else {
-            Self::daily()
+            Ok(Self::daily())
         }
     }
 
@@ -323,7 +364,16 @@ impl CronExpression {
     /// the calendar can hit — months without a 31st silently skip
     /// (this is cron-standard behaviour).
     pub fn monthly_on(day: u32) -> Self {
-        Self::parse(&format!("0 0 {} * *", day)).unwrap()
+        Self::try_monthly_on(day).expect("monthly_on: `day` must be in 1..=31")
+    }
+
+    /// Fallible sibling of [`monthly_on`](Self::monthly_on): returns `Err`
+    /// instead of panicking when `day` is outside `1..=31`.
+    pub fn try_monthly_on(day: u32) -> Result<Self, String> {
+        if !(1..=31).contains(&day) {
+            return Err(format!("monthly_on: `day` must be in 1..=31, got {day}"));
+        }
+        Self::parse(&format!("0 0 {} * *", day))
     }
 
     /// Quarterly on the first day of each quarter at midnight
@@ -388,5 +438,65 @@ mod tests {
     fn test_at_modifier() {
         let expr = CronExpression::daily().at("14:30");
         assert_eq!(expr.expression(), "30 14 * * *");
+    }
+
+    // ---- #380c: helpers now validate ranges (contract-bug fix) ----------
+    //
+    // The cron parser accepts any `u32` without range-checking, so these
+    // helpers' `# Panics` docs were unenforced and bad input silently became
+    // a never-firing schedule. The `try_*` siblings now return descriptive
+    // `Err`; the infallible variants `expect` on the same check.
+
+    #[test]
+    fn try_every_n_minutes_validates_step() {
+        assert!(CronExpression::try_every_n_minutes(5).is_ok());
+        let err = CronExpression::try_every_n_minutes(0).unwrap_err();
+        assert!(err.contains("1..=59"), "got: {err}");
+        assert!(CronExpression::try_every_n_minutes(60).is_err());
+    }
+
+    #[test]
+    fn try_hourly_at_validates_minute() {
+        assert!(CronExpression::try_hourly_at(30).is_ok());
+        let err = CronExpression::try_hourly_at(99).unwrap_err();
+        assert!(err.contains("99") && err.contains("0..=59"), "got: {err}");
+    }
+
+    #[test]
+    fn try_daily_at_validates_but_mirrors_lenient_parse() {
+        // Out-of-range numeric -> Err.
+        assert!(CronExpression::try_daily_at("25:00").is_err());
+        assert!(CronExpression::try_daily_at("09:61").is_err());
+        // Well-formed -> Ok.
+        assert_eq!(
+            CronExpression::try_daily_at("09:30").unwrap().expression(),
+            "30 9 * * *"
+        );
+        // Lenient (unchanged): non-HH:MM falls back to daily, non-numeric -> 0.
+        assert_eq!(
+            CronExpression::try_daily_at("nope").unwrap().expression(),
+            "0 0 * * *"
+        );
+        assert_eq!(
+            CronExpression::try_daily_at("ab:cd").unwrap().expression(),
+            "0 0 * * *"
+        );
+    }
+
+    #[test]
+    fn try_monthly_on_validates_day() {
+        assert!(CronExpression::try_monthly_on(15).is_ok());
+        assert!(CronExpression::try_monthly_on(0).is_err());
+        assert!(CronExpression::try_monthly_on(99).is_err());
+    }
+
+    #[test]
+    fn infallible_factories_now_panic_on_out_of_range() {
+        use std::panic::catch_unwind;
+        assert!(catch_unwind(|| CronExpression::hourly_at(99)).is_err());
+        assert!(catch_unwind(|| CronExpression::monthly_on(99)).is_err());
+        assert!(catch_unwind(|| CronExpression::every_n_minutes(0)).is_err());
+        // Sanity: valid inputs still build the expected expression.
+        assert_eq!(CronExpression::hourly_at(30).expression(), "30 * * * *");
     }
 }

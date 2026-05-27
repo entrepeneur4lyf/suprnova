@@ -162,6 +162,13 @@ impl TaskBuilder {
         self
     }
 
+    /// Fallible sibling of [`hourly_at`](Self::hourly_at): returns `Err`
+    /// instead of panicking when `minute` is outside `0..=59`.
+    pub fn try_hourly_at(mut self, minute: u32) -> Result<Self, String> {
+        self.expression = CronExpression::try_hourly_at(minute)?;
+        Ok(self)
+    }
+
     /// Run every 2 hours
     pub fn every_two_hours(mut self) -> Self {
         self.expression = CronExpression::parse("0 */2 * * *").unwrap();
@@ -203,16 +210,35 @@ impl TaskBuilder {
         self
     }
 
+    /// Fallible sibling of [`daily_at`](Self::daily_at): returns `Err` instead
+    /// of panicking when a numeric `HH:MM` segment is out of cron range.
+    pub fn try_daily_at(mut self, time: &str) -> Result<Self, String> {
+        self.expression = CronExpression::try_daily_at(time)?;
+        Ok(self)
+    }
+
     /// Run twice daily at specific times
     ///
     /// # Example
     /// ```rust,ignore
     /// .twice_daily(1, 13) // At 1:00 AM and 1:00 PM
     /// ```
-    pub fn twice_daily(mut self, first_hour: u32, second_hour: u32) -> Self {
+    pub fn twice_daily(self, first_hour: u32, second_hour: u32) -> Self {
+        self.try_twice_daily(first_hour, second_hour)
+            .expect("twice_daily: both hours must be in the cron hour range 0..=23")
+    }
+
+    /// Fallible sibling of [`twice_daily`](Self::twice_daily): returns `Err`
+    /// instead of panicking when either hour is outside `0..=23`.
+    pub fn try_twice_daily(mut self, first_hour: u32, second_hour: u32) -> Result<Self, String> {
+        if first_hour > 23 || second_hour > 23 {
+            return Err(format!(
+                "twice_daily: hours must be in 0..=23, got {first_hour} and {second_hour}"
+            ));
+        }
         self.expression =
-            CronExpression::parse(&format!("0 {},{} * * *", first_hour, second_hour)).unwrap();
-        self
+            CronExpression::parse(&format!("0 {},{} * * *", first_hour, second_hour))?;
+        Ok(self)
     }
 
     /// Set the time for the current schedule
@@ -326,6 +352,13 @@ impl TaskBuilder {
     pub fn monthly_on(mut self, day: u32) -> Self {
         self.expression = CronExpression::monthly_on(day);
         self
+    }
+
+    /// Fallible sibling of [`monthly_on`](Self::monthly_on): returns `Err`
+    /// instead of panicking when `day` is outside `1..=31`.
+    pub fn try_monthly_on(mut self, day: u32) -> Result<Self, String> {
+        self.expression = CronExpression::try_monthly_on(day)?;
+        Ok(self)
     }
 
     /// Run quarterly on the first day of each quarter at midnight
@@ -465,5 +498,50 @@ mod tests {
         let entry = builder.build(5);
 
         assert_eq!(entry.name, "closure-task-5");
+    }
+
+    // ---- #380c: fallible schedule helpers (range validation) ------------
+
+    #[test]
+    fn try_hourly_at_validates_minute() {
+        assert!(create_test_builder().try_hourly_at(30).is_ok());
+        assert!(create_test_builder().try_hourly_at(99).is_err());
+    }
+
+    #[test]
+    fn try_daily_at_validates_time() {
+        assert!(create_test_builder().try_daily_at("09:30").is_ok());
+        assert!(create_test_builder().try_daily_at("25:00").is_err());
+    }
+
+    #[test]
+    fn try_twice_daily_validates_hours() {
+        let Ok(ok) = create_test_builder().try_twice_daily(1, 13) else {
+            panic!("try_twice_daily(1, 13) must be Ok");
+        };
+        assert_eq!(ok.expression.expression(), "0 1,13 * * *");
+
+        let Err(err) = create_test_builder().try_twice_daily(1, 99) else {
+            panic!("try_twice_daily(1, 99) must be Err");
+        };
+        assert!(err.contains("0..=23"), "got: {err}");
+    }
+
+    #[test]
+    fn try_monthly_on_validates_day() {
+        assert!(create_test_builder().try_monthly_on(15).is_ok());
+        assert!(create_test_builder().try_monthly_on(99).is_err());
+    }
+
+    #[test]
+    fn twice_daily_still_panics_on_out_of_range() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            create_test_builder().twice_daily(1, 99)
+        }));
+        assert!(
+            result.is_err(),
+            "infallible twice_daily must still panic on out-of-range hour",
+        );
     }
 }
