@@ -68,7 +68,22 @@ const PATH_SEGMENT_ENCODE: &AsciiSet = &CONTROLS
 /// Poisoned write locks are recovered via `PoisonError::into_inner` —
 /// a panic during one thread's registration must not silently make
 /// every subsequent name lookup return `None`.
+///
+/// Use [`try_register_route_name`] to get an `Err(FrameworkError)` instead
+/// of a panic when names come from a fallible source (dynamic config,
+/// plugins).
 pub fn register_route_name(name: &str, path: &str) {
+    try_register_route_name(name, path).unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Fallible sibling of [`register_route_name`]: returns `Err(FrameworkError)`
+/// (naming the conflicting name and the path it is already bound to) instead
+/// of panicking when `name` is already registered to a *different* `path`.
+///
+/// Re-registering the same `(name, path)` pair stays a no-op `Ok(())`
+/// (idempotent). Poisoned write locks are recovered in place, matching
+/// [`register_route_name`]. Backs [`RouteBuilder::try_name`].
+pub fn try_register_route_name(name: &str, path: &str) -> Result<(), FrameworkError> {
     let registry = ROUTE_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
     let mut map = match registry.write() {
         Ok(g) => g,
@@ -77,13 +92,14 @@ pub fn register_route_name(name: &str, path: &str) {
     if let Some(existing) = map.get(name)
         && existing != path
     {
-        panic!(
+        return Err(FrameworkError::internal(format!(
             "Route name '{name}' is already registered to path '{existing}'; \
              refusing to re-register to '{path}'. Route names must be unique \
              across the application — rename one of the routes.",
-        );
+        )));
     }
     map.insert(name.to_string(), path.to_string());
+    Ok(())
 }
 
 fn lookup_route(name: &str) -> Option<String> {
@@ -861,10 +877,24 @@ pub struct RouteBuilder {
 }
 
 impl RouteBuilder {
-    /// Name the most recently registered route
+    /// Name the most recently registered route.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `name` is already registered to a different path (see
+    /// [`register_route_name`]). Use [`RouteBuilder::try_name`] for a
+    /// fallible variant.
     pub fn name(self, name: &str) -> Router {
-        register_route_name(name, &self.last_path);
-        self.router
+        self.try_name(name).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`RouteBuilder::name`]: returns
+    /// `Err(FrameworkError)` (naming the conflicting name) instead of
+    /// panicking when `name` is already bound to a different path. The
+    /// builder is consumed either way.
+    pub fn try_name(self, name: &str) -> Result<Router, FrameworkError> {
+        try_register_route_name(name, &self.last_path)?;
+        Ok(self.router)
     }
 
     /// Apply middleware to the most recently registered route

@@ -23,4 +23,5 @@ pub use macros::{
 };
 pub use router::{
     BoxedHandler, RouteBuilder, Router, WsMatch, register_route_name, route, route_with_params,
+    try_register_route_name,
 };

@@ -429,6 +429,52 @@ For the route `/outer/inner/route`, middleware executes in order: `OuterMiddlewa
 - **Chaining**: Multiple middleware can be chained on a group
 - **Nesting**: Groups can be nested to any depth with inherited middleware
 
+## Fallible Registration
+
+Route registration runs once at boot, so a duplicate or malformed route is
+treated as a programmer error: the plain helpers (`get`, `post`, `put`,
+`delete`, `ws`, `.name(...)`, and the `From<GroupBuilder>` / `.into()`
+conversion) **panic** to fail loudly at startup. That is the right default
+for routes declared in source.
+
+When route patterns or names come from a source you don't control at compile
+time — dynamic configuration, a plugin system, a test that deliberately
+registers conflicting routes — use the `try_*` siblings instead. They return
+`Result<_, FrameworkError>` (the error names the offending method and path,
+or the conflicting name) rather than panicking:
+
+| Panicking | Fallible sibling | Returns |
+|-----------|------------------|---------|
+| `Router::get` / `post` / `put` / `delete` | `try_get` / `try_post` / `try_put` / `try_delete` | `Result<RouteBuilder, FrameworkError>` |
+| `RouteBuilder::get` / `post` / `put` / `delete` | same `try_*` names | `Result<RouteBuilder, FrameworkError>` |
+| `Router::ws` (and every `ws_*` variant) | `try_ws` (and every `try_ws_*`) | `Result<Router, FrameworkError>` |
+| `RouteBuilder::name` | `try_name` | `Result<Router, FrameworkError>` |
+| `GroupBuilder` → `Router` via `.into()` | `GroupBuilder::try_finalize` | `Result<Router, FrameworkError>` |
+
+```rust
+use suprnova::{FrameworkError, Router};
+
+// `path` comes from dynamic config, so a malformed or duplicate pattern is
+// a recoverable error rather than a startup panic. `try_get` yields a
+// RouteBuilder on success, which `.into()` turns back into a Router.
+fn register_dynamic(router: Router, path: &str) -> Result<Router, FrameworkError> {
+    Ok(router.try_get(path, health)?.into())
+}
+```
+
+A duplicate group route is recoverable the same way — because `From` cannot
+be fallible, the fallible counterpart of `.into()` is the inherent
+`try_finalize` method:
+
+```rust
+let router: Router = Router::new()
+    .group("/api", |r| r.get("/users", list).post("/users", create))
+    .try_finalize()?; // Err(FrameworkError) instead of a panic on a conflict
+```
+
+The panicking helpers remain as ergonomic escape hatches — the `try_*`
+siblings are purely additive.
+
 ## Fallback Route
 
 The `fallback!` macro allows you to define a custom handler that is called when no other routes match the request. This is useful for implementing custom 404 pages or catch-all handlers.

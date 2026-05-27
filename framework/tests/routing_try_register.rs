@@ -28,6 +28,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use async_trait::async_trait;
 use suprnova::http::{Request, text};
+use suprnova::routing::try_register_route_name;
 use suprnova::ws::{WebSocketHandler, WsSocket};
 use suprnova::{FrameworkError, Response, Router};
 
@@ -306,5 +307,68 @@ fn group_try_finalize_ok_path_merges_routes() {
             .match_route(&hyper::Method::POST, "/api/users")
             .is_some(),
         "POST /api/users must be registered",
+    );
+}
+
+// ---- Route NAME registration (#380e) ----------------------------------
+//
+// The route-name registry is a process-global, so every test here uses a
+// uniquely-prefixed name to avoid cross-test pollution under parallel runs.
+
+#[test]
+fn route_builder_try_name_returns_err_on_duplicate_name_different_path() {
+    // First binding of the name to /a succeeds...
+    let _router: Router = Router::new()
+        .get("/a", h)
+        .try_name("try380e.dup")
+        .expect("first try_name binding must succeed");
+    // ...rebinding the same name to a DIFFERENT path is the recoverable error.
+    let Err(err) = Router::new().get("/b", h).try_name("try380e.dup") else {
+        panic!("try_name must return Err when the name is already bound elsewhere");
+    };
+    assert!(
+        err.to_string().contains("Route name 'try380e.dup'"),
+        "error must name the conflicting route name; got: {err}",
+    );
+}
+
+#[test]
+fn route_builder_name_still_panics_on_duplicate_name() {
+    let _router = Router::new().get("/a", h).name("try380e.panic");
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let _ = Router::new().get("/b", h).name("try380e.panic");
+    }));
+    let Err(payload) = result else {
+        panic!("RouteBuilder::name must still panic on a duplicate name");
+    };
+    assert!(
+        panic_message_of(payload).contains("Route name 'try380e.panic'"),
+        "panic must preserve the original route-name message",
+    );
+}
+
+#[test]
+fn try_name_same_name_same_path_is_idempotent() {
+    let _first: Router = Router::new()
+        .get("/same", h)
+        .try_name("try380e.idem")
+        .expect("first binding ok");
+    // Re-binding the SAME (name, path) pair is a no-op, not an error.
+    let second = Router::new().get("/same", h).try_name("try380e.idem");
+    assert!(
+        second.is_ok(),
+        "re-registering the same (name, path) must stay Ok (idempotent)",
+    );
+}
+
+#[test]
+fn try_register_route_name_primitive_returns_err_on_conflict() {
+    try_register_route_name("try380e.direct", "/x").expect("first binding ok");
+    let Err(err) = try_register_route_name("try380e.direct", "/y") else {
+        panic!("try_register_route_name must return Err on a name->different-path conflict");
+    };
+    assert!(
+        err.to_string().contains("Route name 'try380e.direct'"),
+        "error must name the conflicting route name; got: {err}",
     );
 }
