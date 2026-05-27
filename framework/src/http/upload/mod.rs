@@ -117,6 +117,89 @@ pub fn global_upload_spill_threshold() -> usize {
     }
 }
 
+/// Default ceiling on the number of parts accepted from a single
+/// multipart request.
+///
+/// The total-byte cap bounds raw payload bytes, but multipart framing
+/// (boundary + per-part headers) is not counted toward it — so without a
+/// part ceiling a body composed of many tiny parts can drive unbounded
+/// `MultipartPayload` growth while staying within the byte budget. 1000
+/// mirrors PHP's `max_input_vars` and sits comfortably above any
+/// legitimate form.
+pub const DEFAULT_MAX_MULTIPART_PARTS: usize = 1000;
+
+static GLOBAL_MAX_PARTS: AtomicUsize = AtomicUsize::new(0);
+
+/// Count of multipart parts spilled from memory to a temp file since
+/// process start (see [`upload_tempfiles_spilled_total`]).
+static UPLOAD_TEMPFILES_SPILLED: AtomicUsize = AtomicUsize::new(0);
+
+/// Set the process-global ceiling on the number of parts accepted from a
+/// single multipart request. Once a request presents more than this many
+/// parts the parser rejects it with HTTP 413 *before reading the
+/// offending part*, so allocation stays bounded regardless of per-field
+/// configuration.
+///
+/// Setting `0` is special: it means "use [`DEFAULT_MAX_MULTIPART_PARTS`]".
+/// Setting `usize::MAX` disables the ceiling.
+///
+/// Thread-safe; the most recent value wins for any subsequent request.
+pub fn set_global_max_multipart_parts(parts: usize) {
+    GLOBAL_MAX_PARTS.store(parts, Ordering::SeqCst);
+}
+
+/// Read the currently-configured part ceiling. Returns the default if
+/// [`set_global_max_multipart_parts`] has never been called or was called
+/// with `0`.
+pub fn global_max_multipart_parts() -> usize {
+    let stored = GLOBAL_MAX_PARTS.load(Ordering::SeqCst);
+    if stored == 0 {
+        DEFAULT_MAX_MULTIPART_PARTS
+    } else {
+        stored
+    }
+}
+
+/// Number of multipart parts that have spilled from memory to a temp file
+/// since process start.
+///
+/// A monotonically increasing process-global counter, useful as an
+/// upload-pressure signal. Oversized *text* parts are rejected at the
+/// in-memory spill threshold and never spill, so this counter reflects
+/// only file parts that legitimately exceeded the threshold.
+pub fn upload_tempfiles_spilled_total() -> usize {
+    UPLOAD_TEMPFILES_SPILLED.load(Ordering::SeqCst)
+}
+
+/// Limits enforced while streaming a multipart body into a
+/// [`MultipartPayload`].
+///
+/// Construct one and hand it to [`parse_multipart_streaming_with_limits`].
+/// The [`parse_multipart_streaming`] convenience wrapper fills it from the
+/// process-global accessors; `#[derive(MultipartRequest)]` fills it from
+/// the per-struct `#[multipart(...)]` / `#[field(..., max_count = N)]`
+/// attributes.
+pub struct MultipartLimits<'a> {
+    /// Hard ceiling on total accumulated body bytes across all parts.
+    /// Exceeding it returns HTTP 413; a declared `Content-Length` above it
+    /// is rejected before any body byte is read.
+    pub max_body_bytes: usize,
+    /// Hard ceiling on the number of parts. The (ceiling + 1)-th part is
+    /// rejected with HTTP 413 before it is read, bounding allocation
+    /// against many-tiny-parts flooding.
+    pub max_parts: usize,
+    /// Per-part in-memory byte threshold before a file part spills to a
+    /// temp file. A text part that crosses this threshold is rejected
+    /// (HTTP 400) rather than spilled.
+    pub spill_threshold: usize,
+    /// Per-field count ceilings keyed by wire field name. When a field
+    /// reaches its ceiling, the next part carrying that name is rejected
+    /// with HTTP 422 before it is read — so the (ceiling + 1)-th part
+    /// never allocates. Names absent from this list are bounded only by
+    /// `max_parts`.
+    pub per_field_max_counts: &'a [(&'a str, usize)],
+}
+
 /// Underlying storage for an [`UploadedFile`] part.
 ///
 /// Pre-allocated by the multipart parser based on whether the part
@@ -380,6 +463,7 @@ async fn collect_part<F>(
     spill_threshold: usize,
     body_cap: usize,
     total_so_far: &mut usize,
+    is_text: bool,
 ) -> Result<CollectedPart, FrameworkError>
 where
     F: FnMut(&str, &[u8], u64) -> Result<(), FrameworkError>,
@@ -421,6 +505,21 @@ where
                 // switch backing for every subsequent chunk.
                 mem.extend_from_slice(&chunk);
                 if mem.len() > spill_threshold {
+                    // A text part must fit in memory: the spill threshold
+                    // is a sizing hint for opaque file payloads, not for
+                    // arbitrary form fields. Reject an oversized text part
+                    // here, the moment it crosses the threshold, instead
+                    // of streaming the rest to a temp file only to reject
+                    // it after the part is fully consumed.
+                    if is_text {
+                        return Err(FrameworkError::Domain {
+                            message: format!(
+                                "text field '{name}' exceeded the {spill_threshold}-byte in-memory limit; reject as oversized"
+                            ),
+                            status_code: 400,
+                        });
+                    }
+                    UPLOAD_TEMPFILES_SPILLED.fetch_add(1, Ordering::SeqCst);
                     let temp = NamedTempFile::new().map_err(|e| {
                         FrameworkError::internal(format!("create upload tempfile: {e}"))
                     })?;
@@ -480,8 +579,10 @@ where
 }
 
 /// Stream the body of `req` into a `MultipartPayload`, capped at
-/// `max_body_bytes` total accumulated bytes across all parts and
-/// spilling parts above `spill_threshold` to temp files.
+/// `max_body_bytes` total accumulated bytes across all parts, bounded to
+/// `max_parts` parts, spilling file parts above `spill_threshold` to temp
+/// files, and enforcing any per-field `max_count` ceilings in
+/// `per_field_max_counts` during streaming.
 ///
 /// The `per_field_validator` callback fires after each chunk with
 /// `(field_name, sniff_buffer, total_size_so_far)`. Validators may
@@ -495,19 +596,27 @@ where
 /// # Errors
 ///
 /// - 400 if the request is malformed (missing content-type, bad boundary)
-/// - 413 if the total body exceeds `max_body_bytes`
+/// - 413 if a declared `Content-Length`, the accumulated body size, or the
+///   number of parts exceeds the configured ceiling
+/// - 422 if a part would push a field past its `per_field_max_counts` ceiling
 /// - Whatever `per_field_validator` returns (typically 413 for individual
 ///   field size caps via `MaxSize<N>`, or 422 for content checks)
 /// - 500 for I/O failures spilling to / writing the temp file
-pub async fn parse_multipart_streaming_with_cap<F>(
+pub async fn parse_multipart_streaming_with_limits<F>(
     req: crate::http::Request,
-    max_body_bytes: usize,
-    spill_threshold: usize,
+    limits: MultipartLimits<'_>,
     mut per_field_validator: F,
 ) -> Result<MultipartPayload, FrameworkError>
 where
     F: FnMut(&str, &[u8], u64) -> Result<(), FrameworkError>,
 {
+    let MultipartLimits {
+        max_body_bytes,
+        max_parts,
+        spill_threshold,
+        per_field_max_counts,
+    } = limits;
+
     let content_type = req
         .content_type()
         .ok_or_else(|| FrameworkError::Domain {
@@ -519,6 +628,21 @@ where
         message: format!("invalid multipart boundary: {e}"),
         status_code: 400,
     })?;
+
+    // Pre-reject an honestly-declared oversized body before reading a
+    // single frame, mirroring the generic body path (`body_bytes_with_cap`).
+    // A client that lies (small Content-Length, large body) is still caught
+    // progressively by the per-chunk byte cap inside `collect_part`.
+    if let Some(declared) = req
+        .header("content-length")
+        .and_then(|v| v.parse::<u64>().ok())
+        && declared > max_body_bytes as u64
+    {
+        return Err(FrameworkError::Domain {
+            message: format!("multipart body exceeds {max_body_bytes} bytes (cap)"),
+            status_code: 413,
+        });
+    }
 
     let (_parts, body) = req.into_parts();
     // `BodyStream` would yield `Result<Frame<Bytes>, _>` and `Frame<Bytes>`
@@ -555,6 +679,16 @@ where
     let mut payload = MultipartPayload::default();
     let mut total_bytes: usize = 0;
 
+    // Per-field count ceilings (`max_count`) enforced during streaming.
+    // `cap_for` maps a field's wire name to its ceiling; `seen_for` tracks
+    // how many parts with that name have been accepted so far. Keying
+    // `seen_for` by the `&str` borrowed from `cap_for` (not the per-part
+    // `String`) satisfies the borrow checker without cloning names.
+    let cap_for: std::collections::HashMap<&str, usize> =
+        per_field_max_counts.iter().copied().collect();
+    let mut seen_for: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut part_count: usize = 0;
+
     while let Some(mut field) =
         multipart
             .next_field()
@@ -568,6 +702,33 @@ where
         let file_name = field.file_name().map(|s| s.to_string());
         let mime = field.content_type().map(|m| m.to_string());
 
+        // Bound the total part count before reading the part. The byte cap
+        // limits raw payload bytes but not the *number* of parts (multipart
+        // framing bytes aren't counted toward it), so without this a body
+        // of many tiny parts could grow `payload.fields` unbounded within
+        // the byte budget. Reject the (max_parts + 1)-th part before it
+        // allocates.
+        part_count += 1;
+        if part_count > max_parts {
+            return Err(FrameworkError::Domain {
+                message: format!("multipart request exceeds {max_parts} parts (cap)"),
+                status_code: 413,
+            });
+        }
+
+        // Per-field `max_count`: reject the (ceiling + 1)-th part carrying
+        // this name before it is read, so the extra part never allocates.
+        if let Some((field_key, &cap)) = cap_for.get_key_value(name.as_str()) {
+            let seen = seen_for.entry(*field_key).or_insert(0);
+            *seen += 1;
+            if *seen > cap {
+                return Err(FrameworkError::Domain {
+                    message: format!("field '{name}' exceeds max_count {cap}"),
+                    status_code: 422,
+                });
+            }
+        }
+
         let collected = collect_part(
             &mut field,
             &name,
@@ -575,6 +736,7 @@ where
             spill_threshold,
             max_body_bytes,
             &mut total_bytes,
+            file_name.is_none(),
         )
         .await?;
 
@@ -627,13 +789,45 @@ where
 /// `per_field_validator(name, sniff, size)` after each chunk so the
 /// caller can short-circuit oversized parts at byte boundaries.
 ///
-/// Thin wrapper around [`parse_multipart_streaming_with_cap`] using the
-/// process-global cap from [`global_max_multipart_body_bytes`] and the
-/// process-global spill threshold from
-/// [`global_upload_spill_threshold`]. New callers that want to pin the
-/// cap and/or threshold to known values should prefer
-/// [`parse_multipart_streaming_with_cap`] directly; this exists for
-/// backwards compatibility with the pre-cap signature.
+/// Stream the body of `req` into a [`MultipartPayload`], capped at
+/// `max_body_bytes` total bytes and spilling file parts above
+/// `spill_threshold` to temp files.
+///
+/// A convenience over [`parse_multipart_streaming_with_limits`] for callers
+/// that only need to pin the byte cap and spill threshold: the part-count
+/// ceiling defaults to [`global_max_multipart_parts`] and no per-field
+/// `max_count` ceilings are applied. `Content-Length` pre-rejection and the
+/// global part-count cap still apply.
+pub async fn parse_multipart_streaming_with_cap<F>(
+    req: crate::http::Request,
+    max_body_bytes: usize,
+    spill_threshold: usize,
+    per_field_validator: F,
+) -> Result<MultipartPayload, FrameworkError>
+where
+    F: FnMut(&str, &[u8], u64) -> Result<(), FrameworkError>,
+{
+    parse_multipart_streaming_with_limits(
+        req,
+        MultipartLimits {
+            max_body_bytes,
+            max_parts: global_max_multipart_parts(),
+            spill_threshold,
+            per_field_max_counts: &[],
+        },
+        per_field_validator,
+    )
+    .await
+}
+
+/// Thin wrapper around [`parse_multipart_streaming_with_limits`] that
+/// fills [`MultipartLimits`] from the process-global accessors
+/// ([`global_max_multipart_body_bytes`], [`global_max_multipart_parts`],
+/// [`global_upload_spill_threshold`]) and applies no per-field count
+/// ceilings. Callers that need to pin limits to known values — or enforce
+/// per-field `max_count` — should call
+/// [`parse_multipart_streaming_with_limits`] directly;
+/// `#[derive(MultipartRequest)]` does exactly that.
 pub async fn parse_multipart_streaming<F>(
     req: crate::http::Request,
     per_field_validator: F,
@@ -641,10 +835,14 @@ pub async fn parse_multipart_streaming<F>(
 where
     F: FnMut(&str, &[u8], u64) -> Result<(), FrameworkError>,
 {
-    parse_multipart_streaming_with_cap(
+    parse_multipart_streaming_with_limits(
         req,
-        global_max_multipart_body_bytes(),
-        global_upload_spill_threshold(),
+        MultipartLimits {
+            max_body_bytes: global_max_multipart_body_bytes(),
+            max_parts: global_max_multipart_parts(),
+            spill_threshold: global_upload_spill_threshold(),
+            per_field_max_counts: &[],
+        },
         per_field_validator,
     )
     .await

@@ -82,6 +82,11 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
     let mut validator_arms = Vec::new();
     let mut validator_decls = Vec::new();
     let mut struct_init = Vec::new();
+    // `(wire_name, max_count)` pairs for every Vec field carrying a
+    // `max_count` ceiling. Handed to the parser via
+    // `MultipartLimits::per_field_max_counts` so the ceiling is enforced
+    // during streaming, before the offending part allocates.
+    let mut max_count_entries: Vec<proc_macro2::TokenStream> = Vec::new();
 
     for field in &fields.named {
         let ident = field.ident.clone().unwrap();
@@ -89,17 +94,18 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
 
         // Parse `#[field("name")]` or `#[field("name", max_count = N)]`.
         //
-        // `max_count = N` is a count cap on Vec fields. The Phase 4 body
-        // cap blocks total bytes but a `Vec<UploadedFile<()>>` field could
-        // accept unlimited part count within that budget (a request with
-        // 100k 1-byte parts in a 25 MiB body would allocate a
-        // `MultipartValue::File` per part). `max_count` enforces a
-        // per-Vec ceiling: once the in-progress Vec reaches `max_count`
-        // parts, the next push short-circuits with 422 before allocating.
+        // `max_count = N` is a count ceiling on Vec fields. The total-byte
+        // cap blocks raw payload bytes, but a `Vec<UploadedFile<()>>` field
+        // could otherwise accept an unbounded number of parts within that
+        // budget (multipart framing bytes are not counted toward the byte
+        // cap). `max_count` is handed to the parser via
+        // `MultipartLimits::per_field_max_counts` and enforced DURING
+        // streaming: the (cap + 1)-th part carrying this name is rejected
+        // with 422 before it is read, so the extra part never allocates.
         //
-        // Currently honoured for `Vec<UploadedFile<V>>` (FileVec) and
+        // Honoured for `Vec<UploadedFile<V>>` (FileVec) and
         // `Vec<T: FromStr>` (TextVec). On scalar/option fields the
-        // attribute is accepted but does nothing (the parser keeps
+        // attribute is accepted but does nothing (those keep
         // first-write-wins semantics already).
         let mut field_name: Option<LitStr> = None;
         let mut max_count: Option<usize> = None;
@@ -263,33 +269,20 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                         <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_chunk(&#v_ident, sniff, size)?;
                     }
                 });
-                // `max_count` short-circuit: when the attribute is set,
-                // emit a length check BEFORE pushing the file into the
-                // Vec. We test against the cap (not cap-1) and return
-                // 422 the moment a request would push the (cap+1)-th
-                // file. The check is omitted when no cap is configured
-                // so existing callers see no behavioural change.
-                let cap_guard = match max_count {
-                    Some(cap) => quote! {
-                        if #ident.len() >= #cap {
-                            return ::core::result::Result::Err(::suprnova::FrameworkError::Domain {
-                                message: format!(
-                                    "field '{}' exceeds max_count {}",
-                                    #field_name_str, #cap
-                                ),
-                                status_code: 422,
-                            });
-                        }
-                    },
-                    None => quote! {},
-                };
+                // `max_count` (when set) is enforced by the parser during
+                // streaming via `MultipartLimits::per_field_max_counts`: the
+                // (cap + 1)-th part with this name is rejected with 422
+                // before it is read, so the extra part never allocates.
+                // Collect the `(name, cap)` pair for the limits struct.
+                if let Some(cap) = max_count {
+                    max_count_entries.push(quote! { (#field_name_str, #cap) });
+                }
                 field_arms.push(quote! {
                     #field_name_str => {
                         if let ::suprnova::http::upload::MultipartValue::File { backing, size, file_name, content_type, inferred_extension, sniff } = value {
                             <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_final(
                                 &#v_ident, &sniff, size, content_type.as_deref()
                             )?;
-                            #cap_guard
                             #ident.push(
                                 match backing {
                                     ::suprnova::http::upload::UploadedFileBacking::Memory(b) =>
@@ -370,23 +363,13 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
             }
             FieldShape::TextVec { inner_ty } => {
                 // `max_count` on text Vec fields covers the same DoS as
-                // file Vec fields: 100k text parts in a 25 MiB body would
-                // still allocate a parsed scalar per part. Emit the same
-                // length-check short-circuit when the attribute is set.
-                let cap_guard = match max_count {
-                    Some(cap) => quote! {
-                        if #ident.len() >= #cap {
-                            return ::core::result::Result::Err(::suprnova::FrameworkError::Domain {
-                                message: format!(
-                                    "field '{}' exceeds max_count {}",
-                                    #field_name_str, #cap
-                                ),
-                                status_code: 422,
-                            });
-                        }
-                    },
-                    None => quote! {},
-                };
+                // file Vec fields: many text parts each allocate a parsed
+                // scalar. Like FileVec, the ceiling is enforced by the
+                // parser during streaming via
+                // `MultipartLimits::per_field_max_counts`.
+                if let Some(cap) = max_count {
+                    max_count_entries.push(quote! { (#field_name_str, #cap) });
+                }
                 field_arms.push(quote! {
                     #field_name_str => {
                         if let ::suprnova::http::upload::MultipartValue::Text(s) = value {
@@ -399,7 +382,6 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                                     ),
                                     status_code: 400,
                                 })?;
-                            #cap_guard
                             #ident.push(parsed);
                         }
                     }
@@ -443,10 +425,15 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
 
                 let __max_body_bytes: usize = #max_body_bytes_expr;
                 let __spill_threshold: usize = ::suprnova::http::upload::global_upload_spill_threshold();
-                let payload = ::suprnova::http::upload::parse_multipart_streaming_with_cap(
+                let __limits = ::suprnova::http::upload::MultipartLimits {
+                    max_body_bytes: __max_body_bytes,
+                    max_parts: ::suprnova::http::upload::global_max_multipart_parts(),
+                    spill_threshold: __spill_threshold,
+                    per_field_max_counts: &[ #(#max_count_entries),* ],
+                };
+                let payload = ::suprnova::http::upload::parse_multipart_streaming_with_limits(
                     req,
-                    __max_body_bytes,
-                    __spill_threshold,
+                    __limits,
                     |name: &str, sniff: &[u8], size: u64| -> ::core::result::Result<(), ::suprnova::FrameworkError> {
                         match name {
                             #(#validator_arms)*

@@ -197,12 +197,7 @@ impl Request {
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        let content_length = self
-            .parts
-            .headers
-            .get("content-length")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<u64>().ok());
+        let content_length = super::body::parse_content_length(&self.parts.headers);
 
         let params = self.params;
 
@@ -250,12 +245,7 @@ impl Request {
     /// Calling this twice is a no-op on the second call (the body is
     /// already buffered).
     pub async fn buffer_body(mut self, max_bytes: usize) -> Result<Self, FrameworkError> {
-        let content_length = self
-            .parts
-            .headers
-            .get("content-length")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<u64>().ok());
+        let content_length = super::body::parse_content_length(&self.parts.headers);
 
         let body = std::mem::replace(&mut self.body, BodyState::Consumed);
         let bytes = match body {

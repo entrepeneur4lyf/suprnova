@@ -122,6 +122,18 @@ fn over_limit(max_bytes: usize) -> FrameworkError {
     }
 }
 
+/// Parse the `Content-Length` header into a byte count, if present and
+/// well-formed. Returns `None` for an absent, non-ASCII, or unparseable
+/// value. Shared by the generic body path ([`Request::body_bytes_with_cap`])
+/// and the multipart parser so both pre-reject an honestly-declared
+/// oversized body the same way.
+pub(crate) fn parse_content_length(headers: &hyper::http::HeaderMap) -> Option<u64> {
+    headers
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+}
+
 /// Collect the full body from an [`Incoming`] stream, capped at the
 /// process-global request-body limit (see
 /// [`global_max_request_body_bytes`]). For callers that don't have the
