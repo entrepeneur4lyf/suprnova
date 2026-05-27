@@ -21,8 +21,8 @@ use suprnova::auth::events::{Attempting, Authenticated, Failed, Login, Logout};
 use suprnova::auth::request_state;
 use suprnova::events::testing::{assert_dispatched, assert_not_dispatched};
 use suprnova::{
-    Authenticatable, Credentials, EventFacade, FrameworkError, SessionGuard, StatefulGuard,
-    UserProvider,
+    Auth, AuthConfig, AuthManager, Authenticatable, Credentials, EventFacade, FrameworkError,
+    SessionGuard, StatefulGuard, UserProvider,
 };
 
 /// Shared runtime — SQLx pools die with their creating runtime, so every
@@ -53,6 +53,13 @@ static SETUP: Lazy<()> = Lazy::new(|| {
             .await
             .expect("run local migrator");
         suprnova::App::singleton(conn);
+
+        // Register the default-config AuthManager (web → session → "users")
+        // and the provider behind it, so the static `Auth::*` facade methods
+        // resolve the default guard. The config + provider are identical for
+        // every test, so a single process-wide registration is correct.
+        suprnova::App::singleton(AuthManager::new(AuthConfig::default()));
+        Auth::register_provider("users", Arc::new(FakeProvider)).expect("register users provider");
     });
 });
 
@@ -386,6 +393,125 @@ fn login_then_logout_dispatches_login_and_logout_with_user_id() {
             g.login(the_user(), false).await.unwrap();
             // logout revokes remember-me tokens (DB) then clears the session.
             g.logout().await.unwrap();
+        })
+        .await;
+
+        assert_dispatched::<Login>(|e| e.user_id == "7");
+        assert_dispatched::<Logout>(|e| e.guard == "web" && e.user_id.as_deref() == Some("7"));
+    });
+}
+
+// ── Static-facade delegation ────────────────────────────────────────────────
+//
+// The Laravel-shaped `Auth::attempt/login/once/login_using_id/logout` facade
+// methods must route through the *default* guard resolved from the container
+// `AuthManager` (registered in SETUP), producing the same events + request
+// state as calling the guard directly. `Auth::id()` reads the request-scoped
+// user, so it doubles as a probe that the facade actually authenticated.
+
+#[test]
+fn facade_attempt_routes_through_default_guard() {
+    Lazy::force(&SETUP);
+    RT.block_on(async {
+        let _serial = TEST_LOCK.lock().await;
+        let _fake = EventFacade::fake();
+
+        run_in_request(async {
+            let user = Auth::attempt(&Credentials::password("a@b.com", "secret"), false)
+                .await
+                .unwrap();
+            assert_eq!(user.map(|u| u.get_auth_identifier()), Some("7".to_string()));
+            // Routed through the guard → the request user is cached and the
+            // static facade sees it.
+            assert_eq!(Auth::id(), Some("7".to_string()));
+        })
+        .await;
+
+        assert_dispatched::<Attempting>(|e| e.guard == "web" && !e.remember);
+        assert_dispatched::<Login>(|e| e.guard == "web" && e.user_id == "7" && !e.remember);
+        assert_dispatched::<Authenticated>(|e| e.guard == "web" && e.user_id == "7");
+        assert_not_dispatched::<Failed>(|_| true);
+    });
+}
+
+#[test]
+fn facade_attempt_wrong_password_routes_failed() {
+    Lazy::force(&SETUP);
+    RT.block_on(async {
+        let _serial = TEST_LOCK.lock().await;
+        let _fake = EventFacade::fake();
+
+        run_in_request(async {
+            let user = Auth::attempt(&Credentials::password("a@b.com", "wrong"), false)
+                .await
+                .unwrap();
+            assert!(user.is_none());
+        })
+        .await;
+
+        assert_dispatched::<Failed>(|e| e.guard == "web" && e.user_id.as_deref() == Some("7"));
+        assert_not_dispatched::<Login>(|_| true);
+    });
+}
+
+#[test]
+fn facade_login_using_id_routes_through_default_guard() {
+    Lazy::force(&SETUP);
+    RT.block_on(async {
+        let _serial = TEST_LOCK.lock().await;
+        let _fake = EventFacade::fake();
+
+        run_in_request(async {
+            let user = Auth::login_using_id("7", false).await.unwrap();
+            assert_eq!(user.map(|u| u.get_auth_identifier()), Some("7".to_string()));
+            assert_eq!(Auth::id(), Some("7".to_string()));
+        })
+        .await;
+
+        assert_dispatched::<Login>(|e| e.guard == "web" && e.user_id == "7");
+        assert_dispatched::<Authenticated>(|e| e.user_id == "7");
+    });
+}
+
+#[test]
+fn facade_once_authenticates_without_login_event() {
+    Lazy::force(&SETUP);
+    RT.block_on(async {
+        let _serial = TEST_LOCK.lock().await;
+        let _fake = EventFacade::fake();
+
+        run_in_request(async {
+            assert!(
+                Auth::once(&Credentials::password("a@b.com", "secret"))
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(Auth::id(), Some("7".to_string()));
+        })
+        .await;
+
+        assert_dispatched::<Authenticated>(|e| e.user_id == "7");
+        // `once` does not persist, so it is not a Login.
+        assert_not_dispatched::<Login>(|_| true);
+    });
+}
+
+// Bare `Auth::login` + `Auth::logout`: login fires Login, logout fires Logout
+// AND clears the request-scoped user (so `Auth::id()` reports `None` after) —
+// the request-state clear that the bare facade previously skipped.
+#[test]
+fn facade_login_then_logout_fires_events_and_clears_request_user() {
+    Lazy::force(&SETUP);
+    RT.block_on(async {
+        let _serial = TEST_LOCK.lock().await;
+        let _fake = EventFacade::fake();
+
+        run_in_request(async {
+            Auth::login(the_user(), false).await.unwrap();
+            assert_eq!(Auth::id(), Some("7".to_string()));
+
+            Auth::logout().await.unwrap();
+            assert_eq!(Auth::id(), None, "logout must clear the request user");
         })
         .await;
 

@@ -63,9 +63,9 @@ pub async fn login(form: LoginRequest) -> Response {
         return Err(invalid_credentials().into());
     }
 
-    // Log in the user. `Auth::login` takes the user id as a string so
+    // Log in the user. `Auth::login_id` takes the user id as a string so
     // the session layer stays type-agnostic.
-    Auth::login(user.id.to_string());
+    Auth::login_id(user.id.to_string());
 
     if form.remember {
         // Persist a remember token so the auth provider can resume the
@@ -125,7 +125,7 @@ pub async fn register(form: RegisterRequest) -> Response {
     }
 
     let user = User::create(&form.name, &form.email, &form.password).await?;
-    Auth::login(user.id.to_string());
+    Auth::login_id(user.id.to_string());
 
     redirect!("/dashboard").into()
 }
@@ -136,6 +136,6 @@ pub async fn register(form: RegisterRequest) -> Response {
 
 #[handler]
 pub async fn logout(_req: Request) -> Response {
-    Auth::logout();
+    Auth::logout().await?;
     redirect!("/").into()
 }

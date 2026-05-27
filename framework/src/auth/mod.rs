@@ -32,8 +32,10 @@
 //!     println!("Welcome, user #{}!", user.id);
 //! }
 //!
-//! // Login (numeric apps: convert to string at the boundary)
-//! Auth::login(user.id.to_string());
+//! // Establish a session from a known id (sync primitive). For the
+//! // guard-backed form with events + remember-me, use
+//! // `Auth::attempt(&creds, remember).await?` / `Auth::login(user, remember).await?`.
+//! Auth::login_id(user.id.to_string());
 //!
 //! // Logout (async — also revokes remember-me tokens for the user)
 //! Auth::logout().await?;

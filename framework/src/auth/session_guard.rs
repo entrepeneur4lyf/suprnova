@@ -204,7 +204,7 @@ impl StatefulGuard for SessionGuard {
         if remember {
             Auth::login_remember(user_id.clone(), self.remember_ttl_minutes).await?;
         } else {
-            Auth::login(user_id.clone());
+            Auth::login_id(user_id.clone());
         }
 
         // Cache the resolved user for the rest of the request.
@@ -265,9 +265,10 @@ impl StatefulGuard for SessionGuard {
         // Capture the id before clearing so the Logout event is attributed.
         let user_id = crate::session::auth_user_id();
 
-        // Revoke remember-me, clear the session user, regenerate CSRF.
-        Auth::logout().await?;
-        request_state::clear_current_user();
+        // Tear down session + remember-me + request-scoped user. We call the
+        // event-free primitive rather than `Auth::logout` so the Logout event
+        // is dispatched exactly once, here, attributed to *this* guard's name.
+        Auth::clear_authentication().await?;
 
         EventFacade::dispatch(events::Logout {
             guard: self.name.clone(),

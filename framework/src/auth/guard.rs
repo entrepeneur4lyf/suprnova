@@ -9,9 +9,11 @@ use crate::session::{
 };
 
 use super::authenticatable::Authenticatable;
-use super::contract::{Guard, StatefulGuard};
+use super::contract::{Credentials, Guard, StatefulGuard};
 use super::manager::AuthManager;
 use super::provider::UserProvider;
+use super::{events, request_state};
+use crate::events::EventFacade;
 
 /// Authentication facade
 ///
@@ -20,17 +22,23 @@ use super::provider::UserProvider;
 /// # Example
 ///
 /// ```rust,ignore
-/// use suprnova::Auth;
+/// use suprnova::{Auth, Credentials};
 ///
-/// // Check if authenticated
+/// // Check if authenticated (sync, session-backed)
 /// if Auth::check() {
 ///     let user_id: String = Auth::id().unwrap();
 /// }
 ///
-/// // Log in (numeric apps: convert to string at the boundary)
-/// Auth::login(user_id.to_string());
+/// // Log in by credentials against the default guard — fires Login +
+/// // Authenticated and supports remember-me (requires an AuthManager).
+/// Auth::attempt(&Credentials::password(email, password), remember).await?;
 ///
-/// // Log out (async — also revokes remember-me tokens for the user)
+/// // Or establish the session directly from a known id (sync primitive:
+/// // no provider, no AuthManager, no events).
+/// Auth::login_id(user_id.to_string());
+///
+/// // Log out — clears the session + request user, revokes remember-me,
+/// // and fires Logout.
 /// Auth::logout().await?;
 /// ```
 pub struct Auth;
@@ -53,14 +61,21 @@ impl Auth {
         !Self::check()
     }
 
-    /// Log in a user by their ID
+    /// Establish a session for a known user id — the synchronous session
+    /// primitive behind login.
     ///
-    /// This sets the user ID in the session, making them authenticated.
+    /// The Suprnova-native fast path for "I already have a verified user id,
+    /// authenticate it": it writes the id into the session without a
+    /// [`UserProvider`] lookup, an [`AuthManager`], lifecycle events, or a
+    /// remember-me token. For the Laravel-shaped, guard-backed login — events,
+    /// remember-me, provider resolution — use [`login`](Self::login),
+    /// [`attempt`](Self::attempt), or [`login_using_id`](Self::login_using_id).
     ///
     /// # Security
     ///
-    /// This method regenerates the session ID to prevent session fixation attacks.
-    pub fn login(user_id: impl Into<String>) {
+    /// Regenerates the session ID to prevent session fixation, and rotates the
+    /// CSRF token.
+    pub fn login_id(user_id: impl Into<String>) {
         // Regenerate session ID to prevent session fixation
         regenerate_session_id();
 
@@ -108,7 +123,7 @@ impl Auth {
     ) -> Result<(), crate::error::FrameworkError> {
         let user_id = user_id.into();
         // Regular session login (regen session id + CSRF, set user).
-        Self::login(user_id.clone());
+        Self::login_id(user_id.clone());
 
         // Issue the row. Returns the plaintext destined for the cookie.
         let plaintext = super::remember::issue(&user_id, ttl_minutes).await?;
@@ -154,26 +169,27 @@ impl Auth {
         Ok(removed)
     }
 
-    /// Log out the current user
+    /// Tear down all authentication state for the current request: revoke the
+    /// user's remember-me tokens, clear the session user, clear the
+    /// request-scoped current user, and rotate the CSRF token.
     ///
-    /// Clears the authenticated user from the session AND revokes
-    /// every remember-me token for that user (so closing the browser
-    /// and reopening it does not silently log them back in).
-    ///
-    /// # Security
-    ///
-    /// This regenerates the CSRF token to prevent any cached tokens
-    /// from being reused.
-    pub async fn logout() -> Result<(), crate::error::FrameworkError> {
-        // Revoke remember-me first, while we still have access to the
-        // authenticated user id. `revoke_remember_tokens` no-ops cleanly
-        // when there is no logged-in user.
+    /// The event-free core shared by [`logout`](Self::logout) and a guard's
+    /// `logout`; the caller dispatches the [`Logout`](crate::auth::events::Logout)
+    /// event so it is emitted exactly once, attributed to the right guard.
+    pub(crate) async fn clear_authentication() -> Result<(), crate::error::FrameworkError> {
+        // Revoke remember-me first, while the authenticated id is still
+        // resolvable. `revoke_remember_tokens` no-ops cleanly when there is no
+        // logged-in user.
         Self::revoke_remember_tokens().await?;
 
-        // Clear the authenticated user
+        // Clear the session user *and* the request-scoped cache. Clearing the
+        // request state is essential: `Auth::id` consults it ahead of the
+        // session, so a user resolved this request would otherwise survive
+        // logout and `Auth::id()` would keep reporting it.
         clear_auth_user();
+        request_state::clear_current_user();
 
-        // Regenerate CSRF token for security
+        // Rotate the CSRF token so any cached token cannot be reused.
         session_mut(|session| {
             session.csrf_token = generate_csrf_token();
         });
@@ -181,64 +197,50 @@ impl Auth {
         Ok(())
     }
 
-    /// Log out and invalidate the entire session
+    /// Log out the current user.
     ///
-    /// Use this for complete session destruction (e.g., "logout everywhere").
-    /// Also revokes every remember-me token for the user.
+    /// Clears the session user and the request-scoped current user, revokes
+    /// every remember-me token for that user (so reopening the browser does
+    /// not silently log them back in), rotates the CSRF token, and dispatches
+    /// a [`Logout`](crate::auth::events::Logout) event attributed to the
+    /// default guard. Mirrors Laravel's `Auth::logout()`.
+    ///
+    /// Works without an [`AuthManager`]: the event is attributed to the
+    /// configured default guard name when a manager is registered, and to
+    /// `"web"` otherwise.
+    pub async fn logout() -> Result<(), crate::error::FrameworkError> {
+        // Capture the id before clearing so the event is attributed.
+        let user_id = Self::id();
+        Self::clear_authentication().await?;
+        EventFacade::dispatch(events::Logout {
+            guard: Self::default_guard_name(),
+            user_id,
+        })
+        .await?;
+        Ok(())
+    }
+
+    /// Log out and invalidate the entire session.
+    ///
+    /// Use this for complete session destruction (e.g. "log out everywhere").
+    /// Flushes the whole session (not just the auth user), revokes every
+    /// remember-me token for the user, clears the request-scoped current user,
+    /// and dispatches a [`Logout`](crate::auth::events::Logout) event.
     pub async fn logout_and_invalidate() -> Result<(), crate::error::FrameworkError> {
+        // Capture the id before flushing so the event is attributed.
+        let user_id = Self::id();
         Self::revoke_remember_tokens().await?;
         session_mut(|session| {
             session.flush();
             session.csrf_token = generate_csrf_token();
         });
+        request_state::clear_current_user();
+        EventFacade::dispatch(events::Logout {
+            guard: Self::default_guard_name(),
+            user_id,
+        })
+        .await?;
         Ok(())
-    }
-
-    /// Attempt to authenticate with a validator function
-    ///
-    /// The validator function should return the user ID (as a `String`) if credentials are valid.
-    /// Numeric-id apps can use `.to_string()` on the id before returning it.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let user_id = Auth::attempt(async {
-    ///     // Validate credentials
-    ///     let user = User::find_by_email(&email).await?;
-    ///     if user.verify_password(&password)? {
-    ///         Ok(Some(user.id.to_string()))
-    ///     } else {
-    ///         Ok(None)
-    ///     }
-    /// }).await?;
-    ///
-    /// if let Some(id) = user_id {
-    ///     // Authentication successful
-    /// }
-    /// ```
-    pub async fn attempt<F, Fut>(
-        validator: F,
-    ) -> Result<Option<String>, crate::error::FrameworkError>
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<Option<String>, crate::error::FrameworkError>>,
-    {
-        let result = validator().await?;
-        if let Some(ref user_id) = result {
-            Self::login(user_id.clone());
-        }
-        Ok(result)
-    }
-
-    /// Validate credentials without logging in
-    ///
-    /// Useful for password confirmation dialogs.
-    pub async fn validate<F, Fut>(validator: F) -> Result<bool, crate::error::FrameworkError>
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<bool, crate::error::FrameworkError>>,
-    {
-        validator().await
     }
 
     /// Get the currently authenticated user
@@ -319,6 +321,15 @@ impl Auth {
         })
     }
 
+    /// The default guard's name for event attribution: from the registered
+    /// [`AuthManager`] when present, falling back to `"web"` so logout events
+    /// stay attributed even before a manager is wired up.
+    fn default_guard_name() -> String {
+        App::get::<AuthManager>()
+            .map(|m| m.default_guard_name().to_string())
+            .unwrap_or_else(|| "web".to_string())
+    }
+
     /// Register a [`UserProvider`] under `name` on the [`AuthManager`].
     ///
     /// Guards reference providers by this name (see [`crate::GuardConfig`]).
@@ -359,6 +370,104 @@ impl Auth {
         name: &str,
     ) -> Result<Arc<dyn StatefulGuard>, crate::error::FrameworkError> {
         Self::manager()?.stateful_guard(name)
+    }
+
+    // ── Laravel default-guard delegation ────────────────────────────────────────
+    //
+    // Laravel's `Auth::attempt/login/once/validate/...` proxy to the
+    // application's *default* guard. These mirror that: each resolves the
+    // default guard from the container-bound `AuthManager` and forwards the
+    // call, so they require a manager (`App::singleton(AuthManager::new(...))`)
+    // and fail loud with that remediation otherwise — the same contract as
+    // [`Auth::guard`](Self::guard). The sync session fast paths
+    // (`id`/`check`/`guest`/`via_remember`) and the session primitives
+    // (`login_id`/`logout`) stay manager-free.
+
+    /// Resolve the default guard as a read-only [`Guard`].
+    fn default_guard() -> Result<Arc<dyn Guard>, crate::error::FrameworkError> {
+        Self::manager()?.default_guard()
+    }
+
+    /// Resolve the default guard as a [`StatefulGuard`].
+    fn default_stateful_guard() -> Result<Arc<dyn StatefulGuard>, crate::error::FrameworkError> {
+        Self::manager()?.default_stateful_guard()
+    }
+
+    /// Validate credentials and, on success, log the user into the default
+    /// guard — optionally issuing a remember-me token. Mirrors Laravel's
+    /// `Auth::attempt($credentials, $remember)`.
+    ///
+    /// Returns the resolved user on success (richer than Laravel's `bool` — no
+    /// follow-up [`Auth::user`](Self::user) call needed), `Ok(None)` on bad
+    /// credentials, and `Err` only on an underlying failure (database, hashing,
+    /// or no [`AuthManager`] registered).
+    pub async fn attempt(
+        credentials: &Credentials,
+        remember: bool,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, crate::error::FrameworkError> {
+        Self::default_stateful_guard()?
+            .attempt(credentials, remember)
+            .await
+    }
+
+    /// Validate credentials and authenticate for the current request only (no
+    /// session persistence). Mirrors Laravel's `Auth::once($credentials)`.
+    pub async fn once(credentials: &Credentials) -> Result<bool, crate::error::FrameworkError> {
+        Self::default_stateful_guard()?.once(credentials).await
+    }
+
+    /// Log a known user into the default guard, optionally issuing a
+    /// remember-me token. Mirrors Laravel's `Auth::login($user, $remember)`.
+    ///
+    /// For the synchronous "I only have a verified id" path that needs no
+    /// provider or manager, use [`login_id`](Self::login_id).
+    pub async fn login(
+        user: Arc<dyn Authenticatable>,
+        remember: bool,
+    ) -> Result<(), crate::error::FrameworkError> {
+        Self::default_stateful_guard()?.login(user, remember).await
+    }
+
+    /// Log a user into the default guard by their identifier, optionally
+    /// issuing a remember-me token. Mirrors Laravel's
+    /// `Auth::loginUsingId($id, $remember)`.
+    ///
+    /// Returns the resolved user (richer than Laravel's `Authenticatable|false`),
+    /// or `Ok(None)` if the provider has no such id.
+    pub async fn login_using_id(
+        id: &str,
+        remember: bool,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, crate::error::FrameworkError> {
+        Self::default_stateful_guard()?
+            .login_using_id(id, remember)
+            .await
+    }
+
+    /// Authenticate by id against the default guard for the current request
+    /// only (no session persistence). Mirrors Laravel's `Auth::onceUsingId($id)`.
+    ///
+    /// Returns the resolved user, or `Ok(None)` if the provider has no such id.
+    pub async fn once_using_id(
+        id: &str,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, crate::error::FrameworkError> {
+        Self::default_stateful_guard()?.once_using_id(id).await
+    }
+
+    /// Validate credentials against the default guard's provider without
+    /// logging in. Mirrors Laravel's `Auth::validate($credentials)`.
+    pub async fn validate(credentials: &Credentials) -> Result<bool, crate::error::FrameworkError> {
+        Self::default_guard()?.validate(credentials).await
+    }
+
+    /// Whether the current user was authenticated via a remember-me cookie
+    /// this request (rather than from an active session). Mirrors Laravel's
+    /// `Auth::viaRemember()`.
+    ///
+    /// Reads the request-scoped auth state directly, so — like
+    /// [`id`](Self::id) / [`check`](Self::check) — it needs no [`AuthManager`]
+    /// and never fails.
+    pub fn via_remember() -> bool {
+        request_state::via_remember()
     }
 
     // ── Torii-backed authentication providers ──────────────────────────────────
@@ -447,6 +556,7 @@ mod tests {
         }
     }
 
+    // Knows one user: id `"7"`, email `"a@b.com"`, password `"secret"`.
     struct FakeProvider;
     #[async_trait]
     impl UserProvider for FakeProvider {
@@ -455,6 +565,22 @@ mod tests {
             id: &str,
         ) -> Result<Option<Arc<dyn Authenticatable>>, crate::error::FrameworkError> {
             Ok((id == "7").then(|| Arc::new(TestUser) as Arc<dyn Authenticatable>))
+        }
+
+        async fn retrieve_by_credentials(
+            &self,
+            credentials: &serde_json::Value,
+        ) -> Result<Option<Arc<dyn Authenticatable>>, crate::error::FrameworkError> {
+            let email = credentials.get("email").and_then(|v| v.as_str());
+            Ok((email == Some("a@b.com")).then(|| Arc::new(TestUser) as Arc<dyn Authenticatable>))
+        }
+
+        async fn validate_credentials(
+            &self,
+            _user: &dyn Authenticatable,
+            credentials: &serde_json::Value,
+        ) -> Result<bool, crate::error::FrameworkError> {
+            Ok(credentials.get("password").and_then(|v| v.as_str()) == Some("secret"))
         }
     }
 
@@ -475,5 +601,42 @@ mod tests {
         // The token guard projects as Guard but not StatefulGuard.
         assert!(Auth::guard("api").is_ok());
         assert!(Auth::stateful_guard("api").is_err());
+    }
+
+    // `Auth::validate` routes through the default guard's provider without
+    // logging anyone in (no events, no session), so it is parallel-safe to
+    // assert in-crate. Event-dispatching delegation (`attempt`/`login`/`once`)
+    // is covered in `tests/auth_session_guard.rs`, which isolates the
+    // process-global event fake in its own test binary.
+    #[tokio::test]
+    async fn validate_delegates_to_default_guard() {
+        let _scope = TestContainer::fake();
+        TestContainer::singleton(AuthManager::new(AuthConfig::default()));
+        Auth::register_provider("users", Arc::new(FakeProvider)).expect("register provider");
+
+        assert!(
+            Auth::validate(&Credentials::password("a@b.com", "secret"))
+                .await
+                .expect("validate routes through provider")
+        );
+        assert!(
+            !Auth::validate(&Credentials::password("a@b.com", "wrong"))
+                .await
+                .expect("validate routes through provider")
+        );
+    }
+
+    // The stateful facade methods fail loud (a remediation error, never a
+    // silent success) when no AuthManager is registered. They error in
+    // `manager()` before reaching any guard, so this needs no request scope.
+    #[tokio::test]
+    async fn stateful_methods_fail_loud_without_manager() {
+        let _scope = TestContainer::fake();
+        // No AuthManager registered.
+        let err = Auth::attempt(&Credentials::password("a@b.com", "secret"), false)
+            .await
+            .err()
+            .expect("attempt without a manager must error");
+        assert!(err.to_string().contains("AuthManager"), "got: {err}");
     }
 }
