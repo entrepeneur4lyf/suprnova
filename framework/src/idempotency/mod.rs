@@ -13,10 +13,24 @@
 //!   the Stripe-style idempotency-key model for HTTP endpoints and queue jobs
 //!   that must return the original outcome, not merely skip re-execution.
 //!
+//! ## Lease renewal
+//!
+//! All three keep the lock's lease alive for the duration of `body`: a body
+//! that runs longer than `ttl` cannot let the lock expire and a second caller
+//! execute concurrently. See [`run_under_lease`].
+//!
+//! ## Key material
+//!
 //! Caller-supplied key material is hashed before it touches the cache backend,
 //! so arbitrary client-supplied keys cannot produce unbounded backend keys,
 //! leak raw identifiers into cache tooling, or inject characters that collide
 //! with backend key conventions.
+//!
+//! ## Shared backend
+//!
+//! Cross-process dedupe requires a cross-process cache (e.g. Redis). With the
+//! in-memory backend — or a Redis bootstrap that fell back to memory — the
+//! dedupe window is per-process only.
 
 use crate::cache::Cache;
 use crate::error::FrameworkError;
@@ -61,10 +75,11 @@ impl Idempotency {
     ///   without running `body`.
     ///
     /// The lock is intentionally NOT released on success — the TTL IS the
-    /// dedupe window. Because the window only matters after the body completes,
-    /// `body` running longer than `ttl` does not collapse the window: the lock
-    /// is refreshed in the background for the body's duration (see the crate
-    /// module docs on lease renewal).
+    /// dedupe window. The lock's lease is refreshed in the background for the
+    /// body's duration (see [`run_under_lease`]), so a body that runs longer
+    /// than `ttl` does not collapse the window or allow concurrent execution;
+    /// the effective window is "body duration + up to `ttl` after the last
+    /// refresh".
     ///
     /// Choose [`commit_on_success`](Self::commit_on_success) instead when a
     /// failed `body` should be retryable within the window, or
@@ -83,10 +98,12 @@ impl Idempotency {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<T, FrameworkError>>,
     {
-        let guard = Cache::lock(&lock_key(key), ttl).await?;
+        let h = hashed(key);
+        let guard = Cache::lock(&format!("idem:{h}"), ttl).await?;
         match guard {
-            Some(_g) => {
-                let v = body().await?;
+            Some(g) => {
+                let v = run_under_lease(&g, ttl, &h, body()).await?;
+                // Do NOT release — the TTL is the dedupe window.
                 Ok(Idempotent::Fresh(v))
             }
             None => Ok(Idempotent::Duplicate),
@@ -119,13 +136,14 @@ impl Idempotency {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<T, FrameworkError>>,
     {
-        let guard = Cache::lock(&lock_key(key), ttl).await?;
+        let h = hashed(key);
+        let guard = Cache::lock(&format!("idem:{h}"), ttl).await?;
         match guard {
-            Some(g) => match body().await {
+            Some(g) => match run_under_lease(&g, ttl, &h, body()).await {
                 Ok(v) => Ok(Idempotent::Fresh(v)),
                 Err(e) => {
                     // Release the lock so a retry within the window can re-enter.
-                    let _ = g.release().await;
+                    release_and_log(g, &h).await;
                     Err(e)
                 }
             },
@@ -188,22 +206,23 @@ impl Idempotency {
                 // 2a. Re-check after acquiring: a result may have been stored
                 //     between the step-1 read and the lock acquisition.
                 if let Some(value) = Cache::get::<T>(&result_key).await? {
-                    let _ = guard.release().await;
+                    release_and_log(guard, &h).await;
                     return Ok(Replay::Replayed(value));
                 }
-                // 2b. Run the body, then record the result BEFORE releasing the
-                //     lock so no duplicate can slip in and re-run between the
-                //     store and the release. If the store fails, the guard drops
-                //     un-released and the lock holds until TTL (fail-closed:
-                //     duplicates see InProgress, never a second execution).
-                match body().await {
+                // 2b. Run the body (lease kept alive throughout), then record the
+                //     result BEFORE releasing the lock so no duplicate can slip in
+                //     and re-run between the store and the release. If the store
+                //     fails, the guard drops un-released and the lock holds until
+                //     TTL (fail-closed: duplicates see InProgress, never a second
+                //     execution).
+                match run_under_lease(&guard, ttl, &h, body()).await {
                     Ok(value) => {
                         Cache::put(&result_key, &value, Some(ttl)).await?;
-                        let _ = guard.release().await;
+                        release_and_log(guard, &h).await;
                         Ok(Replay::Fresh(value))
                     }
                     Err(e) => {
-                        let _ = guard.release().await;
+                        release_and_log(guard, &h).await;
                         Err(e)
                     }
                 }
@@ -218,11 +237,77 @@ impl Idempotency {
     }
 }
 
-/// Derive the lock-key argument for [`Cache::lock`] from caller-supplied key
-/// material. The raw key is hashed (see [`hashed`]) so arbitrary client input
-/// cannot bloat or pollute backend keys.
-fn lock_key(key: &str) -> String {
-    format!("idem:{}", hashed(key))
+/// Run `body` while keeping the idempotency lock's lease alive.
+///
+/// A background task refreshes the lock at one-third of `ttl` (floored at 50ms
+/// to avoid a busy-loop on pathologically small TTLs) for as long as `body` is
+/// running, so a body that outlives its original `ttl` cannot let the lock
+/// expire and a second caller execute concurrently — the double-execution
+/// window the bare lock left open. The renewal task parks (never resolves) so
+/// the `select!` always completes via `body`; if a refresh ever fails (token
+/// lost or backend error) it logs once and stops renewing rather than spamming.
+/// Tested with `ttl >= 1s`; a very short `ttl` may not refresh before the first
+/// expiry.
+async fn run_under_lease<T>(
+    guard: &crate::cache::LockGuard,
+    ttl: Duration,
+    hashed_key: &str,
+    body: impl Future<Output = Result<T, FrameworkError>>,
+) -> Result<T, FrameworkError> {
+    let renew = async {
+        let interval = (ttl / 3).max(Duration::from_millis(50));
+        loop {
+            tokio::time::sleep(interval).await;
+            match guard.refresh(ttl).await {
+                Ok(true) => continue,
+                Ok(false) => {
+                    tracing::warn!(
+                        idempotency_key = %hashed_key,
+                        "idempotency lease lost (lock token no longer matches); not renewing"
+                    );
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        idempotency_key = %hashed_key,
+                        error = %e,
+                        "idempotency lease refresh failed; not renewing"
+                    );
+                    break;
+                }
+            }
+        }
+        // Park forever so `select!` only ever completes through the body branch.
+        std::future::pending::<()>().await;
+    };
+
+    tokio::pin!(body);
+    tokio::select! {
+        biased;
+        result = &mut body => result,
+        _ = renew => unreachable!("renewal future parks after the loop and never resolves"),
+    }
+}
+
+/// Release the lock, logging (never returning) on failure.
+///
+/// A failed release does not change the caller's primary result, but a token
+/// mismatch or backend error means a retry may stay blocked until the TTL
+/// lapses, so it must be observable. Logs the hashed key, never the raw key
+/// material.
+async fn release_and_log(guard: crate::cache::LockGuard, hashed_key: &str) {
+    match guard.release().await {
+        Ok(true) => {}
+        Ok(false) => tracing::warn!(
+            idempotency_key = %hashed_key,
+            "idempotency lock release found a token mismatch (already expired or taken over)"
+        ),
+        Err(e) => tracing::warn!(
+            idempotency_key = %hashed_key,
+            error = %e,
+            "idempotency lock release failed"
+        ),
+    }
 }
 
 /// Hash caller-supplied key material into a fixed-length hex digest.
@@ -258,7 +343,7 @@ mod tests {
     #[test]
     fn hashed_does_not_leak_raw_key_material() {
         let raw = "user-4242-card-secret";
-        let key = lock_key(raw);
+        let key = format!("idem:{}", hashed(raw));
         assert!(!key.contains(raw), "raw key material leaked into cache key");
         assert!(key.starts_with("idem:"));
     }
