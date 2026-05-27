@@ -1,7 +1,10 @@
 //! Redis-backed cache implementation
 
 use async_trait::async_trait;
-use redis::{AsyncCommands, Client, aio::ConnectionManager};
+use redis::{
+    AsyncCommands, Client,
+    aio::{ConnectionManager, ConnectionManagerConfig},
+};
 use std::time::Duration;
 
 use super::config::CacheConfig;
@@ -23,9 +26,27 @@ impl RedisCache {
         let client = Client::open(config.url.as_str())
             .map_err(|e| FrameworkError::internal(format!("Redis connection error: {}", e)))?;
 
-        let conn = ConnectionManager::new(client).await.map_err(|e| {
-            FrameworkError::internal(format!("Redis connection manager error: {}", e))
-        })?;
+        // Bound the initial-connect budget so an unreachable Redis fails
+        // CLOSED promptly (HIGH #251) instead of hanging. The redis-rs
+        // defaults are 6 reconnect retries with an UNCAPPED exponential
+        // backoff (max_delay = None), so against a down/unreachable host the
+        // connect future can take well over 10s to resolve with an error —
+        // blocking `Cache::bootstrap` at startup for that whole window.
+        //
+        // We cap it: at most 3 retries, =<500ms between them, each connection
+        // and command attempt bounded by an explicit timeout. A refused or
+        // unreachable host now errors in under two seconds, while a healthy
+        // Redis (sub-second on localhost/LAN) is unaffected.
+        let cm_config = ConnectionManagerConfig::new()
+            .set_connection_timeout(Some(Duration::from_secs(2)))
+            .set_response_timeout(Some(Duration::from_secs(5)))
+            .set_number_of_retries(3)
+            .set_max_delay(Duration::from_millis(500));
+        let conn = ConnectionManager::new_with_config(client, cm_config)
+            .await
+            .map_err(|e| {
+                FrameworkError::internal(format!("Redis connection manager error: {e}"))
+            })?;
 
         let default_ttl = if config.default_ttl > 0 {
             Some(Duration::from_secs(config.default_ttl))
