@@ -419,6 +419,13 @@ macro_rules! text_response {
 /// Global middleware is registered in `bootstrap.rs` and runs in registration order,
 /// before any route-specific middleware.
 ///
+/// Registration is idempotent per middleware type — registering the same
+/// type twice keeps the first registration — so re-running bootstrap won't
+/// double-run a global middleware. Register every global BEFORE the server
+/// is constructed: the server snapshots the registry at build time, so a
+/// `global_middleware!` call made after `Server::from_config` / `Server::new`
+/// does not retroactively apply to that server.
+///
 /// # Example
 ///
 /// ```rust,ignore
