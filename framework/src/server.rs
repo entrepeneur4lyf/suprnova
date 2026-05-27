@@ -1187,4 +1187,42 @@ mod tests {
         // SocketAddr renders IPv6 with bracket notation.
         assert_eq!(addr.to_string(), "[::1]:8000");
     }
+
+    /// `Server::new` must mirror `from_config` and pull globally registered
+    /// middleware (`MiddlewareRegistry::from_global`), not start with an
+    /// empty registry — otherwise an embedder choosing `Server::new` would
+    /// silently drop every `global_middleware!`-registered global. Asserts
+    /// the delta from registering one fresh global so the check is immune to
+    /// any other global the process may already carry.
+    #[test]
+    fn new_snapshots_globally_registered_middleware() {
+        use crate::http::Response;
+        use crate::middleware::Next;
+        use async_trait::async_trait;
+
+        struct NewProbeMiddleware;
+        #[async_trait]
+        impl Middleware for NewProbeMiddleware {
+            async fn handle(&self, request: Request, next: Next) -> Response {
+                next(request).await
+            }
+        }
+
+        let before = Server::new(Router::new())
+            .middleware
+            .global_middleware()
+            .len();
+        crate::register_global_middleware(NewProbeMiddleware);
+        let after = Server::new(Router::new())
+            .middleware
+            .global_middleware()
+            .len();
+
+        assert_eq!(
+            after,
+            before + 1,
+            "Server::new must snapshot newly registered global middleware \
+             (it pulls MiddlewareRegistry::from_global, like from_config)"
+        );
+    }
 }
