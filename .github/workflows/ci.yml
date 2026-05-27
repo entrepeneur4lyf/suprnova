@@ -1,10 +1,18 @@
 name: CI
 
+# CI auto-runs are DISABLED during development — no GitHub Actions billing on
+# push/PR. The full pipeline below is preserved and can only be started
+# manually (Actions tab -> Run workflow). The equivalent gate is run LOCALLY
+# before commits (cargo fmt --all --check; cargo clippy --workspace
+# --all-targets -- -D warnings; the two --features clippy builds; cargo test
+# --workspace), which costs nothing.
+#
+# TO RE-ENABLE before launch, restore the auto-triggers:
+#   push:
+#     branches: [main]
+#   pull_request:
+#     branches: [main]
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
