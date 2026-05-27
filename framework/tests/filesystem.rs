@@ -423,3 +423,26 @@ async fn register_fs_rejects_non_utf8_root() {
         "non-UTF-8 fs root must be rejected, got: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Cloud convenience constructors apply a default RetryLayer. We can't observe
+// the layer directly, so these prove the default composition does not break
+// registration and that a valid config passes input validation.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn register_gcs_with_valid_config_registers() {
+    let _guard = Storage::fake();
+    let result = Storage::register_gcs(
+        "gcs_default_layer",
+        GcsConfig {
+            bucket: "my-bucket".into(),
+            ..Default::default()
+        },
+    );
+    assert!(
+        result.is_ok(),
+        "register_gcs with a valid bucket must register (default RetryLayer composes): {result:?}"
+    );
+    assert!(Storage::disk("gcs_default_layer").is_ok());
+}

@@ -97,6 +97,20 @@ pub struct GcsConfig {
     pub root: Option<String>,
 }
 
+/// Default resilience layer applied by the cloud convenience constructors
+/// ([`Storage::register_s3`], [`Storage::register_azblob`],
+/// [`Storage::register_gcs`]).
+///
+/// Object stores routinely return transient throttling / 5xx errors, so the
+/// convenience constructors retry by default. Callers who need a different
+/// policy (more retries, timeouts, logging, metrics) use the `_with` variants,
+/// which apply no default layer and hand over full control of the stack. Local
+/// filesystem and in-memory disks are not wrapped — they have no transient
+/// failures worth retrying.
+fn default_cloud_resilience(op: Operator) -> Operator {
+    op.layer(opendal::layers::RetryLayer::new().with_max_times(3))
+}
+
 impl Storage {
     /// Look up a registered disk by name and return its [`Operator`].
     ///
@@ -223,9 +237,12 @@ impl Storage {
 
     /// Register an S3 (or S3-compatible) disk.
     ///
-    /// Equivalent to [`Storage::register_s3_with`] with an identity closure.
+    /// Applies a default [`RetryLayer`](opendal::layers::RetryLayer)
+    /// (`with_max_times(3)`) so transient throttling / 5xx errors are retried.
+    /// Use [`Storage::register_s3_with`] for full control of the layer stack
+    /// (it applies no default layer).
     pub fn register_s3(name: impl Into<String>, config: S3Config) -> Result<(), FrameworkError> {
-        Self::register_s3_with(name, config, |op| op)
+        Self::register_s3_with(name, config, default_cloud_resilience)
     }
 
     /// Register an S3 disk with a custom layer stack applied to the
@@ -295,12 +312,15 @@ impl Storage {
 
     /// Register an Azure Blob Storage disk.
     ///
-    /// Equivalent to [`Storage::register_azblob_with`] with an identity closure.
+    /// Applies a default [`RetryLayer`](opendal::layers::RetryLayer)
+    /// (`with_max_times(3)`) so transient throttling / 5xx errors are retried.
+    /// Use [`Storage::register_azblob_with`] for full control of the layer
+    /// stack (it applies no default layer).
     pub fn register_azblob(
         name: impl Into<String>,
         config: AzBlobConfig,
     ) -> Result<(), FrameworkError> {
-        Self::register_azblob_with(name, config, |op| op)
+        Self::register_azblob_with(name, config, default_cloud_resilience)
     }
 
     /// Register an Azure Blob Storage disk with a custom layer stack applied
@@ -342,9 +362,12 @@ impl Storage {
 
     /// Register a Google Cloud Storage disk.
     ///
-    /// Equivalent to [`Storage::register_gcs_with`] with an identity closure.
+    /// Applies a default [`RetryLayer`](opendal::layers::RetryLayer)
+    /// (`with_max_times(3)`) so transient throttling / 5xx errors are retried.
+    /// Use [`Storage::register_gcs_with`] for full control of the layer stack
+    /// (it applies no default layer).
     pub fn register_gcs(name: impl Into<String>, config: GcsConfig) -> Result<(), FrameworkError> {
-        Self::register_gcs_with(name, config, |op| op)
+        Self::register_gcs_with(name, config, default_cloud_resilience)
     }
 
     /// Register a Google Cloud Storage disk with a custom layer stack applied
