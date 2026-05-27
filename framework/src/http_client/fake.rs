@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 
-use super::{Body, ClientResponse, RequestBuilder};
+use super::{Body, ClientResponse, Http, RequestBuilder};
 
 tokio::task_local! {
     /// Per-task fake state. Set by [`Http::fake`]. Inside the scope,
@@ -105,8 +105,8 @@ pub fn assert_sent(predicate: impl Fn(&RecordedRequest) -> bool) {
         if !s.recorded.iter().any(&predicate) {
             panic!(
                 "assert_sent: no recorded request matched the predicate. \
-                 Recorded: {:#?}",
-                s.recorded
+                 Recorded (header values and bodies redacted):{}",
+                redacted(&s.recorded)
             );
         }
     });
@@ -119,7 +119,11 @@ pub fn assert_sent(predicate: impl Fn(&RecordedRequest) -> bool) {
 pub fn assert_not_sent(predicate: impl Fn(&RecordedRequest) -> bool) {
     with_state(|s| {
         if let Some(hit) = s.recorded.iter().find(|r| predicate(r)) {
-            panic!("assert_not_sent: forbidden request was sent: {:#?}", hit);
+            panic!(
+                "assert_not_sent: forbidden request was sent (header values and \
+                 bodies redacted):{}",
+                redacted(std::slice::from_ref(hit))
+            );
         }
     });
 }
@@ -183,7 +187,7 @@ pub(crate) fn is_fake_active() -> bool {
     FAKE_STATE.try_with(|_| ()).is_ok()
 }
 
-pub(crate) fn intercept(req: &RequestBuilder) -> ClientResponse {
+pub(crate) fn intercept(req: &RequestBuilder) -> Result<ClientResponse, crate::FrameworkError> {
     let body_bytes = match &req.body {
         Some(Body::Json(v)) => Some(serde_json::to_vec(v).unwrap_or_default()),
         Some(Body::Form(v)) => Some(
@@ -212,17 +216,27 @@ pub(crate) fn intercept(req: &RequestBuilder) -> ClientResponse {
         match idx {
             Some(i) => {
                 let c = s.canned.remove(i);
-                ClientResponse::fake(
+                Ok(ClientResponse::fake(
                     c.status,
                     vec![("content-type".to_string(), "application/json".to_string())],
                     c.body,
-                )
+                ))
             }
-            None => ClientResponse::fake(
+            // No canned response matched. With the fail-closed guard active,
+            // a drifted URL/method must fail loudly rather than silently
+            // returning an empty 200 that masks the mismatch.
+            None if Http::is_guarded() => Err(crate::FrameworkError::internal(format!(
+                "Http::fake: no canned response matched {} {} while \
+                 Http::fail_on_real_calls is active. Register a matching \
+                 fake_response(...), or release the guard to allow the \
+                 default empty 200 response.",
+                method_str, req.url
+            ))),
+            None => Ok(ClientResponse::fake(
                 200,
                 vec![("content-type".to_string(), "application/json".to_string())],
                 Bytes::from_static(b"{}"),
-            ),
+            )),
         }
     })
 }
@@ -240,4 +254,62 @@ fn with_state<R>(f: impl FnOnce(&mut FakeState) -> R) -> R {
                  Wrap the test body in Http::fake(|| async {{ ... }}).await."
             )
         })
+}
+
+/// Format recorded requests for assertion-failure messages WITHOUT
+/// leaking secrets. Header values and body bytes routinely carry bearer
+/// tokens, API keys, and webhook payloads, so only the method, URL, a
+/// small allowlist of non-sensitive header names, and a body byte count
+/// are shown; every other header value and the body itself are redacted.
+fn redacted(reqs: &[RecordedRequest]) -> String {
+    const SAFE_HEADERS: &[&str] = &["content-type", "accept", "user-agent"];
+    let mut out = String::new();
+    for r in reqs {
+        out.push_str(&format!("\n  {} {}", r.method, r.url));
+        for (name, value) in &r.headers {
+            if SAFE_HEADERS.iter().any(|h| h.eq_ignore_ascii_case(name)) {
+                out.push_str(&format!("\n    {name}: {value}"));
+            } else {
+                out.push_str(&format!("\n    {name}: <redacted>"));
+            }
+        }
+        match &r.body {
+            Some(b) => out.push_str(&format!("\n    body: <{} bytes>", b.len())),
+            None => out.push_str("\n    body: <none>"),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redacted_hides_header_values_and_body_bytes() {
+        let reqs = vec![RecordedRequest {
+            method: "POST".to_string(),
+            url: "https://api.test/charge".to_string(),
+            headers: vec![
+                (
+                    "Authorization".to_string(),
+                    "Bearer super-secret-token".to_string(),
+                ),
+                ("Content-Type".to_string(), "application/json".to_string()),
+            ],
+            body: Some(br#"{"card":"4242424242424242"}"#.to_vec()),
+        }];
+        let out = redacted(&reqs);
+        // Method, URL, and allowlisted header values are shown.
+        assert!(out.contains("POST https://api.test/charge"), "{out}");
+        assert!(out.contains("Content-Type: application/json"), "{out}");
+        // Sensitive header value and body bytes are NOT shown.
+        assert!(
+            !out.contains("super-secret-token"),
+            "auth value leaked: {out}"
+        );
+        assert!(out.contains("Authorization: <redacted>"), "{out}");
+        assert!(!out.contains("4242424242424242"), "body leaked: {out}");
+        assert!(out.contains("body: <"), "{out}");
+    }
 }

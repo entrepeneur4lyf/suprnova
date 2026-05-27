@@ -227,6 +227,11 @@ async fn fake_assert_not_sent_passes_when_clean() {
 
 #[tokio::test]
 async fn fake_unmatched_request_returns_default_200() {
+    // Unmatched-fake behavior now depends on the process-global
+    // fail_on_real_calls flag (an unmatched request errors when guarded),
+    // so this test serializes against the guard-toggling tests via the
+    // shared network lock.
+    let _net = NETWORK_LOCK.lock().await;
     Http::fake(|| async {
         // No canned response queued — request still succeeds with 200 {}
         let resp = Http::get("https://example.com/anything")
@@ -542,6 +547,52 @@ async fn response_body_cap_rejects_oversized_real_body() {
     assert!(
         err.to_string().contains("cap"),
         "expected a cap error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn unmatched_fake_fails_loudly_when_guarded() {
+    let _net = NETWORK_LOCK.lock().await;
+    let _guard = suprnova::FailOnRealCallsGuard::install();
+    Http::fake(|| async {
+        // No fake_response registered. With the fail-closed guard active,
+        // an unmatched request must error (catching URL/method drift)
+        // rather than silently returning the default empty 200.
+        let err = Http::get("https://example.com/drifted")
+            .send()
+            .await
+            .err()
+            .expect("a guarded unmatched fake must error, not return 200");
+        assert!(
+            err.to_string().contains("no canned response matched"),
+            "expected an unmatched-fake error, got: {err}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn nested_guards_restore_outer_state() {
+    let _net = NETWORK_LOCK.lock().await;
+    assert!(!Http::is_guarded(), "default must be unguarded");
+
+    let outer = suprnova::FailOnRealCallsGuard::install();
+    assert!(Http::is_guarded(), "outer install arms the guard");
+    {
+        let inner = suprnova::FailOnRealCallsGuard::install();
+        assert!(Http::is_guarded());
+        drop(inner);
+        // The inner guard must restore the OUTER state (still guarded),
+        // not unconditionally disarm to "allowed".
+        assert!(
+            Http::is_guarded(),
+            "dropping a nested guard must not disarm the outer guard"
+        );
+    }
+    drop(outer);
+    assert!(
+        !Http::is_guarded(),
+        "dropping the outer guard restores the original unguarded state"
     );
 }
 

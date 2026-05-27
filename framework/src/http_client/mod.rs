@@ -262,27 +262,29 @@ impl Http {
 /// }
 /// ```
 ///
-/// The guard does NOT track previous state — `Drop` always returns
-/// the flag to the default of "real calls allowed". If a test needs
-/// to layer guards, it must coordinate explicitly via
-/// [`Http::fail_on_real_calls`] / [`Http::allow_real_calls`].
+/// `Drop` restores the state that was in effect when the guard was
+/// installed, so nested guards compose correctly: dropping an inner guard
+/// returns the flag to whatever the outer scope had set, not
+/// unconditionally to "allowed".
 #[must_use = "FailOnRealCallsGuard releases the guard on drop — bind it to a name"]
 pub struct FailOnRealCallsGuard {
-    _private: (),
+    previous: bool,
 }
 
 impl FailOnRealCallsGuard {
     /// Flip [`Http::fail_on_real_calls`] on and return a guard whose
-    /// `Drop` impl restores the default "real calls allowed" state.
+    /// `Drop` impl restores the PREVIOUS state (not unconditionally
+    /// "allowed"), making nested installs safe.
     pub fn install() -> Self {
+        let previous = Http::is_guarded();
         Http::fail_on_real_calls();
-        Self { _private: () }
+        Self { previous }
     }
 }
 
 impl Drop for FailOnRealCallsGuard {
     fn drop(&mut self) {
-        Http::allow_real_calls();
+        FAIL_ON_REAL_CALLS.store(self.previous, Ordering::SeqCst);
     }
 }
 
@@ -531,7 +533,7 @@ impl RequestBuilder {
         let mut last_err: Option<FrameworkError> = None;
         for attempt in 1..=max_attempts {
             let outcome = if fake::is_fake_active() {
-                Ok::<ClientResponse, FrameworkError>(fake::intercept(&self))
+                fake::intercept(&self)
             } else if Http::is_guarded() {
                 // Process-global fail-closed mode: outbound calls
                 // that don't match an active fake error out instead
