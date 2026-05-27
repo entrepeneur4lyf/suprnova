@@ -51,12 +51,14 @@
 //! ```
 
 pub mod authenticatable;
+pub mod contract;
 pub mod guard;
 pub mod middleware;
 pub mod provider;
 pub mod remember;
 
 pub use authenticatable::Authenticatable;
+pub use contract::{Credentials, Guard, StatefulGuard};
 pub use guard::Auth;
 pub use middleware::{AuthMiddleware, GuestMiddleware};
 pub use provider::UserProvider;

@@ -35,6 +35,26 @@ pub trait Authenticatable: Send + Sync + 'static {
         "id"
     }
 
+    /// The identifier as a string — the value stored in the session and used
+    /// as the guard key. Laravel's `getAuthIdentifier`.
+    ///
+    /// Defaults to the stringified [`auth_identifier`](Self::auth_identifier).
+    /// Override when the user's key isn't a plain integer (e.g. a torii
+    /// `UserId` string or a UUID).
+    fn get_auth_identifier(&self) -> String {
+        self.auth_identifier().to_string()
+    }
+
+    /// The hashed password used for credential validation, or `None` if this
+    /// user authenticates by other means (OAuth, passkey, magic link).
+    /// Laravel's `getAuthPassword`.
+    ///
+    /// Returning `Some` lets the built-in user providers verify a password via
+    /// [`crate::hashing`] without the app implementing a custom provider.
+    fn get_auth_password(&self) -> Option<&str> {
+        None
+    }
+
     /// Allow downcasting to concrete type
     ///
     /// This is used by `Auth::user_as::<T>()` to cast the trait object
