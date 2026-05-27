@@ -2,6 +2,7 @@
 
 use super::macros::convert_route_params;
 use super::{BoxedHandler, RouteBuilder, Router};
+use crate::FrameworkError;
 use crate::http::{Request, Response};
 use crate::middleware::{BoxedMiddleware, Middleware, into_boxed};
 use hyper::Method;
@@ -62,6 +63,30 @@ impl GroupBuilder {
 
     /// Finalize the group and merge routes into the outer router.
     ///
+    /// # Panics
+    ///
+    /// Panics on a duplicate or malformed route pattern (same boot-time
+    /// fail-loud policy as [`Router::get`]). This is the engine behind
+    /// `Router::from(group_builder)` / `group_builder.into()`. Use
+    /// [`GroupBuilder::try_finalize`] for a fallible variant that returns
+    /// `Err(FrameworkError)` instead of panicking.
+    fn finalize(self) -> Router {
+        self.try_finalize().unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of the `From`/`into` conversion: merge the group's
+    /// routes into the outer router, returning `Err(FrameworkError)`
+    /// (naming the offending method + full path) on a duplicate or
+    /// malformed pattern instead of panicking.
+    ///
+    /// A manual `TryFrom<GroupBuilder> for Router` is impossible — the
+    /// existing `From<GroupBuilder> for Router` triggers the std blanket
+    /// `impl<T, U: Into<T>> TryFrom<U> for T` (with `Error = Infallible`),
+    /// so a second `TryFrom` impl would be a conflicting implementation.
+    /// This inherent method is the idiomatic fallible entry point; prefer
+    /// it when group prefixes or inner paths come from a source you don't
+    /// control at compile time.
+    ///
     /// Path normalisation: prefix + inner path are concatenated and then
     /// run through `convert_route_params` so Express-style `:id` segments
     /// are translated to matchit-style `{id}`. The same canonical pattern
@@ -69,31 +94,35 @@ impl GroupBuilder {
     /// key — without that, group middleware on a parameterised route
     /// would miss the dispatcher's lookup (it queries by matched pattern,
     /// not raw path).
-    fn finalize(mut self) -> Router {
+    pub fn try_finalize(mut self) -> Result<Router, FrameworkError> {
         // Insert all group routes into the outer router with the prefix
         for route in self.group_routes {
             let raw_full = format!("{}{}", self.prefix, route.path);
             let full_path = convert_route_params(&raw_full);
 
-            // Insert into the appropriate method router using public(crate) methods,
-            // and capture the canonical `hyper::Method` so middleware is keyed by
-            // (method, path) — sibling routes on the same path under different
-            // methods MUST NOT share middleware.
+            // Insert into the appropriate method router using pub(crate)
+            // fallible methods, and capture the canonical `hyper::Method` so
+            // middleware is keyed by (method, path) — sibling routes on the
+            // same path under different methods MUST NOT share middleware.
             let http_method = match route.method {
                 GroupMethod::Get => {
-                    self.outer_router.insert_get(&full_path, route.handler);
+                    self.outer_router
+                        .try_insert_get(&full_path, route.handler)?;
                     Method::GET
                 }
                 GroupMethod::Post => {
-                    self.outer_router.insert_post(&full_path, route.handler);
+                    self.outer_router
+                        .try_insert_post(&full_path, route.handler)?;
                     Method::POST
                 }
                 GroupMethod::Put => {
-                    self.outer_router.insert_put(&full_path, route.handler);
+                    self.outer_router
+                        .try_insert_put(&full_path, route.handler)?;
                     Method::PUT
                 }
                 GroupMethod::Delete => {
-                    self.outer_router.insert_delete(&full_path, route.handler);
+                    self.outer_router
+                        .try_insert_delete(&full_path, route.handler)?;
                     Method::DELETE
                 }
             };
@@ -109,7 +138,7 @@ impl GroupBuilder {
             }
         }
 
-        self.outer_router
+        Ok(self.outer_router)
     }
 }
 

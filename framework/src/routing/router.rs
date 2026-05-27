@@ -1,3 +1,4 @@
+use crate::FrameworkError;
 use crate::http::{Request, Response};
 use crate::middleware::{BoxedMiddleware, Middleware, into_boxed};
 use crate::ws::BoxedWebSocketHandler;
@@ -290,9 +291,24 @@ impl Router {
     /// security-shaped bug because the surviving handler depended on
     /// registration order rather than user intent.
     pub(crate) fn insert_get(&mut self, path: &str, handler: Arc<BoxedHandler>) {
+        self.try_insert_get(path, handler)
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Fallible sibling of [`Router::insert_get`]: returns
+    /// `Err(FrameworkError)` (naming the method + path) instead of panicking
+    /// on a duplicate or malformed route pattern. Backs the public
+    /// `try_*` registration surface and [`GroupBuilder::try_finalize`].
+    pub(crate) fn try_insert_get(
+        &mut self,
+        path: &str,
+        handler: Arc<BoxedHandler>,
+    ) -> Result<(), FrameworkError> {
         self.get_routes
             .insert(path, (path.to_string(), handler))
-            .unwrap_or_else(|e| panic!("Failed to register GET route '{path}': {e}"));
+            .map_err(|e| {
+                FrameworkError::internal(format!("Failed to register GET route '{path}': {e}"))
+            })
     }
 
     /// Insert a POST route with a pre-boxed handler (internal use for groups).
@@ -302,9 +318,22 @@ impl Router {
     /// Panics on duplicate registration or any other matchit insert error.
     /// See [`Router::insert_get`] for rationale.
     pub(crate) fn insert_post(&mut self, path: &str, handler: Arc<BoxedHandler>) {
+        self.try_insert_post(path, handler)
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Fallible sibling of [`Router::insert_post`]. See
+    /// [`Router::try_insert_get`].
+    pub(crate) fn try_insert_post(
+        &mut self,
+        path: &str,
+        handler: Arc<BoxedHandler>,
+    ) -> Result<(), FrameworkError> {
         self.post_routes
             .insert(path, (path.to_string(), handler))
-            .unwrap_or_else(|e| panic!("Failed to register POST route '{path}': {e}"));
+            .map_err(|e| {
+                FrameworkError::internal(format!("Failed to register POST route '{path}': {e}"))
+            })
     }
 
     /// Insert a PUT route with a pre-boxed handler (internal use for groups).
@@ -314,9 +343,22 @@ impl Router {
     /// Panics on duplicate registration or any other matchit insert error.
     /// See [`Router::insert_get`] for rationale.
     pub(crate) fn insert_put(&mut self, path: &str, handler: Arc<BoxedHandler>) {
+        self.try_insert_put(path, handler)
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Fallible sibling of [`Router::insert_put`]. See
+    /// [`Router::try_insert_get`].
+    pub(crate) fn try_insert_put(
+        &mut self,
+        path: &str,
+        handler: Arc<BoxedHandler>,
+    ) -> Result<(), FrameworkError> {
         self.put_routes
             .insert(path, (path.to_string(), handler))
-            .unwrap_or_else(|e| panic!("Failed to register PUT route '{path}': {e}"));
+            .map_err(|e| {
+                FrameworkError::internal(format!("Failed to register PUT route '{path}': {e}"))
+            })
     }
 
     /// Insert a DELETE route with a pre-boxed handler (internal use for groups).
@@ -326,9 +368,22 @@ impl Router {
     /// Panics on duplicate registration or any other matchit insert error.
     /// See [`Router::insert_get`] for rationale.
     pub(crate) fn insert_delete(&mut self, path: &str, handler: Arc<BoxedHandler>) {
+        self.try_insert_delete(path, handler)
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Fallible sibling of [`Router::insert_delete`]. See
+    /// [`Router::try_insert_get`].
+    pub(crate) fn try_insert_delete(
+        &mut self,
+        path: &str,
+        handler: Arc<BoxedHandler>,
+    ) -> Result<(), FrameworkError> {
         self.delete_routes
             .insert(path, (path.to_string(), handler))
-            .unwrap_or_else(|e| panic!("Failed to register DELETE route '{path}': {e}"));
+            .map_err(|e| {
+                FrameworkError::internal(format!("Failed to register DELETE route '{path}': {e}"))
+            })
     }
 
     /// Register a GET route.
@@ -342,7 +397,24 @@ impl Router {
     ///
     /// Panics on duplicate route registration (two handlers on the same
     /// pattern) or any matchit insert error. See [`Router::insert_get`].
-    pub fn get<H, Fut>(mut self, path: &str, handler: H) -> RouteBuilder
+    /// Use [`Router::try_get`] to get an `Err(FrameworkError)` instead of a
+    /// panic when registering routes from a fallible source.
+    pub fn get<H, Fut>(self, path: &str, handler: H) -> RouteBuilder
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.try_get(path, handler)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Router::get`]: returns `Err(FrameworkError)`
+    /// (naming the method + path) on a duplicate or malformed pattern
+    /// instead of panicking. The chain is consumed either way — on `Err`
+    /// the partially-built router is dropped. Prefer this over [`Router::get`]
+    /// when route patterns come from dynamic config, plugins, or any source
+    /// you don't control at compile time.
+    pub fn try_get<H, Fut>(mut self, path: &str, handler: H) -> Result<RouteBuilder, FrameworkError>
     where
         H: Fn(Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response> + Send + 'static,
@@ -351,12 +423,14 @@ impl Router {
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         self.get_routes
             .insert(&converted, (converted.clone(), Arc::new(handler)))
-            .unwrap_or_else(|e| panic!("Failed to register GET route '{path}': {e}"));
-        RouteBuilder {
+            .map_err(|e| {
+                FrameworkError::internal(format!("Failed to register GET route '{path}': {e}"))
+            })?;
+        Ok(RouteBuilder {
             router: self,
             last_path: converted,
             last_method: Method::GET,
-        }
+        })
     }
 
     /// Register a POST route.
@@ -367,7 +441,22 @@ impl Router {
     /// # Panics
     ///
     /// Panics on duplicate registration or any matchit insert error.
-    pub fn post<H, Fut>(mut self, path: &str, handler: H) -> RouteBuilder
+    /// Use [`Router::try_post`] for a fallible variant.
+    pub fn post<H, Fut>(self, path: &str, handler: H) -> RouteBuilder
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.try_post(path, handler)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Router::post`]. See [`Router::try_get`].
+    pub fn try_post<H, Fut>(
+        mut self,
+        path: &str,
+        handler: H,
+    ) -> Result<RouteBuilder, FrameworkError>
     where
         H: Fn(Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response> + Send + 'static,
@@ -376,12 +465,14 @@ impl Router {
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         self.post_routes
             .insert(&converted, (converted.clone(), Arc::new(handler)))
-            .unwrap_or_else(|e| panic!("Failed to register POST route '{path}': {e}"));
-        RouteBuilder {
+            .map_err(|e| {
+                FrameworkError::internal(format!("Failed to register POST route '{path}': {e}"))
+            })?;
+        Ok(RouteBuilder {
             router: self,
             last_path: converted,
             last_method: Method::POST,
-        }
+        })
     }
 
     /// Register a PUT route.
@@ -392,7 +483,18 @@ impl Router {
     /// # Panics
     ///
     /// Panics on duplicate registration or any matchit insert error.
-    pub fn put<H, Fut>(mut self, path: &str, handler: H) -> RouteBuilder
+    /// Use [`Router::try_put`] for a fallible variant.
+    pub fn put<H, Fut>(self, path: &str, handler: H) -> RouteBuilder
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.try_put(path, handler)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Router::put`]. See [`Router::try_get`].
+    pub fn try_put<H, Fut>(mut self, path: &str, handler: H) -> Result<RouteBuilder, FrameworkError>
     where
         H: Fn(Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response> + Send + 'static,
@@ -401,12 +503,14 @@ impl Router {
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         self.put_routes
             .insert(&converted, (converted.clone(), Arc::new(handler)))
-            .unwrap_or_else(|e| panic!("Failed to register PUT route '{path}': {e}"));
-        RouteBuilder {
+            .map_err(|e| {
+                FrameworkError::internal(format!("Failed to register PUT route '{path}': {e}"))
+            })?;
+        Ok(RouteBuilder {
             router: self,
             last_path: converted,
             last_method: Method::PUT,
-        }
+        })
     }
 
     /// Register a DELETE route.
@@ -417,7 +521,22 @@ impl Router {
     /// # Panics
     ///
     /// Panics on duplicate registration or any matchit insert error.
-    pub fn delete<H, Fut>(mut self, path: &str, handler: H) -> RouteBuilder
+    /// Use [`Router::try_delete`] for a fallible variant.
+    pub fn delete<H, Fut>(self, path: &str, handler: H) -> RouteBuilder
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.try_delete(path, handler)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Router::delete`]. See [`Router::try_get`].
+    pub fn try_delete<H, Fut>(
+        mut self,
+        path: &str,
+        handler: H,
+    ) -> Result<RouteBuilder, FrameworkError>
     where
         H: Fn(Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response> + Send + 'static,
@@ -426,12 +545,14 @@ impl Router {
         let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         self.delete_routes
             .insert(&converted, (converted.clone(), Arc::new(handler)))
-            .unwrap_or_else(|e| panic!("Failed to register DELETE route '{path}': {e}"));
-        RouteBuilder {
+            .map_err(|e| {
+                FrameworkError::internal(format!("Failed to register DELETE route '{path}': {e}"))
+            })?;
+        Ok(RouteBuilder {
             router: self,
             last_path: converted,
             last_method: Method::DELETE,
-        }
+        })
     }
 
     /// Register a WebSocket route. The handler runs after the
@@ -451,6 +572,17 @@ impl Router {
     {
         let boxed: BoxedWebSocketHandler = std::sync::Arc::new(handler);
         self.ws_boxed_with_middleware_and_config(path, boxed, Vec::new(), None)
+    }
+
+    /// Fallible sibling of [`Router::ws`]: returns `Err(FrameworkError)` on a
+    /// duplicate or malformed pattern instead of panicking. See
+    /// [`Router::try_ws_boxed_with_middleware_and_config`].
+    pub fn try_ws<H>(self, path: &str, handler: H) -> Result<Router, FrameworkError>
+    where
+        H: crate::ws::WebSocketHandler,
+    {
+        let boxed: BoxedWebSocketHandler = std::sync::Arc::new(handler);
+        self.try_ws_boxed_with_middleware_and_config(path, boxed, Vec::new(), None)
     }
 
     /// Register a WebSocket route with a per-route [`WsConfig`] override.
@@ -480,6 +612,21 @@ impl Router {
         self.ws_boxed_with_middleware_and_config(path, boxed, Vec::new(), Some(config))
     }
 
+    /// Fallible sibling of [`Router::ws_with_config`]. See
+    /// [`Router::try_ws_boxed_with_middleware_and_config`].
+    pub fn try_ws_with_config<H>(
+        self,
+        path: &str,
+        handler: H,
+        config: crate::ws::WsConfig,
+    ) -> Result<Router, FrameworkError>
+    where
+        H: crate::ws::WebSocketHandler,
+    {
+        let boxed: BoxedWebSocketHandler = std::sync::Arc::new(handler);
+        self.try_ws_boxed_with_middleware_and_config(path, boxed, Vec::new(), Some(config))
+    }
+
     /// Register a WebSocket route with a pre-populated middleware list.
     ///
     /// Middleware runs over the upgrade `Request` before the handler is
@@ -500,6 +647,21 @@ impl Router {
         self.ws_boxed_with_middleware_and_config(path, boxed, middleware, None)
     }
 
+    /// Fallible sibling of [`Router::ws_with_middleware`]. See
+    /// [`Router::try_ws_boxed_with_middleware_and_config`].
+    pub fn try_ws_with_middleware<H>(
+        self,
+        path: &str,
+        handler: H,
+        middleware: Vec<BoxedMiddleware>,
+    ) -> Result<Router, FrameworkError>
+    where
+        H: crate::ws::WebSocketHandler,
+    {
+        let boxed: BoxedWebSocketHandler = std::sync::Arc::new(handler);
+        self.try_ws_boxed_with_middleware_and_config(path, boxed, middleware, None)
+    }
+
     /// Register a WebSocket route with both a middleware list and a per-route
     /// [`WsConfig`] override.
     pub fn ws_with_middleware_and_config<H>(
@@ -516,6 +678,22 @@ impl Router {
         self.ws_boxed_with_middleware_and_config(path, boxed, middleware, Some(config))
     }
 
+    /// Fallible sibling of [`Router::ws_with_middleware_and_config`]. See
+    /// [`Router::try_ws_boxed_with_middleware_and_config`].
+    pub fn try_ws_with_middleware_and_config<H>(
+        self,
+        path: &str,
+        handler: H,
+        middleware: Vec<BoxedMiddleware>,
+        config: crate::ws::WsConfig,
+    ) -> Result<Router, FrameworkError>
+    where
+        H: crate::ws::WebSocketHandler,
+    {
+        let boxed: BoxedWebSocketHandler = std::sync::Arc::new(handler);
+        self.try_ws_boxed_with_middleware_and_config(path, boxed, middleware, Some(config))
+    }
+
     /// Register a pre-boxed WebSocket handler. Used internally by
     /// the `ws!` macro which type-erases the handler at the call
     /// site so the macro's `WsRouteDef` shape doesn't need a generic
@@ -523,6 +701,17 @@ impl Router {
     #[doc(hidden)]
     pub fn ws_boxed(self, path: &str, handler: BoxedWebSocketHandler) -> Router {
         self.ws_boxed_with_middleware_and_config(path, handler, Vec::new(), None)
+    }
+
+    /// Fallible sibling of [`Router::ws_boxed`]. See
+    /// [`Router::try_ws_boxed_with_middleware_and_config`].
+    #[doc(hidden)]
+    pub fn try_ws_boxed(
+        self,
+        path: &str,
+        handler: BoxedWebSocketHandler,
+    ) -> Result<Router, FrameworkError> {
+        self.try_ws_boxed_with_middleware_and_config(path, handler, Vec::new(), None)
     }
 
     /// Register a pre-boxed WebSocket handler with a per-route middleware list.
@@ -537,6 +726,18 @@ impl Router {
         middleware: Vec<BoxedMiddleware>,
     ) -> Router {
         self.ws_boxed_with_middleware_and_config(path, handler, middleware, None)
+    }
+
+    /// Fallible sibling of [`Router::ws_boxed_with_middleware`]. See
+    /// [`Router::try_ws_boxed_with_middleware_and_config`].
+    #[doc(hidden)]
+    pub fn try_ws_boxed_with_middleware(
+        self,
+        path: &str,
+        handler: BoxedWebSocketHandler,
+        middleware: Vec<BoxedMiddleware>,
+    ) -> Result<Router, FrameworkError> {
+        self.try_ws_boxed_with_middleware_and_config(path, handler, middleware, None)
     }
 
     /// Register a pre-boxed WebSocket handler with a per-route middleware list
@@ -557,17 +758,36 @@ impl Router {
     /// [`WsConfig`]: crate::ws::WsConfig
     #[doc(hidden)]
     pub fn ws_boxed_with_middleware_and_config(
-        mut self,
+        self,
         path: &str,
         handler: BoxedWebSocketHandler,
         middleware: Vec<BoxedMiddleware>,
         config: Option<crate::ws::WsConfig>,
     ) -> Router {
+        self.try_ws_boxed_with_middleware_and_config(path, handler, middleware, config)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Router::ws_boxed_with_middleware_and_config`]:
+    /// returns `Err(FrameworkError)` (naming the path) on a duplicate or
+    /// malformed pattern instead of panicking. This is the canonical
+    /// fallible WebSocket registration primitive — every `try_ws*` helper
+    /// delegates to it, mirroring the infallible family.
+    #[doc(hidden)]
+    pub fn try_ws_boxed_with_middleware_and_config(
+        mut self,
+        path: &str,
+        handler: BoxedWebSocketHandler,
+        middleware: Vec<BoxedMiddleware>,
+        config: Option<crate::ws::WsConfig>,
+    ) -> Result<Router, FrameworkError> {
         let converted = crate::routing::macros::convert_route_params(path);
         self.ws_routes
             .insert(&converted, (converted.clone(), handler, middleware, config))
-            .unwrap_or_else(|e| panic!("Failed to register WS route '{path}': {e}"));
-        self
+            .map_err(|e| {
+                FrameworkError::internal(format!("Failed to register WS route '{path}': {e}"))
+            })?;
+        Ok(self)
     }
 
     /// Look up a WebSocket route by path. Returns the matched
@@ -707,6 +927,43 @@ impl RouteBuilder {
         Fut: Future<Output = Response> + Send + 'static,
     {
         self.router.delete(path, handler)
+    }
+
+    /// Fallible sibling of [`RouteBuilder::get`]. See [`Router::try_get`].
+    pub fn try_get<H, Fut>(self, path: &str, handler: H) -> Result<RouteBuilder, FrameworkError>
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.router.try_get(path, handler)
+    }
+
+    /// Fallible sibling of [`RouteBuilder::post`]. See [`Router::try_post`].
+    pub fn try_post<H, Fut>(self, path: &str, handler: H) -> Result<RouteBuilder, FrameworkError>
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.router.try_post(path, handler)
+    }
+
+    /// Fallible sibling of [`RouteBuilder::put`]. See [`Router::try_put`].
+    pub fn try_put<H, Fut>(self, path: &str, handler: H) -> Result<RouteBuilder, FrameworkError>
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.router.try_put(path, handler)
+    }
+
+    /// Fallible sibling of [`RouteBuilder::delete`]. See
+    /// [`Router::try_delete`].
+    pub fn try_delete<H, Fut>(self, path: &str, handler: H) -> Result<RouteBuilder, FrameworkError>
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.router.try_delete(path, handler)
     }
 }
 
