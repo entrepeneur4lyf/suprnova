@@ -9,6 +9,8 @@ use crate::session::{
 };
 
 use super::authenticatable::Authenticatable;
+use super::contract::{Guard, StatefulGuard};
+use super::manager::AuthManager;
 use super::provider::UserProvider;
 
 /// Authentication facade
@@ -303,6 +305,62 @@ impl Auth {
         Ok(user.and_then(|u| u.as_any().downcast_ref::<T>().cloned()))
     }
 
+    // ── Named guards (AuthManager) ──────────────────────────────────────────────
+
+    /// Resolve the [`AuthManager`] from the container, with a remediation
+    /// message when it has not been registered.
+    fn manager() -> Result<AuthManager, crate::error::FrameworkError> {
+        App::get::<AuthManager>().ok_or_else(|| {
+            crate::error::FrameworkError::internal(
+                "No AuthManager registered. Register one in bootstrap.rs with: \
+                 App::singleton(AuthManager::new(AuthConfig::from_env()))"
+                    .to_string(),
+            )
+        })
+    }
+
+    /// Register a [`UserProvider`] under `name` on the [`AuthManager`].
+    ///
+    /// Guards reference providers by this name (see [`crate::GuardConfig`]).
+    /// This is the Rust-native half of Laravel's `config/auth.php`
+    /// `providers` section: the instance is registered programmatically
+    /// because a Suprnova provider carries a Rust type.
+    ///
+    /// ```rust,ignore
+    /// Auth::register_provider("users", Arc::new(my_user_provider))?;
+    /// ```
+    pub fn register_provider(
+        name: impl Into<String>,
+        provider: Arc<dyn UserProvider>,
+    ) -> Result<(), crate::error::FrameworkError> {
+        Self::manager()?.register_provider(name, provider);
+        Ok(())
+    }
+
+    /// Resolve a named guard as the read-only [`Guard`] contract.
+    ///
+    /// ```rust,ignore
+    /// if Auth::guard("api")?.check().await? { /* ... */ }
+    /// ```
+    pub fn guard(name: &str) -> Result<Arc<dyn Guard>, crate::error::FrameworkError> {
+        Self::manager()?.guard(name)
+    }
+
+    /// Resolve a named guard as a [`StatefulGuard`] (login/logout/attempt).
+    ///
+    /// Errors if the named guard is stateless (a token guard).
+    ///
+    /// ```rust,ignore
+    /// let user = Auth::stateful_guard("web")?
+    ///     .attempt(&Credentials::password(email, password), remember)
+    ///     .await?;
+    /// ```
+    pub fn stateful_guard(
+        name: &str,
+    ) -> Result<Arc<dyn StatefulGuard>, crate::error::FrameworkError> {
+        Self::manager()?.stateful_guard(name)
+    }
+
     // ── Torii-backed authentication providers ──────────────────────────────────
 
     /// Access password-based authentication operations.
@@ -364,5 +422,58 @@ impl Auth {
     /// Full implementation coming in P3T5.
     pub fn magic_link() -> crate::torii_integration::magic_link::MagicLinkAuth {
         crate::torii_integration::magic_link::MagicLinkAuth
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::{AuthConfig, AuthManager};
+    use crate::container::testing::TestContainer;
+    use async_trait::async_trait;
+    use std::any::Any;
+
+    #[derive(Clone)]
+    struct TestUser;
+    impl Authenticatable for TestUser {
+        fn auth_identifier(&self) -> i64 {
+            7
+        }
+        fn get_auth_identifier(&self) -> String {
+            "7".to_string()
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    struct FakeProvider;
+    #[async_trait]
+    impl UserProvider for FakeProvider {
+        async fn retrieve_by_id(
+            &self,
+            id: &str,
+        ) -> Result<Option<Arc<dyn Authenticatable>>, crate::error::FrameworkError> {
+            Ok((id == "7").then(|| Arc::new(TestUser) as Arc<dyn Authenticatable>))
+        }
+    }
+
+    // The facade resolves the container-bound manager, registers a provider
+    // through it, and projects both guard contracts. Uses TestContainer
+    // (thread-local) so it stays parallel-safe — never `App::singleton`.
+    #[tokio::test]
+    async fn facade_registers_provider_and_resolves_named_guards() {
+        let _scope = TestContainer::fake();
+        TestContainer::singleton(AuthManager::new(AuthConfig::default()));
+
+        Auth::register_provider("users", Arc::new(FakeProvider)).expect("register provider");
+
+        // The session guard projects as both Guard and StatefulGuard.
+        assert!(Auth::guard("web").is_ok());
+        assert!(Auth::stateful_guard("web").is_ok());
+
+        // The token guard projects as Guard but not StatefulGuard.
+        assert!(Auth::guard("api").is_ok());
+        assert!(Auth::stateful_guard("api").is_err());
     }
 }

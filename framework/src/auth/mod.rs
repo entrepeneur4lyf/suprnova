@@ -51,18 +51,24 @@
 //! ```
 
 pub mod authenticatable;
+pub mod config;
 pub mod contract;
 pub mod events;
 pub mod guard;
+pub mod manager;
 pub mod middleware;
 pub mod provider;
 pub mod remember;
 pub mod request_state;
 pub mod session_guard;
+pub mod token_guard;
 
 pub use authenticatable::Authenticatable;
+pub use config::{AuthConfig, GuardConfig, GuardDriver};
 pub use contract::{Credentials, Guard, StatefulGuard};
 pub use guard::Auth;
+pub use manager::AuthManager;
 pub use middleware::{AuthMiddleware, GuestMiddleware};
 pub use provider::UserProvider;
 pub use session_guard::SessionGuard;
+pub use token_guard::TokenGuard;

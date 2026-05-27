@@ -68,8 +68,9 @@ pub use app::paths::{
     use_resource_path, use_storage_path,
 };
 pub use auth::{
-    Auth, AuthMiddleware, Authenticatable, Credentials, Guard, GuestMiddleware, SessionGuard,
-    StatefulGuard, UserProvider,
+    Auth, AuthConfig, AuthManager, AuthMiddleware, Authenticatable, Credentials, Guard,
+    GuardConfig, GuardDriver, GuestMiddleware, SessionGuard, StatefulGuard, TokenGuard,
+    UserProvider,
 };
 pub use authorization::{Gate, Policy};
 pub use cache::{Cache, CacheConfig, CacheStore, InMemoryCache, LockGuard, RedisCache};
