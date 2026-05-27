@@ -27,8 +27,14 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
+pub mod maintenance;
+pub mod paths;
+
 /// Boxed async bootstrap function (avoids repeating the complex trait-object type).
 type BootstrapFn = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
+
+/// Boxed callback run once after the server boots its services.
+type BootedFn = Box<dyn FnOnce()>;
 
 /// CLI structure for suprnova applications
 #[derive(Parser)]
@@ -81,6 +87,35 @@ enum Commands {
     /// Run the workflow worker daemon
     #[command(name = "workflow:work")]
     WorkflowWork,
+    /// Put the application into maintenance mode
+    Down {
+        /// Seconds for the `Retry-After` header
+        #[arg(long)]
+        retry: Option<u64>,
+        /// Seconds for the browser `Refresh` header
+        #[arg(long)]
+        refresh: Option<u64>,
+        /// Secret URL segment that bypasses maintenance mode
+        #[arg(long)]
+        secret: Option<String>,
+        /// Generate a random bypass secret and print it
+        #[arg(long = "with-secret")]
+        with_secret: bool,
+        /// Redirect visitors to this path instead of serving the 503
+        #[arg(long)]
+        redirect: Option<String>,
+        /// HTTP status code for the maintenance response
+        #[arg(long, default_value = "503")]
+        status: u16,
+        /// A path that stays reachable while down (repeatable)
+        #[arg(long = "except")]
+        except: Vec<String>,
+        /// Plain-text message rendered in the maintenance response body
+        #[arg(long)]
+        message: Option<String>,
+    },
+    /// Bring the application out of maintenance mode
+    Up,
 }
 
 /// Application builder for suprnova framework
@@ -93,6 +128,7 @@ where
     config_fn: Option<Box<dyn FnOnce()>>,
     bootstrap_fn: Option<BootstrapFn>,
     routes_fn: Option<Box<dyn FnOnce() -> Router + Send>>,
+    booted_fns: Vec<BootedFn>,
     _migrator: std::marker::PhantomData<M>,
 }
 
@@ -112,8 +148,15 @@ impl Application<NoMigrator> {
             config_fn: None,
             bootstrap_fn: None,
             routes_fn: None,
+            booted_fns: Vec::new(),
             _migrator: std::marker::PhantomData,
         }
+    }
+
+    /// The Suprnova framework version this application is built against
+    /// (the `suprnova` crate's version).
+    pub fn framework_version() -> &'static str {
+        crate::VERSION
     }
 }
 
@@ -184,6 +227,30 @@ where
         self
     }
 
+    /// Register a callback to run once after the server has booted its
+    /// services (i.e. after `Server::from_config` has run service
+    /// registration), and before it begins accepting connections.
+    ///
+    /// Unlike [`bootstrap`](Self::bootstrap), which registers services, a
+    /// `booted` callback can *resolve* them from the container.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// App::new()
+    ///     .booted(|| {
+    ///         let cfg: MyConfig = App::get().unwrap();
+    ///         tracing::info!(?cfg, "services booted");
+    ///     })
+    /// ```
+    pub fn booted<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce() + 'static,
+    {
+        self.booted_fns.push(Box::new(f));
+        self
+    }
+
     /// Configure the migrator type for database migrations
     ///
     /// # Example
@@ -200,6 +267,7 @@ where
             config_fn: self.config_fn,
             bootstrap_fn: self.bootstrap_fn,
             routes_fn: self.routes_fn,
+            booted_fns: self.booted_fns,
             _migrator: std::marker::PhantomData,
         }
     }
@@ -214,6 +282,7 @@ where
     /// - `migrate:rollback`: Rollback migrations
     /// - `migrate:fresh`: Drop and re-run all migrations
     /// - `schedule:*`: Scheduler commands
+    /// - `down` / `up`: Enter / leave maintenance mode
     pub async fn run(self) {
         let cli = Cli::parse();
 
@@ -231,6 +300,7 @@ where
             config_fn,
             bootstrap_fn,
             routes_fn,
+            booted_fns,
             _migrator,
         } = self;
 
@@ -245,12 +315,12 @@ where
             | Some(Commands::WebRun { no_migrate: false }) => {
                 // Default: run server with auto-migrate
                 Self::run_migrations_silent::<M>().await;
-                Self::run_server_internal(bootstrap_fn, routes_fn).await;
+                Self::run_server_internal(bootstrap_fn, routes_fn, booted_fns).await;
             }
             Some(Commands::Serve { no_migrate: true })
             | Some(Commands::WebRun { no_migrate: true }) => {
                 // Run server without migrations
-                Self::run_server_internal(bootstrap_fn, routes_fn).await;
+                Self::run_server_internal(bootstrap_fn, routes_fn, booted_fns).await;
             }
             Some(Commands::Migrate) => {
                 Self::run_migrations::<M>().await;
@@ -276,12 +346,38 @@ where
             Some(Commands::WorkflowWork) => {
                 Self::run_workflow_worker_internal(bootstrap_fn).await;
             }
+            Some(Commands::Down {
+                retry,
+                refresh,
+                secret,
+                with_secret,
+                redirect,
+                status,
+                except,
+                message,
+            }) => {
+                Self::run_down(
+                    retry,
+                    refresh,
+                    secret,
+                    with_secret,
+                    redirect,
+                    status,
+                    except,
+                    message,
+                )
+                .await;
+            }
+            Some(Commands::Up) => {
+                Self::run_up().await;
+            }
         }
     }
 
     async fn run_server_internal(
         bootstrap_fn: Option<BootstrapFn>,
         routes_fn: Option<Box<dyn FnOnce() -> Router + Send>>,
+        booted_fns: Vec<BootedFn>,
     ) {
         // Run bootstrap
         if let Some(bootstrap_fn) = bootstrap_fn {
@@ -302,8 +398,6 @@ where
         // error type carries the user-facing remediation (it points at
         // `suprnova key:generate`); we surface it on stderr without a
         // panic stack-trace wrapper so production boot logs stay clean.
-        // This is the boot-time fail-closed path described in codex
-        // review finding #1.
         let server = match Server::from_config(router) {
             Ok(s) => s,
             Err(e) => {
@@ -311,6 +405,14 @@ where
                 std::process::exit(1);
             }
         };
+
+        // Services are booted now (Server::from_config ran service
+        // registration); fire the registered `booted` callbacks before
+        // the server begins accepting connections.
+        for booted in booted_fns {
+            booted();
+        }
+
         if let Err(e) = server.run().await {
             eprintln!("suprnova: server exited with error: {e}");
             std::process::exit(1);
@@ -433,14 +535,6 @@ where
     }
 
     async fn run_workflow_worker_internal(bootstrap_fn: Option<BootstrapFn>) {
-        // Audit fix: workflow workers must see the same Cache / Queue /
-        // RateLimit / Mail drivers as the web server. Without this the
-        // worker would silently default to in-memory queue + in-memory
-        // cache even when QUEUE_DRIVER=redis was set in the environment,
-        // because `Server::run`'s driver bootstrap is never reached when
-        // booting through `workflow:work`. Drivers are bootstrapped
-        // BEFORE the user's bootstrap_fn so user code can register
-        // queue handlers, attach to cache, etc., against live drivers.
         if let Err(e) = Self::bootstrap_runtime_drivers().await {
             eprintln!("Workflow worker bootstrap error: {e}");
             std::process::exit(1);
@@ -475,5 +569,73 @@ where
         crate::rate_limit::bootstrap_from_env().await?;
         crate::mail::boot::bootstrap_from_env()?;
         Ok(())
+    }
+
+    /// `down`: record the maintenance payload via the configured driver.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_down(
+        retry: Option<u64>,
+        refresh: Option<u64>,
+        secret: Option<String>,
+        with_secret: bool,
+        redirect: Option<String>,
+        status: u16,
+        except: Vec<String>,
+        message: Option<String>,
+    ) {
+        Self::bootstrap_maintenance_driver().await;
+
+        let secret = match (secret, with_secret) {
+            (Some(s), _) => Some(s),
+            (None, true) => Some(maintenance::random_secret()),
+            (None, false) => None,
+        };
+
+        let payload = maintenance::MaintenancePayload {
+            except,
+            redirect,
+            retry,
+            refresh,
+            secret: secret.clone(),
+            status,
+            template: message,
+        };
+
+        match maintenance::maintenance_mode().activate(&payload).await {
+            Ok(()) => {
+                println!("Application is now in maintenance mode.");
+                if let Some(secret) = secret {
+                    println!("Bypass maintenance mode by visiting: /{secret}");
+                }
+            }
+            Err(e) => {
+                eprintln!("suprnova: failed to enter maintenance mode: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    /// `up`: clear maintenance state via the configured driver.
+    async fn run_up() {
+        Self::bootstrap_maintenance_driver().await;
+
+        match maintenance::maintenance_mode().deactivate().await {
+            Ok(()) => println!("Application is now live."),
+            Err(e) => {
+                eprintln!("suprnova: failed to bring the application up: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    /// The cache-backed maintenance driver needs the cache bootstrapped; the
+    /// file driver needs nothing. Only boot the cache when it's in use.
+    async fn bootstrap_maintenance_driver() {
+        if env::var("MAINTENANCE_DRIVER").as_deref() == Ok("cache")
+            && let Err(e) = crate::cache::Cache::bootstrap().await
+        {
+            eprintln!("suprnova: maintenance (cache driver) bootstrap failed: {e}");
+            std::process::exit(1);
+        }
     }
 }

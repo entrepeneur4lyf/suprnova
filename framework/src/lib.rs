@@ -56,6 +56,17 @@ pub mod ws;
 extern crate self as suprnova;
 
 pub use app::Application;
+/// The Suprnova framework version (the `suprnova` crate version).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub use app::maintenance::{
+    CacheMaintenanceMode, FileMaintenanceMode, MaintenanceMiddleware, MaintenanceMode,
+    MaintenancePayload, maintenance_mode,
+};
+pub use app::paths::{
+    base_path, config_path, database_path, lang_path, public_path, resource_path, set_base_path,
+    storage_path, use_config_path, use_database_path, use_lang_path, use_public_path,
+    use_resource_path, use_storage_path,
+};
 pub use auth::{Auth, AuthMiddleware, Authenticatable, GuestMiddleware, UserProvider};
 pub use authorization::{Gate, Policy};
 pub use cache::{Cache, CacheConfig, CacheStore, InMemoryCache, LockGuard, RedisCache};
