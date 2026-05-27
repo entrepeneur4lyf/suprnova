@@ -20,7 +20,10 @@
 //! [`Idempotency::commit_on_success`](crate::idempotency::Idempotency::commit_on_success)
 //! keyed by a stable per-operation key (e.g. the entity id or a
 //! caller-supplied request id). Without this, a re-delivered job may
-//! execute the same side effect twice.
+//! execute the same side effect twice. When a retry must return the
+//! original outcome rather than merely skip re-execution, use
+//! [`Idempotency::remember`](crate::idempotency::Idempotency::remember),
+//! which records the success value and replays it to later deliveries.
 
 use crate::error::FrameworkError;
 use crate::lock;
