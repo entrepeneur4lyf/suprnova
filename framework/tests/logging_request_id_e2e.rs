@@ -22,6 +22,7 @@ use hyper_util::rt::TokioIo;
 
 use suprnova::http::text;
 use suprnova::{MiddlewareRegistry, Router, handle_request};
+use tracing_test::traced_test;
 
 /// Spawn a test server that routes through the real `handle_request`.
 async fn spawn_server(
@@ -112,7 +113,8 @@ async fn request(
     )
 }
 
-/// A router whose `/boom` handler panics, plus a healthy `/ok` route.
+/// A router whose `/boom` handler panics, `/logs` handler emits a
+/// `tracing` event, plus a healthy `/ok` route.
 fn router() -> Router {
     Router::new()
         .get("/ok", |_req| async { text("ok") })
@@ -120,6 +122,13 @@ fn router() -> Router {
             panic!("intentional handler panic for the request-id echo test");
             #[allow(unreachable_code)]
             text("unreachable")
+        })
+        .get("/logs", |_req| async {
+            // Deliberately does NOT mention any request id — if the id
+            // shows up in this event's captured output, it can only have
+            // come from the surrounding `request` span context.
+            tracing::info!(target: "span_probe", "handler executed");
+            text("logged")
         })
         .into()
 }
@@ -165,4 +174,31 @@ async fn panic_response_echoes_a_fresh_request_id_when_none_supplied() {
     // Fresh ids are lowercase hyphenated UUID v4 (36 chars, 4 dashes).
     assert_eq!(echoed.len(), 36, "fresh id should be a UUID v4");
     assert_eq!(echoed.chars().filter(|c| *c == '-').count(), 4);
+}
+
+/// The HIGH fix: `RequestIdMiddleware` enters a `request` span carrying
+/// `request_id`, so a downstream handler's `tracing` event inherits the
+/// id as span context even though the event itself never mentions it.
+/// `logs_contain` matches against the formatted output, which includes
+/// the span-field prefix — so a hit proves the id propagated via the
+/// span, not via the event. Without `.instrument(span)` the id would be
+/// absent from the handler's log line.
+#[tokio::test]
+#[traced_test]
+async fn downstream_events_inherit_request_id_via_request_span() {
+    let addr = spawn_server(router(), MiddlewareRegistry::new(), 1).await;
+
+    let (status, _headers, _body) = request(
+        addr,
+        "GET",
+        "/logs",
+        &[("X-Request-Id", "span-context-probe-id-4242")],
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    assert!(
+        logs_contain("span-context-probe-id-4242"),
+        "the /logs handler event must carry request_id from the request span context"
+    );
 }

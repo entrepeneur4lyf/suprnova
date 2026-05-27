@@ -549,8 +549,9 @@ async fn handle_request_inner(
             // Build middleware chain
             let mut chain = MiddlewareChain::new();
 
-            // 0. RequestId is always outermost so spans + events emitted
-            //    downstream carry the per-request id automatically.
+            // 0. RequestId is always outermost so the `request` span it
+            //    enters — and every event emitted downstream within it —
+            //    carries the per-request id.
             chain.push(into_boxed(RequestIdMiddleware::with_id(request_id.clone())));
 
             // 1. Add global middleware

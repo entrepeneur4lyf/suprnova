@@ -1,7 +1,11 @@
-//! Per-request UUID stored in a `tokio::task_local!`. The
-//! `RequestIdMiddleware` installs it as the outermost middleware so
-//! every downstream `tracing` event, every error log, and every event
-//! payload carries the same id.
+//! Per-request id stored in a `tokio::task_local!` and attached to a
+//! `tracing` span. `RequestIdMiddleware` installs it as the outermost
+//! middleware and enters a `request` span — carrying `request_id`,
+//! `method`, and `path` — around the rest of the chain, so every
+//! downstream `tracing` event is emitted within that span and carries
+//! the id as span context (nested under `span` in the JSON formatter).
+//! The id is also seeded into the request `Context` (`_request_id`) so
+//! error logs, jobs, and event payloads can read it by name.
 
 use std::fmt;
 use uuid::Uuid;
@@ -51,6 +55,7 @@ pub fn current_request_id() -> Option<RequestId> {
 use crate::http::{Request, Response};
 use crate::middleware::Next;
 use async_trait::async_trait;
+use tracing::Instrument;
 
 /// Middleware that ensures every request has a `RequestId` scoped in
 /// `REQUEST_ID`. If the inbound request carries an `X-Request-Id`
@@ -137,6 +142,19 @@ impl crate::middleware::Middleware for RequestIdMiddleware {
         let id_str = id.as_str().to_string();
         let id_for_context = id_str.clone();
 
+        // The request span carries `request_id`, `method`, and `path` as
+        // fields. Entering it (via `.instrument` below) around the rest of
+        // the chain means every downstream `tracing` event inherits the id
+        // as span context — without each call site having to read and
+        // record it. Fields are recorded eagerly here, so the borrows of
+        // `request` end before it is moved into the handler.
+        let span = tracing::info_span!(
+            "request",
+            request_id = %id_str,
+            method = %request.method(),
+            path = %request.path(),
+        );
+
         // Snapshot the request's query parameters into a `HashMap` so
         // `Context::query_param` and downstream paginate / cursor code
         // can read them without re-parsing the URI on every call.
@@ -170,7 +188,8 @@ impl crate::middleware::Middleware for RequestIdMiddleware {
                     REQUEST_ID
                         .scope(id, async move { next(request).await })
                         .await
-                },
+                }
+                .instrument(span),
             )
             .await;
 
