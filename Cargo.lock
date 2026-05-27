@@ -6935,6 +6935,7 @@ dependencies = [
  "getrandom 0.4.2",
  "http 1.4.1",
  "http-body-util",
+ "httpdate",
  "hyper 1.9.0",
  "hyper-tungstenite",
  "hyper-util",

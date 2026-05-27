@@ -145,6 +145,7 @@ prost-types = { version = "0.12", optional = true }
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "mysql", "json"] }
 iso_currency = { version = "0.5.3", features = ["with-serde"] }
 percent-encoding = "2.3.2"
+httpdate = "1.0.3"
 
 [features]
 default = ["testing"]

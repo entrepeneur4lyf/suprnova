@@ -287,6 +287,14 @@ impl Method {
             Self::Delete => reqwest::Method::DELETE,
         }
     }
+
+    /// Whether this method is idempotent per RFC 7231 §4.2.2 — sending
+    /// the request more than once has the same effect as sending it once.
+    /// Retries are only safe (no duplicated side effect) for idempotent
+    /// methods. GET/PUT/DELETE are idempotent; POST and PATCH are not.
+    pub(crate) fn is_idempotent(self) -> bool {
+        matches!(self, Self::Get | Self::Put | Self::Delete)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -298,15 +306,22 @@ pub(crate) enum Body {
 
 /// Retry policy attached to a [`RequestBuilder`].
 ///
-/// Created with [`RequestBuilder::retry`]. Retries on transient
-/// failures (connect/timeout, HTTP 5xx). The delay between attempt
-/// `n` and attempt `n+1` is `base_backoff * 2^(n-1)`. For HTTP 503,
-/// the larger of the computed backoff and any `Retry-After` header is
-/// used.
+/// Created with [`RequestBuilder::retry`] (idempotent methods only) or
+/// [`RequestBuilder::retry_non_idempotent`] (all methods). Retries on
+/// transient failures (connect/timeout, HTTP 5xx). The delay before
+/// attempt `n+1` is a random duration in `[0, base_backoff * 2^(n-1)]`
+/// (full jitter), capped at 30s. For HTTP 503 the wait is the larger of
+/// that backoff and any `Retry-After` header, still capped at 30s.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RetryPolicy {
     pub(crate) max_attempts: u32,
     pub(crate) base_backoff: Duration,
+    /// When `false` (the default, set by [`RequestBuilder::retry`]),
+    /// retries are limited to idempotent methods. When `true` (set by
+    /// [`RequestBuilder::retry_non_idempotent`]), POST/PATCH are retried
+    /// too — only safe when the upstream is protected by an idempotency
+    /// key or is otherwise safe to call more than once.
+    pub(crate) retry_non_idempotent: bool,
 }
 
 /// Builder for an outbound HTTP request. Created via the [`Http`] facade.
@@ -382,24 +397,26 @@ impl RequestBuilder {
         self.header("Authorization", format!("Basic {}", encoded))
     }
 
-    /// Configure transient-failure retries.
+    /// Configure transient-failure retries for IDEMPOTENT methods.
     ///
     /// `max_attempts` is the total number of attempts including the
     /// first try (so `max_attempts=4` retries up to three times).
-    /// `base_backoff` is the initial delay; subsequent delays double
-    /// (100ms → 200 → 400 → 800ms for four attempts at 100ms base).
+    /// `base_backoff` seeds the delay; the wait before attempt `n+1` is a
+    /// random duration in `[0, base_backoff * 2^(n-1)]` (full jitter, so
+    /// many workers retrying the same outage don't synchronize into a
+    /// thundering herd), capped at 30s.
     ///
-    /// A response is considered transient and eligible for retry if:
+    /// A request is eligible for retry only if its method is idempotent
+    /// (GET/PUT/DELETE) — see [`Self::retry_non_idempotent`] to opt POST/
+    /// PATCH in. An eligible request is retried when:
     /// - The send fails before we have a response (connect / timeout /
-    ///   DNS errors).
-    /// - The response status is 5xx (any server-side failure).
+    ///   DNS errors), or
+    /// - The response status is 5xx.
     ///
-    /// Responses with 4xx are returned as-is — client errors are not
-    /// retried. 2xx/3xx are returned as-is. After exhausting retries
-    /// the last response (or the last error) is returned to the
-    /// caller. For 503, the wait between attempts is the maximum of
-    /// the computed backoff and the `Retry-After` header (parsed as a
-    /// delta-seconds integer).
+    /// 4xx and 2xx/3xx are returned as-is. After exhausting retries the
+    /// last response (or the last error) is returned. For 503 the wait is
+    /// the larger of the jittered backoff and the `Retry-After` header
+    /// (delta-seconds or HTTP-date), still capped at 30s.
     ///
     /// Calling `.retry()` again replaces the previous policy.
     pub fn retry(mut self, max_attempts: u32, base_backoff: Duration) -> Self {
@@ -407,6 +424,27 @@ impl RequestBuilder {
         self.retry = Some(RetryPolicy {
             max_attempts: attempts,
             base_backoff,
+            retry_non_idempotent: false,
+        });
+        self
+    }
+
+    /// Like [`Self::retry`], but ALSO retries non-idempotent methods
+    /// (`POST`, `PATCH`).
+    ///
+    /// [`Self::retry`] deliberately skips POST/PATCH: if the upstream
+    /// already performed the write but the response was lost (or it
+    /// returned 5xx *after* committing), a blind retry duplicates the
+    /// side effect. Only reach for this when the request is safe to send
+    /// more than once — e.g. it carries an idempotency key the server
+    /// honors, or the operation is naturally safe to repeat. Idempotent
+    /// methods (GET/PUT/DELETE) are retried by both this and
+    /// [`Self::retry`]; calling either again replaces the previous policy.
+    pub fn retry_non_idempotent(mut self, max_attempts: u32, base_backoff: Duration) -> Self {
+        self.retry = Some(RetryPolicy {
+            max_attempts: max_attempts.max(1),
+            base_backoff,
+            retry_non_idempotent: true,
         });
         self
     }
@@ -419,6 +457,13 @@ impl RequestBuilder {
     pub async fn send(self) -> Result<ClientResponse, FrameworkError> {
         let policy = self.retry;
         let max_attempts = policy.map(|p| p.max_attempts).unwrap_or(1);
+        // A request is eligible for retry only when a policy is set AND
+        // either the method is idempotent or the caller explicitly opted
+        // non-idempotent methods in. This prevents a blind replay of a
+        // POST/PATCH whose first attempt may have already taken effect.
+        let method_retryable = policy
+            .map(|p| p.retry_non_idempotent || self.method.is_idempotent())
+            .unwrap_or(false);
 
         let mut last_err: Option<FrameworkError> = None;
         for attempt in 1..=max_attempts {
@@ -449,12 +494,16 @@ impl RequestBuilder {
                     let status = resp.status();
                     let is_transient = (500..600).contains(&status);
                     if is_transient
+                        && method_retryable
                         && attempt < max_attempts
                         && let Some(p) = policy
                     {
                         let backoff = backoff_for(attempt, p.base_backoff);
                         let wait = if status == 503 {
-                            std::cmp::max(backoff, retry_after_from(&resp))
+                            std::cmp::min(
+                                std::cmp::max(backoff, retry_after_from(&resp)),
+                                MAX_RETRY_WAIT,
+                            )
                         } else {
                             backoff
                         };
@@ -536,25 +585,57 @@ fn inject_w3c_trace_context(request: &mut reqwest::Request) {
 #[cfg(not(feature = "otel"))]
 fn inject_w3c_trace_context(_request: &mut reqwest::Request) {}
 
-/// `base_backoff * 2^(attempt-1)`. Saturating math so a pathologically
-/// large attempt count can't overflow the shift, and the resulting
-/// duration is clamped to ~136 years (`Duration::saturating_mul`).
+/// Maximum wait between two retry attempts. Bounds both the exponential
+/// backoff and a hostile `Retry-After` (e.g. `Retry-After: 86400`) so a
+/// single retry can never park a task for more than 30 seconds.
+const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
+
+/// Exponential backoff with full jitter. The ceiling is
+/// `base_backoff * 2^(attempt-1)` (saturating, capped at
+/// [`MAX_RETRY_WAIT`]); the returned wait is a uniform random duration in
+/// `[0, ceiling]`. Full jitter (AWS's published recipe) keeps many
+/// workers retrying the same outage from synchronizing into a thundering
+/// herd.
 fn backoff_for(attempt: u32, base_backoff: Duration) -> Duration {
+    use rand::RngExt;
+
     // `Duration::saturating_mul` takes u32; cap the exponent at 31 so
     // `1u32 << exp` is well-defined.
     let exp = attempt.saturating_sub(1).min(31);
     let factor: u32 = 1u32 << exp;
-    base_backoff.saturating_mul(factor)
+    let ceiling = base_backoff.saturating_mul(factor).min(MAX_RETRY_WAIT);
+    let ceiling_ms = ceiling.as_millis() as u64;
+    if ceiling_ms == 0 {
+        return Duration::ZERO;
+    }
+    // Uniform in `[0, ceiling_ms]`; millisecond precision is plenty for
+    // backoff scheduling.
+    let jittered = rand::rng().random_range(0..=ceiling_ms);
+    Duration::from_millis(jittered)
 }
 
-/// Parse a `Retry-After: <seconds>` header. HTTP-date form is not
-/// supported here; integer delta-seconds is the only shape this honors.
-/// Returns `Duration::ZERO` if missing or unparseable.
+/// Parse a `Retry-After` header in either RFC 7231 form: integer
+/// delta-seconds, or an HTTP-date. For an HTTP-date the wait is the time
+/// from now until that instant (a date already in the past yields
+/// `Duration::ZERO`). Returns `Duration::ZERO` if the header is missing
+/// or unparseable.
 fn retry_after_from(resp: &ClientResponse) -> Duration {
-    resp.header("Retry-After")
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::ZERO)
+    let Some(raw) = resp.header("Retry-After") else {
+        return Duration::ZERO;
+    };
+    let raw = raw.trim();
+    // Delta-seconds form (the common case).
+    if let Ok(secs) = raw.parse::<u64>() {
+        return Duration::from_secs(secs);
+    }
+    // HTTP-date form: wait until that instant, clamped at zero if it is
+    // already in the past.
+    match httpdate::parse_http_date(raw) {
+        Ok(when) => when
+            .duration_since(std::time::SystemTime::now())
+            .unwrap_or(Duration::ZERO),
+        Err(_) => Duration::ZERO,
+    }
 }
 
 /// Outbound response. Wraps `reqwest::Response` (real) or in-memory
@@ -656,5 +737,75 @@ impl ClientResponse {
                 "into_inner is not available on fake responses",
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idempotent_methods_are_get_put_delete() {
+        assert!(Method::Get.is_idempotent());
+        assert!(Method::Put.is_idempotent());
+        assert!(Method::Delete.is_idempotent());
+        assert!(!Method::Post.is_idempotent());
+        assert!(!Method::Patch.is_idempotent());
+    }
+
+    #[test]
+    fn backoff_stays_within_ceiling_and_is_capped() {
+        // Full jitter: every sample sits in [0, ceiling]. With a 100ms
+        // base, attempt 3's ceiling is 100ms * 2^2 = 400ms.
+        let base = Duration::from_millis(100);
+        for _ in 0..256 {
+            assert!(
+                backoff_for(3, base) <= Duration::from_millis(400),
+                "jittered backoff exceeded its ceiling"
+            );
+        }
+        // A pathologically large attempt / base is bounded by the 30s cap
+        // rather than overflowing or parking for longer.
+        for _ in 0..256 {
+            assert!(
+                backoff_for(40, Duration::from_secs(10)) <= MAX_RETRY_WAIT,
+                "backoff exceeded the 30s cap"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_after_parses_delta_seconds_and_http_date() {
+        let with_header = |value: String| {
+            ClientResponse::fake(503, vec![("Retry-After".to_string(), value)], Bytes::new())
+        };
+
+        // Delta-seconds form.
+        assert_eq!(
+            retry_after_from(&with_header("5".to_string())),
+            Duration::from_secs(5)
+        );
+
+        // HTTP-date ~3s in the future parses to roughly 3s (HTTP-date has
+        // whole-second granularity, so allow generous slack).
+        let future = std::time::SystemTime::now() + Duration::from_secs(3);
+        let d = retry_after_from(&with_header(httpdate::fmt_http_date(future)));
+        assert!(
+            d >= Duration::from_secs(1) && d <= Duration::from_secs(3),
+            "http-date Retry-After should be ~3s, got {d:?}"
+        );
+
+        // A past HTTP-date clamps to zero.
+        let past = std::time::SystemTime::now() - Duration::from_secs(120);
+        assert_eq!(
+            retry_after_from(&with_header(httpdate::fmt_http_date(past))),
+            Duration::ZERO
+        );
+
+        // Unparseable header → zero.
+        assert_eq!(
+            retry_after_from(&with_header("soon".to_string())),
+            Duration::ZERO
+        );
     }
 }

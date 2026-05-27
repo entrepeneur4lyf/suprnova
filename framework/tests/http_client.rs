@@ -433,6 +433,53 @@ async fn retry_honors_retry_after_header_on_503() {
 }
 
 #[tokio::test]
+async fn retry_skips_non_idempotent_post_by_default() {
+    let _net = NETWORK_LOCK.lock().await;
+    // A 500 that WOULD be retried for an idempotent method. POST is not
+    // idempotent, so `.retry()` must NOT replay it — exactly one attempt,
+    // and the 500 is returned to the caller.
+    let (addr, count) = spawn_canned(vec![(500, None, "{\"err\":1}")]).await;
+    let url = format!("http://{}/x", addr);
+    let resp = Http::post(&url)
+        .retry(3, std::time::Duration::from_millis(5))
+        .send()
+        .await
+        .expect("send returns the 500, not an error");
+    assert_eq!(resp.status(), 500);
+    assert_eq!(
+        *count.lock().unwrap(),
+        1,
+        "POST must not be retried by default (non-idempotent)"
+    );
+}
+
+#[tokio::test]
+async fn retry_non_idempotent_opts_post_into_retries() {
+    let _net = NETWORK_LOCK.lock().await;
+    // Same POST, but opted in via retry_non_idempotent → retried through
+    // the two 500s to the eventual 200.
+    let mut canned: Vec<(u16, Option<u64>, &'static str)> = vec![
+        (500, None, "{\"err\":1}"),
+        (500, None, "{\"err\":2}"),
+        (200, None, "{\"ok\":true}"),
+    ];
+    canned.reverse();
+    let (addr, count) = spawn_canned(canned).await;
+    let url = format!("http://{}/x", addr);
+    let resp = Http::post(&url)
+        .retry_non_idempotent(3, std::time::Duration::from_millis(5))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        *count.lock().unwrap(),
+        3,
+        "retry_non_idempotent must retry POST through to success"
+    );
+}
+
+#[tokio::test]
 async fn into_inner_returns_err_for_fake_response() {
     Http::fake(|| async {
         fake_response("GET", "/x", 200, serde_json::json!({"ok": true}));
