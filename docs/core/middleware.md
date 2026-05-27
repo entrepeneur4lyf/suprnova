@@ -252,9 +252,42 @@ The deadline bounds *time-to-response* — the moment your handler returns its `
 
 When the deadline elapses the in-flight handler is **cancelled** — its future is dropped at the current `.await` point. Anything held across that point is released by its `Drop` impl, so open transactions roll back and locks release. Work you moved off the request with `tokio::spawn` is detached and will **not** be cancelled, so keep handlers cancel-safe.
 
+## Cross-Origin Resource Sharing (CORS)
+
+`CorsMiddleware` is a built-in middleware that adds the `Access-Control-*` headers a browser needs to let a cross-origin page read your responses, and answers the preflight `OPTIONS` request browsers send before non-simple cross-origin calls. Same-origin apps (the default Inertia setup) don't need it — it matters once a browser on a *different* origin calls your API (public API, separate SPA host, mobile webview).
+
+### Installing CORS
+
+CORS must be installed **globally** so preflight requests reach it (see below). There is intentionally no permissive default — choose an origin policy explicitly:
+
+```rust
+// src/bootstrap.rs
+use suprnova::{global_middleware, CorsConfig, CorsMiddleware};
+
+pub async fn register() {
+    global_middleware!(CorsMiddleware::new(
+        CorsConfig::allow_origins(["https://app.example", "https://admin.example"])
+            .allow_credentials(true)
+            .max_age(std::time::Duration::from_secs(600)),
+    ));
+}
+```
+
+`CorsConfig::any_origin()` opts into `Access-Control-Allow-Origin: *` explicitly. Builder methods: `.methods([...])`, `.allow_headers([...])` / `.allow_any_headers()`, `.expose_headers([...])`, `.allow_credentials(bool)`, `.max_age(Duration)`.
+
+### Why CORS must be global
+
+A preflight is an `OPTIONS` request carrying `Access-Control-Request-Method`, and the router has no `OPTIONS` routes — so a preflight never matches a route. suprnova still runs the global middleware chain for unmatched requests (terminating in a 404), so a globally-installed `CorsMiddleware` intercepts the preflight and answers it with `204` before the 404 is produced. A *per-route* CORS middleware would never see preflights.
+
+### Credentials and `*`
+
+`Access-Control-Allow-Origin: *` is invalid together with credentials — the browser rejects it. When `.allow_credentials(true)` is set, the middleware always echoes the specific request `Origin` (and reflects requested headers) instead of `*`, so the invalid combination can't be emitted. Non-wildcard responses also get `Vary: Origin` so shared caches stay correct.
+
 ## Practical Examples
 
 ### CORS Middleware
+
+> **Note:** This is a hand-rolled illustration. For production, prefer the built-in `suprnova::CorsMiddleware` (see *Cross-Origin Resource Sharing (CORS)* above) — it handles preflight `OPTIONS`, credentials, and `Vary` correctly.
 
 ```rust
 use suprnova::{async_trait, Middleware, Next, Request, Response, HttpResponse};
@@ -382,3 +415,4 @@ pub use cors::CorsMiddleware;
 | Short-circuit | Return `Err(HttpResponse::...)` without calling `next()` |
 | Continue chain | Call `next(request).await` |
 | Request timeout | `global_middleware!(TimeoutMiddleware::default())` (global ceiling) or `.middleware(TimeoutMiddleware::seconds(n))` (per route) |
+| CORS | `global_middleware!(CorsMiddleware::new(CorsConfig::allow_origins([...])))` — must be global so preflight is handled |

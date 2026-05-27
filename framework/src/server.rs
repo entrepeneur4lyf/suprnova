@@ -584,8 +584,37 @@ async fn handle_request_inner(
                 }
                 http_response.into_hyper()
             } else {
-                // No fallback defined, return default 404
-                HttpResponse::text("404 Not Found").status(404).into_hyper()
+                // No fallback handler registered. Still run the global
+                // middleware chain (RequestId + global) terminating in a
+                // fixed 404, so cross-cutting concerns act on unrouted
+                // requests too: CORS preflight (OPTIONS never matches a
+                // route, so it lands here) can short-circuit with its 204,
+                // logging sees 404 traffic, and the response carries a
+                // request id. This mirrors the fallback branch above — the
+                // only difference is the terminal handler is a static 404
+                // rather than a user-supplied fallback.
+                let request = Request::new(req).with_params(std::collections::HashMap::new());
+
+                let mut chain = MiddlewareChain::new();
+                chain.push(into_boxed(RequestIdMiddleware));
+                chain.extend(middleware_registry.global_middleware().iter().cloned());
+
+                let not_found: Arc<crate::routing::BoxedHandler> =
+                    Arc::new(Box::new(|_req: Request| {
+                        Box::pin(async { Ok(HttpResponse::text("404 Not Found").status(404)) })
+                            as std::pin::Pin<
+                                Box<dyn std::future::Future<Output = crate::http::Response> + Send>,
+                            >
+                    }));
+
+                let http_response =
+                    execute_chain_safely(chain, request, not_found, &method, path).await;
+
+                #[cfg(feature = "otel")]
+                if http_response.status_code() >= 500 {
+                    tracing::Span::current().record("error", true);
+                }
+                http_response.into_hyper()
             }
         }
     }

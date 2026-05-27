@@ -9,6 +9,7 @@ pub mod config;
 pub mod console;
 pub mod container;
 pub mod context;
+pub mod cors;
 pub mod crypto;
 pub mod csrf;
 pub mod data;
@@ -103,6 +104,7 @@ pub use broadcasting::{
 };
 pub use bus::{Bus, Dispatched};
 pub use console::{CommandEntry, CommandHandler, TypedCommand, dispatch_argv};
+pub use cors::{AllowedHeaders, AllowedOrigins, CorsConfig, CorsMiddleware};
 pub use error::{AppError, FrameworkError, HttpError, ValidationErrors};
 pub use events::{ErrorOccurred, Event, EventDispatcher, EventFacade, Listener};
 pub use factory::{Factory, FactoryBuilder, Persistable, Sequence, persist_via_seaorm};
