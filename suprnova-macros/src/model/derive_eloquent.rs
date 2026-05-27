@@ -239,6 +239,21 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         .zip(field_strs.iter())
         .map(|(ident, name)| casts::to_storage_arm(ident, input.cast_for_field(name)));
 
+    // #380 (Augment) — fallible analogues of the read/write arms
+    // above. These feed `Model::try_from_storage` / `try_into_storage`,
+    // the `?`-propagating hydration/dehydration the framework's own
+    // CRUD hot paths route through. The infallible `From` impls below
+    // keep using the panicking arms as the documented escape hatch.
+    let try_from_storage_arms = field_idents
+        .iter()
+        .zip(field_strs.iter())
+        .map(|(ident, name)| casts::try_from_storage_arm(ident, input.cast_for_field(name)));
+
+    let try_to_storage_arms = field_idents
+        .iter()
+        .zip(field_strs.iter())
+        .map(|(ident, name)| casts::try_to_storage_arm(ident, input.cast_for_field(name)));
+
     // Phase 10C T6 — emit the `to_array` + `__append_accessor`
     // overrides on the `Model` trait when the model declares any of
     // `hidden = [...]` / `visible = [...]` / `appends = [...]`. When
@@ -754,6 +769,34 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             #to_array_override
 
             #append_accessor_dispatch
+
+            // #380 (Augment) — fallible hydration / dehydration. The
+            // framework's CRUD paths call these so a cast that fails to
+            // decode a stored value (corrupt column, schema drift) or
+            // encode a runtime value surfaces a recoverable
+            // `FrameworkError` instead of a panic. That matters off the
+            // HTTP path: queue workers, the scheduler, and CLI commands
+            // have no panic-recovery middleware. The infallible `From`
+            // impls above remain as the ergonomic escape hatch.
+            fn try_from_storage(
+                row: <Self::Entity as ::suprnova::EntityTrait>::Model,
+            ) -> ::core::result::Result<Self, ::suprnova::FrameworkError> {
+                ::core::result::Result::Ok(Self {
+                    #( #try_from_storage_arms, )*
+                    #relations_fields_init
+                })
+            }
+
+            fn try_into_storage(
+                self,
+            ) -> ::core::result::Result<
+                <Self::Entity as ::suprnova::EntityTrait>::Model,
+                ::suprnova::FrameworkError,
+            > {
+                ::core::result::Result::Ok(#module_name::Model {
+                    #( #try_to_storage_arms ),*
+                })
+            }
 
             fn primary_key_value(
                 &self,

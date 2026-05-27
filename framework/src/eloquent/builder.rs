@@ -2180,9 +2180,14 @@ where
         .map_err(|e| FrameworkError::database(e.to_string()))?;
 
         let mut out: Vec<M> = if runtime_casts.is_empty() {
-            // Fast path — convert each row directly via the
-            // macro-emitted `From<inner::Model> for M`.
-            raw_rows.into_iter().map(M::from).collect()
+            // Fast path — convert each row via the macro-emitted
+            // fallible `Model::try_from_storage`, so a cast that fails
+            // to decode a stored value propagates as a `FrameworkError`
+            // instead of panicking (#380 Augment).
+            raw_rows
+                .into_iter()
+                .map(M::try_from_storage)
+                .collect::<Result<Vec<_>, _>>()?
         } else {
             // Slow path (override mode) — serialise the storage-shape
             // row to JSON, apply each runtime cast in place, then

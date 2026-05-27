@@ -308,38 +308,26 @@ async fn corrupt_ciphertext_yields_clear_error() {
         .await
         .unwrap();
 
-    // `find` calls `From<inner::Model>` which `.expect()`s the cast —
-    // a panic propagates out of the awaited future as a join error.
-    // The macro-generated From impl uses `.expect("cast from_storage failed
-    // — corrupt data in database column")` on the from_storage call.
-    // The panic surfaces here as an `Err` from `catch_unwind` semantics
-    // — tokio's `spawn` reflects the panic into the JoinHandle. For
-    // `Model::find`, which executes inline (no spawn), the panic
-    // unwinds normally — we catch it with `std::panic::catch_unwind`
-    // via `AssertUnwindSafe` and `FutureExt::catch_unwind`.
-    use futures::future::FutureExt;
-    let result = std::panic::AssertUnwindSafe(CorruptModel::find(1))
-        .catch_unwind()
-        .await;
-    assert!(
-        result.is_err(),
-        "decrypt of corrupt ciphertext should panic via the macro's .expect()"
+    // #380 (Augment): `find` routes hydration through the fallible
+    // `Model::try_from_storage`, so a corrupt ciphertext surfaces as a
+    // recoverable `Err(FrameworkError)` from `find()` — NOT a panic.
+    // This is the contract that keeps a corrupt row from tearing down a
+    // queue worker, the scheduler, or a CLI command that has no
+    // panic-recovery net. (The infallible `From<inner::Model>` escape
+    // hatch still panics on the same failure; that path is covered by
+    // `eloquent_cast_panic_diagnostic.rs`.)
+    let err = CorruptModel::find(1).await.expect_err(
+        "decrypt of corrupt ciphertext must yield a clear Err from find(), \
+         not Ok and not a panic",
     );
-    // Extract the panic message and assert it mentions the cast failure.
-    let panic_payload = result.unwrap_err();
-    let msg = panic_payload
-        .downcast_ref::<String>()
-        .cloned()
-        .or_else(|| {
-            panic_payload
-                .downcast_ref::<&'static str>()
-                .map(|s| (*s).to_string())
-        })
-        .unwrap_or_default()
-        .to_lowercase();
+    let msg = err.to_string().to_lowercase();
     assert!(
         msg.contains("cast") || msg.contains("corrupt") || msg.contains("from_storage"),
-        "expected cast/corrupt mention in panic, got: {msg}"
+        "expected cast/corrupt mention in error, got: {msg}"
+    );
+    assert!(
+        msg.contains("secret"),
+        "error must name the offending field `secret`; got: {msg}"
     );
 }
 

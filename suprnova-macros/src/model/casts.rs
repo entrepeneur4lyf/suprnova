@@ -206,6 +206,61 @@ pub fn active_model_update_stmt(
     }
 }
 
+/// Fallible read-direction arm for `Model::try_from_storage` — the
+/// `?`-propagating analogue of [`from_storage_arm`]. Cast fields call
+/// `Cast::from_storage` and, on failure, map the error to a
+/// `FrameworkError` that names the offending field (same diagnostic as
+/// the panic path) before propagating via `?`. The surrounding
+/// generated method returns `Result<Self, FrameworkError>`; non-cast
+/// fields are a trivial move out of `row`.
+///
+/// #380 (Augment): the panicking [`from_storage_arm`] stays as the
+/// `From<inner::Model>` escape hatch. This arm gives the framework's
+/// own hydration hot paths (`find` / `all` / `Builder::get` / ...) a
+/// recoverable error so a corrupt row or a deprecated enum variant in
+/// old data does not panic a queue worker, the scheduler, or a CLI
+/// command — none of which sit behind the HTTP panic-recovery net.
+pub fn try_from_storage_arm(ident: &syn::Ident, cast_ty: Option<&Type>) -> TokenStream {
+    match cast_ty {
+        Some(cast_ty) => {
+            let field_name = ident.to_string();
+            quote! {
+                #ident: <#cast_ty as ::suprnova::eloquent::casts::Cast>::from_storage(&row.#ident)
+                    .map_err(|__cast_err| ::suprnova::FrameworkError::internal(::std::format!(
+                        "cast from_storage failed for field `{}`: {} \
+                         (corrupt data in database column or schema drift)",
+                        #field_name,
+                        __cast_err,
+                    )))?
+            }
+        }
+        None => quote! { #ident: row.#ident },
+    }
+}
+
+/// Fallible write-direction arm for `Model::try_into_storage` — the
+/// `?`-propagating analogue of [`to_storage_arm`]. Reads the runtime
+/// value off `self`, routes it through `Cast::to_storage`, and maps a
+/// failure to a field-named `FrameworkError` instead of panicking.
+/// Non-cast fields move out of `self`. See [`try_from_storage_arm`]
+/// for the #380 Augment rationale.
+pub fn try_to_storage_arm(ident: &syn::Ident, cast_ty: Option<&Type>) -> TokenStream {
+    match cast_ty {
+        Some(cast_ty) => {
+            let field_name = ident.to_string();
+            quote! {
+                #ident: <#cast_ty as ::suprnova::eloquent::casts::Cast>::to_storage(&self.#ident)
+                    .map_err(|__cast_err| ::suprnova::FrameworkError::internal(::std::format!(
+                        "cast to_storage failed for field `{}`: {} (invalid runtime value)",
+                        #field_name,
+                        __cast_err,
+                    )))?
+            }
+        }
+        None => quote! { #ident: self.#ident },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Domain 5 audit M-D5-1 regression: the `From<inner::Model>` and
@@ -278,6 +333,81 @@ mod tests {
         assert!(
             !rendered_to.contains("panic"),
             "non-cast to arm should not panic; got: {rendered_to}"
+        );
+    }
+
+    // #380 (Augment): the fallible `try_*` arms must propagate via
+    // `map_err` + `?` (NOT panic) while keeping the field-name
+    // diagnostic, so a corrupt row surfaces a recoverable
+    // `FrameworkError` on the framework's non-HTTP hydration paths.
+
+    #[test]
+    fn try_from_storage_arm_propagates_and_names_field() {
+        let id = ident("email_verified_at");
+        let cast: Type = parse_quote!(AsOptionalDateTime);
+        let rendered = try_from_storage_arm(&id, Some(&cast)).to_string();
+        assert!(
+            rendered.contains("email_verified_at"),
+            "fallible from arm must name the field; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("from_storage"),
+            "fallible from arm must call Cast::from_storage; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("map_err"),
+            "fallible from arm must map_err into FrameworkError; got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("panic"),
+            "fallible from arm must NOT panic; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn try_to_storage_arm_propagates_and_names_field() {
+        let id = ident("encrypted_token");
+        let cast: Type = parse_quote!(AsEncrypted<String>);
+        let rendered = try_to_storage_arm(&id, Some(&cast)).to_string();
+        assert!(
+            rendered.contains("encrypted_token"),
+            "fallible to arm must name the field; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("to_storage"),
+            "fallible to arm must call Cast::to_storage; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("map_err"),
+            "fallible to arm must map_err into FrameworkError; got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("panic"),
+            "fallible to arm must NOT panic; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn try_arms_for_non_cast_fields_are_trivial_moves() {
+        let id = ident("id");
+        let rf = try_from_storage_arm(&id, None).to_string();
+        let rt = try_to_storage_arm(&id, None).to_string();
+        assert!(
+            !rf.contains("map_err") && !rf.contains("panic"),
+            "non-cast fallible from arm must be a trivial move; got: {rf}"
+        );
+        assert!(
+            !rt.contains("map_err") && !rt.contains("panic"),
+            "non-cast fallible to arm must be a trivial move; got: {rt}"
+        );
+        // Read direction sources from `row`; write direction from `self`.
+        assert!(
+            rf.contains("row"),
+            "fallible from arm reads `row`; got: {rf}"
+        );
+        assert!(
+            rt.contains("self"),
+            "fallible to arm reads `self`; got: {rt}"
         );
     }
 }

@@ -1,19 +1,26 @@
 //! Domain 5 audit M-D5-1 runtime regression.
 //!
 //! The macro-emitted `From<inner::Model> for UserStruct` and
-//! `From<UserStruct> for inner::Model` impls panic on cast failure —
-//! that design hasn't changed because making them fallible would
-//! require breaking the row-materialisation API surface on
-//! `Builder::get`, `Model::all`, every eager-load arm, etc. (Domain 2's
-//! middleware safety net translates the panic to a 500 with the
-//! message in the tracing log.)
+//! `From<UserStruct> for inner::Model` impls panic on cast failure.
+//! They are RETAINED as an ergonomic escape hatch (`let u: User =
+//! row.into()`); #380 (Augment) did NOT remove them. M-D5-1 ensures
+//! that panic names the offending field and surfaces the original
+//! `FrameworkError`, so an operator can locate which column failed
+//! directly from the trace. (Domain 2's middleware safety net
+//! translates the panic to a 500 on the HTTP path.)
 //!
-//! M-D5-1 ensures the panic message includes the offending field name
-//! and the original `FrameworkError`, so an operator can locate which
-//! column failed and why directly from the trace — no column-by-column
-//! bisection needed. These tests exercise the runtime panic path by
-//! constructing an inner `Model` value directly (no DB required) and
-//! catching the panic the generated From impl raises.
+//! #380 (Augment) ADDED the fallible `Model::try_from_storage` /
+//! `Model::try_into_storage` siblings and routed the framework's own
+//! hydration/dehydration hot paths (`find`, `all`, `Builder::get`,
+//! `save`, `update`, `delete`, ...) through them — so a corrupt row or
+//! a bad runtime value becomes a recoverable `FrameworkError` rather
+//! than a panic off the HTTP path (queue workers, the scheduler, and
+//! CLI commands have no panic-recovery net).
+//!
+//! These tests exercise BOTH paths by constructing an inner `Model`
+//! value directly (no DB required): the panicking `From` impls (caught
+//! with `catch_unwind`) AND the fallible `try_*` siblings (asserting
+//! `Err` with the same field-named diagnostic, never a panic).
 //!
 //! The token-shape regression lives in
 //! `suprnova-macros/src/model/casts.rs::tests`; this file ensures the
@@ -22,6 +29,7 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use suprnova::eloquent::Model;
 use suprnova::eloquent::casts::Cast;
 use suprnova::{FrameworkError, model};
 
@@ -157,4 +165,65 @@ fn pre_audit_panic_message_no_longer_present() {
     );
     // Sanity: the same path must not silently swallow the failure.
     assert!(!msg.is_empty(), "panic payload must not be empty",);
+}
+
+// ---- #380 (Augment) — fallible siblings -------------------------------
+//
+// The framework's own CRUD hot paths route through these, so a cast
+// failure becomes a recoverable `FrameworkError` (NOT a panic) even off
+// the HTTP path. No `catch_unwind`: the whole point is that these return
+// `Err` rather than unwinding. Teeth: against the pre-#380 code (where
+// the framework called the panicking `From`), `find`/`all`/`get` would
+// have panicked here instead of yielding `Err`.
+
+#[test]
+fn try_from_storage_returns_err_naming_field_instead_of_panicking() {
+    let inner = cast_panic_canary::Model {
+        id: 3,
+        payload: "any-stored-value".to_string(),
+    };
+
+    let err = CastPanicCanary::try_from_storage(inner)
+        .expect_err("try_from_storage must return Err when the cast fails, not panic");
+    let msg = err.to_string();
+
+    assert!(
+        msg.contains("payload"),
+        "error must name the offending field; got: {msg}",
+    );
+    assert!(
+        msg.contains("from_storage exploded"),
+        "error must surface the source FrameworkError; got: {msg}",
+    );
+    assert!(
+        msg.contains("from_storage"),
+        "error must identify the direction (from_storage); got: {msg}",
+    );
+}
+
+#[test]
+fn try_into_storage_returns_err_naming_field_instead_of_panicking() {
+    let user = CastPanicCanary {
+        id: 4,
+        payload: "any-runtime-value".to_string(),
+        ..Default::default()
+    };
+
+    let err = user
+        .try_into_storage()
+        .expect_err("try_into_storage must return Err when the cast fails, not panic");
+    let msg = err.to_string();
+
+    assert!(
+        msg.contains("payload"),
+        "error must name the offending field; got: {msg}",
+    );
+    assert!(
+        msg.contains("to_storage exploded"),
+        "error must surface the source FrameworkError; got: {msg}",
+    );
+    assert!(
+        msg.contains("to_storage"),
+        "error must identify the direction (to_storage); got: {msg}",
+    );
 }

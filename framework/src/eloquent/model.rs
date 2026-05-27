@@ -103,6 +103,45 @@ where
     /// `fillable = [...]` / `guarded = [...]` attributes.
     fn fillable_filter() -> Fillable;
 
+    /// Fallible hydration of an inner SeaORM row into this model — the
+    /// `?`-propagating analogue of the infallible
+    /// `From<<Self::Entity>::Model>` bridge the macro also emits.
+    ///
+    /// The framework's own read paths (`find`, `find_many`, `all`,
+    /// [`Builder::get`](crate::eloquent::Builder), ...) route through
+    /// this method so a cast that fails to decode a stored value — a
+    /// corrupt column, a deprecated enum variant left in old rows,
+    /// schema drift — surfaces as a recoverable [`FrameworkError`]
+    /// rather than a panic. That matters off the HTTP path: a queue
+    /// worker, the scheduler, or a CLI command has no panic-recovery
+    /// middleware to turn a panic into a 500, so an unguarded panic
+    /// there tears down the task.
+    ///
+    /// The infallible `From` impl is retained as an ergonomic escape
+    /// hatch (`let u: User = row.into()`); it panics on the same
+    /// failure with a field-named diagnostic. The default below
+    /// delegates to it so non-`#[suprnova::model]` types that satisfy
+    /// the trait bounds still compile; the macro overrides this with
+    /// the per-field `Cast::from_storage` form that propagates via `?`.
+    fn try_from_storage(row: <Self::Entity as EntityTrait>::Model) -> Result<Self, FrameworkError> {
+        Ok(Self::from(row))
+    }
+
+    /// Fallible dehydration of this model into its inner SeaORM row —
+    /// the `?`-propagating analogue of the infallible
+    /// `From<Self> for <Self::Entity>::Model` bridge.
+    ///
+    /// The framework's write paths (`save`, `update`, `delete`,
+    /// `force_delete`, and their `_with_tx` variants) route through
+    /// this so a cast that fails to encode a runtime value becomes a
+    /// recoverable [`FrameworkError`] instead of a panic. See
+    /// [`Self::try_from_storage`] for the off-the-HTTP-path rationale;
+    /// the macro overrides this with the per-field `Cast::to_storage`
+    /// form.
+    fn try_into_storage(self) -> Result<<Self::Entity as EntityTrait>::Model, FrameworkError> {
+        Ok(self.into())
+    }
+
     /// Phase 10C T5b — read this row's field by column name and
     /// serialise it to a `serde_json::Value`. Returns `None` when the
     /// column name doesn't match any declared field on the model (and
@@ -204,7 +243,7 @@ where
             }
         }
         .map_err(|e| FrameworkError::database(e.to_string()))?;
-        let hydrated = row.map(Self::from);
+        let hydrated = row.map(Self::try_from_storage).transpose()?;
         if let Some(ref m) = hydrated {
             Self::__dispatch_retrieved(m).await?;
         }
@@ -281,10 +320,10 @@ where
         let mut by_id: HashMap<_, _> = rows
             .into_iter()
             .map(|row| {
-                let model = Self::from(row);
-                (model.primary_key_value(), model)
+                let model = Self::try_from_storage(row)?;
+                Ok((model.primary_key_value(), model))
             })
-            .collect();
+            .collect::<Result<HashMap<_, _>, FrameworkError>>()?;
         let ordered: Vec<Self> = id_vec
             .into_iter()
             .filter_map(|id| by_id.remove(&id))
@@ -325,7 +364,10 @@ where
             }
         }
         .map_err(|e| FrameworkError::database(e.to_string()))?;
-        let out: Vec<Self> = rows.into_iter().map(Self::from).collect();
+        let out: Vec<Self> = rows
+            .into_iter()
+            .map(Self::try_from_storage)
+            .collect::<Result<Vec<_>, _>>()?;
         for row in &out {
             Self::__dispatch_retrieved(row).await?;
         }
@@ -395,7 +437,7 @@ where
             .insert_active(am)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        let row = Self::from(inserted);
+        let row = Self::try_from_storage(inserted)?;
 
         Self::__dispatch_created(&row).await?;
         Self::__dispatch_saved(&row).await?;
@@ -449,7 +491,7 @@ where
             .update_active(am)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        let current = Self::from(updated);
+        let current = Self::try_from_storage(updated)?;
 
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
@@ -473,7 +515,7 @@ where
         Self::__dispatch_saving(shared.clone(), false).await?;
 
         let final_attrs = shared.lock().await.clone();
-        let row: <Self::Entity as EntityTrait>::Model = self.into();
+        let row = self.try_into_storage()?;
         let mut am = row.into_active_model();
         Self::apply_attrs_to_active_model(&mut am, final_attrs)?;
         // T11/T12: route through resolve_write.
@@ -487,7 +529,7 @@ where
             .update_active(am)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        let current = Self::from(updated);
+        let current = Self::try_from_storage(updated)?;
 
         Self::__dispatch_updated(&previous, &current).await?;
         Self::__dispatch_saved(&current).await?;
@@ -511,7 +553,7 @@ where
         Self::__dispatch_deleting(&self, false).await?;
 
         let snapshot = self.clone();
-        let row: <Self::Entity as EntityTrait>::Model = self.into();
+        let row = self.try_into_storage()?;
         let am = row.into_active_model();
         // T11/T12: route through resolve_write.
         let exec = crate::database::transaction::ExecutorChoice::resolve_write(
@@ -539,7 +581,7 @@ where
         Self::__dispatch_force_deleting(&self).await?;
 
         let snapshot = self.clone();
-        let row: <Self::Entity as EntityTrait>::Model = self.into();
+        let row = self.try_into_storage()?;
         let am = row.into_active_model();
         // T11/T12: route through resolve_write.
         let exec = crate::database::transaction::ExecutorChoice::resolve_write(
@@ -598,7 +640,7 @@ where
             .update_active(am)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        let current = Self::from(updated);
+        let current = Self::try_from_storage(updated)?;
 
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
@@ -621,7 +663,7 @@ where
         Self::__dispatch_saving(shared.clone(), false).await?;
 
         let final_attrs = shared.lock().await.clone();
-        let row: <Self::Entity as EntityTrait>::Model = self.into();
+        let row = self.try_into_storage()?;
         let mut am = row.into_active_model();
         Self::apply_attrs_to_active_model(&mut am, final_attrs)?;
         let exec = crate::database::transaction::ExecutorChoice::from_tx(tx);
@@ -629,7 +671,7 @@ where
             .update_active(am)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        let current = Self::from(updated);
+        let current = Self::try_from_storage(updated)?;
 
         Self::__dispatch_updated(&previous, &current).await?;
         Self::__dispatch_saved(&current).await?;
@@ -646,7 +688,7 @@ where
         Self::__dispatch_deleting(&self, false).await?;
 
         let snapshot = self.clone();
-        let row: <Self::Entity as EntityTrait>::Model = self.into();
+        let row = self.try_into_storage()?;
         let am = row.into_active_model();
         let exec = crate::database::transaction::ExecutorChoice::from_tx(tx);
         exec.delete_active(am)
@@ -681,7 +723,7 @@ where
             .insert_active(am)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        let row = Self::from(inserted);
+        let row = Self::try_from_storage(inserted)?;
 
         Self::__dispatch_created(&row).await?;
         Self::__dispatch_saved(&row).await?;
@@ -699,7 +741,7 @@ where
         Self::__dispatch_force_deleting(&self).await?;
 
         let snapshot = self.clone();
-        let row: <Self::Entity as EntityTrait>::Model = self.into();
+        let row = self.try_into_storage()?;
         let am = row.into_active_model();
         let exec = crate::database::transaction::ExecutorChoice::from_tx(tx);
         exec.delete_active(am)
