@@ -446,3 +446,26 @@ async fn register_gcs_with_valid_config_registers() {
     );
     assert!(Storage::disk("gcs_default_layer").is_ok());
 }
+
+#[tokio::test]
+async fn register_azblob_derives_endpoint_when_omitted() {
+    let _guard = Storage::fake();
+    // opendal requires an Azblob endpoint; omitting it must derive the standard
+    // public Azure endpoint from the account name rather than fail late.
+    let result = Storage::register_azblob(
+        "az_derived_endpoint",
+        AzBlobConfig {
+            container: "c".into(),
+            account_name: "myacct".into(),
+            // Azure account keys are base64; opendal validates the format.
+            account_key: "YWNjb3VudGtleQ==".into(),
+            endpoint: None,
+            ..Default::default()
+        },
+    );
+    assert!(
+        result.is_ok(),
+        "register_azblob must derive a default endpoint when omitted: {result:?}"
+    );
+    assert!(Storage::disk("az_derived_endpoint").is_ok());
+}

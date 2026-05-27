@@ -76,7 +76,9 @@ pub struct AzBlobConfig {
     pub account_name: String,
     /// Storage account key.
     pub account_key: String,
-    /// Custom endpoint, e.g. for Azurite emulator.
+    /// Custom endpoint (e.g. the Azurite emulator or a sovereign cloud). When
+    /// omitted, the standard public endpoint
+    /// `https://{account_name}.blob.core.windows.net` is used.
     pub endpoint: Option<String>,
     /// Root prefix within the container.
     pub root: Option<String>,
@@ -342,13 +344,19 @@ impl Storage {
                 "Azure Blob storage config requires non-empty `container`, `account_name`, and `account_key`",
             ));
         }
+        // opendal's Azblob backend requires an explicit endpoint. When the
+        // caller omits it, derive the standard public Azure Blob endpoint from
+        // the account name; an explicit endpoint (e.g. the Azurite emulator or
+        // a sovereign cloud) is used as-is.
+        let endpoint = config
+            .endpoint
+            .clone()
+            .unwrap_or_else(|| format!("https://{}.blob.core.windows.net", config.account_name));
         let mut builder = services::Azblob::default()
             .container(&config.container)
             .account_name(&config.account_name)
-            .account_key(&config.account_key);
-        if let Some(endpoint) = config.endpoint.as_deref() {
-            builder = builder.endpoint(endpoint);
-        }
+            .account_key(&config.account_key)
+            .endpoint(&endpoint);
         if let Some(root) = config.root.as_deref() {
             builder = builder.root(root);
         }
