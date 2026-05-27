@@ -202,3 +202,42 @@ async fn downstream_events_inherit_request_id_via_request_span() {
         "the /logs handler event must carry request_id from the request span context"
     );
 }
+
+/// The built-in `/_suprnova/health` endpoint short-circuits before the
+/// middleware chain, but must still honor the `X-Request-Id` contract so
+/// liveness probes stay correlatable with logs.
+#[tokio::test]
+async fn health_endpoint_echoes_inbound_request_id() {
+    let addr = spawn_server(router(), MiddlewareRegistry::new(), 1).await;
+
+    let (status, headers, _body) = request(
+        addr,
+        "GET",
+        "/_suprnova/health",
+        &[("X-Request-Id", "health-probe-id-9001")],
+    )
+    .await;
+
+    assert_eq!(status, 200);
+    assert_eq!(
+        headers.get("x-request-id").map(String::as_str),
+        Some("health-probe-id-9001"),
+        "the health endpoint must echo the inbound X-Request-Id"
+    );
+}
+
+/// With no inbound id, the health endpoint still mints and echoes a fresh
+/// one (UUID v4), matching the routed-path contract.
+#[tokio::test]
+async fn health_endpoint_echoes_a_fresh_request_id_when_none_supplied() {
+    let addr = spawn_server(router(), MiddlewareRegistry::new(), 1).await;
+
+    let (status, headers, _body) = request(addr, "GET", "/_suprnova/health", &[]).await;
+
+    assert_eq!(status, 200);
+    let echoed = headers
+        .get("x-request-id")
+        .expect("health endpoint must carry a fresh X-Request-Id");
+    assert_eq!(echoed.len(), 36, "fresh id should be a UUID v4");
+    assert_eq!(echoed.chars().filter(|c| *c == '-').count(), 4);
+}

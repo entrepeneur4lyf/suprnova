@@ -492,12 +492,16 @@ pub async fn handle_request(
         return handle_ws_upgrade(req, ws_match).await;
     }
 
-    let query = req.uri().query().unwrap_or("");
-
     // Built-in health check endpoint at /_suprnova/health
     // Uses framework prefix to avoid conflicts with user-defined routes
     if path == "/_suprnova/health" && method == hyper::Method::GET {
-        return health_response(query).await;
+        // The health endpoint short-circuits before the middleware chain,
+        // so it resolves and echoes `X-Request-Id` itself to keep liveness
+        // probes correlatable with logs — same contract as routed paths.
+        let request = Request::new(req);
+        let request_id = crate::logging::request_id::resolve_request_id(&request);
+        let query = request.query().unwrap_or("").to_string();
+        return health_response(&query, &request_id).await;
     }
 
     // Inertia context comes off the live Request via header helpers
@@ -1010,7 +1014,7 @@ fn convert_response_body(
 /// this endpoint can trigger restart on outage. The body shape (with
 /// `database` and `database_error` fields) stays the same so dashboards
 /// can parse both healthy and degraded responses uniformly.
-async fn health_response(query: &str) -> hyper::Response<ServerBody> {
+async fn health_response(query: &str, request_id: &RequestId) -> hyper::Response<ServerBody> {
     use chrono::Utc;
     use serde_json::json;
 
@@ -1050,6 +1054,7 @@ async fn health_response(query: &str) -> hyper::Response<ServerBody> {
     hyper::Response::builder()
         .status(status)
         .header("Content-Type", "application/json")
+        .header("X-Request-Id", request_id.as_str())
         .body(
             Full::new(Bytes::from(body))
                 .map_err(|never| match never {})
