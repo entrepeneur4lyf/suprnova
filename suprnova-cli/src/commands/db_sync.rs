@@ -39,10 +39,16 @@ fn run_migrations() {
 
     ui::info("Running pending migrations...");
 
-    let status = Command::new("cargo")
+    let status = match Command::new("cargo")
         .args(["run", "--bin", "migrate", "--", "up"])
         .status()
-        .expect("Failed to execute cargo command");
+    {
+        Ok(status) => status,
+        Err(e) => {
+            ui::error(&format!("Failed to execute cargo command: {e}"));
+            std::process::exit(1);
+        }
+    };
 
     if !status.success() {
         ui::error("Migration failed");
@@ -66,7 +72,13 @@ fn generate_entities(regenerate_models: bool) {
     ui::info("Discovering database schema...");
 
     // Use tokio runtime for async schema discovery
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            ui::error(&format!("Failed to start the async runtime: {e}"));
+            std::process::exit(1);
+        }
+    };
     rt.block_on(async {
         discover_and_generate(&database_url, regenerate_models).await;
     });
@@ -115,14 +127,26 @@ async fn discover_and_generate(database_url: &str, regenerate_models: bool) {
     // Create models directory if it doesn't exist
     let models_dir = Path::new("src/models");
     if !models_dir.exists() {
-        fs::create_dir_all(models_dir).expect("Failed to create models directory");
+        if let Err(e) = fs::create_dir_all(models_dir) {
+            ui::error(&format!(
+                "Failed to create models directory {}: {e}",
+                models_dir.display()
+            ));
+            std::process::exit(1);
+        }
         ui::success("Created src/models directory");
     }
 
     // Create entities directory
     let entities_dir = models_dir.join("entities");
     if !entities_dir.exists() {
-        fs::create_dir_all(&entities_dir).expect("Failed to create entities directory");
+        if let Err(e) = fs::create_dir_all(&entities_dir) {
+            ui::error(&format!(
+                "Failed to create entities directory {}: {e}",
+                entities_dir.display()
+            ));
+            std::process::exit(1);
+        }
         ui::success("Created src/models/entities directory");
     }
 
@@ -286,7 +310,13 @@ fn generate_entity_file(table: &TableInfo, entities_dir: &Path) {
     let entity_file = entities_dir.join(format!("{}.rs", table.name));
     let content = templates::entity_template(&table.name, &table.columns);
 
-    fs::write(&entity_file, content).expect("Failed to write entity file");
+    if let Err(e) = fs::write(&entity_file, content) {
+        ui::error(&format!(
+            "Failed to write entity file {}: {e}",
+            entity_file.display()
+        ));
+        std::process::exit(1);
+    }
     ui::success(&format!("Generated src/models/entities/{}.rs", table.name));
 }
 
@@ -305,7 +335,13 @@ fn generate_user_file_if_not_exists(table: &TableInfo, models_dir: &Path) {
     let struct_name = to_pascal_case(&singularize(&table.name));
     let content = templates::user_model_template(&table.name, &struct_name, &table.columns);
 
-    fs::write(&user_file, content).expect("Failed to write user model file");
+    if let Err(e) = fs::write(&user_file, content) {
+        ui::error(&format!(
+            "Failed to write user model file {}: {e}",
+            user_file.display()
+        ));
+        std::process::exit(1);
+    }
     ui::success(&format!("Created src/models/{}.rs", table.name));
 }
 
@@ -314,7 +350,13 @@ fn generate_user_file(table: &TableInfo, models_dir: &Path) {
     let struct_name = to_pascal_case(&singularize(&table.name));
     let content = templates::user_model_template(&table.name, &struct_name, &table.columns);
 
-    fs::write(&user_file, content).expect("Failed to write user model file");
+    if let Err(e) = fs::write(&user_file, content) {
+        ui::error(&format!(
+            "Failed to write user model file {}: {e}",
+            user_file.display()
+        ));
+        std::process::exit(1);
+    }
     ui::success(&format!("Regenerated src/models/{}.rs", table.name));
 }
 
@@ -322,7 +364,13 @@ fn update_entities_mod(tables: &[TableInfo], entities_dir: &Path) {
     let mod_file = entities_dir.join("mod.rs");
     let content = templates::entities_mod_template(tables);
 
-    fs::write(&mod_file, content).expect("Failed to write entities/mod.rs");
+    if let Err(e) = fs::write(&mod_file, content) {
+        ui::error(&format!(
+            "Failed to write entities/mod.rs {}: {e}",
+            mod_file.display()
+        ));
+        std::process::exit(1);
+    }
     ui::success("Updated src/models/entities/mod.rs");
 }
 
@@ -381,7 +429,13 @@ fn update_models_mod(tables: &[TableInfo], models_dir: &Path) {
     }
 
     let content = lines.join("\n");
-    fs::write(&mod_file, content).expect("Failed to write models/mod.rs");
+    if let Err(e) = fs::write(&mod_file, content) {
+        ui::error(&format!(
+            "Failed to write models/mod.rs {}: {e}",
+            mod_file.display()
+        ));
+        std::process::exit(1);
+    }
     ui::success("Updated src/models/mod.rs");
 }
 
