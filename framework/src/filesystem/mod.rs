@@ -26,6 +26,7 @@
 //! # }
 //! ```
 
+mod path_guard;
 mod registry;
 pub mod streaming;
 
@@ -164,10 +165,15 @@ impl Storage {
     ) -> Result<(), FrameworkError> {
         let root_str = root.as_ref().to_string_lossy();
         let builder = services::Fs::default().root(&root_str);
-        let raw = Operator::new(builder)
+        // `PathGuardLayer` is applied to the raw FS operator before the user's
+        // `layer_fn` runs, so the traversal guard sits closest to the backend
+        // and the caller's own layers (retry, logging, tracing) wrap it. The
+        // caller can add layers but cannot strip the guard.
+        let guarded = Operator::new(builder)
             .map_err(|e| FrameworkError::internal(format!("opendal fs init: {e}")))?
-            .finish();
-        let layered = layer_fn(raw);
+            .finish()
+            .layer(path_guard::PathGuardLayer);
+        let layered = layer_fn(guarded);
         registry::register(name, layered);
         Ok(())
     }
