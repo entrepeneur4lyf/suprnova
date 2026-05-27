@@ -121,23 +121,25 @@ impl TelemetryGuard {
     /// to the collector over HTTP. It is safe to call exactly once;
     /// subsequent calls are no-ops.
     pub async fn shutdown(self) {
-        if self.shutdown_called.swap(true, Ordering::SeqCst) {}
+        // Mark shutdown so the `Drop` impl doesn't warn about a lost flush.
+        // `shutdown` takes `self` by value, so it runs at most once.
+        self.shutdown_called.store(true, Ordering::SeqCst);
         #[cfg(feature = "otel")]
         {
-            if let Some(provider) = &self.tracer_provider {
-                if let Err(err) = provider.shutdown() {
-                    tracing::warn!(?err, "OTel tracer provider shutdown error");
-                }
+            if let Some(provider) = &self.tracer_provider
+                && let Err(err) = provider.shutdown()
+            {
+                tracing::warn!(?err, "OTel tracer provider shutdown error");
             }
-            if let Some(provider) = &self.meter_provider {
-                if let Err(err) = provider.shutdown() {
-                    tracing::warn!(?err, "OTel meter provider shutdown error");
-                }
+            if let Some(provider) = &self.meter_provider
+                && let Err(err) = provider.shutdown()
+            {
+                tracing::warn!(?err, "OTel meter provider shutdown error");
             }
-            if let Some(provider) = &self.logger_provider {
-                if let Err(err) = provider.shutdown() {
-                    tracing::warn!(?err, "OTel logger provider shutdown error");
-                }
+            if let Some(provider) = &self.logger_provider
+                && let Err(err) = provider.shutdown()
+            {
+                tracing::warn!(?err, "OTel logger provider shutdown error");
             }
         }
     }
