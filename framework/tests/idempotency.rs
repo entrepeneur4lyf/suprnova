@@ -59,6 +59,39 @@ async fn key_expires_after_ttl() {
 
 #[tokio::test]
 #[serial]
+async fn once_consumes_the_window_even_when_body_errors() {
+    RAN.store(0, Ordering::SeqCst);
+    install_memory_cache();
+
+    // First caller's body errors. `once` does NOT release on error — the TTL
+    // is the dedupe window regardless of outcome (this is the contract that
+    // distinguishes it from `commit_on_success`).
+    let r1 = Idempotency::once::<_, _, i32>("once-err", Duration::from_secs(60), || async {
+        RAN.fetch_add(1, Ordering::SeqCst);
+        Err(suprnova::FrameworkError::internal("boom"))
+    })
+    .await;
+    assert!(r1.is_err());
+
+    // Second caller within the window: the lock is still held → Duplicate, and
+    // the body does NOT run again.
+    let r2: Idempotent<i32> =
+        Idempotency::once("once-err", Duration::from_secs(60), || async {
+            RAN.fetch_add(1, Ordering::SeqCst);
+            Ok(7)
+        })
+        .await
+        .unwrap();
+    assert_eq!(r2, Idempotent::Duplicate);
+    assert_eq!(
+        RAN.load(Ordering::SeqCst),
+        1,
+        "once must not re-run after a failed predecessor; use commit_on_success to allow retry"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn commit_on_success_releases_lock_when_body_errors() {
     RAN.store(0, Ordering::SeqCst);
     install_memory_cache();
