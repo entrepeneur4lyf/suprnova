@@ -143,8 +143,19 @@ impl MaintenanceMode for FileMaintenanceMode {
         }
         let json = serde_json::to_string_pretty(payload)
             .map_err(|e| FrameworkError::internal(format!("maintenance: serialize: {e}")))?;
-        std::fs::write(&self.path, json).map_err(|e| {
-            FrameworkError::internal(format!("maintenance: write {}: {e}", self.path.display()))
+        // Write to a sibling temp file then rename into place. `rename` is
+        // atomic on the same filesystem, so a request reading the down file
+        // concurrently with `down` never observes a half-written (and thus
+        // unparseable) file — which would otherwise surface as a 500.
+        let tmp = self.path.with_extension("tmp");
+        std::fs::write(&tmp, json).map_err(|e| {
+            FrameworkError::internal(format!("maintenance: write {}: {e}", tmp.display()))
+        })?;
+        std::fs::rename(&tmp, &self.path).map_err(|e| {
+            FrameworkError::internal(format!(
+                "maintenance: rename into {}: {e}",
+                self.path.display()
+            ))
         })
     }
 
