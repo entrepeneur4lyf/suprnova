@@ -3,7 +3,7 @@ use crate::config::{Config, ServerConfig};
 use crate::container::App;
 use crate::http::{HttpResponse, Request};
 use crate::lock;
-use crate::logging::{LogConfig, RequestIdMiddleware};
+use crate::logging::{LogConfig, RequestId, RequestIdMiddleware};
 use crate::middleware::{Middleware, MiddlewareChain, MiddlewareRegistry, into_boxed};
 use crate::routing::Router;
 use crate::telemetry::{OtelConfig, init_telemetry};
@@ -540,12 +540,18 @@ async fn handle_request_inner(
         Some((pattern, handler, params)) => {
             let request = Request::new(req).with_params(params);
 
+            // Resolve the request id ONCE for this request. The same id is
+            // handed to the middleware (which scopes it) and to
+            // `execute_chain_safely` (which echoes it on a synthesized 500
+            // if the chain panics — the request scope is gone by then).
+            let request_id = crate::logging::request_id::resolve_request_id(&request);
+
             // Build middleware chain
             let mut chain = MiddlewareChain::new();
 
             // 0. RequestId is always outermost so spans + events emitted
             //    downstream carry the per-request id automatically.
-            chain.push(into_boxed(RequestIdMiddleware));
+            chain.push(into_boxed(RequestIdMiddleware::with_id(request_id.clone())));
 
             // 1. Add global middleware
             chain.extend(middleware_registry.global_middleware().iter().cloned());
@@ -566,7 +572,8 @@ async fn handle_request_inner(
             // 3. Execute chain with handler, catching panics in middleware
             //    or handler so the client receives a proper 500 instead
             //    of a dropped connection.
-            let http_response = execute_chain_safely(chain, request, handler, &method, path).await;
+            let http_response =
+                execute_chain_safely(chain, request, handler, &method, path, request_id).await;
 
             // Mark the active tracing span as errored on 5xx so the
             // tracing-opentelemetry bridge translates it to OTel
@@ -582,12 +589,13 @@ async fn handle_request_inner(
             // Check for fallback handler
             if let Some((fallback_handler, fallback_middleware)) = router.get_fallback() {
                 let request = Request::new(req).with_params(std::collections::HashMap::new());
+                let request_id = crate::logging::request_id::resolve_request_id(&request);
 
                 // Build middleware chain for fallback
                 let mut chain = MiddlewareChain::new();
 
                 // 0. RequestId is always outermost (same as the matched-route path).
-                chain.push(into_boxed(RequestIdMiddleware));
+                chain.push(into_boxed(RequestIdMiddleware::with_id(request_id.clone())));
 
                 // 1. Add global middleware
                 chain.extend(middleware_registry.global_middleware().iter().cloned());
@@ -596,8 +604,15 @@ async fn handle_request_inner(
                 chain.extend(fallback_middleware);
 
                 // 3. Execute chain with fallback handler, catching panics.
-                let http_response =
-                    execute_chain_safely(chain, request, fallback_handler, &method, path).await;
+                let http_response = execute_chain_safely(
+                    chain,
+                    request,
+                    fallback_handler,
+                    &method,
+                    path,
+                    request_id,
+                )
+                .await;
 
                 // Mark the active tracing span as errored on 5xx so the
                 // tracing-opentelemetry bridge translates it to OTel
@@ -619,9 +634,10 @@ async fn handle_request_inner(
                 // only difference is the terminal handler is a static 404
                 // rather than a user-supplied fallback.
                 let request = Request::new(req).with_params(std::collections::HashMap::new());
+                let request_id = crate::logging::request_id::resolve_request_id(&request);
 
                 let mut chain = MiddlewareChain::new();
-                chain.push(into_boxed(RequestIdMiddleware));
+                chain.push(into_boxed(RequestIdMiddleware::with_id(request_id.clone())));
                 chain.extend(middleware_registry.global_middleware().iter().cloned());
 
                 let not_found: Arc<crate::routing::BoxedHandler> =
@@ -633,7 +649,8 @@ async fn handle_request_inner(
                     }));
 
                 let http_response =
-                    execute_chain_safely(chain, request, not_found, &method, path).await;
+                    execute_chain_safely(chain, request, not_found, &method, path, request_id)
+                        .await;
 
                 #[cfg(feature = "otel")]
                 if http_response.status_code() >= 500 {
@@ -666,6 +683,7 @@ async fn execute_chain_safely(
     handler: Arc<crate::routing::BoxedHandler>,
     method: &hyper::Method,
     path: &str,
+    request_id: RequestId,
 ) -> HttpResponse {
     let exec = AssertUnwindSafe(chain.execute(request, handler));
     match exec.catch_unwind().await {
@@ -676,24 +694,32 @@ async fn execute_chain_safely(
                 panic = %msg,
                 method = %method,
                 path = %path,
+                request_id = %request_id,
                 "request middleware or handler panicked — translating to 500"
             );
-            // Audit HIGH `error` #1: route the panic through the same
-            // `FrameworkError -> HttpResponse` conversion that returned
-            // 5xx errors use. That gives us:
-            //   - The sanitised `{"message": "Internal Server Error"}`
-            //     JSON body (no panic payload leaks downstream).
-            //   - `request_id` injection so a client error can be
-            //     correlated to the structured log.
-            //   - `ErrorOccurred` event dispatch — observability
-            //     listeners (Sentry, Pagerduty, custom log shippers)
-            //     that fire on returned 5xx errors now also fire on
-            //     panics, instead of seeing only the tracing log.
-            // The panic message remains in the tracing::error! above,
-            // not in the HTTP body — same 5xx-sanitisation contract.
-            HttpResponse::from(crate::error::FrameworkError::internal(format!(
-                "request handler panicked: {msg}"
-            )))
+            // Route the panic through the same `FrameworkError ->
+            // HttpResponse` conversion that returned 5xx errors use:
+            //   - the sanitised `{"message": "Internal Server Error"}`
+            //     JSON body (no panic payload leaks downstream);
+            //   - `ErrorOccurred` event dispatch, so observability
+            //     listeners (Sentry, Pagerduty, custom log shippers) that
+            //     fire on returned 5xx errors also fire on panics.
+            // The panic message stays in the tracing::error! above, not in
+            // the HTTP body — same 5xx-sanitisation contract.
+            //
+            // The panic unwound the original `REQUEST_ID` scope, so the
+            // conversion (and the `ErrorOccurred` event it dispatches) would
+            // otherwise read `current_request_id() == None`. Re-establish the
+            // scope with the id resolved once before the chain ran so the
+            // body, the generic 5xx log, and the event all stay correlatable,
+            // then echo the same id back as `X-Request-Id`.
+            crate::logging::REQUEST_ID
+                .sync_scope(request_id.clone(), || {
+                    HttpResponse::from(crate::error::FrameworkError::internal(format!(
+                        "request handler panicked: {msg}"
+                    )))
+                })
+                .header("X-Request-Id", request_id.as_str())
         }
     }
 }

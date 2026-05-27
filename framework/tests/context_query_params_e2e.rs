@@ -45,7 +45,7 @@ async fn drive_capturing_query_params(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
 
-    let mw = Arc::new(RequestIdMiddleware);
+    let mw = Arc::new(RequestIdMiddleware::new());
     let server_captured = captured.clone();
 
     tokio::spawn(async move {

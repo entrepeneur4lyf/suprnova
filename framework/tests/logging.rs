@@ -60,7 +60,7 @@ async fn spawn_with_request_id(captured: Arc<Mutex<Option<String>>>) -> SocketAd
                     let req = Request::new(hyper_req);
 
                     let mut chain = MiddlewareChain::new();
-                    chain.push(into_boxed(RequestIdMiddleware));
+                    chain.push(into_boxed(RequestIdMiddleware::new()));
                     chain.push(into_boxed(CaptureRequestId(captured)));
 
                     // Innermost handler: always returns 200 "ok".
@@ -179,7 +179,7 @@ async fn middleware_seeds_request_id_into_context_bag() {
                     let req = Request::new(hyper_req);
 
                     let mut chain = MiddlewareChain::new();
-                    chain.push(into_boxed(RequestIdMiddleware));
+                    chain.push(into_boxed(RequestIdMiddleware::new()));
                     chain.push(into_boxed(CaptureContextRequestId(captured)));
 
                     let handler: Arc<suprnova::routing::BoxedHandler> = Arc::new(Box::new(
