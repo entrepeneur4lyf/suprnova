@@ -38,6 +38,16 @@ use std::path::{Component, Path};
 /// separator on Windows, so splitting on both keeps the guard correct wherever
 /// it runs.
 fn validate_storage_path(path: &str) -> Result<()> {
+    // opendal's `normalize_path` collapses an empty path and the disk root to
+    // the single indicator "/", which is what reaches this layer for a
+    // root-level list/stat. That is the disk root itself, not an escape, so it
+    // is allowed. Every other path arrives with its leading `/` already
+    // stripped (so a `RootDir` component below can only come from a caller that
+    // bypassed normalization — kept rejected as defense-in-depth).
+    if path == "/" {
+        return Ok(());
+    }
+
     let has_parent_segment = path.split(['/', '\\']).any(|segment| segment == "..");
     let has_traversal_component = Path::new(path).components().any(|component| {
         matches!(
@@ -197,6 +207,8 @@ mod tests {
             "name..with..dots.txt",
             "",
             "dir/",
+            // The post-normalize root indicator (root list/stat) — allowed.
+            "/",
         ] {
             assert!(
                 validate_storage_path(ok).is_ok(),

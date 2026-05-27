@@ -223,6 +223,31 @@ async fn filename_containing_dotdot_substring_is_allowed() {
     assert_eq!(&bytes.to_vec(), b"fine");
 }
 
+#[tokio::test]
+async fn disk_root_listing_and_stat_are_allowed() {
+    let _guard = Storage::fake();
+    let (_tmp, _secret) = rooted_disk_with_outside_secret("ok_root");
+    let disk = Storage::disk("ok_root").unwrap();
+    disk.write("inside.txt", "x".as_bytes().to_vec())
+        .await
+        .unwrap();
+
+    // opendal normalizes both "" and "/" to the root indicator "/", which
+    // reaches the guard as "/". That is the disk root itself, not a traversal,
+    // so listing and stat-ing it must succeed — the guard must not treat the
+    // single root component as an absolute-path escape.
+    let entries = disk
+        .list("")
+        .await
+        .expect("listing the disk root must be allowed");
+    assert!(
+        !entries.is_empty(),
+        "root listing should include the file we just wrote"
+    );
+    disk.list("/").await.expect("list('/') must be allowed");
+    disk.stat("/").await.expect("stat('/') must be allowed");
+}
+
 // ---------------------------------------------------------------------------
 // The framework's own cross-disk helper routes through the guarded operator.
 // ---------------------------------------------------------------------------
