@@ -69,8 +69,8 @@ pub use app::paths::{
 };
 pub use auth::{
     Auth, AuthConfig, AuthManager, AuthMiddleware, Authenticatable, Credentials,
-    DatabaseUserProvider, GenericUser, Guard, GuardConfig, GuardDriver, GuestMiddleware,
-    SessionGuard, StatefulGuard, TokenGuard, UserProvider,
+    DatabaseUserProvider, EloquentUserProvider, GenericUser, Guard, GuardConfig, GuardDriver,
+    GuestMiddleware, SessionGuard, StatefulGuard, TokenGuard, UserProvider,
 };
 pub use authorization::{Gate, Policy};
 pub use cache::{Cache, CacheConfig, CacheStore, InMemoryCache, LockGuard, RedisCache};
