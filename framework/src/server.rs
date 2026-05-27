@@ -49,10 +49,18 @@ pub struct Server {
 }
 
 impl Server {
+    /// Build a [`Server`] with default host/port (`127.0.0.1:8000`).
+    ///
+    /// Pulls in middleware registered via `global_middleware!` (through
+    /// [`MiddlewareRegistry::from_global`]), matching [`Server::from_config`]
+    /// so global auth / session / logging applies no matter which
+    /// constructor an embedder picks. (The two used to diverge: `new`
+    /// started with an empty registry while `from_config` pulled globals —
+    /// a silent way to ship a server with none of its global protection.)
     pub fn new(router: impl Into<Router>) -> Self {
         Self {
             router: Arc::new(router.into()),
-            middleware: MiddlewareRegistry::new(),
+            middleware: MiddlewareRegistry::from_global(),
             host: "127.0.0.1".to_string(),
             port: 8000,
         }
@@ -489,7 +497,7 @@ pub async fn handle_request(
     if hyper_tungstenite::is_upgrade_request(&req)
         && let Some(ws_match) = router.match_ws(&path)
     {
-        return handle_ws_upgrade(req, ws_match).await;
+        return handle_ws_upgrade(req, ws_match, middleware_registry).await;
     }
 
     // Built-in health check endpoint at /_suprnova/health
@@ -747,6 +755,7 @@ fn panic_payload_message(p: &Box<dyn std::any::Any + Send>) -> String {
 async fn handle_ws_upgrade(
     mut req: hyper::Request<hyper::body::Incoming>,
     ws_match: crate::routing::WsMatch,
+    middleware_registry: Arc<MiddlewareRegistry>,
 ) -> hyper::Response<ServerBody> {
     use crate::middleware::MiddlewareChain;
     use crate::routing::BoxedHandler;
@@ -763,14 +772,14 @@ async fn handle_ws_upgrade(
 
     // hyper_tungstenite::upgrade MUST come before Request::new because
     // it needs `&mut req` before we consume `req`.
-    let (response, websocket) = match hyper_tungstenite::upgrade(&mut req, Some(tungstenite_config))
-    {
-        Ok(pair) => pair,
-        Err(e) => {
-            tracing::warn!(error = %e, route = %pattern, "websocket upgrade rejected");
-            return bad_request_text(&format!("websocket upgrade failed: {e}"));
-        }
-    };
+    let (mut response, websocket) =
+        match hyper_tungstenite::upgrade(&mut req, Some(tungstenite_config)) {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::warn!(error = %e, route = %pattern, "websocket upgrade rejected");
+                return bad_request_text(&format!("websocket upgrade failed: {e}"));
+            }
+        };
 
     // Build the framework's Request from the upgrade request. The
     // body is empty for an upgrade request (RFC 6455); we still
@@ -779,21 +788,32 @@ async fn handle_ws_upgrade(
     let path = req.uri().path().to_string();
     let initial_request = Request::new(req).with_params(params);
 
-    // Per-route middleware chain. Runs over the upgrade Request before
-    // dispatching the handler. A non-2xx response from any middleware
-    // (e.g. AuthMiddleware returning 401) aborts the upgrade — the
-    // unwoken websocket future drops cleanly. Middleware can substitute
-    // a modified Request via `next(modified_req)`; the terminator
-    // captures the final Request into a shared Mutex slot.
+    // Resolve the request id once for the whole upgrade. It is echoed on
+    // the 101 handshake response, threaded into the connection span and
+    // the post-upgrade session task, and — via `RequestIdMiddleware` —
+    // attached to any rejection response the chain produces.
+    let request_id = crate::logging::request_id::resolve_request_id(&initial_request);
+
+    // A WebSocket upgrade is an HTTP GET, so the SAME middleware chain an
+    // ordinary request gets applies here, in the SAME fixed order:
+    // RequestId (outermost) -> global middleware -> per-route WS
+    // middleware -> handler. Global auth / session / rate-limit / logging
+    // protect `/ws/*` exactly as they protect any other route; they are
+    // not silently skipped for upgrades.
     //
-    // Lock-poison handling: a panic inside a middleware would normally
-    // poison the captured-request Mutex. We translate that into a 500
-    // response and abort the upgrade, rather than re-panicking inside
-    // the per-connection task — one poisoned upgrade must not cascade
-    // into killing the accept loop or other in-flight connections.
-    let suprnova_req = if middleware_list.is_empty() {
-        initial_request
-    } else {
+    // There is no empty-chain fast path anymore: RequestId and the globals
+    // are always present, so the terminator-capture chain always runs. The
+    // terminator records the final (possibly middleware-rewritten) Request
+    // into a shared slot; a non-2xx response from any middleware (e.g. an
+    // auth gate returning 401) aborts the upgrade and the unwoken websocket
+    // future drops cleanly.
+    //
+    // Lock-poison handling: a panic inside a middleware would otherwise
+    // poison the captured-request Mutex. We translate that into a 500 and
+    // abort the upgrade rather than re-panicking inside the per-connection
+    // task — one poisoned upgrade must not cascade into the accept loop or
+    // other in-flight connections.
+    let suprnova_req = {
         let captured: Arc<Mutex<Option<Request>>> = Arc::new(Mutex::new(None));
         let captured_for_terminator = captured.clone();
 
@@ -817,12 +837,14 @@ async fn handle_ws_upgrade(
         }));
 
         let mut chain = MiddlewareChain::new();
+        chain.push(into_boxed(RequestIdMiddleware::with_id(request_id.clone())));
+        chain.extend(middleware_registry.global_middleware().iter().cloned());
         chain.extend(middleware_list);
 
-        // catch_unwind around the WS terminator chain so a panicking
-        // per-route middleware can't tear down the upgrading connection
-        // task. On panic we abort the upgrade with 500 — same policy
-        // as the HTTP request path (see `execute_chain_safely`).
+        // catch_unwind around the WS chain so a panicking middleware
+        // can't tear down the upgrading connection task. On panic we
+        // abort the upgrade with 500 — same policy as the HTTP request
+        // path (see `execute_chain_safely`).
         let chain_response = match AssertUnwindSafe(chain.execute(initial_request, terminator))
             .catch_unwind()
             .await
@@ -833,12 +855,13 @@ async fn handle_ws_upgrade(
                 tracing::error!(
                     panic = %msg,
                     route = %pattern,
-                    "websocket per-route middleware panicked — aborting upgrade"
+                    "websocket middleware panicked — aborting upgrade"
                 );
                 return HttpResponse::text(
                     "internal error: websocket upgrade aborted (middleware panicked)",
                 )
                 .status(500)
+                .header("X-Request-Id", request_id.as_str())
                 .into_hyper();
             }
         };
@@ -848,12 +871,15 @@ async fn handle_ws_upgrade(
         let http_response = chain_response.unwrap_or_else(|e| e);
         let status = http_response.status_code();
         if !(200..300).contains(&status) {
-            // Middleware short-circuited (e.g. 401, 403). Convert to
-            // ServerBody and return; the upgrade future drops cleanly.
+            // Middleware short-circuited (e.g. 401, 403). The response
+            // already carries X-Request-Id: RequestIdMiddleware is the
+            // outermost layer and tags both success and error variants.
+            // Convert to ServerBody and return; the upgrade future drops
+            // cleanly.
             tracing::debug!(
                 status = status,
                 route = %pattern,
-                "websocket upgrade rejected by per-route middleware"
+                "websocket upgrade rejected by middleware"
             );
             return http_response.into_hyper();
         }
@@ -876,6 +902,7 @@ async fn handle_ws_upgrade(
                         "internal error: websocket upgrade aborted (middleware did not call next)",
                     )
                     .status(500)
+                    .header("X-Request-Id", request_id.as_str())
                     .into_hyper();
                 }
             },
@@ -888,16 +915,33 @@ async fn handle_ws_upgrade(
                     "internal error: websocket upgrade aborted (terminator lock poisoned)",
                 )
                 .status(500)
+                .header("X-Request-Id", request_id.as_str())
                 .into_hyper();
             }
         }
     };
 
+    // Echo X-Request-Id on the 101 handshake response so the upgrade GET
+    // stays correlatable with logs, the same contract as the HTTP path.
+    // The id is `is_safe_request_id`-filtered (or a freshly minted UUID),
+    // so building the header value cannot fail in practice — skip silently
+    // on the impossible error rather than panicking on a header write.
+    if let Ok(value) = hyper::header::HeaderValue::from_str(request_id.as_str()) {
+        response.headers_mut().insert("x-request-id", value);
+    }
+
     // Tracing span covers the entire WS connection lifecycle from
-    // upgrade-resolved to handler-returned. Operators get a single
-    // span per connection plus `connected` / `disconnected` events
-    // bracketing the handler future.
-    let span = tracing::info_span!("ws.connection", route = %pattern, path = %path);
+    // upgrade-resolved to handler-returned. It carries `request_id` so
+    // every event the handler emits inherits it as span context (same
+    // nested-`span` layout as the per-request span). Operators get a
+    // single span per connection plus `connected` / `disconnected`
+    // events bracketing the handler future.
+    let span = tracing::info_span!(
+        "ws.connection",
+        request_id = %request_id,
+        route = %pattern,
+        path = %path
+    );
 
     let handler_task = async move {
         match websocket.await {
@@ -963,6 +1007,12 @@ async fn handle_ws_upgrade(
         }
     }
     .instrument(span);
+
+    // The chain's REQUEST_ID scope unwound when `chain.execute` returned,
+    // so `spawn_with_request_id` would capture nothing here. Re-establish
+    // the id directly around the post-upgrade session task so the handler's
+    // logs (and any work it spawns) carry the request id.
+    let handler_task = crate::logging::REQUEST_ID.scope(request_id, handler_task);
 
     // Track the spawned handler in WS_TASKS so Server::run can drain
     // it on shutdown. Fall back to a bare tokio::spawn when WS_TASKS
