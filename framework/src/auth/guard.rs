@@ -258,26 +258,47 @@ impl Auth {
     /// bind!(dyn UserProvider, DatabaseUserProvider);
     /// ```
     pub async fn user() -> Result<Option<Arc<dyn Authenticatable>>, crate::error::FrameworkError> {
+        // Named-guard system when configured: the default guard checks the
+        // request-scoped cache, resolves through the AuthManager's provider, and
+        // caches the result — so this stays consistent with `Auth::attempt` /
+        // `Auth::guard("web").user()`. `default_guard()` resolves the provider
+        // eagerly, so a registered-but-providerless AuthManager returns `Err`
+        // here and falls through to the legacy branch rather than half-resolving.
+        if let Ok(guard) = Self::default_guard() {
+            return guard.user().await;
+        }
+
+        // Legacy fallback (no AuthManager): the request-scoped cache first (so
+        // `set_user` / `once` users surface), then a globally-bound
+        // `UserProvider`, caching the result for the rest of the request.
+        if let Some(user) = request_state::current_user() {
+            return Ok(Some(user));
+        }
         let user_id = match Self::id() {
             Some(id) => id,
             None => return Ok(None),
         };
-
         let provider = App::make::<dyn UserProvider>().ok_or_else(|| {
             crate::error::FrameworkError::internal(
-                "No UserProvider registered. Register one in bootstrap.rs with: \
-                 bind!(dyn UserProvider, YourUserProvider)"
+                "No user provider configured. Register one with \
+                 Auth::register_provider(\"users\", Arc::new(...)) (named-guard system), \
+                 or bind!(dyn UserProvider, ...) in bootstrap.rs (legacy)."
                     .to_string(),
             )
         })?;
-
-        provider.retrieve_by_id(&user_id).await
+        let user = provider.retrieve_by_id(&user_id).await?;
+        if let Some(ref u) = user {
+            request_state::set_current_user(u.clone());
+        }
+        Ok(user)
     }
 
     /// Get the authenticated user, cast to a concrete type
     ///
     /// This is a convenience method that retrieves the user and downcasts
-    /// it to your concrete User type.
+    /// it to your concrete User type. Returns `None` when no user is
+    /// authenticated *or* when the resolved user is not a `T` (e.g. after
+    /// `set_user` of a different type).
     ///
     /// # Example
     ///
@@ -667,6 +688,37 @@ mod tests {
             Auth::set_user(Arc::new(TestUser));
             assert!(Auth::has_user());
             assert_eq!(Auth::id(), Some("7".to_string()));
+        })
+        .await;
+    }
+
+    // `Auth::user()` routes through the default guard (the AuthManager provider)
+    // and the request-scoped cache — so `set_user` surfaces and it no longer
+    // depends on a legacy `bind!(dyn UserProvider)`. Before unification this
+    // errored here: the old impl went straight to `App::make`, which has no
+    // binding under `TestContainer`.
+    #[tokio::test]
+    async fn user_resolves_through_default_guard_and_request_state() {
+        let _scope = TestContainer::fake();
+        TestContainer::singleton(AuthManager::new(AuthConfig::default()));
+        Auth::register_provider("users", Arc::new(FakeProvider)).expect("register provider");
+
+        request_state::request_state_scope_for_test(async {
+            // Nothing resolved yet.
+            assert!(Auth::user().await.expect("user ok").is_none());
+
+            // `set_user` surfaces through `Auth::user()` via the request cache.
+            Auth::set_user(Arc::new(TestUser));
+            let user = Auth::user().await.expect("user ok").expect("user present");
+            assert_eq!(user.get_auth_identifier(), "7");
+
+            // And downcasts through `user_as`.
+            assert!(
+                Auth::user_as::<TestUser>()
+                    .await
+                    .expect("user_as ok")
+                    .is_some()
+            );
         })
         .await;
     }

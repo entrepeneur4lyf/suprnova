@@ -255,6 +255,10 @@ impl BasicAuthMiddleware {
 
     /// Stateful HTTP Basic auth against the default guard — logs the user into
     /// the session on success. Mirrors Laravel's `Auth::basic()`.
+    ///
+    /// Persisting the login requires `SessionMiddleware` earlier in the chain
+    /// (the session write is a no-op without it); [`once`](Self::once) has no
+    /// such dependency.
     pub fn new() -> Self {
         Self::build(false)
     }
