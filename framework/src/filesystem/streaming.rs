@@ -72,6 +72,47 @@ pub async fn copy_between_disks(
         .await
         .map_err(|e| FrameworkError::internal(format!("open dest: {e}")))?;
 
+    // Once the writer is open, a mid-stream failure can leave a partial object
+    // at `dest_path`. Run the transfer separately so that on ANY error we
+    // discard the partial write before propagating — a failed copy must never
+    // be observable as a truncated destination object.
+    match stream_to_writer(reader, &mut writer).await {
+        Ok(total) => Ok(total),
+        Err(err) => {
+            // `abort` discards staged writes for backends that buffer them
+            // (e.g. S3 multipart parts); `delete` removes an already-visible
+            // partial file (e.g. the local FS backend). Both are best-effort
+            // and only logged — the caller still sees the original error.
+            if let Err(abort_err) = writer.abort().await {
+                tracing::warn!(
+                    disk = dest,
+                    path = dest_path,
+                    error = %abort_err,
+                    "failed to abort writer while cleaning up a failed cross-disk copy"
+                );
+            }
+            if let Err(delete_err) = dest_op.delete(dest_path).await {
+                tracing::warn!(
+                    disk = dest,
+                    path = dest_path,
+                    error = %delete_err,
+                    "failed to delete partial destination while cleaning up a failed cross-disk copy"
+                );
+            }
+            Err(err)
+        }
+    }
+}
+
+/// Stream the full source object into an already-open destination writer.
+///
+/// Split out from [`copy_between_disks`] so the caller can clean up a partial
+/// destination if any step here fails. Consumes the `reader`; borrows the
+/// `writer` so the caller can still `abort()` it on error.
+async fn stream_to_writer(
+    reader: opendal::Reader,
+    writer: &mut opendal::Writer,
+) -> Result<u64, FrameworkError> {
     // Full range — copy the entire object. Stream item is `io::Result<Bytes>`.
     let stream = reader
         .into_bytes_stream(..)
