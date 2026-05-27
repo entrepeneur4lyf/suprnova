@@ -103,13 +103,6 @@ impl Auth {
     /// the hashed row, rotate the token (delete + reissue), and
     /// hydrate the session — the user is logged back in transparently.
     ///
-    /// # Closes
-    ///
-    /// Codex review finding #13 — the pre-fix implementation ignored
-    /// its `remember_token` parameter and performed only a session
-    /// login. There was no DB row, no cookie, no rotation, and
-    /// `logout()` did not clear any persistent state.
-    ///
     /// # Arguments
     ///
     /// * `user_id` — the user's ID (string).
@@ -131,8 +124,7 @@ impl Auth {
         // Build + queue the cookie. The cookie's `Max-Age` matches the
         // row's TTL (`ttl_minutes` converted to seconds) so the browser
         // stops sending the cookie the moment the row expires — the
-        // attribute does not "lie" about validity. Codex finding #13
-        // required "expires-at matches token expiration."
+        // attribute does not "lie" about validity.
         let config = crate::session::SessionConfig::from_env();
         let max_age =
             std::time::Duration::from_secs((ttl_minutes.max(0) as u64).saturating_mul(60));

@@ -1,5 +1,4 @@
-//! Remember-me tokens (codex review finding #13; selector+verifier
-//! hardening from ChatGPT audit findings `auth` HIGH #1 + #2).
+//! Remember-me tokens — a hardened selector+verifier scheme.
 //!
 //! "Remember me" is the cookie that re-authenticates a user after their
 //! session expires or their browser is closed. Done wrong it is a long-
@@ -27,8 +26,7 @@
 //!
 //! # Why both parts
 //!
-//! A pure hash-only design (no selector) had two problems documented by
-//! audit findings:
+//! A pure hash-only design (no selector) had two problems:
 //!
 //! 1. **Unbounded bcrypt scan on forged cookies.** Each row's bcrypt
 //!    hash is per-row salted, so without a selector we had to scan

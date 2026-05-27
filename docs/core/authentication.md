@@ -10,50 +10,66 @@ suprnova provides Laravel-style session-based authentication out of the box. Whe
 
 The authentication system includes:
 
+- **Named guards** — a default session guard (`web`) and a stateless token guard (`api`), each with its own user provider, resolved through `Auth::guard("name")`
+- **A Laravel-shaped `Auth` facade** — `attempt`, `login`, `once`, `login_using_id`, `validate`, `logout`, … all delegating to the default guard
+- **Built-in user providers** — `EloquentUserProvider<User>` (typed model) and `DatabaseUserProvider` (table-backed) so the common case needs no custom provider
 - **Session-based auth** with database-backed sessions
 - **Secure password hashing** using bcrypt
 - **CSRF protection** on all state-changing requests
-- **Auth middleware** for protecting routes
-- **Guest middleware** for login/register pages
+- **Auth + Guest middleware** for protecting routes (with per-guard `for_guard("api")`)
+- **HTTP Basic** authentication middleware
 - **Remember me** functionality
+- **Lifecycle events** — `Attempting`, `Authenticated`, `Login`, `Logout`, `Failed`
 
 ## Auth Facade
 
-The `Auth` struct provides a simple API for authentication operations:
+The `Auth` struct exposes Laravel's facade methods. The credential- and
+user-based methods delegate to the **default guard** (resolved from the
+container `AuthManager`); the sync `check`/`guest`/`id` are the session-backed
+fast path.
 
 ```rust
-use suprnova::Auth;
+use suprnova::{Auth, Credentials};
 
-// Check if user is authenticated
-if Auth::check() {
-    // User is logged in
+// Validate credentials and log the user in (fires Login + Authenticated,
+// honours remember-me). Returns the resolved user, or None on bad credentials.
+if let Some(user) = Auth::attempt(&Credentials::password(&email, &password), remember).await? {
+    println!("Welcome, user {}", user.get_auth_identifier());
 }
 
-// Check if user is a guest
-if Auth::guest() {
-    // User is not logged in
-}
+// Log a known user in directly.
+Auth::login(user, remember).await?;
 
-// Get current user ID
-if let Some(user_id) = Auth::id() {
-    println!("User ID: {}", user_id);
-}
+// Validate without logging in (e.g. a password-confirmation dialog).
+let ok: bool = Auth::validate(&Credentials::password(&email, &password)).await?;
 
-// Get the currently authenticated user
+// Authenticate for this request only — no session (Laravel's `once`).
+Auth::once(&Credentials::password(&email, &password)).await?;
+
+// Sync, session-backed checks (no AuthManager required).
+if Auth::check() { /* authenticated */ }
+if Auth::guest() { /* not authenticated */ }
+if let Some(user_id) = Auth::id() { println!("User ID: {user_id}"); }
+
+// Resolve the current user (via the registered provider).
 if let Some(user) = Auth::user().await? {
-    println!("User ID: {}", user.auth_identifier());
+    println!("User ID: {}", user.get_auth_identifier());
 }
-
-// Get user as concrete type (e.g., your User model)
 if let Some(user) = Auth::user_as::<User>().await? {
     println!("Welcome, {}!", user.name);
 }
 
-// Log in a user
-Auth::login(user_id);
+// Log out — clears the session + request user, revokes remember-me,
+// fires Logout. Always `.await` it.
+Auth::logout().await?;
+```
 
-// Log out the current user
-Auth::logout();
+If you have already verified a user's identity yourself and only need to
+establish the session, use the synchronous primitive `Auth::login_id(id)` — it
+writes the session id without a provider, an `AuthManager`, or events:
+
+```rust
+Auth::login_id(user.id.to_string());
 ```
 
 ## Getting the Current User
@@ -104,11 +120,21 @@ use std::any::Any;
 
 impl Authenticatable for Model {
     fn auth_identifier(&self) -> i64 {
-        self.id as i64
+        self.id
     }
 
-    fn auth_identifier_name(&self) -> &'static str {
-        "id"
+    /// The identifier as a string — this is the canonical value stored in the
+    /// session and used as the guard key (Laravel's `getAuthIdentifier`).
+    /// The default stringifies `auth_identifier`; override it for UUID or
+    /// other non-integer keys.
+    fn get_auth_identifier(&self) -> String {
+        self.id.to_string()
+    }
+
+    /// The hashed password the built-in providers verify against. Return
+    /// `None` for users that authenticate by other means (OAuth, passkey).
+    fn get_auth_password(&self) -> Option<&str> {
+        Some(&self.password)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -117,44 +143,61 @@ impl Authenticatable for Model {
 }
 ```
 
+`get_auth_identifier` (a `String`) is the surface the guard and session use;
+`auth_identifier` (an `i64`) is a Suprnova convenience that defaults the string
+form for integer-keyed models.
+
 ## User Provider
 
-The `UserProvider` trait tells suprnova how to fetch users from your database. A default `DatabaseUserProvider` is registered in `bootstrap.rs`:
+The `UserProvider` trait tells suprnova how to fetch and validate users. Two
+providers ship built in, so the common case needs **no** custom implementation:
+
+- **`EloquentUserProvider<User>`** — resolves through a typed
+  `#[suprnova::model]` user that is also `Authenticatable`. Looks up by primary
+  key for ids and by `email` for credentials.
+- **`DatabaseUserProvider`** — resolves a table by name into a `GenericUser`
+  (id + attribute map); use it when you don't have (or want) a typed model.
+
+Register a provider and the guard configuration on the container `AuthManager`
+in `bootstrap.rs` (the Rust analogue of `config/auth.php`):
 
 ```rust
-// In app/src/providers/auth_provider.rs
-use async_trait::async_trait;
-use suprnova::auth::{Authenticatable, UserProvider};
-use suprnova::FrameworkError;
 use std::sync::Arc;
-
-#[derive(Default)]
-pub struct DatabaseUserProvider;
-
-#[async_trait]
-impl UserProvider for DatabaseUserProvider {
-    async fn retrieve_by_id(
-        &self,
-        id: i64,
-    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
-        let user = User::query()
-            .filter(Column::Id.eq(id as i32))
-            .first()
-            .await?;
-        Ok(user.map(|u| Arc::new(u) as Arc<dyn Authenticatable>))
-    }
-}
-```
-
-Register the provider in `bootstrap.rs`:
-
-```rust
-use suprnova::{bind, UserProvider};
-use crate::providers::DatabaseUserProvider;
+use suprnova::{App, Auth, AuthConfig, AuthManager, EloquentUserProvider};
+use crate::models::user::User;
 
 pub async fn register() {
     // ...
-    bind!(dyn UserProvider, DatabaseUserProvider);
+    App::singleton(AuthManager::new(AuthConfig::from_env()));
+    Auth::register_provider("users", Arc::new(EloquentUserProvider::<User>::new()))
+        .expect("register users provider");
+}
+```
+
+Both built-in providers filter credential lookups against an allowlist (default
+`["email"]`) — a hostile credential map cannot inject extra `WHERE` predicates.
+
+To plug in a custom source (LDAP, an external API), implement `UserProvider`
+yourself. Note `retrieve_by_id` takes the identifier as a **string**:
+
+```rust
+use async_trait::async_trait;
+use std::sync::Arc;
+use suprnova::{Authenticatable, FrameworkError, UserProvider};
+
+struct MyProvider;
+
+#[async_trait]
+impl UserProvider for MyProvider {
+    async fn retrieve_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        // fetch your user by `id`, return it as `Arc<dyn Authenticatable>`
+        # let _ = id; Ok(None)
+    }
+    // retrieve_by_credentials + validate_credentials have provider defaults;
+    // override them to support `Auth::attempt`/`validate`.
 }
 ```
 
@@ -178,6 +221,74 @@ pub fn routes() -> Router {
 
 The `redirect_to` method specifies where unauthenticated users should be redirected. For API routes, use `AuthMiddleware::new()` which returns a 401 status instead.
 
+To check a **named guard** other than the default, chain `for_guard`:
+
+```rust
+// 401 unless the `api` guard is authenticated.
+.middleware(AuthMiddleware::new().for_guard("api"))
+```
+
+`GuestMiddleware::for_guard("name")` works the same way. A token guard
+(`for_guard("api")`) relies on the bearer-token middleware running earlier in
+the chain to populate the request's auth id.
+
+## Named Guards
+
+`AuthConfig` declares the guards and which provider each uses — the default
+config wires `web` (session) and `api` (token), both backed by the `users`
+provider. Resolve a guard by name to act against it explicitly:
+
+```rust
+use suprnova::Auth;
+
+// Read-only check against the API (token) guard.
+if Auth::guard("api")?.check().await? { /* ... */ }
+
+// Login/logout/attempt against a session guard.
+let user = Auth::stateful_guard("web")?
+    .attempt(&credentials, false)
+    .await?;
+```
+
+The bare `Auth::attempt`/`login`/`logout`/… methods are sugar over the
+**default** guard (`AUTH_GUARD`, default `web`). Set the default with the
+`AUTH_GUARD` environment variable.
+
+## HTTP Basic Authentication
+
+`BasicAuthMiddleware` authenticates from the `Authorization: Basic` header
+against a guard's provider:
+
+```rust
+use suprnova::BasicAuthMiddleware;
+
+// Stateful — logs the user into the session on success.
+.middleware(BasicAuthMiddleware::new())
+
+// Stateless — authenticates for this request only.
+.middleware(BasicAuthMiddleware::once())
+```
+
+The decoded username is matched against the `field` credential (default
+`email`); a missing, malformed, or invalid header returns `401` with a
+`WWW-Authenticate: Basic` challenge. Configure with `.field(...)`, `.realm(...)`,
+and `.for_guard(...)`.
+
+## Auth Events
+
+The guards dispatch lifecycle events you can listen for (see [Events &
+Listeners](/core/events)):
+
+| Event | When |
+|-------|------|
+| `Attempting` | a credential attempt begins |
+| `Authenticated` | a user is resolved as the current user (login or `once`) |
+| `Login` | a user is persisted to the session |
+| `Logout` | a user is logged out |
+| `Failed` | a credential attempt fails |
+
+Events carry the guard name and a string user id — never the credentials.
+
 ### Guest Middleware
 
 Use `GuestMiddleware` to protect routes that should only be accessible to guests (like login and register pages):
@@ -198,11 +309,11 @@ pub fn routes() -> Router {
 
 ## Authentication Controller
 
-Here's a typical authentication controller:
+`suprnova new` generates a controller that verifies the password by hand and
+establishes the session with the `Auth::login_id` primitive:
 
 ```rust
 use suprnova::{handler, Auth, Request, Response};
-use suprnova::hashing;
 use crate::models::user::User;
 
 #[handler]
@@ -214,29 +325,47 @@ pub async fn show_login(_req: Request) -> Response {
 pub async fn login(req: Request) -> Response {
     let email: String = req.input("email").unwrap_or_default();
     let password: String = req.input("password").unwrap_or_default();
-    let remember: bool = req.input("remember").unwrap_or(false);
 
-    // Find user by email
+    // Find user by email and verify the password ourselves.
     let user = match User::find_by_email(&email).await {
         Ok(Some(u)) => u,
         _ => return inertia!("auth/Login", { "errors": { "email": ["Invalid credentials"] } }),
     };
-
-    // Verify password
-    if !hashing::verify(&password, &user.password).unwrap_or(false) {
+    if !user.verify_password(&password).unwrap_or(false) {
         return inertia!("auth/Login", { "errors": { "email": ["Invalid credentials"] } });
     }
 
-    // Log in the user
-    Auth::login(user.id);
+    // Establish the session for this id (sync primitive — no provider needed).
+    Auth::login_id(user.id.to_string());
 
     redirect!("/dashboard")
 }
 
 #[handler]
 pub async fn logout(_req: Request) -> Response {
-    Auth::logout();
+    Auth::logout().await?;
     redirect!("/")
+}
+```
+
+Once you've registered an `AuthManager` and a provider (see [User
+Provider](#user-provider)), the whole `login` body collapses to one
+guard-backed call that also fires the `Attempting`/`Login`/`Authenticated`
+events and handles remember-me:
+
+```rust
+use suprnova::Credentials;
+
+#[handler]
+pub async fn login(req: Request) -> Response {
+    let email: String = req.input("email").unwrap_or_default();
+    let password: String = req.input("password").unwrap_or_default();
+    let remember: bool = req.input("remember").unwrap_or(false);
+
+    match Auth::attempt(&Credentials::password(&email, &password), remember).await? {
+        Some(_user) => redirect!("/dashboard"),
+        None => inertia!("auth/Login", { "errors": { "email": ["Invalid credentials"] } }),
+    }
 }
 ```
 
