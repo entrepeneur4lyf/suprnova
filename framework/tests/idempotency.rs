@@ -75,13 +75,12 @@ async fn once_consumes_the_window_even_when_body_errors() {
 
     // Second caller within the window: the lock is still held → Duplicate, and
     // the body does NOT run again.
-    let r2: Idempotent<i32> =
-        Idempotency::once("once-err", Duration::from_secs(60), || async {
-            RAN.fetch_add(1, Ordering::SeqCst);
-            Ok(7)
-        })
-        .await
-        .unwrap();
+    let r2: Idempotent<i32> = Idempotency::once("once-err", Duration::from_secs(60), || async {
+        RAN.fetch_add(1, Ordering::SeqCst);
+        Ok(7)
+    })
+    .await
+    .unwrap();
     assert_eq!(r2, Idempotent::Duplicate);
     assert_eq!(
         RAN.load(Ordering::SeqCst),
@@ -160,23 +159,21 @@ async fn remember_records_result_and_replays_it_to_duplicates() {
     RAN.store(0, Ordering::SeqCst);
     install_memory_cache();
 
-    let r1: Replay<String> =
-        Idempotency::remember("rem-1", Duration::from_secs(60), || async {
-            RAN.fetch_add(1, Ordering::SeqCst);
-            Ok("hello".to_string())
-        })
-        .await
-        .unwrap();
+    let r1: Replay<String> = Idempotency::remember("rem-1", Duration::from_secs(60), || async {
+        RAN.fetch_add(1, Ordering::SeqCst);
+        Ok("hello".to_string())
+    })
+    .await
+    .unwrap();
     assert_eq!(r1, Replay::Fresh("hello".to_string()));
 
     // Duplicate: a different body value must NOT run; the recorded result replays.
-    let r2: Replay<String> =
-        Idempotency::remember("rem-1", Duration::from_secs(60), || async {
-            RAN.fetch_add(1, Ordering::SeqCst);
-            Ok("world".to_string())
-        })
-        .await
-        .unwrap();
+    let r2: Replay<String> = Idempotency::remember("rem-1", Duration::from_secs(60), || async {
+        RAN.fetch_add(1, Ordering::SeqCst);
+        Ok("world".to_string())
+    })
+    .await
+    .unwrap();
     assert_eq!(r2, Replay::Replayed("hello".to_string()));
     assert_eq!(
         RAN.load(Ordering::SeqCst),
@@ -200,23 +197,21 @@ async fn remember_error_does_not_replay_and_is_retryable() {
     assert!(r1.is_err());
 
     // Second call re-enters (lock was released) and succeeds.
-    let r2: Replay<i32> =
-        Idempotency::remember("rem-err", Duration::from_secs(60), || async {
-            RAN.fetch_add(1, Ordering::SeqCst);
-            Ok(42)
-        })
-        .await
-        .unwrap();
+    let r2: Replay<i32> = Idempotency::remember("rem-err", Duration::from_secs(60), || async {
+        RAN.fetch_add(1, Ordering::SeqCst);
+        Ok(42)
+    })
+    .await
+    .unwrap();
     assert_eq!(r2, Replay::Fresh(42));
 
     // Third call replays the recorded success.
-    let r3: Replay<i32> =
-        Idempotency::remember("rem-err", Duration::from_secs(60), || async {
-            RAN.fetch_add(1, Ordering::SeqCst);
-            Ok(0)
-        })
-        .await
-        .unwrap();
+    let r3: Replay<i32> = Idempotency::remember("rem-err", Duration::from_secs(60), || async {
+        RAN.fetch_add(1, Ordering::SeqCst);
+        Ok(0)
+    })
+    .await
+    .unwrap();
     assert_eq!(r3, Replay::Replayed(42));
     assert_eq!(
         RAN.load(Ordering::SeqCst),
@@ -299,13 +294,12 @@ async fn long_body_keeps_lock_alive_so_a_late_duplicate_does_not_double_execute(
     // Wait 2.5x the original TTL: a non-renewed lock would already be gone.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let r2: Idempotent<i32> =
-        Idempotency::once("watchdog", Duration::from_millis(200), || async {
-            RAN.fetch_add(1, Ordering::SeqCst);
-            Ok(2)
-        })
-        .await
-        .unwrap();
+    let r2: Idempotent<i32> = Idempotency::once("watchdog", Duration::from_millis(200), || async {
+        RAN.fetch_add(1, Ordering::SeqCst);
+        Ok(2)
+    })
+    .await
+    .unwrap();
     assert_eq!(
         r2,
         Idempotent::Duplicate,
@@ -383,7 +377,9 @@ impl CacheStore for FailingReleaseCache {
         _key: &str,
         _token: &str,
     ) -> Result<bool, suprnova::FrameworkError> {
-        Err(suprnova::FrameworkError::internal("synthetic release failure"))
+        Err(suprnova::FrameworkError::internal(
+            "synthetic release failure",
+        ))
     }
     async fn refresh_lock(
         &self,
@@ -401,9 +397,8 @@ impl CacheStore for FailingReleaseCache {
 #[tokio::test]
 #[serial]
 async fn commit_on_success_surfaces_body_error_even_when_release_fails() {
-    let store: Arc<dyn CacheStore> = Arc::new(FailingReleaseCache(InMemoryCache::with_prefix(
-        "idem:",
-    )));
+    let store: Arc<dyn CacheStore> =
+        Arc::new(FailingReleaseCache(InMemoryCache::with_prefix("idem:")));
     App::bind::<dyn CacheStore>(store);
 
     // Body fails; the Err-path release also fails. The release failure must be

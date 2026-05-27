@@ -566,7 +566,11 @@ mod tests {
         // Draining with a generous deadline blocks until it completes.
         let remaining = d.drain_queued(std::time::Duration::from_secs(5)).await;
         assert_eq!(remaining, 0, "drain should report all tasks finished");
-        assert_eq!(n.load(Ordering::SeqCst), 1, "listener must have run to completion");
+        assert_eq!(
+            n.load(Ordering::SeqCst),
+            1,
+            "listener must have run to completion"
+        );
     }
 
     struct FailNTimes {
