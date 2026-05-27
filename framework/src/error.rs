@@ -432,6 +432,16 @@ pub enum FrameworkError {
         expected_type: &'static str,
     },
 
+    /// Unsupported media type (415 Unsupported Media Type)
+    ///
+    /// Returned by `FormRequest::extract` when the request body's
+    /// `Content-Type` is neither form-urlencoded nor a JSON media type
+    /// (`application/json` or an `application/*+json` suffix) — including a
+    /// missing or empty `Content-Type`. The framework refuses to guess at
+    /// the body format rather than silently parsing an unknown body as JSON.
+    #[error("Unsupported Media Type")]
+    UnsupportedMediaType,
+
     /// Precognition validation passed (204 No Content)
     ///
     /// Returned by `FormRequest::extract` when the request carries a
@@ -549,6 +559,7 @@ impl FrameworkError {
             Self::Unauthorized => 403,
             Self::ModelNotFound { .. } => 404,
             Self::ParamParse { .. } => 400,
+            Self::UnsupportedMediaType => 415,
             Self::PrecognitionSuccess => 204,
             Self::PrecognitionFailure(_) => 422,
             Self::AlreadyReported => 500,
@@ -596,6 +607,7 @@ impl FrameworkError {
             Self::Unauthorized => "This action is unauthorized.",
             Self::ModelNotFound { model_name } => model_name,
             Self::ParamParse { param, .. } => param,
+            Self::UnsupportedMediaType => "Unsupported Media Type",
             Self::PrecognitionSuccess => "Precognition validation passed",
             Self::PrecognitionFailure(_) => "Precognition validation failed",
             Self::AlreadyReported => "",

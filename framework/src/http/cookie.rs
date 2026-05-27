@@ -179,13 +179,17 @@ impl Cookie {
             url_encode(&self.value)
         )];
 
-        parts.push(format!("Path={}", self.options.path));
+        parts.push(format!("Path={}", sanitize_path(&self.options.path)));
 
         if self.options.http_only {
             parts.push("HttpOnly".to_string());
         }
 
-        if self.options.secure {
+        // Emit `Secure` when the cookie is explicitly secure OR when
+        // `SameSite=None` is set. Modern browsers reject a `SameSite=None`
+        // cookie that is not also `Secure`, so the two are coupled here to
+        // keep the cross-site cookie from being silently dropped.
+        if self.options.secure || self.options.same_site == SameSite::None {
             parts.push("Secure".to_string());
         }
 
@@ -195,8 +199,10 @@ impl Cookie {
             SameSite::None => parts.push("SameSite=None".to_string()),
         }
 
-        if let Some(ref domain) = self.options.domain {
-            parts.push(format!("Domain={}", domain));
+        if let Some(ref domain) = self.options.domain
+            && let Some(safe) = sanitize_domain(domain)
+        {
+            parts.push(format!("Domain={}", safe));
         }
 
         if let Some(max_age) = self.options.max_age {
@@ -297,20 +303,50 @@ fn url_encode(s: &str) -> String {
 /// `char` (Latin-1 interpretation), corrupting every multi-byte UTF-8
 /// cookie value.
 ///
-/// `+` is also translated to a space in line with the
-/// `application/x-www-form-urlencoded` decoding that browsers use for
-/// cookie-like contexts. Pre-`+` translation keeps `percent_decode_str`
-/// happy (it never sees the literal `+`).
+/// `+` is left untouched (a literal plus sign): cookie values are not
+/// form-urlencoded, so translating `+`→space would corrupt any cookie set
+/// by another system that legitimately contains a `+`.
 fn url_decode(s: &str) -> String {
-    // Translate `+` → space first so percent_decode_str sees the same
-    // byte stream the encoder produced when round-tripping form-style
-    // values. (Cookie spec doesn't strictly require `+` ↔ space, but
-    // keeping the prior behaviour avoids surprising clients that
-    // produced `+`-encoded values.)
-    let translated: String = s.chars().map(|c| if c == '+' { ' ' } else { c }).collect();
-    percent_decode_str(&translated)
-        .decode_utf8_lossy()
-        .into_owned()
+    // Cookie values are NOT `application/x-www-form-urlencoded`, so `+` is a
+    // literal plus sign, not an encoded space — decoding it as a space would
+    // corrupt a cookie like `a+b` into `a b`. Our own encoder percent-encodes
+    // a real space as `%20` and a literal `+` as `%2B`, so round-tripping
+    // through this decoder is unaffected.
+    percent_decode_str(s).decode_utf8_lossy().into_owned()
+}
+
+/// Constrain a cookie `Path` attribute to RFC 6265 §4.1.1 `path-value`
+/// (any CHAR except CTLs or `;`). Control characters (CR, LF, NUL, …) and
+/// `;` are stripped so a caller-supplied path can never inject additional
+/// `Set-Cookie` attributes or split the header. A path that is empty after
+/// stripping falls back to `/`, since a `Path` attribute is always emitted.
+fn sanitize_path(path: &str) -> String {
+    let cleaned: String = path
+        .chars()
+        .filter(|&c| !c.is_control() && c != ';')
+        .collect();
+    if cleaned.is_empty() {
+        "/".to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// Constrain a cookie `Domain` attribute to valid host characters (ASCII
+/// letters, digits, `.`, and `-`, which also covers an optional leading
+/// `.`). Anything else is stripped so a caller-supplied domain can't inject
+/// attributes. A domain that is empty after stripping yields `None`: the
+/// attribute is then omitted, which is itself a valid host-only posture.
+fn sanitize_domain(domain: &str) -> Option<String> {
+    let cleaned: String = domain
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-')
+        .collect();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
 }
 
 #[cfg(test)]
@@ -427,5 +463,128 @@ mod tests {
         let cookies = parse_cookies("display_name=caf%C3%A9; lang=fr");
         assert_eq!(cookies.get("display_name"), Some(&"café".to_string()));
         assert_eq!(cookies.get("lang"), Some(&"fr".to_string()));
+    }
+
+    #[test]
+    fn sanitize_path_strips_ctl_and_semicolon() {
+        assert_eq!(sanitize_path("/app"), "/app");
+        // CR, LF, and `;` are removed; surrounding characters are glued.
+        assert_eq!(sanitize_path("/a\r\np;Max-Age=0"), "/apMax-Age=0");
+        // A path that survives as empty falls back to `/`.
+        assert_eq!(sanitize_path(""), "/");
+        assert_eq!(sanitize_path(";\r\n"), "/");
+    }
+
+    #[test]
+    fn sanitize_domain_keeps_host_chars_and_empties_to_none() {
+        assert_eq!(
+            sanitize_domain("example.com").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            sanitize_domain(".example.com").as_deref(),
+            Some(".example.com")
+        );
+        // `;`, `=`, and CRLF are stripped; alnum / `.` / `-` survive.
+        assert_eq!(
+            sanitize_domain("ex;ample.com\r\n").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(sanitize_domain(";;;").as_deref(), None);
+    }
+
+    #[test]
+    fn cookie_path_value_cannot_inject_attributes() {
+        let header = Cookie::new("s", "v")
+            .path("/app\r\n;Max-Age=999")
+            .to_header_value();
+        assert!(
+            !header.contains('\r') && !header.contains('\n'),
+            "no raw CR/LF in header: {header}"
+        );
+        // The Path attribute carries no `;` that could start a new attribute.
+        let path_attr = header
+            .split("; ")
+            .find(|p| p.starts_with("Path="))
+            .expect("a Path attribute is always emitted");
+        assert!(
+            !path_attr.contains(';'),
+            "path must not contain a ';': {path_attr}"
+        );
+    }
+
+    #[test]
+    fn cookie_domain_value_cannot_inject_attributes() {
+        let header = Cookie::new("s", "v")
+            .domain("evil.com\r\n;HttpOnly=x")
+            .to_header_value();
+        assert!(!header.contains('\r') && !header.contains('\n'), "{header}");
+        let dom = header
+            .split("; ")
+            .find(|p| p.starts_with("Domain="))
+            .expect("a Domain attribute was set");
+        // Only host characters survive — the injected `;HttpOnly=x` collapses
+        // into the host text rather than becoming its own attribute.
+        assert_eq!(dom, "Domain=evil.comHttpOnlyx");
+    }
+
+    #[test]
+    fn cookie_all_stripped_path_falls_back_and_domain_is_omitted() {
+        let header = Cookie::new("s", "v")
+            .path(";\r\n")
+            .domain(";;;")
+            .to_header_value();
+        assert!(
+            header.contains("Path=/"),
+            "stripped path falls back to /: {header}"
+        );
+        assert!(
+            !header.contains("Domain="),
+            "an all-stripped domain is omitted entirely: {header}"
+        );
+    }
+
+    #[test]
+    fn samesite_none_forces_secure_even_when_disabled() {
+        let header = Cookie::new("s", "v")
+            .secure(false)
+            .same_site(SameSite::None)
+            .to_header_value();
+        assert!(header.contains("SameSite=None"), "{header}");
+        assert!(
+            header.contains("Secure"),
+            "SameSite=None must be paired with Secure or browsers drop it: {header}"
+        );
+    }
+
+    #[test]
+    fn insecure_lax_cookie_omits_secure() {
+        let header = Cookie::new("s", "v")
+            .secure(false)
+            .same_site(SameSite::Lax)
+            .to_header_value();
+        assert!(
+            !header.contains("Secure"),
+            "an explicitly insecure Lax cookie must not be forced Secure: {header}"
+        );
+    }
+
+    #[test]
+    fn cookie_plus_sign_is_literal_not_space() {
+        // Cookies are not form-urlencoded: a literal `+` must survive decode.
+        let cookies = parse_cookies("token=a+b+c");
+        assert_eq!(cookies.get("token"), Some(&"a+b+c".to_string()));
+        // And our own encode/decode round-trip preserves it (encoder → %2B).
+        assert_eq!(url_decode(&url_encode("a+b")), "a+b");
+    }
+
+    #[test]
+    fn forget_with_custom_path_emits_matching_deletion_attributes() {
+        // A cookie set under a non-root path must be deleted with the SAME
+        // path or the browser keeps the original; `forget` chains with `path`.
+        let header = Cookie::forget("sess").path("/admin").to_header_value();
+        assert!(header.contains("Path=/admin"), "{header}");
+        assert!(header.contains("Max-Age=0"), "{header}");
+        assert!(header.contains("sess="), "{header}");
     }
 }

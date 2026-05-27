@@ -24,10 +24,11 @@ pub struct ParamError {
 
 impl From<ParamError> for HttpResponse {
     fn from(err: ParamError) -> HttpResponse {
-        HttpResponse::json(serde_json::json!({
-            "error": format!("Missing required parameter: {}", err.param_name)
-        }))
-        .status(400)
+        // Route through `FrameworkError` so this legacy conversion produces
+        // the same canonical `{ "message": ... }` body and 400 status as
+        // every other error path, instead of the divergent `{ "error": ... }`
+        // shape it used to emit.
+        HttpResponse::from(crate::error::FrameworkError::from(err))
     }
 }
 
@@ -53,4 +54,33 @@ pub fn text(body: impl Into<String>) -> Response {
 /// Create a JSON response from a serde_json::Value
 pub fn json(body: serde_json::Value) -> Response {
     Ok(HttpResponse::json(body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The legacy `From<ParamError> for HttpResponse` must emit the same
+    /// canonical `{ "message": ... }` body and 400 status as every other
+    /// error path — not the old divergent `{ "error": ... }` shape.
+    #[test]
+    fn param_error_renders_canonical_message_shape() {
+        let resp = HttpResponse::from(ParamError {
+            param_name: "id".to_string(),
+        });
+        assert_eq!(resp.status_code(), 400);
+        let body = std::str::from_utf8(resp.body()).expect("utf-8 body");
+        assert!(
+            body.contains("\"message\""),
+            "body must use the canonical `message` key: {body}"
+        );
+        assert!(
+            !body.contains("\"error\""),
+            "the legacy `error` key must be gone: {body}"
+        );
+        assert!(
+            body.contains("Missing required parameter: id"),
+            "message text preserved: {body}"
+        );
+    }
 }

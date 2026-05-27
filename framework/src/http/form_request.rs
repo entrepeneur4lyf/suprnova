@@ -155,17 +155,40 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send {
             })
             .unwrap_or_default();
 
-        // Get content type before consuming body
-        let content_type = req.content_type().map(|s| s.to_string());
+        // Get the content type before consuming the body and decide how to
+        // parse from it. Strip any parameters (`; charset=...`), trim, and
+        // lowercase so `Application/JSON; charset=utf-8` classifies the same
+        // as `application/json`.
+        let media_type = req.content_type().map(|ct| {
+            ct.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase()
+        });
+
+        // Only two body shapes are understood: form-urlencoded, and JSON
+        // (`application/json` or any `application/*+json` suffix type). Every
+        // other content type — including a missing or empty `Content-Type` —
+        // is rejected with 415 rather than silently parsed as JSON. The check
+        // runs BEFORE the body is read so an unsupported request never streams.
+        let is_form = media_type.as_deref() == Some("application/x-www-form-urlencoded");
+        let is_json = media_type
+            .as_deref()
+            .is_some_and(|mt| mt == "application/json" || mt.ends_with("+json"));
+        if !is_form && !is_json {
+            return Err(FrameworkError::UnsupportedMediaType);
+        }
 
         // Collect and parse body. Honor the per-struct cap; `body_bytes_with_cap`
         // reads `Content-Length` from headers and pre-rejects oversized
         // requests with 413 before consuming any body bytes.
         let (_, bytes) = req.body_bytes_with_cap(Self::max_body_bytes()).await?;
 
-        let data: Self = match content_type.as_deref() {
-            Some(ct) if ct.starts_with("application/x-www-form-urlencoded") => parse_form(&bytes)?,
-            _ => parse_json(&bytes)?,
+        let data: Self = if is_form {
+            parse_form(&bytes)?
+        } else {
+            parse_json(&bytes)?
         };
 
         // Run validation. Precognition runs the same validators as a

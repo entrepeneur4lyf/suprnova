@@ -276,3 +276,106 @@ async fn custom_authorize_full_happy_path() {
     let dto = result.expect("admin role + valid payload must succeed end-to-end");
     assert_eq!(dto.action, "delete");
 }
+
+// ---------------------------------------------------------------------------
+// Content-Type media-type handling: form-urlencoded and JSON (including the
+// `application/*+json` suffix) are accepted; everything else — including a
+// missing Content-Type — is rejected with 415 rather than parsed as JSON.
+// ---------------------------------------------------------------------------
+
+/// POST a raw body with an explicit (or absent) `Content-Type`. Unlike
+/// `post_json`, the content type is fully caller-controlled so these tests can
+/// exercise unsupported and missing media types.
+async fn post_raw(addr: SocketAddr, content_type: Option<&str>, body_bytes: Vec<u8>) {
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let io = TokioIo::new(stream);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+
+    let mut builder = hyper::Request::builder()
+        .method("POST")
+        .uri("http://localhost/users")
+        .header("content-length", body_bytes.len());
+    if let Some(ct) = content_type {
+        builder = builder.header("content-type", ct);
+    }
+    let req = builder.body(Full::new(Bytes::from(body_bytes))).unwrap();
+    let _ = sender.send_request(req).await;
+}
+
+/// Bytes that deserialize cleanly as `CreateUserDto` JSON. Used so the 415
+/// assertions below prove the media-type gate fired, not a parse failure.
+fn valid_json_bytes() -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "email": "ada@example.com",
+        "password": "secretkey"
+    }))
+    .unwrap()
+}
+
+/// Resolve the captured extract result to an HTTP status: 200 for `Ok`,
+/// otherwise the error's `status_code()`.
+async fn capture_status(
+    captured: &Arc<Mutex<Option<Result<CreateUserDto, FrameworkError>>>>,
+) -> u16 {
+    tokio::task::yield_now().await;
+    captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("server did not process request")
+        .map(|_| 200u16)
+        .unwrap_or_else(|e| e.status_code())
+}
+
+#[tokio::test]
+async fn text_plain_body_is_rejected_415_not_parsed_as_json() {
+    let (addr, captured) = spawn_and_capture().await;
+    // Valid JSON bytes, but the WRONG content type → 415, never 200/422.
+    post_raw(addr, Some("text/plain"), valid_json_bytes()).await;
+    assert_eq!(capture_status(&captured).await, 415);
+}
+
+#[tokio::test]
+async fn missing_content_type_is_rejected_415() {
+    let (addr, captured) = spawn_and_capture().await;
+    post_raw(addr, None, valid_json_bytes()).await;
+    assert_eq!(capture_status(&captured).await, 415);
+}
+
+#[tokio::test]
+async fn application_json_with_charset_parameter_is_accepted() {
+    let (addr, captured) = spawn_and_capture().await;
+    post_raw(
+        addr,
+        Some("application/json; charset=utf-8"),
+        valid_json_bytes(),
+    )
+    .await;
+    // Parameter-stripping means this classifies as JSON and succeeds.
+    assert_eq!(capture_status(&captured).await, 200);
+}
+
+#[tokio::test]
+async fn application_suffix_json_media_type_is_accepted() {
+    let (addr, captured) = spawn_and_capture().await;
+    // `application/*+json` (e.g. JSON:API) is a JSON media type.
+    post_raw(addr, Some("application/vnd.api+json"), valid_json_bytes()).await;
+    assert_eq!(capture_status(&captured).await, 200);
+}
+
+#[tokio::test]
+async fn form_urlencoded_body_is_accepted() {
+    let (addr, captured) = spawn_and_capture().await;
+    post_raw(
+        addr,
+        Some("application/x-www-form-urlencoded"),
+        b"email=ada@example.com&password=secretkey".to_vec(),
+    )
+    .await;
+    assert_eq!(capture_status(&captured).await, 200);
+}
