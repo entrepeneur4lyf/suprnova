@@ -416,6 +416,21 @@ impl Server {
         // their close frames before the process tears down background work.
         crate::supervisor::SupervisorRegistry::shutdown(std::time::Duration::from_secs(5)).await;
 
+        // Drain in-flight queued event listeners. These were spawned by
+        // EventDispatcher for `queued()` events and run independently of the
+        // request/worker that fired them; a deploy should let them finish
+        // (bounded) rather than cut them off. Runs after supervisors so any
+        // events they emit on the way down are caught, and before the telemetry
+        // flush so listener spans land in the batch.
+        let queued_in_flight =
+            crate::events::EventFacade::drain_queued(std::time::Duration::from_secs(10)).await;
+        if queued_in_flight > 0 {
+            tracing::warn!(
+                queued_listeners_in_flight = queued_in_flight,
+                "queued event-listener drain deadline exceeded; aborted remaining tasks"
+            );
+        }
+
         // Flush buffered telemetry before returning. Safe to call when
         // OTel is disabled — guard just no-ops.
         guard.shutdown().await;
