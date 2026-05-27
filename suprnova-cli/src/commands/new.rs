@@ -112,11 +112,20 @@ fn get_project_name(name: Option<String>, no_interaction: bool) -> String {
         return "my-suprnova-app".to_string();
     }
 
-    Input::with_theme(&ColorfulTheme::default())
+    match Input::with_theme(&ColorfulTheme::default())
         .with_prompt("Project name")
         .default("my-suprnova-app".to_string())
         .interact_text()
-        .unwrap()
+    {
+        Ok(name) => name,
+        Err(e) => {
+            ui::error(&format!(
+                "Failed to read the project name: {e}. \
+                 Pass a name argument or use --no-interaction in non-interactive shells."
+            ));
+            std::process::exit(1);
+        }
+    }
 }
 
 fn get_description(no_interaction: bool) -> String {
@@ -124,11 +133,20 @@ fn get_description(no_interaction: bool) -> String {
         return "A web application built with Suprnova".to_string();
     }
 
-    Input::with_theme(&ColorfulTheme::default())
+    match Input::with_theme(&ColorfulTheme::default())
         .with_prompt("Description")
         .default("A web application built with Suprnova".to_string())
         .interact_text()
-        .unwrap()
+    {
+        Ok(description) => description,
+        Err(e) => {
+            ui::error(&format!(
+                "Failed to read the description: {e}. \
+                 Use --no-interaction in non-interactive shells."
+            ));
+            std::process::exit(1);
+        }
+    }
 }
 
 fn get_frontend(choice: Option<String>, no_interaction: bool) -> Frontend {
@@ -147,12 +165,22 @@ fn get_frontend(choice: Option<String>, no_interaction: bool) -> Frontend {
     }
 
     let options = ["Svelte (recommended)", "React", "Vue"];
-    let idx = Select::with_theme(&ColorfulTheme::default())
+    let idx = match Select::with_theme(&ColorfulTheme::default())
         .with_prompt("Frontend framework")
         .items(options)
         .default(0)
         .interact()
-        .unwrap();
+    {
+        Ok(idx) => idx,
+        Err(e) => {
+            ui::error(&format!(
+                "Failed to read the frontend selection: {e}. \
+                 Pass --frontend <svelte|react|vue> or --no-interaction in \
+                 non-interactive shells."
+            ));
+            std::process::exit(1);
+        }
+    };
     match idx {
         0 => Frontend::Svelte,
         1 => Frontend::React,
@@ -167,12 +195,21 @@ fn get_author(no_interaction: bool) -> String {
 
     let default_author = get_git_author().unwrap_or_default();
 
-    Input::with_theme(&ColorfulTheme::default())
+    match Input::with_theme(&ColorfulTheme::default())
         .with_prompt("Author")
         .default(default_author)
         .allow_empty(true)
         .interact_text()
-        .unwrap()
+    {
+        Ok(author) => author,
+        Err(e) => {
+            ui::error(&format!(
+                "Failed to read the author: {e}. \
+                 Use --no-interaction in non-interactive shells."
+            ));
+            std::process::exit(1);
+        }
+    }
 }
 
 fn get_git_author() -> Option<String> {
