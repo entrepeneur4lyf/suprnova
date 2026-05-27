@@ -8,9 +8,11 @@
 //!
 //! Use this in CI or your deploy-pipeline smoke tests:
 //!
-//!     suprnova ssr:start &
-//!     ./wait-until.sh suprnova ssr:check
-//!     # …run e2e tests…
+//! ```bash
+//! suprnova ssr:start &
+//! ./wait-until.sh suprnova ssr:check
+//! # ...run e2e tests...
+//! ```
 
 use std::net::TcpStream;
 use std::time::Duration;
