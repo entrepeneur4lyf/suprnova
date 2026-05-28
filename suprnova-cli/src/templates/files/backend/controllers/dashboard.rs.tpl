@@ -6,7 +6,7 @@
 use suprnova::{handler, inertia_response, Auth, FrameworkError, InertiaProps, Model, Request, Response};
 use serde::Serialize;
 
-use crate::models::user::Entity as UserEntity;
+use crate::models::user::User;
 
 #[derive(Serialize)]
 pub struct UserInfo {
@@ -30,7 +30,7 @@ pub async fn index(req: Request) -> Response {
         .parse()
         .map_err(|_| FrameworkError::internal("auth user id is not a valid i64"))?;
 
-    let user = UserEntity::find_by_pk(user_id)
+    let user = User::find(user_id)
         .await?
         .ok_or_else(|| FrameworkError::model_not_found("User"))?;
 

@@ -1,81 +1,95 @@
-//! User model
+//! User model.
+//!
+//! Defined with the `#[suprnova::model]` macro: the struct below *is* the
+//! Eloquent model. The macro emits the SeaORM `Entity` / `Column` /
+//! `ActiveModel` in an inner `user` module and gives `User` the query surface
+//! (`User::query()`, `User::find()`, the `Model::create` mass-assignment entry
+//! point, `save`, timestamps). `Authenticatable` is implemented on the struct
+//! so the auth stack (session middleware, user providers, `Auth::user()`)
+//! resolves users without touching SeaORM directly.
 
-use suprnova::database::{Model as DatabaseModel, ModelMut, QueryBuilder};
-use sea_orm::entity::prelude::*;
-use sea_orm::Set;
-use serde::Serialize;
+use std::any::Any;
 
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize)]
-#[sea_orm(table_name = "users")]
-pub struct Model {
-    #[sea_orm(primary_key)]
+use chrono::{DateTime, Utc};
+use suprnova::{attrs, hashing, model, Authenticatable, FrameworkError};
+
+#[model(
+    table = "users",
+    fillable = ["name", "email", "password"],
+    hidden = ["password", "remember_token"],
+    timestamps,
+)]
+pub struct User {
     pub id: i64,
     pub name: String,
     pub email: String,
-    #[serde(skip_serializing)]
     pub password: String,
-    #[serde(skip_serializing)]
     pub remember_token: Option<String>,
-    pub created_at: DateTimeUtc,
-    pub updated_at: DateTimeUtc,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {}
+// Re-export the SeaORM types the macro emits in the inner `user` module so
+// call sites referencing `crate::models::user::{Entity, Column, ActiveModel}`
+// keep resolving.
+pub use user::{ActiveModel, Column, Entity};
 
-impl ActiveModelBehavior for ActiveModel {}
-
-impl DatabaseModel for Entity {}
-impl ModelMut for Entity {}
-
-/// Type alias for convenient access
-pub type User = Model;
-
-impl Model {
-    /// Start a query builder
-    pub fn query() -> QueryBuilder<Entity> {
-        QueryBuilder::new()
-    }
-
-    /// Find a user by their email address
-    pub async fn find_by_email(email: &str) -> Result<Option<Self>, suprnova::FrameworkError> {
-        Self::query()
-            .filter(Column::Email.eq(email))
+impl User {
+    /// Find a user by their email address.
+    pub async fn find_by_email(email: &str) -> Result<Option<Self>, FrameworkError> {
+        <Self as suprnova::eloquent::Model>::query()
+            .filter("email", email)
             .first()
             .await
     }
 
-    /// Verify the user's password
-    pub fn verify_password(&self, password: &str) -> Result<bool, suprnova::FrameworkError> {
-        suprnova::hashing::verify(password, &self.password)
+    /// Verify a plaintext password against this user's stored hash.
+    pub fn verify_password(&self, password: &str) -> Result<bool, FrameworkError> {
+        hashing::verify(password, &self.password)
     }
 
-    /// Create a new user with a hashed password
+    /// Create a new user, hashing the password before insert. Values are
+    /// mass-assigned through the model's `fillable` set.
     pub async fn create(
         name: impl Into<String>,
         email: impl Into<String>,
         password: &str,
-    ) -> Result<Self, suprnova::FrameworkError> {
-        let hashed = suprnova::hashing::hash(password)?;
-
-        let model = ActiveModel {
-            name: Set(name.into()),
-            email: Set(email.into()),
-            password: Set(hashed),
-            ..Default::default()
-        };
-
-        Entity::insert_one(model).await
+    ) -> Result<Self, FrameworkError> {
+        let name: String = name.into();
+        let email: String = email.into();
+        let hashed = hashing::hash(password)?;
+        <Self as suprnova::eloquent::Model>::create(attrs! {
+            name: name,
+            email: email,
+            password: hashed,
+        })
+        .await
     }
 
-    /// Update the user's remember token
+    /// Set (or clear) the remember-me token and persist it. `remember_token`
+    /// is deliberately outside `fillable` (it is never set from request
+    /// input), so this writes the whole row via `save` rather than a
+    /// mass-assignment update.
     pub async fn update_remember_token(
         &self,
         token: Option<String>,
-    ) -> Result<(), suprnova::FrameworkError> {
-        let mut active: ActiveModel = self.clone().into();
-        active.remember_token = Set(token);
-        Entity::update_one(active).await?;
-        Ok(())
+    ) -> Result<(), FrameworkError> {
+        let mut updated = self.clone();
+        updated.remember_token = token;
+        <Self as suprnova::eloquent::Model>::save(&updated).await
+    }
+}
+
+impl Authenticatable for User {
+    fn auth_identifier(&self) -> i64 {
+        self.id
+    }
+
+    fn auth_identifier_name(&self) -> &'static str {
+        "id"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

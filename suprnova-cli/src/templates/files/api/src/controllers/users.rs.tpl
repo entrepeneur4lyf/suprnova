@@ -106,7 +106,11 @@ pub async fn login(req: Request) -> Response {
         .authenticate(&body.email, &body.password, None, None)
         .await?;
 
+    let token = session.token.ok_or_else(|| {
+        FrameworkError::internal("authentication did not return a session token")
+    })?;
+
     suprnova::json_response!({
-        "token": session.token.to_string()
+        "token": token.to_string()
     })
 }
