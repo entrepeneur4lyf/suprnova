@@ -520,7 +520,13 @@ pub async fn handle_request(
     let flash_bag = crate::inertia::flash::new_bag();
     let ssr_disabled = crate::inertia::ssr::new_disable_ssr_flag();
 
-    crate::inertia::flash::FLASH_BAG
+    // Capture for the post-response HEAD body strip below. RFC 9110 §9.3.2
+    // forbids the server from sending content on HEAD; we enforce this
+    // uniformly here so the handler (whether an explicit HEAD route or the
+    // GET fallback inside `match_route`) cannot violate the spec.
+    let is_head = method == hyper::Method::HEAD;
+
+    let response = crate::inertia::flash::FLASH_BAG
         .scope(flash_bag, async move {
             crate::inertia::ssr::DISABLE_SSR
                 .scope(ssr_disabled, async move {
@@ -538,7 +544,28 @@ pub async fn handle_request(
                 })
                 .await
         })
-        .await
+        .await;
+
+    if is_head {
+        strip_body_for_head(response)
+    } else {
+        response
+    }
+}
+
+/// Replace the body of an outgoing response with an empty `BoxBody`.
+///
+/// Status and headers (including any `Content-Length` set by the handler)
+/// are preserved so the client sees the same metadata it would for the
+/// corresponding GET response. Per RFC 9110 §9.3.2 a HEAD response carries
+/// the same header fields a GET would have produced — the body is the
+/// only thing dropped.
+fn strip_body_for_head(response: hyper::Response<ServerBody>) -> hyper::Response<ServerBody> {
+    let (parts, _body) = response.into_parts();
+    let empty: ServerBody = Full::new(Bytes::new())
+        .map_err(|never| match never {})
+        .boxed();
+    hyper::Response::from_parts(parts, empty)
 }
 
 async fn handle_request_inner(
@@ -548,6 +575,19 @@ async fn handle_request_inner(
     method: hyper::Method,
     path: &str,
 ) -> hyper::Response<ServerBody> {
+    // RFC 9110 §9.3.2: a HEAD request that lacks an explicit handler falls
+    // back to GET inside `Router::match_route`. The middleware list for
+    // such a request must come from the GET registration, not from an
+    // empty `(HEAD, pattern)` slot — otherwise auth / CSRF / rate-limit
+    // would silently skip on HEAD probes. Compute the "effective" method
+    // (the registry whose route matched) and use it for both the
+    // middleware lookup and the chain's method-context.
+    let effective_method = if method == hyper::Method::HEAD && !router.has_explicit_head(path) {
+        hyper::Method::GET
+    } else {
+        method.clone()
+    };
+
     match router.match_route(&method, path) {
         Some((pattern, handler, params)) => {
             let request = Request::new(req).with_params(params);
@@ -570,21 +610,28 @@ async fn handle_request_inner(
             chain.extend(middleware_registry.global_middleware().iter().cloned());
 
             // 2. Add route-level middleware (already boxed).
-            //    Lookup is keyed by `(method, pattern)` — the matched
-            //    route pattern (e.g. `/api/posts/{id}`), NOT the raw
-            //    request path. That keeps two invariants:
+            //    Lookup is keyed by `(effective_method, pattern)` — the
+            //    matched route pattern (e.g. `/api/posts/{id}`), NOT the
+            //    raw request path; `effective_method` collapses HEAD to
+            //    GET when match_route fell back. That keeps three
+            //    invariants:
             //    (a) middleware registered for one HTTP method on a
             //        path never bleeds onto a sibling route on the
-            //        same path under a different method; and
+            //        same path under a different method;
             //    (b) group-applied middleware on parameterised routes
             //        actually runs, instead of silently missing the
-            //        lookup because `/api/posts/42 != /api/posts/{id}`.
-            let route_middleware = router.get_route_middleware(&method, &pattern);
+            //        lookup because `/api/posts/42 != /api/posts/{id}`; and
+            //    (c) HEAD requests that fall back to GET still pick up
+            //        the GET middleware list (auth, CSRF, rate-limit).
+            let route_middleware = router.get_route_middleware(&effective_method, &pattern);
             chain.extend(route_middleware);
 
             // 3. Execute chain with handler, catching panics in middleware
             //    or handler so the client receives a proper 500 instead
-            //    of a dropped connection.
+            //    of a dropped connection. Pass the original `method` so
+            //    handlers / logs see the wire-level verb (HEAD vs GET);
+            //    middleware that needs to discriminate the two can still
+            //    check `request.method()`.
             let http_response =
                 execute_chain_safely(chain, request, handler, &method, path, request_id).await;
 

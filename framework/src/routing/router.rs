@@ -205,7 +205,10 @@ pub struct Router {
     get_routes: MatchitRouter<(String, Arc<BoxedHandler>)>,
     post_routes: MatchitRouter<(String, Arc<BoxedHandler>)>,
     put_routes: MatchitRouter<(String, Arc<BoxedHandler>)>,
+    patch_routes: MatchitRouter<(String, Arc<BoxedHandler>)>,
     delete_routes: MatchitRouter<(String, Arc<BoxedHandler>)>,
+    head_routes: MatchitRouter<(String, Arc<BoxedHandler>)>,
+    options_routes: MatchitRouter<(String, Arc<BoxedHandler>)>,
     /// WebSocket route registry. Separate from the HTTP route
     /// registries because the handler type is different
     /// (`BoxedWebSocketHandler` vs `Arc<BoxedHandler>`) and the match
@@ -244,7 +247,10 @@ impl Router {
             get_routes: MatchitRouter::new(),
             post_routes: MatchitRouter::new(),
             put_routes: MatchitRouter::new(),
+            patch_routes: MatchitRouter::new(),
             delete_routes: MatchitRouter::new(),
+            head_routes: MatchitRouter::new(),
+            options_routes: MatchitRouter::new(),
             ws_routes: MatchitRouter::new(),
             route_middleware: HashMap::new(),
             fallback_handler: None,
@@ -571,6 +577,154 @@ impl Router {
         })
     }
 
+    /// Register a PATCH route.
+    ///
+    /// Express-style `:param` segments are converted to matchit-style
+    /// `{param}` automatically.
+    ///
+    /// # Panics
+    ///
+    /// Panics on duplicate registration or any matchit insert error.
+    /// Use [`Router::try_patch`] for a fallible variant.
+    pub fn patch<H, Fut>(self, path: &str, handler: H) -> RouteBuilder
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.try_patch(path, handler)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Router::patch`]. See [`Router::try_get`].
+    pub fn try_patch<H, Fut>(
+        mut self,
+        path: &str,
+        handler: H,
+    ) -> Result<RouteBuilder, FrameworkError>
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        let converted = crate::routing::macros::convert_route_params(path);
+        let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
+        self.patch_routes
+            .insert(&converted, (converted.clone(), Arc::new(handler)))
+            .map_err(|e| {
+                FrameworkError::internal(format!("Failed to register PATCH route '{path}': {e}"))
+            })?;
+        Ok(RouteBuilder {
+            router: self,
+            last_path: converted,
+            last_method: Method::PATCH,
+        })
+    }
+
+    /// Register a HEAD route.
+    ///
+    /// Per RFC 9110 §9.3.2, a HEAD request is identical to GET except the
+    /// server MUST NOT send a body. Suprnova's dispatcher honours this in
+    /// two ways:
+    ///
+    /// 1. If no explicit HEAD route is registered for a path,
+    ///    [`Router::match_route`] returns the matching GET handler so the
+    ///    same logic runs for both verbs.
+    /// 2. The response body is stripped at the server boundary whenever the
+    ///    request method is HEAD, regardless of whether the handler emitted
+    ///    one. This holds equally for explicit HEAD handlers and for the
+    ///    auto-fallback to GET.
+    ///
+    /// Register an explicit HEAD route only when you need it to override
+    /// the GET fallback (for example, returning custom headers without
+    /// running the GET body computation).
+    ///
+    /// Express-style `:param` segments are converted to matchit-style
+    /// `{param}` automatically.
+    ///
+    /// # Panics
+    ///
+    /// Panics on duplicate registration or any matchit insert error.
+    /// Use [`Router::try_head`] for a fallible variant.
+    pub fn head<H, Fut>(self, path: &str, handler: H) -> RouteBuilder
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.try_head(path, handler)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Router::head`]. See [`Router::try_get`].
+    pub fn try_head<H, Fut>(
+        mut self,
+        path: &str,
+        handler: H,
+    ) -> Result<RouteBuilder, FrameworkError>
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        let converted = crate::routing::macros::convert_route_params(path);
+        let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
+        self.head_routes
+            .insert(&converted, (converted.clone(), Arc::new(handler)))
+            .map_err(|e| {
+                FrameworkError::internal(format!("Failed to register HEAD route '{path}': {e}"))
+            })?;
+        Ok(RouteBuilder {
+            router: self,
+            last_path: converted,
+            last_method: Method::HEAD,
+        })
+    }
+
+    /// Register an OPTIONS route.
+    ///
+    /// CORS preflight (`OPTIONS` + `Access-Control-Request-Method`) is
+    /// handled by `CorsMiddleware` installed as global middleware; explicit
+    /// OPTIONS routes are for non-preflight uses — advertising allowed
+    /// verbs (`Accept-Patch`), public API discovery, programmatic resource
+    /// description.
+    ///
+    /// Express-style `:param` segments are converted to matchit-style
+    /// `{param}` automatically.
+    ///
+    /// # Panics
+    ///
+    /// Panics on duplicate registration or any matchit insert error.
+    /// Use [`Router::try_options`] for a fallible variant.
+    pub fn options<H, Fut>(self, path: &str, handler: H) -> RouteBuilder
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.try_options(path, handler)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Router::options`]. See [`Router::try_get`].
+    pub fn try_options<H, Fut>(
+        mut self,
+        path: &str,
+        handler: H,
+    ) -> Result<RouteBuilder, FrameworkError>
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        let converted = crate::routing::macros::convert_route_params(path);
+        let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
+        self.options_routes
+            .insert(&converted, (converted.clone(), Arc::new(handler)))
+            .map_err(|e| {
+                FrameworkError::internal(format!("Failed to register OPTIONS route '{path}': {e}"))
+            })?;
+        Ok(RouteBuilder {
+            router: self,
+            last_path: converted,
+            last_method: Method::OPTIONS,
+        })
+    }
+
     /// Register a WebSocket route. The handler runs after the
     /// framework completes the HTTP/1.1 Upgrade handshake; it
     /// receives a [`WsSocket`] plus the original [`Request`] so it
@@ -847,7 +1001,28 @@ impl Router {
             hyper::Method::GET => &self.get_routes,
             hyper::Method::POST => &self.post_routes,
             hyper::Method::PUT => &self.put_routes,
+            hyper::Method::PATCH => &self.patch_routes,
             hyper::Method::DELETE => &self.delete_routes,
+            hyper::Method::HEAD => {
+                // RFC 9110 §9.3.2: HEAD is identical to GET except the
+                // server MUST NOT send a body. Honour the spec by giving
+                // an explicit HEAD registration priority (custom headers
+                // without running the GET body computation), and otherwise
+                // returning the matching GET handler. The body is stripped
+                // for HEAD requests at the server boundary regardless of
+                // which arm matched.
+                if let Ok(matched) = self.head_routes.at(path) {
+                    let params: HashMap<String, String> = matched
+                        .params
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect();
+                    let (pattern, handler) = matched.value;
+                    return Some((pattern.clone(), handler.clone(), params));
+                }
+                &self.get_routes
+            }
+            hyper::Method::OPTIONS => &self.options_routes,
             _ => return None,
         };
 
@@ -860,6 +1035,17 @@ impl Router {
             let (pattern, handler) = matched.value;
             (pattern.clone(), handler.clone(), params)
         })
+    }
+
+    /// Whether `path` has a HEAD handler registered explicitly (as
+    /// opposed to falling back to GET in [`Router::match_route`]).
+    ///
+    /// Used by the server to pick the correct `(method, pattern)`
+    /// route-middleware key when a HEAD request falls back to GET: if a
+    /// GET-only registration exists, the GET middleware list must run
+    /// instead of an empty HEAD list.
+    pub fn has_explicit_head(&self, path: &str) -> bool {
+        self.head_routes.at(path).is_ok()
     }
 }
 
@@ -994,6 +1180,61 @@ impl RouteBuilder {
         Fut: Future<Output = Response> + Send + 'static,
     {
         self.router.try_delete(path, handler)
+    }
+
+    /// Register a PATCH route (for chaining without `.name()`).
+    pub fn patch<H, Fut>(self, path: &str, handler: H) -> RouteBuilder
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.router.patch(path, handler)
+    }
+
+    /// Fallible sibling of [`RouteBuilder::patch`]. See [`Router::try_patch`].
+    pub fn try_patch<H, Fut>(self, path: &str, handler: H) -> Result<RouteBuilder, FrameworkError>
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.router.try_patch(path, handler)
+    }
+
+    /// Register a HEAD route (for chaining without `.name()`).
+    pub fn head<H, Fut>(self, path: &str, handler: H) -> RouteBuilder
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.router.head(path, handler)
+    }
+
+    /// Fallible sibling of [`RouteBuilder::head`]. See [`Router::try_head`].
+    pub fn try_head<H, Fut>(self, path: &str, handler: H) -> Result<RouteBuilder, FrameworkError>
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.router.try_head(path, handler)
+    }
+
+    /// Register an OPTIONS route (for chaining without `.name()`).
+    pub fn options<H, Fut>(self, path: &str, handler: H) -> RouteBuilder
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.router.options(path, handler)
+    }
+
+    /// Fallible sibling of [`RouteBuilder::options`]. See
+    /// [`Router::try_options`].
+    pub fn try_options<H, Fut>(self, path: &str, handler: H) -> Result<RouteBuilder, FrameworkError>
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.router.try_options(path, handler)
     }
 }
 
@@ -1212,5 +1453,137 @@ mod tests {
         let _ = Router::new().get("/{a}/{b}", h).name("two.params.test");
         let url = route("two.params.test", &[("a", "x")]);
         assert_eq!(url, Some("/x/{b}".to_string()));
+    }
+
+    // ---- PATCH / HEAD / OPTIONS verb coverage (audit #350) ------------
+
+    /// PATCH routes register through the fluent surface and match.
+    #[test]
+    fn patch_route_registers_and_matches() {
+        let router: Router = Router::new().patch("/posts/:id", h).into();
+        let m = router.match_route(&Method::PATCH, "/posts/42");
+        let (pattern, _handler, params) = m.expect("PATCH must match");
+        assert_eq!(pattern, "/posts/{id}");
+        assert_eq!(params.get("id"), Some(&"42".to_string()));
+    }
+
+    /// HEAD with an explicit handler matches it directly; the GET
+    /// fallback is not consulted.
+    #[test]
+    fn head_route_matches_explicit_registration() {
+        let router: Router = Router::new()
+            .head("/explicit", h)
+            .get("/explicit", h)
+            .into();
+        assert!(router.has_explicit_head("/explicit"));
+        let m = router.match_route(&Method::HEAD, "/explicit");
+        let (pattern, _h, _p) = m.expect("HEAD must match its explicit handler");
+        assert_eq!(pattern, "/explicit");
+    }
+
+    /// HEAD with no explicit handler falls back to the GET registry.
+    /// RFC 9110 §9.3.2: HEAD is identical to GET aside from the body.
+    #[test]
+    fn head_falls_back_to_get_when_no_explicit_head_route() {
+        let router: Router = Router::new().get("/articles/:slug", h).into();
+        assert!(!router.has_explicit_head("/articles/:slug"));
+        let m = router.match_route(&Method::HEAD, "/articles/intro");
+        let (pattern, _h, params) =
+            m.expect("HEAD must fall back to GET when no explicit HEAD is registered");
+        assert_eq!(pattern, "/articles/{slug}");
+        assert_eq!(params.get("slug"), Some(&"intro".to_string()));
+    }
+
+    /// HEAD with neither HEAD nor GET registered still returns None
+    /// (so the server can drop to the 404 / fallback chain).
+    #[test]
+    fn head_returns_none_when_neither_head_nor_get_match() {
+        let router: Router = Router::new().post("/submit", h).into();
+        let m = router.match_route(&Method::HEAD, "/submit");
+        assert!(
+            m.is_none(),
+            "HEAD must not match a POST-only path even via fallback",
+        );
+    }
+
+    /// OPTIONS routes register and match. CORS preflight remains a
+    /// middleware-layer concern; explicit OPTIONS handlers serve
+    /// non-preflight discovery.
+    #[test]
+    fn options_route_registers_and_matches() {
+        let router: Router = Router::new().options("/api/posts", h).into();
+        let m = router.match_route(&Method::OPTIONS, "/api/posts");
+        let (pattern, _h, _p) = m.expect("OPTIONS must match");
+        assert_eq!(pattern, "/api/posts");
+    }
+
+    /// `try_patch` returns Err on duplicate registration; the Result
+    /// reports the method + path so plugins / generators can surface
+    /// the conflict.
+    ///
+    /// `RouteBuilder` does not implement `Debug` (handlers are boxed
+    /// `dyn Fn`), so `Result<RouteBuilder, _>` can't use `.expect_err`.
+    /// Destructure with `match` instead.
+    #[test]
+    fn try_patch_returns_err_on_duplicate() {
+        let router = Router::new();
+        let router = match router.try_patch("/u", h) {
+            Ok(b) => b.router,
+            Err(e) => panic!("first PATCH must register: {e}"),
+        };
+        let err = match router.try_patch("/u", h) {
+            Err(e) => e,
+            Ok(_) => panic!("duplicate must fail"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("PATCH route '/u'"),
+            "error must name the verb + path; got {msg}",
+        );
+    }
+
+    /// `try_head` and `try_options` share the dual-API surface: each
+    /// has a fallible sibling that reports duplicates rather than
+    /// panicking.
+    #[test]
+    fn try_head_and_try_options_return_err_on_duplicate() {
+        let router = Router::new();
+        let router = match router.try_head("/h", h) {
+            Ok(b) => b.router,
+            Err(e) => panic!("first HEAD must register: {e}"),
+        };
+        let err = match router.try_head("/h", h) {
+            Err(e) => e,
+            Ok(_) => panic!("dup HEAD must fail"),
+        };
+        assert!(err.to_string().contains("HEAD route '/h'"));
+
+        let router = Router::new();
+        let router = match router.try_options("/o", h) {
+            Ok(b) => b.router,
+            Err(e) => panic!("first OPTIONS must register: {e}"),
+        };
+        let err = match router.try_options("/o", h) {
+            Err(e) => e,
+            Ok(_) => panic!("dup OPTIONS must fail"),
+        };
+        assert!(err.to_string().contains("OPTIONS route '/o'"));
+    }
+
+    /// RouteBuilder chains through the new verbs (mirroring
+    /// `get`/`post`/`put`/`delete`) so a mixed-verb router builds
+    /// cleanly in one expression.
+    #[test]
+    fn route_builder_chains_patch_head_options() {
+        let router: Router = Router::new()
+            .get("/r", h)
+            .patch("/r/edit", h)
+            .head("/r/probe", h)
+            .options("/r/meta", h)
+            .into();
+        assert!(router.match_route(&Method::GET, "/r").is_some());
+        assert!(router.match_route(&Method::PATCH, "/r/edit").is_some());
+        assert!(router.match_route(&Method::HEAD, "/r/probe").is_some());
+        assert!(router.match_route(&Method::OPTIONS, "/r/meta").is_some());
     }
 }
