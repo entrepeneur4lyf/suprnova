@@ -7,10 +7,12 @@
 //! `{ message, errors }` envelope — the Inertia client surfaces those
 //! automatically on the originating page.
 
+use std::sync::Arc;
+
 use serde::Deserialize;
 use suprnova::{
-    handler, inertia_response, redirect, serde_json, Auth, FormRequest, InertiaProps, Request,
-    Response, Validate, ValidationErrors,
+    handler, inertia_response, redirect, serde_json, Auth, Credentials, FormRequest, InertiaProps,
+    Request, Response, Validate, ValidationErrors,
 };
 
 use crate::models::user::User;
@@ -55,26 +57,19 @@ fn invalid_credentials() -> suprnova::FrameworkError {
 
 #[handler]
 pub async fn login(form: LoginRequest) -> Response {
-    let user = User::find_by_email(&form.email)
-        .await?
-        .ok_or_else(invalid_credentials)?;
-
-    if !user.verify_password(&form.password)? {
-        return Err(invalid_credentials().into());
+    // `Auth::attempt` verifies the password through the registered user
+    // provider, logs the user into the session on success, and issues a
+    // remember-me token when requested — all via the named-guard system
+    // wired in bootstrap.rs.
+    match Auth::attempt(
+        &Credentials::password(&form.email, &form.password),
+        form.remember,
+    )
+    .await?
+    {
+        Some(_user) => redirect!("/dashboard").into(),
+        None => Err(invalid_credentials().into()),
     }
-
-    // Log in the user. `Auth::login_id` takes the user id as a string so
-    // the session layer stays type-agnostic.
-    Auth::login_id(user.id.to_string());
-
-    if form.remember {
-        // Persist a remember token so the auth provider can resume the
-        // session from a cookie after the in-memory session expires.
-        let token = suprnova::session::generate_session_id();
-        user.update_remember_token(Some(token)).await?;
-    }
-
-    redirect!("/dashboard").into()
 }
 
 // ============================================================================
@@ -125,7 +120,8 @@ pub async fn register(form: RegisterRequest) -> Response {
     }
 
     let user = User::create(&form.name, &form.email, &form.password).await?;
-    Auth::login_id(user.id.to_string());
+    // Log the freshly-created user into the session (fires the Login event).
+    Auth::login(Arc::new(user), false).await?;
 
     redirect!("/dashboard").into()
 }

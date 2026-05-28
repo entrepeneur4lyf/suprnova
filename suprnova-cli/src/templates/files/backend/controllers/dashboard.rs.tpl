@@ -3,7 +3,7 @@
 //! Renders the post-login landing page with the currently authenticated
 //! user's basic profile data.
 
-use suprnova::{handler, inertia_response, Auth, FrameworkError, InertiaProps, Model, Request, Response};
+use suprnova::{handler, inertia_response, Auth, FrameworkError, InertiaProps, Request, Response};
 use serde::Serialize;
 
 use crate::models::user::User;
@@ -22,17 +22,11 @@ pub struct DashboardProps {
 
 #[handler]
 pub async fn index(req: Request) -> Response {
-    // `Auth::id` stores ids as strings so the session layer stays
-    // type-agnostic. Parse back into the model's `i64` primary key
-    // before hitting the database.
-    let user_id: i64 = Auth::id()
-        .ok_or(FrameworkError::Unauthorized)?
-        .parse()
-        .map_err(|_| FrameworkError::internal("auth user id is not a valid i64"))?;
-
-    let user = User::find(user_id)
+    // The registered user provider resolves the typed `User` from the
+    // session id; `user_as` downcasts the `Authenticatable` for us.
+    let user = Auth::user_as::<User>()
         .await?
-        .ok_or_else(|| FrameworkError::model_not_found("User"))?;
+        .ok_or(FrameworkError::Unauthorized)?;
 
     inertia_response!(
         &req,

@@ -23,10 +23,16 @@
 //! }
 //! ```
 
+use std::sync::Arc;
+
 #[allow(unused_imports)]
-use suprnova::{bind, global_middleware, singleton, App, CsrfMiddleware, SessionConfig, SessionMiddleware, DB};
+use suprnova::{
+    bind, global_middleware, singleton, App, Auth, AuthConfig, AuthManager, CsrfMiddleware,
+    EloquentUserProvider, SessionConfig, SessionMiddleware, DB,
+};
 
 use crate::middleware;
+use crate::models::user::User;
 
 /// Register global middleware and services
 ///
@@ -45,6 +51,14 @@ pub async fn register() {
 
     // CSRF protection (validates tokens on POST/PUT/PATCH/DELETE)
     global_middleware!(CsrfMiddleware::new());
+
+    // Authentication: register the AuthManager (the config/auth.php analogue)
+    // and a user provider so `Auth::attempt` and `Auth::user_as::<User>()`
+    // resolve users. `EloquentUserProvider<User>` queries the typed model; the
+    // SessionMiddleware above persists the authenticated id across requests.
+    App::singleton(AuthManager::new(AuthConfig::from_env()));
+    Auth::register_provider("users", Arc::new(EloquentUserProvider::<User>::new()))
+        .expect("register users provider");
 
     // Example: Register a trait binding with runtime config
     // bind!(dyn Database, PostgresDB::new());
