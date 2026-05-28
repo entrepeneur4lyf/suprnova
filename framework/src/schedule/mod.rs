@@ -284,6 +284,10 @@ impl Schedule {
 /// into `joinset` via `tokio::spawn`, with `catch_unwind` so a handler panic
 /// is converted into `Err(FrameworkError::internal(...))` carrying the task
 /// name — the scheduler tick loop is never unwound by user code.
+///
+/// Both paths route through
+/// [`task::run_handler_with_optional_overlap_guard`] so the
+/// `without_overlapping` flag is honoured regardless of execution mode.
 async fn run_tasks_into<'a, I>(
     tasks: I,
     joinset: &mut JoinSet<ScheduledTaskJoin>,
@@ -296,11 +300,24 @@ where
         if task.run_in_background {
             let name = task.name.clone();
             let panic_name = name.clone();
+            let guard_name = name.clone();
             let handler: BoxedTask = Arc::clone(&task.task);
+            let without_overlapping = task.without_overlapping;
+            let overlap_ttl = task.overlap_ttl;
+            let state = Arc::clone(&task.state);
             joinset.spawn(async move {
-                let outcome = AssertUnwindSafe(async move { handler.handle().await })
-                    .catch_unwind()
-                    .await;
+                let outcome = AssertUnwindSafe(async move {
+                    task::run_handler_with_optional_overlap_guard(
+                        &guard_name,
+                        handler,
+                        without_overlapping,
+                        overlap_ttl,
+                        state,
+                    )
+                    .await
+                })
+                .catch_unwind()
+                .await;
                 let result = match outcome {
                     Ok(r) => r,
                     Err(_payload) => Err(FrameworkError::internal(format!(
@@ -571,6 +588,164 @@ mod tests {
         assert_eq!(results.len(), 3);
         let order_snapshot = order.lock().unwrap().clone();
         assert_eq!(order_snapshot, vec!["a", "b", "c"]);
+    }
+
+    // -------------------------------------------------------------------------
+    // without_overlapping enforcement
+    // -------------------------------------------------------------------------
+
+    /// Without Cache bootstrapped, `without_overlapping` on a SINGLE task
+    /// must skip a second invocation while the first is still in the
+    /// handler.
+    ///
+    /// Design note: each registered task carries its own `Arc<TaskState>`
+    /// — the overlap flag is per-task identity, not a global gate. So we
+    /// test exactly that: a Notify gates the handler, drive 1 reaches the
+    /// notify and parks; drive 2 enters under the same TaskState, finds
+    /// the AtomicBool set, skips with `Ok(())` and ticks `skip_count`.
+    /// Then we release drive 1 so it can finish, and the third call
+    /// finds the flag clear and runs again.
+    #[tokio::test]
+    async fn without_overlapping_in_process_fallback_skips_overlapping_call() {
+        use crate::testing::TestContainer;
+        // No CacheStore binding in this scope — Cache::lock will Err(...)
+        // and the executor will fall back to in-process AtomicBool
+        // protection.
+        let _scope = TestContainer::fake();
+
+        let start_signal = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let mut schedule = Schedule::new();
+        let start_signal_c = start_signal.clone();
+        let release_c = release.clone();
+        let started_c = started.clone();
+        let builder = schedule
+            .call(move || {
+                let start_signal = start_signal_c.clone();
+                let release = release_c.clone();
+                let started = started_c.clone();
+                async move {
+                    started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    start_signal.notify_one();
+                    release.notified().await;
+                    Ok(())
+                }
+            })
+            .every_minute()
+            .name("singleton")
+            .without_overlapping();
+        schedule.add(builder);
+
+        let state = schedule.tasks()[0].state.clone();
+        let schedule = Arc::new(schedule);
+
+        // Drive 1: starts the task, blocks waiting for `release`.
+        let s1 = Arc::clone(&schedule);
+        let drive1 = tokio::spawn(async move { s1.run_due_tasks().await });
+
+        // Wait for the handler to confirm it's past the CAS guard.
+        tokio::time::timeout(std::time::Duration::from_secs(2), start_signal.notified())
+            .await
+            .expect("first run must enter the handler");
+        assert_eq!(started.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Drive 2: the AtomicBool is set, so the handler is not entered;
+        // the call returns Ok(()) and skip_count ticks by one.
+        let r2 = schedule.run_due_tasks().await;
+        assert_eq!(r2.len(), 1);
+        assert!(
+            r2[0].1.is_ok(),
+            "skipped run is reported as Ok(()) per Laravel parity",
+        );
+        assert_eq!(state.skip_count(), 1, "second call must register a skip");
+        assert_eq!(
+            started.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "skipped call MUST NOT enter the handler",
+        );
+
+        // Release drive 1 and confirm it completes cleanly. Flag reset
+        // behaviour is covered separately by
+        // `without_overlapping_in_process_flag_resets_after_each_run`.
+        release.notify_one();
+        let r1 = tokio::time::timeout(std::time::Duration::from_secs(2), drive1)
+            .await
+            .expect("first run must complete after release")
+            .unwrap();
+        assert_eq!(r1.len(), 1);
+        assert!(r1[0].1.is_ok());
+    }
+
+    /// Sequential invocations on the same task must release the in-process
+    /// flag so the next run can proceed — the AtomicBool must reset whether
+    /// the handler returned Ok or Err.
+    #[tokio::test]
+    async fn without_overlapping_in_process_flag_resets_after_each_run() {
+        use crate::testing::TestContainer;
+        let _scope = TestContainer::fake();
+
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut schedule = Schedule::new();
+        let counter_clone = counter.clone();
+        let builder = schedule
+            .call(move || {
+                let counter = counter_clone.clone();
+                async move {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                }
+            })
+            .every_minute()
+            .name("repeatable")
+            .without_overlapping();
+        schedule.add(builder);
+
+        for _ in 0..3 {
+            let results = schedule.run_due_tasks().await;
+            assert_eq!(results.len(), 1);
+            assert!(results[0].1.is_ok());
+        }
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert_eq!(schedule.tasks()[0].state.skip_count(), 0);
+    }
+
+    /// `without_overlapping_for` overrides the default TTL.
+    #[test]
+    fn without_overlapping_for_sets_custom_ttl() {
+        let mut schedule = Schedule::new();
+        let custom_ttl = std::time::Duration::from_secs(7);
+        let builder = schedule
+            .call(|| async { Ok(()) })
+            .every_minute()
+            .name("custom-ttl")
+            .without_overlapping_for(custom_ttl);
+        schedule.add(builder);
+        let entry = &schedule.tasks()[0];
+        assert!(entry.without_overlapping);
+        assert_eq!(entry.overlap_ttl, custom_ttl);
+    }
+
+    /// Plain `without_overlapping` (no `_for`) uses the documented default
+    /// of 30 minutes — pinned so future changes to the constant are seen.
+    #[test]
+    fn without_overlapping_uses_default_ttl_when_unspecified() {
+        let mut schedule = Schedule::new();
+        let builder = schedule
+            .call(|| async { Ok(()) })
+            .every_minute()
+            .name("default-ttl")
+            .without_overlapping();
+        schedule.add(builder);
+        let entry = &schedule.tasks()[0];
+        assert!(entry.without_overlapping);
+        assert_eq!(entry.overlap_ttl, task::DEFAULT_WITHOUT_OVERLAPPING_TTL);
+        assert_eq!(
+            entry.overlap_ttl,
+            std::time::Duration::from_secs(30 * 60),
+            "default TTL contract: 30 min",
+        );
     }
 
     /// `run_due_tasks_into` returns ONLY inline results; background ones

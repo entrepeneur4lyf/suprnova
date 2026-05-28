@@ -9,6 +9,55 @@ use async_trait::async_trait;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
+
+/// Default overlap-lock TTL: 30 minutes. Long enough that most scheduled
+/// jobs finish well before it expires, short enough that a crashed task
+/// holding an in-flight lock unblocks the next tick without operator
+/// intervention. Override per task with
+/// [`super::TaskBuilder::without_overlapping_for`].
+pub const DEFAULT_WITHOUT_OVERLAPPING_TTL: Duration = Duration::from_secs(30 * 60);
+
+/// Per-task runtime state shared between schedule entries and any spawned
+/// background futures derived from them.
+///
+/// Holds counters needed to enforce [`TaskBuilder::without_overlapping`] in
+/// the absence of a distributed [`Cache`] lock. Wrap in `Arc` so the same
+/// instance is observed by the inline call path and any `tokio::spawn`
+/// children — they need a shared view of whether a previous run is still
+/// in flight.
+///
+/// [`TaskBuilder::without_overlapping`]: super::TaskBuilder::without_overlapping
+/// [`Cache`]: crate::cache::Cache
+#[derive(Default)]
+pub struct TaskState {
+    /// In-process running flag flipped via CAS when a task enters
+    /// [`super::TaskEntry::run`] under `without_overlapping = true` without a
+    /// usable [`Cache`] lock. Reset on completion regardless of result.
+    ///
+    /// [`Cache`]: crate::cache::Cache
+    pub in_process_running: AtomicBool,
+    /// Number of times this task has been observed and skipped due to an
+    /// overlap lock (Cache-side or in-process). Exposed for tests and
+    /// future Pulse/Telescope-style observability surfaces.
+    pub skip_count: AtomicUsize,
+}
+
+impl TaskState {
+    /// Build a fresh, idle [`TaskState`] wrapped in `Arc` so the builder
+    /// can clone it into both the [`TaskEntry`] and any spawned background
+    /// future.
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Snapshot the skip counter — convenient for tests that need to assert
+    /// "this task was skipped N times" without unwrapping atomics.
+    pub fn skip_count(&self) -> usize {
+        self.skip_count.load(Ordering::SeqCst)
+    }
+}
 
 /// Type alias for boxed task handlers
 pub type BoxedTask = Arc<dyn TaskHandler + Send + Sync>;
@@ -95,6 +144,13 @@ pub struct TaskEntry {
     pub without_overlapping: bool,
     /// Run in background (non-blocking)
     pub run_in_background: bool,
+    /// TTL applied to the overlap lock when `without_overlapping` is set.
+    /// Acts as a safety net for crashed tasks that fail to release the
+    /// lock — the next tick after this duration sees a fresh lock and can
+    /// proceed.
+    pub overlap_ttl: Duration,
+    /// Shared runtime state — in-process overlap flag and skip counter.
+    pub state: Arc<TaskState>,
 }
 
 impl TaskEntry {
@@ -103,14 +159,108 @@ impl TaskEntry {
         self.expression.is_due()
     }
 
-    /// Run the task
+    /// Run the task, honouring `without_overlapping` if it is set.
+    ///
+    /// When the flag is enabled the executor first tries a distributed
+    /// [`Cache::lock`] (so multi-process deployments coordinate); when
+    /// `Cache` is not bootstrapped the executor degrades to a per-process
+    /// `AtomicBool` CAS and emits a single warn-once telling the operator
+    /// they're getting the weaker guarantee. A contended lock is treated
+    /// as a successful skip — the task returns `Ok(())` and increments
+    /// the [`TaskState`] skip counter so observability surfaces can see
+    /// it without poisoning the `schedule:run` exit code.
+    ///
+    /// [`Cache::lock`]: crate::cache::Cache::lock
     pub async fn run(&self) -> TaskResult {
-        self.task.handle().await
+        run_handler_with_optional_overlap_guard(
+            &self.name,
+            Arc::clone(&self.task),
+            self.without_overlapping,
+            self.overlap_ttl,
+            Arc::clone(&self.state),
+        )
+        .await
     }
 
     /// Get a human-readable description of the schedule
     pub fn schedule_description(&self) -> &str {
         self.expression.expression()
+    }
+}
+
+/// Single warn-once latch for the "Cache not installed, falling back to
+/// in-process overlap protection" message. Mirrors the precedent in
+/// `features::middleware::warn_once_if_no_evaluator` so production logs
+/// don't get flooded on every minute-aligned tick.
+static CACHE_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
+
+fn warn_cache_fallback_once() {
+    if !CACHE_FALLBACK_WARNED.swap(true, Ordering::SeqCst) {
+        tracing::warn!(
+            target: "suprnova::schedule",
+            "without_overlapping() falling back to in-process AtomicBool protection — \
+             Cache is not bootstrapped. Multi-process deployments (multiple `schedule:work` \
+             or external-cron `schedule:run` callers) will NOT see each other's locks. \
+             Configure Cache (CACHE_DRIVER=memory|redis) before relying on cross-process \
+             overlap protection."
+        );
+    }
+}
+
+/// Shared implementation used by both [`TaskEntry::run`] (inline) and the
+/// `tokio::spawn`'d background path in `schedule::run_tasks_into`. Pulled out
+/// as a free function so the spawned `async move` future can capture the
+/// `'static` arguments it needs without borrowing from `&TaskEntry`.
+pub(crate) async fn run_handler_with_optional_overlap_guard(
+    name: &str,
+    handler: BoxedTask,
+    without_overlapping: bool,
+    overlap_ttl: Duration,
+    state: Arc<TaskState>,
+) -> TaskResult {
+    if !without_overlapping {
+        return handler.handle().await;
+    }
+    let lock_key = format!("schedule:lock:{name}");
+    match crate::cache::Cache::lock(&lock_key, overlap_ttl).await {
+        Ok(Some(guard)) => {
+            let result = handler.handle().await;
+            // Best-effort release — TTL is the leak guard if release fails
+            // (network blip, token rotation). Either way we move on.
+            let _ = guard.release().await;
+            result
+        }
+        Ok(None) => {
+            tracing::info!(
+                target: "suprnova::schedule",
+                task = %name,
+                "skipped: previous run still holds the overlap lock",
+            );
+            state.skip_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        Err(_) => {
+            // Cache isn't bootstrapped — degrade to in-process CAS. Warn
+            // operator once that they're getting the weaker guarantee.
+            warn_cache_fallback_once();
+            if state
+                .in_process_running
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                let result = handler.handle().await;
+                state.in_process_running.store(false, Ordering::SeqCst);
+                result
+            } else {
+                tracing::info!(
+                    target: "suprnova::schedule",
+                    task = %name,
+                    "skipped: in-process overlap flag already set",
+                );
+                state.skip_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -163,6 +313,8 @@ mod tests {
             description: Some("A test task".to_string()),
             without_overlapping: false,
             run_in_background: false,
+            overlap_ttl: DEFAULT_WITHOUT_OVERLAPPING_TTL,
+            state: TaskState::new(),
         };
 
         assert_eq!(entry.name, "test-task");

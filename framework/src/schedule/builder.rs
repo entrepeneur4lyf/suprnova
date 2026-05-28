@@ -3,8 +3,12 @@
 //! Provides a fluent API for configuring scheduled tasks with closures.
 
 use super::expression::{CronExpression, DayOfWeek};
-use super::task::{BoxedFuture, BoxedTask, ClosureTask, Task, TaskEntry, TaskResult};
+use super::task::{
+    BoxedFuture, BoxedTask, ClosureTask, DEFAULT_WITHOUT_OVERLAPPING_TTL, Task, TaskEntry,
+    TaskResult, TaskState,
+};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Builder for configuring scheduled tasks with a fluent API
 ///
@@ -29,6 +33,7 @@ pub struct TaskBuilder {
     pub(crate) name: Option<String>,
     pub(crate) description: Option<String>,
     pub(crate) without_overlapping: bool,
+    pub(crate) overlap_ttl: Option<Duration>,
     pub(crate) run_in_background: bool,
 }
 
@@ -46,6 +51,7 @@ impl TaskBuilder {
             name: None,
             description: None,
             without_overlapping: false,
+            overlap_ttl: None,
             run_in_background: false,
         }
     }
@@ -81,6 +87,7 @@ impl TaskBuilder {
             name: None,
             description: None,
             without_overlapping: false,
+            overlap_ttl: None,
             run_in_background: false,
         }
     }
@@ -393,12 +400,35 @@ impl TaskBuilder {
         self
     }
 
-    /// Prevent overlapping task runs
+    /// Prevent overlapping task runs.
     ///
-    /// When enabled, the scheduler will skip running this task if
-    /// a previous run is still in progress.
+    /// Enforcement order:
+    /// 1. [`Cache::lock`] (cross-process, fail-closed if Cache is bootstrapped
+    ///    — typical production setup with a Redis or in-memory driver).
+    /// 2. In-process `AtomicBool` CAS when Cache is not bootstrapped. A single
+    ///    warn-once log line tells the operator they're getting the weaker
+    ///    guarantee.
+    ///
+    /// A skipped run returns `Ok(())` (matching Laravel's silent-skip
+    /// behaviour) and increments [`TaskState::skip_count`]. Configure a
+    /// custom lock TTL with [`Self::without_overlapping_for`].
+    ///
+    /// [`Cache::lock`]: crate::cache::Cache::lock
+    /// [`TaskState::skip_count`]: super::task::TaskState::skip_count
     pub fn without_overlapping(mut self) -> Self {
         self.without_overlapping = true;
+        self
+    }
+
+    /// Like [`Self::without_overlapping`] but with a caller-supplied lock TTL.
+    ///
+    /// The TTL is the safety net for tasks that crash without releasing the
+    /// lock — the next tick after this duration will see a free lock and can
+    /// proceed. Pick `max(2 × expected_task_duration, 5 min)`. The default
+    /// when [`Self::without_overlapping`] is used bare is 30 minutes.
+    pub fn without_overlapping_for(mut self, ttl: Duration) -> Self {
+        self.without_overlapping = true;
+        self.overlap_ttl = Some(ttl);
         self
     }
 
@@ -426,6 +456,8 @@ impl TaskBuilder {
             description: self.description,
             without_overlapping: self.without_overlapping,
             run_in_background: self.run_in_background,
+            overlap_ttl: self.overlap_ttl.unwrap_or(DEFAULT_WITHOUT_OVERLAPPING_TTL),
+            state: TaskState::new(),
         }
     }
 }
