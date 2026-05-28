@@ -1961,8 +1961,10 @@ let page: Paginator<User> = User::query()
 
 Cursor paginate is the choice for infinite scroll, deep pagination,
 or anywhere a stable row order with cheap O(1)-per-page seeking is
-worth more than a numeric page UI. Forward-only by default — the
-returned `prev_cursor` is always `None`.
+worth more than a numeric page UI. Bidirectional — it reads the
+`?cursor=<opaque>` query parameter, walks forward or backward by the
+cursor's direction, and emits both `next_cursor` and `prev_cursor` as
+the page's neighbours exist (matching Laravel's `cursorPaginate()`).
 
 ```rust
 use suprnova::CursorPaginator;
@@ -1973,8 +1975,8 @@ let page: CursorPaginator<User> = User::query()
 
 // page.data: Vec<User>
 // page.per_page: u64
-// page.next_cursor: Option<String> — opaque cursor for the next page
-// page.prev_cursor: Option<String> — None for forward-only iteration
+// page.next_cursor: Option<String> — opaque cursor for the next page (None on the last)
+// page.prev_cursor: Option<String> — opaque cursor for the previous page (None on the first)
 // page.path: Option<String>
 ```
 
