@@ -27,6 +27,12 @@ impl Pagination {
     /// the configured `DB` connection.
     ///
     /// `current_page` is 1-based; values `< 1` are clamped to `1`.
+    ///
+    /// `per_page == 0` returns `FrameworkError::param("per_page")` (HTTP
+    /// 400) — the same validation the Eloquent
+    /// [`Builder::paginate`](crate::eloquent::Builder::paginate) enforces,
+    /// so the two pagination surfaces agree on the zero-page-size contract
+    /// instead of one silently emitting a `LIMIT 0` page.
     pub async fn length_aware<E>(
         query: Select<E>,
         per_page: u64,
@@ -36,6 +42,9 @@ impl Pagination {
         E: EntityTrait,
         E::Model: Send + Sync,
     {
+        if per_page == 0 {
+            return Err(FrameworkError::param("per_page"));
+        }
         let db = crate::DB::connection()?;
         let conn = db.inner();
         let page = current_page.max(1);
@@ -53,6 +62,11 @@ impl Pagination {
     /// always AES-256-GCM-encrypted via the process key ring; there is no
     /// plaintext base64 fallback — if encryption is not initialized,
     /// encoding returns an error rather than emitting a forgeable cursor.
+    ///
+    /// `per_page == 0` returns `FrameworkError::param("per_page")` (HTTP
+    /// 400), matching the Eloquent
+    /// [`Builder::cursor_paginate`](crate::eloquent::Builder::cursor_paginate)
+    /// contract.
     ///
     /// # Behavior
     ///
@@ -86,6 +100,9 @@ impl Pagination {
         E::Model: Send + Sync,
         C: ColumnTrait + Copy,
     {
+        if per_page == 0 {
+            return Err(FrameworkError::param("per_page"));
+        }
         let db = crate::DB::connection()?;
         let conn = db.inner();
 

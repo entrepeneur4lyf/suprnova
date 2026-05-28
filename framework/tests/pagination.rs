@@ -121,6 +121,48 @@ async fn seaorm_length_aware_page_2_returns_10_rows() {
 }
 
 #[tokio::test]
+async fn facade_length_aware_rejects_zero_per_page() {
+    // A live DB is installed so that, were the guard removed, the call
+    // would succeed (LIMIT 0 → empty page) and `expect_err` would panic —
+    // this is a real regression signal, not a no-DB false pass. The 400
+    // assertion distinguishes the param guard from a 500 DB error.
+    let _guard = TestContainer::fake();
+    let conn = make_db_with_n_rows(5).await;
+    install_db(conn);
+
+    let err = Pagination::length_aware::<toy::Entity>(toy::Entity::find(), 0, 1)
+        .await
+        .expect_err("per_page == 0 must be rejected, not silently paginated");
+    assert_eq!(
+        err.status_code(),
+        400,
+        "zero per_page must be a 400 param error, matching Builder::paginate"
+    );
+}
+
+#[tokio::test]
+async fn facade_cursor_rejects_zero_per_page() {
+    ensure_crypt();
+    let _guard = TestContainer::fake();
+    let conn = make_db_with_n_rows(5).await;
+    install_db(conn);
+
+    let err = Pagination::cursor::<toy::Entity, toy::Column>(
+        toy::Entity::find(),
+        None,
+        0,
+        toy::Column::Id,
+    )
+    .await
+    .expect_err("per_page == 0 must be rejected, not silently paginated");
+    assert_eq!(
+        err.status_code(),
+        400,
+        "zero per_page must be a 400 param error, matching Builder::cursor_paginate"
+    );
+}
+
+#[tokio::test]
 async fn pagination_cursor_walks_forward_until_exhausted() {
     ensure_crypt();
     let _guard = TestContainer::fake();
