@@ -120,20 +120,43 @@ impl QueueDriver for DatabaseQueueDriver {
             .try_get_by_index::<String>(1)
             .map_err(|e| FrameworkError::internal(format!("queue envelope col: {e}")))?;
 
-        txn.execute(Statement::from_sql_and_values(
-            self.backend(),
-            format!(
-                "UPDATE {} SET reserved_until = ?, reserved_token = ? WHERE id = ?",
-                self.table
-            ),
-            vec![
-                sea_orm::Value::from(reserved_until),
-                sea_orm::Value::from(token.clone()),
-                sea_orm::Value::from(id),
-            ],
-        ))
-        .await
-        .map_err(|e| FrameworkError::internal(format!("queue reserve: {e}")))?;
+        // Conditional UPDATE — re-asserts the same "this row is unreserved or
+        // its reservation has expired" predicate the SELECT used. Without the
+        // predicate, two consumers that observed the same visible row could
+        // both stamp their reservation tokens onto it; the loser would walk
+        // away with a token that doesn't match what's stored, and a later
+        // `ack`/`nack` (which keys on `reserved_token`) would no-op silently,
+        // running the job twice. With the predicate the loser sees
+        // `rows_affected == 0` and reports an empty pop, so the worker polls
+        // again instead of holding a stale reservation.
+        let exec = txn
+            .execute(Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "UPDATE {} SET reserved_until = ?, reserved_token = ? \
+                     WHERE id = ? \
+                       AND (reserved_until IS NULL OR reserved_until <= ?)",
+                    self.table
+                ),
+                vec![
+                    sea_orm::Value::from(reserved_until),
+                    sea_orm::Value::from(token.clone()),
+                    sea_orm::Value::from(id),
+                    sea_orm::Value::from(now),
+                ],
+            ))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("queue reserve: {e}")))?;
+
+        if exec.rows_affected() == 0 {
+            // Another consumer reserved this row in the gap between our SELECT
+            // and our UPDATE. Commit the empty txn (nothing to roll back) and
+            // tell the caller the queue had nothing for us.
+            txn.commit()
+                .await
+                .map_err(|e| FrameworkError::internal(format!("queue txn commit: {e}")))?;
+            return Ok(None);
+        }
 
         txn.commit()
             .await
