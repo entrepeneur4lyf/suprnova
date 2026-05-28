@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Default overlap-lock TTL: 30 minutes. Long enough that most scheduled
@@ -39,9 +39,16 @@ pub struct TaskState {
     /// [`Cache`]: crate::cache::Cache
     pub in_process_running: AtomicBool,
     /// Number of times this task has been observed and skipped due to an
-    /// overlap lock (Cache-side or in-process). Exposed for tests and
-    /// future Pulse/Telescope-style observability surfaces.
+    /// overlap lock (Cache-side or in-process) **or** because the
+    /// same-minute dedup CAS rejected a repeat invocation. Exposed for
+    /// tests and future Pulse/Telescope-style observability surfaces.
     pub skip_count: AtomicUsize,
+    /// Minutes-since-UNIX-epoch of the most recent invocation attempt.
+    /// `fetch_max` against the current minute is the same-minute dedup
+    /// gate — if the prior value is `>= now`, we already tried this minute
+    /// and the new call must skip. Init to `0`: any post-epoch run wins
+    /// the first CAS unconditionally.
+    pub last_run_minute: AtomicI64,
 }
 
 impl TaskState {
@@ -218,6 +225,29 @@ pub(crate) async fn run_handler_with_optional_overlap_guard(
     overlap_ttl: Duration,
     state: Arc<TaskState>,
 ) -> TaskResult {
+    // Same-minute dedup (always on, regardless of `without_overlapping`).
+    // `fetch_max` returns the previous value and atomically bumps the
+    // stored value to the max of (prev, now). If the previous value was
+    // already at-or-past `now_minute`, this minute has already been
+    // claimed — skip silently with a tick to `skip_count`. The audit's
+    // HIGH #3 case (a daemon loop or repeated `schedule:run` invocation
+    // executing the same minute-level task multiple times) is closed at
+    // this gate; cross-process protection is layered on by Cache::lock
+    // inside the `without_overlapping` branch below.
+    let now_minute = chrono::Local::now().timestamp() / 60;
+    let prev_minute = state
+        .last_run_minute
+        .fetch_max(now_minute, Ordering::SeqCst);
+    if prev_minute >= now_minute {
+        tracing::info!(
+            target: "suprnova::schedule",
+            task = %name,
+            "skipped: already attempted for minute {now_minute}",
+        );
+        state.skip_count.fetch_add(1, Ordering::SeqCst);
+        return Ok(());
+    }
+
     if !without_overlapping {
         return handler.handle().await;
     }

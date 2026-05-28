@@ -3,7 +3,7 @@
 //! Supports standard cron syntax with 5 fields:
 //! `minute hour day-of-month month day-of-week`
 
-use chrono::{Datelike, Local, Timelike};
+use chrono::{DateTime, Datelike, Local, TimeZone, Timelike};
 
 /// Day of week enum for scheduling
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,10 +197,25 @@ impl CronExpression {
         })
     }
 
-    /// Check if this expression is due now
+    /// Check if this expression is due now (wall clock).
+    ///
+    /// Thin wrapper over [`Self::is_due_at`] that uses `Local::now()` as the
+    /// clock. Production schedulers should call this; tests should prefer
+    /// `is_due_at` so they can inject a synthetic clock and avoid clock-skew
+    /// flakiness.
     pub fn is_due(&self) -> bool {
-        let now = Local::now();
+        self.is_due_at(Local::now())
+    }
 
+    /// Check if this expression is due for the supplied instant.
+    ///
+    /// Exposed so tests can drive cron evaluation against a fixed clock —
+    /// the same-minute dedup test and any future timezone/DST test build a
+    /// `DateTime<Local>` from a fixed `NaiveDateTime` rather than racing
+    /// `tokio::time::pause()` against wall-clock advancement. Generic over
+    /// `TimeZone` so callers can also pass `Utc` or a custom offset when
+    /// the per-schedule timezone follow-up lands.
+    pub fn is_due_at<Tz: TimeZone>(&self, now: DateTime<Tz>) -> bool {
         self.minute.matches(now.minute())
             && self.hour.matches(now.hour())
             && self.day_of_month.matches(now.day())

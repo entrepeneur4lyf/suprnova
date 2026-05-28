@@ -594,17 +594,18 @@ mod tests {
     // without_overlapping enforcement
     // -------------------------------------------------------------------------
 
-    /// Without Cache bootstrapped, `without_overlapping` on a SINGLE task
-    /// must skip a second invocation while the first is still in the
-    /// handler.
+    /// Without Cache bootstrapped, the `without_overlapping` in-process
+    /// AtomicBool must skip a second invocation while the first is still
+    /// in the handler — across a (simulated) minute boundary so the
+    /// same-minute CAS gate doesn't pre-empt the assertion.
     ///
     /// Design note: each registered task carries its own `Arc<TaskState>`
-    /// — the overlap flag is per-task identity, not a global gate. So we
-    /// test exactly that: a Notify gates the handler, drive 1 reaches the
-    /// notify and parks; drive 2 enters under the same TaskState, finds
-    /// the AtomicBool set, skips with `Ok(())` and ticks `skip_count`.
-    /// Then we release drive 1 so it can finish, and the third call
-    /// finds the flag clear and runs again.
+    /// — the overlap flag is per-task identity, not a global gate. The
+    /// always-on same-minute CAS would otherwise fire first; we reset
+    /// `last_run_minute` between drive 1 and drive 2 to simulate the
+    /// minute rolling over so the in-process layer is exercised. The
+    /// without_overlapping AtomicBool catches: drive 2 enters, finds the
+    /// flag set, skips with `Ok(())` and ticks `skip_count`.
     #[tokio::test]
     async fn without_overlapping_in_process_fallback_skips_overlapping_call() {
         use crate::testing::TestContainer;
@@ -651,6 +652,15 @@ mod tests {
             .expect("first run must enter the handler");
         assert_eq!(started.load(std::sync::atomic::Ordering::SeqCst), 1);
 
+        // Simulate the minute rolling over so the always-on same-minute
+        // CAS does not pre-empt the in-process AtomicBool we're trying to
+        // exercise. Reset last_run_minute to 0 (the init value) — drive 2
+        // will then see prev < now_minute, win the same-minute CAS, and
+        // proceed to the without_overlapping branch.
+        state
+            .last_run_minute
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+
         // Drive 2: the AtomicBool is set, so the handler is not entered;
         // the call returns Ok(()) and skip_count ticks by one.
         let r2 = schedule.run_due_tasks().await;
@@ -678,9 +688,12 @@ mod tests {
         assert!(r1[0].1.is_ok());
     }
 
-    /// Sequential invocations on the same task must release the in-process
-    /// flag so the next run can proceed — the AtomicBool must reset whether
-    /// the handler returned Ok or Err.
+    /// Sequential invocations across different minutes must release the
+    /// in-process flag so the next run can proceed — the AtomicBool must
+    /// reset whether the handler returned Ok or Err. We reset the
+    /// same-minute CAS state between iterations to simulate the minute
+    /// rolling over; the in-process AtomicBool reset is what we're
+    /// asserting here.
     #[tokio::test]
     async fn without_overlapping_in_process_flag_resets_after_each_run() {
         use crate::testing::TestContainer;
@@ -703,12 +716,135 @@ mod tests {
         schedule.add(builder);
 
         for _ in 0..3 {
+            // Simulate the minute rolling over so the always-on
+            // same-minute CAS lets each iteration through to the
+            // in-process AtomicBool layer we're actually asserting.
+            schedule.tasks()[0]
+                .state
+                .last_run_minute
+                .store(0, std::sync::atomic::Ordering::SeqCst);
             let results = schedule.run_due_tasks().await;
             assert_eq!(results.len(), 1);
             assert!(results[0].1.is_ok());
         }
         assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 3);
         assert_eq!(schedule.tasks()[0].state.skip_count(), 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // same-minute dedup (HIGH 3)
+    // -------------------------------------------------------------------------
+
+    /// Two `run_due_tasks` calls within the same wall-clock minute must
+    /// dedup the second one — the audit's HIGH 3 case (external cron
+    /// driving `schedule:run` twice in a row, or in-process repeated
+    /// evaluation, must not double-fire a `* * * * *` task).
+    ///
+    /// Test exercises the in-process gate directly: call once, observe
+    /// the handler ran; call again immediately (same minute by
+    /// construction since the test takes milliseconds); observe the
+    /// handler did NOT run a second time and skip_count was bumped.
+    #[tokio::test]
+    async fn same_minute_cas_dedups_repeated_call_within_same_minute() {
+        use crate::testing::TestContainer;
+        let _scope = TestContainer::fake();
+
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut schedule = Schedule::new();
+        let counter_clone = counter.clone();
+        let builder = schedule
+            .call(move || {
+                let counter = counter_clone.clone();
+                async move {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                }
+            })
+            .every_minute()
+            .name("dedup-target");
+        schedule.add(builder);
+
+        // First call: runs handler.
+        let r1 = schedule.run_due_tasks().await;
+        assert_eq!(r1.len(), 1);
+        assert!(r1[0].1.is_ok());
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(schedule.tasks()[0].state.skip_count(), 0);
+
+        // Second call within the same minute: same-minute CAS rejects;
+        // handler is NOT invoked again; skip_count ticks by one.
+        let r2 = schedule.run_due_tasks().await;
+        assert_eq!(r2.len(), 1);
+        assert!(
+            r2[0].1.is_ok(),
+            "same-minute skip is reported as Ok(()) per Laravel parity",
+        );
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "handler MUST NOT fire twice within the same minute",
+        );
+        assert_eq!(schedule.tasks()[0].state.skip_count(), 1);
+
+        // Simulate a minute boundary; next call should fire again.
+        schedule.tasks()[0]
+            .state
+            .last_run_minute
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        let r3 = schedule.run_due_tasks().await;
+        assert_eq!(r3.len(), 1);
+        assert!(r3[0].1.is_ok());
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            schedule.tasks()[0].state.skip_count(),
+            1,
+            "post-minute-rollover call MUST NOT skip",
+        );
+    }
+
+    /// `CronExpression::is_due_at` lets tests drive cron evaluation
+    /// against a fixed clock — the audit's test-coverage gap "Add
+    /// clock-controlled tests for once-per-minute de-duplication,
+    /// repeated `run_due_tasks`, and daemon tick behavior" depends on
+    /// this hook. Pin both a matching and a non-matching minute.
+    #[test]
+    fn is_due_at_drives_cron_with_synthetic_clock() {
+        use chrono::{Local, TimeZone as _};
+
+        // Build an expression that fires at 03:00 every day.
+        let expr = expression::CronExpression::daily().at("03:00");
+        assert_eq!(expr.expression(), "0 3 * * *");
+
+        // A synthetic clock pointing at 03:00 on some arbitrary day —
+        // must report due.
+        let due_clock = Local
+            .with_ymd_and_hms(2026, 5, 28, 3, 0, 0)
+            .single()
+            .expect("test clock construction must yield a single instant");
+        assert!(
+            expr.is_due_at(due_clock),
+            "0 3 * * * should be due at 2026-05-28 03:00:00 local",
+        );
+
+        // Same day, 03:01 — minute field doesn't match, must NOT be due.
+        let off_clock = Local
+            .with_ymd_and_hms(2026, 5, 28, 3, 1, 0)
+            .single()
+            .expect("test clock construction must yield a single instant");
+        assert!(
+            !expr.is_due_at(off_clock),
+            "0 3 * * * must NOT be due at 03:01 (minute mismatch)",
+        );
+
+        // Same minute, different hour — must NOT be due.
+        let wrong_hour = Local
+            .with_ymd_and_hms(2026, 5, 28, 4, 0, 0)
+            .single()
+            .expect("test clock construction must yield a single instant");
+        assert!(
+            !expr.is_due_at(wrong_hour),
+            "0 3 * * * must NOT be due at 04:00 (hour mismatch)",
+        );
     }
 
     /// `without_overlapping_for` overrides the default TTL.
