@@ -408,6 +408,86 @@ impl Router {
             })
     }
 
+    /// Insert a PATCH route with a pre-boxed handler (internal use for groups
+    /// and the `routes!` macro).
+    ///
+    /// # Panics
+    ///
+    /// Panics on duplicate registration or any matchit insert error.
+    /// See [`Router::insert_get`].
+    pub(crate) fn insert_patch(&mut self, path: &str, handler: Arc<BoxedHandler>) {
+        self.try_insert_patch(path, handler)
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Fallible sibling of [`Router::insert_patch`].
+    pub(crate) fn try_insert_patch(
+        &mut self,
+        path: &str,
+        handler: Arc<BoxedHandler>,
+    ) -> Result<(), FrameworkError> {
+        self.patch_routes
+            .insert(path, (path.to_string(), handler))
+            .map_err(|e| {
+                FrameworkError::internal(format!("Failed to register PATCH route '{path}': {e}"))
+            })
+    }
+
+    /// Insert a HEAD route with a pre-boxed handler.
+    ///
+    /// An explicit HEAD registration wins over the GET fallback inside
+    /// [`Router::match_route`] — register HEAD only when you need custom
+    /// headers without running the GET body computation.
+    ///
+    /// # Panics
+    ///
+    /// Panics on duplicate registration or any matchit insert error.
+    pub(crate) fn insert_head(&mut self, path: &str, handler: Arc<BoxedHandler>) {
+        self.try_insert_head(path, handler)
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Fallible sibling of [`Router::insert_head`].
+    pub(crate) fn try_insert_head(
+        &mut self,
+        path: &str,
+        handler: Arc<BoxedHandler>,
+    ) -> Result<(), FrameworkError> {
+        self.head_routes
+            .insert(path, (path.to_string(), handler))
+            .map_err(|e| {
+                FrameworkError::internal(format!("Failed to register HEAD route '{path}': {e}"))
+            })
+    }
+
+    /// Insert an OPTIONS route with a pre-boxed handler.
+    ///
+    /// CORS preflight (`OPTIONS` + `Access-Control-Request-Method`) is
+    /// answered by `CorsMiddleware` at the global-middleware layer, before
+    /// the router. An explicit OPTIONS handler serves non-preflight uses:
+    /// advertising allowed verbs for a resource, public API discovery, etc.
+    ///
+    /// # Panics
+    ///
+    /// Panics on duplicate registration or any matchit insert error.
+    pub(crate) fn insert_options(&mut self, path: &str, handler: Arc<BoxedHandler>) {
+        self.try_insert_options(path, handler)
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Fallible sibling of [`Router::insert_options`].
+    pub(crate) fn try_insert_options(
+        &mut self,
+        path: &str,
+        handler: Arc<BoxedHandler>,
+    ) -> Result<(), FrameworkError> {
+        self.options_routes
+            .insert(path, (path.to_string(), handler))
+            .map_err(|e| {
+                FrameworkError::internal(format!("Failed to register OPTIONS route '{path}': {e}"))
+            })
+    }
+
     /// Register a GET route.
     ///
     /// Express-style `:param` segments are converted to matchit-style

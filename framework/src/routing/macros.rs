@@ -75,13 +75,21 @@ pub(crate) fn convert_route_params(path: &str) -> String {
     result
 }
 
-/// HTTP method for route definitions
+/// HTTP method for route definitions.
+///
+/// Mirrors the verbs the `Router` accepts. PATCH / HEAD / OPTIONS were
+/// added as part of the verb-gap fix; HEAD requests with no explicit
+/// HEAD route fall back to the GET registry inside
+/// [`Router::match_route`] per RFC 9110 §9.3.2.
 #[derive(Clone, Copy)]
 pub enum HttpMethod {
     Get,
     Post,
     Put,
+    Patch,
     Delete,
+    Head,
+    Options,
 }
 
 impl HttpMethod {
@@ -95,7 +103,10 @@ impl HttpMethod {
             HttpMethod::Get => Method::GET,
             HttpMethod::Post => Method::POST,
             HttpMethod::Put => Method::PUT,
+            HttpMethod::Patch => Method::PATCH,
             HttpMethod::Delete => Method::DELETE,
+            HttpMethod::Head => Method::HEAD,
+            HttpMethod::Options => Method::OPTIONS,
         }
     }
 }
@@ -147,7 +158,10 @@ where
             HttpMethod::Get => router.get(&converted_path, self.handler),
             HttpMethod::Post => router.post(&converted_path, self.handler),
             HttpMethod::Put => router.put(&converted_path, self.handler),
+            HttpMethod::Patch => router.patch(&converted_path, self.handler),
             HttpMethod::Delete => router.delete(&converted_path, self.handler),
+            HttpMethod::Head => router.head(&converted_path, self.handler),
+            HttpMethod::Options => router.options(&converted_path, self.handler),
         };
 
         // Apply any middleware
@@ -275,6 +289,106 @@ where
     Fut: Future<Output = Response> + Send + 'static,
 {
     RouteDefBuilder::new(HttpMethod::Delete, path, handler)
+}
+
+/// Create a PATCH route definition with compile-time path validation.
+///
+/// PATCH is the standard verb for partial-resource updates (RFC 5789).
+/// The macro shape mirrors `get!`/`post!`/`put!`/`delete!` and supports
+/// `.name()` and `.middleware()` chaining.
+///
+/// # Example
+/// ```rust,ignore
+/// patch!("/users/{id}", controllers::user::update).name("users.patch")
+/// ```
+///
+/// # Compile Error
+///
+/// Fails to compile if path doesn't start with '/'.
+#[macro_export]
+macro_rules! patch {
+    ($path:expr, $handler:expr) => {{
+        const _: &str = $crate::validate_route_path($path);
+        $crate::__patch_impl($path, $handler)
+    }};
+}
+
+/// Internal implementation for PATCH routes (used by the patch! macro)
+#[doc(hidden)]
+pub fn __patch_impl<H, Fut>(path: &'static str, handler: H) -> RouteDefBuilder<H>
+where
+    H: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Response> + Send + 'static,
+{
+    RouteDefBuilder::new(HttpMethod::Patch, path, handler)
+}
+
+/// Create a HEAD route definition with compile-time path validation.
+///
+/// HEAD requests with no explicit handler fall back to the GET registry
+/// in [`Router::match_route`] per RFC 9110 §9.3.2; an explicit
+/// `head!()` registration wins. The response body is stripped for HEAD
+/// requests at the server boundary regardless of which arm matched, so
+/// the handler can't accidentally emit content over the wire.
+///
+/// # Example
+/// ```rust,ignore
+/// head!("/cached", controllers::cache::head_probe)
+/// ```
+///
+/// # Compile Error
+///
+/// Fails to compile if path doesn't start with '/'.
+#[macro_export]
+macro_rules! head {
+    ($path:expr, $handler:expr) => {{
+        const _: &str = $crate::validate_route_path($path);
+        $crate::__head_impl($path, $handler)
+    }};
+}
+
+/// Internal implementation for HEAD routes (used by the head! macro)
+#[doc(hidden)]
+pub fn __head_impl<H, Fut>(path: &'static str, handler: H) -> RouteDefBuilder<H>
+where
+    H: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Response> + Send + 'static,
+{
+    RouteDefBuilder::new(HttpMethod::Head, path, handler)
+}
+
+/// Create an OPTIONS route definition with compile-time path validation.
+///
+/// CORS preflight (`OPTIONS` + `Access-Control-Request-Method`) is
+/// answered by `CorsMiddleware` at the global-middleware layer, before
+/// the router. Use `options!()` for non-preflight uses — advertising
+/// allowed verbs (`Accept-Patch`), public API discovery, programmatic
+/// resource description.
+///
+/// # Example
+/// ```rust,ignore
+/// options!("/api/posts", controllers::api::post::discover)
+/// ```
+///
+/// # Compile Error
+///
+/// Fails to compile if path doesn't start with '/'.
+#[macro_export]
+macro_rules! options {
+    ($path:expr, $handler:expr) => {{
+        const _: &str = $crate::validate_route_path($path);
+        $crate::__options_impl($path, $handler)
+    }};
+}
+
+/// Internal implementation for OPTIONS routes (used by the options! macro)
+#[doc(hidden)]
+pub fn __options_impl<H, Fut>(path: &'static str, handler: H) -> RouteDefBuilder<H>
+where
+    H: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Response> + Send + 'static,
+{
+    RouteDefBuilder::new(HttpMethod::Options, path, handler)
 }
 
 // ============================================================================
@@ -660,8 +774,17 @@ impl GroupDef {
                         HttpMethod::Put => {
                             router.insert_put(full_path, route.handler);
                         }
+                        HttpMethod::Patch => {
+                            router.insert_patch(full_path, route.handler);
+                        }
                         HttpMethod::Delete => {
                             router.insert_delete(full_path, route.handler);
+                        }
+                        HttpMethod::Head => {
+                            router.insert_head(full_path, route.handler);
+                        }
+                        HttpMethod::Options => {
+                            router.insert_options(full_path, route.handler);
                         }
                     }
 
@@ -952,5 +1075,91 @@ mod tests {
 
         assert_eq!(group.items.len(), 1);
         matches!(&group.items[0], GroupItem::Route(_));
+    }
+
+    // ---- PATCH / HEAD / OPTIONS macro coverage (#350b) ----------------
+
+    /// `__patch_impl`, `__head_impl`, and `__options_impl` mint
+    /// `RouteDefBuilder`s with the matching `HttpMethod` variant. The
+    /// macros are thin wrappers that add compile-time path validation;
+    /// once the impl fn is correct the macro is correct by construction.
+    #[test]
+    fn new_verb_impls_carry_correct_http_method() {
+        let p = super::__patch_impl("/x", test_handler);
+        assert!(matches!(p.method, HttpMethod::Patch));
+        let h = super::__head_impl("/x", test_handler);
+        assert!(matches!(h.method, HttpMethod::Head));
+        let o = super::__options_impl("/x", test_handler);
+        assert!(matches!(o.method, HttpMethod::Options));
+    }
+
+    /// PATCH / HEAD / OPTIONS variants of `HttpMethod` map to the
+    /// matching `hyper::Method` so the middleware map keys correctly
+    /// (`(Method::PATCH, path)` etc.). Without this, `.middleware(...)`
+    /// on a PATCH route via the macro path would silently fail to
+    /// register because the lookup key wouldn't match.
+    #[test]
+    fn new_verb_as_hyper_maps_to_matching_method() {
+        assert_eq!(HttpMethod::Patch.as_hyper(), Method::PATCH);
+        assert_eq!(HttpMethod::Head.as_hyper(), Method::HEAD);
+        assert_eq!(HttpMethod::Options.as_hyper(), Method::OPTIONS);
+    }
+
+    /// `RouteDefBuilder::register` routes the new variants to the
+    /// matching `Router::patch` / `head` / `options` calls. Drive each
+    /// through the public macro chain and verify the resulting router
+    /// matches.
+    #[test]
+    fn macros_register_new_verbs_via_route_def_builder() {
+        use hyper::Method;
+        let router: Router =
+            RouteDefBuilder::new(HttpMethod::Patch, "/p", test_handler).register(Router::new());
+        assert!(router.match_route(&Method::PATCH, "/p").is_some());
+
+        let router: Router =
+            RouteDefBuilder::new(HttpMethod::Head, "/h", test_handler).register(Router::new());
+        assert!(router.match_route(&Method::HEAD, "/h").is_some());
+
+        let router: Router =
+            RouteDefBuilder::new(HttpMethod::Options, "/o", test_handler).register(Router::new());
+        assert!(router.match_route(&Method::OPTIONS, "/o").is_some());
+    }
+
+    /// `GroupDef::register` flattens the new verbs into the right
+    /// per-method registry, inheriting prefix the same way GET/POST do.
+    /// Pins the new arms in `register_with_inherited`.
+    #[test]
+    fn group_def_registers_new_verbs_with_prefix() {
+        use hyper::Method;
+        let group = GroupDef::__new_unchecked("/api")
+            .add(RouteDefBuilder::new(
+                HttpMethod::Patch,
+                "/users/:id",
+                test_handler,
+            ))
+            .add(RouteDefBuilder::new(
+                HttpMethod::Head,
+                "/probes",
+                test_handler,
+            ))
+            .add(RouteDefBuilder::new(
+                HttpMethod::Options,
+                "/discover",
+                test_handler,
+            ));
+
+        let router = group.register(Router::new());
+
+        assert!(
+            router
+                .match_route(&Method::PATCH, "/api/users/42")
+                .is_some()
+        );
+        assert!(router.match_route(&Method::HEAD, "/api/probes").is_some());
+        assert!(
+            router
+                .match_route(&Method::OPTIONS, "/api/discover")
+                .is_some()
+        );
     }
 }

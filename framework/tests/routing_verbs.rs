@@ -224,3 +224,48 @@ async fn head_against_unrouted_path_returns_404() {
     assert_eq!(status.as_u16(), 404);
     assert!(body.is_empty(), "HEAD bodies are always empty");
 }
+
+/// User-call-site smoke test for the `patch!` / `head!` / `options!`
+/// macros — exercises the full chain: `#[macro_export]` macro →
+/// `__verb_impl` → `RouteDefBuilder` → `RouteDefBuilder::register` →
+/// `Router::{patch, head, options}`. If any of those links break, this
+/// test fails before the integration tests above can.
+///
+/// Uses the macros at top-level (the way user code does), nested
+/// `.name()` chaining, and inside a `group!{}` so the GroupDef arm
+/// for the new variants is exercised too.
+#[tokio::test]
+async fn macro_form_patch_head_options_register_and_dispatch() {
+    use hyper::Method;
+    use suprnova::{group, head, options, patch, routes};
+
+    routes! {
+        patch!("/things/:id", |_req| async { text("patched-thing") }).name("things.patch"),
+        head!("/probe", |_req| async { text("ignored body") }),
+        options!("/discover", |_req| async { text("GET, PATCH") }),
+        group!("/api", {
+            patch!("/users/:id", |_req| async { text("patched-api-user") }),
+            head!("/users", |_req| async { text("ignored") }),
+            options!("/users", |_req| async { text("GET, POST, PATCH") }),
+        }),
+    }
+
+    let router = register();
+
+    // Top-level macro registrations match.
+    assert!(router.match_route(&Method::PATCH, "/things/42").is_some());
+    assert!(router.match_route(&Method::HEAD, "/probe").is_some());
+    assert!(router.match_route(&Method::OPTIONS, "/discover").is_some());
+
+    // Grouped macro registrations match, prefix is applied.
+    assert!(router.match_route(&Method::PATCH, "/api/users/7").is_some());
+    assert!(router.match_route(&Method::HEAD, "/api/users").is_some());
+    assert!(router.match_route(&Method::OPTIONS, "/api/users").is_some());
+
+    // Drive a PATCH end-to-end to prove the dispatch path runs the
+    // handler, not just registers the route.
+    let addr = spawn_server(router, 1).await;
+    let (status, _, body) = send_request(addr, "PATCH", "/things/42").await;
+    assert_eq!(status.as_u16(), 200);
+    assert_eq!(body, "patched-thing");
+}
