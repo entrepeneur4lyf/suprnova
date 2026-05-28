@@ -102,6 +102,18 @@ impl Default for WorkerConfig {
     }
 }
 
+/// One job's terminal state for the worker's settlement match.
+///
+/// Carries the dispatch result by type, not by string-matching the error
+/// message: a job whose own failure body legitimately contains the words
+/// "timed out after" can no longer be misclassified, and a real timeout
+/// is observable without parsing.
+enum DispatchOutcome {
+    Ok,
+    Failed(FrameworkError),
+    TimedOut(Duration),
+}
+
 /// Pull-loop worker: pops one reservation at a time, dispatches by job_name,
 /// acks on success, requeues with backoff on failure, drops after max_tries.
 ///
@@ -131,28 +143,25 @@ pub async fn run_worker(driver: Arc<dyn QueueDriver>, cfg: WorkerConfig) {
         let timeout_opt = env.timeout_secs.map(Duration::from_secs);
         let dispatch_fut = dispatch_by_name(&env.job_name, env.payload.clone());
 
-        let outcome: Result<(), FrameworkError> = match timeout_opt {
+        let outcome = match timeout_opt {
             Some(t) => match tokio::time::timeout(t, dispatch_fut).await {
-                Ok(inner) => inner,
-                Err(_) => Err(FrameworkError::internal(format!(
-                    "job {} timed out after {}s",
-                    env.job_name,
-                    t.as_secs()
-                ))),
+                Ok(Ok(())) => DispatchOutcome::Ok,
+                Ok(Err(e)) => DispatchOutcome::Failed(e),
+                Err(_elapsed) => DispatchOutcome::TimedOut(t),
             },
-            None => dispatch_fut.await,
+            None => match dispatch_fut.await {
+                Ok(()) => DispatchOutcome::Ok,
+                Err(e) => DispatchOutcome::Failed(e),
+            },
         };
 
         match outcome {
-            Ok(()) => {
+            DispatchOutcome::Ok => {
                 let _ = driver.ack(&res.token).await;
                 tracing::debug!(job = %env.job_name, id = %env.id, "queue job ok");
             }
-            Err(e) => {
-                let is_timeout = e.to_string().contains("timed out after");
-                let exhausted =
-                    env.attempts >= env.max_tries || (is_timeout && env.fail_on_timeout);
-                if exhausted {
+            DispatchOutcome::Failed(e) => {
+                if env.attempts >= env.max_tries {
                     tracing::error!(
                         job = %env.job_name,
                         id = %env.id,
@@ -170,6 +179,31 @@ pub async fn run_worker(driver: Arc<dyn QueueDriver>, cfg: WorkerConfig) {
                         retry_in = ?delay,
                         error = %e,
                         "queue job failed, will retry"
+                    );
+                    let _ = driver.nack(&res.token, delay).await;
+                }
+            }
+            DispatchOutcome::TimedOut(t) => {
+                let exhausted = env.fail_on_timeout || env.attempts >= env.max_tries;
+                if exhausted {
+                    tracing::error!(
+                        job = %env.job_name,
+                        id = %env.id,
+                        attempts = env.attempts,
+                        timeout_secs = t.as_secs(),
+                        fail_on_timeout = env.fail_on_timeout,
+                        "queue job dead-lettered (timed out)"
+                    );
+                    let _ = driver.ack(&res.token).await;
+                } else {
+                    let delay = next_delay(&env.backoff, env.attempts, None);
+                    tracing::warn!(
+                        job = %env.job_name,
+                        id = %env.id,
+                        attempt = env.attempts,
+                        retry_in = ?delay,
+                        timeout_secs = t.as_secs(),
+                        "queue job timed out, will retry"
                     );
                     let _ = driver.nack(&res.token, delay).await;
                 }
