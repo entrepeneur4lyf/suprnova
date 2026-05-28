@@ -51,9 +51,10 @@ use std::sync::Arc;
 /// ```
 #[async_trait]
 pub trait Channel: Send + Sync + 'static {
-    /// Canonical channel name (e.g. `"notifications"`, `"chat.{room_id}"`).
-    /// Used as the registry key; T5's WS handler matches client
-    /// `subscribe` requests against this exact string.
+    /// Canonical channel name (e.g. `"notifications"`, `"chat.lobby"`).
+    /// Used as the registry key; the WS handler matches client `subscribe`
+    /// requests against this **exact** string — there is no `{param}`
+    /// templating, so a channel name is a fixed `&'static str`.
     fn name(&self) -> &'static str;
 
     /// Authorize a subscribe request. Default = public (returns
@@ -133,7 +134,7 @@ pub type BoxedChannel = Arc<dyn Channel>;
 ///
 /// let mut registry = ChannelRegistry::new();
 /// registry.register(OrderUpdates);
-/// registry.register(ChatChannel { room_id: 42 });
+/// registry.register(LobbyChat);
 ///
 /// let chan = registry.resolve("order.updates").expect("registered");
 /// ```

@@ -16,6 +16,7 @@ use crate::broadcasting::hub::{BroadcastEnvelope, BroadcastHub};
 use crate::events::{Event, Listener};
 use async_trait::async_trait;
 use serde::Serialize;
+use serde_json::Value;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -33,6 +34,23 @@ pub trait Broadcastable: Event + Serialize {
     /// of the ServerFrame::Event envelope). Default: `Event::event_name()`.
     fn broadcast_event_name(&self) -> &'static str {
         Self::event_name()
+    }
+
+    /// The payload pushed to subscribers. `None` (the default) serializes the
+    /// whole event via [`Serialize`]; return `Some(value)` to broadcast a
+    /// curated shape instead — Laravel's `broadcastWith()`. The broadcast
+    /// payload is independent of the event's own fields, so you can omit
+    /// secrets or reshape for the client without changing the event type.
+    fn broadcast_with(&self) -> Option<Value> {
+        None
+    }
+
+    /// Whether to broadcast *this* instance. `true` by default. Returning
+    /// `false` dispatches the event to in-process [`Listener`]s as usual but
+    /// suppresses the WebSocket push — Laravel's `broadcastWhen()`. Only the
+    /// broadcast is skipped; the rest of the event pipeline is unaffected.
+    fn broadcast_when(&self) -> bool {
+        true
     }
 }
 
@@ -55,12 +73,24 @@ impl<E: Broadcastable> BroadcastListener<E> {
 #[async_trait]
 impl<E: Broadcastable> Listener<E> for BroadcastListener<E> {
     async fn handle(&self, event: &E) -> Result<(), FrameworkError> {
+        // `broadcast_when() == false` suppresses only the WS push — by the time
+        // this listener runs, the event has already reached its in-process
+        // listeners; we just skip publishing to the hub.
+        if !event.broadcast_when() {
+            return Ok(());
+        }
         let channels = event.broadcast_on();
         if channels.is_empty() {
             return Ok(());
         }
-        let data = serde_json::to_value(event)
-            .map_err(|e| FrameworkError::internal(format!("Broadcastable serde failed: {e}")))?;
+        // `broadcast_with()` chooses the wire payload: a curated value when
+        // provided, otherwise the event's full `Serialize` form.
+        let data = match event.broadcast_with() {
+            Some(custom) => custom,
+            None => serde_json::to_value(event).map_err(|e| {
+                FrameworkError::internal(format!("Broadcastable serde failed: {e}"))
+            })?,
+        };
         let event_name = event.broadcast_event_name().to_string();
         for channel in channels {
             self.hub

@@ -225,7 +225,30 @@ impl Broadcastable for OrderPlaced {
 
 Wire up the dispatcher integration once at bootstrap with `EventFacade::broadcast::<E>(hub)`. After that, calling `EventFacade::dispatch(OrderPlaced { ... }).await?` is all that is needed — no separate publish call.
 
-The event is serialized to JSON using `serde_json` and delivered to every subscriber on every channel returned by `broadcast_on`. Channels that no client has subscribed to are silently skipped.
+By default the event is serialized to JSON using `serde_json` and delivered to every subscriber on every channel returned by `broadcast_on`. Channels that no client has subscribed to are silently skipped.
+
+Two optional methods refine that default:
+
+- **`broadcast_with(&self) -> Option<Value>`** — return `Some(value)` to push a curated payload instead of the full event serialization (Laravel's `broadcastWith()`). Use it to omit secrets or reshape for the client without changing the event type:
+
+  ```rust
+  impl Broadcastable for AccountFunded {
+      fn broadcast_on(&self) -> Vec<String> { vec![format!("account.{}", self.account_id)] }
+      fn broadcast_with(&self) -> Option<serde_json::Value> {
+          // Never put the balance on the wire — only the public id.
+          Some(serde_json::json!({ "account_id": self.account_id }))
+      }
+  }
+  ```
+
+- **`broadcast_when(&self) -> bool`** — return `false` to dispatch the event to in-process listeners but skip the WebSocket push (Laravel's `broadcastWhen()`). Only the broadcast is gated; the rest of the event pipeline runs unchanged:
+
+  ```rust
+  impl Broadcastable for DraftSaved {
+      fn broadcast_on(&self) -> Vec<String> { vec![format!("doc.{}", self.doc_id)] }
+      fn broadcast_when(&self) -> bool { self.publish } // only broadcast on publish
+  }
+  ```
 
 ## The Wire Protocol
 
@@ -436,7 +459,7 @@ The following items are intentionally deferred. Each note describes the path for
 | `suprnova::broadcasting::Channel` | Trait for named channels. Implement `name()` (required). Override `authorize(&self, req, data) -> bool` for private semantics, or `presence_info()` for presence semantics. |
 | `suprnova::broadcasting::PrivateChannel` | Marker trait. Implementing it alongside `Channel` (with a custom `authorize`) makes the channel private. No additional methods. |
 | `suprnova::broadcasting::PresenceChannel` | Trait with `async fn member_info(&self, req: &Request) -> Result<Value, FrameworkError>`. Returns the joining member's data used in `presence.joined` / `presence.here` frames. |
-| `suprnova::broadcasting::Broadcastable` | Trait with `fn broadcast_on(&self) -> Vec<String>`. Implement on any `Event` to have it pushed to hub subscribers when dispatched via `EventFacade`. |
+| `suprnova::broadcasting::Broadcastable` | Trait on an `Event`: `broadcast_on() -> Vec<String>` (channels), `broadcast_event_name()` (wire name), `broadcast_with() -> Option<Value>` (curated payload), `broadcast_when() -> bool` (conditional push). Pushed to hub subscribers when dispatched via `EventFacade`. |
 | `suprnova::broadcasting::BroadcastHub` | Trait implemented by `InMemoryBroadcastHub` and `SeaStreamerBroadcastHub`. The DI container holds the active hub. |
 | `suprnova::broadcasting::InMemoryBroadcastHub` | Default hub. In-process fanout only. No external dependencies. |
 | `suprnova::broadcasting::fanout::SeaStreamerBroadcastHub` | Multi-process hub behind the `broadcasting-fanout` feature. Accepts a broker URI. |
