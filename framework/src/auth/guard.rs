@@ -180,6 +180,11 @@ impl Auth {
         // logout and `Auth::id()` would keep reporting it.
         clear_auth_user();
         request_state::clear_current_user();
+        // Also clear any 2FA challenge that was mid-flight when logout
+        // landed — pending and authed are both authentication state,
+        // and a tear-down that drops one but leaves the other strands
+        // the state machine.
+        crate::session::middleware::clear_two_factor_pending();
 
         // Rotate the CSRF token so any cached token cannot be reused.
         session_mut(|session| {

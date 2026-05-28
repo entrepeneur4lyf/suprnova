@@ -7,6 +7,7 @@
 //! process-wide `OnceLock`, so we install a key exactly once for the
 //! binary (pattern lifted from `framework/tests/pagination.rs`).
 
+use sea_orm_migration::prelude::*;
 use suprnova::auth_flows::two_factor::migration::Migration as TwoFactorMigration;
 use suprnova::auth_flows::two_factor::migration_replay::Migration as TwoFactorReplayMigration;
 use suprnova::auth_flows::{TwoFactor, TwoFactorUser};
@@ -21,9 +22,11 @@ fn ensure_crypt() {
     });
 }
 
-/// Test migrator: only ships the framework's 2FA migration so each
-/// test starts with a clean `two_factor_credentials` table and no
-/// unrelated tables to slow things down.
+/// Test migrator: ships the framework's 2FA migrations + a local
+/// `remember_tokens` table so `TwoFactor::start_challenge`'s
+/// remember-me revoke has a table to DELETE from. (The framework
+/// does not ship the remember-me migration — consumer apps own that
+/// schema — so we recreate the canonical shape here.)
 struct TestMigrator;
 
 #[async_trait::async_trait]
@@ -32,8 +35,96 @@ impl sea_orm_migration::MigratorTrait for TestMigrator {
         vec![
             Box::new(TwoFactorMigration),
             Box::new(TwoFactorReplayMigration),
+            Box::new(CreateRememberTokensTable),
         ]
     }
+}
+
+/// Local migration mirroring the canonical remember-me schema from
+/// `framework/tests/remember_me.rs`. `TwoFactor::start_challenge`
+/// revokes remember-me tokens for the user before demoting to
+/// pending — without this table that revoke errors out, and tests
+/// that pre-set `auth_user_id` (to prove `start_challenge` clears
+/// it) hit the revoke path.
+struct CreateRememberTokensTable;
+
+impl MigrationName for CreateRememberTokensTable {
+    fn name(&self) -> &str {
+        "m20240101_000002_create_remember_tokens_table"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CreateRememberTokensTable {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(RememberTokens::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(RememberTokens::Id)
+                            .big_integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(RememberTokens::UserId).string().not_null())
+                    .col(ColumnDef::new(RememberTokens::Selector).string().not_null())
+                    .col(
+                        ColumnDef::new(RememberTokens::TokenHash)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RememberTokens::ExpiresAt)
+                            .timestamp()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RememberTokens::CreatedAt)
+                            .timestamp()
+                            .not_null()
+                            .default(Expr::current_timestamp()),
+                    )
+                    .col(
+                        ColumnDef::new(RememberTokens::LastUsedAt)
+                            .timestamp()
+                            .null(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_two_factor_test_remember_tokens_selector")
+                    .table(RememberTokens::Table)
+                    .col(RememberTokens::Selector)
+                    .unique()
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(RememberTokens::Table).to_owned())
+            .await
+    }
+}
+
+#[derive(DeriveIden)]
+enum RememberTokens {
+    Table,
+    Id,
+    UserId,
+    Selector,
+    TokenHash,
+    ExpiresAt,
+    CreatedAt,
+    LastUsedAt,
 }
 
 /// Minimal user shape that satisfies the [`TwoFactorUser`] contract.
@@ -83,7 +174,7 @@ async fn start_challenge_sets_pending_and_clears_auth_user() {
             "auth slot must be set before start_challenge for the test to be meaningful"
         );
 
-        TwoFactor::start_challenge("test-user-1");
+        TwoFactor::start_challenge("test-user-1").await.unwrap();
 
         // Pending is now the target id.
         assert_eq!(
@@ -104,7 +195,9 @@ async fn cancel_challenge_clears_pending() {
 
     let slot = suprnova::session::new_session_slot_for_test();
     suprnova::session::session_scope_for_test(slot, async {
-        TwoFactor::start_challenge("test-user-cancel");
+        TwoFactor::start_challenge("test-user-cancel")
+            .await
+            .unwrap();
         assert!(TwoFactor::pending_user_id().is_some());
 
         TwoFactor::cancel_challenge();
@@ -142,12 +235,14 @@ async fn complete_challenge_without_pending_returns_400() {
 #[tokio::test]
 async fn pending_user_id_outside_session_returns_none() {
     // Outside a `session_scope_for_test` the session task-local is
-    // not installed; pending must read as None (and start/cancel
-    // must no-op silently — they cannot crash).
+    // not installed; pending must read as None and start/cancel
+    // must no-op silently — they cannot crash. `start_challenge`'s
+    // remember-me revoke also no-ops here because `Auth::id()`
+    // returns None outside any session/request scope.
     assert_eq!(TwoFactor::pending_user_id(), None);
-    TwoFactor::start_challenge("orphan-id"); // no-op outside scope
+    TwoFactor::start_challenge("orphan-id").await.unwrap();
     assert_eq!(TwoFactor::pending_user_id(), None);
-    TwoFactor::cancel_challenge(); // also no-op
+    TwoFactor::cancel_challenge();
 }
 
 #[tokio::test]

@@ -396,12 +396,12 @@ impl TwoFactor {
         Ok(matches!(row, Some(r) if r.confirmed_at.is_some()))
     }
 
-    /// Begin a 2FA challenge for `user_id`: clear the
-    /// fully-authenticated session slot (if any) and stash `user_id`
-    /// as the pending user. The caller — typically a password-login
-    /// handler that just resolved a user for whom
-    /// [`Self::is_enabled_by_id`] returned `true` — should then
-    /// redirect to the challenge page. The session remains in
+    /// Begin a 2FA challenge for `user_id`: revoke the user's
+    /// remember-me tokens, clear the fully-authenticated session slot
+    /// (if any), and stash `user_id` as the pending user. The caller
+    /// — typically a password-login handler that just resolved a user
+    /// for whom [`Self::is_enabled_by_id`] returned `true` — should
+    /// then redirect to the challenge page. The session remains in
     /// pending state until [`Self::complete_challenge`] succeeds
     /// (promoting pending → authed) or the user explicitly cancels
     /// via [`Self::cancel_challenge`].
@@ -413,8 +413,28 @@ impl TwoFactor {
     /// of `AuthMiddleware` to redirect pending users to the
     /// challenge page rather than letting them fall through to the
     /// login page.
-    pub fn start_challenge(user_id: impl Into<String>) {
+    ///
+    /// # Why revoke remember-me
+    ///
+    /// `Auth::attempt(creds, true)` issues the remember-me cookie
+    /// and database row **before** the login handler sees the
+    /// result and decides to gate on 2FA. Without an explicit revoke
+    /// here, that cookie would outlive the demotion to pending: a
+    /// user who closed their browser before completing the
+    /// challenge would be auto-logged-in on the next visit via
+    /// remember-me, bypassing 2FA entirely. We revoke before
+    /// clearing the auth slot because revoke reads `Auth::id()` to
+    /// identify whose tokens to delete — clearing first would make
+    /// it a no-op.
+    ///
+    /// Apps that want remember-me + 2FA must re-issue the cookie
+    /// after a successful `complete_challenge` (e.g. via
+    /// `Auth::login_remember`). The "remember" preference is not
+    /// plumbed through the pending state today.
+    pub async fn start_challenge(user_id: impl Into<String>) -> Result<(), FrameworkError> {
         let user_id = user_id.into();
+        // Revoke FIRST while Auth::id() still resolves the user.
+        crate::auth::Auth::revoke_remember_tokens().await?;
         // Pending and authed are mutually exclusive — clear any prior
         // authed state. This also covers the case where Auth::attempt
         // marked the user authed before the caller noticed 2FA was on.
@@ -424,9 +444,10 @@ impl TwoFactor {
         // for the rest of THIS request, not only after the next
         // round-trip. `clear_current_user` is the sync primitive —
         // `Auth::clear_authentication` is the broader logout helper
-        // (revokes remember-me, rotates CSRF) which is wrong for a
-        // mid-login challenge.
+        // (revokes remember-me — already done above — and rotates
+        // CSRF, which would be wrong mid-login).
         crate::auth::request_state::clear_current_user();
+        Ok(())
     }
 
     /// Read the user-id of a session that has a 2FA challenge
