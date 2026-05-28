@@ -510,10 +510,21 @@ impl TwoFactor {
     /// here, that cookie would outlive the demotion to pending: a
     /// user who closed their browser before completing the
     /// challenge would be auto-logged-in on the next visit via
-    /// remember-me, bypassing 2FA entirely. We revoke before
-    /// clearing the auth slot because revoke reads `Auth::id()` to
-    /// identify whose tokens to delete — clearing first would make
-    /// it a no-op.
+    /// remember-me, bypassing 2FA entirely.
+    ///
+    /// # Fail-closed ordering
+    ///
+    /// We save `Auth::id()` to a local, **then** clear the session
+    /// auth slot, **then** revoke remember-me against the saved id
+    /// via [`Auth::revoke_remember_tokens_for_user`]. The reordering
+    /// matters: if the revoke errors (DB transient failure, lock
+    /// timeout), `start_challenge` returns `Err` — but the session
+    /// is already in a safe state (`auth_user_id` cleared, pending
+    /// set), so `AuthMiddleware` kicks the user to `/login` rather
+    /// than letting them through as fully authenticated. An earlier
+    /// implementation ran revoke first, then cleared auth — a
+    /// transient revoke failure there left the session
+    /// fully-authed bypassing the 2FA gate.
     ///
     /// The cookie + row that `start_challenge` revokes are the
     /// pre-challenge ones. If `remember` is `true`,
@@ -526,21 +537,39 @@ impl TwoFactor {
         remember: bool,
     ) -> Result<(), FrameworkError> {
         let user_id = user_id.into();
-        // Revoke FIRST while Auth::id() still resolves the user.
-        crate::auth::Auth::revoke_remember_tokens().await?;
-        // Pending and authed are mutually exclusive — clear any prior
-        // authed state. This also covers the case where Auth::attempt
-        // marked the user authed before the caller noticed 2FA was on.
+        // Capture the currently-authenticated id (if any) BEFORE we
+        // tear down the auth slot — the revoke needs it to identify
+        // whose remember-me rows to delete, but the slot has to go
+        // first for fail-closed safety.
+        let saved_id = crate::auth::Auth::id();
+
+        // STEP 1: Tear down auth state. Pending and authed are
+        // mutually exclusive — clear the auth slot, the request-
+        // scoped current user, and install the pending slot. If any
+        // subsequent step errors, the session is now in a safe
+        // state (no `auth_user_id` → `AuthMiddleware` kicks to
+        // /login, no bypass through stale session state).
         crate::session::middleware::clear_auth_user();
+        crate::auth::request_state::clear_current_user();
         crate::session::middleware::set_two_factor_pending(user_id);
         crate::session::middleware::set_two_factor_pending_remember(remember);
-        // Mirror the change into request_state so Auth::id() agrees
-        // for the rest of THIS request, not only after the next
-        // round-trip. `clear_current_user` is the sync primitive —
-        // `Auth::clear_authentication` is the broader logout helper
-        // (revokes remember-me — already done above — and rotates
-        // CSRF, which would be wrong mid-login).
-        crate::auth::request_state::clear_current_user();
+
+        // STEP 2: Revoke remember-me using the saved id. `Auth::id()`
+        // is now `None` (we just cleared the slot), which is why we
+        // can't use the bare `Auth::revoke_remember_tokens()` here —
+        // it would no-op on the missing id and leave the row in
+        // place. `_for_user` takes the id explicitly.
+        if let Some(id) = saved_id {
+            crate::auth::Auth::revoke_remember_tokens_for_user(&id).await?;
+        } else {
+            // No prior auth — queue a clear cookie anyway in case
+            // the browser still holds a stale one from another
+            // session. The cookie attributes match
+            // `revoke_remember_tokens` so behaviour is symmetric.
+            let config = crate::session::SessionConfig::from_env();
+            let clear = crate::session::middleware::create_forget_remember_cookie(&config);
+            crate::session::middleware::push_pending_cookie(clear);
+        }
         Ok(())
     }
 

@@ -170,19 +170,57 @@ impl Auth {
     /// Returns the number of rows deleted (0 if the user had no
     /// remember-me tokens).
     pub async fn revoke_remember_tokens() -> Result<u64, crate::error::FrameworkError> {
-        let removed = match Self::id() {
-            Some(id) => super::remember::revoke_all_for_user(&id).await?,
-            None => 0,
-        };
+        match Self::id() {
+            Some(id) => Self::revoke_remember_tokens_for_user(&id).await,
+            None => {
+                // No authenticated user — still queue the clear cookie
+                // so any stale one in the browser's jar is dropped.
+                Self::queue_remember_clear_cookie();
+                Ok(0)
+            }
+        }
+    }
 
-        // Always queue the clear cookie — even when the user has no
-        // remember-me row, the browser might still hold a stale one
-        // from a previous account, and clearing is the polite default.
+    /// Revoke every remember-me token for `user_id` AND queue a
+    /// "clear" cookie on the outgoing response. Identical to
+    /// [`revoke_remember_tokens`](Self::revoke_remember_tokens)
+    /// but identifies the target user explicitly instead of via
+    /// [`Auth::id()`](Self::id), so the caller can safely tear
+    /// down the session's auth slot **before** invoking the
+    /// revoke (rather than ordering revoke first so `Auth::id()`
+    /// still resolves).
+    ///
+    /// The canonical user is
+    /// [`crate::auth_flows::TwoFactor::start_challenge`], which
+    /// needs fail-closed ordering: clear the auth slot first so a
+    /// transient revoke failure cannot leave a fully-authed
+    /// session bypassing the 2FA gate. With this method, the
+    /// challenge demote saves `Auth::id()` to a local, clears
+    /// auth, and only then calls the revoke — a mid-step failure
+    /// can no longer strand the session in an authed-but-pending
+    /// state.
+    ///
+    /// Returns the number of rows deleted (0 if the user had no
+    /// remember-me tokens). Same audit listeners fire (none from
+    /// the framework's auth surface; the `remember_tokens` table
+    /// has no event).
+    pub async fn revoke_remember_tokens_for_user(
+        user_id: &str,
+    ) -> Result<u64, crate::error::FrameworkError> {
+        let removed = super::remember::revoke_all_for_user(user_id).await?;
+        Self::queue_remember_clear_cookie();
+        Ok(removed)
+    }
+
+    /// Queue the "forget remember-me" cookie on the outgoing response.
+    /// Internal helper — callers want `revoke_remember_tokens` or
+    /// `revoke_remember_tokens_for_user`, which queue the clear cookie
+    /// as part of their contract. Centralised here so the cookie
+    /// attributes stay in one place.
+    fn queue_remember_clear_cookie() {
         let config = crate::session::SessionConfig::from_env();
         let clear = crate::session::middleware::create_forget_remember_cookie(&config);
         crate::session::middleware::push_pending_cookie(clear);
-
-        Ok(removed)
     }
 
     /// Tear down all authentication state for the current request: revoke the
