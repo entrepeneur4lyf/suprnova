@@ -529,6 +529,24 @@ pub mod async_rules {
     /// Returns `Err` when at least one row matches and its `id`
     /// (when [`Self::except_id`] is set) differs.
     ///
+    /// # This is an advisory check, not a guarantee
+    ///
+    /// `Unique` reads the table *before* the write, so it carries an
+    /// unavoidable time-of-check/time-of-use race: two concurrent
+    /// requests can both pass the `COUNT(*)` and then both insert, and
+    /// the database ends up with duplicates. Laravel's `unique` rule has
+    /// exactly the same property. The **only** real guarantee is a
+    /// `UNIQUE` constraint (or unique index) on the column in the
+    /// database schema.
+    ///
+    /// Use `Unique` for a fast, friendly pre-submit message (and so
+    /// Precognition can validate the field), and back it with the DB
+    /// constraint for correctness. When the constraint fires on the
+    /// loser of a race, map that write error back to the same clean 422
+    /// with
+    /// [`FrameworkError::from_unique_violation`](crate::FrameworkError::from_unique_violation)
+    /// instead of leaking a 500.
+    ///
     /// # Safety on identifiers
     ///
     /// `table` and `column` are `&'static str` slices under crate

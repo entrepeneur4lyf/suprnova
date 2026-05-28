@@ -105,10 +105,10 @@ pub use sea_orm::sea_query;
 pub use sea_orm::strum::IntoEnumIterator as Iterable;
 pub use sea_orm::{
     ActiveModelBehavior, ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait,
-    DatabaseConnection, DatabaseTransaction, DeriveActiveEnum, EntityName, EntityTrait, Iden,
-    IntoActiveModel, ModelTrait, NotSet, PrimaryKeyToColumn, PrimaryKeyTrait, QueryFilter,
-    QueryOrder, QuerySelect, RelationDef, RelationTrait, Schema, Select, Set, TransactionTrait,
-    TryGetable,
+    DatabaseConnection, DatabaseTransaction, DbErr, DeriveActiveEnum, EntityName, EntityTrait,
+    Iden, IntoActiveModel, ModelTrait, NotSet, PrimaryKeyToColumn, PrimaryKeyTrait, QueryFilter,
+    QueryOrder, QuerySelect, RelationDef, RelationTrait, Schema, Select, Set, SqlErr,
+    TransactionTrait, TryGetable,
 };
 
 // Top-level escape hatch (spec 02-seaorm-aliasing §Rationale): the full

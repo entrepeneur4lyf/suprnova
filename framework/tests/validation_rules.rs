@@ -685,3 +685,83 @@ async fn async_rule_check_helper_leaves_empty_on_success() {
     .await;
     assert!(errs.is_empty(), "no rows → no errors");
 }
+
+// --- FrameworkError::from_unique_violation — map DB constraint to 422 ---
+//
+// `Unique` is advisory (TOCTOU); the DB UNIQUE constraint is the real
+// guarantee. These tests prove the write-error → 422 mapping closes the
+// loop the loser of a race hits, and that non-unique errors pass through
+// as 500-class errors rather than being misreported as validation.
+
+async fn db_with_unique_email() -> DbConnection {
+    let raw = Database::connect("sqlite::memory:").await.unwrap();
+    raw.execute(Statement::from_string(
+        DbBackend::Sqlite,
+        "CREATE TABLE accounts (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE)"
+            .to_string(),
+    ))
+    .await
+    .unwrap();
+    DbConnection::from_raw(raw)
+}
+
+#[tokio::test]
+async fn from_unique_violation_maps_duplicate_insert_to_422() {
+    use suprnova::FrameworkError;
+
+    let db = db_with_unique_email().await;
+    let backend = db.inner().get_database_backend();
+    let insert = |email: &str| {
+        Statement::from_sql_and_values(
+            backend,
+            "INSERT INTO accounts (email) VALUES (?)",
+            vec![Value::from(email.to_string())],
+        )
+    };
+
+    // First insert succeeds; the second violates the UNIQUE constraint.
+    db.inner().execute(insert("dup@example.com")).await.unwrap();
+    let dup_err = db
+        .inner()
+        .execute(insert("dup@example.com"))
+        .await
+        .unwrap_err();
+
+    let mapped = FrameworkError::from_unique_violation("email", "Email already taken", dup_err);
+    assert!(
+        matches!(mapped, FrameworkError::Validation(_)),
+        "a unique-constraint violation must map to a Validation (422) error"
+    );
+    assert_eq!(mapped.status_code(), 422);
+    match &mapped {
+        FrameworkError::Validation(errs) => {
+            assert_eq!(errs.errors["email"][0], "Email already taken");
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn from_unique_violation_passes_through_non_unique_errors() {
+    use suprnova::FrameworkError;
+
+    let db = db_with_unique_email().await;
+    let backend = db.inner().get_database_backend();
+    // Write to a table that doesn't exist — a real DbErr that is NOT a
+    // unique-constraint violation.
+    let err = db
+        .inner()
+        .execute(Statement::from_string(
+            backend,
+            "INSERT INTO does_not_exist (x) VALUES (1)".to_string(),
+        ))
+        .await
+        .unwrap_err();
+
+    let mapped = FrameworkError::from_unique_violation("email", "ignored", err);
+    assert!(
+        !matches!(mapped, FrameworkError::Validation(_)),
+        "a non-unique DB error must pass through, not become a 422"
+    );
+    assert_ne!(mapped.status_code(), 422);
+}

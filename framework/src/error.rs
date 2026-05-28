@@ -571,6 +571,58 @@ impl FrameworkError {
         Self::Validation(errors)
     }
 
+    /// Turn a database write error into a field-scoped 422 validation
+    /// error **when** it is a unique-constraint violation; otherwise pass
+    /// the original error through unchanged (a 500-class `Database`
+    /// error).
+    ///
+    /// This closes the gap left by the [`Unique`] validation rule.
+    /// `Unique` runs a `SELECT COUNT(*)` *before* the write, so it is an
+    /// **advisory** check with an unavoidable time-of-check/time-of-use
+    /// race: two concurrent requests can both pass the pre-check and then
+    /// both attempt the insert. The only real guarantee is a `UNIQUE`
+    /// constraint (or unique index) on the column in the database. This
+    /// helper lets the handler catch the constraint violation the loser
+    /// of that race receives and render it as the same clean 422 the
+    /// advisory rule would have produced, instead of leaking a 500:
+    ///
+    /// ```rust,ignore
+    /// // `users.email` has a UNIQUE constraint in the migration.
+    /// let user = new_user
+    ///     .insert(db)
+    ///     .await
+    ///     .map_err(|e| FrameworkError::from_unique_violation(
+    ///         "email",
+    ///         "That email address is already registered.",
+    ///         e,
+    ///     ))?;
+    /// ```
+    ///
+    /// Use the advisory [`Unique`] rule for a friendly pre-submit message
+    /// (and Precognition), and this helper at the write site for the
+    /// authoritative answer. Backend coverage is whatever SeaORM's
+    /// [`DbErr::sql_err`] recognises — MySQL, Postgres, and SQLite all
+    /// map their duplicate-key errors to
+    /// [`SqlErr::UniqueConstraintViolation`].
+    ///
+    /// [`Unique`]: crate::validation::rule::async_rules::Unique
+    /// [`DbErr::sql_err`]: sea_orm::DbErr::sql_err
+    /// [`SqlErr::UniqueConstraintViolation`]: sea_orm::SqlErr::UniqueConstraintViolation
+    pub fn from_unique_violation(
+        field: impl Into<String>,
+        message: impl Into<String>,
+        err: sea_orm::DbErr,
+    ) -> Self {
+        match err.sql_err() {
+            Some(sea_orm::SqlErr::UniqueConstraintViolation(_)) => {
+                let mut errors = ValidationErrors::new();
+                errors.add(field, message);
+                Self::Validation(errors)
+            }
+            _ => err.into(),
+        }
+    }
+
     /// Create a ModelNotFound error (404)
     pub fn model_not_found(name: impl Into<String>) -> Self {
         Self::ModelNotFound {

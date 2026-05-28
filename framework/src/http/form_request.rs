@@ -55,7 +55,7 @@ use validator::Validate;
 /// }
 /// ```
 #[async_trait]
-pub trait FormRequest: Sized + DeserializeOwned + Validate + Send {
+pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
     /// Check if the request is authorized
     ///
     /// Override this method to add authorization logic.
@@ -95,6 +95,50 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send {
     /// }
     /// ```
     fn after_validation(&self) -> Result<(), ValidationErrors> {
+        Ok(())
+    }
+
+    /// Async cross-field validation hook. This is where database-backed
+    /// and other `.await`-ing rules — most notably the built-in
+    /// [`Unique`] rule — participate in automatic request validation.
+    ///
+    /// The synchronous [`validate!`] macro cannot weave in `.await`
+    /// points, and [`after_validation`] is synchronous, so without this
+    /// hook an async rule like `Unique` could only run if every app
+    /// hand-wrote the same plumbing in its handler. `extract` calls this
+    /// method as the final validation stage, so overriding it is all an
+    /// app needs:
+    ///
+    /// ```rust,ignore
+    /// #[async_trait]
+    /// impl FormRequest for CreateUserRequest {
+    ///     async fn after_validation_async(&self) -> Result<(), ValidationErrors> {
+    ///         let mut errs = ValidationErrors::new();
+    ///         Unique::new("users", "email")
+    ///             .check_async(&self.email, &mut errs, "email")
+    ///             .await;
+    ///         errs.into_result()
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// # Ordering and bail behavior
+    ///
+    /// `extract` runs the stages in order — the derived `validate()`, the
+    /// synchronous [`after_validation`], then this async hook — and
+    /// **bails at the first failing stage**. The async hook therefore
+    /// only runs once the synchronous rules pass, so a malformed value
+    /// (e.g. a syntactically invalid email) never reaches the database
+    /// `Unique` query. In Precognition mode the hook's errors are
+    /// filtered by `Precognition-Validate-Only` exactly like the other
+    /// stages.
+    ///
+    /// The default implementation returns `Ok(())`.
+    ///
+    /// [`Unique`]: crate::validation::rule::async_rules::Unique
+    /// [`validate!`]: crate::validate
+    /// [`after_validation`]: Self::after_validation
+    async fn after_validation_async(&self) -> Result<(), ValidationErrors> {
         Ok(())
     }
 
@@ -196,59 +240,67 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send {
         let validation_result = data.validate();
 
         if is_precognition {
-            return match validation_result {
-                Ok(()) => {
-                    // Per-field rules passed. Cross-field hook still
-                    // has to run — a "passwords must match" failure
-                    // should reach the Precognition client too.
-                    match data.after_validation() {
-                        Ok(()) => Err(FrameworkError::PrecognitionSuccess),
-                        Err(errs) => {
-                            let filtered = if validate_only.is_empty() {
-                                errs
-                            } else {
-                                errs.retain_fields(&validate_only)
-                            };
-                            if filtered.is_empty() {
-                                Err(FrameworkError::PrecognitionSuccess)
-                            } else {
-                                Err(FrameworkError::PrecognitionFailure(filtered))
-                            }
-                        }
-                    }
-                }
-                Err(errors) => {
-                    let errs = ValidationErrors::from_validator(errors);
-                    let filtered = if validate_only.is_empty() {
-                        // No filter — return all errors as the failure.
-                        errs
-                    } else {
-                        errs.retain_fields(&validate_only)
-                    };
-                    if filtered.is_empty() {
-                        // All real errors were on fields the client
-                        // didn't ask about → success for what was asked.
-                        Err(FrameworkError::PrecognitionSuccess)
-                    } else {
-                        Err(FrameworkError::PrecognitionFailure(filtered))
-                    }
-                }
+            // Walk the validation stages in order, bailing at the first
+            // that fails: the derived `validate()`, then the synchronous
+            // cross-field hook, then the async cross-field hook (where
+            // `Unique` and other DB-backed rules live). The async stage
+            // runs only once the cheaper synchronous stages pass, so a
+            // malformed value never reaches a database `Unique` query —
+            // and if a *different* field is malformed, the client's
+            // requested field still resolves through the same filter. An
+            // empty bag means every stage passed.
+            let bag = match validation_result {
+                Err(errors) => ValidationErrors::from_validator(errors),
+                Ok(()) => match data.after_validation() {
+                    Err(errs) => errs,
+                    Ok(()) => match data.after_validation_async().await {
+                        Err(errs) => errs,
+                        Ok(()) => ValidationErrors::new(),
+                    },
+                },
             };
+            return Err(precognition_outcome(bag, &validate_only));
         }
 
-        // Non-Precognition: standard flow.
+        // Non-Precognition: standard flow. Same staged, bail-on-first
+        // structure as the Precognition branch above.
         if let Err(errors) = validation_result {
             return Err(FrameworkError::Validation(
                 ValidationErrors::from_validator(errors),
             ));
         }
 
-        // Per-field rules passed — run the cross-field hook.
+        // Per-field rules passed — run the synchronous cross-field hook.
         if let Err(errs) = data.after_validation() {
             return Err(FrameworkError::Validation(errs));
         }
 
+        // Synchronous stages passed — run the async cross-field hook
+        // (DB-backed rules such as `Unique`). This is the final stage.
+        if let Err(errs) = data.after_validation_async().await {
+            return Err(FrameworkError::Validation(errs));
+        }
+
         Ok(data)
+    }
+}
+
+/// Collapse a (possibly empty) validation error bag into the Precognition
+/// outcome: filter to the `Precognition-Validate-Only` fields (when the
+/// client supplied a filter), then map an empty result to
+/// [`FrameworkError::PrecognitionSuccess`] (HTTP 204) and a non-empty one
+/// to [`FrameworkError::PrecognitionFailure`] (HTTP 422). An empty input
+/// bag — every validation stage passed — is always success.
+fn precognition_outcome(bag: ValidationErrors, validate_only: &[String]) -> FrameworkError {
+    let filtered = if validate_only.is_empty() {
+        bag
+    } else {
+        bag.retain_fields(validate_only)
+    };
+    if filtered.is_empty() {
+        FrameworkError::PrecognitionSuccess
+    } else {
+        FrameworkError::PrecognitionFailure(filtered)
     }
 }
 
