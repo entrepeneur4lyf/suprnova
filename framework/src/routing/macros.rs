@@ -391,6 +391,109 @@ where
     RouteDefBuilder::new(HttpMethod::Options, path, handler)
 }
 
+/// Create a route that responds to every common HTTP method —
+/// `any!()` is the Laravel `Route::any(...)` equivalent. The handler
+/// is registered against GET, POST, PUT, PATCH, DELETE, HEAD, and
+/// OPTIONS sharing one matchit slot per method (per-method O(1)
+/// dispatch). `.name()` registers the name once; `.middleware()` fans
+/// out across every method's `(method, path)` middleware key so a
+/// shared auth / CSRF / rate-limit guard cannot accidentally miss a
+/// verb.
+///
+/// `any!` works at the top level of `routes! {}` and inside `group! {}`.
+/// Inside a group, the group prefix is concatenated normally and the
+/// group's inherited middleware fans out across every verb too.
+///
+/// # Example
+/// ```rust,ignore
+/// any!("/webhooks/inbound", controllers::webhooks::inbound)
+///     .name("webhooks.inbound")
+///     .middleware(SignatureCheck)
+/// ```
+///
+/// # Compile Error
+///
+/// Fails to compile if path doesn't start with '/'.
+#[macro_export]
+macro_rules! any {
+    ($path:expr, $handler:expr) => {{
+        const _: &str = $crate::validate_route_path($path);
+        $crate::__any_impl($path, $handler)
+    }};
+}
+
+/// Internal implementation for `any!()` routes. Returns an
+/// [`AnyRouteDefBuilder`] that records path + handler + optional name
+/// + optional middlewares; the fan-out across seven methods happens
+/// at `.register(router)` time.
+#[doc(hidden)]
+pub fn __any_impl<H, Fut>(path: &'static str, handler: H) -> AnyRouteDefBuilder<H>
+where
+    H: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Response> + Send + 'static,
+{
+    AnyRouteDefBuilder::new(path, handler)
+}
+
+/// Macro-layer builder for `any!()` routes. Symmetric with
+/// [`RouteDefBuilder`] but registers across all seven common HTTP
+/// methods at `register()` time. The `.name()` and `.middleware()`
+/// chain methods accumulate state for the eventual fan-out — name
+/// fires once, middleware fans out across every verb's
+/// `(method, path)` middleware slot.
+pub struct AnyRouteDefBuilder<H> {
+    path: &'static str,
+    handler: H,
+    name: Option<&'static str>,
+    middlewares: Vec<BoxedMiddleware>,
+}
+
+impl<H, Fut> AnyRouteDefBuilder<H>
+where
+    H: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Response> + Send + 'static,
+{
+    fn new(path: &'static str, handler: H) -> Self {
+        Self {
+            path,
+            handler,
+            name: None,
+            middlewares: Vec::new(),
+        }
+    }
+
+    /// Name this route. Registered once across all seven verbs since
+    /// the path is shared.
+    pub fn name(mut self, name: &'static str) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    /// Attach middleware that runs for every method the `any!` route
+    /// was registered against.
+    pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
+        self.middlewares.push(into_boxed(middleware));
+        self
+    }
+
+    /// Register this `any` route against the router. Drives
+    /// [`Router::any`] then fans the middleware list across every
+    /// method, then applies the optional name once.
+    pub fn register(self, router: Router) -> Router {
+        let converted_path = convert_route_params(self.path);
+        let multi = router.any(&converted_path, self.handler);
+        let multi = self
+            .middlewares
+            .into_iter()
+            .fold(multi, |b, m| b.middleware_boxed(m));
+        if let Some(name) = self.name {
+            multi.name(name)
+        } else {
+            multi.into()
+        }
+    }
+}
+
 // ============================================================================
 // WebSocket Route Support
 // ============================================================================
@@ -614,10 +717,25 @@ pub struct GroupRoute {
     middlewares: Vec<BoxedMiddleware>,
 }
 
-/// An item that can be added to a route group - either a route or a nested group
+/// A multi-method route (`any!`) stored within a group. Holds a
+/// pre-boxed handler shared across every verb plus the name +
+/// middleware list. Registered by [`GroupDef::register_with_inherited`]
+/// by fanning the handler into every per-method matchit slot and
+/// fanning the middleware list across every `(method, path)` key.
+pub struct GroupAnyRoute {
+    path: &'static str,
+    handler: Arc<BoxedHandler>,
+    name: Option<&'static str>,
+    middlewares: Vec<BoxedMiddleware>,
+}
+
+/// An item that can be added to a route group - a single-method route,
+/// a multi-method (`any!`) route, or a nested group.
 pub enum GroupItem {
-    /// A single route
+    /// A single-method route
     Route(GroupRoute),
+    /// A multi-method route (every common HTTP verb shares this handler)
+    AnyRoute(GroupAnyRoute),
     /// A nested group with its own prefix and middleware
     NestedGroup(Box<GroupDef>),
 }
@@ -805,6 +923,61 @@ impl GroupDef {
                         router.add_middleware(http_method.clone(), full_path, mw);
                     }
                 }
+                GroupItem::AnyRoute(any_route) => {
+                    // Prefix + matchit normalisation, mirroring the
+                    // single-method arm above so a group prefix
+                    // containing `:param` gets converted the same way.
+                    let raw_full = if any_route.path == "/" {
+                        full_prefix.clone()
+                    } else {
+                        format!("{}{}", full_prefix, any_route.path)
+                    };
+                    let full_path = convert_route_params(&raw_full);
+                    let full_path: &'static str = Box::leak(full_path.into_boxed_str());
+
+                    // Fan the same Arc<BoxedHandler> across every common
+                    // HTTP method's matchit registry. Order matches
+                    // `ANY_METHODS` in router.rs so tests / logs see the
+                    // same ordering.
+                    router.insert_get(full_path, any_route.handler.clone());
+                    router.insert_post(full_path, any_route.handler.clone());
+                    router.insert_put(full_path, any_route.handler.clone());
+                    router.insert_patch(full_path, any_route.handler.clone());
+                    router.insert_delete(full_path, any_route.handler.clone());
+                    router.insert_head(full_path, any_route.handler.clone());
+                    router.insert_options(full_path, any_route.handler);
+
+                    // Name is registered once — the path is shared
+                    // across all seven verbs so reverse-lookup returns
+                    // the same URL no matter which method the caller
+                    // is looking up.
+                    if let Some(name) = any_route.name {
+                        register_route_name(name, full_path);
+                    }
+
+                    // Fan combined (inherited + group) middleware AND
+                    // route-local middleware across every (method, path)
+                    // key. Without this, auth / CSRF / rate-limit
+                    // attached to an `any!` route would silently skip
+                    // some verbs.
+                    let all_methods = [
+                        hyper::Method::GET,
+                        hyper::Method::POST,
+                        hyper::Method::PUT,
+                        hyper::Method::PATCH,
+                        hyper::Method::DELETE,
+                        hyper::Method::HEAD,
+                        hyper::Method::OPTIONS,
+                    ];
+                    for method in &all_methods {
+                        for mw in &combined_middleware {
+                            router.add_middleware(method.clone(), full_path, mw.clone());
+                        }
+                        for mw in &any_route.middlewares {
+                            router.add_middleware(method.clone(), full_path, mw.clone());
+                        }
+                    }
+                }
                 GroupItem::NestedGroup(nested) => {
                     // Recursively register the nested group with accumulated prefix and middleware
                     nested.register_with_inherited(router, &full_prefix, &combined_middleware);
@@ -852,6 +1025,36 @@ where
 impl IntoGroupItem for GroupDef {
     fn into_group_item(self) -> GroupItem {
         GroupItem::NestedGroup(Box::new(self))
+    }
+}
+
+impl<H, Fut> AnyRouteDefBuilder<H>
+where
+    H: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Response> + Send + 'static,
+{
+    /// Convert this `any!()` definition to a type-erased `GroupAnyRoute`
+    /// for use inside `group!{}`. Boxes the handler once; the seven-method
+    /// fan-out happens inside [`GroupDef::register_with_inherited`].
+    pub fn into_group_any_route(self) -> GroupAnyRoute {
+        let handler = self.handler;
+        let boxed: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
+        GroupAnyRoute {
+            path: self.path,
+            handler: Arc::new(boxed),
+            name: self.name,
+            middlewares: self.middlewares,
+        }
+    }
+}
+
+impl<H, Fut> IntoGroupItem for AnyRouteDefBuilder<H>
+where
+    H: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Response> + Send + 'static,
+{
+    fn into_group_item(self) -> GroupItem {
+        GroupItem::AnyRoute(self.into_group_any_route())
     }
 }
 

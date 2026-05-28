@@ -805,6 +805,128 @@ impl Router {
         })
     }
 
+    /// Register the same handler against an explicit list of HTTP methods.
+    ///
+    /// Laravel parity for `Route::match([...], ...)`. Each method gets its
+    /// own entry in the per-method matchit registry, all sharing the same
+    /// boxed handler (cloned `Arc`), so dispatch is O(1) per request. The
+    /// returned [`MultiMethodRouteBuilder`] lets you attach a single name
+    /// and a single middleware list that fan out across every method —
+    /// see the type docs for the fan-out semantics.
+    ///
+    /// Express-style `:param` segments are converted to matchit-style
+    /// `{param}` automatically.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `methods` is empty, contains a verb other than
+    /// GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS, or if any of the methods
+    /// already has a route registered at this path. The error message
+    /// names the offending verb so the conflict is debuggable.
+    ///
+    /// Partial-failure caveat: if the first `n` methods register cleanly
+    /// and method `n+1` conflicts, the first `n` registrations remain in
+    /// the Router. This matches the chained-registration behavior of
+    /// `.get(...).get(...)` (the first wins, the second panics). Use
+    /// [`Router::try_methods`] when registering from a fallible source.
+    pub fn methods<H, Fut>(
+        self,
+        methods: &[Method],
+        path: &str,
+        handler: H,
+    ) -> MultiMethodRouteBuilder
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.try_methods(methods, path, handler)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Router::methods`]. Returns `Err(FrameworkError)`
+    /// (naming the conflicting verb) instead of panicking. The partial-
+    /// failure caveat on [`Router::methods`] applies here too: methods
+    /// before the failing one stay registered.
+    pub fn try_methods<H, Fut>(
+        mut self,
+        methods: &[Method],
+        path: &str,
+        handler: H,
+    ) -> Result<MultiMethodRouteBuilder, FrameworkError>
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        if methods.is_empty() {
+            return Err(FrameworkError::internal(
+                "Router::methods() requires at least one HTTP method",
+            ));
+        }
+        let converted = crate::routing::macros::convert_route_params(path);
+        let boxed: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
+        let handler_arc = Arc::new(boxed);
+        let mut registered = Vec::with_capacity(methods.len());
+        for method in methods {
+            match *method {
+                Method::GET => self.try_insert_get(&converted, handler_arc.clone())?,
+                Method::POST => self.try_insert_post(&converted, handler_arc.clone())?,
+                Method::PUT => self.try_insert_put(&converted, handler_arc.clone())?,
+                Method::PATCH => self.try_insert_patch(&converted, handler_arc.clone())?,
+                Method::DELETE => self.try_insert_delete(&converted, handler_arc.clone())?,
+                Method::HEAD => self.try_insert_head(&converted, handler_arc.clone())?,
+                Method::OPTIONS => self.try_insert_options(&converted, handler_arc.clone())?,
+                ref other => {
+                    return Err(FrameworkError::internal(format!(
+                        "Router::methods() got unsupported method '{other}'; only \
+                         GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS are accepted"
+                    )));
+                }
+            }
+            registered.push(method.clone());
+        }
+        Ok(MultiMethodRouteBuilder {
+            router: self,
+            methods: registered,
+            path: converted,
+        })
+    }
+
+    /// Register the same handler against every common HTTP method
+    /// (GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS).
+    ///
+    /// Laravel parity for `Route::any(...)`. Equivalent to calling
+    /// [`Router::methods`] with the seven-method list. Same dual-API
+    /// + chained-name + fan-out-middleware story as [`Router::methods`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if any of the seven methods already has a route registered
+    /// at this path. See [`Router::methods`] for the partial-failure
+    /// caveat. Use [`Router::try_any`] when the path may already be
+    /// registered (dynamic config, plugins).
+    pub fn any<H, Fut>(self, path: &str, handler: H) -> MultiMethodRouteBuilder
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.try_any(path, handler)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Router::any`]. Returns `Err(FrameworkError)`
+    /// instead of panicking; otherwise identical.
+    pub fn try_any<H, Fut>(
+        self,
+        path: &str,
+        handler: H,
+    ) -> Result<MultiMethodRouteBuilder, FrameworkError>
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.try_methods(ANY_METHODS, path, handler)
+    }
+
     /// Register a WebSocket route. The handler runs after the
     /// framework completes the HTTP/1.1 Upgrade handshake; it
     /// receives a [`WsSocket`] plus the original [`Request`] so it
@@ -1316,10 +1438,166 @@ impl RouteBuilder {
     {
         self.router.try_options(path, handler)
     }
+
+    /// Register a route across every common HTTP method (GET / POST /
+    /// PUT / PATCH / DELETE / HEAD / OPTIONS) — Laravel `Route::any`.
+    /// See [`Router::any`].
+    pub fn any<H, Fut>(self, path: &str, handler: H) -> MultiMethodRouteBuilder
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.router.any(path, handler)
+    }
+
+    /// Fallible sibling of [`RouteBuilder::any`]. See [`Router::try_any`].
+    pub fn try_any<H, Fut>(
+        self,
+        path: &str,
+        handler: H,
+    ) -> Result<MultiMethodRouteBuilder, FrameworkError>
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.router.try_any(path, handler)
+    }
+
+    /// Register a route across an explicit list of HTTP methods —
+    /// Laravel `Route::match([...], ...)`. See [`Router::methods`].
+    pub fn methods<H, Fut>(
+        self,
+        methods: &[Method],
+        path: &str,
+        handler: H,
+    ) -> MultiMethodRouteBuilder
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.router.methods(methods, path, handler)
+    }
+
+    /// Fallible sibling of [`RouteBuilder::methods`]. See
+    /// [`Router::try_methods`].
+    pub fn try_methods<H, Fut>(
+        self,
+        methods: &[Method],
+        path: &str,
+        handler: H,
+    ) -> Result<MultiMethodRouteBuilder, FrameworkError>
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.router.try_methods(methods, path, handler)
+    }
 }
 
 impl From<RouteBuilder> for Router {
     fn from(builder: RouteBuilder) -> Self {
+        builder.router
+    }
+}
+
+/// The seven HTTP methods that [`Router::any`] fans out across. Kept
+/// in registration order so `methods` field of the returned builder
+/// matches the order callers see in tests / logs.
+const ANY_METHODS: &[Method] = &[
+    Method::GET,
+    Method::POST,
+    Method::PUT,
+    Method::PATCH,
+    Method::DELETE,
+    Method::HEAD,
+    Method::OPTIONS,
+];
+
+/// Builder returned by [`Router::methods`] and [`Router::any`]. Holds the
+/// inner `Router` plus the list of methods the route was registered against,
+/// and the canonical path (after `:param` → `{param}` conversion). Chained
+/// `.name(...)` and `.middleware(...)` calls fan out across every stored
+/// method, then `Into<Router>` (or `.name(...)` returning `Router`) hands
+/// back ownership.
+///
+/// Fan-out semantics:
+///
+/// - `.name(name)` registers `name` once (the path is shared across
+///   methods); reverse lookup via [`route`] returns the same URL no
+///   matter which verb the user came from.
+/// - `.middleware(M)` adds the middleware under every
+///   `(method, path)` key — auth / CSRF / rate-limit registered on an
+///   `any` route therefore guard all seven verbs, not just one.
+///
+/// `MultiMethodRouteBuilder` cannot be re-entered as a `RouteBuilder`
+/// because the "most recently registered route" is ambiguous when N
+/// methods share one registration. Chain further routes off the
+/// `Router` (via `.into()`) instead.
+pub struct MultiMethodRouteBuilder {
+    pub(crate) router: Router,
+    methods: Vec<Method>,
+    path: String,
+}
+
+impl MultiMethodRouteBuilder {
+    /// Methods this builder registered against (in registration order).
+    /// Used by tests and the macro-layer `AnyRouteDefBuilder` to verify
+    /// the fan-out.
+    pub fn methods(&self) -> &[Method] {
+        &self.methods
+    }
+
+    /// The canonical path (after `:param` normalisation) the route was
+    /// registered under.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Name this multi-method route. The name is registered ONCE; reverse
+    /// lookup via [`route`] returns the same URL regardless of which verb
+    /// the user is querying for.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `name` is already registered to a different path. Use
+    /// [`MultiMethodRouteBuilder::try_name`] for a fallible variant.
+    pub fn name(self, name: &str) -> Router {
+        self.try_name(name).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`MultiMethodRouteBuilder::name`].
+    pub fn try_name(self, name: &str) -> Result<Router, FrameworkError> {
+        try_register_route_name(name, &self.path)?;
+        Ok(self.router)
+    }
+
+    /// Attach middleware that runs for every method this route was
+    /// registered against. Fans out internally to N `(method, path)`
+    /// entries in the route-middleware map so each per-method route
+    /// inherits the same instance.
+    pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
+        let boxed = into_boxed(middleware);
+        for method in &self.methods {
+            self.router
+                .add_middleware(method.clone(), &self.path, boxed.clone());
+        }
+        self
+    }
+
+    /// Pre-boxed sibling of [`MultiMethodRouteBuilder::middleware`]
+    /// (used internally by the macro-layer `AnyRouteDefBuilder` so it
+    /// doesn't need to know about the `M: Middleware` generic).
+    pub fn middleware_boxed(mut self, middleware: BoxedMiddleware) -> Self {
+        for method in &self.methods {
+            self.router
+                .add_middleware(method.clone(), &self.path, middleware.clone());
+        }
+        self
+    }
+}
+
+impl From<MultiMethodRouteBuilder> for Router {
+    fn from(builder: MultiMethodRouteBuilder) -> Self {
         builder.router
     }
 }
@@ -1665,5 +1943,155 @@ mod tests {
         assert!(router.match_route(&Method::PATCH, "/r/edit").is_some());
         assert!(router.match_route(&Method::HEAD, "/r/probe").is_some());
         assert!(router.match_route(&Method::OPTIONS, "/r/meta").is_some());
+    }
+
+    // ---- any / methods fan-out coverage (#350c) -----------------------
+
+    /// `Router::any` registers the handler against every common HTTP
+    /// method (GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS).
+    /// Pins the seven-method fan-out — if a verb is missed, `match_route`
+    /// against it returns `None` and the request 404s.
+    #[test]
+    fn any_route_registers_all_seven_methods() {
+        let router: Router = Router::new().any("/x", h).into();
+        for m in [
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::HEAD,
+            Method::OPTIONS,
+        ] {
+            assert!(
+                router.match_route(&m, "/x").is_some(),
+                "any() must register {m}, but match_route returned None",
+            );
+        }
+    }
+
+    /// `Router::methods(&[…])` registers exactly the verbs in the list
+    /// and no others. Pins the partial-fan-out behavior.
+    #[test]
+    fn methods_registers_only_requested_verbs() {
+        let router: Router = Router::new()
+            .methods(&[Method::GET, Method::POST], "/y", h)
+            .into();
+        assert!(router.match_route(&Method::GET, "/y").is_some());
+        assert!(router.match_route(&Method::POST, "/y").is_some());
+        assert!(
+            router.match_route(&Method::PUT, "/y").is_none(),
+            "methods(&[GET, POST]) must NOT register PUT",
+        );
+        assert!(
+            router.match_route(&Method::DELETE, "/y").is_none(),
+            "methods(&[GET, POST]) must NOT register DELETE",
+        );
+    }
+
+    /// `Router::methods(&[])` returns Err (rather than registering
+    /// nothing silently).
+    #[test]
+    fn methods_with_empty_list_returns_err() {
+        let router = Router::new();
+        match router.try_methods(&[], "/z", h) {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("at least one HTTP method"),
+                    "error must explain the empty-list rejection; got {msg}",
+                );
+            }
+            Ok(_) => panic!("methods(&[], …) must fail"),
+        }
+    }
+
+    /// `Router::methods` with an unsupported method (e.g. CONNECT, TRACE)
+    /// returns Err naming the offender. Prevents silent acceptance of
+    /// a method we don't have a matchit registry for.
+    #[test]
+    fn methods_with_unsupported_verb_returns_err() {
+        let router = Router::new();
+        let bad = Method::from_bytes(b"CONNECT").expect("valid CONNECT");
+        match router.try_methods(&[Method::GET, bad], "/y", h) {
+            Err(e) => assert!(
+                e.to_string().contains("CONNECT"),
+                "error must name the unsupported verb",
+            ),
+            Ok(_) => panic!("methods with unsupported verb must fail"),
+        }
+    }
+
+    /// `.name(...)` on a MultiMethodRouteBuilder registers the name
+    /// once, and the path resolves correctly. The advisor flagged
+    /// this explicitly: "one name binding per `any` registration
+    /// (not seven)".
+    #[test]
+    fn any_route_name_registers_once_and_resolves() {
+        let _ = Router::new()
+            .any("/webhooks/inbound", h)
+            .name("webhooks.any.test");
+        let url = route("webhooks.any.test", &[]);
+        assert_eq!(url, Some("/webhooks/inbound".to_string()));
+    }
+
+    /// `.middleware(M)` on a MultiMethodRouteBuilder fans the same
+    /// middleware out across every `(method, path)` key. The advisor
+    /// flagged this explicitly: "middleware count grows; tests should
+    /// pin it." We count the resulting middleware-map entries by
+    /// querying per-method.
+    #[test]
+    fn any_route_middleware_fans_out_across_all_methods() {
+        use crate::middleware::{Middleware, Next};
+        use async_trait::async_trait;
+
+        #[derive(Clone)]
+        struct NoopMw;
+        #[async_trait]
+        impl Middleware for NoopMw {
+            async fn handle(&self, request: Request, next: Next) -> Response {
+                next(request).await
+            }
+        }
+
+        let router: Router = Router::new().any("/m", h).middleware(NoopMw).into();
+        for m in [
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::HEAD,
+            Method::OPTIONS,
+        ] {
+            assert_eq!(
+                router.get_route_middleware(&m, "/m").len(),
+                1,
+                "any().middleware(M) must register on ({m}, /m) — \
+                 fan-out missed this verb",
+            );
+        }
+    }
+
+    /// `RouteBuilder::any` and `RouteBuilder::methods` chain off a
+    /// prior route registration.
+    #[test]
+    fn route_builder_chains_any_and_methods() {
+        let router: Router = Router::new().get("/r", h).any("/any", h).into();
+        assert!(router.match_route(&Method::GET, "/r").is_some());
+        for m in [Method::GET, Method::POST, Method::PATCH, Method::DELETE] {
+            assert!(
+                router.match_route(&m, "/any").is_some(),
+                "any chain must register {m}",
+            );
+        }
+
+        let router: Router = Router::new()
+            .get("/r", h)
+            .methods(&[Method::PUT, Method::PATCH], "/m", h)
+            .into();
+        assert!(router.match_route(&Method::PUT, "/m").is_some());
+        assert!(router.match_route(&Method::PATCH, "/m").is_some());
+        assert!(router.match_route(&Method::GET, "/m").is_none());
     }
 }

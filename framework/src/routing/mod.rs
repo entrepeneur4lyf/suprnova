@@ -5,6 +5,7 @@ mod router;
 pub use group::{GroupBuilder, GroupRouter};
 pub use macros::{
     // Internal functions used by macros (hidden from docs)
+    __any_impl,
     __delete_impl,
     __fallback_impl,
     __get_impl,
@@ -14,7 +15,9 @@ pub use macros::{
     __post_impl,
     __put_impl,
     __ws_impl,
+    AnyRouteDefBuilder,
     FallbackDefBuilder,
+    GroupAnyRoute,
     GroupDef,
     GroupItem,
     GroupRoute,
@@ -25,6 +28,6 @@ pub use macros::{
     validate_route_path,
 };
 pub use router::{
-    BoxedHandler, RouteBuilder, Router, WsMatch, register_route_name, route, route_with_params,
-    try_register_route_name,
+    BoxedHandler, MultiMethodRouteBuilder, RouteBuilder, Router, WsMatch, register_route_name,
+    route, route_with_params, try_register_route_name,
 };

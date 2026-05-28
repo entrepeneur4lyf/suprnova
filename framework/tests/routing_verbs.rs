@@ -269,3 +269,122 @@ async fn macro_form_patch_head_options_register_and_dispatch() {
     assert_eq!(status.as_u16(), 200);
     assert_eq!(body, "patched-thing");
 }
+
+// `routes! {}` expands to a `pub fn register() -> Router` whose body
+// can't capture local environment (fn items have no closures over
+// outer state). The two tests below need to compare middleware
+// invocation counts against a shared `Vec`, so we use a process-wide
+// `OnceLock<Mutex<Vec<&str>>>` plus `#[serial]` to keep them from
+// stepping on each other.
+use serial_test::serial;
+use std::sync::OnceLock;
+
+fn any_macro_tracker() -> &'static std::sync::Mutex<Vec<&'static str>> {
+    static T: OnceLock<std::sync::Mutex<Vec<&'static str>>> = OnceLock::new();
+    T.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// `any!()` at the routes! top level registers the handler against
+/// every common HTTP method, fans middleware across all seven, and
+/// registers the name once. Drives the full chain via `handle_request`
+/// against GET, POST, PUT, PATCH, DELETE, OPTIONS and confirms the
+/// shared handler responds + the shared middleware ran for each.
+#[tokio::test]
+#[serial]
+async fn any_macro_dispatches_all_methods_and_fans_middleware() {
+    use suprnova::{any, routes};
+
+    any_macro_tracker().lock().expect("tracker lock").clear();
+
+    routes! {
+        any!("/webhook", |_req| async { text("any-response") })
+            .name("webhook.any.macro")
+            .middleware(TaggingMiddleware {
+                tag: "shared-auth",
+                tracker: Arc::new(std::sync::Mutex::new(Vec::new())),
+            })
+            .middleware(StaticTracker { tag: "any-counter" }),
+    }
+
+    let router = register();
+    let addr = spawn_server(router, 6).await;
+
+    for method in ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] {
+        let (status, _, body) = send_request(addr, method, "/webhook").await;
+        assert_eq!(status.as_u16(), 200, "any! must respond 200 for {method}",);
+        assert_eq!(body, "any-response");
+    }
+
+    let log = any_macro_tracker().lock().expect("tracker lock").clone();
+    assert_eq!(
+        log,
+        vec![
+            "any-counter",
+            "any-counter",
+            "any-counter",
+            "any-counter",
+            "any-counter",
+            "any-counter",
+        ],
+        "middleware must fan out across every method (6 hits, one per verb)",
+    );
+}
+
+/// `any!()` inside `group!{}` inherits the group prefix AND group
+/// middleware fans across every verb of the multi-method route.
+/// Exercises the `GroupItem::AnyRoute` arm in
+/// `GroupDef::register_with_inherited`.
+#[tokio::test]
+#[serial]
+async fn any_macro_inside_group_inherits_prefix_and_middleware() {
+    use hyper::Method;
+    use suprnova::{any, group, routes};
+
+    any_macro_tracker().lock().expect("tracker lock").clear();
+
+    routes! {
+        group!("/api", {
+            any!("/anything", |_req| async { text("g-any") }),
+        }).middleware(StaticTracker { tag: "group-auth" }),
+    }
+
+    let router = register();
+    for m in [Method::GET, Method::POST, Method::PATCH] {
+        assert!(
+            router.match_route(&m, "/api/anything").is_some(),
+            "any! inside group must register {m} at /api/anything",
+        );
+    }
+
+    let addr = spawn_server(router, 1).await;
+    let (status, _, body) = send_request(addr, "POST", "/api/anything").await;
+    assert_eq!(status.as_u16(), 200);
+    assert_eq!(body, "g-any");
+    assert_eq!(
+        *any_macro_tracker().lock().expect("tracker lock"),
+        vec!["group-auth"],
+        "group middleware must fire on the any-route POST",
+    );
+}
+
+/// `routes!{}`-friendly middleware: captures its tag and the global
+/// `any_macro_tracker()` static, no per-instance state. The earlier
+/// `TaggingMiddleware` carries an `Arc<Mutex<...>>` field which means
+/// a fresh instance is needed per test — `StaticTracker` shares one
+/// process-global Vec so the routes! body (a `fn` item) can construct
+/// it inline.
+#[derive(Clone)]
+struct StaticTracker {
+    tag: &'static str,
+}
+
+#[async_trait]
+impl Middleware for StaticTracker {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        any_macro_tracker()
+            .lock()
+            .expect("tracker lock")
+            .push(self.tag);
+        next(request).await
+    }
+}

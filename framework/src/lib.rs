@@ -174,6 +174,7 @@ pub use resources::{
 };
 pub use routing::{
     // Internal functions used by macros (hidden from docs)
+    __any_impl,
     __delete_impl,
     __fallback_impl,
     __get_impl,
