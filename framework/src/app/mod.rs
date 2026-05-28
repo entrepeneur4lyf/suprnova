@@ -187,6 +187,70 @@ impl Default for Application<NoMigrator> {
     }
 }
 
+/// Build a [`Schedule`] by running the registered `schedule_fn` (if any) against
+/// a fresh schedule.
+///
+/// Extracted as a free function (not a method on `Application<M>`) so unit tests
+/// can drive the schedule registration flow without instantiating an
+/// `Application<NoMigrator>` and without the migrator type bleeding into test
+/// expectations.
+pub(crate) fn build_schedule(schedule_fn: Option<ScheduleFn>) -> Schedule {
+    let mut schedule = Schedule::new();
+    if let Some(f) = schedule_fn {
+        f(&mut schedule);
+    }
+    schedule
+}
+
+/// Render the `schedule:list` output for a built [`Schedule`].
+///
+/// Returns the exact string the handler would print to stdout, so callers can
+/// either `print!("{}", …)` from a CLI handler or assert on it from a test
+/// without capturing stdout. Trailing newline is included so the caller does
+/// not have to worry about whether the schedule is empty.
+pub(crate) fn format_schedule_listing(schedule: &Schedule) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    if schedule.is_empty() {
+        out.push_str("No scheduled tasks registered.\n");
+        out.push_str(
+            "Define tasks in src/schedule.rs and wire it with \
+             `Application::schedule(schedule::register)`.\n",
+        );
+        return out;
+    }
+    out.push_str("Registered scheduled tasks:\n");
+    for entry in schedule.tasks() {
+        let expr = entry.expression.expression();
+        let _ = match &entry.description {
+            Some(desc) => writeln!(out, "  {} [{expr}] — {desc}", entry.name),
+            None => writeln!(out, "  {} [{expr}]", entry.name),
+        };
+    }
+    out
+}
+
+/// Evaluate every currently-due task in the schedule and collect the results.
+///
+/// Returns `(results, any_failed)` so the CLI handler can drive the success/
+/// failure exit semantics while tests can assert on the structured outcome
+/// without intercepting `std::process::exit`.
+pub(crate) async fn evaluate_due_once(
+    schedule: &Schedule,
+) -> (
+    Vec<(String, Result<(), crate::error::FrameworkError>)>,
+    bool,
+) {
+    let results: Vec<(String, Result<(), crate::error::FrameworkError>)> = schedule
+        .run_due_tasks()
+        .await
+        .into_iter()
+        .map(|(name, result)| (name.to_owned(), result))
+        .collect();
+    let any_failed = results.iter().any(|(_, r)| r.is_err());
+    (results, any_failed)
+}
+
 impl<M> Application<M>
 where
     M: MigratorTrait,
@@ -560,16 +624,6 @@ where
         println!("Database refreshed successfully!");
     }
 
-    /// Build the application's [`Schedule`] by running the registered
-    /// `schedule_fn` (if any) against a fresh schedule.
-    fn build_schedule(schedule_fn: Option<ScheduleFn>) -> Schedule {
-        let mut schedule = Schedule::new();
-        if let Some(f) = schedule_fn {
-            f(&mut schedule);
-        }
-        schedule
-    }
-
     /// `schedule:work`: run the scheduler as a long-lived daemon.
     ///
     /// The first tick is aligned to the next minute boundary, then due tasks
@@ -587,7 +641,7 @@ where
         if let Some(bootstrap_fn) = bootstrap_fn {
             bootstrap_fn().await;
         }
-        let schedule = Self::build_schedule(schedule_fn);
+        let schedule = build_schedule(schedule_fn);
 
         println!("==============================================");
         println!("  suprnova Scheduler Daemon");
@@ -645,48 +699,29 @@ where
         if let Some(bootstrap_fn) = bootstrap_fn {
             bootstrap_fn().await;
         }
-        let schedule = Self::build_schedule(schedule_fn);
+        let schedule = build_schedule(schedule_fn);
 
         println!("Running due scheduled tasks...");
-        let results = schedule.run_due_tasks().await;
+        let (results, any_failed) = evaluate_due_once(&schedule).await;
         if results.is_empty() {
             println!("No tasks were due.");
             return;
         }
-        let mut failed = false;
-        for (name, result) in results {
+        for (name, result) in &results {
             match result {
                 Ok(()) => println!("  ✓ {name}"),
-                Err(e) => {
-                    eprintln!("  ✗ {name}: {e}");
-                    failed = true;
-                }
+                Err(e) => eprintln!("  ✗ {name}: {e}"),
             }
         }
-        if failed {
+        if any_failed {
             std::process::exit(1);
         }
     }
 
     /// `schedule:list`: print every registered task and its cron expression.
     async fn list_scheduled_tasks(schedule_fn: Option<ScheduleFn>) {
-        let schedule = Self::build_schedule(schedule_fn);
-        if schedule.is_empty() {
-            println!("No scheduled tasks registered.");
-            println!(
-                "Define tasks in src/schedule.rs and wire it with \
-                 `Application::schedule(schedule::register)`."
-            );
-            return;
-        }
-        println!("Registered scheduled tasks:");
-        for entry in schedule.tasks() {
-            let expr = entry.expression.expression();
-            match &entry.description {
-                Some(desc) => println!("  {} [{expr}] — {desc}", entry.name),
-                None => println!("  {} [{expr}]", entry.name),
-            }
-        }
+        let schedule = build_schedule(schedule_fn);
+        print!("{}", format_schedule_listing(&schedule));
     }
 
     async fn run_workflow_worker_internal(bootstrap_fn: Option<BootstrapFn>) {
@@ -868,5 +903,188 @@ where
             eprintln!("suprnova: maintenance (cache driver) bootstrap failed: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! End-to-end coverage for the `schedule:list` / `schedule:run` /
+    //! `schedule:work` integration points. The free helpers
+    //! [`build_schedule`], [`format_schedule_listing`], and
+    //! [`evaluate_due_once`] are the exact code the three CLI subcommand
+    //! handlers delegate to, so exercising them here proves the
+    //! `Application::schedule(f)` registration flow reaches the user's
+    //! `schedule_fn` and produces the same artefacts the binary would emit.
+    use super::*;
+    use crate::error::FrameworkError;
+    use crate::schedule::{Schedule, Task, TaskResult};
+    use async_trait::async_trait;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn build_schedule_with_none_returns_empty_schedule() {
+        let schedule = build_schedule(None);
+        assert!(
+            schedule.is_empty(),
+            "no schedule_fn should produce an empty Schedule",
+        );
+    }
+
+    #[test]
+    fn build_schedule_runs_user_fn_against_fresh_schedule() {
+        let f: ScheduleFn = Box::new(|sched: &mut Schedule| {
+            let b = sched.call(|| async { Ok(()) }).every_minute().name("a");
+            sched.add(b);
+            let b = sched.call(|| async { Ok(()) }).hourly().name("b");
+            sched.add(b);
+        });
+        let schedule = build_schedule(Some(f));
+        assert_eq!(schedule.len(), 2);
+        assert!(schedule.find("a").is_some());
+        assert!(schedule.find("b").is_some());
+    }
+
+    #[test]
+    fn format_schedule_listing_empty_includes_registration_hint() {
+        let schedule = build_schedule(None);
+        let out = format_schedule_listing(&schedule);
+        assert!(
+            out.contains("No scheduled tasks registered."),
+            "empty listing should announce no tasks: {out:?}",
+        );
+        assert!(
+            out.contains("Application::schedule(schedule::register)"),
+            "empty listing should suggest the registration call: {out:?}",
+        );
+    }
+
+    #[test]
+    fn format_schedule_listing_renders_name_expression_and_description() {
+        let f: ScheduleFn = Box::new(|sched: &mut Schedule| {
+            let b = sched
+                .call(|| async { Ok(()) })
+                .every_minute()
+                .name("nightly-cleanup")
+                .description("Remove stale upload temp files");
+            sched.add(b);
+            let b = sched
+                .call(|| async { Ok(()) })
+                .hourly()
+                .name("plain-hourly");
+            sched.add(b);
+        });
+        let schedule = build_schedule(Some(f));
+        let out = format_schedule_listing(&schedule);
+        assert!(out.starts_with("Registered scheduled tasks:\n"));
+        assert!(out.contains("nightly-cleanup"));
+        assert!(out.contains("[* * * * *]"));
+        assert!(out.contains("— Remove stale upload temp files"));
+        assert!(out.contains("plain-hourly"));
+        assert!(out.contains("[0 * * * *]"));
+    }
+
+    /// `evaluate_due_once` is what `schedule:run` delegates to. The handler
+    /// uses the returned `any_failed` flag to choose its process exit code; a
+    /// test that asserts the flag covers the success-path contract end-to-end
+    /// without spawning a child process.
+    #[tokio::test]
+    async fn evaluate_due_once_executes_due_tasks_and_marks_success() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = Arc::clone(&calls);
+        let f: ScheduleFn = Box::new(move |sched: &mut Schedule| {
+            let counter = Arc::clone(&calls_clone);
+            let b = sched
+                .call(move || {
+                    let counter = Arc::clone(&counter);
+                    async move {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    }
+                })
+                .every_minute()
+                .name("ok-task");
+            sched.add(b);
+        });
+        let schedule = build_schedule(Some(f));
+        let (results, any_failed) = evaluate_due_once(&schedule).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "ok-task");
+        assert!(results[0].1.is_ok());
+        assert!(
+            !any_failed,
+            "no failed tasks should report any_failed=false"
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluate_due_once_reports_failure_via_any_failed_flag() {
+        let f: ScheduleFn = Box::new(|sched: &mut Schedule| {
+            let b = sched
+                .call(|| async { Err(FrameworkError::internal("boom")) })
+                .every_minute()
+                .name("boom-task");
+            sched.add(b);
+            let b = sched
+                .call(|| async { Ok(()) })
+                .every_minute()
+                .name("ok-task");
+            sched.add(b);
+        });
+        let schedule = build_schedule(Some(f));
+        let (results, any_failed) = evaluate_due_once(&schedule).await;
+        assert_eq!(results.len(), 2);
+        assert!(any_failed, "a failing task must flip any_failed");
+        let by_name: std::collections::BTreeMap<_, _> = results
+            .iter()
+            .map(|(n, r)| (n.as_str(), r.is_err()))
+            .collect();
+        assert_eq!(by_name.get("boom-task"), Some(&true));
+        assert_eq!(by_name.get("ok-task"), Some(&false));
+    }
+
+    #[tokio::test]
+    async fn evaluate_due_once_with_empty_schedule_returns_empty_results() {
+        let schedule = build_schedule(None);
+        let (results, any_failed) = evaluate_due_once(&schedule).await;
+        assert!(results.is_empty());
+        assert!(!any_failed);
+    }
+
+    /// Trait-based tasks must reach the same registration / listing /
+    /// evaluation pipeline as closure-based ones — proves
+    /// `Schedule::task(T)` and `Schedule::call(|| ...)` both round-trip
+    /// through the CLI helpers.
+    #[tokio::test]
+    async fn application_pipeline_handles_trait_based_tasks() {
+        struct CleanupTask {
+            ran: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl Task for CleanupTask {
+            async fn handle(&self) -> TaskResult {
+                self.ran.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let ran_clone = Arc::clone(&ran);
+        let f: ScheduleFn = Box::new(move |sched: &mut Schedule| {
+            let task = CleanupTask { ran: ran_clone };
+            let b = sched.task(task).every_minute().name("cleanup");
+            sched.add(b);
+        });
+        let schedule = build_schedule(Some(f));
+        let listing = format_schedule_listing(&schedule);
+        assert!(listing.contains("cleanup"));
+        assert!(listing.contains("[* * * * *]"));
+
+        let (results, any_failed) = evaluate_due_once(&schedule).await;
+        assert_eq!(results.len(), 1);
+        assert!(!any_failed);
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
     }
 }
