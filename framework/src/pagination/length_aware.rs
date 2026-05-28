@@ -168,16 +168,7 @@ impl<T> LengthAwarePaginator<T> {
     /// so a custom name with reserved characters can't corrupt the URL.
     pub fn url_for_page(&self, page: u64) -> String {
         let key = self.page_name.as_deref().unwrap_or("page");
-        let pair = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair(key, &page.to_string())
-            .finish();
-        match &self.path {
-            Some(base) => {
-                let sep = if base.contains('?') { '&' } else { '?' };
-                format!("{base}{sep}{pair}")
-            }
-            None => format!("?{pair}"),
-        }
+        crate::pagination::build_query_url(self.path.as_deref(), key, &page.to_string())
     }
 
     /// `true` when there is a next page to fetch.

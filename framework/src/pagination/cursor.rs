@@ -84,6 +84,16 @@ pub struct CursorPaginator<T> {
     /// of `next_cursor` / `prev_cursor` use this as the path prefix.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// Query-string parameter name the JSON:API link builder uses when
+    /// constructing the `next`/`prev` cursor URLs. `None` resolves to
+    /// `"cursor"` — the key [`Builder::cursor_paginate`] reads. Not
+    /// serialized; parallels [`LengthAwarePaginator::page_name`]
+    /// (clients receive the cursor values and rebuild URLs their side).
+    ///
+    /// [`Builder::cursor_paginate`]: crate::eloquent::Builder::cursor_paginate
+    /// [`LengthAwarePaginator::page_name`]: crate::pagination::LengthAwarePaginator::page_name
+    #[serde(skip)]
+    pub cursor_name: Option<String>,
 }
 
 impl<T> CursorPaginator<T> {
@@ -101,6 +111,7 @@ impl<T> CursorPaginator<T> {
             next_cursor,
             prev_cursor,
             path: None,
+            cursor_name: None,
         }
     }
 
@@ -108,6 +119,14 @@ impl<T> CursorPaginator<T> {
     /// builder-style chaining.
     pub fn with_path(mut self, path: impl Into<String>) -> Self {
         self.path = Some(path.into());
+        self
+    }
+
+    /// Override the query-string parameter name the JSON:API link builder
+    /// uses for the `next`/`prev` cursor URLs. Defaults to `"cursor"`.
+    /// Returns `self` for builder-style chaining.
+    pub fn with_cursor_name(mut self, name: impl Into<String>) -> Self {
+        self.cursor_name = Some(name.into());
         self
     }
 }

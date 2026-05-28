@@ -207,6 +207,25 @@ impl Pagination {
     }
 }
 
+/// Append a single `key=value` query pair to an optional base path,
+/// percent-encoding the pair. Shared by `LengthAwarePaginator::url_for_page`
+/// (numeric `page=N`) and the cursor paginator's JSON:API link builder
+/// (`cursor=<opaque>`), so both pick the separator the same way: `&` when
+/// the base already carries a query string, `?` otherwise, and a bare
+/// `?key=value` when there is no base path.
+pub(crate) fn build_query_url(path: Option<&str>, key: &str, value: &str) -> String {
+    let pair = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair(key, value)
+        .finish();
+    match path {
+        Some(base) => {
+            let sep = if base.contains('?') { '&' } else { '?' };
+            format!("{base}{sep}{pair}")
+        }
+        None => format!("?{pair}"),
+    }
+}
+
 // ── Paginated<T> trait ────────────────────────────────────────────────────
 
 /// Common surface consumed by `Resource::paginated` for building
@@ -269,7 +288,98 @@ impl<T> Paginated<T> for CursorPaginator<T> {
     }
 
     fn links_iter(&self) -> Box<dyn Iterator<Item = (&'static str, String)> + '_> {
-        // Cursor paginators don't carry a base URL; return empty links.
-        Box::new(std::iter::empty())
+        // Emit `next`/`prev` links from the stored cursor values, keyed by
+        // `cursor_name` (defaulting to "cursor" — the query key
+        // `Builder::cursor_paginate` reads). Mirrors the length-aware
+        // paginator: links are produced whenever the corresponding cursor
+        // exists, with or without a base path (no path → relative
+        // `?cursor=<opaque>`).
+        let key = self.cursor_name.as_deref().unwrap_or("cursor");
+        let mut links: Vec<(&'static str, String)> = Vec::new();
+        if let Some(next) = &self.next_cursor {
+            links.push(("next", build_query_url(self.path.as_deref(), key, next)));
+        }
+        if let Some(prev) = &self.prev_cursor {
+            links.push(("prev", build_query_url(self.path.as_deref(), key, prev)));
+        }
+        Box::new(links.into_iter())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn cursor_with(next: Option<&str>, prev: Option<&str>) -> CursorPaginator<i32> {
+        CursorPaginator::new(
+            vec![1, 2],
+            10,
+            next.map(|s| s.to_string()),
+            prev.map(|s| s.to_string()),
+        )
+    }
+
+    fn links_of<T>(p: &impl Paginated<T>) -> HashMap<&'static str, String> {
+        p.links_iter().collect()
+    }
+
+    #[test]
+    fn cursor_links_emit_next_and_prev_with_path() {
+        let p = cursor_with(Some("NEXTCUR"), Some("PREVCUR")).with_path("/api/items");
+        let links = links_of(&p);
+        assert_eq!(
+            links.get("next").map(String::as_str),
+            Some("/api/items?cursor=NEXTCUR")
+        );
+        assert_eq!(
+            links.get("prev").map(String::as_str),
+            Some("/api/items?cursor=PREVCUR")
+        );
+    }
+
+    #[test]
+    fn cursor_links_omit_absent_cursors() {
+        // First page: prev_cursor is None → only a `next` link is emitted.
+        let p = cursor_with(Some("NEXTCUR"), None).with_path("/api/items");
+        let links = links_of(&p);
+        assert!(links.contains_key("next"));
+        assert!(!links.contains_key("prev"));
+    }
+
+    #[test]
+    fn cursor_links_use_custom_cursor_name() {
+        let p = cursor_with(Some("NEXTCUR"), None)
+            .with_path("/api/items")
+            .with_cursor_name("after");
+        let links = links_of(&p);
+        assert_eq!(
+            links.get("next").map(String::as_str),
+            Some("/api/items?after=NEXTCUR")
+        );
+    }
+
+    #[test]
+    fn cursor_links_append_to_existing_query_string() {
+        // A base that already carries a query string must get `&cursor=`,
+        // never a malformed second `?`.
+        let p = cursor_with(Some("NEXTCUR"), None).with_path("/api/items?sort=name");
+        let links = links_of(&p);
+        assert_eq!(
+            links.get("next").map(String::as_str),
+            Some("/api/items?sort=name&cursor=NEXTCUR")
+        );
+    }
+
+    #[test]
+    fn cursor_links_without_path_are_relative() {
+        // Parity with LengthAwarePaginator, which emits `?page=N` when no
+        // base path is set.
+        let p = cursor_with(Some("NEXTCUR"), None);
+        let links = links_of(&p);
+        assert_eq!(
+            links.get("next").map(String::as_str),
+            Some("?cursor=NEXTCUR")
+        );
     }
 }
