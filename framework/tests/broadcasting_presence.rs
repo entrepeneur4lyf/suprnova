@@ -9,7 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use suprnova::FrameworkError;
 use suprnova::broadcasting::{
-    BroadcastingWsHandler, Channel, ChannelRegistry, InMemoryBroadcastHub, PresenceChannel,
+    BroadcastingWsHandler, Channel, ChannelParams, ChannelRegistry, InMemoryBroadcastHub,
+    PresenceChannel,
 };
 use suprnova::http::Request;
 use suprnova::routing::Router;
@@ -35,7 +36,11 @@ impl Channel for PresenceLobby {
 
 #[async_trait]
 impl PresenceChannel for PresenceLobby {
-    async fn member_info(&self, _req: &Request) -> Result<Value, FrameworkError> {
+    async fn member_info(
+        &self,
+        _req: &Request,
+        _params: &ChannelParams,
+    ) -> Result<Value, FrameworkError> {
         // Use nanos as a cheap unique-ish user id within a test run.
         use std::time::{SystemTime, UNIX_EPOCH};
         let uid = SystemTime::now()

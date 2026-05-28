@@ -8,7 +8,9 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use suprnova::FrameworkError;
-use suprnova::broadcasting::{Channel, ChannelRegistry, PresenceChannel, PrivateChannel};
+use suprnova::broadcasting::{
+    Channel, ChannelParams, ChannelRegistry, PresenceChannel, PrivateChannel,
+};
 
 // ---------------------------------------------------------------------------
 // Concrete channel impls used across tests
@@ -33,7 +35,12 @@ impl Channel for PrivateChat {
     fn name(&self) -> &'static str {
         "chat.{room_id}"
     }
-    async fn authorize(&self, _req: &suprnova::http::Request, _data: &Value) -> bool {
+    async fn authorize(
+        &self,
+        _req: &suprnova::http::Request,
+        _params: &ChannelParams,
+        _data: &Value,
+    ) -> bool {
         true
     }
 }
@@ -50,7 +57,11 @@ impl Channel for PresenceLobby {
 
 #[async_trait]
 impl PresenceChannel for PresenceLobby {
-    async fn member_info(&self, _req: &suprnova::http::Request) -> Result<Value, FrameworkError> {
+    async fn member_info(
+        &self,
+        _req: &suprnova::http::Request,
+        _params: &ChannelParams,
+    ) -> Result<Value, FrameworkError> {
         Ok(json!({ "user_id": 42 }))
     }
 }
@@ -68,9 +79,14 @@ fn registry_resolves_registered_channels() {
 
     assert_eq!(registry.len(), 3);
     assert!(registry.resolve("notifications").is_some());
-    assert!(registry.resolve("chat.{room_id}").is_some());
     assert!(registry.resolve("presence.lobby").is_some());
     assert!(registry.resolve("nonexistent").is_none());
+
+    // A concrete subscription resolves against the `chat.{room_id}` pattern
+    // and binds the captured segment.
+    let (chan, params) = registry.resolve("chat.7").expect("pattern resolves");
+    assert_eq!(chan.name(), "chat.{room_id}");
+    assert_eq!(params.get("room_id"), Some("7"));
 }
 
 #[test]

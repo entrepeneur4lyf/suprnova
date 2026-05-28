@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
 use suprnova::broadcasting::{
-    BroadcastEnvelope, BroadcastHub, BroadcastingWsHandler, Channel, ChannelRegistry,
-    InMemoryBroadcastHub,
+    BroadcastEnvelope, BroadcastHub, BroadcastingWsHandler, Channel, ChannelParams,
+    ChannelRegistry, InMemoryBroadcastHub,
 };
 use suprnova::http::Request;
 use suprnova::middleware::MiddlewareRegistry;
@@ -25,7 +25,13 @@ impl Channel for PublicChat {
     }
 
     /// Allow client-initiated publishes for standard chat events only.
-    async fn authorize_publish(&self, _req: &Request, event: &str, _data: &Value) -> bool {
+    async fn authorize_publish(
+        &self,
+        _req: &Request,
+        _params: &ChannelParams,
+        event: &str,
+        _data: &Value,
+    ) -> bool {
         event == "MessagePosted"
     }
 }
@@ -37,7 +43,7 @@ impl Channel for PrivateChat {
     fn name(&self) -> &'static str {
         "chat.private"
     }
-    async fn authorize(&self, _req: &Request, data: &Value) -> bool {
+    async fn authorize(&self, _req: &Request, _params: &ChannelParams, data: &Value) -> bool {
         // Accept only if data carries `{"token":"valid"}`
         data["token"] == "valid"
     }
@@ -56,6 +62,21 @@ impl Channel for NoPublishChat {
     // No authorize_publish override → default deny.
 }
 
+/// A parameterized channel `room.{id}` whose `authorize` reads the captured
+/// `{id}` and admits only room 42 — proving the handler resolves the pattern
+/// and threads the params to the hook over the live WS path.
+struct RoomChannel;
+
+#[async_trait]
+impl Channel for RoomChannel {
+    fn name(&self) -> &'static str {
+        "room.{id}"
+    }
+    async fn authorize(&self, _req: &Request, params: &ChannelParams, _data: &Value) -> bool {
+        params.get("id") == Some("42")
+    }
+}
+
 async fn spawn_broadcasting_server() -> (u16, Arc<InMemoryBroadcastHub>) {
     let hub: Arc<InMemoryBroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
 
@@ -63,6 +84,7 @@ async fn spawn_broadcasting_server() -> (u16, Arc<InMemoryBroadcastHub>) {
     registry.register(PublicChat);
     registry.register(PrivateChat);
     registry.register(NoPublishChat);
+    registry.register(RoomChannel);
     let registry = Arc::new(registry);
 
     let handler = BroadcastingWsHandler::new(hub.clone(), registry.clone());
@@ -147,6 +169,44 @@ async fn subscribe_and_receive_event_round_trip() {
     assert_eq!(frame["channel"], "chat.public");
     assert_eq!(frame["event"], "MessagePosted");
     assert_eq!(frame["data"]["text"], "hello");
+
+    ws.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn parameterized_channel_threads_params_to_authorize() {
+    let (port, hub) = spawn_broadcasting_server().await;
+    let url = format!("ws://127.0.0.1:{port}/ws/broadcast");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
+
+    // room.42 → the pattern `room.{id}` matches, authorize sees id=="42" → allowed.
+    let sub = serde_json::to_string(&json!({ "action": "subscribe", "channel": "room.42" }))
+        .unwrap();
+    ws.send(Message::text(sub)).await.unwrap();
+    let frame = read_server_frame(&mut ws).await;
+    assert_eq!(frame["action"], "subscribed");
+    assert_eq!(frame["channel"], "room.42");
+
+    // A publish to the concrete room name reaches this subscriber.
+    hub.publish(BroadcastEnvelope {
+        channel: "room.42".into(),
+        event: "Ping".into(),
+        data: json!({ "n": 1 }),
+    })
+    .await;
+    let frame = read_server_frame(&mut ws).await;
+    assert_eq!(frame["action"], "event");
+    assert_eq!(frame["channel"], "room.42");
+
+    // room.99 → same pattern, authorize sees id=="99" → denied.
+    let sub = serde_json::to_string(&json!({ "action": "subscribe", "channel": "room.99" }))
+        .unwrap();
+    ws.send(Message::text(sub)).await.unwrap();
+    let frame = read_server_frame(&mut ws).await;
+    assert_eq!(frame["action"], "error");
+    assert_eq!(frame["channel"], "room.99");
 
     ws.close(None).await.unwrap();
 }

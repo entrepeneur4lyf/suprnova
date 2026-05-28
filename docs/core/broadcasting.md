@@ -138,7 +138,7 @@ Private channels run an async `authorize` gate when a client subscribes. Return 
 ```rust
 use async_trait::async_trait;
 use serde_json::Value;
-use suprnova::broadcasting::{Channel, PrivateChannel};
+use suprnova::broadcasting::{Channel, ChannelParams, PrivateChannel};
 use suprnova::http::Request;
 
 pub struct PrivateChat;
@@ -147,7 +147,7 @@ pub struct PrivateChat;
 impl Channel for PrivateChat {
     fn name(&self) -> &'static str { "chat.private" }
 
-    async fn authorize(&self, _req: &Request, data: &Value) -> bool {
+    async fn authorize(&self, _req: &Request, _params: &ChannelParams, data: &Value) -> bool {
         data["token"].as_str().map(|t| t == "valid").unwrap_or(false)
     }
 }
@@ -155,7 +155,37 @@ impl Channel for PrivateChat {
 impl PrivateChannel for PrivateChat {}
 ```
 
-The `data` value is whatever the client sent in the subscribe frame's `"data"` field — a bearer token, a signed subscription ticket, or any application-defined payload. The `Request` is the original HTTP upgrade request, so you can also read headers or cookies from it.
+The `data` value is whatever the client sent in the subscribe frame's `"data"` field — a bearer token, a signed subscription ticket, or any application-defined payload. The `Request` is the original HTTP upgrade request, so you can also read headers or cookies from it. `params` carries any values captured from a parameterized channel name (see below) and is empty for fixed-name channels.
+
+### Parameterized Channels
+
+A channel `name()` may contain `{param}` segments. One registered channel then serves every concrete subscription that matches the pattern, and the captured values arrive in `authorize` (and the other hooks) as a `ChannelParams` map — the same model as Laravel's `Broadcast::channel('orders.{id}', …)`:
+
+```rust
+use async_trait::async_trait;
+use serde_json::Value;
+use suprnova::broadcasting::{Channel, ChannelParams, PrivateChannel};
+use suprnova::http::Request;
+
+pub struct OrderChannel;
+
+#[async_trait]
+impl Channel for OrderChannel {
+    fn name(&self) -> &'static str { "orders.{id}" }
+
+    async fn authorize(&self, _req: &Request, params: &ChannelParams, _data: &Value) -> bool {
+        let order_id = params.get("id").unwrap_or_default();
+        // Gate on the captured id — e.g. does the session user own this order?
+        !order_id.is_empty()
+    }
+}
+impl PrivateChannel for OrderChannel {}
+
+// One registration serves orders.42, orders.99, …
+registry.register(OrderChannel);
+```
+
+Each `{param}` binds exactly one dot-segment: `orders.{id}` matches `orders.42` but not `orders` or `orders.42.line`. Resolution prefers an exact fixed-name registration (`orders.featured` beats `orders.{id}` for that name), then the most specific pattern (most literal segments); register non-overlapping patterns to keep matches unambiguous.
 
 ### Presence Channels
 
@@ -166,7 +196,7 @@ Implement both `Channel::presence_info` and `PresenceChannel` together — `pres
 ```rust
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use suprnova::broadcasting::{Channel, PresenceChannel};
+use suprnova::broadcasting::{Channel, ChannelParams, PresenceChannel};
 use suprnova::http::Request;
 use suprnova::FrameworkError;
 
@@ -183,7 +213,7 @@ impl Channel for PresenceLobby {
 
 #[async_trait]
 impl PresenceChannel for PresenceLobby {
-    async fn member_info(&self, req: &Request) -> Result<Value, FrameworkError> {
+    async fn member_info(&self, req: &Request, _params: &ChannelParams) -> Result<Value, FrameworkError> {
         // Return whatever member data your client needs — typically
         // a user ID so clients can identify who is present.
         Ok(json!({ "user_id": 42, "display_name": "Alice" }))

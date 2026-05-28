@@ -157,8 +157,8 @@ impl WebSocketHandler for BroadcastingWsHandler {
                                 false
                             } else {
                                 match self.registry.resolve(&channel) {
-                                    Some(ch) => {
-                                        ch.authorize_publish(&req, &event, &data).await
+                                    Some((ch, params)) => {
+                                        ch.authorize_publish(&req, &params, &event, &data).await
                                     }
                                     None => false,
                                 }
@@ -232,8 +232,9 @@ async fn handle_subscribe(
     outbound_tx: &tokio::sync::mpsc::Sender<String>,
     socket: &mut WsSocket,
 ) -> Result<(), FrameworkError> {
-    // Resolve the channel from the registry.
-    let Some(ch) = registry.resolve(channel) else {
+    // Resolve the channel from the registry, capturing any params bound from a
+    // parameterized name (e.g. `{id}` for `orders.{id}` subscribed as `orders.42`).
+    let Some((ch, params)) = registry.resolve(channel) else {
         let err = ServerFrame::Error {
             channel: Some(channel.to_string()),
             reason: "no such channel".into(),
@@ -245,7 +246,7 @@ async fn handle_subscribe(
     };
 
     // Authorize the subscription.
-    if !ch.authorize(req, data).await {
+    if !ch.authorize(req, &params, data).await {
         let err = ServerFrame::Error {
             channel: Some(channel.to_string()),
             reason: "unauthorized".into(),
@@ -261,7 +262,7 @@ async fn handle_subscribe(
     let presence_bootstrap: Option<(Vec<Value>, String, Value)> =
         if let Some(pc) = ch.presence_info() {
             let existing = hub.list_members(channel).await;
-            let info = pc.member_info(req).await?;
+            let info = pc.member_info(req, &params).await?;
             let member_id = Uuid::new_v4().to_string();
             Some((existing, member_id, info))
         } else {
