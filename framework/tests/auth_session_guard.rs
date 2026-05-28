@@ -519,3 +519,45 @@ fn facade_login_then_logout_fires_events_and_clears_request_user() {
         assert_dispatched::<Logout>(|e| e.guard == "web" && e.user_id.as_deref() == Some("7"));
     });
 }
+
+// Logout clears BOTH 2FA pending slots (user_id + remember preference) — they
+// are auth state too, and a tear-down that drops one but leaves the other
+// strands the auth state machine for the next request. The pending_remember
+// slot was added with the 2FA challenge integration; without an explicit
+// clear in `clear_authentication` it would survive logout and bleed into a
+// next user's login on the same browser.
+#[test]
+fn facade_logout_clears_both_two_factor_pending_slots() {
+    Lazy::force(&SETUP);
+    RT.block_on(async {
+        let _serial = TEST_LOCK.lock().await;
+        let _fake = EventFacade::fake();
+
+        run_in_request(async {
+            Auth::login(the_user(), false).await.unwrap();
+            // Install both pending slots — typically `start_challenge`
+            // would do this, but we set them directly to assert the
+            // tear-down clears each one independently.
+            suprnova::session::set_two_factor_pending("7");
+            suprnova::session::set_two_factor_pending_remember(true);
+            assert_eq!(
+                suprnova::session::two_factor_pending_user_id(),
+                Some("7".to_string())
+            );
+            assert!(suprnova::session::two_factor_pending_remember());
+
+            Auth::logout().await.unwrap();
+
+            assert_eq!(
+                suprnova::session::two_factor_pending_user_id(),
+                None,
+                "logout must clear pending user-id slot"
+            );
+            assert!(
+                !suprnova::session::two_factor_pending_remember(),
+                "logout must clear pending remember-me slot"
+            );
+        })
+        .await;
+    });
+}

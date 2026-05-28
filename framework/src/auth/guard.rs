@@ -245,33 +245,61 @@ impl Auth {
 
     /// Tear down all authentication state for the current request: revoke the
     /// user's remember-me tokens, clear the session user, clear the
-    /// request-scoped current user, and rotate the CSRF token.
+    /// request-scoped current user, clear any in-flight 2FA pending state,
+    /// and rotate the CSRF token.
     ///
     /// The event-free core shared by [`logout`](Self::logout) and a guard's
     /// `logout`; the caller dispatches the [`Logout`](crate::auth::events::Logout)
     /// event so it is emitted exactly once, attributed to the right guard.
+    ///
+    /// # Fail-closed ordering
+    ///
+    /// The session-state teardown runs **before** the remember-me revoke.
+    /// If the revoke errors (DB transient outage, lock timeout), this
+    /// method still returns `Err` — but the session is already in a
+    /// logged-out state, so a stale auth slot cannot survive the failed
+    /// logout. Reversing the order would leave a user fully authenticated
+    /// when the revoke failed (the original implementation's gap).
     pub(crate) async fn clear_authentication() -> Result<(), crate::error::FrameworkError> {
-        // Revoke remember-me first, while the authenticated id is still
-        // resolvable. `revoke_remember_tokens` no-ops cleanly when there is no
-        // logged-in user.
-        Self::revoke_remember_tokens().await?;
+        // Capture the authenticated id BEFORE clearing — the revoke
+        // below needs it, and `Auth::id()` is about to become `None`.
+        let saved_id = Self::id();
 
-        // Clear the session user *and* the request-scoped cache. Clearing the
-        // request state is essential: `Auth::id` consults it ahead of the
-        // session, so a user resolved this request would otherwise survive
-        // logout and `Auth::id()` would keep reporting it.
+        // STEP 1: Clear session auth + request-scoped cache + 2FA
+        // pending state, and rotate the CSRF token. Clearing
+        // request_state is essential: `Auth::id` consults it ahead of
+        // the session, so a user resolved this request would otherwise
+        // survive logout and `Auth::id()` would keep reporting it.
+        // Both 2FA pending slots (user-id + remember preference) are
+        // authentication state — a tear-down that drops one but leaves
+        // the other strands the state machine.
         clear_auth_user();
         request_state::clear_current_user();
-        // Also clear any 2FA challenge that was mid-flight when logout
-        // landed — pending and authed are both authentication state,
-        // and a tear-down that drops one but leaves the other strands
-        // the state machine.
         crate::session::middleware::clear_two_factor_pending();
-
-        // Rotate the CSRF token so any cached token cannot be reused.
+        crate::session::middleware::clear_two_factor_pending_remember();
         session_mut(|session| {
             session.csrf_token = generate_csrf_token();
         });
+
+        // STEP 2: Revoke remember-me using the saved id. A failure
+        // here propagates as `Err` to the caller, but the session is
+        // already in a safe logged-out state — the failed revoke
+        // queues the clear cookie first (cookie-first ordering on
+        // `revoke_remember_tokens_for_user`), so the browser drops
+        // the cookie regardless, and the stale DB row cannot be
+        // exploited until a future prune sweeps it.
+        match saved_id {
+            Some(id) => {
+                Self::revoke_remember_tokens_for_user(&id).await?;
+            }
+            None => {
+                // No prior auth — still queue the clear cookie in
+                // case the browser holds a stale one from another
+                // session. Matches `revoke_remember_tokens`'s
+                // contract for the no-id branch.
+                Self::queue_remember_clear_cookie();
+            }
+        }
 
         Ok(())
     }
@@ -306,14 +334,33 @@ impl Auth {
     /// remember-me token for the user, clears the request-scoped current user,
     /// and dispatches a [`Logout`](crate::auth::events::Logout) event.
     pub async fn logout_and_invalidate() -> Result<(), crate::error::FrameworkError> {
-        // Capture the id before flushing so the event is attributed.
+        // Capture the id before flushing so the event is attributed
+        // AND so the revoke below can target the right user after the
+        // session is gone. `Auth::id()` returns `None` once we flush.
         let user_id = Self::id();
-        Self::revoke_remember_tokens().await?;
+
+        // STEP 1: Destroy session + request_state FIRST. Even if the
+        // revoke errors below, the session is already gone — every
+        // bit of auth state is wiped. Reversing the order (revoke
+        // first, then flush) leaves a fully-authed session if the
+        // revoke fails, defeating the point of `logout_and_invalidate`.
         session_mut(|session| {
             session.flush();
             session.csrf_token = generate_csrf_token();
         });
         request_state::clear_current_user();
+
+        // STEP 2: Revoke remember-me using the captured id. Same
+        // cookie-first ordering as `clear_authentication`: even if
+        // the DB DELETE fails, the response carries the clear cookie
+        // and the browser drops the remember-me cookie on its way out.
+        if let Some(ref id) = user_id {
+            Self::revoke_remember_tokens_for_user(id).await?;
+        } else {
+            // No prior auth — queue the clear cookie defensively.
+            Self::queue_remember_clear_cookie();
+        }
+
         EventFacade::dispatch(events::Logout {
             guard: Self::default_guard_name(),
             user_id,
