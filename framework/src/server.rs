@@ -1012,6 +1012,13 @@ async fn handle_ws_upgrade(
     // so `spawn_with_request_id` would capture nothing here. Re-establish
     // the id directly around the post-upgrade session task so the handler's
     // logs (and any work it spawns) carry the request id.
+    //
+    // Only REQUEST_ID follows the handler — deliberately NOT the request
+    // `Context` bag (query params, flash). A WebSocket session is long-lived
+    // and is not serving the originating GET's per-request state; the handler
+    // reads anything it needs from the upgrade request directly via
+    // `suprnova_req`. This matches `spawn_with_request_id`, which likewise
+    // carries only the id into spawned work.
     let handler_task = crate::logging::REQUEST_ID.scope(request_id, handler_task);
 
     // Track the spawned handler in WS_TASKS so Server::run can drain
