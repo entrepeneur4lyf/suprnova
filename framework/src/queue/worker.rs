@@ -157,8 +157,18 @@ pub async fn run_worker(driver: Arc<dyn QueueDriver>, cfg: WorkerConfig) {
 
         match outcome {
             DispatchOutcome::Ok => {
-                let _ = driver.ack(&res.token).await;
-                tracing::debug!(job = %env.job_name, id = %env.id, "queue job ok");
+                if let Err(e) = driver.ack(&res.token).await {
+                    tracing::error!(
+                        job = %env.job_name,
+                        id = %env.id,
+                        driver = driver.name(),
+                        error = %e,
+                        "queue ack failed after successful run; \
+                         job may be re-delivered (at-least-once)"
+                    );
+                } else {
+                    tracing::debug!(job = %env.job_name, id = %env.id, "queue job ok");
+                }
             }
             DispatchOutcome::Failed(e) => {
                 if env.attempts >= env.max_tries {
@@ -169,7 +179,16 @@ pub async fn run_worker(driver: Arc<dyn QueueDriver>, cfg: WorkerConfig) {
                         error = %e,
                         "queue job dead-lettered (max_tries exhausted)"
                     );
-                    let _ = driver.ack(&res.token).await;
+                    if let Err(ack_err) = driver.ack(&res.token).await {
+                        tracing::error!(
+                            job = %env.job_name,
+                            id = %env.id,
+                            driver = driver.name(),
+                            error = %ack_err,
+                            "queue ack failed for dead-lettered job; \
+                             reservation may stay until visibility expiry"
+                        );
+                    }
                 } else {
                     let delay = next_delay(&env.backoff, env.attempts, None);
                     tracing::warn!(
@@ -180,7 +199,17 @@ pub async fn run_worker(driver: Arc<dyn QueueDriver>, cfg: WorkerConfig) {
                         error = %e,
                         "queue job failed, will retry"
                     );
-                    let _ = driver.nack(&res.token, delay).await;
+                    if let Err(nack_err) = driver.nack(&res.token, delay).await {
+                        tracing::error!(
+                            job = %env.job_name,
+                            id = %env.id,
+                            driver = driver.name(),
+                            error = %nack_err,
+                            retry_in = ?delay,
+                            "queue nack failed; reservation may be redelivered \
+                             after visibility expiry without bumped attempts"
+                        );
+                    }
                 }
             }
             DispatchOutcome::TimedOut(t) => {
@@ -194,7 +223,16 @@ pub async fn run_worker(driver: Arc<dyn QueueDriver>, cfg: WorkerConfig) {
                         fail_on_timeout = env.fail_on_timeout,
                         "queue job dead-lettered (timed out)"
                     );
-                    let _ = driver.ack(&res.token).await;
+                    if let Err(ack_err) = driver.ack(&res.token).await {
+                        tracing::error!(
+                            job = %env.job_name,
+                            id = %env.id,
+                            driver = driver.name(),
+                            error = %ack_err,
+                            "queue ack failed for timed-out dead-lettered job; \
+                             reservation may stay until visibility expiry"
+                        );
+                    }
                 } else {
                     let delay = next_delay(&env.backoff, env.attempts, None);
                     tracing::warn!(
@@ -205,7 +243,17 @@ pub async fn run_worker(driver: Arc<dyn QueueDriver>, cfg: WorkerConfig) {
                         timeout_secs = t.as_secs(),
                         "queue job timed out, will retry"
                     );
-                    let _ = driver.nack(&res.token, delay).await;
+                    if let Err(nack_err) = driver.nack(&res.token, delay).await {
+                        tracing::error!(
+                            job = %env.job_name,
+                            id = %env.id,
+                            driver = driver.name(),
+                            error = %nack_err,
+                            retry_in = ?delay,
+                            "queue nack failed after timeout; reservation may be \
+                             redelivered after visibility expiry without bumped attempts"
+                        );
+                    }
                 }
             }
         }
