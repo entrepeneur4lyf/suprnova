@@ -66,6 +66,77 @@ impl Queue {
         Self::push_later(job, available_at).await
     }
 
+    /// Push a typed job, but only if no job with the same
+    /// `(job_name, J::unique_id(&job))` was successfully enqueued in the
+    /// last [`Job::unique_for`]. Returns `Ok(true)` when the job was
+    /// pushed, `Ok(false)` when it was suppressed as a duplicate.
+    ///
+    /// Backed by [`Idempotency::commit_on_success`](crate::idempotency::Idempotency::commit_on_success):
+    /// a push failure releases the dedupe key so the caller can retry; a
+    /// successful push holds the key for `unique_for` to gate re-submissions.
+    ///
+    /// Requires the cache layer to be bootstrapped (the dedupe lock lives
+    /// in [`Cache`](crate::cache::Cache)). Returns an internal error if
+    /// `J::unique_id(&job)` returns `None`.
+    pub async fn push_unique<J: Job>(job: J) -> Result<bool, FrameworkError> {
+        Self::push_unique_at::<J>(job, Utc::now()).await
+    }
+
+    /// `push_unique` variant that schedules the envelope for delivery at
+    /// `available_at` (combines with the configured driver's delayed-job
+    /// strategy: ZSET on Redis, `available_at` column on the database
+    /// driver, virtual-clock DelayQueue on the memory driver).
+    pub async fn push_unique_later<J: Job>(
+        job: J,
+        available_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, FrameworkError> {
+        Self::push_unique_at::<J>(job, available_at).await
+    }
+
+    /// `push_unique` variant that takes a delay from now (the unique
+    /// analogue of [`Queue::later`]).
+    pub async fn later_unique<J: Job>(
+        delay: std::time::Duration,
+        job: J,
+    ) -> Result<bool, FrameworkError> {
+        let available_at = Utc::now()
+            + chrono::Duration::from_std(delay)
+                .map_err(|e| FrameworkError::internal(format!("delay overflow: {e}")))?;
+        Self::push_unique_at::<J>(job, available_at).await
+    }
+
+    /// Common path for the three `*_unique*` entrypoints — builds the
+    /// dedupe key, runs the enqueue under `Idempotency::commit_on_success`,
+    /// and reports `true` for `Fresh`, `false` for `Duplicate`.
+    async fn push_unique_at<J: Job>(
+        job: J,
+        available_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, FrameworkError> {
+        if testing::is_active() {
+            // In fake mode, dedupe is irrelevant — record and report fresh.
+            testing::record::<J>(&job)?;
+            return Ok(true);
+        }
+        let id = job.unique_id().ok_or_else(|| {
+            FrameworkError::internal(
+                "Queue::push_unique requires Job::unique_id(&self) to return Some(...)",
+            )
+        })?;
+        let ttl = J::unique_for();
+        let key = format!("queue-unique:{}:{}", J::job_name(), id);
+
+        let outcome =
+            crate::idempotency::Idempotency::commit_on_success(&key, ttl, move || async move {
+                let mut env = envelope_for::<J>(&job, available_at)?;
+                env.idempotency_key = Some(id);
+                let drv = current_driver()?;
+                drv.push(env).await
+            })
+            .await?;
+
+        Ok(matches!(outcome, crate::idempotency::Idempotent::Fresh(())))
+    }
+
     /// Replace the registered driver. Primarily for boot-time wiring;
     /// in tests prefer `testing::install_fake()`.
     pub fn set_driver(driver: Arc<dyn QueueDriver>) {

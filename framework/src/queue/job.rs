@@ -76,4 +76,33 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
     {
         false
     }
+
+    /// Per-instance unique key for dedupe. Return `Some(id)` to make this job
+    /// eligible for [`Queue::push_unique`](crate::queue::Queue::push_unique);
+    /// the framework gates the enqueue on the composed key
+    /// `queue-unique:<job_name>:<id>` for [`Self::unique_for`] seconds.
+    /// Default: `None` (no uniqueness; equivalent to a non-unique job).
+    ///
+    /// Idempotent jobs that always run can leave this as `None` and use
+    /// [`Idempotency`](crate::idempotency::Idempotency) inside [`handle`]
+    /// instead.
+    fn unique_id(&self) -> Option<String>
+    where
+        Self: Sized,
+    {
+        None
+    }
+
+    /// Dedupe TTL for [`Self::unique_id`]. The dedupe key is held for this
+    /// long after a successful enqueue; a later `push_unique` for the same
+    /// (job_name, unique_id) within the window returns "duplicate" and does
+    /// NOT enqueue. Default: 5 minutes — long enough to cover typical
+    /// worker-side processing windows, short enough not to block legitimate
+    /// re-submissions long after the original ran.
+    fn unique_for() -> Duration
+    where
+        Self: Sized,
+    {
+        Duration::from_secs(300)
+    }
 }
