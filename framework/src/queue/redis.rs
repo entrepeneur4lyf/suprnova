@@ -66,6 +66,17 @@
 //!
 //! The consumer is created with `AutoCommit::Disabled` so no implicit ack
 //! ever fires. The caller drives all acknowledgements through `ack`/`nack`.
+//!
+//! ## Connection topology
+//!
+//! `RedisQueueDriver` maintains **two** connection pools at the same Redis
+//! endpoint: the sea-streamer pool (consumer-group `XREADGROUP`/`XACK` and
+//! producer `XADD` for immediate publishes) and a `redis::aio::Connection-
+//! Manager` (ZSET `ZADD` and `EVAL` for the delayed-job promotion script).
+//! Both layers are needed because sea-streamer's API doesn't expose ZSET or
+//! `EVAL` and the `redis` crate doesn't speak the consumer-group protocol at
+//! the abstraction sea-streamer provides. Size connection pools accordingly
+//! (each driver instance opens both).
 
 use crate::error::FrameworkError;
 use crate::lock;

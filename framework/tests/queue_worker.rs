@@ -3,6 +3,7 @@ use serial_test::serial;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
+use suprnova::queue::driver::QueueDriver;
 use suprnova::queue::memory::MemoryQueueDriver;
 use suprnova::queue::worker::{WorkerConfig, register_job, run_worker};
 use suprnova::queue::{BackoffSchedule, Queue};
@@ -126,4 +127,33 @@ async fn worker_dead_letters_after_max_tries() {
         "should stop after max_tries"
     );
     assert_eq!(SUCCESSES.load(Ordering::SeqCst), 0, "must not succeed");
+}
+
+/// Pins the cancel-during-empty-pop path: a worker idling on
+/// `sleep(poll_interval)` between pops must wake within milliseconds of
+/// cancel, not wait out the full interval. The deliberately long
+/// `poll_interval = 5s` is the test's teeth — without the `tokio::select!`
+/// wrapping both pop and the empty-queue sleep, this would time out.
+#[tokio::test]
+#[serial]
+async fn run_worker_exits_promptly_after_cancel() {
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    let cancel = CancellationToken::new();
+    let cfg = WorkerConfig {
+        visibility_timeout: Duration::from_secs(60),
+        poll_interval: Duration::from_secs(5),
+        max_jobs: None,
+    };
+    let handle = tokio::spawn(run_worker(driver, cfg, cancel.clone()));
+
+    // Let the worker tick once and settle into the empty-queue sleep.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    cancel.cancel();
+
+    let r = tokio::time::timeout(Duration::from_millis(500), handle).await;
+    assert!(
+        r.is_ok(),
+        "worker did not exit within 500ms of CancellationToken::cancel \
+         (the poll-interval select! arm must wake on cancel)"
+    );
 }

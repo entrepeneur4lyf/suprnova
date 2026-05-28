@@ -129,6 +129,15 @@ impl QueueDriver for DatabaseQueueDriver {
         // running the job twice. With the predicate the loser sees
         // `rows_affected == 0` and reports an empty pop, so the worker polls
         // again instead of holding a stale reservation.
+        //
+        // On SQLite, correctness relies on the connection's `busy_timeout`
+        // being non-zero so consumer B's UPDATE blocks waiting for A's
+        // writer lock (then sees the row reserved, fails the predicate, and
+        // affects zero rows). sqlx-sqlite defaults `busy_timeout` to 5s, so
+        // this holds in practice; if a future sqlx version drops that
+        // default to 0, two concurrent pops could each get `SQLITE_BUSY` and
+        // the race would surface as a transient error rather than a
+        // double-reservation.
         let exec = txn
             .execute(Statement::from_sql_and_values(
                 self.backend(),
