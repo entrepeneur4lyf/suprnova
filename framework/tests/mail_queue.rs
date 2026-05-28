@@ -11,6 +11,7 @@ use suprnova::queue::Queue;
 use suprnova::queue::driver::QueueDriver;
 use suprnova::queue::memory::MemoryQueueDriver;
 use suprnova::queue::worker::{WorkerConfig, register_job, run_worker};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct WelcomeMail {
@@ -71,7 +72,9 @@ async fn mail_queue_dispatches_through_queue_and_send_job_renders_via_transport(
         WorkerConfig {
             visibility_timeout: Duration::from_secs(60),
             poll_interval: Duration::from_millis(5),
+            max_jobs: None,
         },
+        CancellationToken::new(),
     ));
 
     for _ in 0..200 {
@@ -207,7 +210,9 @@ async fn mail_queue_accepts_mailable_that_overrides_render_without_template_sour
         WorkerConfig {
             visibility_timeout: Duration::from_secs(60),
             poll_interval: Duration::from_millis(5),
+            max_jobs: None,
         },
+        CancellationToken::new(),
     ));
     for _ in 0..200 {
         if !capture.captured().is_empty() {

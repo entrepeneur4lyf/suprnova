@@ -7,6 +7,7 @@ use suprnova::queue::memory::MemoryQueueDriver;
 use suprnova::queue::worker::{WorkerConfig, register_job, run_worker};
 use suprnova::queue::{BackoffSchedule, Queue};
 use suprnova::{FrameworkError, Job, async_trait};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct FlakyJob {
@@ -60,8 +61,9 @@ async fn worker_retries_failing_job_until_success() {
     let cfg = WorkerConfig {
         visibility_timeout: Duration::from_secs(60),
         poll_interval: Duration::from_millis(5),
+        max_jobs: None,
     };
-    let handle = tokio::spawn(run_worker(d.clone(), cfg));
+    let handle = tokio::spawn(run_worker(d.clone(), cfg, CancellationToken::new()));
 
     for _ in 0..200 {
         if SUCCESSES.load(Ordering::SeqCst) > 0 {
@@ -105,8 +107,9 @@ async fn worker_dead_letters_after_max_tries() {
     let cfg = WorkerConfig {
         visibility_timeout: Duration::from_secs(60),
         poll_interval: Duration::from_millis(5),
+        max_jobs: None,
     };
-    let handle = tokio::spawn(run_worker(d.clone(), cfg));
+    let handle = tokio::spawn(run_worker(d.clone(), cfg, CancellationToken::new()));
 
     for _ in 0..400 {
         if ATTEMPTS.load(Ordering::SeqCst) >= 5 {

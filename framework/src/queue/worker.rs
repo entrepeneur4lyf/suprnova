@@ -34,6 +34,7 @@ use futures::future::BoxFuture;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 type Dispatcher =
     Arc<dyn Fn(serde_json::Value) -> BoxFuture<'static, Result<(), FrameworkError>> + Send + Sync>;
@@ -103,6 +104,10 @@ pub fn registered_job_names() -> Vec<String> {
 pub struct WorkerConfig {
     pub visibility_timeout: Duration,
     pub poll_interval: Duration,
+    /// Optional hard cap on jobs processed by this worker before it exits
+    /// cleanly. `None` runs until cancelled. Used by `queue:work --max-jobs N`
+    /// for periodic restart strategies (e.g. release-on-restart deploys).
+    pub max_jobs: Option<u64>,
 }
 
 impl Default for WorkerConfig {
@@ -110,6 +115,7 @@ impl Default for WorkerConfig {
         Self {
             visibility_timeout: Duration::from_secs(60),
             poll_interval: Duration::from_millis(100),
+            max_jobs: None,
         }
     }
 }
@@ -134,19 +140,60 @@ enum DispatchOutcome {
 /// the correct incremented count (preventing the worker from treating every
 /// retry as attempt 1).
 ///
-/// Returns when its task is cancelled. Designed to run under `tokio::spawn`.
-pub async fn run_worker(driver: Arc<dyn QueueDriver>, cfg: WorkerConfig) {
+/// Returns when `shutdown` is cancelled or when `cfg.max_jobs` is reached.
+/// A cancel signal interrupts pop polling but never an in-flight handler:
+/// a job that's already been popped is allowed to finish (bounded by its
+/// own per-job `timeout()` if set) before the worker exits, so in-flight
+/// side effects don't get torn mid-stride. Designed to run under
+/// `tokio::spawn`.
+pub async fn run_worker(
+    driver: Arc<dyn QueueDriver>,
+    cfg: WorkerConfig,
+    shutdown: CancellationToken,
+) {
+    let mut processed: u64 = 0;
     loop {
-        let popped = match driver.pop(cfg.visibility_timeout).await {
+        // Stop accepting new work the moment shutdown fires; the current
+        // in-flight job (if any) has already been popped above and will run
+        // to completion below before the next iteration sees the cancel.
+        if shutdown.is_cancelled() {
+            return;
+        }
+        if let Some(max) = cfg.max_jobs
+            && processed >= max
+        {
+            tracing::info!(
+                processed,
+                max_jobs = max,
+                "queue worker reached max_jobs, exiting cleanly"
+            );
+            return;
+        }
+
+        // Pop OR cancel — whichever happens first. `biased` makes cancel win
+        // a tie so a queue under load can still exit promptly.
+        let popped = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return,
+            res = driver.pop(cfg.visibility_timeout) => res,
+        };
+
+        let popped = match popped {
             Ok(opt) => opt,
             Err(e) => {
                 tracing::error!(error = %e, driver = driver.name(), "queue pop failed");
-                tokio::time::sleep(cfg.poll_interval).await;
+                tokio::select! {
+                    _ = shutdown.cancelled() => return,
+                    _ = tokio::time::sleep(cfg.poll_interval) => {}
+                }
                 continue;
             }
         };
         let Some(res) = popped else {
-            tokio::time::sleep(cfg.poll_interval).await;
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = tokio::time::sleep(cfg.poll_interval) => {}
+            }
             continue;
         };
 
@@ -269,5 +316,10 @@ pub async fn run_worker(driver: Arc<dyn QueueDriver>, cfg: WorkerConfig) {
                 }
             }
         }
+
+        // One settlement = one processed job for the max_jobs cap, regardless
+        // of outcome (success/failure/timeout). Settlement-failure logging
+        // above is separate from this accounting.
+        processed = processed.saturating_add(1);
     }
 }

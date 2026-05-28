@@ -85,6 +85,17 @@ impl Queue {
     pub fn driver_name() -> Result<&'static str, FrameworkError> {
         Ok(current_driver()?.name())
     }
+
+    /// Return the registered driver as an `Arc<dyn QueueDriver>` so callers
+    /// (workers, admin inspectors) can use it directly. Most app code should
+    /// prefer the [`Queue::push`] facade.
+    ///
+    /// # Errors
+    ///
+    /// Same conditions as [`Queue::driver_name`].
+    pub fn driver() -> Result<Arc<dyn QueueDriver>, FrameworkError> {
+        current_driver()
+    }
 }
 
 pub(crate) fn current_driver() -> Result<Arc<dyn QueueDriver>, FrameworkError> {

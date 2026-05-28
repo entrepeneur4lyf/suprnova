@@ -15,6 +15,7 @@ use suprnova::queue::driver::QueueDriver;
 use suprnova::queue::memory::MemoryQueueDriver;
 use suprnova::queue::worker::{WorkerConfig, register_job, run_worker};
 use suprnova::{FrameworkError, Notify};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct OrderShipped {
@@ -96,7 +97,9 @@ async fn notification_queue_dispatches_through_queue_and_lands_in_db() {
         WorkerConfig {
             visibility_timeout: Duration::from_secs(60),
             poll_interval: Duration::from_millis(5),
+            max_jobs: None,
         },
+        CancellationToken::new(),
     ));
 
     for _ in 0..200 {

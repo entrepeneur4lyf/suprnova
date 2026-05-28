@@ -91,6 +91,21 @@ enum Commands {
     /// Run the workflow worker daemon
     #[command(name = "workflow:work")]
     WorkflowWork,
+    /// Run the queue worker daemon (drains the configured queue driver)
+    #[command(name = "queue:work")]
+    QueueWork {
+        /// Visibility timeout for popped messages (seconds). Drivers may
+        /// interpret this differently; see driver docs.
+        #[arg(long, default_value = "60")]
+        visibility_timeout: u64,
+        /// Poll interval when the queue is empty (milliseconds).
+        #[arg(long = "poll", default_value = "100")]
+        poll_interval_ms: u64,
+        /// Exit cleanly after processing this many jobs. Useful for
+        /// release-on-restart deploys (worker exits, supervisor restarts).
+        #[arg(long)]
+        max_jobs: Option<u64>,
+    },
     /// Put the application into maintenance mode
     Down {
         /// Seconds for the `Retry-After` header
@@ -374,6 +389,19 @@ where
             }
             Some(Commands::WorkflowWork) => {
                 Self::run_workflow_worker_internal(bootstrap_fn).await;
+            }
+            Some(Commands::QueueWork {
+                visibility_timeout,
+                poll_interval_ms,
+                max_jobs,
+            }) => {
+                Self::run_queue_worker_internal(
+                    bootstrap_fn,
+                    visibility_timeout,
+                    poll_interval_ms,
+                    max_jobs,
+                )
+                .await;
             }
             Some(Commands::Down {
                 retry,
@@ -682,6 +710,82 @@ where
         if let Err(e) = crate::workflow::WorkflowWorker::work_loop().await {
             eprintln!("Workflow worker error: {e}");
             std::process::exit(1);
+        }
+    }
+
+    /// `queue:work`: drain the configured queue driver until cancelled.
+    ///
+    /// Boots the runtime drivers + the app's `bootstrap_fn` so popped jobs
+    /// can resolve services from the container. Honours Ctrl-C cleanly via
+    /// `CancellationToken`: the cancel fires at the next pop boundary, so an
+    /// in-flight handler runs to completion (bounded by its own per-job
+    /// `timeout()` if set) before the worker exits.
+    async fn run_queue_worker_internal(
+        bootstrap_fn: Option<BootstrapFn>,
+        visibility_timeout: u64,
+        poll_interval_ms: u64,
+        max_jobs: Option<u64>,
+    ) {
+        if let Err(e) = Self::bootstrap_runtime_drivers().await {
+            eprintln!("suprnova: queue worker bootstrap error: {e}");
+            std::process::exit(1);
+        }
+        if let Some(bootstrap_fn) = bootstrap_fn {
+            bootstrap_fn().await;
+        }
+
+        let driver = match crate::queue::Queue::driver() {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("suprnova: no queue driver configured: {e}");
+                std::process::exit(1);
+            }
+        };
+
+        let cfg = crate::queue::worker::WorkerConfig {
+            visibility_timeout: Duration::from_secs(visibility_timeout),
+            poll_interval: Duration::from_millis(poll_interval_ms),
+            max_jobs,
+        };
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        println!("==============================================");
+        println!("  suprnova Queue Worker");
+        println!("==============================================");
+        println!("  driver:             {}", driver.name());
+        println!("  visibility timeout: {visibility_timeout}s");
+        println!("  poll interval:      {poll_interval_ms}ms");
+        if let Some(m) = max_jobs {
+            println!("  max jobs:           {m} (exits after)");
+        } else {
+            println!("  max jobs:           unlimited");
+        }
+        println!("  Press Ctrl+C to stop");
+        println!("==============================================");
+
+        let cancel_for_worker = cancel.clone();
+        let mut worker = tokio::spawn(async move {
+            crate::queue::worker::run_worker(driver, cfg, cancel_for_worker).await;
+        });
+
+        // Either Ctrl-C fires (then we cancel and wait for in-flight to
+        // settle) or the worker exits on its own (max_jobs reached).
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("suprnova: queue worker shutting down (Ctrl-C).");
+                cancel.cancel();
+                if let Err(e) = worker.await {
+                    eprintln!("suprnova: queue worker task error during drain: {e}");
+                    std::process::exit(1);
+                }
+            }
+            res = &mut worker => {
+                if let Err(e) = res {
+                    eprintln!("suprnova: queue worker task error: {e}");
+                    std::process::exit(1);
+                }
+            }
         }
     }
 
