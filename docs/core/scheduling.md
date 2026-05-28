@@ -297,7 +297,7 @@ For full control, use cron syntax:
 
 ### Preventing Overlapping
 
-Prevent a task from running if a previous instance is still executing:
+Skip a tick when a previous run of the same task is still in flight:
 
 ```rust
 schedule.add(
@@ -308,9 +308,47 @@ schedule.add(
 );
 ```
 
+**How the lock works.** When the flag is set, suprnova tries to acquire a
+distributed mutex via the configured [`Cache`](/docs/core/cache) backend
+(`schedule:lock:<task-name>`). A successful acquire runs the task and releases
+the lock; a contended acquire is reported as a successful skip — `Ok(())`,
+with the task's skip counter ticked so observability surfaces can see it
+without poisoning the `schedule:run` exit code.
+
+**Cache is required for cross-process protection.** If you run multiple
+processes that schedule the same task (e.g. several boxes invoking
+`suprnova schedule:run` from system cron, or `schedule:work` daemons behind a
+load-balancer), the Cache backend is what coordinates them. **Without a
+configured Cache, `without_overlapping()` silently degrades to a per-process
+`AtomicBool`** — two separate processes will not see each other's locks. The
+framework emits a one-time `WARN` (`suprnova::schedule`) the first time this
+fallback fires so operators notice the weaker guarantee:
+
+> `without_overlapping() falling back to in-process AtomicBool protection — Cache is not bootstrapped. Multi-process deployments will NOT see each other's locks. Configure Cache (CACHE_DRIVER=memory|redis) before relying on cross-process overlap protection.`
+
+**Custom lock TTL.** The lock TTL defaults to 30 minutes — long enough for
+most tasks to finish, short enough that a crashed task holding the lock
+unblocks the next tick without operator intervention. Override per task with
+`.without_overlapping_for(Duration)`:
+
+```rust
+use std::time::Duration;
+
+schedule.add(
+    schedule.task(SlowBackupTask::new())
+        .daily()
+        .name("backup:full")
+        // This job legitimately runs longer than the 30-minute default;
+        // give the lock a 2-hour TTL so a slow run doesn't get pre-empted
+        // by the next tick.
+        .without_overlapping_for(Duration::from_secs(2 * 3600))
+);
+```
+
 ### Running in Background
 
-Run tasks without waiting for completion:
+Detach tasks from the per-tick critical path so they don't block other due
+tasks from starting:
 
 ```rust
 schedule.add(
@@ -320,6 +358,31 @@ schedule.add(
         .run_in_background()
 );
 ```
+
+**Panic isolation.** Background tasks run inside a `tokio::task::JoinSet`
+with `catch_unwind`, so a panicking task surfaces as a `FrameworkError`
+recorded against the task's name rather than tearing down the scheduler. The
+`schedule:work` daemon drains the JoinSet on shutdown (Ctrl-C / SIGTERM) so
+in-flight background tasks complete before exit.
+
+**Combine with `without_overlapping`.** The two flags compose — a background
+task with `without_overlapping()` will spawn into the JoinSet and acquire the
+overlap lock from inside the spawned future, so the lock semantics described
+above still apply.
+
+### Same-Minute Dedup
+
+Cron resolution is minute-level, and suprnova enforces that: if the same task
+is asked to run twice within the same wall-clock minute inside a single
+process, the second call is a no-op skip — `Ok(())`, with the task's skip
+counter ticked. This closes a class of bug where a daemon loop or a tight
+`schedule:run` invocation could run a `.every_minute()` task multiple times
+in the same minute.
+
+This in-process gate is **always on**, independent of `without_overlapping`.
+It does NOT span processes (each process has its own per-task state). If you
+need cross-process same-minute coordination, layer on `without_overlapping`
++ a configured Cache backend — together they cover both directions.
 
 ## Running the Scheduler
 
@@ -368,6 +431,15 @@ Add a single cron entry to run the scheduler every minute:
 ```bash
 * * * * * cd /path/to/your/project && suprnova schedule:run >> /dev/null 2>&1
 ```
+
+**Cross-process coordination.** If you run `schedule:run` from system cron on
+more than one host (or alongside a `schedule:work` daemon), tasks with
+`.without_overlapping()` need a configured **Cache** backend
+(`CACHE_DRIVER=redis` recommended for production) to coordinate across
+processes. Without it, the overlap flag degrades to per-process protection
+and the same task can run on multiple hosts in the same minute. See
+[Preventing Overlapping](#preventing-overlapping) above for the full lock
+semantics.
 
 ### Using Systemd
 
@@ -469,5 +541,7 @@ pub use backup_database_task::BackupDatabaseTask;
 | Run once | `suprnova schedule:run` |
 | Run daemon | `suprnova schedule:work` |
 | List tasks | `suprnova schedule:list` |
-| Prevent overlap | `.without_overlapping()` |
-| Background | `.run_in_background()` |
+| Prevent overlap | `.without_overlapping()` (default 30-min lock TTL via Cache backend) |
+| Custom overlap TTL | `.without_overlapping_for(Duration)` |
+| Background | `.run_in_background()` (panic-isolated via JoinSet) |
+| Same-minute dedup | Always on per-process; skipped runs return `Ok(())` |
