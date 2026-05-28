@@ -49,9 +49,10 @@ pub use config::SessionConfig;
 pub use driver::DatabaseSessionDriver;
 pub use middleware::{
     SessionMiddleware, auth_user_id, clear_auth_user, clear_two_factor_pending,
-    generate_csrf_token, generate_session_id, get_csrf_token, invalidate_session,
-    is_authenticated, regenerate_session_id, session, session_mut, set_auth_user,
-    set_two_factor_pending, two_factor_pending_user_id,
+    clear_two_factor_pending_remember, generate_csrf_token, generate_session_id, get_csrf_token,
+    invalidate_session, is_authenticated, regenerate_session_id, session, session_mut,
+    set_auth_user, set_two_factor_pending, set_two_factor_pending_remember,
+    two_factor_pending_remember, two_factor_pending_user_id,
 };
 pub use store::{SessionData, SessionStore};
 

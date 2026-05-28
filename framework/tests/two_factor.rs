@@ -174,7 +174,9 @@ async fn start_challenge_sets_pending_and_clears_auth_user() {
             "auth slot must be set before start_challenge for the test to be meaningful"
         );
 
-        TwoFactor::start_challenge("test-user-1").await.unwrap();
+        TwoFactor::start_challenge("test-user-1", false)
+            .await
+            .unwrap();
 
         // Pending is now the target id.
         assert_eq!(
@@ -195,7 +197,7 @@ async fn cancel_challenge_clears_pending() {
 
     let slot = suprnova::session::new_session_slot_for_test();
     suprnova::session::session_scope_for_test(slot, async {
-        TwoFactor::start_challenge("test-user-cancel")
+        TwoFactor::start_challenge("test-user-cancel", false)
             .await
             .unwrap();
         assert!(TwoFactor::pending_user_id().is_some());
@@ -240,7 +242,9 @@ async fn pending_user_id_outside_session_returns_none() {
     // remember-me revoke also no-ops here because `Auth::id()`
     // returns None outside any session/request scope.
     assert_eq!(TwoFactor::pending_user_id(), None);
-    TwoFactor::start_challenge("orphan-id").await.unwrap();
+    TwoFactor::start_challenge("orphan-id", false)
+        .await
+        .unwrap();
     assert_eq!(TwoFactor::pending_user_id(), None);
     TwoFactor::cancel_challenge();
 }

@@ -117,9 +117,33 @@ impl Auth {
         let user_id = user_id.into();
         // Regular session login (regen session id + CSRF, set user).
         Self::login_id(user_id.clone());
+        // Issue the row + queue the cookie.
+        Self::issue_remember_cookie(&user_id, ttl_minutes).await
+    }
 
+    /// Issue the remember-me row + queue the remember-me cookie for the
+    /// outgoing response, **without** touching the session id, CSRF
+    /// token, or session user slot.
+    ///
+    /// The remember-me half of [`login_remember`], factored out so
+    /// callers that have already rotated the session id and set the
+    /// auth user themselves can opt in without redoing the session
+    /// dance. The principal user today is
+    /// [`crate::auth_flows::TwoFactor::complete_challenge`]: it rotates
+    /// session id + CSRF + sets the auth user as part of promoting
+    /// pending → authed, then conditionally calls this when the user
+    /// requested remember-me at password-login time.
+    ///
+    /// For a fresh login flow that has not yet established the session,
+    /// call [`login_remember`](Self::login_remember) instead — it
+    /// handles session id rotation + CSRF + auth user + remember-me in
+    /// one step.
+    pub async fn issue_remember_cookie(
+        user_id: &str,
+        ttl_minutes: i64,
+    ) -> Result<(), crate::error::FrameworkError> {
         // Issue the row. Returns the plaintext destined for the cookie.
-        let plaintext = super::remember::issue(&user_id, ttl_minutes).await?;
+        let plaintext = super::remember::issue(user_id, ttl_minutes).await?;
 
         // Build + queue the cookie. The cookie's `Max-Age` matches the
         // row's TTL (`ttl_minutes` converted to seconds) so the browser
@@ -342,7 +366,12 @@ impl Auth {
     /// The default guard's name for event attribution: from the registered
     /// [`AuthManager`] when present, falling back to `"web"` so logout events
     /// stay attributed even before a manager is wired up.
-    fn default_guard_name() -> String {
+    ///
+    /// `pub` so peer subsystems (notably the 2FA challenge flow) can
+    /// attribute their own `Login` / `Authenticated` dispatches to the
+    /// same guard the rest of the auth surface uses, without having to
+    /// pull `AuthManager` directly.
+    pub fn default_guard_name() -> String {
         App::get::<AuthManager>()
             .map(|m| m.default_guard_name().to_string())
             .unwrap_or_else(|| "web".to_string())

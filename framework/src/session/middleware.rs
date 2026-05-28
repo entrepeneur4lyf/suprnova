@@ -588,3 +588,68 @@ pub fn clear_two_factor_pending() {
         }
     });
 }
+
+/// Reserved key under `SessionData::data` for the "user asked to be
+/// remembered" preference that was supplied to
+/// [`crate::auth_flows::TwoFactor::start_challenge`] and needs to
+/// survive until [`crate::auth_flows::TwoFactor::complete_challenge`]
+/// can re-issue the remember-me cookie.
+///
+/// Lives in the generic data bag rather than as a typed field on
+/// `SessionData` for the same reason as [`TWO_FACTOR_PENDING_KEY`] —
+/// avoiding driver churn for a feature whose state is naturally
+/// transient.
+const TWO_FACTOR_PENDING_REMEMBER_KEY: &str = "_two_factor_pending_remember";
+
+/// Read the "user asked to be remembered" preference stashed by
+/// [`set_two_factor_pending_remember`]. Returns `false` outside a
+/// request scope or when no preference was set.
+///
+/// Backs [`crate::auth_flows::TwoFactor::complete_challenge`]'s
+/// remember-me re-issue path.
+pub fn two_factor_pending_remember() -> bool {
+    session()
+        .and_then(|s| {
+            s.data
+                .get(TWO_FACTOR_PENDING_REMEMBER_KEY)
+                .and_then(|v| v.as_bool())
+        })
+        .unwrap_or(false)
+}
+
+/// Stash the "user asked to be remembered" preference alongside the
+/// pending user-id. The caller — typically
+/// [`crate::auth_flows::TwoFactor::start_challenge`] — passes through
+/// the `remember` argument it received from the login form.
+///
+/// Stored as a JSON boolean; clears the slot when `remember` is
+/// `false` to keep the bag minimal.
+pub fn set_two_factor_pending_remember(remember: bool) {
+    if remember {
+        session_mut(|session| {
+            session.data.insert(
+                TWO_FACTOR_PENDING_REMEMBER_KEY.to_string(),
+                serde_json::Value::Bool(true),
+            );
+            session.dirty = true;
+        });
+    } else {
+        clear_two_factor_pending_remember();
+    }
+}
+
+/// Clear the "remember-me on completion" preference. Called by a
+/// successful challenge completion (after consuming the value), by
+/// [`clear_two_factor_pending`] callers that want a clean teardown, or
+/// when the preference is explicitly being reset to `false`.
+pub fn clear_two_factor_pending_remember() {
+    session_mut(|session| {
+        if session
+            .data
+            .remove(TWO_FACTOR_PENDING_REMEMBER_KEY)
+            .is_some()
+        {
+            session.dirty = true;
+        }
+    });
+}

@@ -398,13 +398,15 @@ impl TwoFactor {
 
     /// Begin a 2FA challenge for `user_id`: revoke the user's
     /// remember-me tokens, clear the fully-authenticated session slot
-    /// (if any), and stash `user_id` as the pending user. The caller
-    /// — typically a password-login handler that just resolved a user
-    /// for whom [`Self::is_enabled_by_id`] returned `true` — should
-    /// then redirect to the challenge page. The session remains in
-    /// pending state until [`Self::complete_challenge`] succeeds
-    /// (promoting pending → authed) or the user explicitly cancels
-    /// via [`Self::cancel_challenge`].
+    /// (if any), stash `user_id` as the pending user, and remember
+    /// whether the user opted into remember-me at password-login
+    /// time. The caller — typically a password-login handler that
+    /// just resolved a user for whom [`Self::is_enabled_by_id`]
+    /// returned `true` — should then redirect to the challenge page.
+    /// The session remains in pending state until
+    /// [`Self::complete_challenge`] succeeds (promoting pending →
+    /// authed) or the user explicitly cancels via
+    /// [`Self::cancel_challenge`].
     ///
     /// `Auth::id()` returns `None` while a challenge is pending, so
     /// any route gated by [`crate::AuthMiddleware`] keeps the user
@@ -413,6 +415,16 @@ impl TwoFactor {
     /// of `AuthMiddleware` to redirect pending users to the
     /// challenge page rather than letting them fall through to the
     /// login page.
+    ///
+    /// # Arguments
+    ///
+    /// * `user_id` — the id of the user whose password verified.
+    /// * `remember` — whether the original login form requested
+    ///   remember-me. The preference is stashed in the session and
+    ///   consumed by [`Self::complete_challenge`], which re-issues
+    ///   the remember-me cookie on a successful challenge. Pass the
+    ///   exact `remember` value the caller received from the login
+    ///   form — `false` if the form had no remember-me checkbox.
     ///
     /// # Why revoke remember-me
     ///
@@ -427,11 +439,16 @@ impl TwoFactor {
     /// identify whose tokens to delete — clearing first would make
     /// it a no-op.
     ///
-    /// Apps that want remember-me + 2FA must re-issue the cookie
-    /// after a successful `complete_challenge` (e.g. via
-    /// `Auth::login_remember`). The "remember" preference is not
-    /// plumbed through the pending state today.
-    pub async fn start_challenge(user_id: impl Into<String>) -> Result<(), FrameworkError> {
+    /// The cookie + row that `start_challenge` revokes are the
+    /// pre-challenge ones. If `remember` is `true`,
+    /// [`Self::complete_challenge`] issues a **fresh** cookie + row
+    /// on the post-challenge user-id, so remember-me-with-2FA users
+    /// get the same UX as remember-me-without-2FA users without the
+    /// caller having to remember to re-issue the cookie themselves.
+    pub async fn start_challenge(
+        user_id: impl Into<String>,
+        remember: bool,
+    ) -> Result<(), FrameworkError> {
         let user_id = user_id.into();
         // Revoke FIRST while Auth::id() still resolves the user.
         crate::auth::Auth::revoke_remember_tokens().await?;
@@ -440,6 +457,7 @@ impl TwoFactor {
         // marked the user authed before the caller noticed 2FA was on.
         crate::session::middleware::clear_auth_user();
         crate::session::middleware::set_two_factor_pending(user_id);
+        crate::session::middleware::set_two_factor_pending_remember(remember);
         // Mirror the change into request_state so Auth::id() agrees
         // for the rest of THIS request, not only after the next
         // round-trip. `clear_current_user` is the sync primitive —
@@ -469,12 +487,14 @@ impl TwoFactor {
 
     /// Complete the 2FA challenge by verifying `code` against the
     /// session's pending user. On success, promotes the pending user
-    /// to fully authenticated (writing `auth_user_id` into the
-    /// session, clearing the pending slot, and updating
-    /// request_state) and dispatches
-    /// [`crate::auth_flows::events::TwoFactorChallenged`]. Returns
-    /// the full [`crate::torii_integration::User`] so the caller can
-    /// branch the post-login redirect on user attributes.
+    /// to fully authenticated, rotates the session id and CSRF token
+    /// to defeat session fixation, re-issues the remember-me cookie
+    /// when the original login form requested it, and dispatches the
+    /// standard [`crate::auth::events::Login`] +
+    /// [`crate::auth::events::Authenticated`] pair followed by the
+    /// 2FA-specific [`crate::auth_flows::events::TwoFactorChallenged`].
+    /// Returns the full [`crate::torii_integration::User`] so the
+    /// caller can branch the post-login redirect on user attributes.
     ///
     /// Accepts either a current TOTP code or an unused recovery code —
     /// the recovery-code path matches Fortify's challenge controller,
@@ -486,6 +506,19 @@ impl TwoFactor {
     /// — the same way [`Self::verify`] does for direct verification —
     /// so an attacker who racked up bad challenge codes will trip
     /// `AccountLocked` after the configured threshold.
+    ///
+    /// # Promotion contract
+    ///
+    /// The promotion mirrors [`crate::auth::Auth::login_id`] /
+    /// [`crate::auth::Auth::login_remember`]: a fresh session id
+    /// (so a session id planted before the challenge cannot ride
+    /// the post-challenge auth), a fresh CSRF token (so any cached
+    /// pre-auth token cannot be replayed under the new privilege
+    /// level), and the auth user written into the session. The
+    /// `Login` / `Authenticated` dispatches are the same shape and
+    /// guard-attribution as a no-2FA password login, so listeners
+    /// that hook those events (last-login timestamps, audit logs,
+    /// post-login redirects, …) fire here too.
     ///
     /// # Errors
     ///
@@ -550,15 +583,62 @@ impl TwoFactor {
             return Err(FrameworkError::domain("invalid 2FA code", 401));
         }
 
-        // Promote: pending → authed. Order matters — set authed
-        // first so a concurrent reader observing the row mid-transition
-        // sees one authentication state, never zero.
+        // Read the remember-me preference the user supplied at
+        // password-login time BEFORE clearing the pending bag — the
+        // bag is about to be torn down as part of the promotion.
+        let remember = crate::session::middleware::two_factor_pending_remember();
+
+        // Promote: pending → authed. Mirrors `Auth::login_id`'s
+        // contract — rotate the session id to defeat session
+        // fixation, set the user, clear pending state, rotate CSRF.
+        // A planted pre-challenge session id cannot ride the
+        // post-challenge auth.
+        crate::session::regenerate_session_id();
         crate::session::middleware::set_auth_user(&pending_id);
         crate::session::middleware::clear_two_factor_pending();
+        crate::session::middleware::clear_two_factor_pending_remember();
+        crate::session::session_mut(|session| {
+            session.csrf_token = crate::session::generate_csrf_token();
+        });
 
-        // Discard dispatch errors — the promotion has already
-        // committed; a listener panic must not surface here. The
-        // dispatcher itself logs listener errors via tracing.
+        // Re-issue remember-me if the user opted in pre-challenge.
+        // The pre-challenge cookie was revoked by `start_challenge`;
+        // this is a fresh row + cookie tied to the now-authenticated
+        // user-id, with the configured default TTL. Without this,
+        // remember-me-with-2FA would silently fail open relative to
+        // remember-me-without-2FA.
+        if remember {
+            let ttl_minutes = (crate::session::SessionConfig::from_env()
+                .remember_lifetime
+                .as_secs()
+                / 60) as i64;
+            crate::auth::Auth::issue_remember_cookie(&pending_id, ttl_minutes).await?;
+        }
+
+        // Standard login lifecycle events first so listeners that
+        // hook `Login` / `Authenticated` (last-login timestamps,
+        // audit logs, post-login redirects) fire on the 2FA path
+        // too — they cannot rely on `Auth::attempt` having fired
+        // them, because attempt completed before 2FA gating
+        // demoted the session. Then the 2FA-specific event for
+        // code that wants to distinguish "logged in via challenge"
+        // from "logged in via password alone."
+        //
+        // Dispatch errors are intentionally swallowed (logged by
+        // the dispatcher) — the promotion has already committed; a
+        // listener failure must not surface here.
+        let guard = crate::auth::Auth::default_guard_name();
+        let _ = crate::events::EventFacade::dispatch(crate::auth::events::Login {
+            guard: guard.clone(),
+            user_id: pending_id.clone(),
+            remember,
+        })
+        .await;
+        let _ = crate::events::EventFacade::dispatch(crate::auth::events::Authenticated {
+            guard,
+            user_id: pending_id.clone(),
+        })
+        .await;
         let _ = crate::events::EventFacade::dispatch(TwoFactorChallenged {
             user_id: pending_id,
         })

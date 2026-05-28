@@ -661,16 +661,22 @@ user with 2FA enabled can't reach protected pages on password alone:
 
 1. Password login resolves a user.
 2. If `TwoFactor::is_enabled_by_id(&user_id)` returns `true`, the login
-   handler calls `TwoFactor::start_challenge(user_id)` — that stashes
-   the user-id as **pending** in the session and clears the
-   fully-authenticated slot. `Auth::id()` returns `None` from this
-   point until the challenge completes.
+   handler calls `TwoFactor::start_challenge(user_id, remember)` —
+   that stashes the user-id as **pending** in the session, clears the
+   fully-authenticated slot, revokes any remember-me cookie issued by
+   `Auth::attempt`, and remembers whether the user opted into
+   remember-me for re-issue after the challenge completes. `Auth::id()`
+   returns `None` from this point until the challenge completes.
 3. The handler redirects to a `/two-factor-challenge` route that shows
    the code form.
 4. The challenge POST handler calls `TwoFactor::complete_challenge(code)`
    — that verifies the code (TOTP **or** an unused recovery code,
    matching Fortify's challenge controller), promotes pending →
-   authed, and dispatches `TwoFactorChallenged`.
+   authed, rotates the session id (defeating session fixation) and the
+   CSRF token, re-issues the remember-me cookie when the user opted
+   in at step 2, and dispatches the standard `Auth\Login` +
+   `Auth\Authenticated` lifecycle events plus the 2FA-specific
+   `TwoFactor\Challenged`.
 
 ```rust
 use std::sync::Arc;
@@ -682,8 +688,12 @@ pub async fn login(form: LoginRequest) -> Response {
         Some(user) => {
             let user_id = user.get_auth_identifier();
             if TwoFactor::is_enabled_by_id(&user_id).await? {
-                // Demote to "pending": auth slot cleared, pending set.
-                TwoFactor::start_challenge(user_id);
+                // Demote to "pending": auth slot cleared, pending set,
+                // remember-me cookie revoked. Pass through the form's
+                // remember flag so `complete_challenge` can re-issue
+                // the cookie on success without the handler having to
+                // remember to do it itself.
+                TwoFactor::start_challenge(user_id, form.remember).await?;
                 redirect!("/two-factor-challenge").into()
             } else {
                 redirect!("/dashboard").into()
@@ -695,9 +705,21 @@ pub async fn login(form: LoginRequest) -> Response {
 
 pub async fn complete(form: TwoFactorChallengeRequest) -> Response {
     let _user = TwoFactor::complete_challenge(&form.code).await?;
+    // Session id + CSRF have rotated; remember-me has been re-issued
+    // if the original login form set it. Listeners that hook
+    // `Auth\Login` / `Auth\Authenticated` saw a normal login.
     redirect!("/dashboard").into()
 }
 ```
+
+**Why the rotation matters:** `complete_challenge` rotates the session
+id and CSRF token as part of the promotion to authed. That closes the
+classic session-fixation attack where an attacker plants a known
+session id on a victim before they log in — after the rotation, the
+planted id is dead and only the freshly-generated id carries the
+authenticated state. The contract matches `Auth::login_id` /
+`Auth::login_remember` so 2FA logins are indistinguishable from
+no-2FA logins in terms of session state and listener observability.
 
 Gate every protected route group with `TwoFactorChallengeMiddleware`
 **before** `AuthMiddleware` so a pending session is bounced to the
