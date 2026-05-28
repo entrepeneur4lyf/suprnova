@@ -11,18 +11,29 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Environment-driven OpenTelemetry configuration.
 ///
-/// Mirrors the standard OTel environment variables:
+/// This struct models only the handful of vars Suprnova reads itself to
+/// decide *whether* and *as whom* to export:
 ///
 /// | Field            | Env var                          | Default                         |
 /// |------------------|----------------------------------|---------------------------------|
 /// | `endpoint`       | `OTEL_EXPORTER_OTLP_ENDPOINT`    | _unset_ → telemetry disabled    |
 /// | `service_name`   | `OTEL_SERVICE_NAME`              | `"suprnova"`                    |
 /// | `service_version`| `OTEL_SERVICE_VERSION`           | `CARGO_PKG_VERSION` at compile  |
-/// | `disabled`       | `OTEL_SDK_DISABLED=true`         | `false`                         |
+/// | `disabled`       | `OTEL_SDK_DISABLED` (case-insensitive `true` / `1`) | `false`     |
 ///
 /// Telemetry is "enabled" when `endpoint` is `Some` **and** `disabled` is
 /// `false`. The endpoint is read once at process start; runtime mutation
 /// is unsupported.
+///
+/// **The rest of the standard OTLP knobs are read by the SDK, not here.**
+/// `OTEL_EXPORTER_OTLP_HEADERS` (collector auth), `_PROTOCOL`, `_TIMEOUT`,
+/// and `_COMPRESSION` are consumed directly by the `opentelemetry-otlp`
+/// exporter builders when `init_telemetry` calls `.build()` — so operators
+/// get the standard behavior without Suprnova re-modeling each one. The one
+/// value Suprnova sets explicitly is the endpoint (via `.with_endpoint`),
+/// which means a per-signal override like `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`
+/// is currently shadowed by the base `OTEL_EXPORTER_OTLP_ENDPOINT` for all
+/// three signals — see `MODULE_REVIEW_NOTES` for that known limitation.
 #[derive(Debug, Clone)]
 pub struct OtelConfig {
     /// OTLP collector base URL (e.g. `http://localhost:4318`).
@@ -51,10 +62,7 @@ impl OtelConfig {
         let service_name = env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "suprnova".to_string());
         let service_version = env::var("OTEL_SERVICE_VERSION")
             .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
-        let disabled = matches!(
-            env::var("OTEL_SDK_DISABLED").as_deref(),
-            Ok("true") | Ok("TRUE") | Ok("1")
-        );
+        let disabled = parse_sdk_disabled(env::var("OTEL_SDK_DISABLED").ok().as_deref());
         Self {
             endpoint,
             service_name,
@@ -81,6 +89,22 @@ impl OtelConfig {
     }
 }
 
+/// Parse the `OTEL_SDK_DISABLED` value into a boolean.
+///
+/// The OTel spec treats it as a case-insensitive boolean ("true"/"false").
+/// We accept any case of `true`, plus the common `1` convention; everything
+/// else (including `false`, `0`, empty, and unset) leaves telemetry enabled.
+/// Pulled out as a pure function so the parsing contract is unit-testable
+/// without mutating process-global environment state.
+fn parse_sdk_disabled(value: Option<&str>) -> bool {
+    value
+        .map(|v| {
+            let v = v.trim();
+            v.eq_ignore_ascii_case("true") || v == "1"
+        })
+        .unwrap_or(false)
+}
+
 /// RAII handle returned from [`init_telemetry`]. Owns the SDK provider
 /// instances so they can be flushed deterministically on shutdown.
 ///
@@ -94,9 +118,6 @@ impl OtelConfig {
 /// signal).
 pub struct TelemetryGuard {
     shutdown_called: Arc<AtomicBool>,
-    /// True for guards produced by the legacy `init_subscriber` path —
-    /// those have no providers to flush and shouldn't emit a drop warning.
-    legacy: bool,
     #[cfg(feature = "otel")]
     tracer_provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
     #[cfg(feature = "otel")]
@@ -106,12 +127,29 @@ pub struct TelemetryGuard {
 }
 
 impl TelemetryGuard {
-    /// Mark this guard as "shutdown" without actually invoking provider
-    /// flush — used by the legacy `init_subscriber` path which has no
-    /// providers to flush. Suppresses the Drop warning.
-    pub(crate) fn mark_shutdown_for_legacy(mut self) {
-        // Setting `legacy` ensures Drop is silent.
-        self.legacy = true;
+    /// `true` when this guard owns at least one live SDK provider that
+    /// still needs an explicit flush. The Drop warning is gated on this —
+    /// a guard with no providers (the disabled path, the legacy
+    /// `init_subscriber` path, or any non-`otel` build) has nothing to
+    /// lose on drop and must stay silent.
+    #[cfg(feature = "otel")]
+    fn owns_providers(&self) -> bool {
+        self.tracer_provider.is_some()
+            || self.meter_provider.is_some()
+            || self.logger_provider.is_some()
+    }
+
+    /// Without the `otel` feature there are no providers to own.
+    #[cfg(not(feature = "otel"))]
+    fn owns_providers(&self) -> bool {
+        false
+    }
+
+    /// Mark this guard as "shutdown" without invoking provider flush —
+    /// used by the legacy `init_subscriber` path. That path holds no
+    /// providers, so [`Self::owns_providers`] already keeps Drop silent;
+    /// this additionally records the shutdown so the state is unambiguous.
+    pub(crate) fn mark_shutdown_for_legacy(self) {
         self.shutdown_called.store(true, Ordering::SeqCst);
     }
 
@@ -147,7 +185,12 @@ impl TelemetryGuard {
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
-        if !self.legacy && !self.shutdown_called.load(Ordering::SeqCst) {
+        // Warn only when we hold providers that were never flushed.
+        // Guards with no providers (disabled path, legacy subscriber path,
+        // non-`otel` builds) have nothing buffered, so a silent drop is
+        // correct — warning there would be pure noise on every process that
+        // runs without a collector configured.
+        if self.owns_providers() && !self.shutdown_called.load(Ordering::SeqCst) {
             tracing::warn!(
                 "TelemetryGuard dropped without shutdown() — buffered \
                  telemetry may be lost. Call guard.shutdown().await before \
@@ -158,11 +201,10 @@ impl Drop for TelemetryGuard {
 }
 
 /// Build a [`TelemetryGuard`] with no provider handles. Used by the
-/// disabled / no-feature paths.
+/// disabled / no-feature paths. Holds no providers, so its Drop is silent.
 fn empty_guard() -> TelemetryGuard {
     TelemetryGuard {
         shutdown_called: Arc::new(AtomicBool::new(false)),
-        legacy: false,
         #[cfg(feature = "otel")]
         tracer_provider: None,
         #[cfg(feature = "otel")]
@@ -275,7 +317,6 @@ fn init_telemetry_with_otel(log_config: LogConfig, otel_config: OtelConfig) -> T
             install_base_subscriber(&log_config);
             return TelemetryGuard {
                 shutdown_called: Arc::new(AtomicBool::new(false)),
-                legacy: false,
                 tracer_provider: Some(tracer_provider),
                 meter_provider: None,
                 logger_provider: None,
@@ -303,7 +344,6 @@ fn init_telemetry_with_otel(log_config: LogConfig, otel_config: OtelConfig) -> T
             install_base_subscriber(&log_config);
             return TelemetryGuard {
                 shutdown_called: Arc::new(AtomicBool::new(false)),
-                legacy: false,
                 tracer_provider: Some(tracer_provider),
                 meter_provider: Some(meter_provider),
                 logger_provider: None,
@@ -362,7 +402,6 @@ fn init_telemetry_with_otel(log_config: LogConfig, otel_config: OtelConfig) -> T
 
     TelemetryGuard {
         shutdown_called: Arc::new(AtomicBool::new(false)),
-        legacy: false,
         tracer_provider: Some(tracer_provider),
         meter_provider: Some(meter_provider),
         logger_provider: Some(logger_provider),
@@ -449,5 +488,57 @@ mod tests {
         assert!(guard.logger_provider.is_none());
         // Acknowledge the guard so Drop doesn't warn.
         guard.mark_shutdown_for_legacy();
+    }
+
+    // ---- OTEL_SDK_DISABLED parse (no env mutation needed) -------------
+
+    #[test]
+    fn sdk_disabled_accepts_case_insensitive_true_and_one() {
+        for v in ["true", "True", "TRUE", "tRuE", "1"] {
+            assert!(parse_sdk_disabled(Some(v)), "{v:?} should disable the SDK",);
+        }
+    }
+
+    #[test]
+    fn sdk_disabled_trims_surrounding_whitespace() {
+        assert!(parse_sdk_disabled(Some("  true  ")));
+        assert!(parse_sdk_disabled(Some(" 1 ")));
+    }
+
+    #[test]
+    fn sdk_disabled_leaves_telemetry_enabled_for_other_values() {
+        // Unset, explicit false, zero, and arbitrary text all mean "enabled".
+        for v in [
+            None,
+            Some("false"),
+            Some("FALSE"),
+            Some("0"),
+            Some("yes"),
+            Some(""),
+        ] {
+            assert!(!parse_sdk_disabled(v), "{v:?} must NOT disable the SDK",);
+        }
+    }
+
+    // ---- empty / disabled guard drop is silent ------------------------
+
+    #[test]
+    fn empty_guard_owns_no_providers_so_drop_is_silent() {
+        // The disabled path returns `empty_guard()`. It holds no providers,
+        // so `owns_providers()` is false and Drop must not warn about lost
+        // telemetry — there is nothing buffered. Regression guard for the
+        // spurious "buffered telemetry may be lost" warning that fired on
+        // every collector-less process before this fix.
+        let guard = empty_guard();
+        assert!(
+            !guard.owns_providers(),
+            "a guard with no providers must report owns_providers() == false",
+        );
+        // Drop runs here with shutdown_called still false; the assertion
+        // above pins the invariant the Drop warning is gated on. (A
+        // subscriber-capture assertion would need global subscriber state,
+        // which collides with parallel tests — the owns_providers gate is
+        // the deterministic core.)
+        drop(guard);
     }
 }
