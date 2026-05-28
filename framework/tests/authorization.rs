@@ -1,6 +1,4 @@
-use suprnova::{FrameworkError, Gate, policy};
-
-// FIX 6: kebab-case resource names in generated action strings.
+use suprnova::{Authorizable, FrameworkError, Gate, policy};
 
 #[derive(Debug)]
 struct User {
@@ -63,7 +61,7 @@ async fn gate_authorize_returns_forbidden_when_denied() {
     assert!(matches!(result, Err(FrameworkError::Unauthorized)));
 }
 
-// ── Task 3: #[policy] proc-macro test ────────────────────────────────────────
+// ── #[policy] proc-macro test ─────────────────────────────────────────────────
 
 struct Comment {
     pub author_id: i64,
@@ -100,7 +98,7 @@ fn policy_macro_registers_gates_via_inventory() {
     assert!(!Gate::allows("update-comment", &alice, &theirs));
 }
 
-// ── FIX 6: PascalCase → kebab-case action names ───────────────────────────────
+// ── PascalCase → kebab-case action names ──────────────────────────────────────
 
 #[allow(dead_code)]
 struct UserProfile {
@@ -119,7 +117,7 @@ impl UserProfilePolicy {
     }
 }
 
-// ── FIX 4: Async gate support ─────────────────────────────────────────────────
+// ── Async gate support ────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
 struct Item {
@@ -231,7 +229,7 @@ async fn gate_authorize_async_returns_unauthorized_when_denied() {
     ));
 }
 
-// ── FIX 5: init_policies callable independently of Server::serve ──────────────
+// ── init_policies callable independently of Server::serve ────────────────────
 
 /// Verifies that `init_policies()` is idempotent and works without `Server::serve`.
 ///
@@ -259,8 +257,10 @@ fn init_policies_registers_gates_without_server_serve() {
     );
 }
 
-/// Without FIX 6, `UserProfile` becomes `"view-userprofile"` (no hyphen).
-/// With FIX 6, it must be `"view-user-profile"` (PascalCase kebab-ified).
+/// A PascalCase resource type must be kebab-cased in the generated
+/// action name: `UserProfile` → `"view-user-profile"`, not the
+/// flat-lowercase `"view-userprofile"` (which would defeat ergonomic
+/// `Gate::allows` calls).
 #[test]
 fn policy_macro_kebab_cases_multi_word_resource() {
     suprnova::authorization::init_policies();
@@ -282,4 +282,247 @@ fn policy_macro_kebab_cases_multi_word_resource() {
         !Gate::allows("view-userprofile", &alice, &mine),
         "flat-lowercase action 'view-userprofile' must not be registered"
     );
+}
+
+// ── Introspection: has + abilities ───────────────────────────────────────────
+
+#[test]
+fn gate_has_returns_true_for_registered_action() {
+    Gate::define::<User, Post>("publish-post", |user, _post| user.is_admin);
+    assert!(
+        Gate::has::<User, Post>("publish-post"),
+        "has must report registered (action, U, R) tuples"
+    );
+    // Distinct U/R or missing action must report `false` — `has`
+    // keys on the full tuple, not the action string alone.
+    assert!(!Gate::has::<User, Comment>("publish-post"));
+    assert!(!Gate::has::<User, Post>("delete-post-permanently"));
+}
+
+#[test]
+fn gate_abilities_lists_registered_actions_deduped() {
+    Gate::define::<User, Post>("archive-post", |u, _| u.is_admin);
+    Gate::define::<User, Post>("unarchive-post", |u, _| u.is_admin);
+    // Same action against a DIFFERENT resource type should NOT
+    // produce a duplicate in `abilities()` — it dedupes by action
+    // string the same way Laravel's `Gate::abilities()` does.
+    Gate::define::<User, Comment>("archive-post", |u, _| u.is_admin);
+
+    let abilities = Gate::abilities();
+    let count_archive = abilities.iter().filter(|a| *a == "archive-post").count();
+    assert_eq!(
+        count_archive, 1,
+        "abilities must dedupe by action name; got {abilities:?}"
+    );
+    assert!(abilities.contains(&"unarchive-post".to_string()));
+}
+
+// ── Multi-action: any / none / check (sync) ──────────────────────────────────
+
+#[tokio::test]
+async fn gate_any_returns_true_when_at_least_one_allows() {
+    Gate::define::<User, Post>("any-view", |_u, p| p.is_public);
+    Gate::define::<User, Post>("any-edit", |u, p| p.author_id == u.id);
+
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
+    let public_post = Post {
+        id: 1,
+        author_id: 99,
+        is_public: true,
+    };
+    let foreign_private = Post {
+        id: 2,
+        author_id: 99,
+        is_public: false,
+    };
+
+    // Public post: view allows, edit denies → any is true.
+    assert!(Gate::any(&["any-view", "any-edit"], &alice, &public_post));
+    // Foreign private: both deny → any is false.
+    assert!(!Gate::any(
+        &["any-view", "any-edit"],
+        &alice,
+        &foreign_private
+    ));
+}
+
+#[tokio::test]
+async fn gate_none_is_inverse_of_any() {
+    Gate::define::<User, Post>("none-view", |_u, p| p.is_public);
+
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
+    let private_post = Post {
+        id: 1,
+        author_id: 99,
+        is_public: false,
+    };
+    // none-view denies on private → none returns true (no actions allow).
+    assert!(Gate::none(&["none-view"], &alice, &private_post));
+}
+
+#[tokio::test]
+async fn gate_check_requires_all_actions_to_allow() {
+    Gate::define::<User, Post>("check-view", |_u, p| p.is_public);
+    Gate::define::<User, Post>("check-comment", |_u, _p| true);
+
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
+    let public_post = Post {
+        id: 1,
+        author_id: 99,
+        is_public: true,
+    };
+    let private_post = Post {
+        id: 2,
+        author_id: 99,
+        is_public: false,
+    };
+
+    // Both allow on public → check is true.
+    assert!(Gate::check(
+        &["check-view", "check-comment"],
+        &alice,
+        &public_post
+    ));
+    // check-view denies on private → check is false.
+    assert!(!Gate::check(
+        &["check-view", "check-comment"],
+        &alice,
+        &private_post
+    ));
+    // Empty slice is vacuously true (matches Iterator::all).
+    assert!(Gate::check::<User, Post>(&[], &alice, &public_post));
+}
+
+// ── Multi-action: any / none / check (async) ─────────────────────────────────
+
+#[tokio::test]
+async fn gate_any_async_works_with_mixed_sync_and_async_registrations() {
+    Gate::define::<User, Post>("aa-sync", |u, _| u.is_admin);
+    Gate::define_async::<User, Post, _, _>("aa-async", |u, _p| {
+        let admin = u.is_admin;
+        async move { admin }
+    });
+
+    let alice_admin = User {
+        id: 1,
+        is_admin: true,
+    };
+    let bob = User {
+        id: 2,
+        is_admin: false,
+    };
+    let post = Post {
+        id: 1,
+        author_id: 1,
+        is_public: false,
+    };
+
+    // Admin: both allow → any_async is true.
+    assert!(Gate::any_async(&["aa-sync", "aa-async"], &alice_admin, &post).await);
+    // Non-admin: both deny → any_async is false.
+    assert!(!Gate::any_async(&["aa-sync", "aa-async"], &bob, &post).await);
+}
+
+#[tokio::test]
+async fn gate_check_async_short_circuits_on_first_deny() {
+    Gate::define::<User, Post>("ca-cheap-deny", |_u, _p| false);
+    // This second gate would never be called if check_async
+    // short-circuits — we can't directly assert "wasn't called"
+    // without observable side effects, but a passing test confirms
+    // the iteration completes (otherwise it would hang forever in
+    // a real wait).
+    Gate::define_async::<User, Post, _, _>("ca-expensive-allow", |_u, _p| async {
+        // Cheap async to avoid an actual hang in misuse.
+        true
+    });
+
+    let bob = User {
+        id: 2,
+        is_admin: false,
+    };
+    let post = Post {
+        id: 1,
+        author_id: 1,
+        is_public: false,
+    };
+
+    // First gate denies → check_async returns false without
+    // accepting the second gate's allow.
+    assert!(!Gate::check_async(&["ca-cheap-deny", "ca-expensive-allow"], &bob, &post).await);
+}
+
+// ── Authorizable trait sugar ─────────────────────────────────────────────────
+
+impl Authorizable for User {}
+
+#[tokio::test]
+async fn authorizable_can_delegates_to_gate_allows() {
+    Gate::define::<User, Post>("can-view", |_u, p| p.is_public);
+
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
+    let public_post = Post {
+        id: 1,
+        author_id: 99,
+        is_public: true,
+    };
+    let private_post = Post {
+        id: 2,
+        author_id: 99,
+        is_public: false,
+    };
+
+    assert!(alice.can("can-view", &public_post));
+    assert!(!alice.can("can-view", &private_post));
+    assert!(alice.cannot("can-view", &private_post));
+}
+
+#[tokio::test]
+async fn authorizable_authorize_returns_unauthorized_on_deny() {
+    Gate::define::<User, Post>("can-edit", |u, p| p.author_id == u.id);
+
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
+    let foreign = Post {
+        id: 99,
+        author_id: 999,
+        is_public: true,
+    };
+
+    let result = alice.authorize("can-edit", &foreign);
+    assert!(matches!(result, Err(FrameworkError::Unauthorized)));
+}
+
+#[tokio::test]
+async fn authorizable_can_async_dispatches_async_gates() {
+    Gate::define_async::<User, Post, _, _>("can-async-view", |_u, p| {
+        let public = p.is_public;
+        async move { public }
+    });
+
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
+    let public_post = Post {
+        id: 1,
+        author_id: 99,
+        is_public: true,
+    };
+
+    assert!(alice.can_async("can-async-view", &public_post).await);
+    assert!(!alice.cannot_async("can-async-view", &public_post).await);
 }

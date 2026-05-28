@@ -41,10 +41,10 @@ impl GateRegistry {
             let r = r.downcast_ref::<R>().expect("gate resource type");
             f(u, r)
         });
-        // Domain 10 audit D10-A — degrade gracefully on lock poison
-        // rather than panic-the-boot-path. Skipping a single gate
-        // registration is recoverable; the gate's authorize calls
-        // return None → safe-deny (`Err(FrameworkError::Unauthorized)`).
+        // Degrade gracefully on lock poison rather than panic the
+        // boot path. Skipping a single gate registration is
+        // recoverable; the gate's authorize calls return None →
+        // safe-deny (`Err(FrameworkError::Unauthorized)`).
         match self.gates.write() {
             Ok(mut gates) => {
                 gates.insert(key, GateEntry::Sync(erased));
@@ -81,8 +81,8 @@ impl GateRegistry {
             let fut = f(u, r);
             Box::pin(fut)
         });
-        // Domain 10 audit D10-A — same poison-recovery shape as
-        // `register` (sync). Safe-deny on next authorize attempt.
+        // Same poison-recovery shape as `register` (sync) —
+        // safe-deny on the next authorize attempt.
         match self.gates.write() {
             Ok(mut gates) => {
                 gates.insert(key, GateEntry::Async(erased));
@@ -112,8 +112,8 @@ impl GateRegistry {
         resource: &R,
     ) -> Option<bool> {
         let key = (action.to_string(), TypeId::of::<U>(), TypeId::of::<R>());
-        // Domain 10 audit D10-A — every Gate::authorize call dispatches
-        // through here. Returning None on poison means the caller's
+        // Every Gate::authorize call dispatches through here.
+        // Returning None on poison means the caller's
         // `Gate::authorize` returns Err(Unauthorized) — safe-deny.
         let gates = match self.gates.read() {
             Ok(g) => g,
@@ -159,8 +159,8 @@ impl GateRegistry {
         // We hold the read lock only long enough to clone the result or start
         // the async dispatch — we must NOT hold it across an `.await`.
         //
-        // Domain 10 audit D10-A — degrade to None on poison; caller's
-        // `Gate::authorize_async` returns Err(Unauthorized) (safe-deny).
+        // Degrade to None on poison; caller's `Gate::authorize_async`
+        // returns Err(Unauthorized) (safe-deny).
         let entry_result: EntryResult = match self.gates.read() {
             Ok(gates) => match gates.get(&key) {
                 Some(GateEntry::Sync(f)) => Some(Ok(f(user as &dyn Any, resource as &dyn Any))),
@@ -183,6 +183,36 @@ impl GateRegistry {
             Some(Ok(result)) => Some(result),
             Some(Err(fut)) => Some(fut.await),
         }
+    }
+
+    /// Whether a gate (sync or async) is registered for
+    /// `(action, U, R)`. Used by [`crate::Gate::has`] for the
+    /// introspection path Laravel calls `Gate::has`.
+    pub(crate) fn has<U: 'static, R: 'static>(&self, action: &str) -> bool {
+        let key = (action.to_string(), TypeId::of::<U>(), TypeId::of::<R>());
+        match self.gates.read() {
+            Ok(gates) => gates.contains_key(&key),
+            // Poisoned lock: same safe-deny posture as the invoke
+            // paths — pretend the gate is absent rather than panic.
+            Err(_) => false,
+        }
+    }
+
+    /// Distinct action names across every registered (action, U, R)
+    /// tuple. Used by [`crate::Gate::abilities`] — mirrors Laravel's
+    /// `Gate::abilities()` (which also dedupes by action name).
+    /// Returns an empty vec on lock poison (same safe-deny shape).
+    pub(crate) fn abilities(&self) -> Vec<String> {
+        let Ok(gates) = self.gates.read() else {
+            tracing::error!(
+                "Gate registry lock poisoned during abilities(); returning empty list."
+            );
+            return Vec::new();
+        };
+        let mut names: Vec<String> = gates.keys().map(|(a, _, _)| a.clone()).collect();
+        names.sort_unstable();
+        names.dedup();
+        names
     }
 }
 

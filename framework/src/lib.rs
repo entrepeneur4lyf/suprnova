@@ -72,7 +72,7 @@ pub use auth::{
     Credentials, DatabaseUserProvider, EloquentUserProvider, GenericUser, Guard, GuardConfig,
     GuardDriver, GuestMiddleware, SessionGuard, StatefulGuard, TokenGuard, UserProvider,
 };
-pub use authorization::{Gate, Policy};
+pub use authorization::{Authorizable, Gate, Policy};
 pub use cache::{Cache, CacheConfig, CacheStore, InMemoryCache, LockGuard, RedisCache};
 pub use config::{AppConfig, Config, Environment, ServerConfig, env, env_optional, env_required};
 pub use container::{App, Container};
