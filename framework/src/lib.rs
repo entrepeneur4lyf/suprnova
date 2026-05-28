@@ -72,7 +72,7 @@ pub use auth::{
     Credentials, DatabaseUserProvider, EloquentUserProvider, GenericUser, Guard, GuardConfig,
     GuardDriver, GuestMiddleware, SessionGuard, StatefulGuard, TokenGuard, UserProvider,
 };
-pub use authorization::{Authorizable, Gate, Policy};
+pub use authorization::{Authorizable, Gate};
 // The crate root binds `Response` to the HTTP response contract, so the
 // authorization decision type is exported here under an unambiguous alias.
 // Its Laravel-spelled home is `suprnova::authorization::Response`.

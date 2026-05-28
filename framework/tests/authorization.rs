@@ -118,6 +118,72 @@ impl UserProfilePolicy {
     }
 }
 
+// ── #[policy] methods returning a rich Response ───────────────────────────────
+
+struct Article {
+    author_id: i64,
+}
+
+struct ArticlePolicy;
+
+#[policy(User, Article)]
+impl ArticlePolicy {
+    // A `-> bool` method routes through `Gate::define` (unchanged behaviour).
+    fn view(_user: &User, _article: &Article) -> bool {
+        true
+    }
+
+    // A `-> Response` method routes through `Gate::define_with`, so the denial
+    // carries a message + HTTP status that `inspect` / `authorize` surface.
+    fn update(user: &User, article: &Article) -> Response {
+        if article.author_id == user.id {
+            Response::allow()
+        } else {
+            Response::deny_with_status(404, "Article not found.")
+        }
+    }
+}
+
+#[test]
+fn policy_macro_routes_bool_and_response_returns() {
+    suprnova::authorization::init_policies();
+
+    let owner = User {
+        id: 7,
+        is_admin: false,
+    };
+    let stranger = User {
+        id: 8,
+        is_admin: false,
+    };
+    let article = Article { author_id: 7 };
+
+    // The `-> bool` method registered a plain allow/deny gate.
+    assert!(Gate::allows("view-article", &owner, &article));
+
+    // The `-> Response` method allows the owner.
+    assert!(Gate::allows("update-article", &owner, &article));
+
+    // It denies a stranger with the rich message + status it returned — proof
+    // the method routed to `define_with`, not `define`.
+    let denied = Gate::inspect("update-article", &stranger, &article);
+    assert!(denied.denied());
+    assert_eq!(denied.message(), Some("Article not found."));
+    assert_eq!(denied.status(), Some(404));
+
+    // `authorize` propagates that status as a Domain error, not a bare 403.
+    match Gate::authorize("update-article", &stranger, &article) {
+        Err(FrameworkError::Domain {
+            status_code,
+            message,
+        }) => {
+            assert_eq!(status_code, 404);
+            assert_eq!(message, "Article not found.");
+        }
+        other => panic!("expected Domain 404, got {other:?}"),
+    }
+}
+
 // ── Async gate support ────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]

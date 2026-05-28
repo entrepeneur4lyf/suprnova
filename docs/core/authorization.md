@@ -5,10 +5,10 @@ icon: shield-check
 ---
 
 Authentication answers _"who are you?"_ — authorization answers _"are you
-allowed to do this?"_ suprnova ships a Laravel-shaped `Gate` facade plus a
-`Policy` trait + `#[policy]` macro for resource-oriented wiring, with sync
-and async variants of every check so the same surface works whether your
-policy body needs a DB hit or just a struct-field comparison.
+allowed to do this?"_ suprnova ships a Laravel-shaped `Gate` facade plus the
+`#[policy]` macro for resource-oriented wiring, with sync and async variants
+of every check so the same surface works whether your policy body needs a DB
+hit or just a struct-field comparison.
 
 ## Quick start
 
@@ -103,13 +103,14 @@ surfaces the bug in logs via `tracing::warn!` rather than silently
 passing). Async-registered gates respond correctly from the
 `_async` paths.
 
-## The `Policy` trait
+## Policies with `#[policy]`
 
-When you have a resource type with several abilities, write a `Policy`
-once and let `#[policy]` register every method as a gate:
+When a resource type has several abilities, group them into a policy struct
+and let `#[policy]` register every method as a gate:
 
 ```rust
 use suprnova::policy;
+use suprnova::authorization::Response;
 
 struct User { id: i64, is_admin: bool }
 struct Post { id: i64, author_id: i64, is_public: bool }
@@ -117,26 +118,43 @@ struct PostPolicy;
 
 #[policy(User, Post)]
 impl PostPolicy {
+    // A `-> bool` method is a plain allow/deny gate.
     fn view_any(_user: &User, _post: &Post) -> bool {
-        true  // anyone can list posts
+        true // anyone can list posts
     }
     fn view(user: &User, post: &Post) -> bool {
         post.is_public || post.author_id == user.id || user.is_admin
     }
-    fn update(user: &User, post: &Post) -> bool {
-        post.author_id == user.id || user.is_admin
+
+    // A `-> Response` method can carry a message + HTTP status on denial.
+    fn update(user: &User, post: &Post) -> Response {
+        if post.author_id == user.id || user.is_admin {
+            Response::allow()
+        } else {
+            Response::deny_with("You may only edit your own posts.")
+        }
     }
-    fn delete(user: &User, post: &Post) -> bool {
-        user.is_admin
+    fn delete(user: &User, post: &Post) -> Response {
+        if user.is_admin {
+            Response::allow()
+        } else {
+            Response::deny_as_not_found() // hide the post from non-admins
+        }
     }
 }
 ```
 
-The macro generates one `inventory::submit!` per impl method, each
-calling `Gate::define::<User, Post>(action, fn)`. `Server::serve` drains
-the inventory via `init_policies()` at boot, so by the time the first
-request arrives every action is registered. `init_policies()` is also
-public and idempotent — call it manually in tests.
+Each method becomes one `inventory::submit!`. `Server::serve` drains the
+inventory via `init_policies()` at boot, so by the time the first request
+arrives every action is registered. `init_policies()` is also public and
+idempotent — call it manually in tests.
+
+Policy methods are stateless associated functions taking `(user, resource)` —
+the same shape as Laravel's `update(User $user, Post $post)`, where `$this` is
+the stateless policy object. Every method takes both arguments for a uniform
+gate signature; `view_any` / `create` simply ignore the resource (`_post`).
+Methods you don't write aren't registered, and an unregistered action
+default-denies.
 
 ### Method-name → action mapping
 
@@ -154,24 +172,23 @@ This diverges from Laravel's camelCase action names (`viewAny`,
 string mirrors the method identifier you'd autocomplete in your
 editor.
 
-### Convention defaults
+### Return type: `bool` or `Response`
 
-The `Policy<U>` trait ships seven default method bodies matching
-Laravel's resource policy verbs:
+A policy method's return type selects how it registers — and what a denial
+can carry:
 
-| Method | Default | Rationale |
+| Return type | Registers via | Denial surfaces as |
 |---|---|---|
-| `view_any(user)` | `true` | Listing is typically public |
-| `view(&self, user)` | `true` | Reading is typically public |
-| `create(user)` | `true` | Creation is typically open |
-| `update(&self, user)` | `false` | Mutation requires an explicit decision |
-| `delete(&self, user)` | `false` | Same |
-| `restore(&self, user)` | `false` | Soft-delete restore — explicit |
-| `force_delete(&self, user)` | `false` | Permanent destruction — most restrictive default |
+| `bool` | `Gate::define` | bare `403` (`This action is unauthorized.`) |
+| `Response` | `Gate::define_with` | the message, code, and HTTP status the `Response` carries |
 
-Override the methods you care about; omitted methods take the default
-and are NOT registered by `#[policy]` (so they remain at the
-trait-default unless someone calls them directly).
+Return `bool` for a simple yes/no. Return a `Response` (imported from
+`suprnova::authorization::Response`) when a denial should carry a reason or a
+non-403 status — `Response::deny_with("…")` for a message, or
+`Response::deny_as_not_found()` to answer `404` and hide the resource's
+existence. Both compile to the same type-erased gate (a `bool` is wrapped into
+a bare allow/deny). Any other return type — or a missing one — is a compile
+error.
 
 ## The `Authorizable` trait
 
@@ -343,14 +360,6 @@ rule applied* — no `before` hook fired, no gate is registered, no `after`
 hook filled in — as distinct from an explicit `Some(deny)`. `inspect`
 normalizes that `None` to a default deny; `raw` preserves it for diagnostics
 ("is this action governed at all?").
-
-### Policy methods are bool-only (for now)
-
-`#[policy]` methods return `bool`, so a policy denial currently produces a
-*bare* deny — `inspect()` on it has `message() == None`. Rich messages come
-from `define_with`. Letting policy methods also return a `Response` is the
-next commit in this module (it requires teaching the `#[policy]` macro to
-detect each method's return type); see `docs/parity/authorization.md`.
 
 ## `before` / `after` hooks
 

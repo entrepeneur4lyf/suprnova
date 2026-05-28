@@ -39,8 +39,8 @@
 //! ```
 //!
 //! Authorize against the bound model in the handler using
-//! [`crate::authorization::Gate`] (and optionally an inventory-registered
-//! [`Policy`](crate::authorization::Policy) for per-model rules). The
+//! [`crate::authorization::Gate`] (gates registered directly, or via the
+//! [`policy`](crate::policy) attribute macro for per-model rules). The
 //! framework's auth surface gives you the current user through
 //! [`Auth::user_as::<U>()`](crate::auth::Auth::user_as):
 //!
