@@ -186,7 +186,31 @@ impl crate::middleware::Middleware for RequestIdMiddleware {
             request_id = %id_str,
             method = %request.method(),
             path = %request.path(),
+            // Declared up front as Empty so the 5xx marker recorded after
+            // the chain actually lands — `tracing` silently ignores
+            // `record` for fields not declared at span creation. The
+            // `tracing-opentelemetry` bridge reads this to set OTel
+            // `Status::Error` on 5xx responses. A never-recorded Empty
+            // field is omitted from output, so this is zero-cost on the
+            // 2xx path and in non-otel builds.
+            error = tracing::field::Empty,
         );
+
+        // Join the upstream distributed trace before the span is entered.
+        // If the request carries a valid W3C `traceparent`, this reparents
+        // the span onto the caller's span so the server span is a child in
+        // the same trace instead of a fresh root. No-op without the `otel`
+        // feature or without a usable trace header. MUST run before
+        // `.instrument(span)` — the OTel bridge materializes the span on
+        // first poll, so a later `set_parent` is dropped.
+        crate::telemetry::propagation::join_upstream_trace(&span, request.headers());
+
+        // Clone for the post-chain 5xx error marker; the original `span` is
+        // moved into `.instrument(...)` below. Only needed under `otel`
+        // (the field is otherwise never recorded), so the clone is gated to
+        // avoid an unused binding in default builds.
+        #[cfg(feature = "otel")]
+        let span_for_status = span.clone();
 
         // Snapshot the request's query parameters into a `HashMap` so
         // `Context::query_param` and downstream paginate / cursor code
@@ -225,6 +249,28 @@ impl crate::middleware::Middleware for RequestIdMiddleware {
                 .instrument(span),
             )
             .await;
+
+        // Mark the span errored on a 5xx response so the
+        // `tracing-opentelemetry` bridge maps it to OTel `Status::Error`.
+        // Recorded here — the outermost middleware — so all three
+        // chain-running server paths (matched route, fallback, static 404)
+        // get the marker from one place instead of three duplicated
+        // post-chain blocks in `server.rs`.
+        //
+        // A *panic* inside the chain unwinds past this point (the span's
+        // future is dropped mid-flight), so a panic-induced 500 is NOT
+        // marked here; `execute_chain_safely` still emits an error-level
+        // log and dispatches `ErrorOccurred` for that case, so it is not
+        // silent — only the OTel span status is unset on panic.
+        #[cfg(feature = "otel")]
+        {
+            let status = match &result {
+                Ok(resp) | Err(resp) => resp.status_code(),
+            };
+            if status >= 500 {
+                span_for_status.record("error", true);
+            }
+        }
 
         // Echo X-Request-Id on both success and error variants.
         match result {

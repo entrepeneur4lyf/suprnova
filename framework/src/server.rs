@@ -635,14 +635,11 @@ async fn handle_request_inner(
             let http_response =
                 execute_chain_safely(chain, request, handler, &method, path, request_id).await;
 
-            // Mark the active tracing span as errored on 5xx so the
-            // tracing-opentelemetry bridge translates it to OTel
-            // `Status::Error`. The field is a no-op when no span is
-            // active (e.g. before the Phase 2 request span lands).
-            #[cfg(feature = "otel")]
-            if http_response.status_code() >= 500 {
-                tracing::Span::current().record("error", true);
-            }
+            // The 5xx -> OTel `Status::Error` marker is recorded inside
+            // `RequestIdMiddleware` (the outermost middleware), where the
+            // request span is still live. Recording here would target the
+            // wrong span: this runs after the middleware's `.instrument`
+            // scope has already closed.
             http_response.into_hyper()
         }
         None => {
@@ -674,14 +671,8 @@ async fn handle_request_inner(
                 )
                 .await;
 
-                // Mark the active tracing span as errored on 5xx so the
-                // tracing-opentelemetry bridge translates it to OTel
-                // `Status::Error`. The field is a no-op when no span is
-                // active.
-                #[cfg(feature = "otel")]
-                if http_response.status_code() >= 500 {
-                    tracing::Span::current().record("error", true);
-                }
+                // 5xx -> OTel error marker is recorded in
+                // `RequestIdMiddleware` (outermost), where the span is live.
                 http_response.into_hyper()
             } else {
                 // No fallback handler registered. Still run the global
