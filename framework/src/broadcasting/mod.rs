@@ -16,6 +16,7 @@ mod handler;
 mod hub;
 mod protocol;
 pub(crate) mod request_socket;
+mod testing;
 
 #[cfg(feature = "broadcasting-fanout")]
 pub mod fanout;
@@ -27,3 +28,4 @@ pub use channel::{
 pub use handler::BroadcastingWsHandler;
 pub use hub::{BroadcastEnvelope, BroadcastHub, InMemoryBroadcastHub};
 pub use protocol::{ClientFrame, ServerFrame};
+pub use testing::RecordingBroadcastHub;

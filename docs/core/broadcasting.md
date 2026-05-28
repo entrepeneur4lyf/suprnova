@@ -498,16 +498,33 @@ The following items are intentionally deferred. Each note describes the path for
 
 - **Per-instance presence visibility.** The framework merges all connected members into one unified view; there is no admin-facing surface for "which members are connected to which specific process." This is a monitoring/ops concern rather than a product concern and is deferred.
 
+## Testing broadcasts
+
+`RecordingBroadcastHub` is a `BroadcastHub` that records every published envelope while still delivering to live subscribers — the Suprnova analogue of Laravel's `Broadcast::fake()`. Bind it in place of `InMemoryBroadcastHub` in a test and assert what was broadcast without subscribing first:
+
+```rust
+use suprnova::broadcasting::RecordingBroadcastHub;
+
+let hub = RecordingBroadcastHub::new();
+// ... run code that publishes (directly, or via a dispatched Broadcastable) ...
+hub.assert_broadcast("orders.42", "OrderShipped");
+assert_eq!(hub.count(), 1);
+```
+
+`broadcasts()` returns every recorded envelope for finer-grained assertions, and `assert_nothing_broadcast()` asserts none were sent. To assert that a `Broadcastable` *event* was dispatched at all (rather than what reached the wire), `Event::fake()` records the event itself — see [events](./events.md).
+
 ## Reference
 
 | Symbol | Purpose |
 |--------|---------|
-| `suprnova::broadcasting::Channel` | Trait for named channels. Implement `name()` (required). Override `authorize(&self, req, data) -> bool` for private semantics, or `presence_info()` for presence semantics. |
+| `suprnova::broadcasting::Channel` | Trait for named channels. Implement `name()` (required; may be a `{param}` pattern). Override `authorize(&self, req, params, data) -> bool` for private semantics, or `presence_info()` for presence semantics. |
+| `suprnova::broadcasting::ChannelParams` | Values captured from a parameterized channel `name()` (e.g. `{id}` for `orders.{id}`). Passed to the channel hooks; `get(key) -> Option<&str>`. Empty for fixed-name channels. |
 | `suprnova::broadcasting::PrivateChannel` | Marker trait. Implementing it alongside `Channel` (with a custom `authorize`) makes the channel private. No additional methods. |
-| `suprnova::broadcasting::PresenceChannel` | Trait with `async fn member_info(&self, req: &Request) -> Result<Value, FrameworkError>`. Returns the joining member's data used in `presence.joined` / `presence.here` frames. |
+| `suprnova::broadcasting::PresenceChannel` | Trait with `async fn member_info(&self, req: &Request, params: &ChannelParams) -> Result<Value, FrameworkError>`. Returns the joining member's data used in `presence.joined` / `presence.here` frames. |
 | `suprnova::broadcasting::Broadcastable` | Trait on an `Event`: `broadcast_on() -> Vec<String>` (channels), `broadcast_event_name()` (wire name), `broadcast_with() -> Option<Value>` (curated payload), `broadcast_when() -> bool` (conditional push), `broadcast_to_others() -> bool` (exclude the originating socket via `X-Socket-ID`). Pushed to hub subscribers when dispatched via `EventFacade`. |
 | `suprnova::broadcasting::BroadcastHub` | Trait implemented by `InMemoryBroadcastHub` and `SeaStreamerBroadcastHub`. The DI container holds the active hub. |
 | `suprnova::broadcasting::InMemoryBroadcastHub` | Default hub. In-process fanout only. No external dependencies. |
+| `suprnova::broadcasting::RecordingBroadcastHub` | Test double (`Broadcast::fake()` analogue). Records published envelopes for assertions (`assert_broadcast`, `broadcasts`, `assert_nothing_broadcast`) while still delivering to subscribers. |
 | `suprnova::broadcasting::fanout::SeaStreamerBroadcastHub` | Multi-process hub behind the `broadcasting-fanout` feature. Accepts a broker URI. |
 | `suprnova::broadcasting::ChannelRegistry` | Registry of all known channels. Populated at bootstrap. Resolved from the container by `build_broadcasting_handler()`. |
 | `build_broadcasting_handler()` | Returns a `WebSocketHandler` that implements the full JSON envelope protocol. Resolves the hub and registry from the container. Pass directly to `ws!(...)`. |
