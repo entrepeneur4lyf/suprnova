@@ -1,3 +1,4 @@
+use suprnova::authorization::Response;
 use suprnova::{Authorizable, FrameworkError, Gate, policy};
 
 #[derive(Debug)]
@@ -525,4 +526,211 @@ async fn authorizable_can_async_dispatches_async_gates() {
 
     assert!(alice.can_async("can-async-view", &public_post).await);
     assert!(!alice.cannot_async("can-async-view", &public_post).await);
+}
+
+// ── Rich Response: define_with + inspect + raw ───────────────────────────────
+
+#[tokio::test]
+async fn gate_define_with_returns_rich_response() {
+    Gate::define_with::<User, Post>("dw-update", |user, post| {
+        if post.author_id == user.id {
+            Response::allow()
+        } else {
+            Response::deny_with("You do not own this post.")
+        }
+    });
+
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
+    let owned = Post {
+        id: 1,
+        author_id: 1,
+        is_public: false,
+    };
+    let foreign = Post {
+        id: 2,
+        author_id: 99,
+        is_public: false,
+    };
+
+    let ok = Gate::inspect("dw-update", &alice, &owned);
+    assert!(ok.allowed());
+    assert_eq!(ok.message(), None);
+
+    let denied = Gate::inspect("dw-update", &alice, &foreign);
+    assert!(denied.denied());
+    assert_eq!(denied.message(), Some("You do not own this post."));
+    // allows() still collapses the rich decision to a bool.
+    assert!(!Gate::allows("dw-update", &alice, &foreign));
+}
+
+#[tokio::test]
+async fn gate_inspect_default_denies_undefined_action() {
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
+    let post = Post {
+        id: 1,
+        author_id: 1,
+        is_public: true,
+    };
+    let r = Gate::inspect("dw-never-defined", &alice, &post);
+    assert!(r.denied());
+    assert_eq!(r.status(), None);
+    assert_eq!(r.message(), None);
+}
+
+#[tokio::test]
+async fn gate_raw_distinguishes_undefined_from_deny() {
+    Gate::define::<User, Post>("raw-deny", |_u, _p| false);
+    Gate::define::<User, Post>("raw-allow", |_u, _p| true);
+
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
+    let post = Post {
+        id: 1,
+        author_id: 1,
+        is_public: true,
+    };
+
+    // Undefined ability → None (no rule), distinct from an explicit deny.
+    assert!(Gate::raw("raw-undefined", &alice, &post).is_none());
+    // Explicit deny → Some(denied).
+    assert!(Gate::raw("raw-deny", &alice, &post).is_some_and(|r| r.denied()));
+    // Allow → Some(allowed).
+    assert!(Gate::raw("raw-allow", &alice, &post).is_some_and(|r| r.allowed()));
+}
+
+#[tokio::test]
+async fn gate_authorize_carries_status_from_rich_response() {
+    Gate::define_with::<User, Post>("dw-secret", |_u, _p| Response::deny_as_not_found());
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
+    let post = Post {
+        id: 1,
+        author_id: 99,
+        is_public: false,
+    };
+
+    match Gate::authorize("dw-secret", &alice, &post) {
+        Err(FrameworkError::Domain { status_code, .. }) => assert_eq!(status_code, 404),
+        other => panic!("expected Domain 404 from deny_as_not_found, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn gate_inspect_async_with_define_async_with() {
+    Gate::define_async_with::<User, Post, _, _>("dw-async-update", |user, post| {
+        let owns = post.author_id == user.id;
+        async move {
+            tokio::task::yield_now().await;
+            if owns {
+                Response::allow()
+            } else {
+                Response::deny_with("not yours (async)")
+            }
+        }
+    });
+
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
+    let foreign = Post {
+        id: 9,
+        author_id: 99,
+        is_public: false,
+    };
+
+    let r = Gate::inspect_async("dw-async-update", &alice, &foreign).await;
+    assert!(r.denied());
+    assert_eq!(r.message(), Some("not yours (async)"));
+    assert!(!Gate::allows_async("dw-async-update", &alice, &foreign).await);
+}
+
+// ── before / after hooks ─────────────────────────────────────────────────────
+//
+// Each hook test uses a DEDICATED user type. before/after hooks are keyed by
+// the user's TypeId in the process-global registry, so registering one against
+// the shared `User` type would leak into every other parallel test. A unique
+// per-test user type isolates the hook completely.
+
+#[derive(Debug)]
+struct AdminUser {
+    is_admin: bool,
+}
+
+#[tokio::test]
+async fn gate_before_hook_short_circuits_and_continues() {
+    // The gate always denies; the before hook grants admins everything.
+    Gate::define::<AdminUser, Post>("bh-edit", |_u, _p| false);
+    Gate::before::<AdminUser>(|u, _action| u.is_admin.then_some(true));
+
+    let admin = AdminUser { is_admin: true };
+    let regular = AdminUser { is_admin: false };
+    let post = Post {
+        id: 1,
+        author_id: 1,
+        is_public: false,
+    };
+
+    // Admin: before short-circuits the denying gate → allowed.
+    assert!(Gate::allows("bh-edit", &admin, &post));
+    // Non-admin: before returns None → the gate decides → denied.
+    assert!(!Gate::allows("bh-edit", &regular, &post));
+}
+
+#[derive(Debug)]
+struct AfterUser {
+    #[allow(dead_code)]
+    id: i64,
+}
+
+#[tokio::test]
+async fn gate_after_hook_fills_only_undecided() {
+    // A denying gate for one action; the after hook ALWAYS returns allow.
+    Gate::define::<AfterUser, Post>("ah-defined", |_u, _p| false);
+    Gate::after::<AfterUser>(|_u, _action, _decided| Some(true));
+
+    let user = AfterUser { id: 1 };
+    let post = Post {
+        id: 1,
+        author_id: 1,
+        is_public: false,
+    };
+
+    // Undefined ability: result is None → the after hook FILLS it → allowed.
+    assert!(Gate::allows("ah-undefined", &user, &post));
+    // Defined-deny: result is Some(false) → after CANNOT override → denied.
+    assert!(!Gate::allows("ah-defined", &user, &post));
+}
+
+#[derive(Debug)]
+struct AsyncHookUser {
+    is_admin: bool,
+}
+
+#[tokio::test]
+async fn gate_before_hook_applies_to_async_path() {
+    Gate::define::<AsyncHookUser, Post>("ah-async-edit", |_u, _p| false);
+    Gate::before::<AsyncHookUser>(|u, _action| u.is_admin.then_some(true));
+
+    let admin = AsyncHookUser { is_admin: true };
+    let regular = AsyncHookUser { is_admin: false };
+    let post = Post {
+        id: 1,
+        author_id: 1,
+        is_public: false,
+    };
+
+    // The before hook fires on the async evaluation path too.
+    assert!(Gate::allows_async("ah-async-edit", &admin, &post).await);
+    assert!(!Gate::allows_async("ah-async-edit", &regular, &post).await);
 }

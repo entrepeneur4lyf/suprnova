@@ -69,7 +69,9 @@ independently — `Gate::has::<User, Post>("publish")` and
 |---|---|---|
 | `Gate::allows(action, &user, &resource)` | `bool` | Quick branch |
 | `Gate::denies(action, &user, &resource)` | `bool` | Inverse |
-| `Gate::authorize(action, &user, &resource)` | `Result<(), FrameworkError>` | Returns `Unauthorized` (403) — short-circuits handler with `?` |
+| `Gate::authorize(action, &user, &resource)` | `Result<(), FrameworkError>` | 403 on a bare deny; a rich denial carries its own status/message (see [Rich decisions](#rich-decisions-response-inspect-raw)) — short-circuits a handler with `?` |
+| `Gate::inspect(action, &user, &resource)` | `Response` | Full decision: `allowed` + `message` + `code` + HTTP `status` |
+| `Gate::raw(action, &user, &resource)` | `Option<Response>` | Like `inspect`, but `None` = no rule defined (vs an explicit deny) |
 | `Gate::any(&[...], &user, &resource)` | `bool` | True if any allow |
 | `Gate::none(&[...], &user, &resource)` | `bool` | True if none allow |
 | `Gate::check(&[...], &user, &resource)` | `bool` | True if all allow |
@@ -278,18 +280,111 @@ registry **safe-denies** — every subsequent `authorize` call returns
 `tracing::error!` and continue. This matches the broader framework
 policy: a poisoned lock never aborts the process.
 
-## What's not (yet) shipped
+## Rich decisions: `Response`, `inspect`, `raw`
 
-The remaining Laravel-Gate surface is a follow-up commit:
+A bare `bool` gate answers only allow/deny. For a denial that carries a
+*message*, a machine *code*, or a non-403 HTTP *status*, register the gate
+with `define_with` (or `define_async_with`) and return a `Response`:
 
-- **`Response` type** with rich denial messages + HTTP status: lets
-  `authorize` emit 404 / 422 in addition to 403 with a message body.
-- **`Gate::inspect` / `Gate::raw`**: depend on `Response`.
-- **`Gate::before` / `Gate::after` hooks**: super-admin override +
-  audit-logging seams. Type-erased; the hook author downcasts to
-  their concrete user type.
-- **`Gate::forUser`**: scoped impersonation for "would this other
-  user be allowed?" UIs.
+```rust
+use suprnova::authorization::Response;  // re-exported at the crate root as `GateResponse`
 
-These are deliberately deferred so this commit can stay atomic; see
-`docs/parity/authorization.md` for the design notes.
+Gate::define_with::<User, Post>("update", |user, post| {
+    if post.author_id == user.id {
+        Response::allow()
+    } else {
+        Response::deny_with("You do not own this post.")
+    }
+});
+
+// Hide a resource's existence rather than admit it exists:
+Gate::define_with::<User, Secret>("view", |user, secret| {
+    if user.can_see(secret) {
+        Response::allow()
+    } else {
+        Response::deny_as_not_found()  // a 404, not a 403
+    }
+});
+```
+
+Inspect the full decision with `Gate::inspect` (sync) / `Gate::inspect_async`:
+
+```rust
+let decision = Gate::inspect("update", &user, &post);
+decision.allowed();   // bool
+decision.message();   // Option<&str>  — Some("You do not own this post.")
+decision.status();    // Option<u16>   — None here; Some(404) after deny_as_not_found
+```
+
+`Response` constructors mirror Laravel: `allow()`, `deny()`,
+`deny_with(msg)`, `deny_with_status(status, msg)`, `deny_as_not_found()`,
+plus `with_message` / `with_code` / `with_status` / `as_not_found` builders.
+
+### How a denial becomes an error
+
+`Gate::authorize` collapses the decision through `Response::authorize()`:
+
+| Decision | `authorize` result |
+|---|---|
+| allowed | `Ok(())` |
+| bare `deny()` (no message/code/status) | `FrameworkError::Unauthorized` (403, `"This action is unauthorized."`) |
+| rich denial (message and/or status set) | `FrameworkError::Domain { message, status_code }` |
+
+So `deny_as_not_found()` surfaces as a 404, `deny_with_status(422, "…")` as a
+422, and `deny_with("…")` as a 403 carrying your message. The `code` is
+readable on the inspected `Response` but does **not** travel through
+`authorize` — `FrameworkError` has no code field; read it from `inspect()` if
+you need it.
+
+### `raw`: "denied" vs "undefined"
+
+`Gate::raw` (and `raw_async`) returns `Option<Response>`: `None` means *no
+rule applied* — no `before` hook fired, no gate is registered, no `after`
+hook filled in — as distinct from an explicit `Some(deny)`. `inspect`
+normalizes that `None` to a default deny; `raw` preserves it for diagnostics
+("is this action governed at all?").
+
+### Policy methods are bool-only (for now)
+
+`#[policy]` methods return `bool`, so a policy denial currently produces a
+*bare* deny — `inspect()` on it has `message() == None`. Rich messages come
+from `define_with`. Letting policy methods also return a `Response` is the
+next commit in this module (it requires teaching the `#[policy]` macro to
+detect each method's return type); see `docs/parity/authorization.md`.
+
+## `before` / `after` hooks
+
+`Gate::before` registers a check that runs *before* any gate; the first hook
+to return `Some(decision)` short-circuits everything. The canonical use is a
+global override:
+
+```rust
+// Administrators may do anything.
+Gate::before::<User>(|user, _action| user.is_admin.then_some(true));
+```
+
+`Gate::after` runs *after* the gate. Following Laravel's `??=` semantic, an
+after hook can only **fill in** an undecided result (no gate matched and no
+before hook fired) — it can never override an allow/deny already produced.
+Every after hook still runs, so it doubles as the audit-logging seam:
+
+```rust
+Gate::after::<User>(|user, action, decided| {
+    audit_log(user.id, action, decided);   // observe every evaluation
+    None                                    // record-only; don't change the result
+});
+```
+
+Hooks are keyed by the **user type** `U`, not by resource — a hook fires for
+every `(action, U, R)`. Put resource-specific logic in the gate. Hooks are
+synchronous predicates and apply to the async evaluation path too; for async
+authorization logic, use `define_async` / `define_async_with`.
+
+## No `forUser`
+
+Laravel's `Gate::forUser($user)->allows(...)` rebinds the gate's *implicit*
+current-user resolver. suprnova's gate takes the user **explicitly** on every
+call, so "check as a different user" is just `Gate::allows(action,
+&other_user, &resource)`. There is no implicit resolver to rebind — the
+explicit API is strictly more general, which makes `forUser` redundant rather
+than missing.

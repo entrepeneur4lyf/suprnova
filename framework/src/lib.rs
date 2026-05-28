@@ -73,6 +73,10 @@ pub use auth::{
     GuardDriver, GuestMiddleware, SessionGuard, StatefulGuard, TokenGuard, UserProvider,
 };
 pub use authorization::{Authorizable, Gate, Policy};
+// The crate root binds `Response` to the HTTP response contract, so the
+// authorization decision type is exported here under an unambiguous alias.
+// Its Laravel-spelled home is `suprnova::authorization::Response`.
+pub use authorization::Response as GateResponse;
 pub use cache::{Cache, CacheConfig, CacheStore, InMemoryCache, LockGuard, RedisCache};
 pub use config::{AppConfig, Config, Environment, ServerConfig, env, env_optional, env_required};
 pub use container::{App, Container};

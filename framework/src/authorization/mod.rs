@@ -1,7 +1,9 @@
 mod gate;
 mod registry;
+mod response;
 
 pub use gate::Gate;
+pub use response::Response;
 
 /// Trait-based policy convenience. Implement `Policy` once on a
 /// resource type and the `#[policy]` macro will wire it up.

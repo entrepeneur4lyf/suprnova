@@ -1,5 +1,6 @@
 use std::future::Future;
 
+use super::Response;
 use super::registry::global;
 use crate::FrameworkError;
 
@@ -12,6 +13,15 @@ use crate::FrameworkError;
 ///     // ...
 /// }
 /// ```
+///
+/// # No `forUser`
+///
+/// Laravel's `Gate::forUser($user)->allows(...)` rebinds the gate's *implicit*
+/// current-user resolver to a different user. Suprnova's gate takes the user
+/// **explicitly** on every call — `Gate::allows(action, &user, &resource)` —
+/// so "check as a different user" is just passing that user. There is no
+/// implicit resolver to rebind, which makes `forUser` redundant rather than
+/// missing: the explicit API is strictly more general.
 pub struct Gate;
 
 impl Gate {
@@ -25,13 +35,38 @@ impl Gate {
         global().register::<U, R>(action, f);
     }
 
+    /// Define a synchronous gate whose closure returns a rich [`Response`]
+    /// rather than a bare `bool` — so a denial can carry a message, code, and
+    /// HTTP status that [`inspect`](Self::inspect) and [`authorize`](Self::authorize)
+    /// surface.
+    ///
+    /// ```ignore
+    /// use suprnova::authorization::Response;
+    ///
+    /// Gate::define_with::<User, Post>("update", |user, post| {
+    ///     if post.author_id == user.id {
+    ///         Response::allow()
+    ///     } else {
+    ///         Response::deny_with("You do not own this post.")
+    ///     }
+    /// });
+    /// ```
+    pub fn define_with<U: 'static, R: 'static>(
+        action: &str,
+        f: impl Fn(&U, &R) -> Response + Send + Sync + 'static,
+    ) {
+        global().register_with::<U, R>(action, f);
+    }
+
     /// Returns `true` when the gate exists and allows the action.
     /// Missing gates **deny by default**.
     ///
-    /// Calling `allows` on an async-registered gate returns `false` (default
-    /// deny). Use [`allows_async`] to invoke async gates correctly.
+    /// Routes through [`inspect`](Self::inspect), so `before`/`after` hooks
+    /// apply. Calling `allows` on an async-registered gate returns `false`
+    /// (default deny). Use [`allows_async`](Self::allows_async) to invoke async
+    /// gates correctly.
     pub fn allows<U: 'static, R: 'static>(action: &str, user: &U, resource: &R) -> bool {
-        global().invoke(action, user, resource).unwrap_or(false)
+        Self::inspect(action, user, resource).allowed()
     }
 
     /// Returns `true` when the gate denies the action.
@@ -39,17 +74,21 @@ impl Gate {
         !Self::allows(action, user, resource)
     }
 
-    /// Return `Err(FrameworkError::Unauthorized)` when denied.
+    /// Authorize the action, returning the denial as an error.
+    ///
+    /// A bare denial maps to `FrameworkError::Unauthorized` (403). A rich
+    /// denial — from a [`define_with`](Self::define_with) gate that returned a
+    /// `Response` with a custom message/status — maps to
+    /// `FrameworkError::Domain` carrying that message and status (e.g. 404 from
+    /// `Response::deny_as_not_found()`).
     pub fn authorize<U: 'static, R: 'static>(
         action: &str,
         user: &U,
         resource: &R,
     ) -> Result<(), FrameworkError> {
-        if Self::allows(action, user, resource) {
-            Ok(())
-        } else {
-            Err(FrameworkError::Unauthorized)
-        }
+        Self::inspect(action, user, resource)
+            .authorize()
+            .map(|_| ())
     }
 
     // ── Async API ─────────────────────────────────────────────────────────────
@@ -76,16 +115,25 @@ impl Gate {
         global().register_async::<U, R, F, Fut>(action, f);
     }
 
+    /// Define an asynchronous gate whose future resolves to a rich [`Response`]
+    /// (the async sibling of [`define_with`](Self::define_with)).
+    pub fn define_async_with<U, R, F, Fut>(action: &str, f: F)
+    where
+        U: 'static,
+        R: 'static,
+        F: Fn(&U, &R) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        global().register_async_with::<U, R, F, Fut>(action, f);
+    }
+
     /// Async version of [`allows`]. Works for both sync- and async-registered gates.
     pub async fn allows_async<U: 'static, R: 'static>(
         action: &str,
         user: &U,
         resource: &R,
     ) -> bool {
-        global()
-            .invoke_async(action, user, resource)
-            .await
-            .unwrap_or(false)
+        Self::inspect_async(action, user, resource).await.allowed()
     }
 
     /// Async version of [`denies`].
@@ -103,11 +151,100 @@ impl Gate {
         user: &U,
         resource: &R,
     ) -> Result<(), FrameworkError> {
-        if Self::allows_async(action, user, resource).await {
-            Ok(())
-        } else {
-            Err(FrameworkError::Unauthorized)
-        }
+        Self::inspect_async(action, user, resource)
+            .await
+            .authorize()
+            .map(|_| ())
+    }
+
+    // ── Rich decisions: inspect / raw + before / after hooks ────────────────
+
+    /// Evaluate the action and return the rich [`Response`] — the
+    /// allow/deny decision plus any message, code, and HTTP status. Mirrors
+    /// Laravel's `Gate::inspect`. An undefined ability (no gate, no hook
+    /// decision) yields a default deny.
+    ///
+    /// This is the evaluation core: [`allows`](Self::allows),
+    /// [`denies`](Self::denies), and [`authorize`](Self::authorize) all route
+    /// through it, so `before`/`after` hooks apply uniformly.
+    pub fn inspect<U: 'static, R: 'static>(action: &str, user: &U, resource: &R) -> Response {
+        global()
+            .raw::<U, R>(action, user, resource)
+            .unwrap_or_else(Response::deny)
+    }
+
+    /// Async sibling of [`inspect`](Self::inspect).
+    pub async fn inspect_async<U: 'static, R: 'static>(
+        action: &str,
+        user: &U,
+        resource: &R,
+    ) -> Response {
+        global()
+            .raw_async::<U, R>(action, user, resource)
+            .await
+            .unwrap_or_else(Response::deny)
+    }
+
+    /// The raw evaluation result, preserving the *undefined* case as `None`.
+    ///
+    /// Unlike [`inspect`](Self::inspect) (which normalizes `None` to a default
+    /// deny), `raw` returns `None` when nothing decided — no `before` hook
+    /// fired, no gate is registered for `(action, U, R)`, and no `after` hook
+    /// filled in. This distinguishes "explicitly denied" from "no rule
+    /// defined", mirroring Laravel's `Gate::raw`.
+    pub fn raw<U: 'static, R: 'static>(action: &str, user: &U, resource: &R) -> Option<Response> {
+        global().raw::<U, R>(action, user, resource)
+    }
+
+    /// Async sibling of [`raw`](Self::raw).
+    pub async fn raw_async<U: 'static, R: 'static>(
+        action: &str,
+        user: &U,
+        resource: &R,
+    ) -> Option<Response> {
+        global().raw_async::<U, R>(action, user, resource).await
+    }
+
+    /// Register a hook that runs **before** any gate for the user type `U`.
+    ///
+    /// Returning `Some(decision)` short-circuits all gates and other before
+    /// hooks for that user type (first `Some` wins); returning `None` lets
+    /// evaluation continue to the gate. The canonical use is a global override
+    /// such as "administrators may do anything":
+    ///
+    /// ```ignore
+    /// Gate::before::<User>(|user, _action| user.is_admin.then_some(true));
+    /// ```
+    ///
+    /// Hooks are keyed by the **user type** (`U`), not by resource, so a hook
+    /// fires for every `(action, U, R)` regardless of resource — put
+    /// resource-specific logic in the gate. Hooks are synchronous predicates;
+    /// for async authorization logic use [`define_async`](Self::define_async)
+    /// or [`define_async_with`](Self::define_async_with). They apply to the
+    /// async evaluation path too.
+    pub fn before<U: 'static>(f: impl Fn(&U, &str) -> Option<bool> + Send + Sync + 'static) {
+        global().register_before::<U>(f);
+    }
+
+    /// Register a hook that runs **after** the gate for the user type `U`.
+    ///
+    /// Every after hook runs (so it can log the outcome), receiving the running
+    /// decision as `Option<bool>` (`None` while still undecided). Following
+    /// Laravel's `$result ??= $afterResult` semantic, an after hook can only
+    /// **fill in** an undecided result — it cannot override an allow or deny
+    /// that a before hook or gate already produced. Return `None` to record a
+    /// no-op.
+    ///
+    /// ```ignore
+    /// // Grant a fallback only when no gate is defined for the action:
+    /// Gate::after::<User>(|user, _action, decided| {
+    ///     decided.is_none().then(|| user.is_superuser)
+    /// });
+    /// ```
+    pub fn after<U: 'static>(
+        f: impl Fn(&U, &str, Option<bool>) -> Option<bool> + Send + Sync + 'static,
+    ) {
+        global().register_after::<U>(f);
     }
 
     // ── Introspection ─────────────────────────────────────────────────────────
