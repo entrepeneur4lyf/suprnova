@@ -156,15 +156,27 @@ impl<T> LengthAwarePaginator<T> {
         self.with_path(base_url)
     }
 
-    /// Generate the URL for a specific page number by appending
-    /// `?<page_name>=N` to the configured `path`. Falls back to
-    /// `?<page_name>=N` when no `path` is set. `page_name` defaults
-    /// to `"page"` when unset.
+    /// Generate the URL for a specific page number by appending the page
+    /// query parameter to the configured `path`. Falls back to a bare
+    /// `?<page_name>=N` when no `path` is set. `page_name` defaults to
+    /// `"page"` when unset.
+    ///
+    /// The separator is `&` when `path` already carries a query string and
+    /// `?` otherwise, so a path like `/users?sort=name` yields
+    /// `/users?sort=name&page=2` rather than a malformed double-`?`. The
+    /// page parameter name is percent-encoded (the value is a numeric page),
+    /// so a custom name with reserved characters can't corrupt the URL.
     pub fn url_for_page(&self, page: u64) -> String {
         let key = self.page_name.as_deref().unwrap_or("page");
+        let pair = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair(key, &page.to_string())
+            .finish();
         match &self.path {
-            Some(base) => format!("{}?{}={}", base, key, page),
-            None => format!("?{}={}", key, page),
+            Some(base) => {
+                let sep = if base.contains('?') { '&' } else { '?' };
+                format!("{base}{sep}{pair}")
+            }
+            None => format!("?{pair}"),
         }
     }
 
@@ -246,6 +258,24 @@ mod tests {
         // No path — fallback also picks up the custom name.
         let p2 = LengthAwarePaginator::new(vec![1], 10, 10, 1).with_page_name("p");
         assert_eq!(p2.url_for_page(3), "?p=3");
+    }
+
+    #[test]
+    fn url_for_page_appends_to_existing_query_string() {
+        // A base that already has a query string must get `&page=`, not a
+        // second `?` — `/users?sort=name?page=2` is a malformed URL.
+        let p = LengthAwarePaginator::new(vec![1, 2], 20, 10, 1).with_path("/users?sort=name");
+        assert_eq!(p.url_for_page(2), "/users?sort=name&page=2");
+    }
+
+    #[test]
+    fn url_for_page_encodes_the_page_parameter_name() {
+        // A param name with characters that must be encoded never lands
+        // raw in the URL (form-urlencoded renders a space as `+`).
+        let p = LengthAwarePaginator::new(vec![1], 10, 10, 1)
+            .with_path("/users")
+            .with_page_name("weird key");
+        assert_eq!(p.url_for_page(2), "/users?weird+key=2");
     }
 
     #[test]
