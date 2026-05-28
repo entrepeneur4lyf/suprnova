@@ -12,19 +12,23 @@ pub use inertia::IntoInertiaScroll;
 pub use length_aware::LengthAwarePaginator;
 pub use simple::Paginator;
 
-use sea_orm::{
-    ColumnTrait, EntityTrait, ModelTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
-    Select,
-};
+use sea_orm::{ColumnTrait, EntityTrait, ModelTrait, QueryFilter, QueryOrder, QuerySelect, Select};
 
 use crate::FrameworkError;
+use crate::database::transaction::ExecutorChoice;
 
 /// Static facade: `Pagination::length_aware` and `Pagination::cursor`.
 pub struct Pagination;
 
 impl Pagination {
-    /// Run a length-aware (offset/limit + COUNT(*)) paginate against
-    /// the configured `DB` connection.
+    /// Run a length-aware (offset/limit + COUNT(*)) paginate.
+    ///
+    /// Routing matches the Eloquent builder's read path
+    /// ([`ExecutorChoice::resolve_read`]): an ambient
+    /// [`DB::transaction`](crate::DB::transaction) is honored (the COUNT and
+    /// the page query both run on the transaction's connection), and a
+    /// registered `__read_replica__` connection is used automatically.
+    /// Use [`Self::length_aware_on`] to target a named connection.
     ///
     /// `current_page` is 1-based; values `< 1` are clamped to `1`.
     ///
@@ -45,17 +49,58 @@ impl Pagination {
         if per_page == 0 {
             return Err(FrameworkError::param("per_page"));
         }
-        let db = crate::DB::connection()?;
-        let conn = db.inner();
-        let page = current_page.max(1);
+        let exec = ExecutorChoice::resolve_read(None, None, None).await?;
+        Self::length_aware_with(exec, query, per_page, current_page).await
+    }
 
-        let total = query.clone().count(conn).await?;
+    /// Run [`Self::length_aware`] against a specific named connection — the
+    /// facade equivalent of [`Builder::on`](crate::eloquent::Builder::on).
+    /// Routing matches the builder: an ambient `DB::transaction` still wins
+    /// over the named connection, and the `__primary__` sentinel selects
+    /// the default pool.
+    pub async fn length_aware_on<E>(
+        connection: &str,
+        query: Select<E>,
+        per_page: u64,
+        current_page: u64,
+    ) -> Result<LengthAwarePaginator<E::Model>, FrameworkError>
+    where
+        E: EntityTrait,
+        E::Model: Send + Sync,
+    {
+        if per_page == 0 {
+            return Err(FrameworkError::param("per_page"));
+        }
+        let exec = ExecutorChoice::resolve_read(None, Some(connection), None).await?;
+        Self::length_aware_with(exec, query, per_page, current_page).await
+    }
+
+    async fn length_aware_with<E>(
+        exec: ExecutorChoice,
+        query: Select<E>,
+        per_page: u64,
+        current_page: u64,
+    ) -> Result<LengthAwarePaginator<E::Model>, FrameworkError>
+    where
+        E: EntityTrait,
+        E::Model: Send + Sync,
+    {
+        let page = current_page.max(1);
+        let total = exec.select_count(query.clone()).await?;
         let offset = (page - 1).saturating_mul(per_page);
-        let data = query.offset(offset).limit(per_page).all(conn).await?;
+        let data = exec
+            .select_all(query.offset(offset).limit(per_page))
+            .await?;
         Ok(LengthAwarePaginator::new(data, total, per_page, page))
     }
 
-    /// Run a cursor-based paginate over the active DB connection.
+    /// Run a cursor-based paginate.
+    ///
+    /// Routing matches the Eloquent builder's read path
+    /// ([`ExecutorChoice::resolve_read`]): an ambient
+    /// [`DB::transaction`](crate::DB::transaction) is honored and a
+    /// registered `__read_replica__` connection is used automatically. Use
+    /// [`Self::cursor_on`] to target a named connection.
     ///
     /// Cursors carry a typed [`sea_orm::Value`] of the `order_col`
     /// boundary plus a direction (`next`/`prev`). The cursor is opaque and
@@ -103,9 +148,47 @@ impl Pagination {
         if per_page == 0 {
             return Err(FrameworkError::param("per_page"));
         }
-        let db = crate::DB::connection()?;
-        let conn = db.inner();
+        let exec = ExecutorChoice::resolve_read(None, None, None).await?;
+        Self::cursor_with(exec, query, cursor, per_page, order_col).await
+    }
 
+    /// Run [`Self::cursor`] against a specific named connection — the facade
+    /// equivalent of [`Builder::on`](crate::eloquent::Builder::on). Routing
+    /// matches the builder: an ambient `DB::transaction` still wins over the
+    /// named connection, and the `__primary__` sentinel selects the default
+    /// pool.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn cursor_on<E, C>(
+        connection: &str,
+        query: Select<E>,
+        cursor: Option<&str>,
+        per_page: u64,
+        order_col: C,
+    ) -> Result<CursorPaginator<E::Model>, FrameworkError>
+    where
+        E: EntityTrait<Column = C>,
+        E::Model: Send + Sync,
+        C: ColumnTrait + Copy,
+    {
+        if per_page == 0 {
+            return Err(FrameworkError::param("per_page"));
+        }
+        let exec = ExecutorChoice::resolve_read(None, Some(connection), None).await?;
+        Self::cursor_with(exec, query, cursor, per_page, order_col).await
+    }
+
+    async fn cursor_with<E, C>(
+        exec: ExecutorChoice,
+        query: Select<E>,
+        cursor: Option<&str>,
+        per_page: u64,
+        order_col: C,
+    ) -> Result<CursorPaginator<E::Model>, FrameworkError>
+    where
+        E: EntityTrait<Column = C>,
+        E::Model: Send + Sync,
+        C: ColumnTrait + Copy,
+    {
         let decoded = match cursor {
             Some(c) => Some(CursorPaginator::<E::Model>::decode_value(c)?),
             None => None,
@@ -113,28 +196,30 @@ impl Pagination {
 
         let (rows, scan_direction) = match &decoded {
             None => {
-                let rows = query
-                    .order_by_asc(order_col)
-                    .limit(per_page + 1)
-                    .all(conn)
+                let rows = exec
+                    .select_all(query.order_by_asc(order_col).limit(per_page + 1))
                     .await?;
                 (rows, CursorDirection::Next)
             }
             Some((boundary, CursorDirection::Next)) => {
-                let rows = query
-                    .order_by_asc(order_col)
-                    .filter(order_col.gt(boundary.clone()))
-                    .limit(per_page + 1)
-                    .all(conn)
+                let rows = exec
+                    .select_all(
+                        query
+                            .order_by_asc(order_col)
+                            .filter(order_col.gt(boundary.clone()))
+                            .limit(per_page + 1),
+                    )
                     .await?;
                 (rows, CursorDirection::Next)
             }
             Some((boundary, CursorDirection::Prev)) => {
-                let mut rows = query
-                    .order_by_desc(order_col)
-                    .filter(order_col.lt(boundary.clone()))
-                    .limit(per_page + 1)
-                    .all(conn)
+                let mut rows = exec
+                    .select_all(
+                        query
+                            .order_by_desc(order_col)
+                            .filter(order_col.lt(boundary.clone()))
+                            .limit(per_page + 1),
+                    )
                     .await?;
                 rows.reverse();
                 (rows, CursorDirection::Prev)

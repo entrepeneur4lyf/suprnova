@@ -163,6 +163,59 @@ async fn facade_cursor_rejects_zero_per_page() {
 }
 
 #[tokio::test]
+async fn facade_on_routes_to_a_named_connection() {
+    // Prove `length_aware_on` / `cursor_on` route to the registered named
+    // connection rather than the default: the default DB holds 25 rows, a
+    // separate "reports" connection holds 7, and the `_on` calls must see 7.
+    ensure_crypt();
+    let _guard = TestContainer::fake();
+    install_db(make_db_with_n_rows(25).await);
+
+    suprnova::ConnectionRegistry::register_existing(
+        "reports",
+        DbConnection::from_raw(make_db_with_n_rows(7).await),
+    )
+    .await
+    .unwrap();
+
+    let def = Pagination::length_aware::<toy::Entity>(toy::Entity::find(), 100, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        def.total, 25,
+        "default facade must use the default connection"
+    );
+
+    let rep = Pagination::length_aware_on::<toy::Entity>("reports", toy::Entity::find(), 100, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        rep.total, 7,
+        "length_aware_on must route to the named connection"
+    );
+
+    // A single 100-wide page over the 7-row "reports" connection holds all
+    // 7 rows with no next cursor.
+    let cur = Pagination::cursor_on::<toy::Entity, toy::Column>(
+        "reports",
+        toy::Entity::find(),
+        None,
+        100,
+        toy::Column::Id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        cur.data.len(),
+        7,
+        "cursor_on must route to the named connection"
+    );
+    assert!(cur.next_cursor.is_none());
+
+    suprnova::ConnectionRegistry::clear();
+}
+
+#[tokio::test]
 async fn pagination_cursor_walks_forward_until_exhausted() {
     ensure_crypt();
     let _guard = TestContainer::fake();

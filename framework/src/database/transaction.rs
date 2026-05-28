@@ -312,6 +312,22 @@ impl ExecutorChoice {
         }
     }
 
+    /// Execute a SeaORM-built `Select<E>` as a `COUNT(*)` and return the
+    /// total matching row count. Routes through the active transaction or
+    /// the pool like [`Self::select_all`].
+    #[doc(hidden)]
+    pub async fn select_count<E>(&self, q: sea_orm::Select<E>) -> Result<u64, sea_orm::DbErr>
+    where
+        E: sea_orm::EntityTrait,
+        E::Model: Send + Sync,
+    {
+        use sea_orm::PaginatorTrait;
+        match self {
+            ExecutorChoice::Tx(t) => q.count(t.as_ref()).await,
+            ExecutorChoice::Pool(c) => q.count(c.inner()).await,
+        }
+    }
+
     /// Execute a prepared `Statement` that produces rows.
     #[doc(hidden)]
     pub async fn query_all(
