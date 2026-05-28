@@ -114,17 +114,51 @@ async fn send_request(
 
 /// HEAD against a GET-only route succeeds (RFC 9110 §9.3.2 fallback)
 /// and returns the GET status with the body stripped to zero bytes.
+///
+/// Also pins the wire-level Content-Length behavior. Per RFC 9110
+/// §9.3.2 a HEAD response SHOULD carry the Content-Length the GET
+/// would have set; our `strip_body_for_head` helper preserves
+/// `parts.headers` but swaps the body for `Full::new(Bytes::new())`
+/// whose `size_hint().exact()` is `Some(0)`. Whether hyper writes
+/// the preserved header or recomputes from the empty body's
+/// size_hint is its wire-encoding decision. This assertion pins
+/// whichever value hyper actually emits so a future hyper bump
+/// that changes the behavior surfaces here.
 #[tokio::test]
 async fn head_falls_back_to_get_and_strips_body() {
     let router = Router::new().get("/articles", |_req| async { text("a long article body") });
 
     let addr = spawn_server(router, 2).await;
-    let (status, _headers, body) = send_request(addr, "HEAD", "/articles").await;
+    let (status, headers, body) = send_request(addr, "HEAD", "/articles").await;
 
     assert_eq!(status.as_u16(), 200, "HEAD must inherit GET's 200");
     assert!(
         body.is_empty(),
         "HEAD body must be empty after strip; got {body:?}",
+    );
+
+    // Document hyper's wire-encoding decision on Content-Length for
+    // HEAD responses.
+    //
+    // Suprnova's `HttpResponse::text(...)` doesn't set Content-Length
+    // explicitly — hyper computes it from the body's `size_hint()` at
+    // serialization time. After `strip_body_for_head` swaps the body
+    // for an empty `BoxBody`, hyper sees `size_hint().exact() == 0`
+    // through the boxed body and emits NO Content-Length header at
+    // all on the wire (chunked-or-omit fallback). RFC 9110 §9.3.2
+    // SHOULD says HEAD responses ought to carry the Content-Length
+    // GET would have sent — clients tolerate the omission, but it's
+    // a deferred polish item (tracked in the routing MEDIUMs list).
+    //
+    // This assertion pins the current behavior so a future hyper
+    // bump or strip-path change that starts emitting Content-Length
+    // surfaces here intentionally.
+    assert!(
+        headers.get("content-length").is_none(),
+        "hyper currently emits no Content-Length for stripped HEAD \
+         responses (size_hint-driven, header-implicit). RFC 9110 §9.3.2 \
+         SHOULD says HEAD should carry the GET Content-Length — when \
+         we tighten the strip path to preserve it, update this test.",
     );
 
     // Sanity: the same GET still returns the body.
