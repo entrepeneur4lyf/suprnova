@@ -200,6 +200,20 @@ impl Auth {
     /// can no longer strand the session in an authed-but-pending
     /// state.
     ///
+    /// # Cookie-first ordering
+    ///
+    /// The clear cookie is queued **before** the row-delete query.
+    /// If the delete fails (DB transient outage, lock timeout),
+    /// the response still carries the clear-cookie directive — the
+    /// browser drops the cookie on the way out and cannot re-
+    /// authenticate via remember-me on the next request, even
+    /// though the stale row in the database hasn't been removed
+    /// yet (a future `prune_expired` sweep will). Reversing the
+    /// order would leave a "row alive + cookie alive" window after
+    /// a transient revoke error, which the remember-me middleware
+    /// would happily use to log the user back in — defeating the
+    /// revoke entirely.
+    ///
     /// Returns the number of rows deleted (0 if the user had no
     /// remember-me tokens). Same audit listeners fire (none from
     /// the framework's auth surface; the `remember_tokens` table
@@ -207,9 +221,15 @@ impl Auth {
     pub async fn revoke_remember_tokens_for_user(
         user_id: &str,
     ) -> Result<u64, crate::error::FrameworkError> {
-        let removed = super::remember::revoke_all_for_user(user_id).await?;
+        // Queue the clear cookie FIRST. queue_remember_clear_cookie
+        // is infallible (env-config read + sync Cookie::build + sync
+        // push into the per-request slot), so this branch never
+        // errors before the response carries the clear directive.
         Self::queue_remember_clear_cookie();
-        Ok(removed)
+        // THEN attempt the row delete. A failure here propagates as
+        // Err to the caller — but the browser will drop the cookie
+        // regardless, so the stale DB row cannot be exploited.
+        super::remember::revoke_all_for_user(user_id).await
     }
 
     /// Queue the "forget remember-me" cookie on the outgoing response.
