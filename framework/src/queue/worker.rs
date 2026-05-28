@@ -49,8 +49,20 @@ pub fn register_job<J: Job>() {
         })
     });
     let mut g = lock::write(&REGISTRY).expect("queue registry poisoned");
-    g.get_or_insert_with(HashMap::new)
-        .insert(J::job_name().to_string(), f);
+    let name = J::job_name();
+    let map = g.get_or_insert_with(HashMap::new);
+    if map.insert(name.to_string(), f).is_some() {
+        // Keep last-writer-wins (tests rely on re-registration) but make it
+        // observable: silently rerouting in-flight messages is a foot-gun in
+        // production where the same `job_name` should have exactly one
+        // registration site.
+        tracing::warn!(
+            job = name,
+            "register_job replaced an existing dispatcher for this job_name; \
+             duplicate registration may indicate inventory + manual registration \
+             of the same job (last writer wins)"
+        );
+    }
 }
 
 pub async fn dispatch_by_name(
