@@ -36,10 +36,11 @@ impl Queue {
     /// Push a typed job. Returns when the envelope is committed to the
     /// driver (NOT when the job runs).
     pub async fn push<J: Job>(job: J) -> Result<(), FrameworkError> {
+        let now = Utc::now();
         if testing::is_active() {
-            return testing::record::<J>(&job);
+            return testing::record::<J>(&job, now);
         }
-        let env = envelope_for::<J>(&job, Utc::now())?;
+        let env = envelope_for::<J>(&job, now)?;
         let drv = current_driver()?;
         drv.push(env).await
     }
@@ -51,7 +52,7 @@ impl Queue {
         available_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), FrameworkError> {
         if testing::is_active() {
-            return testing::record::<J>(&job);
+            return testing::record::<J>(&job, available_at);
         }
         let env = envelope_for::<J>(&job, available_at)?;
         let drv = current_driver()?;
@@ -114,7 +115,7 @@ impl Queue {
     ) -> Result<bool, FrameworkError> {
         if testing::is_active() {
             // In fake mode, dedupe is irrelevant — record and report fresh.
-            testing::record::<J>(&job)?;
+            testing::record::<J>(&job, available_at)?;
             return Ok(true);
         }
         let id = job.unique_id().ok_or_else(|| {
