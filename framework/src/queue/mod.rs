@@ -129,10 +129,10 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
                 ))
             })?;
             // DatabaseConnection is Arc-backed (SeaORM pool), so clone is cheap.
-            Queue::set_driver(Arc::new(database::DatabaseQueueDriver::new(
-                db.inner().clone(),
-                table,
-            )));
+            // `new` validates QUEUE_DB_TABLE as a SQL identifier — a malformed
+            // env value fails here instead of reaching SQL composition.
+            let driver = database::DatabaseQueueDriver::new(db.inner().clone(), table)?;
+            Queue::set_driver(Arc::new(driver));
         }
         other => {
             tracing::warn!(driver = %other, "unknown QUEUE_DRIVER, falling back to memory");

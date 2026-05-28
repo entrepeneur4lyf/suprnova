@@ -3,6 +3,7 @@
 //! On SQLite, uses transaction-level locking via `BEGIN` to serialize pop
 //! attempts. On MySQL / Postgres, uses `SELECT ... FOR UPDATE SKIP LOCKED`.
 
+use crate::database::validate_identifier;
 use crate::error::FrameworkError;
 use crate::queue::driver::{QueueDriver, Reservation, ReservationToken};
 use crate::queue::envelope::Envelope;
@@ -18,8 +19,22 @@ pub struct DatabaseQueueDriver {
 }
 
 impl DatabaseQueueDriver {
-    pub fn new(db: DatabaseConnection, table: String) -> Self {
-        Self { db, table }
+    /// Construct a driver bound to the given connection and `jobs` table.
+    ///
+    /// The `table` argument is interpolated directly into every SQL
+    /// statement (push/pop/ack/nack), so it MUST validate as a SQL
+    /// identifier — operator-controlled env input doesn't excuse the
+    /// composition. Validation happens once, here, rather than on every
+    /// query.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::param`] when `table` fails
+    /// [`validate_identifier`] (empty, too long, bad characters, multiple
+    /// schema separators).
+    pub fn new(db: DatabaseConnection, table: String) -> Result<Self, FrameworkError> {
+        validate_identifier(&table)?;
+        Ok(Self { db, table })
     }
 
     fn backend(&self) -> DatabaseBackend {

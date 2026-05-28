@@ -51,7 +51,7 @@ fn env(name: &str) -> Envelope {
 #[tokio::test]
 async fn database_driver_push_and_ack() {
     let db = fresh_db().await;
-    let d = DatabaseQueueDriver::new(db, "jobs".to_string());
+    let d = DatabaseQueueDriver::new(db, "jobs".to_string()).unwrap();
 
     d.push(env("A")).await.unwrap();
     d.push(env("B")).await.unwrap();
@@ -71,7 +71,7 @@ async fn database_driver_push_and_ack() {
 #[tokio::test]
 async fn database_driver_reserved_rows_invisible_to_other_pops() {
     let db = fresh_db().await;
-    let d = DatabaseQueueDriver::new(db, "jobs".to_string());
+    let d = DatabaseQueueDriver::new(db, "jobs".to_string()).unwrap();
 
     d.push(env("A")).await.unwrap();
 
@@ -83,7 +83,7 @@ async fn database_driver_reserved_rows_invisible_to_other_pops() {
 #[tokio::test]
 async fn database_driver_nack_bumps_attempts() {
     let db = fresh_db().await;
-    let d = DatabaseQueueDriver::new(db, "jobs".to_string());
+    let d = DatabaseQueueDriver::new(db, "jobs".to_string()).unwrap();
 
     d.push(env("A")).await.unwrap();
 
@@ -97,4 +97,27 @@ async fn database_driver_nack_bumps_attempts() {
         r2.envelope.attempts, 1,
         "nack must bump attempts (per trait contract)"
     );
+}
+
+#[tokio::test]
+async fn database_driver_rejects_invalid_table_identifier() {
+    let db = fresh_db().await;
+    for bad in [
+        "",
+        "jobs; DROP TABLE users",
+        "jobs--",
+        "jobs'",
+        "jobs/*",
+        "1jobs",
+        "jobs jobs",
+    ] {
+        let err = match DatabaseQueueDriver::new(db.clone(), bad.into()) {
+            Err(e) => e,
+            Ok(_) => panic!("expected validation error for {bad:?}, got Ok"),
+        };
+        assert!(
+            err.to_string().to_lowercase().contains("identifier"),
+            "expected an identifier-validation error for {bad:?}, got: {err}"
+        );
+    }
 }
