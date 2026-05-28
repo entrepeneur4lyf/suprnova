@@ -49,9 +49,10 @@ impl Pagination {
     /// Run a cursor-based paginate over the active DB connection.
     ///
     /// Cursors carry a typed [`sea_orm::Value`] of the `order_col`
-    /// boundary plus a direction (`next`/`prev`). The cursor is opaque
-    /// AES-256-GCM-encrypted (when `APP_KEY` is set; otherwise plain
-    /// base64).
+    /// boundary plus a direction (`next`/`prev`). The cursor is opaque and
+    /// always AES-256-GCM-encrypted via the process key ring; there is no
+    /// plaintext base64 fallback — if encryption is not initialized,
+    /// encoding returns an error rather than emitting a forgeable cursor.
     ///
     /// # Behavior
     ///
