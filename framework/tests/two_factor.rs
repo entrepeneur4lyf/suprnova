@@ -1,9 +1,9 @@
-//! Phase 11 - `TwoFactor` TOTP integration tests.
+//! `TwoFactor` TOTP integration tests.
 //!
 //! Each test grabs a fresh in-memory SQLite database via
 //! `TestDatabase::fresh::<TestMigrator>()`. The migrator only contains
-//! the framework-owned `two_factor::migration::Migration`; the example
-//! app wires this into its own `Migrator` in Task 9. `Crypt` is a
+//! the framework-owned `two_factor::migration::Migration`; consumer
+//! apps wire this into their own `Migrator`. `Crypt` is a
 //! process-wide `OnceLock`, so we install a key exactly once for the
 //! binary (pattern lifted from `framework/tests/pagination.rs`).
 
@@ -131,6 +131,104 @@ async fn confirm_with_invalid_code_fails() {
     assert_eq!(err.status_code(), 401);
     // Row still exists, just not confirmed.
     assert!(!TwoFactor::is_enabled(&user).await.unwrap());
+}
+
+#[tokio::test]
+async fn regenerate_recovery_codes_requires_confirmation() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+
+    let user = FakeUser {
+        id: "user-regen-pre-confirm".into(),
+        email: "regen-pre@example.com".into(),
+    };
+
+    // No enrollment at all: regenerate must 400 with the
+    // "no confirmed 2FA enrollment" guard.
+    let err = TwoFactor::regenerate_recovery_codes(&user, "anything")
+        .await
+        .unwrap_err();
+    assert_eq!(err.status_code(), 400);
+
+    // Enroll but don't confirm: still not "enabled," so the guard
+    // refuses regenerate.
+    let _ = TwoFactor::enroll(&user).await.unwrap();
+    let err = TwoFactor::regenerate_recovery_codes(&user, "anything")
+        .await
+        .unwrap_err();
+    assert_eq!(err.status_code(), 400);
+}
+
+#[tokio::test]
+async fn regenerate_recovery_codes_with_recovery_proof_consumes_it() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+
+    let user = FakeUser {
+        id: "user-regen-rec".into(),
+        email: "regen-rec@example.com".into(),
+    };
+
+    let response = TwoFactor::enroll(&user).await.unwrap();
+    let confirm_code = totp_code_for(&response.otpauth_url);
+    TwoFactor::confirm(&user, &confirm_code).await.unwrap();
+    let original_codes = response.recovery_codes.clone();
+
+    // Use one of the original recovery codes as proof. The recovery
+    // path is symmetric with re_enroll's proof model — the code is
+    // single-use, so it's consumed.
+    let proof = original_codes[0].clone();
+    let fresh = TwoFactor::regenerate_recovery_codes(&user, &proof)
+        .await
+        .unwrap();
+
+    assert_eq!(fresh.len(), 10);
+    let original_set: std::collections::HashSet<_> = original_codes.iter().collect();
+    let fresh_set: std::collections::HashSet<_> = fresh.iter().collect();
+    assert!(original_set.is_disjoint(&fresh_set));
+
+    // The proof code was burned BEFORE rotation, so even though it
+    // appeared in the original set it can't be reused against the new
+    // row.
+    assert!(
+        !TwoFactor::consume_recovery_code(&user, &proof)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn regenerate_recovery_codes_rejects_invalid_proof() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+
+    let user = FakeUser {
+        id: "user-regen-bad".into(),
+        email: "regen-bad@example.com".into(),
+    };
+
+    let response = TwoFactor::enroll(&user).await.unwrap();
+    let confirm_code = totp_code_for(&response.otpauth_url);
+    TwoFactor::confirm(&user, &confirm_code).await.unwrap();
+    let original_codes = response.recovery_codes.clone();
+
+    let err = TwoFactor::regenerate_recovery_codes(&user, "definitely-not-a-code")
+        .await
+        .unwrap_err();
+    assert_eq!(err.status_code(), 401);
+
+    // The original recovery codes are untouched after a rejected
+    // attempt — a hostile caller that fails proof cannot blow away
+    // the legitimate codes. Skim-test on the first one (consume
+    // returns true if the code matches the persisted set).
+    let first = original_codes.first().expect("enrollment yields ≥1 code");
+    let consumed = TwoFactor::consume_recovery_code(&user, first)
+        .await
+        .unwrap();
+    assert!(
+        consumed,
+        "original recovery code {first} must still work after failed-proof attempt"
+    );
 }
 
 #[tokio::test]

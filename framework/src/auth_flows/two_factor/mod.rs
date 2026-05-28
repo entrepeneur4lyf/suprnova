@@ -383,6 +383,79 @@ impl TwoFactor {
         Ok(matches!(row, Some(r) if r.confirmed_at.is_some()))
     }
 
+    /// Rotate the recovery codes for an active 2FA enrollment.
+    ///
+    /// Replaces the stored recovery-codes column with a fresh set of
+    /// 10 codes. The plaintext codes are returned for one-time display
+    /// — there is no API for retrieving them again. The secret and
+    /// `confirmed_at` are left untouched (only the recovery-codes
+    /// column rotates), so the user's existing authenticator app
+    /// continues to work without re-pairing.
+    ///
+    /// Requires either a current TOTP code or an unused recovery code
+    /// as proof of possession — same model as [`Self::re_enroll`]. A
+    /// session-hijacked attacker that can reach this endpoint without
+    /// proof would otherwise blow away the legitimate user's recovery
+    /// codes (a denial-of-service against account recovery).
+    ///
+    /// # Errors
+    ///
+    /// - [`FrameworkError::domain`] with status `400` when no
+    ///   confirmed enrollment exists — call [`Self::enroll`] /
+    ///   [`Self::confirm`] first.
+    /// - [`FrameworkError::domain`] with status `401` when `proof`
+    ///   validates as neither a current TOTP code nor an unused
+    ///   recovery code.
+    pub async fn regenerate_recovery_codes<U: TwoFactorUser>(
+        user: &U,
+        proof: &str,
+    ) -> Result<Vec<String>, FrameworkError> {
+        if !Self::is_enabled(user).await? {
+            return Err(FrameworkError::domain(
+                "no confirmed 2FA enrollment; cannot regenerate recovery codes",
+                400,
+            ));
+        }
+
+        // Accept TOTP or recovery-code proof. `verify` enforces atomic
+        // replay protection; `consume_recovery_code` burns the code on
+        // success. Either path independently blocks an attacker
+        // without observed proof.
+        let totp_accepted = Self::verify(user, proof).await?;
+        let proof_accepted = if totp_accepted {
+            true
+        } else {
+            Self::consume_recovery_code(user, proof).await?
+        };
+
+        if !proof_accepted {
+            return Err(FrameworkError::domain(
+                "regenerate-recovery-codes proof is neither a valid TOTP code nor a recovery code",
+                401,
+            ));
+        }
+
+        let new_codes = recovery::generate(RECOVERY_CODE_COUNT);
+        let encrypted = Crypt::encrypt_string(&new_codes.join("\n"))?;
+
+        let db = DB::connection()?;
+        let conn = db.inner();
+        let row = entity::Entity::find_by_id(user.user_id().to_string())
+            .one(conn)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("two_factor find: {e}")))?
+            .ok_or_else(|| FrameworkError::internal("two_factor row vanished mid-regenerate"))?;
+        let mut active: entity::ActiveModel = row.into();
+        active.recovery_codes = Set(Some(encrypted));
+        active.updated_at = Set(chrono::Utc::now());
+        active
+            .update(conn)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("two_factor update: {e}")))?;
+
+        Ok(new_codes)
+    }
+
     /// Disable 2FA entirely. Deletes the row and dispatches
     /// [`TwoFactorDisabled`] **only** when a row was actually
     /// removed.

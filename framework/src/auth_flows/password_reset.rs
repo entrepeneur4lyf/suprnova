@@ -66,28 +66,41 @@ impl PasswordReset {
     /// when the email is on file, `Ok(None)` when it isn't — call sites that
     /// dispatch mail off the result must never leak the difference.
     ///
+    /// Fires [`crate::auth_flows::events::PasswordResetLinkSent`] on
+    /// success (`Some`). The anti-enumeration `Ok(None)` path fires
+    /// **no** event, so listeners that count events cannot distinguish
+    /// absent emails. Dispatch errors are discarded — the token has
+    /// already been minted and a listener panic must not surface as a
+    /// request failure.
+    ///
     /// Torii's default expiration is 15 minutes (per
     /// `PasswordResetService::request_password_reset`); use
     /// [`PasswordReset::request_with_expiration`] for a custom window.
     pub async fn request(email: &str) -> Result<Option<(User, String)>, FrameworkError> {
-        instance()?
+        let result = instance()?
             .password_reset()
             .request(email)
             .await
-            .map_err(map_err)
+            .map_err(map_err)?;
+        dispatch_link_sent_event(&result).await;
+        Ok(result)
     }
 
     /// Request a password-reset token with a custom expiration window.
-    /// Same anti-enumeration `Ok(None)` semantics as [`PasswordReset::request`].
+    /// Same anti-enumeration `Ok(None)` semantics and
+    /// [`crate::auth_flows::events::PasswordResetLinkSent`] dispatch
+    /// behaviour as [`PasswordReset::request`].
     pub async fn request_with_expiration(
         email: &str,
         expires_in: chrono::Duration,
     ) -> Result<Option<(User, String)>, FrameworkError> {
-        instance()?
+        let result = instance()?
             .password_reset()
             .request_with_expiration(email, expires_in)
             .await
-            .map_err(map_err)
+            .map_err(map_err)?;
+        dispatch_link_sent_event(&result).await;
+        Ok(result)
     }
 
     /// Check whether `token` is valid without consuming it.
@@ -251,4 +264,22 @@ impl PasswordReset {
 
 fn map_err(e: torii::ToriiError) -> FrameworkError {
     FrameworkError::internal(format!("torii password reset: {e}"))
+}
+
+/// Best-effort dispatch of [`PasswordResetLinkSent`] for the
+/// success arm of `request` / `request_with_expiration`. Discards
+/// dispatch errors — the token has already been minted; a listener
+/// panic must not surface as a request failure. The anti-enumeration
+/// path (`None`) is a no-op so listeners that count events cannot
+/// distinguish absent emails.
+async fn dispatch_link_sent_event(result: &Option<(User, String)>) {
+    if let Some((user, _)) = result {
+        let _ = crate::events::EventFacade::dispatch(
+            crate::auth_flows::events::PasswordResetLinkSent {
+                user_id: user.id.to_string(),
+                email: user.email.clone(),
+            },
+        )
+        .await;
+    }
 }

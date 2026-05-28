@@ -260,6 +260,61 @@ Failure semantics for the event dispatch are covered globally in
 short version: token consumption commits before the event fires, so a
 listener panic cannot un-verify the user.
 
+### Verified-only route gate: `EnsureEmailVerifiedMiddleware`
+
+`EnsureEmailVerifiedMiddleware` gates routes on the authenticated
+user's `email_verified_at`. Compose it after `AuthMiddleware` and the
+chain blocks any request whose user has not yet completed the verify
+step.
+
+The choice between **403 JSON** and **302 HTML redirect** is made at
+route-registration time via the constructor — there is no
+request-content sniffing, matching the pattern set by
+`AuthMiddleware::new` / `AuthMiddleware::redirect_to`:
+
+```rust
+use suprnova::{AuthMiddleware, EnsureEmailVerifiedMiddleware, group, get};
+
+// API surface — 403 with a JSON body
+group!("/api")
+    .middleware(AuthMiddleware::new())
+    .middleware(EnsureEmailVerifiedMiddleware::new())
+    .routes([
+        get!("/me", profile::show),
+    ]);
+
+// Web surface — 302 (or 409 + X-Inertia-Location for Inertia visits)
+group!("/dashboard")
+    .middleware(AuthMiddleware::redirect_to("/login"))
+    .middleware(EnsureEmailVerifiedMiddleware::redirect_to("/email/verify"))
+    .routes([
+        get!("/", dashboard::index),
+    ]);
+```
+
+If no user is authenticated, the middleware falls into the same
+response branch as "authed but not verified" — matching Laravel's
+`! $request->user() || ! hasVerifiedEmail()` shape. Compose
+`AuthMiddleware` first when you want a separate `401` for unauthed
+requests.
+
+### Checking verification status directly
+
+For handler logic that conditionally renders "please verify" UI without
+redirecting the entire request, read the flag from the torii `User`:
+
+```rust
+if let Some(user_id) = suprnova::Auth::id() {
+    if let Some(user) = suprnova::torii_integration::find_user_by_id(&user_id).await? {
+        let verified: bool = user.is_email_verified();
+        // branch on it in the handler
+    }
+}
+```
+
+The middleware is the right tool for blanket route-level enforcement;
+this direct check is for in-handler branching.
+
 ## Password Reset
 
 `PasswordReset` mirrors the same shape — `request`, `verify_token`, `complete`,
@@ -556,6 +611,28 @@ Without this gate, an attacker who triggered enrollment on a victim account
 using only a fresh recovery code, bypassing TOTP entirely. The contract is
 symmetric with `verify`'s "confirmed enrollment only" guard.
 
+### Regenerating recovery codes
+
+When a user exhausts (or wants to rotate) their recovery codes:
+
+```rust
+let fresh: Vec<String> = TwoFactor::regenerate_recovery_codes(&user_2fa, &proof).await?;
+```
+
+Requires either a current TOTP code or an unused recovery code as
+`proof` — same model as `re_enroll`. Without the proof check a
+session-hijacked attacker could silently blow away the legitimate
+user's recovery codes, creating a denial-of-service against account
+recovery.
+
+The fresh codes replace the persisted set; the existing secret and
+`confirmed_at` are preserved (the user's authenticator app continues
+to work without re-pairing). Errors:
+
+- `400` — no confirmed enrollment exists; call `enroll`/`confirm` first.
+- `401` — `proof` validates as neither a TOTP code nor an unused
+  recovery code.
+
 ### Re-enrollment overwrites
 
 Calling `enroll` again on a user who already has a row **overwrites** the
@@ -612,11 +689,12 @@ knobs.
 
 ## Events
 
-Six events fire across the flows, one per security-state transition:
+Seven events fire across the flows, one per security-state transition:
 
 | Event | Fired by | Carries |
 |---|---|---|
 | `EmailVerified` | `EmailVerification::verify` on success | `user_id: String` |
+| `PasswordResetLinkSent` | `PasswordReset::request` on success — anti-enumeration silent for absent emails | `user_id: String`, `email: String` |
 | `PasswordResetCompleted` | `PasswordReset::complete` on success | `user_id: String` |
 | `AccountLocked` | `BruteForce::record_failed_attempt` on the unlocked → locked transition | `email: String`, `failed_attempts: u32` |
 | `AccountUnlocked` | `BruteForce::unlock_account` when an actual unlock occurred | `email: String` |

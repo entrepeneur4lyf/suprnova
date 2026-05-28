@@ -1,4 +1,4 @@
-//! Phase 11 — `EmailVerification` facade integration tests.
+//! `EmailVerification` facade integration tests.
 //!
 //! # Design: shared runtime + one-time setup
 //!

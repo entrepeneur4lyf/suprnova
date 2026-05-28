@@ -1,4 +1,4 @@
-//! Phase 11 — Auth Flows.
+//! Auth Flows.
 //!
 //! Five auth-flow features behind one cohesive module:
 //!
@@ -23,6 +23,7 @@
 //! See `docs/core/auth-flows.md` for end-to-end usage.
 
 pub mod brute_force;
+pub mod email_verified_middleware;
 pub mod email_verify;
 pub mod events;
 pub mod mail;
@@ -31,10 +32,11 @@ pub mod remember_me;
 pub mod two_factor;
 
 pub use brute_force::{BruteForce, LoginThrottleMiddleware};
+pub use email_verified_middleware::EnsureEmailVerifiedMiddleware;
 pub use email_verify::EmailVerification;
 pub use events::{
-    AccountLocked, AccountUnlocked, EmailVerified, PasswordResetCompleted, TwoFactorDisabled,
-    TwoFactorEnrolled,
+    AccountLocked, AccountUnlocked, EmailVerified, PasswordResetCompleted, PasswordResetLinkSent,
+    TwoFactorDisabled, TwoFactorEnrolled,
 };
 pub use mail::{EmailVerificationMail, PasswordChangedMail, PasswordResetMail};
 pub use password_reset::PasswordReset;

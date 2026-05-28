@@ -238,8 +238,8 @@ pub use payments::{
 
 pub use auth_flows::{
     BruteForce, EmailVerification, EmailVerificationMail, EnrollmentResponse,
-    LoginThrottleMiddleware, PasswordChangedMail, PasswordReset, PasswordResetMail, TwoFactor,
-    TwoFactorUser,
+    EnsureEmailVerifiedMiddleware, LoginThrottleMiddleware, PasswordChangedMail, PasswordReset,
+    PasswordResetLinkSent, PasswordResetMail, TwoFactor, TwoFactorUser,
 };
 #[doc(hidden)]
 pub use clap as __clap;

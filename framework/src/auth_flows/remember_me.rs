@@ -3,8 +3,8 @@
 //!
 //! # Why a re-export instead of a fresh implementation
 //!
-//! `framework/src/auth/remember.rs` shipped a stronger design than the
-//! Phase 11 plan's original "encrypted cookie bytes" sketch:
+//! `framework/src/auth/remember.rs` ships a stronger design than a
+//! plain "encrypted cookie bytes" approach:
 //!
 //! - **DB-row + bcrypt hash** — each issued token has a row in
 //!   `remember_tokens` storing only the bcrypt hash, never the

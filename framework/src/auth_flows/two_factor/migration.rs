@@ -3,7 +3,7 @@
 //!
 //! Consumer apps include this migration in their `Migrator`'s
 //! `migrations()` list — the framework owns the schema, the app owns
-//! when to apply it. The example app wires this in Phase 11 Task 9.
+//! when to apply it.
 
 use sea_orm_migration::prelude::*;
 

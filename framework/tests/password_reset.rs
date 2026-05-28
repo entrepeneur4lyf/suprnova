@@ -1,4 +1,4 @@
-//! Phase 11 — `PasswordReset` facade integration tests.
+//! `PasswordReset` facade integration tests.
 //!
 //! Shape mirrors `framework/tests/email_verify.rs` (shared tokio
 //! runtime + one-time `init_torii` via `Lazy<()>`). See that file's

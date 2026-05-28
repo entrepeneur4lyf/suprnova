@@ -1,9 +1,12 @@
-//! Phase 11 auth-flow events.
+//! Auth-flow events.
 //!
-//! Six events covering the security-state transitions emitted by the
+//! Seven events covering the security-state transitions emitted by the
 //! auth_flows facades:
 //!
 //! - [`EmailVerified`] — `EmailVerification::verify` consumed a valid token.
+//! - [`PasswordResetLinkSent`] — `PasswordReset::request` issued a token
+//!   for an on-file email (anti-enumeration: no event fires when the
+//!   email is absent).
 //! - [`PasswordResetCompleted`] — `PasswordReset::complete` succeeded.
 //! - [`AccountLocked`] — `BruteForce::record_failed_attempt` pushed an
 //!   account across the threshold (unlocked → locked transition).
@@ -33,6 +36,32 @@ pub struct EmailVerified {
 impl Event for EmailVerified {
     fn event_name() -> &'static str {
         "EmailVerified"
+    }
+}
+
+/// Fires when [`crate::auth_flows::PasswordReset::request`] successfully
+/// issues a reset token for an email that is on file.
+///
+/// **Anti-enumeration:** the event does **not** fire when the email
+/// is absent — that path returns `Ok(None)` with no token minted and
+/// no side effect, so a listener that counts events cannot
+/// distinguish "absent email" from "no request made." Listeners
+/// typically audit-log the action (the user just received a sensitive
+/// security email) or alert on suspicious patterns (repeated requests
+/// against the same user from different peer IPs).
+///
+/// `user_id` is the stringified torii `UserId`; `email` is the address
+/// the reset link was dispatched to (matches the input on file, not
+/// necessarily the raw request input, in case torii normalises).
+#[derive(Debug, Clone)]
+pub struct PasswordResetLinkSent {
+    pub user_id: String,
+    pub email: String,
+}
+
+impl Event for PasswordResetLinkSent {
+    fn event_name() -> &'static str {
+        "PasswordResetLinkSent"
     }
 }
 
@@ -143,6 +172,7 @@ mod tests {
     fn event_names_distinct() {
         let mut names = vec![
             EmailVerified::event_name(),
+            PasswordResetLinkSent::event_name(),
             PasswordResetCompleted::event_name(),
             AccountLocked::event_name(),
             AccountUnlocked::event_name(),
