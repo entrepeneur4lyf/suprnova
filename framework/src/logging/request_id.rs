@@ -188,12 +188,15 @@ impl crate::middleware::Middleware for RequestIdMiddleware {
             path = %request.path(),
             // Declared up front as Empty so the 5xx marker recorded after
             // the chain actually lands — `tracing` silently ignores
-            // `record` for fields not declared at span creation. The
-            // `tracing-opentelemetry` bridge reads this to set OTel
-            // `Status::Error` on 5xx responses. A never-recorded Empty
-            // field is omitted from output, so this is zero-cost on the
-            // 2xx path and in non-otel builds.
-            error = tracing::field::Empty,
+            // `record` for fields not declared at span creation. The field
+            // name is the one `tracing-opentelemetry` special-cases:
+            // recording `otel.status_code = "error"` makes the bridge call
+            // `span.set_status(Status::error(..))`, which is the real OTel
+            // span status (a bare `error` field would only become a plain
+            // attribute, not a Status). A never-recorded Empty field is
+            // omitted from output, so this is zero-cost on the 2xx path and
+            // in non-otel builds.
+            otel.status_code = tracing::field::Empty,
         );
 
         // Join the upstream distributed trace before the span is entered.
@@ -252,6 +255,8 @@ impl crate::middleware::Middleware for RequestIdMiddleware {
 
         // Mark the span errored on a 5xx response so the
         // `tracing-opentelemetry` bridge maps it to OTel `Status::Error`.
+        // The value `"error"` on the `otel.status_code` field is what the
+        // bridge matches (case-insensitively) to call `set_status`.
         // Recorded here — the outermost middleware — so all three
         // chain-running server paths (matched route, fallback, static 404)
         // get the marker from one place instead of three duplicated
@@ -268,7 +273,7 @@ impl crate::middleware::Middleware for RequestIdMiddleware {
                 Ok(resp) | Err(resp) => resp.status_code(),
             };
             if status >= 500 {
-                span_for_status.record("error", true);
+                span_for_status.record("otel.status_code", "error");
             }
         }
 
