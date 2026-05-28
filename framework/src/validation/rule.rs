@@ -503,7 +503,7 @@ pub trait AsyncRule: Send + Sync {
     ///
     /// ```rust,ignore
     /// let mut errs = ValidationErrors::new();
-    /// Unique { table: "users", column: "email", except_id: None }
+    /// Unique::new("users", "email")
     ///     .check_async(&self.email, &mut errs, "email")
     ///     .await;
     /// errs.into_result()
@@ -521,13 +521,24 @@ pub trait AsyncRule: Send + Sync {
 pub mod async_rules {
     use super::AsyncRule;
     use crate::DB;
+    use crate::database::validate_identifier;
     use sea_orm::{ConnectionTrait, Statement, Value};
 
-    /// Laravel `unique:table,column[,except_id]` — issues a single
-    /// parameterized `COUNT(*)` against the configured DB connection.
+    /// Laravel `unique:table,column` — issues a single parameterized
+    /// `COUNT(*)` against the configured DB connection and fails when a
+    /// matching row exists.
     ///
-    /// Returns `Err` when at least one row matches and its `id`
-    /// (when [`Self::except_id`] is set) differs.
+    /// Construct with [`Unique::new`] and refine with the builder:
+    ///
+    /// ```rust,ignore
+    /// // `email` must be unique, ignoring the row currently being edited
+    /// Unique::new("users", "email").ignore(current_user_id)
+    ///
+    /// // `email` unique *per tenant*, compared case-insensitively
+    /// Unique::new("users", "email")
+    ///     .where_eq("tenant_id", tenant_id)
+    ///     .case_insensitive()
+    /// ```
     ///
     /// # This is an advisory check, not a guarantee
     ///
@@ -549,40 +560,110 @@ pub mod async_rules {
     ///
     /// # Safety on identifiers
     ///
-    /// `table` and `column` are `&'static str` slices under crate
-    /// control (i.e. caller-provided literals in source). The
-    /// implementation interpolates them directly into the SQL string,
-    /// which is safe because they are not user-controlled. The actual
-    /// value being checked and the `except_id`, on the other hand, are
-    /// passed as bound parameters.
+    /// `table`, `column`, the exclusion key column, and any
+    /// [`where_eq`](Self::where_eq) scope column are `&'static str`
+    /// slices from source. SQL has no placeholder for identifiers, so
+    /// they are interpolated into the query — but every one is first run
+    /// through [`validate_identifier`](crate::database::validate_identifier),
+    /// the same allowlist the model-less query builder uses, so a typo or
+    /// hostile literal errors instead of shaping an injection. The value
+    /// under test, the excluded id, and scope values are all bound
+    /// parameters.
     pub struct Unique {
-        pub table: &'static str,
-        pub column: &'static str,
-        pub except_id: Option<i64>,
+        table: &'static str,
+        column: &'static str,
+        except: Option<(&'static str, i64)>,
+        wheres: Vec<(&'static str, Value)>,
+        case_insensitive: bool,
+    }
+
+    impl Unique {
+        /// Start a uniqueness rule for `column` in `table`.
+        pub fn new(table: &'static str, column: &'static str) -> Self {
+            Self {
+                table,
+                column,
+                except: None,
+                wheres: Vec::new(),
+                case_insensitive: false,
+            }
+        }
+
+        /// Ignore the row whose `id` equals `id` — the "editing my own
+        /// record" case, where a user's own email must not trip the rule
+        /// on update. Uses the `id` primary-key column.
+        pub fn ignore(mut self, id: i64) -> Self {
+            self.except = Some(("id", id));
+            self
+        }
+
+        /// Like [`ignore`](Self::ignore) but excludes on a custom key
+        /// column instead of `id` (a non-`id` primary key, or excluding
+        /// by another unique key).
+        pub fn ignore_with_column(mut self, id_column: &'static str, id: i64) -> Self {
+            self.except = Some((id_column, id));
+            self
+        }
+
+        /// Scope the uniqueness check to rows where `column = value`.
+        /// Multiple calls AND together. This is Laravel's
+        /// `Rule::unique(...)->where(col, val)` — e.g. an email that must
+        /// be unique only *within a tenant*:
+        /// `Unique::new("users", "email").where_eq("tenant_id", tenant_id)`.
+        pub fn where_eq(mut self, column: &'static str, value: impl Into<Value>) -> Self {
+            self.wheres.push((column, value.into()));
+            self
+        }
+
+        /// Compare case-insensitively (`LOWER(column) = LOWER(?)`). Use
+        /// for emails or usernames where `Foo@x.com` and `foo@x.com` must
+        /// be treated as the same value.
+        pub fn case_insensitive(mut self) -> Self {
+            self.case_insensitive = true;
+            self
+        }
     }
 
     #[async_trait::async_trait]
     impl AsyncRule for Unique {
         async fn passes(&self, value: &str) -> Result<(), String> {
+            // Identifiers can't be placeholder-bound; validate each one
+            // through the shared allowlist before interpolation.
+            let table = validate_identifier(self.table).map_err(|e| e.to_string())?;
+            let column = validate_identifier(self.column).map_err(|e| e.to_string())?;
+
             let conn = DB::connection().map_err(|e| format!("db: {e}"))?;
             let backend = conn.inner().get_database_backend();
 
-            let (sql, values) = match self.except_id {
-                None => (
-                    format!(
-                        "SELECT COUNT(*) AS c FROM {} WHERE {} = ?",
-                        self.table, self.column
-                    ),
-                    vec![Value::from(value.to_string())],
-                ),
-                Some(id) => (
-                    format!(
-                        "SELECT COUNT(*) AS c FROM {} WHERE {} = ? AND id <> ?",
-                        self.table, self.column
-                    ),
-                    vec![Value::from(value.to_string()), Value::from(id)],
-                ),
-            };
+            let mut clauses: Vec<String> = Vec::new();
+            let mut values: Vec<Value> = Vec::new();
+
+            // Target-column predicate.
+            if self.case_insensitive {
+                clauses.push(format!("LOWER({column}) = LOWER(?)"));
+            } else {
+                clauses.push(format!("{column} = ?"));
+            }
+            values.push(Value::from(value.to_string()));
+
+            // Exclude the row being edited.
+            if let Some((id_column, id)) = self.except {
+                let id_column = validate_identifier(id_column).map_err(|e| e.to_string())?;
+                clauses.push(format!("{id_column} <> ?"));
+                values.push(Value::from(id));
+            }
+
+            // Scoped uniqueness predicates (AND together).
+            for (scope_col, scope_val) in &self.wheres {
+                let scope_col = validate_identifier(scope_col).map_err(|e| e.to_string())?;
+                clauses.push(format!("{scope_col} = ?"));
+                values.push(scope_val.clone());
+            }
+
+            let sql = format!(
+                "SELECT COUNT(*) AS c FROM {table} WHERE {}",
+                clauses.join(" AND ")
+            );
 
             let stmt = Statement::from_sql_and_values(backend, &sql, values);
             let row = conn

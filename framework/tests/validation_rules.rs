@@ -132,11 +132,7 @@ async fn unique_passes_when_no_row_exists() {
     let db = fresh_db().await;
     TestContainer::singleton(db);
 
-    let rule = Unique {
-        table: "users",
-        column: "email",
-        except_id: None,
-    };
+    let rule = Unique::new("users", "email");
     assert!(rule.passes("nobody@example.com").await.is_ok());
 }
 
@@ -147,11 +143,7 @@ async fn unique_fails_when_row_exists() {
     seed_user_with_email(&db, "taken@example.com").await;
     TestContainer::singleton(db);
 
-    let rule = Unique {
-        table: "users",
-        column: "email",
-        except_id: None,
-    };
+    let rule = Unique::new("users", "email");
     let err = rule.passes("taken@example.com").await.unwrap_err();
     assert!(
         err.contains("already"),
@@ -166,11 +158,7 @@ async fn unique_ignores_except_id() {
     let id = seed_user_with_email(&db, "self@example.com").await;
     TestContainer::singleton(db);
 
-    let rule = Unique {
-        table: "users",
-        column: "email",
-        except_id: Some(id),
-    };
+    let rule = Unique::new("users", "email").ignore(id);
     assert!(rule.passes("self@example.com").await.is_ok());
 }
 
@@ -654,13 +642,9 @@ async fn async_rule_check_helper_accumulates_errors() {
     TestContainer::singleton(db);
 
     let mut errs = ValidationErrors::new();
-    Unique {
-        table: "users",
-        column: "email",
-        except_id: None,
-    }
-    .check_async("taken@example.com", &mut errs, "email")
-    .await;
+    Unique::new("users", "email")
+        .check_async("taken@example.com", &mut errs, "email")
+        .await;
     assert!(
         errs.errors.contains_key("email"),
         "duplicate email should produce an `email` error"
@@ -676,13 +660,9 @@ async fn async_rule_check_helper_leaves_empty_on_success() {
     TestContainer::singleton(db);
 
     let mut errs = ValidationErrors::new();
-    Unique {
-        table: "users",
-        column: "email",
-        except_id: None,
-    }
-    .check_async("nobody@example.com", &mut errs, "email")
-    .await;
+    Unique::new("users", "email")
+        .check_async("nobody@example.com", &mut errs, "email")
+        .await;
     assert!(errs.is_empty(), "no rows → no errors");
 }
 
@@ -764,4 +744,182 @@ async fn from_unique_violation_passes_through_non_unique_errors() {
         "a non-unique DB error must pass through, not become a 422"
     );
     assert_ne!(mapped.status_code(), 422);
+}
+
+// --- Unique builder options ---
+
+#[tokio::test]
+async fn unique_where_eq_scopes_the_check() {
+    let _guard = TestContainer::fake();
+    let raw = Database::connect("sqlite::memory:").await.unwrap();
+    raw.execute(Statement::from_string(
+        DbBackend::Sqlite,
+        "CREATE TABLE members (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, \
+         tenant_id INTEGER NOT NULL)"
+            .to_string(),
+    ))
+    .await
+    .unwrap();
+    raw.execute(Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "INSERT INTO members (email, tenant_id) VALUES (?, ?)",
+        vec![Value::from("a@x.com".to_string()), Value::from(1i64)],
+    ))
+    .await
+    .unwrap();
+    TestContainer::singleton(DbConnection::from_raw(raw));
+
+    // Same email, same tenant → taken.
+    assert!(
+        Unique::new("members", "email")
+            .where_eq("tenant_id", 1i64)
+            .passes("a@x.com")
+            .await
+            .is_err()
+    );
+    // Same email, different tenant → free (scoped out by the predicate).
+    assert!(
+        Unique::new("members", "email")
+            .where_eq("tenant_id", 2i64)
+            .passes("a@x.com")
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn unique_case_insensitive_folds_case() {
+    let _guard = TestContainer::fake();
+    let db = fresh_db().await;
+    seed_user_with_email(&db, "foo@example.com").await;
+    TestContainer::singleton(db);
+
+    // Differently-cased value collides only with case_insensitive().
+    assert!(
+        Unique::new("users", "email")
+            .case_insensitive()
+            .passes("FOO@EXAMPLE.COM")
+            .await
+            .is_err(),
+        "LOWER() comparison must treat FOO@EXAMPLE.COM as the stored foo@example.com"
+    );
+    // Default (case-sensitive) comparison must NOT collide on different case.
+    assert!(
+        Unique::new("users", "email")
+            .passes("FOO@EXAMPLE.COM")
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn unique_ignore_with_column_excludes_by_custom_key() {
+    let _guard = TestContainer::fake();
+    let raw = Database::connect("sqlite::memory:").await.unwrap();
+    raw.execute(Statement::from_string(
+        DbBackend::Sqlite,
+        "CREATE TABLE widgets (widget_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)"
+            .to_string(),
+    ))
+    .await
+    .unwrap();
+    let res = raw
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO widgets (name) VALUES (?)",
+            vec![Value::from("gizmo".to_string())],
+        ))
+        .await
+        .unwrap();
+    let id = res.last_insert_id() as i64;
+    TestContainer::singleton(DbConnection::from_raw(raw));
+
+    // Excluding the only matching row by its custom PK column → free.
+    assert!(
+        Unique::new("widgets", "name")
+            .ignore_with_column("widget_id", id)
+            .passes("gizmo")
+            .await
+            .is_ok()
+    );
+    // Not excluding → taken.
+    assert!(
+        Unique::new("widgets", "name")
+            .passes("gizmo")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn unique_rejects_malformed_identifiers() {
+    let _guard = TestContainer::fake();
+    let db = fresh_db().await;
+    TestContainer::singleton(db);
+
+    // A hostile/typo'd table name errors at the identifier gate, before
+    // any SQL is built or run.
+    let err = Unique::new("users; DROP TABLE users", "email")
+        .passes("x@y.com")
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("identifier"),
+        "expected an identifier-validation error, got: {err}"
+    );
+}
+
+// --- Unique through FormRequest::after_validation_async (the recipe) ---
+//
+// Proves the documented integration: an app that overrides
+// `after_validation_async` to call `Unique::check_async` gets automatic,
+// framework-invoked uniqueness validation. Driven directly (not through a
+// socket) so the thread-local test DB is visible to the rule.
+
+mod unique_via_form_request {
+    use super::*;
+    use suprnova::{FormRequest, ValidationErrors};
+
+    #[derive(serde::Deserialize, validator::Validate)]
+    struct RegisterForm {
+        #[validate(email)]
+        email: String,
+    }
+
+    #[suprnova::async_trait]
+    impl FormRequest for RegisterForm {
+        async fn after_validation_async(&self) -> Result<(), ValidationErrors> {
+            let mut errs = ValidationErrors::new();
+            Unique::new("users", "email")
+                .check_async(&self.email, &mut errs, "email")
+                .await;
+            errs.into_result()
+        }
+    }
+
+    #[tokio::test]
+    async fn after_validation_async_runs_unique_and_rejects_duplicate() {
+        let _guard = TestContainer::fake();
+        let db = fresh_db().await;
+        seed_user_with_email(&db, "taken@example.com").await;
+        TestContainer::singleton(db);
+
+        let form = RegisterForm {
+            email: "taken@example.com".into(),
+        };
+        let errs = form.after_validation_async().await.unwrap_err();
+        assert!(errs.errors.contains_key("email"));
+    }
+
+    #[tokio::test]
+    async fn after_validation_async_passes_for_free_value() {
+        let _guard = TestContainer::fake();
+        let db = fresh_db().await;
+        TestContainer::singleton(db);
+
+        let form = RegisterForm {
+            email: "free@example.com".into(),
+        };
+        assert!(form.after_validation_async().await.is_ok());
+    }
 }
