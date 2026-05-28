@@ -132,22 +132,42 @@ impl TwoFactor {
             ));
         }
 
-        // Accept either path. TOTP path runs verify() which already
-        // enforces replay protection; recovery path consumes a code
-        // (single-use). Both block attackers without observed proof.
-        let totp_accepted = Self::verify(user, proof).await?;
+        // Reject early if the account is locked by brute-force
+        // throttling — symmetric with [`Self::complete_challenge`]'s
+        // gate. Without it, an attacker who tripped lockout via
+        // wrong proof codes could still rotate the secret by
+        // submitting the right one (since `verify_internal` itself
+        // doesn't consult lockout state). Best-effort: when torii
+        // isn't initialised (test / dev configs that exercise the
+        // 2FA primitives without booting torii), the gate
+        // short-circuits to "not locked" — same posture as the
+        // other brute-force interactions in this module.
+        if is_locked_best_effort(user.email()).await {
+            return Err(FrameworkError::domain(
+                "account is locked due to too many failed attempts",
+                429,
+            ));
+        }
+
+        // Use silent variants so a single bad proof counts as ONE
+        // failed attempt, not two (one from `verify` + one from
+        // `consume_recovery_code`). The outer layer records the
+        // canonical attempt once.
+        let totp_accepted = Self::verify_internal(user, proof).await?;
         let proof_accepted = if totp_accepted {
             true
         } else {
-            Self::consume_recovery_code(user, proof).await?
+            Self::consume_recovery_internal(user, proof).await?
         };
 
         if !proof_accepted {
+            record_2fa_failure(user.email()).await;
             return Err(FrameworkError::domain(
                 "re-enrollment proof is neither a valid TOTP code nor a recovery code",
                 401,
             ));
         }
+        reset_2fa_failures(user.email()).await;
 
         Self::write_new_enrollment(user).await
     }
@@ -583,11 +603,19 @@ impl TwoFactor {
         crate::session::middleware::two_factor_pending_user_id()
     }
 
-    /// Cancel a pending 2FA challenge — clears the pending user-id
-    /// from the session without authenticating anyone. Typical use
-    /// is a "back to login" button on the challenge page.
+    /// Cancel a pending 2FA challenge — clears both pending slots
+    /// (user-id + remember preference) from the session without
+    /// authenticating anyone. Typical use is a "back to login"
+    /// button on the challenge page.
+    ///
+    /// Clearing both slots in lockstep is the contract: leaving
+    /// `pending_remember` set after canceling would bleed the
+    /// "remember me" preference into a next user's login flow on
+    /// the same browser. Pending and pending-remember are paired
+    /// state; tear-downs drop both.
     pub fn cancel_challenge() {
         crate::session::middleware::clear_two_factor_pending();
+        crate::session::middleware::clear_two_factor_pending_remember();
     }
 
     /// Complete the 2FA challenge by verifying `code` against the
@@ -844,23 +872,40 @@ impl TwoFactor {
             ));
         }
 
-        // Accept TOTP or recovery-code proof. `verify` enforces atomic
-        // replay protection; `consume_recovery_code` burns the code on
-        // success. Either path independently blocks an attacker
-        // without observed proof.
-        let totp_accepted = Self::verify(user, proof).await?;
+        // Reject early if the account is locked by brute-force
+        // throttling — symmetric with [`Self::complete_challenge`]'s
+        // and [`Self::re_enroll`]'s gates. A session-hijacked
+        // attacker who tripped lockout cannot blow away the
+        // legitimate user's recovery codes by guessing the right
+        // proof after the lockout window opened a sliver.
+        // Best-effort posture (matches `record_2fa_failure` /
+        // `reset_2fa_failures`): a test / dev config that runs
+        // without torii initialised sees no gating, not a hard error.
+        if is_locked_best_effort(user.email()).await {
+            return Err(FrameworkError::domain(
+                "account is locked due to too many failed attempts",
+                429,
+            ));
+        }
+
+        // Use silent variants so a single bad proof counts as ONE
+        // failed attempt, not two (one from `verify` + one from
+        // `consume_recovery_code`). The outer layer records once.
+        let totp_accepted = Self::verify_internal(user, proof).await?;
         let proof_accepted = if totp_accepted {
             true
         } else {
-            Self::consume_recovery_code(user, proof).await?
+            Self::consume_recovery_internal(user, proof).await?
         };
 
         if !proof_accepted {
+            record_2fa_failure(user.email()).await;
             return Err(FrameworkError::domain(
                 "regenerate-recovery-codes proof is neither a valid TOTP code nor a recovery code",
                 401,
             ));
         }
+        reset_2fa_failures(user.email()).await;
 
         let new_codes = recovery::generate(RECOVERY_CODE_COUNT);
         let encrypted = Crypt::encrypt_string(&new_codes.join("\n"))?;
@@ -1025,6 +1070,23 @@ async fn record_2fa_failure(email: &str) {
 async fn reset_2fa_failures(email: &str) {
     if let Err(e) = crate::auth_flows::BruteForce::reset_attempts(email).await {
         tracing::debug!("BruteForce::reset_attempts skipped for 2FA success on {email}: {e}");
+    }
+}
+
+/// Best-effort lockout check. Returns `false` (= not locked) if torii
+/// isn't initialised — same posture as [`record_2fa_failure`]: the
+/// throttling layer is opt-in, so an environment without torii sees
+/// no lockout gating, not a hard error. Production deployments
+/// running 2FA always init torii, so the `false` fallback is purely
+/// for tests / dev configs that exercise the 2FA primitives
+/// without booting the full torii stack.
+async fn is_locked_best_effort(email: &str) -> bool {
+    match crate::auth_flows::BruteForce::is_locked(email).await {
+        Ok(locked) => locked,
+        Err(e) => {
+            tracing::debug!("BruteForce::is_locked skipped for 2FA gate on {email}: {e}");
+            false
+        }
     }
 }
 
