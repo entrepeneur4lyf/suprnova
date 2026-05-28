@@ -33,6 +33,34 @@ pub struct BroadcastEnvelope {
     pub event: String,
     /// Event payload, opaque to the hub.
     pub data: Value,
+    /// Optional connection `socket_id` to exclude from delivery — the basis
+    /// for [`Broadcastable::broadcast_to_others`](crate::broadcasting::Broadcastable::broadcast_to_others).
+    /// The forwarder for the matching connection skips this envelope; every
+    /// other subscriber still receives it. `None` (the default) delivers to
+    /// all. It rides the cross-process fanout so exclusion holds there too, but
+    /// is never forwarded to clients — it is a server-side routing concern.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub except: Option<String>,
+}
+
+impl BroadcastEnvelope {
+    /// A new envelope delivered to every subscriber (no exclusion).
+    pub fn new(channel: impl Into<String>, event: impl Into<String>, data: Value) -> Self {
+        Self {
+            channel: channel.into(),
+            event: event.into(),
+            data,
+            except: None,
+        }
+    }
+
+    /// Exclude one connection (by its `socket_id`) from this broadcast. Used by
+    /// `broadcast_to_others`, and the per-dispatch escape hatch for code that
+    /// publishes directly: `hub.publish(BroadcastEnvelope::new(c, e, d).with_except(id))`.
+    pub fn with_except(mut self, socket_id: impl Into<String>) -> Self {
+        self.except = Some(socket_id.into());
+        self
+    }
 }
 
 /// The broadcasting primitive. Apps depend on `Arc<dyn BroadcastHub>`
@@ -197,11 +225,7 @@ mod tests {
     async fn publish_with_no_subscribers_is_silent() {
         let hub = InMemoryBroadcastHub::new();
         // Should not panic, should not log error.
-        hub.publish(BroadcastEnvelope {
-            channel: "lonely".into(),
-            event: "Tick".into(),
-            data: json!({}),
-        })
-        .await;
+        hub.publish(BroadcastEnvelope::new("lonely", "Tick", json!({})))
+            .await;
     }
 }

@@ -9,11 +9,11 @@ async fn publish_to_subscribed_channel_delivers_envelope() {
     let hub = InMemoryBroadcastHub::new();
     let mut rx = hub.subscribe("chat.42");
 
-    hub.publish(BroadcastEnvelope {
-        channel: "chat.42".into(),
-        event: "MessagePosted".into(),
-        data: json!({ "text": "hello" }),
-    })
+    hub.publish(BroadcastEnvelope::new(
+        "chat.42",
+        "MessagePosted",
+        json!({ "text": "hello" }),
+    ))
     .await;
 
     let received = rx.recv().await.expect("envelope arrives");
@@ -28,11 +28,11 @@ async fn publish_to_unsubscribed_channel_is_ignored_by_other_subscribers() {
     let mut chat_rx = hub.subscribe("chat.42");
     let mut presence_rx = hub.subscribe("presence.lobby");
 
-    hub.publish(BroadcastEnvelope {
-        channel: "presence.lobby".into(),
-        event: "MemberJoined".into(),
-        data: json!({ "user_id": 7 }),
-    })
+    hub.publish(BroadcastEnvelope::new(
+        "presence.lobby",
+        "MemberJoined",
+        json!({ "user_id": 7 }),
+    ))
     .await;
 
     let presence_msg = presence_rx
@@ -61,12 +61,8 @@ async fn unsubscribe_via_drop_releases_slot() {
     // tokio::sync::broadcast detects drops on the next publish (or
     // explicit poll). Yield + publish to push the count refresh.
     tokio::task::yield_now().await;
-    hub.publish(BroadcastEnvelope {
-        channel: "chat.42".into(),
-        event: "Tick".into(),
-        data: json!({}),
-    })
-    .await;
+    hub.publish(BroadcastEnvelope::new("chat.42", "Tick", json!({})))
+        .await;
     tokio::task::yield_now().await;
 
     assert_eq!(hub.subscriber_count("chat.42"), 1);

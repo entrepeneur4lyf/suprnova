@@ -50,6 +50,11 @@ pub enum ClientFrame {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ServerFrame {
+    /// Sent once, first, when the connection opens. Carries the per-connection
+    /// `socket_id` the client echoes back as the `X-Socket-ID` header on HTTP
+    /// requests so server-side `broadcast_to_others` can exclude it. Mirrors
+    /// Pusher's `connection_established`.
+    Connected { socket_id: String },
     /// Acknowledges a `Subscribe` request.
     Subscribed { channel: String },
     /// Acknowledges an `Unsubscribe` request.

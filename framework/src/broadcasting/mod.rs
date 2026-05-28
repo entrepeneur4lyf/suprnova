@@ -15,6 +15,7 @@ mod channel;
 mod handler;
 mod hub;
 mod protocol;
+pub(crate) mod request_socket;
 
 #[cfg(feature = "broadcasting-fanout")]
 pub mod fanout;

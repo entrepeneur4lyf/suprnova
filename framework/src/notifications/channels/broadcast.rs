@@ -60,11 +60,11 @@ impl Channel for BroadcastChannel {
             )
         })?;
 
-        let envelope = BroadcastEnvelope {
-            channel: route.to_string(),
-            event: notification.name().to_string(),
-            data: notification.data(),
-        };
+        let envelope = BroadcastEnvelope::new(
+            route.to_string(),
+            notification.name().to_string(),
+            notification.data(),
+        );
         tracing::debug!(
             channel = %envelope.channel,
             event = %envelope.event,

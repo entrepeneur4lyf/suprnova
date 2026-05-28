@@ -107,7 +107,12 @@ type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn connect(url: &str) -> WsStream {
-    tokio_tungstenite::connect_async(url).await.unwrap().0
+    let mut ws = tokio_tungstenite::connect_async(url).await.unwrap().0;
+    // The broadcasting handler sends a `connected` frame first; consume it so
+    // presence assertions see `subscribed` / presence events as the first frame.
+    let frame = next_frame(&mut ws).await;
+    assert_eq!(frame["action"], "connected");
+    ws
 }
 
 async fn send_json(ws: &mut WsStream, v: Value) {

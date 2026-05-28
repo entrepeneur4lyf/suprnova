@@ -437,11 +437,11 @@ impl SeaStreamerBroadcastHub {
         };
         let tagged = TaggedEnvelope {
             instance_id: self.instance_id,
-            envelope: BroadcastEnvelope {
-                channel: PRESENCE_META_CHANNEL.to_string(),
-                event: event_name.to_string(),
+            envelope: BroadcastEnvelope::new(
+                PRESENCE_META_CHANNEL.to_string(),
+                event_name.to_string(),
                 data,
-            },
+            ),
         };
         match serde_json::to_vec(&tagged) {
             Ok(bytes) => match self.producer.send(bytes.as_slice()) {
@@ -641,11 +641,11 @@ fn send_presence_via_producer(
     let uuid = Uuid::parse_str(instance_id_str).unwrap_or_else(|_| Uuid::nil());
     let tagged = TaggedEnvelope {
         instance_id: uuid,
-        envelope: BroadcastEnvelope {
-            channel: PRESENCE_META_CHANNEL.to_string(),
-            event: event_name.to_string(),
+        envelope: BroadcastEnvelope::new(
+            PRESENCE_META_CHANNEL.to_string(),
+            event_name.to_string(),
             data,
-        },
+        ),
     };
     match serde_json::to_vec(&tagged) {
         Ok(bytes) => {

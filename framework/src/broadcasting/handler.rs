@@ -104,6 +104,20 @@ impl WebSocketHandler for BroadcastingWsHandler {
         // inside this module.
         let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<String>(64);
 
+        // Assign this connection a socket id and announce it first, so the
+        // client can echo it as `X-Socket-ID` and a server-side
+        // `broadcast_to_others` can exclude this connection. Mirrors Pusher's
+        // `connection_established`.
+        let socket_id = Uuid::new_v4().to_string();
+        socket
+            .send_text(
+                serde_json::to_string(&ServerFrame::Connected {
+                    socket_id: socket_id.clone(),
+                })
+                .unwrap_or_default(),
+            )
+            .await?;
+
         loop {
             tokio::select! {
                 // Outbound arm: a forwarder pushed an event.
@@ -127,6 +141,7 @@ impl WebSocketHandler for BroadcastingWsHandler {
                                 &self.registry,
                                 &forwarders,
                                 &outbound_tx,
+                                &socket_id,
                                 &mut socket,
                             )
                             .await?;
@@ -175,8 +190,11 @@ impl WebSocketHandler for BroadcastingWsHandler {
                                     )
                                     .await?;
                             } else {
+                                // Client publishes are not socket-excluded — the
+                                // publisher receives its own event like any other
+                                // subscriber (see broadcasting docs).
                                 self.hub
-                                    .publish(BroadcastEnvelope { channel, event, data })
+                                    .publish(BroadcastEnvelope::new(channel, event, data))
                                     .await;
                             }
                         }
@@ -201,11 +219,11 @@ impl WebSocketHandler for BroadcastingWsHandler {
             if let Some(ps) = entry.presence {
                 self.hub.untrack_member(&channel, &ps.member_id).await;
                 self.hub
-                    .publish(BroadcastEnvelope {
-                        channel: channel.clone(),
-                        event: "presence.left".into(),
-                        data: ps.info,
-                    })
+                    .publish(BroadcastEnvelope::new(
+                        channel.clone(),
+                        "presence.left",
+                        ps.info,
+                    ))
                     .await;
             }
             entry.handle.abort();
@@ -230,6 +248,7 @@ async fn handle_subscribe(
     registry: &Arc<ChannelRegistry>,
     forwarders: &Arc<Mutex<HashMap<String, ForwarderEntry>>>,
     outbound_tx: &tokio::sync::mpsc::Sender<String>,
+    socket_id: &str,
     socket: &mut WsSocket,
 ) -> Result<(), FrameworkError> {
     // Resolve the channel from the registry, capturing any params bound from a
@@ -272,10 +291,17 @@ async fn handle_subscribe(
     // Subscribe to the hub and spawn a forwarder.
     let mut rx = hub.subscribe(channel);
     let tx = outbound_tx.clone();
+    let self_socket = socket_id.to_string();
     let forwarder = tokio::spawn(async move {
         loop {
             match rx.recv().await {
                 Ok(envelope) => {
+                    // Skip the connection this broadcast excludes
+                    // (`broadcast_to_others` / per-dispatch `except`); every
+                    // other subscriber still receives it.
+                    if envelope.except.as_deref() == Some(self_socket.as_str()) {
+                        continue;
+                    }
                     let frame = ServerFrame::Event {
                         channel: envelope.channel,
                         event: envelope.event,
@@ -316,11 +342,11 @@ async fn handle_subscribe(
             // Existing subscription being replaced — clean up presence if needed.
             if let Some(ps) = old.presence {
                 hub.untrack_member(channel, &ps.member_id).await;
-                hub.publish(BroadcastEnvelope {
-                    channel: channel.to_string(),
-                    event: "presence.left".into(),
-                    data: ps.info,
-                })
+                hub.publish(BroadcastEnvelope::new(
+                    channel.to_string(),
+                    "presence.left",
+                    ps.info,
+                ))
                 .await;
             }
             old.handle.abort();
@@ -373,11 +399,11 @@ async fn handle_subscribe(
         // presence.joined — published via hub so all subscribers receive it
         // (including the new subscriber via their forwarder — that's the
         // standard Pusher self-join behaviour; clients filter by member_id).
-        hub.publish(BroadcastEnvelope {
-            channel: channel.to_string(),
-            event: "presence.joined".into(),
-            data: info,
-        })
+        hub.publish(BroadcastEnvelope::new(
+            channel.to_string(),
+            "presence.joined",
+            info,
+        ))
         .await;
     }
 
@@ -398,11 +424,11 @@ async fn handle_unsubscribe(
     if let Some(e) = entry {
         if let Some(ps) = e.presence {
             hub.untrack_member(channel, &ps.member_id).await;
-            hub.publish(BroadcastEnvelope {
-                channel: channel.to_string(),
-                event: "presence.left".into(),
-                data: ps.info,
-            })
+            hub.publish(BroadcastEnvelope::new(
+                channel.to_string(),
+                "presence.left",
+                ps.info,
+            ))
             .await;
         }
         e.handle.abort();

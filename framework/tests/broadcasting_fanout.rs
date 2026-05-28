@@ -61,11 +61,7 @@ async fn wait_for_member_count(
 
 /// Convenience: build a test envelope.
 fn envelope(channel: &str, event: &str, data: serde_json::Value) -> BroadcastEnvelope {
-    BroadcastEnvelope {
-        channel: channel.to_string(),
-        event: event.to_string(),
-        data,
-    }
+    BroadcastEnvelope::new(channel, event, data)
 }
 
 // ── local-fanout tests ───────────────────────────────────────────────────────

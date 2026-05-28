@@ -526,6 +526,17 @@ pub async fn handle_request(
     // GET fallback inside `match_route`) cannot violate the spec.
     let is_head = method == hyper::Method::HEAD;
 
+    // The broadcasting WS handler assigns each connection a `socket_id` and the
+    // client echoes it as `X-Socket-ID`; capture it so a `broadcast_to_others`
+    // event dispatched while handling this request can exclude that connection.
+    let request_socket_id = req
+        .headers()
+        .get("x-socket-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
     let response = crate::inertia::flash::FLASH_BAG
         .scope(flash_bag, async move {
             crate::inertia::ssr::DISABLE_SSR
@@ -533,13 +544,16 @@ pub async fn handle_request(
                     // Per-request auth state (resolved user cache + via-remember
                     // flag), guard-agnostic so token-only requests without a
                     // session can still use `set_user` / `once` / `has_user`.
-                    crate::auth::request_state::scope(handle_request_inner(
-                        router,
-                        middleware_registry,
-                        req,
-                        method,
-                        &path,
-                    ))
+                    crate::broadcasting::request_socket::scope(
+                        request_socket_id,
+                        crate::auth::request_state::scope(handle_request_inner(
+                            router,
+                            middleware_registry,
+                            req,
+                            method,
+                            &path,
+                        )),
+                    )
                     .await
                 })
                 .await

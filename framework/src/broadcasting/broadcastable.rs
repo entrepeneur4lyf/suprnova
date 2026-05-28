@@ -52,6 +52,20 @@ pub trait Broadcastable: Event + Serialize {
     fn broadcast_when(&self) -> bool {
         true
     }
+
+    /// Whether to exclude the connection that triggered this broadcast —
+    /// the originating WebSocket `socket_id`, taken from the current request's
+    /// `X-Socket-ID` header (Laravel's `toOthers()`). `false` by default (every
+    /// subscriber receives it). When `true`, the originating connection is
+    /// skipped *if one is identified*; off-request (a worker or job) or when the
+    /// client sent no `X-Socket-ID`, it degrades to broadcasting to everyone.
+    ///
+    /// This is a per-event-type choice. For per-dispatch exclusion, publish
+    /// directly with
+    /// [`BroadcastEnvelope::with_except`](crate::broadcasting::BroadcastEnvelope::with_except).
+    fn broadcast_to_others(&self) -> bool {
+        false
+    }
 }
 
 /// Generic Listener that publishes the event to the hub when fired.
@@ -92,14 +106,17 @@ impl<E: Broadcastable> Listener<E> for BroadcastListener<E> {
             })?,
         };
         let event_name = event.broadcast_event_name().to_string();
+        // `broadcast_to_others()` excludes the connection that triggered this
+        // broadcast (the current request's `X-Socket-ID`), when one is present.
+        let except = if event.broadcast_to_others() {
+            crate::broadcasting::request_socket::current()
+        } else {
+            None
+        };
         for channel in channels {
-            self.hub
-                .publish(BroadcastEnvelope {
-                    channel,
-                    event: event_name.clone(),
-                    data: data.clone(),
-                })
-                .await;
+            let mut envelope = BroadcastEnvelope::new(channel, event_name.clone(), data.clone());
+            envelope.except = except.clone();
+            self.hub.publish(envelope).await;
         }
         Ok(())
     }

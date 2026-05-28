@@ -280,6 +280,19 @@ Two optional methods refine that default:
   }
   ```
 
+- **`broadcast_to_others(&self) -> bool`** — return `true` to exclude the connection that triggered the broadcast (Laravel's `toOthers()`). Each broadcasting client is assigned a `socket_id` on connect (the `connected` frame) and echoes it as the `X-Socket-ID` header on HTTP requests; a `broadcast_to_others` event dispatched while handling such a request skips that connection. Off-request (a worker or job), or when no `X-Socket-ID` is present, it broadcasts to everyone:
+
+  ```rust
+  impl Broadcastable for MessagePosted {
+      fn broadcast_on(&self) -> Vec<String> { vec![format!("chat.{}", self.room)] }
+      fn broadcast_to_others(&self) -> bool { true } // the sender already has the message
+  }
+  ```
+
+  This is a per-event-type choice. For per-dispatch exclusion, publish directly: `hub.publish(BroadcastEnvelope::new(channel, event, data).with_except(socket_id))`.
+
+  > **Server-side plumbing.** Suprnova assigns and surfaces the `socket_id` and excludes it on the broadcast path. Echoing `X-Socket-ID` from the browser is the client's job; the bundled typed broadcast client is not yet shipped, so for now you wire the header yourself — read the `connected` frame's `socket_id` and send it back as `X-Socket-ID`.
+
 ## The Wire Protocol
 
 All messages over the broadcasting WebSocket route are UTF-8 JSON frames. Two frame shapes are defined: `ClientFrame` (client to server) and `ServerFrame` (server to client).
@@ -304,12 +317,14 @@ All messages over the broadcasting WebSocket route are UTF-8 JSON frames. Two fr
 
 | `action` | Fields | Meaning |
 |----------|--------|---------|
+| `connected` | `socket_id` | Sent once, first. Echo `socket_id` as the `X-Socket-ID` header on HTTP requests so `broadcast_to_others` can exclude this connection. |
 | `subscribed` | `channel` | Subscription accepted. |
 | `unsubscribed` | `channel` | Unsubscription confirmed. |
 | `event` | `channel`, `event`, `data` | An event was broadcast to this channel. |
 | `error` | `channel`, `reason` | The last action on this channel failed. |
 
 ```json
+{"action":"connected","socket_id":"6f1a3c2e-…"}
 {"action":"subscribed","channel":"chat.42"}
 {"action":"unsubscribed","channel":"chat.42"}
 {"action":"event","channel":"chat.42","event":"MessagePosted","data":{"text":"hi"}}
@@ -319,6 +334,7 @@ All messages over the broadcasting WebSocket route are UTF-8 JSON frames. Two fr
 ### Example Session Log
 
 ```
+S → C  {"action":"connected","socket_id":"6f1a3c2e-…"}
 C → S  {"action":"subscribe","channel":"order.updates","data":{}}
 S → C  {"action":"subscribed","channel":"order.updates"}
 
@@ -489,7 +505,7 @@ The following items are intentionally deferred. Each note describes the path for
 | `suprnova::broadcasting::Channel` | Trait for named channels. Implement `name()` (required). Override `authorize(&self, req, data) -> bool` for private semantics, or `presence_info()` for presence semantics. |
 | `suprnova::broadcasting::PrivateChannel` | Marker trait. Implementing it alongside `Channel` (with a custom `authorize`) makes the channel private. No additional methods. |
 | `suprnova::broadcasting::PresenceChannel` | Trait with `async fn member_info(&self, req: &Request) -> Result<Value, FrameworkError>`. Returns the joining member's data used in `presence.joined` / `presence.here` frames. |
-| `suprnova::broadcasting::Broadcastable` | Trait on an `Event`: `broadcast_on() -> Vec<String>` (channels), `broadcast_event_name()` (wire name), `broadcast_with() -> Option<Value>` (curated payload), `broadcast_when() -> bool` (conditional push). Pushed to hub subscribers when dispatched via `EventFacade`. |
+| `suprnova::broadcasting::Broadcastable` | Trait on an `Event`: `broadcast_on() -> Vec<String>` (channels), `broadcast_event_name()` (wire name), `broadcast_with() -> Option<Value>` (curated payload), `broadcast_when() -> bool` (conditional push), `broadcast_to_others() -> bool` (exclude the originating socket via `X-Socket-ID`). Pushed to hub subscribers when dispatched via `EventFacade`. |
 | `suprnova::broadcasting::BroadcastHub` | Trait implemented by `InMemoryBroadcastHub` and `SeaStreamerBroadcastHub`. The DI container holds the active hub. |
 | `suprnova::broadcasting::InMemoryBroadcastHub` | Default hub. In-process fanout only. No external dependencies. |
 | `suprnova::broadcasting::fanout::SeaStreamerBroadcastHub` | Multi-process hub behind the `broadcasting-fanout` feature. Accepts a broker URI. |
