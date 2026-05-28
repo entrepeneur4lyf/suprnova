@@ -14,7 +14,7 @@ name = "console"
 path = "src/bin/console.rs"
 
 [dependencies]
-suprnova = { package = "suprnova-rs", version = "0.1" }
+suprnova = "0.1"
 tokio = { version = "1", features = ["full"] }
 sea-orm-migration = { version = "1.0", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-native-tls"] }
 sea-orm = { version = "1.0", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-native-tls", "macros", "with-chrono"] }

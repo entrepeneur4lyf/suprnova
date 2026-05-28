@@ -10,7 +10,7 @@
 //!    file and reject occurrences of `TODO`, `FIXME`, `unimplemented!`,
 //!    `panic!(`, or the historical stub helpers.
 //! 2. Confirm that a freshly scaffolded project compiles end-to-end by
-//!    rewriting its `suprnova-rs` dependency to point at the in-tree
+//!    rewriting its `suprnova` dependency to point at the in-tree
 //!    framework crate and running `cargo check`. Marked `#[ignore]` so
 //!    `cargo test --workspace` stays fast — run with
 //!    `cargo test --workspace -- --ignored` to exercise them.
@@ -223,7 +223,7 @@ fn make_task_generates_clean_code() {
 // ---------------------------------------------------------------------------
 
 /// Rewrite the scaffolded `Cargo.toml` so it builds against the
-/// in-tree `framework/` crate instead of the published `suprnova-rs`
+/// in-tree `framework/` crate instead of the published `suprnova`
 /// release. The published crate exists for end users but isn't
 /// resolvable inside this workspace's test harness; swapping the dep
 /// line for a `path =` reference is what lets `cargo check` succeed
