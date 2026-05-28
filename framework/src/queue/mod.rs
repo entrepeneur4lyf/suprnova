@@ -71,6 +71,20 @@ impl Queue {
     pub fn set_driver(driver: Arc<dyn QueueDriver>) {
         *lock::write(&DRIVER).unwrap_or_else(|e| panic!("{e}")) = Some(driver);
     }
+
+    /// Return the registered driver's `name()` for observability (admin,
+    /// `queue:work` startup log, debug). Returns the same `FrameworkError`
+    /// that [`Queue::push`] would surface when no driver is registered.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::internal`] when the driver registry is
+    /// poisoned, or when no driver has been wired (call
+    /// [`bootstrap_default`] / [`bootstrap_from_env`] / [`Queue::set_driver`]
+    /// at boot).
+    pub fn driver_name() -> Result<&'static str, FrameworkError> {
+        Ok(current_driver()?.name())
+    }
 }
 
 pub(crate) fn current_driver() -> Result<Arc<dyn QueueDriver>, FrameworkError> {
@@ -98,10 +112,16 @@ pub async fn bootstrap_default() {
 
 /// Read `QUEUE_DRIVER` env and configure the matching driver. Falls back to the
 /// in-memory default on any unrecognized value or when `QUEUE_DRIVER` is unset.
+///
+/// Unlike [`bootstrap_default`], this call **always replaces** the registered
+/// driver — long-running processes (workers, tests) that re-invoke
+/// `bootstrap_from_env` after `QUEUE_DRIVER` changes (or after an earlier
+/// Redis/database boot) will pick up the new driver instead of being pinned to
+/// the first one installed.
 pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
     let driver = std::env::var("QUEUE_DRIVER").unwrap_or_else(|_| "memory".into());
     match driver.as_str() {
-        "memory" => bootstrap_default().await,
+        "memory" => Queue::set_driver(Arc::new(memory::MemoryQueueDriver::new())),
         "redis" => {
             let url = std::env::var("QUEUE_REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
@@ -136,7 +156,7 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
         }
         other => {
             tracing::warn!(driver = %other, "unknown QUEUE_DRIVER, falling back to memory");
-            bootstrap_default().await;
+            Queue::set_driver(Arc::new(memory::MemoryQueueDriver::new()));
         }
     }
     Ok(())
