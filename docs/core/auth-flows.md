@@ -756,7 +756,28 @@ code is single-use.
 brute-force counter through `BruteForce::record_failed_attempt`, the
 same way bare `TwoFactor::verify` does — so an attacker grinding the
 challenge form will trip `AccountLocked` after the configured
-threshold.
+threshold. A single bad submission counts as **one** failed attempt
+even though `complete_challenge` tries both the TOTP and recovery-code
+paths internally; the silent-validation cores skip the BF counter so
+the outer layer can record the canonical attempt exactly once.
+
+**Lockout gate:** `complete_challenge` checks `BruteForce::is_locked`
+up front and returns `429 Too Many Requests` if the account is
+already locked — even if the submitted code is correct. Without
+this in-method gate, an attacker who tripped the lockout could still
+get in by submitting the right code on the next request: the BF
+counter is keyed on the user's email but `verify` itself doesn't
+consult it. The password path's `LoginThrottleMiddleware` enforces
+the same constraint at the route layer; composing it in front of
+the challenge POST route is fine — both gates are idempotent.
+
+**Failure event:** `complete_challenge` dispatches
+`TwoFactorChallengeFailed { user_id }` on a bad code (or a locked
+account), distinct from the password path's `Auth\Failed`. Listeners
+watching for "user tried 2FA and failed" subscribe to the new event;
+listeners watching for "password didn't authenticate" stay on
+`Auth\Failed`. The two surfaces are kept separate so a 2FA mistype
+doesn't look like a password failure to audit pipelines.
 
 ### Controllers
 
@@ -794,7 +815,7 @@ knobs.
 
 ## Events
 
-Eight events fire across the flows, one per security-state transition:
+Nine events fire across the flows, one per security-state transition:
 
 | Event | Fired by | Carries |
 |---|---|---|
@@ -805,6 +826,7 @@ Eight events fire across the flows, one per security-state transition:
 | `AccountUnlocked` | `BruteForce::unlock_account` when an actual unlock occurred | `email: String` |
 | `TwoFactorEnrolled` | `TwoFactor::confirm` on success | `user_id: String` |
 | `TwoFactorChallenged` | `TwoFactor::complete_challenge` promoted pending → authed | `user_id: String` |
+| `TwoFactorChallengeFailed` | `TwoFactor::complete_challenge` rejected a bad code or refused a locked account | `user_id: String` |
 | `TwoFactorDisabled` | `TwoFactor::disable` when a row was actually removed | `user_id: String` |
 
 Every event is `Debug + Clone + 'static`, carries no sensitive data (no

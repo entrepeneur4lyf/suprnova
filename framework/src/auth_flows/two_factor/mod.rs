@@ -28,7 +28,9 @@ pub mod migration;
 pub mod migration_replay;
 pub mod recovery;
 
-use crate::auth_flows::events::{TwoFactorChallenged, TwoFactorDisabled, TwoFactorEnrolled};
+use crate::auth_flows::events::{
+    TwoFactorChallengeFailed, TwoFactorChallenged, TwoFactorDisabled, TwoFactorEnrolled,
+};
 use crate::crypto::Crypt;
 use crate::database::DB;
 use crate::error::FrameworkError;
@@ -372,6 +374,80 @@ impl TwoFactor {
         Ok(consumed)
     }
 
+    /// Internal silent variant of [`Self::verify`]: runs the full
+    /// security pipeline (replay-window check, code match, atomic
+    /// timestep claim) but **does not** touch the brute-force
+    /// counter. Used by [`Self::complete_challenge`] which needs to
+    /// try TOTP and recovery in the same submission without double-
+    /// counting a single failed attempt as two against the BF
+    /// counter.
+    ///
+    /// Returns `Ok(false)` for any rejection — no-row, not-confirmed,
+    /// replay, mismatch, or race lost. Callers that need to
+    /// distinguish "not enabled" from "wrong code" can re-check
+    /// [`Self::is_enabled`] (a single DB read).
+    async fn verify_internal<U: TwoFactorUser>(
+        user: &U,
+        code: &str,
+    ) -> Result<bool, FrameworkError> {
+        let db = DB::connection()?;
+        let Some(row) = entity::Entity::find_by_id(user.user_id().to_string())
+            .one(db.inner())
+            .await
+            .map_err(|e| FrameworkError::internal(format!("two_factor find: {e}")))?
+        else {
+            return Ok(false);
+        };
+        if row.confirmed_at.is_none() {
+            return Ok(false);
+        }
+
+        let current_timestep = current_totp_timestep();
+        if let Some(last) = row.last_used_timestep
+            && current_timestep <= last
+        {
+            return Ok(false);
+        }
+
+        let secret_b32 = Crypt::decrypt_string(&row.secret)?;
+        if !check_code(&secret_b32, code)? {
+            return Ok(false);
+        }
+
+        let claim = entity::Entity::update_many()
+            .col_expr(
+                entity::Column::LastUsedTimestep,
+                Expr::value(current_timestep),
+            )
+            .col_expr(entity::Column::UpdatedAt, Expr::value(chrono::Utc::now()))
+            .filter(entity::Column::UserId.eq(user.user_id()))
+            .filter(
+                Condition::any()
+                    .add(entity::Column::LastUsedTimestep.is_null())
+                    .add(entity::Column::LastUsedTimestep.lt(current_timestep)),
+            )
+            .exec(db.inner())
+            .await
+            .map_err(|e| FrameworkError::internal(format!("two_factor replay claim: {e}")))?;
+
+        Ok(claim.rows_affected > 0)
+    }
+
+    /// Internal silent variant of [`Self::consume_recovery_code`]:
+    /// consumes the code single-use if it matches but **does not**
+    /// touch the brute-force counter. Used by
+    /// [`Self::complete_challenge`] for the same reason
+    /// [`Self::verify_internal`] exists.
+    async fn consume_recovery_internal<U: TwoFactorUser>(
+        user: &U,
+        code: &str,
+    ) -> Result<bool, FrameworkError> {
+        if !Self::is_enabled(user).await? {
+            return Ok(false);
+        }
+        recovery::consume(user.user_id(), code).await
+    }
+
     /// Returns `true` when an active (confirmed) 2FA enrollment
     /// exists for this user. Sugar over [`Self::is_enabled_by_id`]
     /// for callers that already hold a [`TwoFactorUser`].
@@ -493,8 +569,13 @@ impl TwoFactor {
     /// standard [`crate::auth::events::Login`] +
     /// [`crate::auth::events::Authenticated`] pair followed by the
     /// 2FA-specific [`crate::auth_flows::events::TwoFactorChallenged`].
-    /// Returns the full [`crate::torii_integration::User`] so the
-    /// caller can branch the post-login redirect on user attributes.
+    /// On a bad code, dispatches
+    /// [`crate::auth_flows::events::TwoFactorChallengeFailed`] and
+    /// records exactly one failed attempt against the brute-force
+    /// counter — single-attempt accounting even though both TOTP and
+    /// recovery-code paths are tried. Returns the full
+    /// [`crate::torii_integration::User`] on success so the caller
+    /// can branch the post-login redirect on user attributes.
     ///
     /// Accepts either a current TOTP code or an unused recovery code —
     /// the recovery-code path matches Fortify's challenge controller,
@@ -502,10 +583,21 @@ impl TwoFactor {
     /// their authenticator. Recovery codes are consumed single-use on
     /// acceptance.
     ///
-    /// Failed code attempts feed the per-account brute-force counter
-    /// — the same way [`Self::verify`] does for direct verification —
-    /// so an attacker who racked up bad challenge codes will trip
-    /// `AccountLocked` after the configured threshold.
+    /// # Brute-force gating
+    ///
+    /// The challenge endpoint is the symmetric counterpart of the
+    /// password endpoint that [`crate::auth_flows::LoginThrottleMiddleware`]
+    /// gates. This method enforces the same gate in-method via
+    /// [`crate::auth_flows::BruteForce::is_locked`] so a locked
+    /// account cannot bypass the lockout by submitting the right
+    /// code: a 429 fires before any code is checked. (Composing
+    /// `LoginThrottleMiddleware` in front of the challenge route is
+    /// also fine — both gates are idempotent.) Failed submissions
+    /// increment the counter exactly once even though both the TOTP
+    /// and recovery-code paths are tried — the silent
+    /// [`Self::verify_internal`] / [`Self::consume_recovery_internal`]
+    /// cores skip BF interaction so this method can record the
+    /// single canonical attempt itself.
     ///
     /// # Promotion contract
     ///
@@ -547,10 +639,41 @@ impl TwoFactor {
             ));
         };
 
-        // Adapter so we can call the existing `verify` /
-        // `consume_recovery_code` — they thread the email through to
-        // `BruteForce::record_failed_attempt` for the throttling
-        // linkage, but the credential check itself is user-id-keyed.
+        // Reject early if 2FA was disabled between start_challenge and
+        // now. The user must re-login from scratch (without 2FA gating);
+        // proceeding would either reject every code (no enrollment to
+        // match against) or risk promoting on a disabled-2FA path.
+        if !Self::is_enabled_by_id(&pending_id).await? {
+            return Err(FrameworkError::domain(
+                "2FA is no longer enabled for this account; restart the login flow",
+                400,
+            ));
+        }
+
+        // Reject early if the account is locked by brute-force
+        // throttling. Without this gate, an attacker who tripped
+        // lockout via wrong codes could still get in by submitting
+        // the right code — the BF counter is keyed on the user's
+        // email but `verify_internal` itself doesn't consult it, so
+        // the lockout would be advisory. The password path's
+        // `LoginThrottleMiddleware` enforces this at the route layer;
+        // we enforce it in-method so the challenge endpoint is closed
+        // regardless of which middleware the consumer composes.
+        if crate::auth_flows::BruteForce::is_locked(&user.email).await? {
+            let _ = crate::events::EventFacade::dispatch(TwoFactorChallengeFailed {
+                user_id: pending_id.clone(),
+            })
+            .await;
+            return Err(FrameworkError::domain(
+                "account is locked due to too many failed attempts",
+                429,
+            ));
+        }
+
+        // Adapter so we can call the existing TwoFactorUser-keyed
+        // primitives — the silent variants don't thread the email
+        // through to brute-force (the wrapper layer below does that),
+        // but the trait still wants both.
         struct ChallengeAdapter<'a> {
             user_id: &'a str,
             email: &'a str,
@@ -571,17 +694,28 @@ impl TwoFactor {
 
         // TOTP first (fast path); fall back to recovery-code consume
         // so the user isn't locked out when they've lost their
-        // authenticator app. Both paths independently throttle
-        // through `BruteForce::record_failed_attempt`.
-        let totp_accepted = Self::verify(&adapter, code).await?;
+        // authenticator app. The `_internal` variants skip the BF
+        // counter; we record exactly once at the outer layer below
+        // so a single bad submission counts as ONE failed attempt
+        // even though both paths were tried.
+        let totp_accepted = Self::verify_internal(&adapter, code).await?;
         let accepted = if totp_accepted {
             true
         } else {
-            Self::consume_recovery_code(&adapter, code).await?
+            Self::consume_recovery_internal(&adapter, code).await?
         };
         if !accepted {
+            record_2fa_failure(&user.email).await;
+            let _ = crate::events::EventFacade::dispatch(TwoFactorChallengeFailed {
+                user_id: pending_id.clone(),
+            })
+            .await;
             return Err(FrameworkError::domain("invalid 2FA code", 401));
         }
+        // Reset the failed-attempt counter so a user who finally gets
+        // the code right after a typo or two isn't carrying a stale
+        // count into their next session.
+        reset_2fa_failures(&user.email).await;
 
         // Read the remember-me preference the user supplied at
         // password-login time BEFORE clearing the pending bag — the

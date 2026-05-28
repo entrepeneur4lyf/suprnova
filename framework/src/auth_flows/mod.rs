@@ -37,7 +37,7 @@ pub use email_verified_middleware::EnsureEmailVerifiedMiddleware;
 pub use email_verify::EmailVerification;
 pub use events::{
     AccountLocked, AccountUnlocked, EmailVerified, PasswordResetCompleted, PasswordResetLinkSent,
-    TwoFactorChallenged, TwoFactorDisabled, TwoFactorEnrolled,
+    TwoFactorChallengeFailed, TwoFactorChallenged, TwoFactorDisabled, TwoFactorEnrolled,
 };
 pub use mail::{EmailVerificationMail, PasswordChangedMail, PasswordResetMail};
 pub use password_reset::PasswordReset;

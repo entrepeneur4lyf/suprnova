@@ -25,10 +25,10 @@ use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 
 use suprnova::auth::events::{Authenticated, Login};
-use suprnova::auth_flows::events::TwoFactorChallenged;
+use suprnova::auth_flows::events::{TwoFactorChallengeFailed, TwoFactorChallenged};
 use suprnova::auth_flows::two_factor::migration::Migration as TwoFactorMigration;
 use suprnova::auth_flows::two_factor::migration_replay::Migration as TwoFactorReplayMigration;
-use suprnova::auth_flows::{TwoFactor, TwoFactorUser};
+use suprnova::auth_flows::{BruteForce, TwoFactor, TwoFactorUser};
 use suprnova::events::testing::{assert_dispatched, assert_not_dispatched};
 use suprnova::http::cookie::Cookie;
 use suprnova::torii_integration::{ToriiConfig, init_torii};
@@ -439,5 +439,129 @@ fn complete_challenge_with_remember_false_does_not_issue_remember_me_cookie() {
         assert_dispatched::<Authenticated>(|e| e.user_id == captured_user_id);
         // Sanity: `Login{remember:true}` was NOT dispatched.
         assert_not_dispatched::<Login>(|e| e.remember);
+    });
+}
+
+#[test]
+fn complete_challenge_with_bad_code_records_single_brute_force_attempt() {
+    Lazy::force(&SETUP);
+    RT.block_on(async {
+        let _serial = TEST_LOCK.lock().await;
+        let _fake = EventFacade::fake();
+
+        let (user_id, email, _otpauth_url) = register_and_enroll("bf-single").await;
+
+        // Baseline: zero failed attempts.
+        let before = BruteForce::get_lockout_status(&email).await.unwrap();
+        assert_eq!(
+            before.failed_attempts, 0,
+            "fresh user must start with zero failed attempts"
+        );
+
+        run_in_request(async {
+            TwoFactor::start_challenge(&user_id, false)
+                .await
+                .expect("start_challenge");
+            // "000000" is overwhelmingly likely to not be the current
+            // TOTP and not a recovery code (recovery codes are 8-char
+            // alnum). Both validation paths reject it.
+            let err = TwoFactor::complete_challenge("000000")
+                .await
+                .expect_err("bad code must fail");
+            assert_eq!(err.status_code(), 401, "wrong code is 401, not 429");
+        })
+        .await;
+
+        // The single bad submission must count as ONE attempt, not two
+        // (one from verify failing + one from consume_recovery_code
+        // failing). The fix factors out silent verify/consume_recovery
+        // cores and records the canonical attempt at the outer layer.
+        let after = BruteForce::get_lockout_status(&email).await.unwrap();
+        assert_eq!(
+            after.failed_attempts, 1,
+            "bad code must record exactly one failed attempt; got {}",
+            after.failed_attempts
+        );
+    });
+}
+
+#[test]
+fn complete_challenge_with_bad_code_dispatches_failed_event_and_no_login() {
+    Lazy::force(&SETUP);
+    RT.block_on(async {
+        let _serial = TEST_LOCK.lock().await;
+        let _fake = EventFacade::fake();
+
+        let (user_id, _email, _otpauth_url) = register_and_enroll("failed-event").await;
+        let captured_user_id = user_id.clone();
+
+        run_in_request(async {
+            TwoFactor::start_challenge(&user_id, false)
+                .await
+                .expect("start_challenge");
+            let err = TwoFactor::complete_challenge("000000")
+                .await
+                .expect_err("bad code must fail");
+            assert_eq!(err.status_code(), 401);
+        })
+        .await;
+
+        assert_dispatched::<TwoFactorChallengeFailed>(|e| e.user_id == captured_user_id);
+        // The standard auth lifecycle events MUST NOT fire on a
+        // failed challenge — listeners would otherwise see a "Login"
+        // for a user who never actually got in.
+        assert_not_dispatched::<Login>(|_| true);
+        assert_not_dispatched::<Authenticated>(|_| true);
+        assert_not_dispatched::<TwoFactorChallenged>(|_| true);
+    });
+}
+
+#[test]
+fn complete_challenge_rejects_locked_account_without_checking_code() {
+    Lazy::force(&SETUP);
+    RT.block_on(async {
+        let _serial = TEST_LOCK.lock().await;
+        let _fake = EventFacade::fake();
+
+        let (user_id, email, otpauth_url) = register_and_enroll("locked").await;
+        let captured_user_id = user_id.clone();
+
+        // Drive the failed-attempt counter past the default threshold
+        // (5) so the account is genuinely locked. Mirrors the lockout
+        // setup pattern in `tests/brute_force.rs`.
+        for _ in 0..6 {
+            BruteForce::record_failed_attempt(&email, None)
+                .await
+                .expect("record_failed_attempt");
+        }
+        assert!(
+            BruteForce::is_locked(&email).await.unwrap(),
+            "lockout precondition: account must be locked before complete_challenge"
+        );
+
+        // Even the CORRECT TOTP code must be rejected with 429 — a
+        // locked account cannot bypass the lockout by submitting the
+        // right code. This is the symmetric counterpart of the
+        // password path's `LoginThrottleMiddleware` gate.
+        run_in_request(async {
+            TwoFactor::start_challenge(&user_id, false)
+                .await
+                .expect("start_challenge");
+            let valid_totp = totp_code_for(&otpauth_url);
+            let err = TwoFactor::complete_challenge(&valid_totp)
+                .await
+                .expect_err("locked account must be rejected");
+            assert_eq!(
+                err.status_code(),
+                429,
+                "locked-account rejection must be 429 Too Many Requests, not 401"
+            );
+        })
+        .await;
+
+        assert_dispatched::<TwoFactorChallengeFailed>(|e| e.user_id == captured_user_id);
+        assert_not_dispatched::<Login>(|_| true);
+        assert_not_dispatched::<Authenticated>(|_| true);
+        assert_not_dispatched::<TwoFactorChallenged>(|_| true);
     });
 }

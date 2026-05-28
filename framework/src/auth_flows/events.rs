@@ -1,6 +1,6 @@
 //! Auth-flow events.
 //!
-//! Eight events covering the security-state transitions emitted by the
+//! Nine events covering the security-state transitions emitted by the
 //! auth_flows facades:
 //!
 //! - [`EmailVerified`] — `EmailVerification::verify` consumed a valid token.
@@ -15,6 +15,9 @@
 //! - [`TwoFactorEnrolled`] — `TwoFactor::confirm` set `confirmed_at`.
 //! - [`TwoFactorChallenged`] — `TwoFactor::complete_challenge` promoted
 //!   a pending session to fully authenticated.
+//! - [`TwoFactorChallengeFailed`] — `TwoFactor::complete_challenge`
+//!   rejected a submitted code (neither a valid TOTP nor an unused
+//!   recovery code).
 //! - [`TwoFactorDisabled`] — `TwoFactor::disable` removed an existing
 //!   2FA row (no-op disables on never-enrolled users do not fire).
 //!
@@ -168,6 +171,30 @@ impl Event for TwoFactorChallenged {
     }
 }
 
+/// Fires when [`crate::auth_flows::TwoFactor::complete_challenge`]
+/// rejects a submitted code — neither a current TOTP code nor an
+/// unused recovery code matched. Distinct from
+/// [`crate::auth::events::Failed`], which is the
+/// password-failed-to-authenticate event: at this point the user
+/// already passed the password check, so the auth-level Failed
+/// listener has nothing to say. Mirrors Fortify's
+/// `TwoFactorAuthenticationFailed`.
+///
+/// The submitted code is intentionally NOT carried — listeners should
+/// rely on the `BruteForce` counters keyed on the user's email if
+/// they need attempt-count semantics rather than re-implementing
+/// rate logic from raw event streams.
+#[derive(Debug, Clone)]
+pub struct TwoFactorChallengeFailed {
+    pub user_id: String,
+}
+
+impl Event for TwoFactorChallengeFailed {
+    fn event_name() -> &'static str {
+        "TwoFactorChallengeFailed"
+    }
+}
+
 /// Fires when 2FA is disabled for a user via
 /// [`crate::auth_flows::TwoFactor::disable`].
 ///
@@ -201,6 +228,7 @@ mod tests {
             AccountUnlocked::event_name(),
             TwoFactorEnrolled::event_name(),
             TwoFactorChallenged::event_name(),
+            TwoFactorChallengeFailed::event_name(),
             TwoFactorDisabled::event_name(),
         ];
         let before = names.len();
