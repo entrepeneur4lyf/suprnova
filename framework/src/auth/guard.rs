@@ -344,6 +344,15 @@ impl Auth {
         // bit of auth state is wiped. Reversing the order (revoke
         // first, then flush) leaves a fully-authed session if the
         // revoke fails, defeating the point of `logout_and_invalidate`.
+        //
+        // The session-id rotation matters here in a way it doesn't
+        // for plain `logout`: `flush()` clears `data` + `user_id` but
+        // leaves `session.id` intact, so without an explicit
+        // `regenerate_session_id` the destroyed session and the next
+        // session would share an ID — defeating "complete session
+        // destruction." Laravel's `session()->invalidate()` is
+        // explicitly `flush()` + `regenerate()`; we match that here.
+        regenerate_session_id();
         session_mut(|session| {
             session.flush();
             session.csrf_token = generate_csrf_token();

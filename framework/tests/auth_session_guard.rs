@@ -520,6 +520,50 @@ fn facade_login_then_logout_fires_events_and_clears_request_user() {
     });
 }
 
+// `Auth::logout_and_invalidate` is the "complete session destruction"
+// variant — distinct from `Auth::logout` (which keeps the session for
+// flash messages etc.). Its contract requires a fresh session id on
+// the way out so the same id cannot be reused after the wipe. Without
+// this, `flush()` only clears `data` + `user_id` but keeps `session.id`,
+// and the post-logout cookie still names the now-empty session row,
+// effectively reviving the id for whatever fresh content lands next.
+// Mirrors Laravel's `session()->invalidate()` = `flush()` + `regenerate()`.
+#[test]
+fn facade_logout_and_invalidate_rotates_session_id() {
+    Lazy::force(&SETUP);
+    RT.block_on(async {
+        let _serial = TEST_LOCK.lock().await;
+        let _fake = EventFacade::fake();
+
+        run_in_request(async {
+            Auth::login(the_user(), false).await.unwrap();
+            let pre_id = suprnova::session::session()
+                .map(|s| s.id)
+                .expect("session scope installed");
+
+            Auth::logout_and_invalidate().await.unwrap();
+
+            let post_id = suprnova::session::session()
+                .map(|s| s.id)
+                .expect("session scope installed");
+
+            assert_ne!(
+                pre_id, post_id,
+                "logout_and_invalidate must rotate the session id (Laravel \
+                 session()->invalidate() semantic); plain Auth::logout does NOT"
+            );
+            assert_eq!(
+                Auth::id(),
+                None,
+                "logout_and_invalidate must clear the request user"
+            );
+        })
+        .await;
+
+        assert_dispatched::<Logout>(|e| e.guard == "web" && e.user_id.as_deref() == Some("7"));
+    });
+}
+
 // Logout clears BOTH 2FA pending slots (user_id + remember preference) — they
 // are auth state too, and a tear-down that drops one but leaves the other
 // strands the auth state machine for the next request. The pending_remember
