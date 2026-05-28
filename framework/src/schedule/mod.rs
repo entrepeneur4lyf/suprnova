@@ -736,14 +736,21 @@ mod tests {
     // -------------------------------------------------------------------------
 
     /// Two `run_due_tasks` calls within the same wall-clock minute must
-    /// dedup the second one — the audit's HIGH 3 case (external cron
-    /// driving `schedule:run` twice in a row, or in-process repeated
-    /// evaluation, must not double-fire a `* * * * *` task).
+    /// dedup the second one — closes the in-process subset of the
+    /// audit's HIGH 3 case (cross-process external-cron same-minute
+    /// dedup is the opt-in path via `without_overlapping` + a Cache
+    /// backend; the always-on in-process CAS does not span processes).
     ///
     /// Test exercises the in-process gate directly: call once, observe
     /// the handler ran; call again immediately (same minute by
     /// construction since the test takes milliseconds); observe the
     /// handler did NOT run a second time and skip_count was bumped.
+    ///
+    /// Wall-clock margin: the two `run_due_tasks` calls execute in
+    /// microseconds, so they land in the same UNIX minute with
+    /// probability ≈1 − 8e-7 (≈ms-budget / 60s-budget). A flake here
+    /// would mean a real-time minute boundary fired between the two
+    /// calls — vanishingly unlikely and easy to retry.
     #[tokio::test]
     async fn same_minute_cas_dedups_repeated_call_within_same_minute() {
         use crate::testing::TestContainer;
