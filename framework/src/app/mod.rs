@@ -241,14 +241,27 @@ pub(crate) async fn evaluate_due_once(
     Vec<(String, Result<(), crate::error::FrameworkError>)>,
     bool,
 ) {
-    let results: Vec<(String, Result<(), crate::error::FrameworkError>)> = schedule
-        .run_due_tasks()
-        .await
-        .into_iter()
-        .map(|(name, result)| (name.to_owned(), result))
-        .collect();
+    let results = schedule.run_due_tasks().await;
     let any_failed = results.iter().any(|(_, r)| r.is_err());
     (results, any_failed)
+}
+
+/// Format a single background-task completion for the scheduler daemon's
+/// stderr log. Failures (handler `Err`, task panic, or `JoinError` from
+/// cancellation) print a single line; success completions are silent so
+/// per-minute heartbeats don't drown out real signal.
+fn report_background_outcome(
+    joined: Result<crate::schedule::ScheduledTaskJoin, tokio::task::JoinError>,
+) {
+    match joined {
+        Ok((_name, Ok(()))) => {}
+        Ok((name, Err(e))) => {
+            eprintln!("suprnova: scheduled task '{name}' failed: {e}")
+        }
+        Err(e) => {
+            eprintln!("suprnova: scheduled task join error: {e}")
+        }
+    }
 }
 
 impl<M> Application<M>
@@ -669,10 +682,27 @@ where
         // skip missed ticks and resume on the next aligned boundary.
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // Long-lived JoinSet for `.run_in_background()` tasks. These tasks
+        // are fire-and-forget within a tick — the loop polls completed ones
+        // before each tick and on shutdown awaits the rest before exit, so a
+        // slow background task never gets dropped mid-flight.
+        let mut bg_tasks: tokio::task::JoinSet<crate::schedule::ScheduledTaskJoin> =
+            tokio::task::JoinSet::new();
+
         loop {
             tokio::select! {
                 _ = tick.tick() => {
-                    for (name, result) in schedule.run_due_tasks().await {
+                    // Surface any background tasks that completed since the
+                    // last tick. `try_join_next` is non-blocking — anything
+                    // still running stays in the set for the next sweep.
+                    while let Some(joined) = bg_tasks.try_join_next() {
+                        report_background_outcome(joined);
+                    }
+                    // Run this tick's due tasks. Inline tasks complete
+                    // before we return; `run_in_background` tasks land in
+                    // `bg_tasks` and are observed on the next tick or at
+                    // shutdown.
+                    for (name, result) in schedule.run_due_tasks_into(&mut bg_tasks).await {
                         if let Err(e) = result {
                             eprintln!("suprnova: scheduled task '{name}' failed: {e}");
                         }
@@ -680,6 +710,15 @@ where
                 }
                 _ = tokio::signal::ctrl_c() => {
                     println!("suprnova: scheduler shutting down.");
+                    if !bg_tasks.is_empty() {
+                        println!(
+                            "suprnova: waiting for {} background task(s) to finish…",
+                            bg_tasks.len()
+                        );
+                    }
+                    while let Some(joined) = bg_tasks.join_next().await {
+                        report_background_outcome(joined);
+                    }
                     break;
                 }
             }
@@ -1086,5 +1125,44 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!(!any_failed);
         assert_eq!(ran.load(Ordering::SeqCst), 1);
+    }
+
+    /// `schedule:run` semantics: a `.run_in_background()` task must still
+    /// surface in the returned `(results, any_failed)` tuple, so the
+    /// handler reports success/failure consistently regardless of how the
+    /// task was executed.
+    #[tokio::test]
+    async fn evaluate_due_once_drains_background_tasks_before_returning() {
+        let f: ScheduleFn = Box::new(|sched: &mut Schedule| {
+            let b = sched
+                .call(|| async { Ok(()) })
+                .every_minute()
+                .name("inline-ok");
+            sched.add(b);
+            let b = sched
+                .call(|| async { Ok(()) })
+                .every_minute()
+                .name("bg-ok")
+                .run_in_background();
+            sched.add(b);
+            let b = sched
+                .call(|| async { Err(FrameworkError::internal("bg-failure")) })
+                .every_minute()
+                .name("bg-err")
+                .run_in_background();
+            sched.add(b);
+        });
+        let schedule = build_schedule(Some(f));
+        let (results, any_failed) = evaluate_due_once(&schedule).await;
+        assert_eq!(results.len(), 3);
+        assert!(any_failed, "a failing background task must flip any_failed");
+
+        let by_name: std::collections::BTreeMap<_, _> = results
+            .iter()
+            .map(|(n, r)| (n.as_str(), r.is_ok()))
+            .collect();
+        assert_eq!(by_name.get("inline-ok"), Some(&true));
+        assert_eq!(by_name.get("bg-ok"), Some(&true));
+        assert_eq!(by_name.get("bg-err"), Some(&false));
     }
 }
