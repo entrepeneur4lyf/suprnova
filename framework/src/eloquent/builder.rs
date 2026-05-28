@@ -2434,15 +2434,17 @@ where
     /// Cursor paginate — opaque-cursor keyset pagination over the
     /// model's primary key.
     ///
-    /// Forward-only (the returned `prev_cursor` is always `None`).
-    /// Reads the current cursor from `?cursor=<opaque>`; passes the
-    /// PK as the keyset boundary. Cursors are encrypted+MACd via
-    /// `CursorPaginator::encode_value` so they can't be forged.
+    /// Bidirectional, matching Laravel's `cursorPaginate()` and the
+    /// [`Pagination::cursor`](crate::pagination::Pagination::cursor)
+    /// facade. Reads the current cursor from `?cursor=<opaque>`, decodes
+    /// its direction, and walks forward (`pk > boundary`, ASC) or
+    /// backward (`pk < boundary`, DESC then reversed to ASC). Emits both
+    /// `next_cursor` and `prev_cursor` as the page's neighbours exist, so
+    /// a client can page in either direction. Cursors are encrypted+MACd
+    /// via `CursorPaginator::encode_value` so they can't be forged.
     ///
-    /// Adds `ORDER BY <pk> ASC` to the builder, then fetches
-    /// `per_page + 1` rows; the overflow row drives `next_cursor`.
     /// Any existing `ORDER BY` on the builder is replaced — cursor
-    /// pagination requires a stable PK order.
+    /// pagination requires a stable total order over the PK.
     ///
     /// ## Errors
     ///
@@ -2457,59 +2459,62 @@ where
         }
 
         let pk = M::primary_key_name();
-        let cursor_wire = current_cursor_from_request();
+        let decoded = match current_cursor_from_request() {
+            Some(c) => Some(crate::pagination::CursorPaginator::<M>::decode_value(&c)?),
+            None => None,
+        };
+        let plan = crate::pagination::cursor::plan_scan(decoded);
 
-        // Replace any existing ORDER BY with a PK ASC sort. Cursor
-        // pagination requires a stable order over the keyset column
-        // for `gt(boundary)` to slice into a deterministic page
-        // window.
+        // Replace any existing ORDER BY with a stable PK sort in the
+        // plan's direction — cursor pagination requires a total order
+        // over the keyset column.
         let mut q = self;
         q.orders.clear();
-        let mut q = q.order_by_asc(pk);
-
-        if let Some(c) = &cursor_wire {
-            let (boundary, _dir) = crate::pagination::CursorPaginator::<M>::decode_value(c)?;
-            // Filter `pk > boundary`. Convert the typed SeaORM Value
-            // back to JSON via `sea_value_to_json_loose`; the builder's
-            // own `filter_op` pipeline rebinds it via
-            // `json_value_to_sea_value` in the renderer. The intermediate
-            // JSON form is fine for cursor PKs — every variant we care
-            // about (Int / BigInt / Uuid / String) round-trips losslessly.
-            let boundary_json = crate::eloquent::model::sea_value_to_json_loose(&boundary);
-            q = q.filter_op(pk, ">", boundary_json);
+        let mut q = if plan.order_asc {
+            q.order_by_asc(pk)
+        } else {
+            q.order_by_desc(pk)
+        };
+        if let Some((op, boundary)) = &plan.filter {
+            // Convert the typed boundary back to JSON; the builder's
+            // `filter_op` pipeline rebinds it via `json_value_to_sea_value`
+            // in the renderer. Every PK variant we care about (Int /
+            // BigInt / Uuid / String) round-trips losslessly.
+            let boundary_json = crate::eloquent::model::sea_value_to_json_loose(boundary);
+            q = q.filter_op(pk, op, boundary_json);
         }
 
-        let raw: Vec<M> = q.limit(per_page + 1).get().await?.into_vec();
-        let has_more = (raw.len() as u64) > per_page;
-        let mut rows = raw;
-        if has_more {
-            rows.truncate(per_page as usize);
+        let mut rows: Vec<M> = q.limit(per_page + 1).get().await?.into_vec();
+        // Normalize a backward (DESC) scan back to ASC so finalize_page
+        // sees the overflow row at the start.
+        if !plan.order_asc {
+            rows.reverse();
         }
+        let (rows, flags) = crate::pagination::cursor::finalize_page(rows, per_page, &plan);
 
-        let next_cursor = if has_more {
-            if let Some(row) = rows.last() {
-                let pk_val: sea_orm::Value = row.primary_key_value().into();
-                Some(crate::pagination::CursorPaginator::<M>::encode_value(
-                    &pk_val,
-                    crate::pagination::CursorDirection::Next,
-                )?)
-            } else {
-                None
-            }
+        let next_cursor = if flags.has_next && !rows.is_empty() {
+            let pk_val: sea_orm::Value = rows.last().unwrap().primary_key_value().into();
+            Some(crate::pagination::CursorPaginator::<M>::encode_value(
+                &pk_val,
+                crate::pagination::CursorDirection::Next,
+            )?)
+        } else {
+            None
+        };
+        let prev_cursor = if flags.has_prev && !rows.is_empty() {
+            let pk_val: sea_orm::Value = rows.first().unwrap().primary_key_value().into();
+            Some(crate::pagination::CursorPaginator::<M>::encode_value(
+                &pk_val,
+                crate::pagination::CursorDirection::Prev,
+            )?)
         } else {
             None
         };
 
-        // Forward-only: prev_cursor is always None. Reverse iteration
-        // is a follow-up if a consumer needs it.
-        let prev_cursor = None;
-
-        Ok(crate::pagination::CursorPaginator::new(
-            rows,
-            per_page,
-            next_cursor,
-            prev_cursor,
-        ))
+        Ok(
+            crate::pagination::CursorPaginator::new(rows, per_page, next_cursor, prev_cursor)
+                .with_cursor_name("cursor"),
+        )
     }
 
     // ---- Chunking + lazy iteration (Phase 10C T8) -----------------------

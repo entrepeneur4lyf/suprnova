@@ -269,6 +269,104 @@ impl<T> CursorPaginator<T> {
     }
 }
 
+/// The keyset scan a decoded cursor resolves to, decoupled from any
+/// query-construction mechanics. Both `Pagination::cursor` (SeaORM
+/// `Select<E>` + typed column ops) and `Builder::cursor_paginate`
+/// (the Eloquent builder's JSON `filter_op` over the primary key)
+/// consume the same plan, so the bidirectional next/prev semantics
+/// live in one place rather than being reimplemented per surface.
+pub(crate) struct ScanPlan {
+    /// `true` → fetch ASC (first page / forward step); `false` → fetch
+    /// DESC (backward step, which the caller reverses back to ASC).
+    pub order_asc: bool,
+    /// `Some((op, boundary))` keyset filter — `op` is `">"` (forward)
+    /// or `"<"` (backward). `None` on the first page.
+    pub filter: Option<(&'static str, sea_orm::Value)>,
+    /// Direction this scan represents; drives the cursor computation in
+    /// [`finalize_page`]. Fully correlated with `order_asc` (kept
+    /// separate for readability at the call sites).
+    pub scan_direction: CursorDirection,
+    /// The caller arrived via a forward (`next`) cursor.
+    pub entered_via_next: bool,
+    /// The caller arrived via a backward (`prev`) cursor.
+    pub entered_via_prev: bool,
+}
+
+/// Whether a finalized page has rows before / after it, i.e. whether a
+/// `prev_cursor` / `next_cursor` should be emitted.
+pub(crate) struct PageFlags {
+    pub has_next: bool,
+    pub has_prev: bool,
+}
+
+/// Resolve a decoded cursor (`None` = first page) into the scan to run.
+/// Pure — no query mechanics, no IO.
+pub(crate) fn plan_scan(decoded: Option<(sea_orm::Value, CursorDirection)>) -> ScanPlan {
+    match decoded {
+        None => ScanPlan {
+            order_asc: true,
+            filter: None,
+            scan_direction: CursorDirection::Next,
+            entered_via_next: false,
+            entered_via_prev: false,
+        },
+        Some((boundary, CursorDirection::Next)) => ScanPlan {
+            order_asc: true,
+            filter: Some((">", boundary)),
+            scan_direction: CursorDirection::Next,
+            entered_via_next: true,
+            entered_via_prev: false,
+        },
+        Some((boundary, CursorDirection::Prev)) => ScanPlan {
+            order_asc: false,
+            filter: Some(("<", boundary)),
+            scan_direction: CursorDirection::Prev,
+            entered_via_next: false,
+            entered_via_prev: true,
+        },
+    }
+}
+
+/// Trim the overflow probe row and compute the page flags.
+///
+/// `rows` MUST be ASC-normalized: the caller fetches `per_page + 1`
+/// rows and, for a backward (DESC) scan, reverses them back to ASC
+/// before calling this. With that contract the overflow row is at the
+/// END for a forward scan and at the START for a backward scan, so it
+/// is dropped from the correct side. Returns the trimmed page plus
+/// whether a next / prev cursor should be emitted.
+pub(crate) fn finalize_page<T>(
+    mut rows: Vec<T>,
+    per_page: u64,
+    plan: &ScanPlan,
+) -> (Vec<T>, PageFlags) {
+    let overflow = rows.len() as u64 > per_page;
+    if overflow {
+        match plan.scan_direction {
+            CursorDirection::Next => rows.truncate(per_page as usize),
+            CursorDirection::Prev => {
+                let drop = rows.len() - per_page as usize;
+                rows.drain(0..drop);
+            }
+        }
+    }
+    let has_next = match plan.scan_direction {
+        // Forward scan: more rows ahead iff we fetched an overflow row.
+        CursorDirection::Next => overflow,
+        // Backward scan: we came FROM further forward, so there is
+        // always a way forward.
+        CursorDirection::Prev => true,
+    };
+    let has_prev = match plan.scan_direction {
+        // Forward scan: rows lie before us iff we stepped here via a
+        // cursor at all (first page has nothing before it).
+        CursorDirection::Next => plan.entered_via_next || plan.entered_via_prev,
+        // Backward scan: more rows behind iff we fetched an overflow row.
+        CursorDirection::Prev => overflow,
+    };
+    (rows, PageFlags { has_next, has_prev })
+}
+
 /// Convert a SeaORM `Value` into the cursor wire shape. Returns the
 /// variant discriminator string plus a JSON value.
 fn value_to_tagged_json(v: &sea_orm::Value) -> Result<(String, serde_json::Value), FrameworkError> {
@@ -544,6 +642,99 @@ mod tests {
         assert_ne!(wire, plain_b64);
         let decoded = CursorPaginator::<i32>::decode_cursor(&wire).unwrap();
         assert_eq!(decoded, "user-42");
+    }
+
+    fn plan_for(dir: Option<CursorDirection>) -> ScanPlan {
+        let decoded = dir.map(|d| (sea_orm::Value::BigInt(Some(10)), d));
+        plan_scan(decoded)
+    }
+
+    #[test]
+    fn plan_scan_first_page_is_ascending_unfiltered() {
+        let p = plan_for(None);
+        assert!(p.order_asc);
+        assert!(p.filter.is_none());
+        assert_eq!(p.scan_direction, CursorDirection::Next);
+        assert!(!p.entered_via_next && !p.entered_via_prev);
+    }
+
+    #[test]
+    fn plan_scan_next_filters_greater_than_ascending() {
+        let p = plan_for(Some(CursorDirection::Next));
+        assert!(p.order_asc);
+        assert_eq!(p.filter.as_ref().map(|(op, _)| *op), Some(">"));
+        assert_eq!(p.scan_direction, CursorDirection::Next);
+        assert!(p.entered_via_next);
+    }
+
+    #[test]
+    fn plan_scan_prev_filters_less_than_descending() {
+        let p = plan_for(Some(CursorDirection::Prev));
+        assert!(!p.order_asc);
+        assert_eq!(p.filter.as_ref().map(|(op, _)| *op), Some("<"));
+        assert_eq!(p.scan_direction, CursorDirection::Prev);
+        assert!(p.entered_via_prev);
+    }
+
+    #[test]
+    fn finalize_first_page_full_has_next_no_prev() {
+        // First page, fetched per_page+1 → overflow → next, no prev.
+        let plan = plan_for(None);
+        let (rows, flags) = finalize_page(vec![1, 2, 3, 4], 3, &plan);
+        assert_eq!(rows, vec![1, 2, 3], "forward overflow trims from the END");
+        assert!(flags.has_next);
+        assert!(!flags.has_prev);
+    }
+
+    #[test]
+    fn finalize_first_page_exact_has_neither() {
+        // Exactly per_page rows on the first page → no overflow → no next.
+        let plan = plan_for(None);
+        let (rows, flags) = finalize_page(vec![1, 2, 3], 3, &plan);
+        assert_eq!(rows, vec![1, 2, 3]);
+        assert!(!flags.has_next);
+        assert!(!flags.has_prev);
+    }
+
+    #[test]
+    fn finalize_forward_step_full_has_both() {
+        // Stepped here via a next cursor, page is full with overflow →
+        // both directions available.
+        let plan = plan_for(Some(CursorDirection::Next));
+        let (rows, flags) = finalize_page(vec![11, 12, 13, 14], 3, &plan);
+        assert_eq!(rows, vec![11, 12, 13]);
+        assert!(flags.has_next);
+        assert!(flags.has_prev, "a forward step always has a way back");
+    }
+
+    #[test]
+    fn finalize_backward_step_overflow_trims_front() {
+        // Backward scan: rows arrive ASC-normalized (caller reversed the
+        // DESC fetch); the overflow row sits at the START and is dropped
+        // there. A back-scan always has a way forward.
+        let plan = plan_for(Some(CursorDirection::Prev));
+        let (rows, flags) = finalize_page(vec![0, 1, 2, 3], 3, &plan);
+        assert_eq!(
+            rows,
+            vec![1, 2, 3],
+            "backward overflow trims from the START"
+        );
+        assert!(flags.has_next);
+        assert!(
+            flags.has_prev,
+            "overflow on a back-scan means more lie before"
+        );
+    }
+
+    #[test]
+    fn finalize_backward_step_no_overflow_reaches_start() {
+        // Walked back to the first page (no overflow) → no further prev,
+        // but still a way forward.
+        let plan = plan_for(Some(CursorDirection::Prev));
+        let (rows, flags) = finalize_page(vec![1, 2, 3], 3, &plan);
+        assert_eq!(rows, vec![1, 2, 3]);
+        assert!(flags.has_next);
+        assert!(!flags.has_prev);
     }
 
     #[test]

@@ -5,7 +5,8 @@
 //!   `last_page`.
 //! - `Paginator<M>` — simple, no COUNT; checks an extra row for
 //!   `has_more`.
-//! - `CursorPaginator<M>` — opaque keyset over the PK; forward-only.
+//! - `CursorPaginator<M>` — opaque keyset over the PK; bidirectional
+//!   (next/prev), matching Laravel's `cursorPaginate()`.
 //!
 //! Page parameter defaults to `"page"`; override via
 //! `paginate_using("custom", per_page)`. Cursor parameter defaults to
@@ -20,7 +21,9 @@
 use chrono::{DateTime, Utc};
 use suprnova::context::Context;
 use suprnova::testing::TestDatabase;
-use suprnova::{CursorPaginator, LengthAwarePaginator, Model, Paginator, attrs, model};
+use suprnova::{
+    CursorPaginator, EntityTrait, LengthAwarePaginator, Model, Paginator, attrs, model,
+};
 
 // ---- Fixture -----------------------------------------------------------
 
@@ -276,6 +279,121 @@ async fn cursor_paginate_last_page_has_no_next_cursor() {
     let page2: CursorPaginator<T7Article> = T7Article::query().cursor_paginate(10).await.unwrap();
     assert_eq!(page2.data.len(), 5);
     assert!(page2.next_cursor.is_none());
+
+    Context::test_clear_query();
+}
+
+/// Raw SeaORM entity over the SAME `t7_articles` table, used as the
+/// facade side of the cross-surface parity test. `T7Article` is the
+/// Eloquent model (`Builder::cursor_paginate`); this plain entity drives
+/// `Pagination::cursor` against the same rows. It declares only the
+/// columns the facade reads (`id`, `title`).
+mod facade {
+    use sea_orm::entity::prelude::*;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+    #[sea_orm(table_name = "t7_articles")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        pub title: String,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+#[tokio::test]
+async fn cursor_paginate_is_bidirectional_and_matches_the_facade() {
+    // The level-up: `Builder::cursor_paginate` is now bidirectional (it
+    // was forward-only, always returning `prev_cursor: None`). Walk
+    // page 1 → page 2 → back to page 1, and at each step assert the
+    // builder agrees with the `Pagination::cursor` facade (over the same
+    // table) on both the row ids and the next/prev cursor presence. Each
+    // surface threads its OWN cursors. The walk fails on the old
+    // forward-only builder, where page 2 has no prev cursor to follow.
+    use suprnova::Pagination;
+
+    let _db = fixture(25).await;
+    Context::test_clear_query();
+
+    let fids =
+        |p: &CursorPaginator<facade::Model>| p.data.iter().map(|r| r.id).collect::<Vec<i64>>();
+    let bids = |p: &CursorPaginator<T7Article>| p.data.iter().map(|r| r.id).collect::<Vec<i64>>();
+
+    // --- page 1 (no cursor) ---
+    let f1 = Pagination::cursor::<facade::Entity, facade::Column>(
+        facade::Entity::find(),
+        None,
+        10,
+        facade::Column::Id,
+    )
+    .await
+    .unwrap();
+    let b1 = T7Article::query().cursor_paginate(10).await.unwrap();
+
+    assert_eq!(fids(&f1), (1..=10).collect::<Vec<i64>>());
+    assert_eq!(
+        fids(&f1),
+        bids(&b1),
+        "page 1 row ids must match across surfaces"
+    );
+    assert_eq!(f1.next_cursor.is_some(), b1.next_cursor.is_some());
+    assert_eq!(f1.prev_cursor.is_some(), b1.prev_cursor.is_some());
+    assert!(b1.prev_cursor.is_none() && b1.next_cursor.is_some());
+
+    // --- page 2 (forward, each surface following its own next cursor) ---
+    let f2 = Pagination::cursor::<facade::Entity, facade::Column>(
+        facade::Entity::find(),
+        f1.next_cursor.as_deref(),
+        10,
+        facade::Column::Id,
+    )
+    .await
+    .unwrap();
+    Context::test_set_query("cursor", b1.next_cursor.as_ref().unwrap());
+    let b2 = T7Article::query().cursor_paginate(10).await.unwrap();
+
+    assert_eq!(fids(&f2), (11..=20).collect::<Vec<i64>>());
+    assert_eq!(
+        fids(&f2),
+        bids(&b2),
+        "page 2 row ids must match across surfaces"
+    );
+    assert!(
+        b2.prev_cursor.is_some(),
+        "builder must emit a prev cursor on page 2 — the bidirectional level-up"
+    );
+    assert_eq!(f2.prev_cursor.is_some(), b2.prev_cursor.is_some());
+    assert_eq!(f2.next_cursor.is_some(), b2.next_cursor.is_some());
+
+    // --- back to page 1 (each surface following its page-2 prev cursor) ---
+    let fb = Pagination::cursor::<facade::Entity, facade::Column>(
+        facade::Entity::find(),
+        f2.prev_cursor.as_deref(),
+        10,
+        facade::Column::Id,
+    )
+    .await
+    .unwrap();
+    Context::test_set_query("cursor", b2.prev_cursor.as_ref().unwrap());
+    let bb = T7Article::query().cursor_paginate(10).await.unwrap();
+
+    assert_eq!(
+        bids(&bb),
+        (1..=10).collect::<Vec<i64>>(),
+        "following page 2's prev cursor returns to page 1"
+    );
+    assert_eq!(
+        fids(&fb),
+        bids(&bb),
+        "back-page row ids must match across surfaces"
+    );
+    assert!(bb.prev_cursor.is_none(), "walked back to the first page");
+    assert!(bb.next_cursor.is_some());
 
     Context::test_clear_query();
 }

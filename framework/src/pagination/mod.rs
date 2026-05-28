@@ -8,6 +8,10 @@ pub mod length_aware;
 pub mod simple;
 
 pub use cursor::{CursorDirection, CursorPaginator};
+// Internal keyset-scan helpers shared with `eloquent::Builder::cursor_paginate`.
+// Imported by function name so the `cursor` parameter in `Pagination::cursor`
+// doesn't shadow the module path.
+use cursor::{finalize_page, plan_scan};
 pub use inertia::IntoInertiaScroll;
 pub use length_aware::LengthAwarePaginator;
 pub use simple::Paginator;
@@ -193,94 +197,49 @@ impl Pagination {
             Some(c) => Some(CursorPaginator::<E::Model>::decode_value(c)?),
             None => None,
         };
+        let plan = plan_scan(decoded);
 
-        let (rows, scan_direction) = match &decoded {
-            None => {
-                let rows = exec
-                    .select_all(query.order_by_asc(order_col).limit(per_page + 1))
-                    .await?;
-                (rows, CursorDirection::Next)
-            }
-            Some((boundary, CursorDirection::Next)) => {
-                let rows = exec
-                    .select_all(
-                        query
-                            .order_by_asc(order_col)
-                            .filter(order_col.gt(boundary.clone()))
-                            .limit(per_page + 1),
-                    )
-                    .await?;
-                (rows, CursorDirection::Next)
-            }
-            Some((boundary, CursorDirection::Prev)) => {
-                let mut rows = exec
-                    .select_all(
-                        query
-                            .order_by_desc(order_col)
-                            .filter(order_col.lt(boundary.clone()))
-                            .limit(per_page + 1),
-                    )
-                    .await?;
-                rows.reverse();
-                (rows, CursorDirection::Prev)
-            }
+        // Apply the plan to the SeaORM query: order in the plan's
+        // direction, then the typed keyset filter.
+        let mut q = if plan.order_asc {
+            query.order_by_asc(order_col)
+        } else {
+            query.order_by_desc(order_col)
         };
-
-        // After the fetch:
-        //   - Next scan: rows are ASC; overflow row (if any) is at END.
-        //   - Prev scan: DESC-fetched then reversed → rows are ASC;
-        //     overflow row (if any) is at START.
-        let mut rows = rows;
-        let overflow = rows.len() as u64 > per_page;
-        if overflow {
-            match scan_direction {
-                CursorDirection::Next => {
-                    rows.truncate(per_page as usize);
-                }
-                CursorDirection::Prev => {
-                    let drop = rows.len() - per_page as usize;
-                    rows.drain(0..drop);
-                }
-            }
+        if let Some((op, boundary)) = &plan.filter {
+            q = if *op == ">" {
+                q.filter(order_col.gt(boundary.clone()))
+            } else {
+                q.filter(order_col.lt(boundary.clone()))
+            };
         }
-
-        let entered_via_next = matches!(decoded, Some((_, CursorDirection::Next)));
-        let entered_via_prev = matches!(decoded, Some((_, CursorDirection::Prev)));
+        let mut rows = exec.select_all(q.limit(per_page + 1)).await?;
+        // Normalize a backward (DESC) scan back to ASC so finalize_page
+        // sees the overflow row at the start.
+        if !plan.order_asc {
+            rows.reverse();
+        }
+        let (rows, flags) = finalize_page(rows, per_page, &plan);
 
         // next_cursor: a forward cursor pinned at this page's last row.
-        let next_cursor = {
-            let has_next = match scan_direction {
-                CursorDirection::Next => overflow,
-                CursorDirection::Prev => true, // back-scan ⇒ we always came FROM further forward
-            };
-            if has_next && !rows.is_empty() {
-                let last = rows.last().unwrap();
-                let v = last.get(order_col);
-                Some(CursorPaginator::<E::Model>::encode_value(
-                    &v,
-                    CursorDirection::Next,
-                )?)
-            } else {
-                None
-            }
+        let next_cursor = if flags.has_next && !rows.is_empty() {
+            let v = rows.last().unwrap().get(order_col);
+            Some(CursorPaginator::<E::Model>::encode_value(
+                &v,
+                CursorDirection::Next,
+            )?)
+        } else {
+            None
         };
-
         // prev_cursor: a backward cursor pinned at this page's first row.
-        let prev_cursor = {
-            let has_prev = match scan_direction {
-                CursorDirection::Next => entered_via_next || entered_via_prev,
-                CursorDirection::Prev => overflow,
-            };
-            if has_prev && !rows.is_empty() {
-                let first = rows.first().unwrap();
-                let v = first.get(order_col);
-                Some(CursorPaginator::<E::Model>::encode_value(
-                    &v,
-                    CursorDirection::Prev,
-                )?)
-            } else {
-                None
-            }
+        let prev_cursor = if flags.has_prev && !rows.is_empty() {
+            let v = rows.first().unwrap().get(order_col);
+            Some(CursorPaginator::<E::Model>::encode_value(
+                &v,
+                CursorDirection::Prev,
+            )?)
+        } else {
+            None
         };
 
         Ok(CursorPaginator::new(
