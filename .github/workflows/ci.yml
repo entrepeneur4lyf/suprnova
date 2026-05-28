@@ -100,6 +100,33 @@ jobs:
       - name: cargo test --features broadcasting-fanout
         run: cargo test -p suprnova --features broadcasting-fanout --no-fail-fast
 
+  # Generated-project gate — scaffold a project and `cargo check` it against
+  # the in-tree framework. Catches the entire class of "scaffold templates
+  # drift from the framework API" (e.g. a removed Eloquent method, a
+  # re-exported-crate version bump) before a user hits it on `suprnova new`.
+  # The scaffold_snapshot compile checks are `#[ignore]`d in the suite
+  # (~40s each, they compile a whole generated project) so they don't slow
+  # local `cargo test`; CI is where they run.
+  scaffold:
+    name: scaffold compiles (generated projects)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-scaffold
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libsqlite3-dev libpq-dev
+
+      - name: scaffold_snapshot compile checks (default + api starters)
+        run: cargo test -p suprnova-cli --test scaffold_snapshot -- --ignored
+
   # Security gate. `.cargo/audit.toml` defines documented ignores for
   # advisories whose dep paths are feature-gated off in the default
   # build (see production gate #370).
