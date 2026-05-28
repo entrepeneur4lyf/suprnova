@@ -1,3 +1,38 @@
+//! HTTP `Router`, route-name registry, and per-method matching.
+//!
+//! ## Route names are process-global
+//!
+//! Suprnova stores named-route bindings in a single
+//! `OnceLock<RwLock<HashMap<String, String>>>` — there is one
+//! `name → path` table per process, not per [`Router`]. Two
+//! consequences worth knowing:
+//!
+//! 1. **Suprnova supports one [`Router`] per process.**
+//!    `Server::from_config` consumes a single `Router`, and the
+//!    Laravel-shaped `route("users.show", &[("id", "42")])` helper
+//!    resolves through the process-global table without a `Router`
+//!    reference — that's the ergonomic call sites depend on
+//!    (`http::response::Redirect::route`, handler-side
+//!    `suprnova::route`, templates). If you need two isolated
+//!    route-name spaces in one process (multi-tenant subapps,
+//!    hot-reload of a competing router), that's a deliberate gap;
+//!    file an issue and we'll add a per-Router registry surface.
+//!
+//! 2. **Names must be globally unique.** [`register_route_name`]
+//!    panics when two routes claim the same name under different
+//!    paths; [`try_register_route_name`] returns
+//!    `Err(FrameworkError)` instead. Re-registering the same
+//!    `(name, path)` pair is idempotent, so inventory-driven
+//!    registration (e.g. `routes!{}` inside a `register()` called
+//!    more than once) doesn't panic.
+//!
+//! Parallel tests should pick unique names per test
+//! (`users.show.encoding`, `users.show.frag`, …) — the inline tests
+//! in this module follow that convention. Tests that want a clean
+//! slate can call [`clear_route_names_for_test`]; the matchit
+//! per-method routes themselves live on the `Router` you build per
+//! test, only the name table is process-global.
+
 use crate::FrameworkError;
 use crate::http::{Request, Response};
 use crate::middleware::{BoxedMiddleware, Middleware, into_boxed};
@@ -10,8 +45,43 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock, RwLock};
 
-/// Global registry mapping route names to path patterns
+/// Process-global registry mapping route names to path patterns.
+///
+/// See the module-level docstring for the one-Router-per-process
+/// rationale and the test-isolation utility
+/// [`clear_route_names_for_test`].
 static ROUTE_REGISTRY: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
+
+/// Drain every entry from the process-global route-name registry.
+///
+/// Public test utility for tests that register named routes against
+/// the process-global table and want a clean slate between cases.
+/// Mirrors the [`crate::events::EventDispatcher::clear`] and
+/// [`crate::eloquent::scope::ScopeRegistry::clear`] precedent for
+/// process-global state that other tests rely on across the
+/// framework.
+///
+/// **Concurrency:** the registry is shared across every thread.
+/// Tests that call this must either run with `#[serial_test::serial]`
+/// or coordinate their own ordering; concurrent parallel tests
+/// calling `clear` would see each other's effects.
+///
+/// **Production:** the function is callable in production too, but
+/// Suprnova boots its named routes once at startup — the only
+/// intended call site is tests. The `_for_test` suffix signals
+/// that intent.
+///
+/// A poisoned write lock is recovered in place (matches
+/// [`register_route_name`]'s policy) so a panic during one thread's
+/// registration doesn't permanently disable the clear hook.
+pub fn clear_route_names_for_test() {
+    if let Some(lock) = ROUTE_REGISTRY.get() {
+        match lock.write() {
+            Ok(mut map) => map.clear(),
+            Err(poisoned) => poisoned.into_inner().clear(),
+        }
+    }
+}
 
 /// Characters that must be percent-encoded when substituting a value
 /// into a route pattern segment. The set covers the gen-delims and
@@ -2071,6 +2141,44 @@ mod tests {
                  fan-out missed this verb",
             );
         }
+    }
+
+    /// `clear_route_names_for_test` drains the process-global
+    /// registry: a name registered, then cleared, no longer resolves.
+    /// The serial-test attribute keeps this from racing other tests
+    /// that touch the same global table.
+    ///
+    /// Uses unique names (`clear.test.*`) so even when the serial
+    /// attribute is dropped or skipped by a future re-org, this
+    /// test's effects stay isolated from other tests' name bindings.
+    #[test]
+    #[serial_test::serial(route_registry)]
+    fn clear_route_names_drains_the_process_global_registry() {
+        // Land a binding so the registry has something to drain.
+        let _ = Router::new()
+            .get("/before-clear", h)
+            .name("clear.test.before");
+        assert!(
+            route("clear.test.before", &[]).is_some(),
+            "pre-clear name must be resolvable",
+        );
+
+        clear_route_names_for_test();
+
+        assert!(
+            route("clear.test.before", &[]).is_none(),
+            "clear_route_names_for_test must drain prior bindings",
+        );
+
+        // Subsequent registrations work normally — the OnceLock holds
+        // the same RwLock<HashMap>, only its contents got cleared.
+        let _ = Router::new()
+            .get("/after-clear", h)
+            .name("clear.test.after");
+        assert_eq!(
+            route("clear.test.after", &[]),
+            Some("/after-clear".to_string()),
+        );
     }
 
     /// `RouteBuilder::any` and `RouteBuilder::methods` chain off a

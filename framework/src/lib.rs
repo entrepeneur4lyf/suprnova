@@ -195,6 +195,7 @@ pub use routing::{
     RouteDefBuilder,
     Router,
     WsRouteDef,
+    clear_route_names_for_test,
     route,
     validate_route_path,
 };
