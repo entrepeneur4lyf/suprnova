@@ -234,15 +234,19 @@ pub mod rules {
         }
     }
 
-    /// Laravel `numeric` — value parses cleanly as an `f64` (covers
+    /// Laravel `numeric` — value parses as a **finite** `f64` (covers
     /// integers, floats, and scientific notation).
+    ///
+    /// Rust's `f64::from_str` accepts `"NaN"`, `"inf"`, `"-inf"`, and
+    /// magnitudes that overflow to infinity; none of those are valid
+    /// user-input numbers, so they are rejected here.
     pub struct Numeric;
     impl Rule for Numeric {
         fn passes(&self, value: &str) -> Result<(), String> {
-            value
-                .parse::<f64>()
-                .map(|_| ())
-                .map_err(|_| "must be numeric".into())
+            match value.parse::<f64>() {
+                Ok(n) if n.is_finite() => Ok(()),
+                _ => Err("must be numeric".into()),
+            }
         }
     }
 
@@ -306,6 +310,21 @@ pub mod rules {
             url::Url::parse(value)
                 .map(|_| ())
                 .map_err(|_| "must be a valid URL".into())
+        }
+    }
+
+    /// Scheme-constrained URL — parses as a well-formed URL **and** has
+    /// an `http` or `https` scheme. This is the rule to reach for on
+    /// callback, webhook, and avatar URLs, where [`Url`]'s liberal
+    /// scheme acceptance (`file:`, `javascript:`, custom URIs all parse)
+    /// is a footgun.
+    pub struct HttpUrl;
+    impl Rule for HttpUrl {
+        fn passes(&self, value: &str) -> Result<(), String> {
+            match url::Url::parse(value) {
+                Ok(u) if matches!(u.scheme(), "http" | "https") => Ok(()),
+                _ => Err("must be a valid http(s) URL".into()),
+            }
         }
     }
 
@@ -712,7 +731,7 @@ pub use async_rules::Unique;
 /// }
 /// ```
 ///
-/// Each row is one of two shapes:
+/// Each row is one of three shapes:
 ///
 /// - `field_ident => Rule1, Rule2, ... ;` — the field is treated as
 ///   required-shaped: the rule is invoked on `&self.field` directly.
@@ -721,10 +740,17 @@ pub use async_rules::Unique;
 ///   over the contained scalar).
 /// - `field_ident ?: Rule1, Rule2, ... ;` — the field is `Option<T>`.
 ///   When `Some`, the rules run on the unwrapped inner value; when
-///   `None`, every rule on the row is skipped. This matches Laravel's
+///   `None`, every rule on the row is **skipped**. This matches Laravel's
 ///   "if present, validate" semantics for optional form fields and is
 ///   the right choice for every `Option<String>` (or `Option<i64>`, …)
-///   field on a form.
+///   field on a form. **Note:** because `None` skips, a
+///   presence-conditional rule like `RequiredIf` on a `?:` row can never
+///   fail an *absent* field — use `?=>` for that.
+/// - `field_ident ?=> Rule1, Rule2, ... ;` — also for an `Option<String>`
+///   field, but the rules run **even when `None`** (absence is treated as
+///   the empty string). This is the row for presence-conditional rules
+///   (`RequiredIf` / `RequiredWith` / `RequiredUnless`) that must be able
+///   to fail an absent optional field. A present `Some` is evaluated too.
 ///
 /// Each rule is either a plain [`Rule`] (no suffix) or a
 /// [`ContextualRule`] followed by `=> with $ctx_ident`. The contextual
@@ -747,6 +773,23 @@ pub use async_rules::Unique;
 /// types, the inner type must implement the rule's expected borrow
 /// itself.
 ///
+/// # Conditionally-required optional fields
+///
+/// `?:` is "if present, validate" — it can't *require* an absent field.
+/// When an `Option<String>` field must be present under a condition on a
+/// sibling field, use the `?=>` row instead:
+///
+/// ```rust,ignore
+/// // card_number is required only when billing_type == "card"
+/// validate! { self =>
+///     card_number ?=> RequiredIf { other: "billing_type", value: "card" } => with ctx;
+/// }
+/// ```
+///
+/// `?=>` evaluates its rules even when the field is `None` (absence is
+/// treated as the empty string), so `RequiredIf` can fail. It uses
+/// `Option::as_deref`, so the field must be `Option<String>`-shaped.
+///
 /// # Async rules
 ///
 /// The macro is sync-only. Call
@@ -766,18 +809,37 @@ macro_rules! validate {
 /// API even though `#[macro_export]` makes it reachable at the crate
 /// root — `#[doc(hidden)]` keeps it out of rustdoc.
 ///
-/// The walker consumes one row per recursive invocation. A row is
-/// either `field => rule1, rule2;` (required-shape) or
-/// `field?: rule1, rule2;` (optional-shape — runs rules only when the
-/// field is `Some`). Recursion terminates when the input is empty (or
-/// only a stray `;` remains, supporting the optional trailing
-/// semicolon style).
+/// The walker consumes one row per recursive invocation. A row is one of
+/// `field => rule1, rule2;` (required-shape), `field?: rule1, rule2;`
+/// (optional-shape — runs rules only when the field is `Some`), or
+/// `field ?=> rule1, rule2;` (conditional-presence — runs rules even when
+/// the field is `None`, treating absence as `""`). Recursion terminates
+/// when the input is empty (or only a stray `;` remains, supporting the
+/// optional trailing semicolon style).
 #[macro_export]
 #[doc(hidden)]
 macro_rules! __validate_rows {
     // Optional-shape row: `field?: Rule1, Rule2 => with ctx, ... ;`
     ($errs:ident, $self:ident, $field:ident ?: $($rule:expr $(=> with $ctx:ident)?),+ ; $($rest:tt)*) => {
         if let ::core::option::Option::Some(ref __val) = $self.$field {
+            $(
+                $crate::__validate_one_optional!($errs, $field, __val, $rule $(=> with $ctx)?);
+            )+
+        }
+        $crate::__validate_rows!($errs, $self, $($rest)*);
+    };
+    // Conditional-presence optional row: `field ?=> Rule => with ctx, ... ;`
+    //
+    // The optional-typed sibling of the required contextual row
+    // (`field => Rule => with ctx`): the rules run *even when the field is
+    // `None`*, treating absence as the empty string. This is what lets a
+    // presence-conditional rule (`RequiredIf` and friends) fail an absent
+    // `Option<String>` field — the case `?:` cannot express because it
+    // skips entirely on `None`. Uses `as_deref`, so the field must be
+    // `Option<String>`-shaped (an `Option<i64>` is a loud compile error).
+    ($errs:ident, $self:ident, $field:ident ?=> $($rule:expr $(=> with $ctx:ident)?),+ ; $($rest:tt)*) => {
+        {
+            let __val: &str = $self.$field.as_deref().unwrap_or("");
             $(
                 $crate::__validate_one_optional!($errs, $field, __val, $rule $(=> with $ctx)?);
             )+

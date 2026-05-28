@@ -219,8 +219,8 @@ pub use timeout::TimeoutMiddleware;
 pub use validation::rule::{
     AsyncRule, ContextualRule, FormContext, Rule, Unique, async_rules, rules,
     rules::{
-        Alpha, AlphaNum, Between, Boolean, Confirmed, Different, Email, In, Integer, Max, Min,
-        NotIn, Numeric, Required, RequiredIf, RequiredUnless, RequiredWith, Same, Url, Uuid,
+        Alpha, AlphaNum, Between, Boolean, Confirmed, Different, Email, HttpUrl, In, Integer, Max,
+        Min, NotIn, Numeric, Required, RequiredIf, RequiredUnless, RequiredWith, Same, Url, Uuid,
     },
 };
 #[cfg(feature = "vector-pinecone")]

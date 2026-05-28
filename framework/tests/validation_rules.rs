@@ -3,8 +3,8 @@
 
 use sea_orm::{ConnectionTrait, Database, DbBackend, Statement, Value};
 use suprnova::rules::{
-    Alpha, AlphaNum, Between, Boolean, Confirmed, Different, Email, In, Integer, Max, Min, NotIn,
-    Numeric, Required, RequiredIf, RequiredUnless, RequiredWith, Same, Url, Uuid,
+    Alpha, AlphaNum, Between, Boolean, Confirmed, Different, Email, HttpUrl, In, Integer, Max, Min,
+    NotIn, Numeric, Required, RequiredIf, RequiredUnless, RequiredWith, Same, Url, Uuid,
 };
 use suprnova::testing::TestContainer;
 use suprnova::{AsyncRule, ContextualRule, DbConnection, FormContext, Rule, Unique};
@@ -229,6 +229,34 @@ fn url_and_uuid_validate_format() {
 
     assert!(Uuid.passes("550e8400-e29b-41d4-a716-446655440000").is_ok());
     assert!(Uuid.passes("not-a-uuid").is_err());
+}
+
+#[test]
+fn numeric_rejects_non_finite() {
+    // Rust's f64 parser accepts these, but they're not valid user-input
+    // numbers.
+    assert!(Numeric.passes("NaN").is_err());
+    assert!(Numeric.passes("inf").is_err());
+    assert!(Numeric.passes("-inf").is_err());
+    assert!(Numeric.passes("infinity").is_err());
+    assert!(
+        Numeric.passes("1e400").is_err(),
+        "a magnitude that overflows to infinity must be rejected"
+    );
+    // Finite values still pass.
+    assert!(Numeric.passes("3.14").is_ok());
+    assert!(Numeric.passes("-42").is_ok());
+}
+
+#[test]
+fn http_url_requires_http_scheme() {
+    assert!(HttpUrl.passes("https://example.com").is_ok());
+    assert!(HttpUrl.passes("http://x.test/p?q=1").is_ok());
+    // Schemes that plain `Url` accepts but `HttpUrl` rejects.
+    assert!(HttpUrl.passes("file:///etc/passwd").is_err());
+    assert!(HttpUrl.passes("javascript:alert(1)").is_err());
+    assert!(HttpUrl.passes("ftp://host/file").is_err());
+    assert!(HttpUrl.passes("not a url").is_err());
 }
 
 // --- expanded contextual rule set ---
@@ -627,6 +655,71 @@ mod validate_macro {
             "mismatching confirmation must produce a `password` error; got: {:?}",
             errs.errors
         );
+    }
+
+    // --- `?=>` conditional-presence row (RequiredIf on an absent Option) ---
+
+    struct CheckoutForm {
+        billing_type: String,
+        card_number: Option<String>,
+    }
+
+    fn billing_ctx(billing_type: &str) -> std::collections::HashMap<String, String> {
+        let mut ctx = std::collections::HashMap::new();
+        ctx.insert("billing_type".to_string(), billing_type.to_string());
+        ctx
+    }
+
+    #[test]
+    fn validate_macro_conditional_required_fires_on_absent_optional() {
+        // card_number is None, but billing_type == "card" requires it.
+        // `?:` would silently skip; `?=>` evaluates and fails.
+        let form = CheckoutForm {
+            billing_type: "card".into(),
+            card_number: None,
+        };
+        let ctx = billing_ctx(&form.billing_type);
+        let result: Result<(), ValidationErrors> = validate! { form =>
+            card_number ?=> RequiredIf { other: "billing_type", value: "card" } => with ctx;
+        };
+        let errs = result.unwrap_err();
+        assert!(
+            errs.errors.contains_key("card_number"),
+            "RequiredIf must fire on an absent Option when the condition holds; got {:?}",
+            errs.errors
+        );
+    }
+
+    #[test]
+    fn validate_macro_conditional_required_passes_when_condition_absent() {
+        // billing_type != "card" → card_number not required even though None.
+        let form = CheckoutForm {
+            billing_type: "invoice".into(),
+            card_number: None,
+        };
+        let ctx = billing_ctx(&form.billing_type);
+        let result: Result<(), ValidationErrors> = validate! { form =>
+            card_number ?=> RequiredIf { other: "billing_type", value: "card" } => with ctx;
+        };
+        assert!(
+            result.is_ok(),
+            "absent optional must pass when the condition does not hold; got {:?}",
+            result.err().map(|e| e.errors)
+        );
+    }
+
+    #[test]
+    fn validate_macro_conditional_required_evaluates_present_value() {
+        // `?=>` also runs on a populated Some value (here it passes).
+        let form = CheckoutForm {
+            billing_type: "card".into(),
+            card_number: Some("4111111111111111".into()),
+        };
+        let ctx = billing_ctx(&form.billing_type);
+        let result: Result<(), ValidationErrors> = validate! { form =>
+            card_number ?=> RequiredIf { other: "billing_type", value: "card" } => with ctx;
+        };
+        assert!(result.is_ok());
     }
 }
 
