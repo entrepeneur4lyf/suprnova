@@ -34,12 +34,32 @@
 //! documented divergence from the trait contract imposed by Redis Streams'
 //! construction-time-only idle window.
 //!
+//! ## Delayed jobs (ZSET-backed)
+//!
+//! Redis Streams has no native scheduling. Envelopes whose `available_at` is in
+//! the future (`Queue::later`, `Queue::push_later`, or a `nack` with non-zero
+//! `requeue_delay`) are NOT published to the stream immediately — they go into
+//! a companion sorted set `<stream>:delayed` keyed by `available_at` (unix
+//! seconds). On every `pop`, the driver runs a Lua script under `EVAL` that
+//! atomically claims all ZSET entries with `score <= now`, `XADD`s them onto
+//! the stream (field `msg`, matching sea-streamer-redis's payload encoding),
+//! and `ZREM`s them. The script iterates `ZREM` by member rather than using
+//! `ZREMRANGEBYSCORE` so a brand-new same-score entry that lands between the
+//! `ZRANGEBYSCORE` and the cleanup isn't accidentally removed.
+//!
+//! The promotion uses Lua because three round-trips (`ZRANGEBYSCORE` → `XADD`
+//! per entry → `ZREM`) from Rust would let two parallel consumers double-claim
+//! the same delayed entry; `EVAL` runs the whole sequence atomically on the
+//! Redis server.
+//!
 //! ## nack semantics
 //!
 //! Redis Streams has no native nack-with-delay. `nack` is implemented as an
 //! atomic two-step:
 //! 1. Re-publish the envelope (with `attempts` incremented and `available_at`
-//!    advanced by `requeue_delay`) via `XADD`.
+//!    advanced by `requeue_delay`). A zero delay re-publishes directly to the
+//!    stream via `XADD`; a non-zero delay goes to the `<stream>:delayed` ZSET
+//!    and is promoted by the next `pop`.
 //! 2. Acknowledge the original message via `XACK` so it leaves the PEL.
 //!
 //! ## AutoCommit::Disabled
@@ -53,6 +73,8 @@ use crate::queue::driver::{QueueDriver, Reservation, ReservationToken};
 use crate::queue::envelope::Envelope;
 use async_trait::async_trait;
 use chrono::Utc;
+use redis::AsyncCommands;
+use redis::aio::ConnectionManager;
 use sea_streamer::ConsumerMode;
 use sea_streamer::{
     Buffer, Consumer, ConsumerOptions, Message, Producer, StreamKey, Streamer, StreamerUri,
@@ -67,6 +89,24 @@ use std::sync::Mutex;
 use std::time::Duration;
 use uuid::Uuid;
 
+/// Lua script that atomically promotes due delayed entries.
+///
+/// `KEYS[1]` is the `<stream>:delayed` sorted set; `KEYS[2]` is the stream
+/// itself. `ARGV[1]` is the cutoff score (current unix seconds). The script
+/// returns the number of entries promoted.
+///
+/// The `XADD` field name is `msg` to match sea-streamer-redis's default
+/// payload field, so promoted entries decode identically to ones the producer
+/// pushed directly.
+const PROMOTE_DUE_SCRIPT: &str = r#"
+local entries = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+for _, entry in ipairs(entries) do
+    redis.call('XADD', KEYS[2], '*', 'msg', entry)
+    redis.call('ZREM', KEYS[1], entry)
+end
+return #entries
+"#;
+
 /// Value stored in the pending map: the original envelope plus the
 /// `SharedMessage` needed to call `RedisConsumer::ack`.
 type PendingEntry = (Envelope, sea_streamer::SharedMessage);
@@ -79,6 +119,17 @@ pub struct RedisQueueDriver {
     producer: RedisProducer,
     consumer: RedisConsumer,
     stream_key: StreamKey,
+    /// `<stream>:delayed` — the sorted set holding envelopes whose
+    /// `available_at` is still in the future. Promoted into the stream by
+    /// every `pop` via `PROMOTE_DUE_SCRIPT`.
+    delayed_key: String,
+    /// Direct Redis connection used for ZADD on `push`/`nack` and EVAL on
+    /// `pop`. Sea-streamer's `RedisProducer` is intentionally bypassed for
+    /// these operations because it speaks only XADD; the
+    /// `ConnectionManager` is cheap to clone (internally a multiplexed
+    /// connection plus an Arc-shared task) and is what the `redis` crate
+    /// recommends for high-throughput async use.
+    conn: ConnectionManager,
     /// Map from `ReservationToken` UUID → `(Envelope, SharedMessage)`.
     /// The `SharedMessage` is required by `RedisConsumer::ack`.
     pending: Mutex<HashMap<Uuid, PendingEntry>>,
@@ -138,19 +189,73 @@ impl RedisQueueDriver {
             .await
             .map_err(|e| FrameworkError::internal(format!("redis consumer error: {e}")))?;
 
+        // Open a second Redis connection (via the `redis` crate, alongside
+        // sea-streamer's pool) for ZSET operations and the promotion Lua
+        // script. Same URL; the driver speaks two protocol layers at the
+        // same endpoint.
+        let client = redis::Client::open(url)
+            .map_err(|e| FrameworkError::internal(format!("redis client open: {e}")))?;
+        let conn = ConnectionManager::new(client)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("redis ConnectionManager: {e}")))?;
+
+        let delayed_key = format!("{}:delayed", stream);
+
         Ok(Self {
             producer,
             consumer,
             stream_key,
+            delayed_key,
+            conn,
             pending: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Run the promotion Lua script to flush all due delayed entries onto the
+    /// stream. Called from `pop` on every entry; cheap on an empty ZSET.
+    async fn promote_due(&self) -> Result<(), FrameworkError> {
+        let now = Utc::now().timestamp();
+        let stream_name = self.stream_key.name();
+        let script = redis::Script::new(PROMOTE_DUE_SCRIPT);
+        let mut conn = self.conn.clone();
+        script
+            .key(&self.delayed_key)
+            .key(stream_name)
+            .arg(now)
+            .invoke_async::<i64>(&mut conn)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("redis promote_due EVAL: {e}")))?;
+        Ok(())
+    }
+
+    /// ZADD an envelope into the delayed ZSET with score = `available_at` seconds.
+    async fn zadd_delayed(&self, env: &Envelope) -> Result<(), FrameworkError> {
+        let json = env
+            .to_json()
+            .map_err(|e| FrameworkError::internal(format!("envelope encode error: {e}")))?;
+        let score = env.available_at.timestamp();
+        let mut conn = self.conn.clone();
+        let _added: i64 = conn
+            .zadd(&self.delayed_key, json, score)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("redis ZADD delayed: {e}")))?;
+        Ok(())
     }
 }
 
 #[async_trait]
 impl QueueDriver for RedisQueueDriver {
-    /// Serialize the envelope to JSON and publish it to the Redis stream.
+    /// Serialize the envelope to JSON and publish it.
+    ///
+    /// Envelopes whose `available_at` is in the future go to the
+    /// `<stream>:delayed` ZSET and only enter the stream when a later `pop`
+    /// runs the promotion script. Immediate envelopes go straight to the
+    /// stream via the sea-streamer producer.
     async fn push(&self, env: Envelope) -> Result<(), FrameworkError> {
+        if env.available_at > Utc::now() {
+            return self.zadd_delayed(&env).await;
+        }
+
         let json = env
             .to_json()
             .map_err(|e| FrameworkError::internal(format!("envelope encode error: {e}")))?;
@@ -179,6 +284,11 @@ impl QueueDriver for RedisQueueDriver {
         &self,
         visibility_timeout: Duration,
     ) -> Result<Option<Reservation>, FrameworkError> {
+        // Promote any due delayed entries onto the stream before we poll. The
+        // script is atomic; concurrent consumers won't double-promote the
+        // same envelope.
+        self.promote_due().await?;
+
         // Poll in short probe windows so we return promptly when the queue is
         // empty AND honour the caller's deadline when a message is slow to arrive
         // (e.g. right after a push on a fresh stream/consumer-group).
@@ -265,12 +375,14 @@ impl QueueDriver for RedisQueueDriver {
     /// 1. Retrieve and remove the `(Envelope, SharedMessage)` from the pending map.
     /// 2. Bump `envelope.attempts += 1`.
     /// 3. Set `envelope.available_at = now + requeue_delay`.
-    /// 4. Re-publish the modified envelope via `XADD`.
+    /// 4. Re-publish the modified envelope. A zero `requeue_delay` re-publishes
+    ///    to the stream via `XADD`; a non-zero delay lands the envelope in
+    ///    `<stream>:delayed` and the next `pop` promotes it once due.
     /// 5. Acknowledge the original message via `XACK` (removes it from the PEL).
     ///
-    /// At-least-once: the re-publish (XADD) and ack (XACK) are non-atomic.
-    /// A crash between XADD success and XACK success causes one extra
-    /// delivery with the pre-nack attempts counter.
+    /// At-least-once: the re-publish and ack are non-atomic. A crash between
+    /// re-publish success and ack success causes one extra delivery with the
+    /// pre-nack attempts counter.
     async fn nack(
         &self,
         token: &ReservationToken,
@@ -295,19 +407,24 @@ impl QueueDriver for RedisQueueDriver {
             + chrono::Duration::from_std(requeue_delay).unwrap_or(chrono::Duration::zero());
         envelope.available_at = available_at;
 
-        // Re-publish with the bumped envelope.
-        let json = envelope
-            .to_json()
-            .map_err(|e| FrameworkError::internal(format!("envelope encode error (nack): {e}")))?;
-
-        let send_fut = self
-            .producer
-            .send_to(&self.stream_key, json.as_str())
-            .map_err(|e| FrameworkError::internal(format!("redis nack re-publish error: {e}")))?;
-
-        send_fut.await.map_err(|e| {
-            FrameworkError::internal(format!("redis nack re-publish receipt error: {e}"))
-        })?;
+        if requeue_delay.is_zero() {
+            // Immediate retry — straight to the stream.
+            let json = envelope.to_json().map_err(|e| {
+                FrameworkError::internal(format!("envelope encode error (nack): {e}"))
+            })?;
+            let send_fut = self
+                .producer
+                .send_to(&self.stream_key, json.as_str())
+                .map_err(|e| {
+                    FrameworkError::internal(format!("redis nack re-publish error: {e}"))
+                })?;
+            send_fut.await.map_err(|e| {
+                FrameworkError::internal(format!("redis nack re-publish receipt error: {e}"))
+            })?;
+        } else {
+            // Deferred retry — park on the delayed ZSET; pop will promote.
+            self.zadd_delayed(&envelope).await?;
+        }
 
         // Ack the original message so it leaves the PEL.
         self.consumer
