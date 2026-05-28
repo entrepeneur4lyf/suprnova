@@ -718,7 +718,10 @@ pub use async_rules::Unique;
 /// use suprnova::{validate, Required, Email, Min, Max, RequiredIf, ValidationErrors};
 ///
 /// fn after_validation(&self) -> Result<(), ValidationErrors> {
-///     let ctx = self.to_form_context();
+///     // Contextual rules read sibling values from a `FormContext` you
+///     // build — a map of field name to its string value.
+///     let mut ctx = std::collections::HashMap::new();
+///     ctx.insert("billing_type".to_string(), self.billing_type.clone());
 ///     validate! { self =>
 ///         email       => Required, Email;
 ///         password    => Min(8), Max(72);
