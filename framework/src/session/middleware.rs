@@ -540,3 +540,51 @@ pub fn clear_auth_user() {
         session.dirty = true;
     });
 }
+
+/// Reserved key under `SessionData::data` for the "password verified
+/// but 2FA challenge not yet completed" user-id.
+///
+/// Kept in the generic data bag rather than as a typed field on
+/// `SessionData` so adding 2FA-challenge support doesn't require
+/// every session driver to learn about a new column — the bag is
+/// already serialized end-to-end.
+const TWO_FACTOR_PENDING_KEY: &str = "_two_factor_pending_user_id";
+
+/// Read the user-id of a user who has authenticated their password
+/// but has not yet completed the 2FA TOTP challenge. Returns `None`
+/// outside the request scope or when no challenge is pending.
+///
+/// Backs [`crate::auth_flows::TwoFactor::pending_user_id`].
+pub fn two_factor_pending_user_id() -> Option<String> {
+    session().and_then(|s| {
+        s.data
+            .get(TWO_FACTOR_PENDING_KEY)
+            .and_then(|v| v.as_str().map(String::from))
+    })
+}
+
+/// Stash a "2FA challenge pending" user-id in the session. The caller
+/// (typically [`crate::auth_flows::TwoFactor::start_challenge`]) is
+/// responsible for clearing the fully-authenticated slot first —
+/// pending and authed are mutually exclusive states.
+pub fn set_two_factor_pending(user_id: impl Into<String>) {
+    let user_id = user_id.into();
+    session_mut(|session| {
+        session.data.insert(
+            TWO_FACTOR_PENDING_KEY.to_string(),
+            serde_json::Value::String(user_id),
+        );
+        session.dirty = true;
+    });
+}
+
+/// Clear the "2FA challenge pending" user-id. Called by a successful
+/// challenge completion (which promotes pending → authed), an
+/// explicit "cancel challenge" UI action, or a fresh logout.
+pub fn clear_two_factor_pending() {
+    session_mut(|session| {
+        if session.data.remove(TWO_FACTOR_PENDING_KEY).is_some() {
+            session.dirty = true;
+        }
+    });
+}

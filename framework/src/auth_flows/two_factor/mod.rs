@@ -28,7 +28,7 @@ pub mod migration;
 pub mod migration_replay;
 pub mod recovery;
 
-use crate::auth_flows::events::{TwoFactorDisabled, TwoFactorEnrolled};
+use crate::auth_flows::events::{TwoFactorChallenged, TwoFactorDisabled, TwoFactorEnrolled};
 use crate::crypto::Crypt;
 use crate::database::DB;
 use crate::error::FrameworkError;
@@ -373,14 +373,177 @@ impl TwoFactor {
     }
 
     /// Returns `true` when an active (confirmed) 2FA enrollment
-    /// exists for this user.
+    /// exists for this user. Sugar over [`Self::is_enabled_by_id`]
+    /// for callers that already hold a [`TwoFactorUser`].
     pub async fn is_enabled<U: TwoFactorUser>(user: &U) -> Result<bool, FrameworkError> {
+        Self::is_enabled_by_id(user.user_id()).await
+    }
+
+    /// Returns `true` when an active (confirmed) 2FA enrollment
+    /// exists for `user_id`.
+    ///
+    /// String-id variant of [`Self::is_enabled`]. The underlying query
+    /// never touches the user's email, so callers that have a bare
+    /// user-id string (e.g. inside a login handler after `Auth::attempt`
+    /// returns) don't need to construct a [`TwoFactorUser`] just to
+    /// answer "should this login go through a challenge?"
+    pub async fn is_enabled_by_id(user_id: &str) -> Result<bool, FrameworkError> {
         let db = DB::connection()?;
-        let row = entity::Entity::find_by_id(user.user_id().to_string())
+        let row = entity::Entity::find_by_id(user_id.to_string())
             .one(db.inner())
             .await
             .map_err(|e| FrameworkError::internal(format!("two_factor find: {e}")))?;
         Ok(matches!(row, Some(r) if r.confirmed_at.is_some()))
+    }
+
+    /// Begin a 2FA challenge for `user_id`: clear the
+    /// fully-authenticated session slot (if any) and stash `user_id`
+    /// as the pending user. The caller — typically a password-login
+    /// handler that just resolved a user for whom
+    /// [`Self::is_enabled_by_id`] returned `true` — should then
+    /// redirect to the challenge page. The session remains in
+    /// pending state until [`Self::complete_challenge`] succeeds
+    /// (promoting pending → authed) or the user explicitly cancels
+    /// via [`Self::cancel_challenge`].
+    ///
+    /// `Auth::id()` returns `None` while a challenge is pending, so
+    /// any route gated by [`crate::AuthMiddleware`] keeps the user
+    /// out. Compose
+    /// [`crate::auth_flows::TwoFactorChallengeMiddleware`] in front
+    /// of `AuthMiddleware` to redirect pending users to the
+    /// challenge page rather than letting them fall through to the
+    /// login page.
+    pub fn start_challenge(user_id: impl Into<String>) {
+        let user_id = user_id.into();
+        // Pending and authed are mutually exclusive — clear any prior
+        // authed state. This also covers the case where Auth::attempt
+        // marked the user authed before the caller noticed 2FA was on.
+        crate::session::middleware::clear_auth_user();
+        crate::session::middleware::set_two_factor_pending(user_id);
+        // Mirror the change into request_state so Auth::id() agrees
+        // for the rest of THIS request, not only after the next
+        // round-trip. `clear_current_user` is the sync primitive —
+        // `Auth::clear_authentication` is the broader logout helper
+        // (revokes remember-me, rotates CSRF) which is wrong for a
+        // mid-login challenge.
+        crate::auth::request_state::clear_current_user();
+    }
+
+    /// Read the user-id of a session that has a 2FA challenge
+    /// pending. Returns `None` outside a request scope or when no
+    /// challenge is pending. Equivalent to
+    /// [`crate::session::middleware::two_factor_pending_user_id`];
+    /// exposed on the facade so consumers find it via
+    /// `TwoFactor::*` autocomplete.
+    pub fn pending_user_id() -> Option<String> {
+        crate::session::middleware::two_factor_pending_user_id()
+    }
+
+    /// Cancel a pending 2FA challenge — clears the pending user-id
+    /// from the session without authenticating anyone. Typical use
+    /// is a "back to login" button on the challenge page.
+    pub fn cancel_challenge() {
+        crate::session::middleware::clear_two_factor_pending();
+    }
+
+    /// Complete the 2FA challenge by verifying `code` against the
+    /// session's pending user. On success, promotes the pending user
+    /// to fully authenticated (writing `auth_user_id` into the
+    /// session, clearing the pending slot, and updating
+    /// request_state) and dispatches
+    /// [`crate::auth_flows::events::TwoFactorChallenged`]. Returns
+    /// the full [`crate::torii_integration::User`] so the caller can
+    /// branch the post-login redirect on user attributes.
+    ///
+    /// Accepts either a current TOTP code or an unused recovery code —
+    /// the recovery-code path matches Fortify's challenge controller,
+    /// which lets users fall back to a recovery code if they've lost
+    /// their authenticator. Recovery codes are consumed single-use on
+    /// acceptance.
+    ///
+    /// Failed code attempts feed the per-account brute-force counter
+    /// — the same way [`Self::verify`] does for direct verification —
+    /// so an attacker who racked up bad challenge codes will trip
+    /// `AccountLocked` after the configured threshold.
+    ///
+    /// # Errors
+    ///
+    /// - [`FrameworkError::domain`] with status `400` if no challenge
+    ///   is pending — the caller must invoke [`Self::start_challenge`]
+    ///   (typically from a password-login handler) before
+    ///   `complete_challenge` is meaningful.
+    /// - [`FrameworkError::domain`] with status `401` if the pending
+    ///   user-id no longer resolves to a torii user (deleted mid-
+    ///   challenge) or the supplied code validates as neither a TOTP
+    ///   code nor a recovery code.
+    pub async fn complete_challenge(
+        code: &str,
+    ) -> Result<crate::torii_integration::User, FrameworkError> {
+        let Some(pending_id) = crate::session::middleware::two_factor_pending_user_id() else {
+            return Err(FrameworkError::domain(
+                "no 2FA challenge pending; submit credentials first",
+                400,
+            ));
+        };
+
+        let Some(user) = crate::torii_integration::find_user_by_id(&pending_id).await? else {
+            return Err(FrameworkError::domain(
+                "pending 2FA user no longer exists",
+                401,
+            ));
+        };
+
+        // Adapter so we can call the existing `verify` /
+        // `consume_recovery_code` — they thread the email through to
+        // `BruteForce::record_failed_attempt` for the throttling
+        // linkage, but the credential check itself is user-id-keyed.
+        struct ChallengeAdapter<'a> {
+            user_id: &'a str,
+            email: &'a str,
+        }
+        impl TwoFactorUser for ChallengeAdapter<'_> {
+            fn user_id(&self) -> &str {
+                self.user_id
+            }
+            fn email(&self) -> &str {
+                self.email
+            }
+        }
+
+        let adapter = ChallengeAdapter {
+            user_id: &pending_id,
+            email: &user.email,
+        };
+
+        // TOTP first (fast path); fall back to recovery-code consume
+        // so the user isn't locked out when they've lost their
+        // authenticator app. Both paths independently throttle
+        // through `BruteForce::record_failed_attempt`.
+        let totp_accepted = Self::verify(&adapter, code).await?;
+        let accepted = if totp_accepted {
+            true
+        } else {
+            Self::consume_recovery_code(&adapter, code).await?
+        };
+        if !accepted {
+            return Err(FrameworkError::domain("invalid 2FA code", 401));
+        }
+
+        // Promote: pending → authed. Order matters — set authed
+        // first so a concurrent reader observing the row mid-transition
+        // sees one authentication state, never zero.
+        crate::session::middleware::set_auth_user(&pending_id);
+        crate::session::middleware::clear_two_factor_pending();
+
+        // Discard dispatch errors — the promotion has already
+        // committed; a listener panic must not surface here. The
+        // dispatcher itself logs listener errors via tracing.
+        let _ = crate::events::EventFacade::dispatch(TwoFactorChallenged {
+            user_id: pending_id,
+        })
+        .await;
+
+        Ok(user)
     }
 
     /// Rotate the recovery codes for an active 2FA enrollment.

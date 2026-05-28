@@ -30,17 +30,19 @@ pub mod mail;
 pub mod password_reset;
 pub mod remember_me;
 pub mod two_factor;
+pub mod two_factor_challenge_middleware;
 
 pub use brute_force::{BruteForce, LoginThrottleMiddleware};
 pub use email_verified_middleware::EnsureEmailVerifiedMiddleware;
 pub use email_verify::EmailVerification;
 pub use events::{
     AccountLocked, AccountUnlocked, EmailVerified, PasswordResetCompleted, PasswordResetLinkSent,
-    TwoFactorDisabled, TwoFactorEnrolled,
+    TwoFactorChallenged, TwoFactorDisabled, TwoFactorEnrolled,
 };
 pub use mail::{EmailVerificationMail, PasswordChangedMail, PasswordResetMail};
 pub use password_reset::PasswordReset;
 pub use two_factor::{EnrollmentResponse, TwoFactor, TwoFactorUser};
+pub use two_factor_challenge_middleware::TwoFactorChallengeMiddleware;
 
 /// Resolve the `MAIL_FROM` env var. Errors when unset — the auth-flow
 /// facades dispatch mail through this address and silently defaulting

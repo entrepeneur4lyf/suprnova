@@ -653,6 +653,89 @@ Idempotent: a disable on a user who never enrolled is not an error. The
 listeners see one entry per actual disable rather than one per click on a
 no-op button.
 
+### Challenge flow (gating login on the second factor)
+
+The enroll/confirm/verify primitives above are the building blocks; the
+**challenge flow** is what stitches them into the login lifecycle so a
+user with 2FA enabled can't reach protected pages on password alone:
+
+1. Password login resolves a user.
+2. If `TwoFactor::is_enabled_by_id(&user_id)` returns `true`, the login
+   handler calls `TwoFactor::start_challenge(user_id)` — that stashes
+   the user-id as **pending** in the session and clears the
+   fully-authenticated slot. `Auth::id()` returns `None` from this
+   point until the challenge completes.
+3. The handler redirects to a `/two-factor-challenge` route that shows
+   the code form.
+4. The challenge POST handler calls `TwoFactor::complete_challenge(code)`
+   — that verifies the code (TOTP **or** an unused recovery code,
+   matching Fortify's challenge controller), promotes pending →
+   authed, and dispatches `TwoFactorChallenged`.
+
+```rust
+use std::sync::Arc;
+use suprnova::auth_flows::TwoFactor;
+use suprnova::{Auth, Credentials, redirect};
+
+pub async fn login(form: LoginRequest) -> Response {
+    match Auth::attempt(&Credentials::password(&form.email, &form.password), form.remember).await? {
+        Some(user) => {
+            let user_id = user.get_auth_identifier();
+            if TwoFactor::is_enabled_by_id(&user_id).await? {
+                // Demote to "pending": auth slot cleared, pending set.
+                TwoFactor::start_challenge(user_id);
+                redirect!("/two-factor-challenge").into()
+            } else {
+                redirect!("/dashboard").into()
+            }
+        }
+        None => Err(invalid_credentials().into()),
+    }
+}
+
+pub async fn complete(form: TwoFactorChallengeRequest) -> Response {
+    let _user = TwoFactor::complete_challenge(&form.code).await?;
+    redirect!("/dashboard").into()
+}
+```
+
+Gate every protected route group with `TwoFactorChallengeMiddleware`
+**before** `AuthMiddleware` so a pending session is bounced to the
+challenge page rather than the login page:
+
+```rust
+use suprnova::{AuthMiddleware, TwoFactorChallengeMiddleware, group, get};
+
+group!("/dashboard")
+    .middleware(TwoFactorChallengeMiddleware::redirect_to("/two-factor-challenge"))
+    .middleware(AuthMiddleware::redirect_to("/login"))
+    .routes([
+        get!("/", dashboard::index),
+    ]);
+```
+
+The challenge page itself (the GET that renders the form, the POST
+that calls `complete_challenge`) must NOT install
+`TwoFactorChallengeMiddleware` — it is the destination. The POST
+handler typically also checks `TwoFactor::pending_user_id().is_some()`
+up front so a stale link doesn't reach the verify logic with an empty
+session.
+
+**Cancel:** a "back to login" link calls
+`TwoFactor::cancel_challenge()` — clears pending without
+authenticating anyone.
+
+**Recovery code fallback:** `complete_challenge(code)` tries the
+TOTP path first and falls back to consuming a recovery code, so a
+user who lost their authenticator can still get in. Each recovery
+code is single-use.
+
+**Brute-force linkage:** failed challenge codes feed the per-account
+brute-force counter through `BruteForce::record_failed_attempt`, the
+same way bare `TwoFactor::verify` does — so an attacker grinding the
+challenge form will trip `AccountLocked` after the configured
+threshold.
+
 ### Controllers
 
 The full enroll / confirm / disable trio lives in
@@ -689,7 +772,7 @@ knobs.
 
 ## Events
 
-Seven events fire across the flows, one per security-state transition:
+Eight events fire across the flows, one per security-state transition:
 
 | Event | Fired by | Carries |
 |---|---|---|
@@ -699,6 +782,7 @@ Seven events fire across the flows, one per security-state transition:
 | `AccountLocked` | `BruteForce::record_failed_attempt` on the unlocked → locked transition | `email: String`, `failed_attempts: u32` |
 | `AccountUnlocked` | `BruteForce::unlock_account` when an actual unlock occurred | `email: String` |
 | `TwoFactorEnrolled` | `TwoFactor::confirm` on success | `user_id: String` |
+| `TwoFactorChallenged` | `TwoFactor::complete_challenge` promoted pending → authed | `user_id: String` |
 | `TwoFactorDisabled` | `TwoFactor::disable` when a row was actually removed | `user_id: String` |
 
 Every event is `Debug + Clone + 'static`, carries no sensitive data (no

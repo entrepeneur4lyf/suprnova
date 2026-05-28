@@ -70,6 +70,87 @@ fn totp_code_for(otpauth_url: &str) -> String {
 }
 
 #[tokio::test]
+async fn start_challenge_sets_pending_and_clears_auth_user() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+
+    let slot = suprnova::session::new_session_slot_for_test();
+    suprnova::session::session_scope_for_test(slot, async {
+        suprnova::session::set_auth_user("pre-existing-id");
+        assert_eq!(
+            suprnova::session::auth_user_id(),
+            Some("pre-existing-id".to_string()),
+            "auth slot must be set before start_challenge for the test to be meaningful"
+        );
+
+        TwoFactor::start_challenge("test-user-1");
+
+        // Pending is now the target id.
+        assert_eq!(
+            TwoFactor::pending_user_id(),
+            Some("test-user-1".to_string()),
+        );
+        // Auth slot was cleared — pending and authed are mutually
+        // exclusive.
+        assert_eq!(suprnova::session::auth_user_id(), None);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn cancel_challenge_clears_pending() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+
+    let slot = suprnova::session::new_session_slot_for_test();
+    suprnova::session::session_scope_for_test(slot, async {
+        TwoFactor::start_challenge("test-user-cancel");
+        assert!(TwoFactor::pending_user_id().is_some());
+
+        TwoFactor::cancel_challenge();
+
+        assert_eq!(
+            TwoFactor::pending_user_id(),
+            None,
+            "cancel_challenge must clear the pending slot"
+        );
+        // cancel does NOT install the user as authed — that's the
+        // whole point of cancelling.
+        assert_eq!(suprnova::session::auth_user_id(), None);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn complete_challenge_without_pending_returns_400() {
+    ensure_crypt();
+    let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+
+    let slot = suprnova::session::new_session_slot_for_test();
+    suprnova::session::session_scope_for_test(slot, async {
+        // No pending — complete_challenge must fail closed with 400.
+        let err = TwoFactor::complete_challenge("000000").await.unwrap_err();
+        assert_eq!(
+            err.status_code(),
+            400,
+            "complete_challenge without pending must be 400 Bad Request"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn pending_user_id_outside_session_returns_none() {
+    // Outside a `session_scope_for_test` the session task-local is
+    // not installed; pending must read as None (and start/cancel
+    // must no-op silently — they cannot crash).
+    assert_eq!(TwoFactor::pending_user_id(), None);
+    TwoFactor::start_challenge("orphan-id"); // no-op outside scope
+    assert_eq!(TwoFactor::pending_user_id(), None);
+    TwoFactor::cancel_challenge(); // also no-op
+}
+
+#[tokio::test]
 async fn enrollment_round_trip() {
     ensure_crypt();
     let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();

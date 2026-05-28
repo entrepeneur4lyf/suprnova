@@ -1,6 +1,6 @@
 //! Auth-flow events.
 //!
-//! Seven events covering the security-state transitions emitted by the
+//! Eight events covering the security-state transitions emitted by the
 //! auth_flows facades:
 //!
 //! - [`EmailVerified`] — `EmailVerification::verify` consumed a valid token.
@@ -13,6 +13,8 @@
 //! - [`AccountUnlocked`] — `BruteForce::unlock_account` cleared a real
 //!   lock (no-op unlocks on already-unlocked accounts do not fire).
 //! - [`TwoFactorEnrolled`] — `TwoFactor::confirm` set `confirmed_at`.
+//! - [`TwoFactorChallenged`] — `TwoFactor::complete_challenge` promoted
+//!   a pending session to fully authenticated.
 //! - [`TwoFactorDisabled`] — `TwoFactor::disable` removed an existing
 //!   2FA row (no-op disables on never-enrolled users do not fire).
 //!
@@ -145,6 +147,27 @@ impl Event for TwoFactorEnrolled {
     }
 }
 
+/// Fires when a user successfully completes the 2FA challenge step
+/// after a password login — `TwoFactor::complete_challenge` promoted
+/// the session from "password verified" to fully authenticated.
+///
+/// `user_id` is the stringified torii `UserId`. Failed challenge
+/// attempts do **not** fire this event — they go through the standard
+/// [`crate::auth_flows::BruteForce`] throttling path that
+/// [`crate::auth_flows::TwoFactor::verify`] already drives, so audit
+/// listeners distinguish successful 2FA challenge passes (here) from
+/// failed attempts (via `AccountLocked` / brute-force counters).
+#[derive(Debug, Clone)]
+pub struct TwoFactorChallenged {
+    pub user_id: String,
+}
+
+impl Event for TwoFactorChallenged {
+    fn event_name() -> &'static str {
+        "TwoFactorChallenged"
+    }
+}
+
 /// Fires when 2FA is disabled for a user via
 /// [`crate::auth_flows::TwoFactor::disable`].
 ///
@@ -177,6 +200,7 @@ mod tests {
             AccountLocked::event_name(),
             AccountUnlocked::event_name(),
             TwoFactorEnrolled::event_name(),
+            TwoFactorChallenged::event_name(),
             TwoFactorDisabled::event_name(),
         ];
         let before = names.len();
