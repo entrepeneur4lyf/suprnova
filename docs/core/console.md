@@ -216,7 +216,7 @@ There are two distinct command-invocation paths in a Suprnova project, and the a
 
 | Command surface                           | Invocation                              | Why                                      |
 |-------------------------------------------|-----------------------------------------|------------------------------------------|
-| `suprnova new`, `suprnova make:*`, `suprnova serve` | Global CLI binary (`cargo install suprnova-cli`) | File-only generators; don't need user code. |
+| `suprnova new`, `suprnova make:*`, `suprnova serve` | Global CLI binary (installed via `cargo install --git`) | File-only generators; don't need user code. |
 | `suprnova migrate`, `suprnova migrate:status`, etc. | Global CLI shells into `cargo run --bin app -- migrate` | Schema-level; the app binary's Clap parser handles it. |
 | `console db:seed`, `console <your-command>` | Per-project `console` binary           | Needs user types (seeders, commands); compiled into the user's crate. |
 

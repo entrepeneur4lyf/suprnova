@@ -8,10 +8,10 @@ The suprnova CLI provides a comprehensive set of commands for creating projects,
 
 ## Installation
 
-The suprnova CLI is installed when you installsuprnovae Suprnova framework:
+Install the Suprnova CLI:
 
 ```bash
-cargo install suprnova-cli
+cargo install --git https://github.com/entrepeneur4lyf/suprnova.git suprnova-cli
 ```
 
 ## Available Commands
@@ -20,7 +20,7 @@ cargo install suprnova-cli
 
 | Command | Description |
 |---------|-------------|
-| `suprnova new [name]` | Create asuprnovaw Suprnova project |
+| `suprnova new [name]` | Create a new Suprnova project |
 | `suprnova serve` | Start development servers (backend + frontend) |
 
 ### Generator Commands

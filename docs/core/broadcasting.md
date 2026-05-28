@@ -356,7 +356,7 @@ By default, the `InMemoryBroadcastHub` fans out only to WebSocket subscribers co
 **`Cargo.toml`:**
 
 ```toml
-suprnova = { version = "...", features = ["broadcasting-fanout"] }
+suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", features = ["broadcasting-fanout"] }
 ```
 
 **`src/bootstrap.rs`:**

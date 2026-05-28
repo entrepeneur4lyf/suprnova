@@ -2,7 +2,6 @@
 
 **A Laravel-inspired web framework for Rust**
 
-[![Crates.io](https://img.shields.io/crates/v/suprnova.svg)](https://crates.io/crates/suprnova)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Build web applications in Rust with the developer experience you love from Laravel and Rails. Suprnova gives you expressive routing, powerful tooling, and batteries-included features — without sacrificing Rust's performance.
@@ -17,7 +16,7 @@ what's shipped, and what's coming.
 ## Quick Start
 
 ```bash
-cargo install suprnova-cli
+cargo install --git https://github.com/entrepeneur4lyf/suprnova.git suprnova-cli
 suprnova new myapp
 cd myapp
 suprnova serve

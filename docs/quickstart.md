@@ -17,7 +17,7 @@ This quickstart guide assumes that you already have Rust and Cargo up and runnin
 Install the suprnova-cli on your machine via Cargo using the following command:
 
 ```bash Terminal
-cargo install suprnova-cli
+cargo install --git https://github.com/entrepeneur4lyf/suprnova.git suprnova-cli
 ```
 
 ### Step 2:  Create your project using suprnova-cli

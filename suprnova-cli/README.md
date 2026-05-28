@@ -5,7 +5,7 @@ A CLI tool for scaffolding Suprnova web applications.
 ## Installation
 
 ```bash
-cargo install suprnova-cli
+cargo install --git https://github.com/entrepeneur4lyf/suprnova.git suprnova-cli
 ```
 
 ## Usage

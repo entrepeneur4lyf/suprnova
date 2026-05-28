@@ -407,7 +407,7 @@ feature set so consuming test suites pick them up for free with:
 
 ```toml
 [dependencies]
-suprnova = "0.x"
+suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git" }
 
 [dev-dependencies]
 # `testing` is on transitively via the dependency above — nothing extra.
@@ -427,10 +427,10 @@ off and enable only what you ship:
 
 ```toml
 [dependencies]
-suprnova = { version = "0.x", default-features = false, features = ["..."] }
+suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", default-features = false, features = ["..."] }
 
 [dev-dependencies]
-suprnova = { version = "0.x", features = ["testing", "..."] }
+suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", features = ["testing", "..."] }
 ```
 
 This is a tightening, not a fix — boot validation closes the actual
