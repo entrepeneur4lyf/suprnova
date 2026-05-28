@@ -43,7 +43,10 @@ enum GroupMethod {
     Get,
     Post,
     Put,
+    Patch,
     Delete,
+    Head,
+    Options,
 }
 
 impl GroupBuilder {
@@ -120,10 +123,25 @@ impl GroupBuilder {
                         .try_insert_put(&full_path, route.handler)?;
                     Method::PUT
                 }
+                GroupMethod::Patch => {
+                    self.outer_router
+                        .try_insert_patch(&full_path, route.handler)?;
+                    Method::PATCH
+                }
                 GroupMethod::Delete => {
                     self.outer_router
                         .try_insert_delete(&full_path, route.handler)?;
                     Method::DELETE
+                }
+                GroupMethod::Head => {
+                    self.outer_router
+                        .try_insert_head(&full_path, route.handler)?;
+                    Method::HEAD
+                }
+                GroupMethod::Options => {
+                    self.outer_router
+                        .try_insert_options(&full_path, route.handler)?;
+                    Method::OPTIONS
                 }
             };
 
@@ -213,6 +231,146 @@ impl GroupRouter {
         });
         self
     }
+
+    /// Register a PATCH route within the group.
+    pub fn patch<H, Fut>(mut self, path: &str, handler: H) -> Self
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        let boxed: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
+        self.routes.push(GroupRoute {
+            method: GroupMethod::Patch,
+            path: path.to_string(),
+            handler: Arc::new(boxed),
+        });
+        self
+    }
+
+    /// Register a HEAD route within the group.
+    ///
+    /// As elsewhere, HEAD requests fall back to GET when no explicit
+    /// HEAD route is registered (RFC 9110 §9.3.2); this method is for
+    /// the explicit-override case (e.g. returning custom headers
+    /// without running the GET body computation).
+    pub fn head<H, Fut>(mut self, path: &str, handler: H) -> Self
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        let boxed: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
+        self.routes.push(GroupRoute {
+            method: GroupMethod::Head,
+            path: path.to_string(),
+            handler: Arc::new(boxed),
+        });
+        self
+    }
+
+    /// Register an OPTIONS route within the group.
+    ///
+    /// CORS preflight is handled by `CorsMiddleware` at the
+    /// global-middleware layer; this method serves non-preflight uses
+    /// (allowed-verb discovery etc.).
+    pub fn options<H, Fut>(mut self, path: &str, handler: H) -> Self
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        let boxed: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
+        self.routes.push(GroupRoute {
+            method: GroupMethod::Options,
+            path: path.to_string(),
+            handler: Arc::new(boxed),
+        });
+        self
+    }
+
+    /// Register one handler against every common HTTP method
+    /// (GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS).
+    ///
+    /// The same boxed handler is shared (cloned `Arc`) across all
+    /// seven method-routes within the group. Group middleware applied
+    /// via [`GroupBuilder::middleware`] fans across every method at
+    /// finalize time, matching the fluent `Router::any` fan-out
+    /// semantics.
+    pub fn any<H, Fut>(self, path: &str, handler: H) -> Self
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        let boxed: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
+        let arc = Arc::new(boxed);
+        self.push_routes_for_methods(
+            path,
+            [
+                GroupMethod::Get,
+                GroupMethod::Post,
+                GroupMethod::Put,
+                GroupMethod::Patch,
+                GroupMethod::Delete,
+                GroupMethod::Head,
+                GroupMethod::Options,
+            ],
+            arc,
+        )
+    }
+
+    /// Register one handler against an explicit list of HTTP methods —
+    /// Laravel `Route::match([...], ...)` in the fluent-group form.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `methods` is empty or contains a verb other than
+    /// GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS.
+    pub fn methods<H, Fut>(self, methods: &[Method], path: &str, handler: H) -> Self
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        let group_methods = methods
+            .iter()
+            .map(|m| match *m {
+                Method::GET => GroupMethod::Get,
+                Method::POST => GroupMethod::Post,
+                Method::PUT => GroupMethod::Put,
+                Method::PATCH => GroupMethod::Patch,
+                Method::DELETE => GroupMethod::Delete,
+                Method::HEAD => GroupMethod::Head,
+                Method::OPTIONS => GroupMethod::Options,
+                ref other => panic!(
+                    "GroupRouter::methods() got unsupported HTTP method '{other}'; only \
+                     GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS are accepted",
+                ),
+            })
+            .collect::<Vec<_>>();
+        if group_methods.is_empty() {
+            panic!("GroupRouter::methods() requires at least one HTTP method");
+        }
+        let boxed: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
+        let arc = Arc::new(boxed);
+        self.push_routes_for_methods(path, group_methods, arc)
+    }
+
+    /// Internal helper used by [`GroupRouter::any`] and
+    /// [`GroupRouter::methods`]. Pushes one `GroupRoute` entry per
+    /// requested method, all sharing the same `Arc<BoxedHandler>` so
+    /// per-method dispatch stays O(1) at finalize time.
+    fn push_routes_for_methods(
+        mut self,
+        path: &str,
+        methods: impl IntoIterator<Item = GroupMethod>,
+        handler: Arc<BoxedHandler>,
+    ) -> Self {
+        for method in methods {
+            self.routes.push(GroupRoute {
+                method,
+                path: path.to_string(),
+                handler: handler.clone(),
+            });
+        }
+        self
+    }
 }
 
 impl Router {
@@ -262,5 +420,149 @@ impl RouteBuilder {
         F: FnOnce(GroupRouter) -> GroupRouter,
     {
         self.router.group(prefix, builder_fn)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Fluent GroupRouter parity for #350d.
+
+    use super::*;
+    use crate::http::text;
+    use hyper::Method;
+
+    async fn h(_req: Request) -> Response {
+        text("ok")
+    }
+
+    /// Fluent `r.patch(...)` inside `router.group(...)` registers
+    /// PATCH at `prefix + path`, mirroring the macro-group arm.
+    #[test]
+    fn fluent_group_registers_patch() {
+        let router: Router = Router::new()
+            .group("/api", |r| r.patch("/users/:id", h))
+            .into();
+        assert!(
+            router
+                .match_route(&Method::PATCH, "/api/users/42")
+                .is_some()
+        );
+    }
+
+    /// Fluent `r.head(...)` registers explicit HEAD (the GET fallback
+    /// already runs without this — explicit HEAD is for the override
+    /// case).
+    #[test]
+    fn fluent_group_registers_head_explicit() {
+        let router: Router = Router::new().group("/probes", |r| r.head("/x", h)).into();
+        assert!(router.has_explicit_head("/probes/x"));
+    }
+
+    /// Fluent `r.options(...)` registers OPTIONS.
+    #[test]
+    fn fluent_group_registers_options() {
+        let router: Router = Router::new()
+            .group("/api", |r| r.options("/discover", h))
+            .into();
+        assert!(
+            router
+                .match_route(&Method::OPTIONS, "/api/discover")
+                .is_some()
+        );
+    }
+
+    /// Fluent `r.any(...)` fans the handler across all seven common
+    /// HTTP methods. Pins per-method matching at finalize time after
+    /// prefix concatenation.
+    #[test]
+    fn fluent_group_any_registers_all_methods() {
+        let router: Router = Router::new().group("/api", |r| r.any("/webhook", h)).into();
+        for m in [
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::HEAD,
+            Method::OPTIONS,
+        ] {
+            assert!(
+                router.match_route(&m, "/api/webhook").is_some(),
+                "fluent group any() must register {m} at /api/webhook",
+            );
+        }
+    }
+
+    /// Fluent `r.methods(&[GET, HEAD])` registers exactly those verbs.
+    #[test]
+    fn fluent_group_methods_registers_requested_only() {
+        let router: Router = Router::new()
+            .group("/api", |r| {
+                r.methods(&[Method::GET, Method::HEAD], "/probes", h)
+            })
+            .into();
+        assert!(router.match_route(&Method::GET, "/api/probes").is_some());
+        assert!(router.has_explicit_head("/api/probes"));
+        assert!(router.match_route(&Method::POST, "/api/probes").is_none());
+    }
+
+    /// Group-level middleware applied via `.middleware(M)` fans across
+    /// every verb of a fluent `any()` route. Mirrors the macro-group
+    /// fan-out, closing the audit MEDIUM about fluent vs macro group
+    /// disparity.
+    #[test]
+    fn fluent_group_middleware_fans_across_any_methods() {
+        use crate::middleware::{Middleware, Next};
+        use async_trait::async_trait;
+
+        #[derive(Clone)]
+        struct NoopMw;
+        #[async_trait]
+        impl Middleware for NoopMw {
+            async fn handle(&self, request: Request, next: Next) -> Response {
+                next(request).await
+            }
+        }
+
+        let router: Router = Router::new()
+            .group("/api", |r| r.any("/wh", h))
+            .middleware(NoopMw)
+            .into();
+
+        for m in [
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::HEAD,
+            Method::OPTIONS,
+        ] {
+            assert_eq!(
+                router.get_route_middleware(&m, "/api/wh").len(),
+                1,
+                "group middleware must reach the any-route for {m}",
+            );
+        }
+    }
+
+    /// Empty methods list panics with a useful message.
+    #[test]
+    #[should_panic(expected = "at least one HTTP method")]
+    fn fluent_group_methods_empty_list_panics() {
+        let _ = Router::new()
+            .group("/api", |r| r.methods(&[], "/x", h))
+            .finalize();
+    }
+
+    /// Unsupported HTTP method (CONNECT, TRACE, etc.) panics naming
+    /// the offender.
+    #[test]
+    #[should_panic(expected = "CONNECT")]
+    fn fluent_group_methods_rejects_unsupported_verb() {
+        let bad = Method::from_bytes(b"CONNECT").expect("valid CONNECT");
+        let _ = Router::new()
+            .group("/api", |r| r.methods(&[Method::GET, bad], "/x", h))
+            .finalize();
     }
 }
