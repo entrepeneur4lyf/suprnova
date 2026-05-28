@@ -196,29 +196,56 @@ impl<T> CursorPaginator<T> {
     /// Panics if `Crypt` is not initialized. The framework guarantees
     /// initialization in `Server::from_config`; if it isn't, the
     /// process never reached steady-state and emitting an unsigned
-    /// cursor would be a security bug. The previous plaintext
-    /// `URL_SAFE_NO_PAD.encode` fallback was removed for codex review
-    /// finding #1.
+    /// cursor would be a security bug. For a non-panicking form — in
+    /// library code, or anywhere outside the server's post-boot request
+    /// path where the `Crypt`-initialized invariant is not guaranteed —
+    /// use [`Self::try_encode_cursor`].
     pub fn encode_cursor(value: &str) -> String {
-        Self::encode_value(
-            &sea_orm::Value::String(Some(Box::new(value.to_string()))),
-            CursorDirection::Next,
-        )
-        .expect(
+        Self::try_encode_cursor(value).expect(
             "Crypt invariant: cursors must be encrypted. \
              Initialize via Server::from_config (sets APP_KEY-derived key).",
         )
     }
 
-    /// Decode a cursor produced by [`Self::encode_cursor`] back to its
-    /// string payload. **Legacy helper** — see [`Self::encode_cursor`].
+    /// Fallible sibling of [`Self::encode_cursor`] — returns `Err`
+    /// instead of panicking when `Crypt` is not initialized. Prefer
+    /// this anywhere the post-boot `Crypt` invariant is not guaranteed;
+    /// it follows the framework's `try_*` convention for fallible
+    /// operations that carry an infallible Laravel-style name.
+    pub fn try_encode_cursor(value: &str) -> Result<String, FrameworkError> {
+        Self::encode_value(
+            &sea_orm::Value::String(Some(Box::new(value.to_string()))),
+            CursorDirection::Next,
+        )
+    }
+
+    /// Decode a cursor produced by [`Self::encode_cursor`] /
+    /// [`Self::try_encode_cursor`] back to its string payload.
+    /// **Legacy helper** — see [`Self::encode_cursor`].
+    ///
+    /// Errors when the wire cursor decodes to a non-`String` typed
+    /// boundary (e.g. a `BigInt` cursor emitted by the typed
+    /// [`Self::encode_value`] path). The legacy String helper used to
+    /// Debug-stringify such a value, silently hiding the type mismatch;
+    /// it now surfaces the mismatch so callers reach for
+    /// [`Self::decode_value`] when decoding typed cursors.
     pub fn decode_cursor(wire: &str) -> Result<String, FrameworkError> {
         let (value, _dir) = Self::decode_value(wire)?;
         match value {
             sea_orm::Value::String(Some(s)) => Ok(*s),
             sea_orm::Value::String(None) => Ok(String::new()),
-            // Other variants stringify via Debug.
-            other => Ok(format!("{other:?}")),
+            other => {
+                // Name the variant (a type tag, not the value) so the
+                // mismatch is diagnosable without leaking cursor contents.
+                let variant = value_to_tagged_json(&other)
+                    .map(|(tag, _)| tag)
+                    .unwrap_or_else(|_| "unknown".to_string());
+                Err(FrameworkError::internal(format!(
+                    "decode_cursor: expected a String cursor (as produced by \
+                     encode_cursor / try_encode_cursor), got a {variant} cursor. \
+                     Use CursorPaginator::decode_value to decode typed cursors."
+                )))
+            }
         }
     }
 }
@@ -498,6 +525,32 @@ mod tests {
         assert_ne!(wire, plain_b64);
         let decoded = CursorPaginator::<i32>::decode_cursor(&wire).unwrap();
         assert_eq!(decoded, "user-42");
+    }
+
+    #[test]
+    fn try_encode_cursor_round_trips_via_decode_cursor() {
+        let _g = CURSOR_LOCK.lock().unwrap();
+        ensure_key();
+        let wire = CursorPaginator::<i32>::try_encode_cursor("user-7").unwrap();
+        assert_eq!(
+            CursorPaginator::<i32>::decode_cursor(&wire).unwrap(),
+            "user-7"
+        );
+    }
+
+    #[test]
+    fn decode_cursor_errors_on_non_string_typed_cursor() {
+        // A typed (non-String) cursor — e.g. one produced by the typed
+        // `encode_value` path — must NOT silently Debug-stringify through
+        // the legacy String helper; it errors so a type mismatch surfaces.
+        let _g = CURSOR_LOCK.lock().unwrap();
+        ensure_key();
+        let wire = CursorPaginator::<i32>::encode_value(
+            &sea_orm::Value::BigInt(Some(42)),
+            CursorDirection::Next,
+        )
+        .unwrap();
+        assert!(CursorPaginator::<i32>::decode_cursor(&wire).is_err());
     }
 
     #[test]
