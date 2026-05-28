@@ -165,7 +165,7 @@ impl Schedule {
     ///     Ok(())
     /// }).daily().at("03:00").name("my-task");
     /// ```
-    pub fn call<F, Fut>(&mut self, f: F) -> TaskBuilder
+    pub fn call<F, Fut>(&self, f: F) -> TaskBuilder
     where
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<(), FrameworkError>> + Send + 'static,

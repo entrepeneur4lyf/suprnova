@@ -329,7 +329,10 @@ fallback fires so operators notice the weaker guarantee:
 **Custom lock TTL.** The lock TTL defaults to 30 minutes — long enough for
 most tasks to finish, short enough that a crashed task holding the lock
 unblocks the next tick without operator intervention. Override per task with
-`.without_overlapping_for(Duration)`:
+`.without_overlapping_for(Duration)`. `Duration::ZERO` is undefined across
+cache backends (Redis errors, in-memory expires instantly, Memcached treats
+it as "never expire"), so the builder coerces it to the 30-minute default
+with a one-time `WARN` so the operator can fix the call site.
 
 ```rust
 use std::time::Duration;

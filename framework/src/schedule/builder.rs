@@ -449,6 +449,26 @@ impl TaskBuilder {
             .name
             .unwrap_or_else(|| format!("closure-task-{}", task_index));
 
+        // Zero TTL is undefined across cache backends (Redis SETEX 0 is an
+        // error; in-memory treats it as instant expiration; Memcached treats
+        // 0 as "never expires"). Coerce it to the documented default so all
+        // backends see the same contract, and tell the operator what we did
+        // so they can fix the call site.
+        let overlap_ttl = match self.overlap_ttl {
+            Some(d) if !d.is_zero() => d,
+            Some(_zero) => {
+                tracing::warn!(
+                    target: "suprnova::schedule",
+                    task = %name,
+                    default_secs = DEFAULT_WITHOUT_OVERLAPPING_TTL.as_secs(),
+                    "without_overlapping_for(Duration::ZERO) is undefined across \
+                     cache backends; coerced to default",
+                );
+                DEFAULT_WITHOUT_OVERLAPPING_TTL
+            }
+            None => DEFAULT_WITHOUT_OVERLAPPING_TTL,
+        };
+
         TaskEntry {
             name,
             expression: self.expression,
@@ -456,7 +476,7 @@ impl TaskBuilder {
             description: self.description,
             without_overlapping: self.without_overlapping,
             run_in_background: self.run_in_background,
-            overlap_ttl: self.overlap_ttl.unwrap_or(DEFAULT_WITHOUT_OVERLAPPING_TTL),
+            overlap_ttl,
             state: TaskState::new(),
         }
     }
@@ -530,6 +550,28 @@ mod tests {
         let entry = builder.build(5);
 
         assert_eq!(entry.name, "closure-task-5");
+    }
+
+    /// `Duration::ZERO` is undefined across cache backends — Redis errors,
+    /// in-memory expires immediately, Memcached treats 0 as "never expire".
+    /// The builder must coerce it to the documented default so every backend
+    /// sees the same contract.
+    #[test]
+    fn without_overlapping_for_zero_duration_coerces_to_default() {
+        let entry = create_test_builder()
+            .every_minute()
+            .name("zero-ttl")
+            .without_overlapping_for(Duration::from_secs(0))
+            .build(0);
+
+        assert!(
+            entry.without_overlapping,
+            "the flag is still set — only the TTL is rewritten",
+        );
+        assert_eq!(
+            entry.overlap_ttl, DEFAULT_WITHOUT_OVERLAPPING_TTL,
+            "zero TTL must be coerced to the documented default",
+        );
     }
 
     // ---- #380c: fallible schedule helpers (range validation) ------------

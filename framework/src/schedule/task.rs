@@ -37,18 +37,19 @@ pub struct TaskState {
     /// usable [`Cache`] lock. Reset on completion regardless of result.
     ///
     /// [`Cache`]: crate::cache::Cache
-    pub in_process_running: AtomicBool,
+    pub(crate) in_process_running: AtomicBool,
     /// Number of times this task has been observed and skipped due to an
     /// overlap lock (Cache-side or in-process) **or** because the
-    /// same-minute dedup CAS rejected a repeat invocation. Exposed for
-    /// tests and future Pulse/Telescope-style observability surfaces.
-    pub skip_count: AtomicUsize,
+    /// same-minute dedup CAS rejected a repeat invocation. Read via
+    /// [`TaskState::skip_count`] — the field stays `pub(crate)` so the
+    /// atomic implementation can change without breaking external code.
+    pub(crate) skip_count: AtomicUsize,
     /// Minutes-since-UNIX-epoch of the most recent invocation attempt.
     /// `fetch_max` against the current minute is the same-minute dedup
     /// gate — if the prior value is `>= now`, we already tried this minute
     /// and the new call must skip. Init to `0`: any post-epoch run wins
     /// the first CAS unconditionally.
-    pub last_run_minute: AtomicI64,
+    pub(crate) last_run_minute: AtomicI64,
 }
 
 impl TaskState {
