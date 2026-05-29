@@ -85,7 +85,7 @@ pub use crypto::{Crypt, EncryptionKey};
 pub use csrf::{CsrfMiddleware, OriginPolicy, csrf_field, csrf_meta_tag, csrf_token};
 pub use data::{
     Field, IncludeError, IncludeMiddleware, IsRelationLoaded, RequestIncludeSet,
-    current_include_set, scope_include_set,
+    current_include_set, scope_include_set, with_include_overrides,
 };
 pub use database::{
     AutoRouteBinding, ConnectionRegistry, DB, Database, DatabaseConfig, DatabaseType, DbConnection,

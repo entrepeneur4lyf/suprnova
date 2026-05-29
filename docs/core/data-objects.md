@@ -95,6 +95,70 @@ Register `IncludeMiddleware` globally — typically between session and authoriz
 SessionMiddleware → IncludeMiddleware → AuthMiddleware → handlers
 ```
 
+### Programmatic include/exclude/only/except
+
+`RequestIncludeSet` mirrors Laravel-Data's `IncludeableData` contract with chainable builders. Handlers, tests, and middleware can construct or override a set without poking the public fields directly:
+
+```rust
+use suprnova::data::RequestIncludeSet;
+
+let set = RequestIncludeSet::default()
+    .include(["author", "comments"])
+    .exclude(["password"])
+    .only(["id", "name"])
+    .except(["secret"]);
+
+assert!(set.is_visible("name"));   // on `only`, not in `except`
+assert!(!set.is_visible("secret"));// `except` always wins
+assert!(set.includes("author"));   // request for the `author` relation
+```
+
+| Method | Effect | Laravel equivalent |
+|---|---|---|
+| `.include(fields)` | append to the include list (lazy fields to resolve) | `Data::include(...$fields)` |
+| `.exclude(fields)` | append to the exclude list (fields to drop) | `Data::exclude(...$fields)` |
+| `.only(fields)` | initialise or extend the `only` allowlist | `Data::only(...$fields)` |
+| `.except(fields)` | append to the except list (always-drop) | `Data::except(...$fields)` |
+| `.include_when(cond, fields)` | append only when `cond == true` | `Data::includeWhen($field, $condition)` |
+| `.exclude_when(cond, fields)` | append only when `cond == true` | `Data::excludeWhen($field, $condition)` |
+| `.only_when(cond, fields)` | extend `only` only when `cond == true` | `Data::onlyWhen($field, $condition)` |
+| `.except_when(cond, fields)` | append only when `cond == true` | `Data::exceptWhen($field, $condition)` |
+| `.merge(other)` | union two sets (in-place layered overrides) | manual `array_merge` in PHP |
+| `.includes(field)` | `field` (or `field.path`) in include list? | `relationLoaded()` analogue |
+| `.is_excluded(field)` | `field` in exclude list? | reads exclude partial |
+| `.is_excepted(field)` | `field` in except list? | reads except partial |
+| `.is_only_listed(field)` | `field` allowed by `only` (or `only` unset)? | reads only partial |
+| `.is_visible(field)` | full Laravel resolution order: except → exclude → only | `resolveResource` decision |
+
+Builders take any `IntoIterator<Item = impl Into<String>>`, so arrays, vecs, and slices of `&str`/`String` all work. Strings are trimmed; empty entries are dropped (matching `from_query`).
+
+Dot-paths in any list match the root segment when probed by bare name — `include=["author.posts"]` reports `set.includes("author") == true`, matching Laravel-Data's path resolution. The nested `posts` segment is consumed by `IncludeTree::from_include_set` for JSON:API compound documents.
+
+### Handler-side override: `with_include_overrides`
+
+To layer programmatic overrides on top of what the request's query string already declared (without losing the request's set), use `with_include_overrides`:
+
+```rust
+use suprnova::data::with_include_overrides;
+
+async fn show_album(req: Request, user: User) -> Response {
+    with_include_overrides(
+        |set| set
+            .include_when(user.is_admin(), ["audit_log"])
+            .exclude_when(!user.is_admin(), ["price_cost"]),
+        async move {
+            // Inside this scope, the lazy-prop resolver and JSON:API
+            // include resolver see the merged set.
+            Inertia::data("Album/Show", album_dto).into_response()
+        },
+    ).await
+}
+```
+
+The closure runs against a clone of the currently-bound set (or the empty default if no middleware has bound one). After the future completes, the original set is restored — this is a scoped override, not a mutation.
+
+For tests, prefer `scope_include_set(set, future)` to install a fresh set without inheriting any ambient state.
+
 ## Generic structs
 
 ```rust

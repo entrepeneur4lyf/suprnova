@@ -15,6 +15,7 @@ pub use error::IncludeError;
 pub use field::Field;
 pub use include_set::{
     REQUEST_INCLUDE_SET, RequestIncludeSet, current_include_set, scope_include_set,
+    with_include_overrides,
 };
 pub use middleware::IncludeMiddleware;
 pub use when_loaded::IsRelationLoaded;
