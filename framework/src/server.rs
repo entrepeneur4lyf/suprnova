@@ -562,6 +562,13 @@ pub async fn handle_request(
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
 
+    // Capture method/path for the post-response terminable dispatch.
+    // `method` is moved into `handle_request_inner` and `&path` is passed
+    // through, so we clone before the scope so the post-response branch
+    // below can still build its `TerminationSnapshot`.
+    let terminate_method = method.clone();
+    let terminate_path = path.clone();
+
     let response = crate::inertia::flash::FLASH_BAG
         .scope(flash_bag, async move {
             crate::inertia::ssr::DISABLE_SSR
@@ -585,11 +592,30 @@ pub async fn handle_request(
         })
         .await;
 
-    if is_head {
+    let response = if is_head {
         strip_body_for_head(response)
     } else {
         response
+    };
+
+    // Post-response termination: run every registered `Terminable`
+    // hook. Spawned on the background runtime so the client gets the
+    // response immediately and the slow work (session persistence,
+    // audit logging, metrics flush) runs without blocking the wire.
+    // The count check elides the spawn entirely when no hooks are
+    // registered, keeping the hot path zero-cost.
+    if crate::middleware::terminable_count() > 0 {
+        let snapshot = crate::middleware::TerminationSnapshot {
+            method: terminate_method.clone(),
+            path: terminate_path.clone(),
+            status: response.status().as_u16(),
+        };
+        tokio::spawn(async move {
+            crate::middleware::dispatch_termination(snapshot).await;
+        });
     }
+
+    response
 }
 
 /// Replace the body of an outgoing response with an empty `BoxBody`.

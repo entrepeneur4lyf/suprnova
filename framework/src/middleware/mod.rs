@@ -23,11 +23,39 @@
 //! }
 //! ```
 
+mod aliases;
 mod chain;
+mod pipeline;
 mod registry;
+mod terminable;
 
+pub use aliases::{
+    MiddlewareFactory, MiddlewareResolveError, append_middleware_priority, clear_middleware_alias,
+    clear_middleware_group, has_middleware_alias, has_middleware_group, middleware_priority,
+    prepend_middleware_priority, register_middleware_alias, register_middleware_group,
+    registered_middleware_aliases, registered_middleware_groups, resolve_middleware_alias,
+    resolve_middleware_group,
+};
 pub use chain::MiddlewareChain;
-pub use registry::{MiddlewareRegistry, get_global_middleware, register_global_middleware};
+pub use pipeline::Pipeline;
+pub use registry::{
+    MiddlewareRegistry, get_global_middleware, global_middleware_count, has_global_middleware,
+    prepend_global_middleware, register_global_middleware,
+};
+pub use terminable::{
+    Terminable, TerminationSnapshot, dispatch_termination, has_terminable, register_terminable,
+    registered_terminables, terminable_count,
+};
+
+#[doc(hidden)]
+pub use aliases::{
+    clear_all_middleware_aliases_for_test, clear_all_middleware_groups_for_test,
+    clear_middleware_priority_for_test,
+};
+#[doc(hidden)]
+pub use registry::clear_global_middleware_for_test;
+#[doc(hidden)]
+pub use terminable::clear_terminables_for_test;
 
 use crate::http::{Request, Response};
 use async_trait::async_trait;

@@ -173,7 +173,14 @@ pub use logging::{
     spawn_with_request_id,
 };
 pub use middleware::{
-    Middleware, MiddlewareFuture, MiddlewareRegistry, Next, register_global_middleware,
+    Middleware, MiddlewareFactory, MiddlewareFuture, MiddlewareRegistry, MiddlewareResolveError,
+    Next, Pipeline, Terminable, TerminationSnapshot, append_middleware_priority,
+    clear_middleware_alias, clear_middleware_group, dispatch_termination, get_global_middleware,
+    global_middleware_count, has_global_middleware, has_middleware_alias, has_middleware_group,
+    has_terminable, middleware_priority, prepend_global_middleware, prepend_middleware_priority,
+    register_global_middleware, register_middleware_alias, register_middleware_group,
+    register_terminable, registered_middleware_aliases, registered_middleware_groups,
+    registered_terminables, resolve_middleware_alias, resolve_middleware_group, terminable_count,
 };
 pub use pagination::{
     CursorDirection, CursorPaginator, IntoInertiaScroll, LengthAwarePaginator, Paginated,

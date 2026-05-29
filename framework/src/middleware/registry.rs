@@ -95,6 +95,75 @@ pub fn get_global_middleware() -> Vec<BoxedMiddleware> {
     guard.iter().map(|(_, mw)| mw.clone()).collect()
 }
 
+/// Prepend a global middleware so it runs **before** every existing
+/// global middleware. Mirrors Laravel's `Kernel::prependMiddleware`.
+///
+/// Registration is still idempotent per concrete type — re-registering
+/// an existing global is a no-op. Used by the bootstrap surface when an
+/// extension wants to ensure its middleware runs ahead of everything the
+/// app registered itself (e.g. an APM probe that must wrap the entire
+/// chain to time it correctly).
+pub fn prepend_global_middleware<M: Middleware + 'static>(middleware: M) {
+    let registry = GLOBAL_MIDDLEWARE.get_or_init(|| RwLock::new(Vec::new()));
+    let mut vec = match registry.write() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let tid = TypeId::of::<M>();
+    if vec.iter().any(|(existing, _)| *existing == tid) {
+        tracing::debug!(
+            "global middleware of this type is already registered; skipping the \
+             prepend. Wrap it in a distinct newtype to register multiple instances."
+        );
+        return;
+    }
+    vec.insert(0, (tid, into_boxed(middleware)));
+}
+
+/// Whether a global middleware of this concrete type has been
+/// registered. Laravel's `Kernel::hasMiddleware`.
+pub fn has_global_middleware<M: Middleware + 'static>() -> bool {
+    let tid = TypeId::of::<M>();
+    let Some(lock) = GLOBAL_MIDDLEWARE.get() else {
+        return false;
+    };
+    let guard = match lock.read() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.iter().any(|(existing, _)| *existing == tid)
+}
+
+/// Number of global middleware currently registered. Useful for
+/// boot-time diagnostics and assertions in test suites that snapshot the
+/// registry around their setup.
+pub fn global_middleware_count() -> usize {
+    let Some(lock) = GLOBAL_MIDDLEWARE.get() else {
+        return 0;
+    };
+    let guard = match lock.read() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.len()
+}
+
+/// Clear every global middleware. Test-only convenience for suites that
+/// need the snapshot to start empty (e.g. asserting boot-time
+/// registration without inheriting whatever the rest of the suite
+/// registered).
+#[doc(hidden)]
+pub fn clear_global_middleware_for_test() {
+    let Some(lock) = GLOBAL_MIDDLEWARE.get() else {
+        return;
+    };
+    let mut guard = match lock.write() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.clear();
+}
+
 /// Registry for global middleware that runs on every request
 ///
 /// # Example
@@ -150,9 +219,44 @@ impl MiddlewareRegistry {
         self
     }
 
+    /// Insert global middleware at the front of the chain, before any
+    /// existing entry. Mirrors Laravel's `Kernel::prependMiddleware`.
+    ///
+    /// Use when an embedder needs to wrap the entire chain (e.g. a
+    /// tracing probe that must outerly time the rest of the stack).
+    pub fn prepend<M: Middleware + 'static>(mut self, middleware: M) -> Self {
+        self.global.insert(0, into_boxed(middleware));
+        self
+    }
+
+    /// Push a pre-boxed global middleware. Companion to [`Self::append`]
+    /// for callers that already hold a `BoxedMiddleware` (e.g. from a
+    /// registry snapshot or alias resolution).
+    pub fn append_boxed(mut self, middleware: BoxedMiddleware) -> Self {
+        self.global.push(middleware);
+        self
+    }
+
+    /// Insert a pre-boxed global middleware at the front of the chain.
+    pub fn prepend_boxed(mut self, middleware: BoxedMiddleware) -> Self {
+        self.global.insert(0, middleware);
+        self
+    }
+
     /// Get the list of global middleware
     pub fn global_middleware(&self) -> &[BoxedMiddleware] {
         &self.global
+    }
+
+    /// Number of global middleware. Convenience for tests and
+    /// diagnostics so callers don't have to write `.global_middleware().len()`.
+    pub fn len(&self) -> usize {
+        self.global.len()
+    }
+
+    /// Whether the registry has no global middleware.
+    pub fn is_empty(&self) -> bool {
+        self.global.is_empty()
     }
 }
 
