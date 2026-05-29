@@ -90,3 +90,54 @@ fn base64_url_no_pad_decode(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
     use base64::Engine;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s)
 }
+
+// ---------------------------------------------------------------------------
+// VAPID TTL bounds — RFC 8292 caps the JWT lifetime at 24 hours. Zero /
+// negative TTLs would produce already-expired tokens; the previous `as u64`
+// cast quietly wrapped negatives into multi-century lifetimes.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sign_rejects_zero_ttl() {
+    let signer = VapidSigner::new(VapidKey::generate());
+    let err = signer
+        .sign("https://example.org", "mailto:a@b.com", 0)
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("TTL must be positive"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn sign_rejects_negative_ttl() {
+    let signer = VapidSigner::new(VapidKey::generate());
+    let err = signer
+        .sign("https://example.org", "mailto:a@b.com", -1)
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("TTL must be positive"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn sign_rejects_ttl_above_24h() {
+    let signer = VapidSigner::new(VapidKey::generate());
+    let err = signer
+        .sign("https://example.org", "mailto:a@b.com", 24 * 3600 + 1)
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("exceeds RFC 8292"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn sign_accepts_exactly_24h_ttl() {
+    let signer = VapidSigner::new(VapidKey::generate());
+    let jwt = signer
+        .sign("https://example.org", "mailto:a@b.com", 24 * 3600)
+        .expect("24h boundary must be accepted");
+    assert_eq!(jwt.split('.').count(), 3, "valid JWT must have 3 segments");
+}

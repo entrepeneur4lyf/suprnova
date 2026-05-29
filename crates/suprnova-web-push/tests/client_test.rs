@@ -1,5 +1,6 @@
 use suprnova_web_push::{
-    ContentEncoding, SubscriptionInfo, VapidKey, VapidSigner, WebPushClient, WebPushError,
+    ContentEncoding, EndpointPolicy, SubscriptionInfo, VapidKey, VapidSigner, WebPushClient,
+    WebPushError,
 };
 use wiremock::matchers::{header_exists, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -32,7 +33,10 @@ async fn client_posts_encrypted_payload_with_vapid_headers() {
 
     let key = VapidKey::generate();
     let signer = VapidSigner::new(key);
-    let client = WebPushClient::new(signer, "mailto:admin@example.org");
+    // wiremock serves `http://127.0.0.1:<port>`, which the production-default
+    // Strict endpoint policy would reject — opt into AllowAny for the mock.
+    let client = WebPushClient::new(signer, "mailto:admin@example.org")
+        .with_endpoint_policy(EndpointPolicy::AllowAny);
 
     let resp = client
         .send(&sub_for(&server), b"hello", ContentEncoding::Aes128Gcm, 60)
@@ -51,7 +55,8 @@ async fn client_maps_410_to_subscription_gone() {
         .await;
 
     let signer = VapidSigner::new(VapidKey::generate());
-    let client = WebPushClient::new(signer, "mailto:admin@example.org");
+    let client = WebPushClient::new(signer, "mailto:admin@example.org")
+        .with_endpoint_policy(EndpointPolicy::AllowAny);
 
     let err = client
         .send(&sub_for(&server), b"hi", ContentEncoding::Aes128Gcm, 60)
@@ -73,7 +78,8 @@ async fn client_maps_4xx_5xx_to_push_service_rejected() {
         .await;
 
     let signer = VapidSigner::new(VapidKey::generate());
-    let client = WebPushClient::new(signer, "mailto:admin@example.org");
+    let client = WebPushClient::new(signer, "mailto:admin@example.org")
+        .with_endpoint_policy(EndpointPolicy::AllowAny);
 
     let err = client
         .send(&sub_for(&server), b"hi", ContentEncoding::Aes128Gcm, 60)
@@ -86,4 +92,79 @@ async fn client_maps_4xx_5xx_to_push_service_rejected() {
         }
         other => panic!("expected PushServiceRejected, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// SSRF guard: production-default Strict policy rejects untrusted endpoint
+// shapes before the HTTP POST happens. AllowAny is for tests only.
+// ---------------------------------------------------------------------------
+
+fn sub_with_endpoint(endpoint: &str) -> SubscriptionInfo {
+    SubscriptionInfo {
+        endpoint: endpoint.into(),
+        keys: suprnova_web_push::client::SubscriptionKeys {
+            p256dh: RECEIVER_P256DH.into(),
+            auth: RECEIVER_AUTH.into(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn strict_default_rejects_http_endpoint() {
+    let signer = VapidSigner::new(VapidKey::generate());
+    let client = WebPushClient::new(signer, "mailto:admin@example.org");
+
+    let err = client
+        .send(
+            &sub_with_endpoint("http://fcm.googleapis.com/push/abc"),
+            b"hi",
+            ContentEncoding::Aes128Gcm,
+            60,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("https"),
+        "Strict policy must reject http://, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn strict_default_rejects_ip_literal_endpoint() {
+    let signer = VapidSigner::new(VapidKey::generate());
+    let client = WebPushClient::new(signer, "mailto:admin@example.org");
+
+    let err = client
+        .send(
+            &sub_with_endpoint("https://169.254.169.254/latest/meta-data"),
+            b"hi",
+            ContentEncoding::Aes128Gcm,
+            60,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("IP literal"),
+        "Strict policy must reject IP-literal hosts, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn strict_default_rejects_metadata_host() {
+    let signer = VapidSigner::new(VapidKey::generate());
+    let client = WebPushClient::new(signer, "mailto:admin@example.org");
+
+    let err = client
+        .send(
+            &sub_with_endpoint("https://metadata.google.internal/computeMetadata/v1/"),
+            b"hi",
+            ContentEncoding::Aes128Gcm,
+            60,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("not a valid push service host"),
+        "Strict policy must reject cloud-metadata hostnames, got: {err}"
+    );
 }

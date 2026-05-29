@@ -10,7 +10,7 @@ pub mod error;
 pub mod payload;
 pub mod vapid;
 
-pub use client::{PushResponse, SubscriptionInfo, WebPushClient};
+pub use client::{EndpointPolicy, PushResponse, SubscriptionInfo, WebPushClient};
 pub use error::WebPushError;
 pub use payload::{ContentEncoding, Payload};
 pub use vapid::{VapidClaims, VapidKey, VapidSigner};

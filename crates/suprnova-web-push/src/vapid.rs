@@ -69,13 +69,32 @@ impl VapidSigner {
     ///
     /// `audience` — push service origin, e.g. `"https://fcm.googleapis.com"`.
     /// `subject` — contact URI, e.g. `"mailto:admin@example.org"`.
-    /// `ttl_secs` — token lifetime in seconds (max 24 h per RFC 8292).
+    /// `ttl_secs` — token lifetime in seconds. Must be strictly positive and
+    /// at most 24 h per RFC 8292; out-of-range values are rejected before
+    /// signing.
     pub fn sign(
         &self,
         audience: &str,
         subject: &str,
         ttl_secs: i64,
     ) -> Result<String, WebPushError> {
+        // RFC 8292 caps VAPID JWT lifetime at 24 hours. A zero / negative TTL
+        // would produce an already-expired token, and the previous `as u64`
+        // cast quietly wrapped negatives into multi-century lifetimes. Reject
+        // both ends explicitly so the failure mode is a clear `Vapid` error
+        // rather than a JWT the push service silently refuses.
+        const MAX_TTL_SECS: i64 = 24 * 3600;
+        if ttl_secs <= 0 {
+            return Err(WebPushError::Vapid(format!(
+                "VAPID TTL must be positive (got {ttl_secs} seconds)"
+            )));
+        }
+        if ttl_secs > MAX_TTL_SECS {
+            return Err(WebPushError::Vapid(format!(
+                "VAPID TTL exceeds RFC 8292 maximum of 24 hours (got {ttl_secs} seconds, max {MAX_TTL_SECS})"
+            )));
+        }
+
         // Use standard claim helpers — avoids duplicate aud/sub/exp keys that
         // would occur if we embedded those fields in a custom claims struct
         // and also let jwt-simple set them via JWTClaims.

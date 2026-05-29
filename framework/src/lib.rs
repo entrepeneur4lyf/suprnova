@@ -231,8 +231,8 @@ pub use vector::{
     VectorStore,
 };
 pub use web_push::{
-    ContentEncoding, PushResponse, SubscriptionInfo, VapidClaims, VapidKey, VapidSigner,
-    WebPushClient, WebPushError,
+    ContentEncoding, EndpointPolicy, PushResponse, SubscriptionInfo, VapidClaims, VapidKey,
+    VapidSigner, WebPushClient, WebPushError,
 };
 pub use workflow::{
     StepStatus, WorkflowConfig, WorkflowContext, WorkflowHandle, WorkflowStatus, WorkflowWorker,

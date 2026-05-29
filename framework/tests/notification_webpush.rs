@@ -19,7 +19,7 @@ use suprnova::notifications::channels::webpush::WebPushChannel;
 use suprnova::notifications::{
     Channel, DynNotification, Notifiable, Notification, NotificationDispatcher,
 };
-use suprnova::web_push::{VapidKey, VapidSigner, WebPushClient};
+use suprnova::web_push::{EndpointPolicy, VapidKey, VapidSigner, WebPushClient};
 use tracing_test::traced_test;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -75,7 +75,12 @@ impl Notifiable for Subscriber {
 
 fn build_channel() -> Arc<WebPushChannel> {
     let signer = VapidSigner::new(VapidKey::generate());
-    let client = Arc::new(WebPushClient::new(signer, "mailto:admin@suprnova.dev"));
+    // wiremock serves `http://127.0.0.1:<port>` URLs; the production-default
+    // Strict endpoint policy would reject those. Tests opt into AllowAny.
+    let client = Arc::new(
+        WebPushClient::new(signer, "mailto:admin@suprnova.dev")
+            .with_endpoint_policy(EndpointPolicy::AllowAny),
+    );
     Arc::new(WebPushChannel::new(client, 60))
 }
 
@@ -163,11 +168,17 @@ async fn webpush_channel_returns_error_for_malformed_subscription_json() {
     // JSON. A garbage route surfaces as a contextual decode error —
     // callers can match on the "subscription JSON decode" substring to
     // distinguish bad routes from upstream push-service failures.
+    // This test exercises the JSON-decode error path, which fires before
+    // the endpoint policy runs — so the policy choice is moot here, but we
+    // keep AllowAny for consistency with the other tests in this file.
     let channel = WebPushChannel::new(
-        Arc::new(WebPushClient::new(
-            VapidSigner::new(VapidKey::generate()),
-            "mailto:admin@suprnova.dev",
-        )),
+        Arc::new(
+            WebPushClient::new(
+                VapidSigner::new(VapidKey::generate()),
+                "mailto:admin@suprnova.dev",
+            )
+            .with_endpoint_policy(EndpointPolicy::AllowAny),
+        ),
         60,
     );
 

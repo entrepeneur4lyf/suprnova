@@ -4,6 +4,6 @@
 //! to subscribed clients.
 
 pub use suprnova_web_push::{
-    ContentEncoding, PushResponse, SubscriptionInfo, VapidClaims, VapidKey, VapidSigner,
-    WebPushClient, WebPushError,
+    ContentEncoding, EndpointPolicy, PushResponse, SubscriptionInfo, VapidClaims, VapidKey,
+    VapidSigner, WebPushClient, WebPushError,
 };
