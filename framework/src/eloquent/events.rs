@@ -126,7 +126,15 @@ where
 /// this from `__dispatch_creating` / `__dispatch_saving` /
 /// `__dispatch_updating` / `__dispatch_deleting` /
 /// `__dispatch_restoring`.
+///
+/// When the current task is inside a [`crate::seed::without_events`]
+/// scope, the dispatch short-circuits to `Ok(())` — every cancellable
+/// model event proceeds uncancellable (matches Laravel's
+/// `WithoutModelEvents`).
 pub async fn dispatch_cancellable<E: Event + Clone>(event: E) -> Result<(), FrameworkError> {
+    if crate::seed::events_muted() {
+        return Ok(());
+    }
     let listeners = global_cancellable_listeners::<E>().await;
     if listeners.is_empty() {
         return Ok(());
@@ -149,7 +157,14 @@ pub async fn dispatch_cancellable<E: Event + Clone>(event: E) -> Result<(), Fram
 /// [`crate::events::EventFacade`]. Thin wrapper so the
 /// macro-emitted dispatch sites read consistently with the
 /// cancellable counterpart.
+///
+/// When the current task is inside a [`crate::seed::without_events`]
+/// scope, the dispatch short-circuits to `Ok(())` — listeners are
+/// not invoked and the event is not recorded.
 pub async fn dispatch_after<E: Event>(event: E) -> Result<(), FrameworkError> {
+    if crate::seed::events_muted() {
+        return Ok(());
+    }
     EventFacade::dispatch(event).await
 }
 

@@ -258,3 +258,205 @@ async fn clear_resets_the_registry() {
     seed::register::<SeederA>();
     assert_eq!(seed::count(), 1);
 }
+
+#[tokio::test]
+#[serial]
+async fn run_one_runs_only_the_named_seeder() {
+    reset_all();
+
+    seed::register::<SeederA>();
+    seed::register::<SeederB>();
+    seed::register::<SeederC>();
+
+    seed::run_one("SeederB").await.unwrap();
+
+    assert_eq!(A_RAN.load(Ordering::SeqCst), 0, "SeederA was not targeted");
+    assert_eq!(B_RAN.load(Ordering::SeqCst), 1, "SeederB ran exactly once");
+    assert_eq!(C_RAN.load(Ordering::SeqCst), 0, "SeederC was not targeted");
+}
+
+#[tokio::test]
+#[serial]
+async fn run_one_returns_not_found_for_unknown_name() {
+    reset_all();
+
+    seed::register::<SeederA>();
+
+    let err = seed::run_one("DoesNotExist").await.unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("no seeder registered for `DoesNotExist`"),
+        "expected not-found message, got: {msg}"
+    );
+    assert_eq!(
+        A_RAN.load(Ordering::SeqCst),
+        0,
+        "no seeder fired on a lookup miss"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn is_registered_round_trips() {
+    reset_all();
+
+    assert!(!seed::is_registered("SeederA"));
+    seed::register::<SeederA>();
+    assert!(seed::is_registered("SeederA"));
+    assert!(!seed::is_registered("SeederB"));
+}
+
+// --- WithoutModelEvents-equivalent (seed::without_events) ---------------
+
+mod without_events {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use suprnova::eloquent::events::dispatch_after;
+    use suprnova::eloquent::events::{
+        CancellableListener, EventResult, dispatch_cancellable, listen_cancellable,
+    };
+    use suprnova::events::Event;
+    use suprnova::events::testing as event_testing;
+
+    #[derive(Clone, Debug)]
+    struct CreatedFake;
+    impl Event for CreatedFake {
+        fn event_name() -> &'static str {
+            "CreatedFake"
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct SavingFake;
+    impl Event for SavingFake {
+        fn event_name() -> &'static str {
+            "SavingFake"
+        }
+    }
+
+    static CANCELLABLE_RAN: AtomicBool = AtomicBool::new(false);
+
+    struct AlwaysOkListener;
+    #[async_trait]
+    impl CancellableListener<SavingFake> for AlwaysOkListener {
+        async fn handle(&self, _event: &SavingFake) -> EventResult {
+            CANCELLABLE_RAN.store(true, Ordering::SeqCst);
+            EventResult::ok()
+        }
+    }
+
+    struct VetoingListener;
+    #[async_trait]
+    impl CancellableListener<SavingFake> for VetoingListener {
+        async fn handle(&self, _event: &SavingFake) -> EventResult {
+            EventResult::cancel("vetoed by listener")
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn dispatch_after_short_circuits_inside_scope() {
+        // Drive through Event::fake() so we observe the gate at the
+        // boundary without actually wiring a listener: a recorded
+        // event proves the call reached `EventFacade::dispatch`; an
+        // empty record proves the mute fired first.
+        let _guard = event_testing::install_fake();
+
+        seed::without_events(async {
+            dispatch_after(CreatedFake).await.unwrap();
+        })
+        .await;
+
+        let count = event_testing::dispatched_count::<CreatedFake>(|_| true);
+        assert_eq!(
+            count, 0,
+            "dispatch_after must short-circuit before EventFacade::dispatch when muted",
+        );
+
+        // Outside the scope, the dispatch goes through normally.
+        dispatch_after(CreatedFake).await.unwrap();
+        let count_after = event_testing::dispatched_count::<CreatedFake>(|_| true);
+        assert_eq!(
+            count_after, 1,
+            "dispatch_after fires normally outside the without_events scope",
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn dispatch_cancellable_short_circuits_inside_scope() {
+        CANCELLABLE_RAN.store(false, Ordering::SeqCst);
+        suprnova::eloquent::events::clear_cancellable_listeners();
+
+        listen_cancellable::<SavingFake, _>(std::sync::Arc::new(AlwaysOkListener)).await;
+
+        seed::without_events(async {
+            dispatch_cancellable(SavingFake).await.unwrap();
+        })
+        .await;
+        assert!(
+            !CANCELLABLE_RAN.load(Ordering::SeqCst),
+            "cancellable listener must not run when muted",
+        );
+
+        // Outside the scope, the listener runs.
+        dispatch_cancellable(SavingFake).await.unwrap();
+        assert!(
+            CANCELLABLE_RAN.load(Ordering::SeqCst),
+            "cancellable listener runs normally outside the without_events scope",
+        );
+
+        suprnova::eloquent::events::clear_cancellable_listeners();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn cancellation_does_not_fire_inside_scope() {
+        // A vetoing listener would normally surface as
+        // FrameworkError::bad_request; under without_events the call
+        // returns Ok(()) instead.
+        suprnova::eloquent::events::clear_cancellable_listeners();
+
+        listen_cancellable::<SavingFake, _>(std::sync::Arc::new(VetoingListener)).await;
+
+        let muted_result =
+            seed::without_events(async { dispatch_cancellable(SavingFake).await }).await;
+        assert!(
+            muted_result.is_ok(),
+            "veto suppressed under without_events: {muted_result:?}",
+        );
+
+        // Outside the scope, the same listener vetoes.
+        let unmuted_result = dispatch_cancellable(SavingFake).await;
+        assert!(
+            unmuted_result.is_err(),
+            "veto fires normally outside without_events",
+        );
+        assert!(format!("{}", unmuted_result.unwrap_err()).contains("vetoed by listener"));
+
+        suprnova::eloquent::events::clear_cancellable_listeners();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn nested_scopes_compose() {
+        let _guard = event_testing::install_fake();
+
+        // Inner scope inherits the outer mute.
+        seed::without_events(async {
+            seed::without_events(async {
+                dispatch_after(CreatedFake).await.unwrap();
+            })
+            .await;
+            // Back in the outer scope — still muted.
+            dispatch_after(CreatedFake).await.unwrap();
+        })
+        .await;
+
+        assert_eq!(
+            event_testing::dispatched_count::<CreatedFake>(|_| true),
+            0,
+            "nested scope inherits mute",
+        );
+    }
+}

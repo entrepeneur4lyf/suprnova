@@ -101,5 +101,86 @@ async fn db_seed_appears_in_console_registry() {
     // inventory::submit! — no opt-in step.
     let entry = console::find("db:seed").expect("db:seed registered by the framework");
     assert_eq!(entry.name, "db:seed");
-    assert_eq!(entry.description, "Run all registered seeders");
+    assert_eq!(
+        entry.description,
+        "Run seeders (all by default, or one via --class=<Name>)"
+    );
+}
+
+// --- --class targeting via the dispatch_argv surface --------------------
+
+static OTHER_RAN: AtomicUsize = AtomicUsize::new(0);
+
+struct OtherSeeder;
+#[async_trait]
+impl Seeder for OtherSeeder {
+    fn name() -> &'static str {
+        "OtherSeeder"
+    }
+    async fn run() -> Result<(), FrameworkError> {
+        OTHER_RAN.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn db_seed_class_equals_runs_only_named_seeder() {
+    seed::clear();
+    SEEDER_RAN.store(0, Ordering::SeqCst);
+    OTHER_RAN.store(0, Ordering::SeqCst);
+
+    seed::register::<RecordingSeeder>();
+    seed::register::<OtherSeeder>();
+
+    let argv = vec![
+        "console".to_string(),
+        "db:seed".to_string(),
+        "--class=OtherSeeder".to_string(),
+    ];
+    console::dispatch_argv(argv).await.expect("targeted run ok");
+
+    assert_eq!(SEEDER_RAN.load(Ordering::SeqCst), 0, "untargeted skipped");
+    assert_eq!(OTHER_RAN.load(Ordering::SeqCst), 1, "targeted ran once");
+    seed::clear();
+}
+
+#[tokio::test]
+#[serial]
+async fn db_seed_class_bare_positional_form_works() {
+    seed::clear();
+    OTHER_RAN.store(0, Ordering::SeqCst);
+
+    seed::register::<OtherSeeder>();
+
+    let argv = vec![
+        "console".to_string(),
+        "db:seed".to_string(),
+        "OtherSeeder".to_string(),
+    ];
+    console::dispatch_argv(argv).await.expect("targeted run ok");
+
+    assert_eq!(OTHER_RAN.load(Ordering::SeqCst), 1, "bare positional ran");
+    seed::clear();
+}
+
+#[tokio::test]
+#[serial]
+async fn db_seed_class_unknown_returns_not_found_error() {
+    seed::clear();
+    seed::register::<RecordingSeeder>();
+
+    let argv = vec![
+        "console".to_string(),
+        "db:seed".to_string(),
+        "--class=DoesNotExist".to_string(),
+    ];
+    let err = console::dispatch_argv(argv).await.unwrap_err();
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("no seeder registered for `DoesNotExist`"),
+        "expected not-found, got: {msg}"
+    );
+    seed::clear();
 }
