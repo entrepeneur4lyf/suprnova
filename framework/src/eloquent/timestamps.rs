@@ -27,6 +27,46 @@
 
 use crate::error::FrameworkError;
 
+tokio::task_local! {
+    /// Task-local "touches disabled" flag. When `true`, the macro-
+    /// emitted [`Touchable::touch`] impls short-circuit to `Ok(())`
+    /// without bumping `updated_at`. Mirrors Laravel's
+    /// `Model::withoutTouching` scope but task-scoped so concurrent
+    /// requests on other tasks remain unaffected.
+    static TOUCHES_DISABLED: bool;
+}
+
+/// Whether the current task is inside a [`without_touching`] scope.
+/// Called by the macro-emitted [`Touchable::touch`] impl to honour the
+/// scope.
+pub fn touches_disabled() -> bool {
+    TOUCHES_DISABLED.try_with(|b| *b).unwrap_or(false)
+}
+
+/// Run `fut` with touches disabled for the current async task —
+/// every `model.touch()` call inside the scope short-circuits. Suprnova
+/// analogue of Laravel's `Model::withoutTouching(closure)`.
+///
+/// The flag is a `tokio::task_local!` so it doesn't leak across
+/// `tokio::spawn` boundaries and concurrent requests on other tasks
+/// continue to honour their own scope (or its absence).
+///
+/// ```ignore
+/// use suprnova::eloquent::without_touching;
+///
+/// without_touching(async {
+///     // Inside this scope, `post.touch().await` is a no-op even
+///     // though the touchable impl is wired through.
+///     post.touch().await?;
+/// }).await;
+/// ```
+pub async fn without_touching<F, T>(fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    TOUCHES_DISABLED.scope(true, fut).await
+}
+
 /// Bump `updated_at` on this row without changing any other column.
 ///
 /// Implemented by the `#[suprnova::model]` macro on every struct that

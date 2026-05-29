@@ -165,6 +165,69 @@ pub(crate) enum WhereTerm {
     DatePart(DatePart, String, Value),
     Not(Box<WhereTerm>),
     Or(Vec<WhereTerm>),
+    /// Correlated `EXISTS (...)` / `NOT EXISTS (...)` from
+    /// [`Builder::has`] / [`Builder::where_has`] /
+    /// [`Builder::doesnt_have`] / [`Builder::where_doesnt_have`] and the
+    /// belongs-to / morph existence variants. The boxed spec carries
+    /// everything the renderer needs: the relation entry's join shape,
+    /// any user-supplied inner WHERE terms, the EXISTS/NOT-EXISTS
+    /// polarity, and the optional `>= N` count constraint.
+    Exists(Box<ExistsSpec>),
+}
+
+/// Spec passed to [`WhereTerm::Exists`]. Built by
+/// [`Builder::has`] / [`Builder::where_has`] / [`Builder::doesnt_have`]
+/// / [`Builder::where_doesnt_have`] and the belongs-to / morph
+/// existence variants. The boxed shape keeps `WhereTerm` small.
+#[derive(Debug, Clone)]
+pub(crate) struct ExistsSpec {
+    /// The parent's `EloquentModel::TABLE` — passed in so the renderer
+    /// can qualify the correlated `parent.pk = child.fk` clause.
+    pub parent_table: String,
+    /// The parent's PK column on this side of the EXISTS — taken from
+    /// [`RelationEntry::parent_key`].
+    pub parent_key: String,
+    /// Direct target table for has / has-one / has-many / morph-one /
+    /// morph-many. Empty when the join routes through a pivot — see
+    /// `pivot_table`.
+    pub target_table: String,
+    /// FK on the child / target side. Empty for pivot joins.
+    pub foreign_key: String,
+    /// Pivot table for m2m / morph-m2m / through. Empty otherwise.
+    pub pivot_table: String,
+    /// Pivot column pointing at the parent. Empty when no pivot.
+    pub pivot_parent_key: String,
+    /// Pivot column pointing at the related / final target. Empty
+    /// when no pivot.
+    pub pivot_related_key: String,
+    /// Related table's PK (for joining pivot → related). Empty when no
+    /// pivot path.
+    pub related_pk: String,
+    /// Morph discriminator column on the child side. Empty for
+    /// non-morph kinds.
+    pub morph_type_column: String,
+    /// Stable morph-type string the discriminator must equal. Empty
+    /// for non-morph kinds.
+    pub morph_type_value: String,
+    /// Polarity: `true` renders `EXISTS (...)`, `false` renders
+    /// `NOT EXISTS (...)`.
+    pub positive: bool,
+    /// Optional `>= count` constraint (Laravel-shape: `has("posts",
+    /// ">", 3)`). When `None` the subquery is bare `EXISTS (SELECT 1
+    /// ...)`. When `Some`, the renderer expands to `(SELECT COUNT(*) ...)
+    /// op count`, with `op` being a validated SQL comparison operator.
+    pub count_op: Option<String>,
+    pub count_value: Option<i64>,
+    /// Optional inner WHERE constraint contributed by `where_has`'s
+    /// closure. The inner builder's `where_terms` are merged into the
+    /// subquery body so users can refine the EXISTS arm.
+    pub inner_terms: Vec<WhereTerm>,
+    /// Phase 10D — Laravel `whereRelation("posts", "col", "val")`
+    /// shortcut. Renders the same EXISTS shape but adds the col/op/val
+    /// constraint inline; equivalent to `whereHas` with a tiny closure.
+    pub relation_column: Option<String>,
+    pub relation_op: Option<String>,
+    pub relation_value: Option<Value>,
 }
 
 /// Which part of a temporal column to compare against. Mapped per
@@ -433,6 +496,55 @@ fn validate_where_term(term: &WhereTerm) -> Result<(), FrameworkError> {
         WhereTerm::Not(inner) => validate_where_term(inner)?,
         WhereTerm::Or(terms) => {
             for t in terms {
+                validate_where_term(t)?;
+            }
+        }
+        WhereTerm::Exists(spec) => {
+            // The renderer only interpolates spec fields the macro
+            // populated from compile-time string literals or fully
+            // validated overrides. We still re-run the identifier /
+            // operator validator at the I/O boundary to enforce
+            // the contract documented on
+            // [`Builder::has`] / [`Builder::where_relation`]: even
+            // metadata fed from `RelationEntry` (which is otherwise
+            // trusted) is treated as untrusted at this layer.
+            if !spec.parent_table.is_empty() {
+                validate_identifier(&spec.parent_table)?;
+            }
+            if !spec.parent_key.is_empty() {
+                validate_identifier(&spec.parent_key)?;
+            }
+            if !spec.target_table.is_empty() {
+                validate_identifier(&spec.target_table)?;
+            }
+            if !spec.foreign_key.is_empty() {
+                validate_identifier(&spec.foreign_key)?;
+            }
+            if !spec.pivot_table.is_empty() {
+                validate_identifier(&spec.pivot_table)?;
+            }
+            if !spec.pivot_parent_key.is_empty() {
+                validate_identifier(&spec.pivot_parent_key)?;
+            }
+            if !spec.pivot_related_key.is_empty() {
+                validate_identifier(&spec.pivot_related_key)?;
+            }
+            if !spec.related_pk.is_empty() {
+                validate_identifier(&spec.related_pk)?;
+            }
+            if !spec.morph_type_column.is_empty() {
+                validate_identifier(&spec.morph_type_column)?;
+            }
+            if let Some(op) = &spec.count_op {
+                validate_sql_operator(op)?;
+            }
+            if let Some(col) = &spec.relation_column {
+                validate_identifier(col)?;
+            }
+            if let Some(op) = &spec.relation_op {
+                validate_sql_operator(op)?;
+            }
+            for t in &spec.inner_terms {
                 validate_where_term(t)?;
             }
         }
@@ -741,6 +853,20 @@ impl<M> Builder<M> {
         self.eager_specs
             .push(EagerSpec::WithWhere(rel.into(), erased));
         self
+    }
+
+    /// Folder helper: merge a fresh [`WhereTerm`] into an OR group
+    /// with the previous WHERE term, matching the shape
+    /// [`Self::or_filter`] produces.
+    fn merge_or_term(&mut self, new: WhereTerm) {
+        match self.where_terms.last_mut() {
+            Some(WhereTerm::Or(group)) => group.push(new),
+            Some(_) => {
+                let last = self.where_terms.pop().expect("checked Some above");
+                self.where_terms.push(WhereTerm::Or(vec![last, new]));
+            }
+            None => self.where_terms.push(new),
+        }
     }
 
     /// Append the `(column, value)` pairs from an `Attrs` map onto the
@@ -1480,6 +1606,313 @@ fn render_date_part(backend: DbBackend, part: DatePart, col: &str) -> String {
     }
 }
 
+/// Render an `EXISTS (...)` / `NOT EXISTS (...)` correlated subquery.
+///
+/// Three join shapes, dispatched on which slots the spec carries:
+///
+/// 1. **Pivot** (`pivot_table` populated) — m2m / morph-m2m / through:
+///    ```sql
+///    EXISTS (SELECT 1 FROM target
+///             INNER JOIN pivot
+///                ON pivot.<pivot_related_key> = target.<related_pk>
+///             WHERE pivot.<pivot_parent_key> = parent.<parent_key>
+///               AND <morph_type_column> = '<morph_type_value>'
+///               AND <inner where terms>)
+///    ```
+/// 2. **BelongsTo** (`foreign_key` on parent table, `parent_key` is
+///    target's PK) — child.id = parent.fk:
+///    ```sql
+///    EXISTS (SELECT 1 FROM target WHERE target.<parent_key> = parent.<foreign_key>)
+///    ```
+/// 3. **Has** (`foreign_key` on target table, `parent_key` is parent
+///    PK) — child.fk = parent.pk:
+///    ```sql
+///    EXISTS (SELECT 1 FROM target WHERE target.<foreign_key> = parent.<parent_key>
+///                                   AND <morph_type_column> = '<morph_type_value>'
+///                                   AND <inner where terms>)
+///    ```
+///
+/// When `spec.count_op`/`count_value` are set the renderer emits a
+/// scalar `(SELECT COUNT(*) ...) <op> <n>` shape instead of bare
+/// `EXISTS`. When `spec.positive` is `false` the whole result wraps in
+/// `NOT (...)`.
+///
+/// The renderer threads `values` + `n` through the placeholder
+/// counter — Postgres `$N` numbers stay monotonic across the parent's
+/// WHERE clause and the subquery body, the same way UNION arms do.
+fn render_exists(
+    backend: DbBackend,
+    spec: &ExistsSpec,
+    values: &mut Vec<SeaValue>,
+    n: &mut usize,
+) -> String {
+    let mut where_parts: Vec<String> = Vec::new();
+
+    // Three shapes — pivot, belongs-to, has — selected by which slots
+    // the spec carries. The renderer is intentionally explicit rather
+    // than data-driven: each shape has different correlation logic, and
+    // a generic templater would obscure which join lands on which side.
+    let from_clause = if !spec.pivot_table.is_empty() {
+        // Pivot path. `target_table` JOIN `pivot_table` on
+        // `pivot.related_key = target.related_pk`. The correlation
+        // back to the parent goes on `pivot.parent_key = parent.pk`.
+        let join_clause = if spec.related_pk.is_empty() || spec.pivot_related_key.is_empty() {
+            // Degenerate pivot (no target join column). Fall back to
+            // the parent-correlation alone — degrades gracefully when
+            // the macro could only supply the parent side.
+            spec.pivot_table.clone()
+        } else {
+            format!(
+                "{pivot} INNER JOIN {target} ON {pivot}.{prk} = {target}.{tpk}",
+                pivot = spec.pivot_table,
+                target = spec.target_table,
+                prk = spec.pivot_related_key,
+                tpk = spec.related_pk,
+            )
+        };
+        where_parts.push(format!(
+            "{pivot}.{ppk} = {parent}.{pk}",
+            pivot = spec.pivot_table,
+            ppk = spec.pivot_parent_key,
+            parent = spec.parent_table,
+            pk = spec.parent_key,
+        ));
+        if !spec.morph_type_column.is_empty() && !spec.morph_type_value.is_empty() {
+            *n += 1;
+            let ph = placeholder(backend, *n);
+            values.push(SeaValue::String(Some(Box::new(
+                spec.morph_type_value.clone(),
+            ))));
+            where_parts.push(format!(
+                "{pivot}.{col} = {ph}",
+                pivot = spec.pivot_table,
+                col = spec.morph_type_column,
+            ));
+        }
+        join_clause
+    } else if !spec.target_table.is_empty() {
+        // Has / belongs-to path. The correlation column on the target
+        // side is `foreign_key`; on the parent side it's `parent_key`.
+        where_parts.push(format!(
+            "{target}.{fk} = {parent}.{pk}",
+            target = spec.target_table,
+            fk = spec.foreign_key,
+            parent = spec.parent_table,
+            pk = spec.parent_key,
+        ));
+        if !spec.morph_type_column.is_empty() && !spec.morph_type_value.is_empty() {
+            *n += 1;
+            let ph = placeholder(backend, *n);
+            values.push(SeaValue::String(Some(Box::new(
+                spec.morph_type_value.clone(),
+            ))));
+            where_parts.push(format!(
+                "{target}.{col} = {ph}",
+                target = spec.target_table,
+                col = spec.morph_type_column,
+            ));
+        }
+        spec.target_table.clone()
+    } else {
+        // No target table and no pivot — there's no SQL we can render.
+        // This shouldn't be reachable from the builder API, but if
+        // metadata is missing we render a clause that fails closed:
+        // `EXISTS (SELECT 1 WHERE 1 = 0)` evaluates to FALSE, which
+        // matches "you asked for related rows we can't locate, so
+        // none qualify."
+        if spec.positive {
+            return "EXISTS (SELECT 1 WHERE 1 = 0)".to_string();
+        } else {
+            return "NOT EXISTS (SELECT 1 WHERE 1 = 0)".to_string();
+        }
+    };
+
+    // Inner constraint from `where_has`'s closure.
+    for t in &spec.inner_terms {
+        let part = render_subquery_term(backend, t, values, n);
+        where_parts.push(part);
+    }
+
+    // `where_relation` shortcut: col op val constraint inline.
+    if let (Some(col), Some(val)) = (&spec.relation_column, &spec.relation_value) {
+        let op = spec
+            .relation_op
+            .as_deref()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "=".to_string());
+        *n += 1;
+        let ph = placeholder(backend, *n);
+        values.push(json_value_to_sea_value(val));
+        // Qualify with the target table when present so the col reads
+        // unambiguously in the subquery's WHERE — Laravel's
+        // whereRelation always renders the qualified form.
+        if !spec.target_table.is_empty() {
+            where_parts.push(format!("{}.{} {} {}", spec.target_table, col, op, ph));
+        } else {
+            where_parts.push(format!("{col} {op} {ph}"));
+        }
+    }
+
+    let where_sql = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_parts.join(" AND "))
+    };
+
+    let body = if let (Some(op), Some(count)) = (&spec.count_op, spec.count_value) {
+        // Scalar-subquery form: `(SELECT COUNT(*) FROM ...) <op> <count>`.
+        // The count value lands inline (not bound) because it's a
+        // typed `i64` we control — no injection surface. The operator
+        // already passed `validate_sql_operator`.
+        format!(
+            "(SELECT COUNT(*) FROM {from}{where_sql}) {op} {count}",
+            from = from_clause,
+            where_sql = where_sql,
+        )
+    } else {
+        format!(
+            "EXISTS (SELECT 1 FROM {from}{where_sql})",
+            from = from_clause
+        )
+    };
+
+    if spec.positive {
+        body
+    } else {
+        // Count-mode and exists-mode wrap differently. For
+        // `(SELECT COUNT(*) ...) op n`, polarity flips the operator
+        // semantically; the simplest correct render is to wrap the
+        // whole comparison in NOT. SQL's NOT against a comparison is
+        // well-defined and matches Laravel's `orDoesntHave` behaviour.
+        format!("NOT ({body})")
+    }
+}
+
+/// Render a single [`WhereTerm`] inside the EXISTS subquery body.
+/// Mirrors `Builder::render_where_term`'s arms but free-standing so the
+/// renderer doesn't require a `Builder<M>` receiver — the inner terms
+/// were copied off a typed `Builder<R>` at `where_has` time and the
+/// types `R` have already been discarded.
+fn render_subquery_term(
+    backend: DbBackend,
+    term: &WhereTerm,
+    values: &mut Vec<SeaValue>,
+    n: &mut usize,
+) -> String {
+    match term {
+        WhereTerm::Eq(col, v) => {
+            *n += 1;
+            let ph = placeholder(backend, *n);
+            values.push(json_value_to_sea_value(v));
+            format!("{col} = {ph}")
+        }
+        WhereTerm::Op(col, op, v) => {
+            *n += 1;
+            let ph = placeholder(backend, *n);
+            values.push(json_value_to_sea_value(v));
+            format!("{col} {op} {ph}")
+        }
+        WhereTerm::In(col, vs) => {
+            let phs: Vec<String> = vs
+                .iter()
+                .map(|v| {
+                    *n += 1;
+                    let ph = placeholder(backend, *n);
+                    values.push(json_value_to_sea_value(v));
+                    ph
+                })
+                .collect();
+            if phs.is_empty() {
+                "1 = 0".to_string()
+            } else {
+                format!("{col} IN ({})", phs.join(", "))
+            }
+        }
+        WhereTerm::NotIn(col, vs) => {
+            let phs: Vec<String> = vs
+                .iter()
+                .map(|v| {
+                    *n += 1;
+                    let ph = placeholder(backend, *n);
+                    values.push(json_value_to_sea_value(v));
+                    ph
+                })
+                .collect();
+            if phs.is_empty() {
+                "1 = 1".to_string()
+            } else {
+                format!("{col} NOT IN ({})", phs.join(", "))
+            }
+        }
+        WhereTerm::Between(col, a, b) => {
+            *n += 1;
+            let pa = placeholder(backend, *n);
+            values.push(json_value_to_sea_value(a));
+            *n += 1;
+            let pb = placeholder(backend, *n);
+            values.push(json_value_to_sea_value(b));
+            format!("{col} BETWEEN {pa} AND {pb}")
+        }
+        WhereTerm::NotBetween(col, a, b) => {
+            *n += 1;
+            let pa = placeholder(backend, *n);
+            values.push(json_value_to_sea_value(a));
+            *n += 1;
+            let pb = placeholder(backend, *n);
+            values.push(json_value_to_sea_value(b));
+            format!("{col} NOT BETWEEN {pa} AND {pb}")
+        }
+        WhereTerm::Null(col) => format!("{col} IS NULL"),
+        WhereTerm::NotNull(col) => format!("{col} IS NOT NULL"),
+        WhereTerm::Like(col, pat) => {
+            *n += 1;
+            let ph = placeholder(backend, *n);
+            values.push(SeaValue::String(Some(Box::new(pat.clone()))));
+            format!("{col} LIKE {ph}")
+        }
+        WhereTerm::NotLike(col, pat) => {
+            *n += 1;
+            let ph = placeholder(backend, *n);
+            values.push(SeaValue::String(Some(Box::new(pat.clone()))));
+            format!("{col} NOT LIKE {ph}")
+        }
+        WhereTerm::Column(a, b) => format!("{a} = {b}"),
+        WhereTerm::Raw(sql, bindings) => {
+            for v in bindings {
+                *n += 1;
+                values.push(json_value_to_sea_value(v));
+            }
+            sql.clone()
+        }
+        WhereTerm::JsonContains(col, v) => {
+            *n += 1;
+            let ph = placeholder(backend, *n);
+            values.push(json_value_to_sea_value(v));
+            render_json_contains(backend, col, &ph)
+        }
+        WhereTerm::JsonLength(col, op, len) => render_json_length(backend, col, op, *len),
+        WhereTerm::DatePart(part, col, v) => {
+            *n += 1;
+            let ph = placeholder(backend, *n);
+            values.push(json_value_to_sea_value(v));
+            let lhs = render_date_part(backend, *part, col);
+            format!("{lhs} = {ph}")
+        }
+        WhereTerm::Not(inner) => {
+            let inner_sql = render_subquery_term(backend, inner, values, n);
+            format!("NOT ({inner_sql})")
+        }
+        WhereTerm::Or(terms) => {
+            let parts: Vec<String> = terms
+                .iter()
+                .map(|t| render_subquery_term(backend, t, values, n))
+                .collect();
+            format!("({})", parts.join(" OR "))
+        }
+        WhereTerm::Exists(spec) => render_exists(backend, spec, values, n),
+    }
+}
+
 fn render_json_contains(backend: DbBackend, col: &str, ph: &str) -> String {
     match backend {
         DbBackend::Postgres => format!("{col} @> {ph}"),
@@ -1630,6 +2063,7 @@ impl<M> Builder<M> {
                     .collect();
                 format!("({})", parts.join(" OR "))
             }
+            WhereTerm::Exists(spec) => render_exists(backend, spec, values, n),
         }
     }
 
@@ -1901,6 +2335,428 @@ where
     <<M::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
         Send + Into<sea_orm::Value>,
 {
+    // ---- Has / where-has existence engine (Laravel parity) ---------------
+    //
+    // These methods produce correlated `EXISTS (...)` / `NOT EXISTS
+    // (...)` subqueries from a relation name. The relation lookup uses
+    // [`crate::eloquent::relations::find_relation`] keyed on `M`'s
+    // `TypeId`; unknown names render the safe "no rows match" form so
+    // a typo silently returns an empty result set instead of leaking
+    // a full-table scan.
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_exists_spec_for(
+        &self,
+        relation: &str,
+        positive: bool,
+        count_op: Option<&str>,
+        count_value: Option<i64>,
+        inner_terms: Vec<WhereTerm>,
+        relation_column: Option<String>,
+        relation_op: Option<String>,
+        relation_value: Option<Value>,
+    ) -> ExistsSpec {
+        let entry = crate::eloquent::relations::find_relation::<M>(relation);
+        match entry {
+            Some(e) => ExistsSpec {
+                parent_table: M::TABLE.to_string(),
+                parent_key: e.parent_key.to_string(),
+                target_table: e.target_table.to_string(),
+                foreign_key: e.foreign_key.to_string(),
+                pivot_table: e.pivot_table.to_string(),
+                pivot_parent_key: e.pivot_parent_key.to_string(),
+                pivot_related_key: e.pivot_related_key.to_string(),
+                related_pk: if e.pivot_table.is_empty() {
+                    String::new()
+                } else {
+                    "id".to_string()
+                },
+                morph_type_column: e.morph_type_column.to_string(),
+                morph_type_value: e.morph_type_value.to_string(),
+                positive,
+                count_op: count_op.map(str::to_string),
+                count_value,
+                inner_terms,
+                relation_column,
+                relation_op,
+                relation_value,
+            },
+            None => ExistsSpec {
+                parent_table: M::TABLE.to_string(),
+                parent_key: String::new(),
+                target_table: String::new(),
+                foreign_key: String::new(),
+                pivot_table: String::new(),
+                pivot_parent_key: String::new(),
+                pivot_related_key: String::new(),
+                related_pk: String::new(),
+                morph_type_column: String::new(),
+                morph_type_value: String::new(),
+                positive,
+                count_op: count_op.map(str::to_string),
+                count_value,
+                inner_terms,
+                relation_column,
+                relation_op,
+                relation_value,
+            },
+        }
+    }
+
+    /// `WHERE EXISTS (SELECT 1 FROM related ...)` — restrict to rows
+    /// whose `relation` returns at least one matching child.
+    ///
+    /// ```ignore
+    /// // Users who have at least one post.
+    /// let users = User::query().has("posts").get().await?;
+    /// ```
+    pub fn has(mut self, relation: &str) -> Self {
+        let spec =
+            self.build_exists_spec_for(relation, true, None, None, Vec::new(), None, None, None);
+        self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
+        self
+    }
+
+    /// `WHERE (SELECT COUNT(*) FROM related ...) <op> <count>` — like
+    /// [`Self::has`] but with a count comparator.
+    ///
+    /// ```ignore
+    /// // Users with at least 3 published posts.
+    /// let prolific = User::query().has_count("posts", ">=", 3).get().await?;
+    /// ```
+    pub fn has_count(mut self, relation: &str, op: &str, count: i64) -> Self {
+        let spec = self.build_exists_spec_for(
+            relation,
+            true,
+            Some(op),
+            Some(count),
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
+        self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
+        self
+    }
+
+    /// `OR EXISTS (...)` — disjunction form of [`Self::has`].
+    pub fn or_has(mut self, relation: &str) -> Self {
+        let spec =
+            self.build_exists_spec_for(relation, true, None, None, Vec::new(), None, None, None);
+        let new = WhereTerm::Exists(Box::new(spec));
+        self.merge_or_term(new);
+        self
+    }
+
+    /// `WHERE NOT EXISTS (SELECT 1 FROM related ...)` — restrict to
+    /// rows whose `relation` returns no matching children.
+    pub fn doesnt_have(mut self, relation: &str) -> Self {
+        let spec =
+            self.build_exists_spec_for(relation, false, None, None, Vec::new(), None, None, None);
+        self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
+        self
+    }
+
+    /// `OR NOT EXISTS (...)` — disjunction form of [`Self::doesnt_have`].
+    pub fn or_doesnt_have(mut self, relation: &str) -> Self {
+        let spec =
+            self.build_exists_spec_for(relation, false, None, None, Vec::new(), None, None, None);
+        let new = WhereTerm::Exists(Box::new(spec));
+        self.merge_or_term(new);
+        self
+    }
+
+    /// `WHERE EXISTS (SELECT 1 FROM related WHERE <closure>)` — take a
+    /// closure constraining the inner builder; the WHERE terms it
+    /// produces land in the subquery's body.
+    ///
+    /// ```ignore
+    /// let recent = User::query()
+    ///     .where_has::<Post, _>("posts", |q| q.filter_op("created_at", ">=", "2026-01-01"))
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn where_has<R, F>(mut self, relation: &str, predicate: F) -> Self
+    where
+        R: 'static,
+        F: FnOnce(Builder<R>) -> Builder<R>,
+    {
+        let inner = predicate(Builder::<R>::new());
+        let spec = self.build_exists_spec_for(
+            relation,
+            true,
+            None,
+            None,
+            inner.where_terms,
+            None,
+            None,
+            None,
+        );
+        self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
+        self
+    }
+
+    /// `OR EXISTS (... <closure>)` — disjunction form of [`Self::where_has`].
+    pub fn or_where_has<R, F>(mut self, relation: &str, predicate: F) -> Self
+    where
+        R: 'static,
+        F: FnOnce(Builder<R>) -> Builder<R>,
+    {
+        let inner = predicate(Builder::<R>::new());
+        let spec = self.build_exists_spec_for(
+            relation,
+            true,
+            None,
+            None,
+            inner.where_terms,
+            None,
+            None,
+            None,
+        );
+        let new = WhereTerm::Exists(Box::new(spec));
+        self.merge_or_term(new);
+        self
+    }
+
+    /// `WHERE NOT EXISTS (... <closure>)`. Negated form of [`Self::where_has`].
+    pub fn where_doesnt_have<R, F>(mut self, relation: &str, predicate: F) -> Self
+    where
+        R: 'static,
+        F: FnOnce(Builder<R>) -> Builder<R>,
+    {
+        let inner = predicate(Builder::<R>::new());
+        let spec = self.build_exists_spec_for(
+            relation,
+            false,
+            None,
+            None,
+            inner.where_terms,
+            None,
+            None,
+            None,
+        );
+        self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
+        self
+    }
+
+    /// `OR NOT EXISTS (... <closure>)`.
+    pub fn or_where_doesnt_have<R, F>(mut self, relation: &str, predicate: F) -> Self
+    where
+        R: 'static,
+        F: FnOnce(Builder<R>) -> Builder<R>,
+    {
+        let inner = predicate(Builder::<R>::new());
+        let spec = self.build_exists_spec_for(
+            relation,
+            false,
+            None,
+            None,
+            inner.where_terms,
+            None,
+            None,
+            None,
+        );
+        let new = WhereTerm::Exists(Box::new(spec));
+        self.merge_or_term(new);
+        self
+    }
+
+    /// Laravel's `whereRelation` shortcut. Equivalent to
+    /// `where_has::<R, _>(rel, |q| q.filter(col, val))` without the
+    /// typed closure — the column constraint renders inline in the
+    /// EXISTS subquery body.
+    pub fn where_relation(
+        mut self,
+        relation: &str,
+        col: impl IntoColumn,
+        val: impl IntoVal,
+    ) -> Self {
+        let spec = self.build_exists_spec_for(
+            relation,
+            true,
+            None,
+            None,
+            Vec::new(),
+            Some(col.col_name()),
+            Some("=".to_string()),
+            Some(val.into_val()),
+        );
+        self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
+        self
+    }
+
+    /// Like [`Self::where_relation`] but takes an explicit comparison
+    /// operator (`>`, `<=`, `!=`, ...).
+    pub fn where_relation_op(
+        mut self,
+        relation: &str,
+        col: impl IntoColumn,
+        op: &str,
+        val: impl IntoVal,
+    ) -> Self {
+        let spec = self.build_exists_spec_for(
+            relation,
+            true,
+            None,
+            None,
+            Vec::new(),
+            Some(col.col_name()),
+            Some(op.to_string()),
+            Some(val.into_val()),
+        );
+        self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
+        self
+    }
+
+    /// `OR ...` form of [`Self::where_relation`].
+    pub fn or_where_relation(
+        mut self,
+        relation: &str,
+        col: impl IntoColumn,
+        val: impl IntoVal,
+    ) -> Self {
+        let spec = self.build_exists_spec_for(
+            relation,
+            true,
+            None,
+            None,
+            Vec::new(),
+            Some(col.col_name()),
+            Some("=".to_string()),
+            Some(val.into_val()),
+        );
+        let new = WhereTerm::Exists(Box::new(spec));
+        self.merge_or_term(new);
+        self
+    }
+
+    /// Laravel's `whereBelongsTo($parent, "rel")` — restrict to rows
+    /// whose `rel` belongs-to-relation matches the given parent row's
+    /// PK. Renders a direct `WHERE child.<fk> = <parent_pk>` because
+    /// the belongs-to FK lives on THIS table (no EXISTS needed).
+    ///
+    /// ```ignore
+    /// let posts = Post::query().where_belongs_to("author", author.id).get().await?;
+    /// ```
+    pub fn where_belongs_to(mut self, relation: &str, parent_pk: impl IntoVal) -> Self {
+        if let Some(e) = crate::eloquent::relations::find_relation::<M>(relation) {
+            self.where_terms.push(WhereTerm::Eq(
+                e.foreign_key.to_string(),
+                parent_pk.into_val(),
+            ));
+        } else {
+            self.where_terms
+                .push(WhereTerm::Raw("1 = 0".to_string(), Vec::new()));
+        }
+        self
+    }
+
+    // ---- where_key / where_key_not / latest / oldest -------------------
+
+    /// Laravel-shape PK filter — `WHERE pk = id`. Sugar over
+    /// `filter(M::primary_key_name(), id)`.
+    pub fn where_key(self, id: impl IntoVal) -> Self {
+        let pk = M::primary_key_name();
+        self.filter(pk, id)
+    }
+
+    /// Rust-idiomatic alias for [`Self::where_key`].
+    pub fn filter_key(self, id: impl IntoVal) -> Self {
+        self.where_key(id)
+    }
+
+    /// Laravel-shape PK exclusion — `WHERE pk <> id`. Sugar over
+    /// `filter_op(M::primary_key_name(), "!=", id)`.
+    pub fn where_key_not(self, id: impl IntoVal) -> Self {
+        let pk = M::primary_key_name();
+        self.filter_op(pk, "!=", id)
+    }
+
+    /// Rust-idiomatic alias for [`Self::where_key_not`].
+    pub fn filter_key_not(self, id: impl IntoVal) -> Self {
+        self.where_key_not(id)
+    }
+
+    /// Laravel-shape `latest()` — `ORDER BY <col> DESC`. Defaults to
+    /// `"created_at"`; pass an explicit column to override.
+    pub fn latest(self) -> Self {
+        self.order_by("created_at", Direction::Desc)
+    }
+
+    /// Like [`Self::latest`] but uses the named column.
+    pub fn latest_by(self, col: impl IntoColumn) -> Self {
+        self.order_by(col, Direction::Desc)
+    }
+
+    /// Laravel-shape `oldest()` — `ORDER BY <col> ASC`. Defaults to
+    /// `"created_at"`; pass an explicit column to override.
+    pub fn oldest(self) -> Self {
+        self.order_by("created_at", Direction::Asc)
+    }
+
+    /// Like [`Self::oldest`] but uses the named column.
+    pub fn oldest_by(self, col: impl IntoColumn) -> Self {
+        self.order_by(col, Direction::Asc)
+    }
+
+    // ---- without / with_only (eager-load opt-outs) ------------------------
+
+    /// Remove `relations` from the eager-load plan. No-op when none of
+    /// the names match. Mirrors Laravel's `Builder::without`.
+    pub fn without<I, S>(mut self, relations: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let drop: std::collections::HashSet<String> =
+            relations.into_iter().map(Into::into).collect();
+        self.eager_specs.retain(|spec| match spec {
+            EagerSpec::With(n)
+            | EagerSpec::WithCount(n)
+            | EagerSpec::WithSum(n, _)
+            | EagerSpec::WithAvg(n, _)
+            | EagerSpec::WithMin(n, _)
+            | EagerSpec::WithMax(n, _)
+            | EagerSpec::WithWhere(n, _) => !drop.contains(n),
+        });
+        self
+    }
+
+    /// Replace the eager-load plan with exactly `relations`. Mirrors
+    /// Laravel's `Builder::withOnly`.
+    pub fn with_only<I, S>(mut self, relations: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.eager_specs.clear();
+        for r in relations {
+            self.eager_specs.push(EagerSpec::With(r.into()));
+        }
+        self
+    }
+
+    // ---- qualify_column / qualify_columns ---------------------------------
+
+    /// Return `M::TABLE.col` — the fully-qualified column name. Useful
+    /// for joins where bare `col` would be ambiguous. Mirrors
+    /// Laravel's `Model::qualifyColumn`.
+    pub fn qualify_column(col: &str) -> String {
+        format!("{}.{}", M::TABLE, col)
+    }
+
+    /// Qualify every column in `cols` against `M::TABLE`. Returns a
+    /// new `Vec<String>`.
+    pub fn qualify_columns<I, S>(cols: I) -> Vec<String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        cols.into_iter()
+            .map(|c| format!("{}.{}", M::TABLE, c.as_ref()))
+            .collect()
+    }
+
     /// Render the SQL for debugging. Uses the live DB connection's
     /// backend if one is initialised, otherwise falls back to SQLite
     /// shape so tests without a connection still get deterministic
@@ -2275,6 +3131,77 @@ where
         self.first()
             .await?
             .ok_or_else(|| FrameworkError::not_found("no rows matched"))
+    }
+
+    /// Laravel-shape `sole()` — succeed only when the query matches
+    /// EXACTLY one row.
+    ///
+    /// Returns `FrameworkError::not_found` when zero rows match and
+    /// `FrameworkError::bad_request` ("multiple rows matched") when two
+    /// or more rows match. Useful in invariant-checking code paths
+    /// where ambiguity is a bug, not a UX choice.
+    pub async fn sole(mut self) -> Result<M, FrameworkError> {
+        // Fetch up to 2 rows so we can distinguish the "exactly one"
+        // case from the "many" case without paying a separate COUNT.
+        self.limit = Some(2);
+        let mut rows = self.get().await?.into_vec();
+        match rows.len() {
+            0 => Err(FrameworkError::not_found("no rows matched")),
+            1 => Ok(rows.pop().expect("rows.len() == 1 checked above")),
+            _ => Err(FrameworkError::bad_request(
+                "multiple rows matched a sole() query",
+            )),
+        }
+    }
+
+    /// Laravel-shape `soleValue($col)` — fetch a single value, succeed
+    /// only when one row matches. Variant of [`Self::sole`] that
+    /// projects a column.
+    pub async fn sole_value<T: TryGetable>(
+        mut self,
+        col: impl IntoColumn,
+    ) -> Result<T, FrameworkError> {
+        // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
+        // + per-model default + `__read_replica__`.
+        self.limit = Some(2);
+        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
+            self.tx_override.as_ref(),
+            self.connection_override.as_deref(),
+            M::default_connection_name(),
+        )
+        .await?;
+        let backend = exec.backend();
+        let col_name = col.col_name();
+        let (sql, vals) = self.render_select_for(backend, M::TABLE, &col_name)?;
+        let stmt = Statement::from_sql_and_values(backend, &sql, vals);
+        let rows = exec
+            .query_all(stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        match rows.len() {
+            0 => Err(FrameworkError::not_found("no rows matched")),
+            1 => rows[0]
+                .try_get::<T>("", &col_name)
+                .map_err(|e| FrameworkError::database(e.to_string())),
+            _ => Err(FrameworkError::bad_request(
+                "multiple rows matched a sole_value() query",
+            )),
+        }
+    }
+
+    /// Laravel-shape `valueOrFail($col)` — fetch a single column from
+    /// the first matching row, error when no row matches.
+    pub async fn value_or_fail<T: TryGetable>(
+        self,
+        col: impl IntoColumn,
+    ) -> Result<T, FrameworkError> {
+        let col_name_owned = col.col_name();
+        match self.value::<T>(col_name_owned.as_str()).await? {
+            Some(v) => Ok(v),
+            None => Err(FrameworkError::not_found(format!(
+                "no value for column {col_name_owned}"
+            ))),
+        }
     }
 
     /// Whether the query matches at least one row.
@@ -3040,6 +3967,283 @@ where
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(row.and_then(|r| r.try_get::<T>("", expr).ok()))
+    }
+
+    // ---- Mass update / delete / upsert / increment_each / decrement_each --
+    //
+    // These methods compile to a single SQL statement that hits the
+    // database directly — no per-row Model lifecycle hooks fire. Use
+    // them when you have a WHERE-shape narrowing the scope and want to
+    // mutate every matching row in one round-trip (the canonical
+    // analogue of Laravel's `Model::query()->update([...])`).
+    //
+    // For per-row hooks (Saving / Updated / Deleted events), iterate
+    // with `get()` and call `.save()` / `.update(...)` / `.delete()`
+    // on each row instead.
+
+    /// `UPDATE table SET <attrs> WHERE <where_terms>`. Returns the
+    /// affected row count. Does NOT fire model events — for per-row
+    /// hook dispatch iterate with `get()` and call `.update(attrs)`
+    /// per row.
+    ///
+    /// Every column in `attrs` is interpolated as a SQL identifier
+    /// (not a parameter — SQL doesn't allow that), and validated
+    /// through [`crate::database::validate_identifier`]. Values are
+    /// bound as parameters.
+    pub async fn update_all(self, attrs: Attrs) -> Result<u64, FrameworkError> {
+        if attrs.is_empty() {
+            return Ok(0);
+        }
+        // Validate column names up front so an injection attempt fails
+        // closed before the renderer interpolates them.
+        for (k, _) in attrs.iter() {
+            crate::database::validate_identifier(k)?;
+        }
+        self.validate_inputs()?;
+        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+            self.tx_override.as_ref(),
+            self.connection_override.as_deref(),
+            M::default_connection_name(),
+        )
+        .await?;
+        let backend = exec.backend();
+
+        let mut values: Vec<SeaValue> = Vec::new();
+        let mut n: usize = 0;
+
+        let mut sql = String::new();
+        sql.push_str("UPDATE ");
+        sql.push_str(M::TABLE);
+        sql.push_str(" SET ");
+        let set_parts: Vec<String> = attrs
+            .iter()
+            .map(|(col, v)| {
+                n += 1;
+                let ph = placeholder(backend, n);
+                values.push(json_value_to_sea_value(v));
+                format!("{col} = {ph}")
+            })
+            .collect();
+        sql.push_str(&set_parts.join(", "));
+
+        if !self.where_terms.is_empty() {
+            sql.push_str(" WHERE ");
+            let parts: Vec<String> = self
+                .where_terms
+                .iter()
+                .map(|t| self.render_where_term(backend, t, &mut values, &mut n))
+                .collect();
+            sql.push_str(&parts.join(" AND "));
+        }
+
+        let stmt = Statement::from_sql_and_values(backend, &sql, values);
+        let result = exec
+            .run(stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        Ok(result.rows_affected())
+    }
+
+    /// `DELETE FROM table WHERE <where_terms>`. Returns the affected
+    /// row count. Mass-delete — no per-row Model events fire. For
+    /// soft-delete model behaviour iterate with `get()` and call
+    /// `.delete()` per row.
+    pub async fn delete_all(self) -> Result<u64, FrameworkError> {
+        self.validate_inputs()?;
+        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+            self.tx_override.as_ref(),
+            self.connection_override.as_deref(),
+            M::default_connection_name(),
+        )
+        .await?;
+        let backend = exec.backend();
+        let (sql, vals) = self.to_delete_sql_with_bindings_for(backend, M::TABLE);
+        let stmt = Statement::from_sql_and_values(backend, &sql, vals);
+        let result = exec
+            .run(stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        Ok(result.rows_affected())
+    }
+
+    /// Increment each column in `columns` by its mapped step. Atomic
+    /// `UPDATE table SET col1 = col1 + ?, col2 = col2 + ? WHERE
+    /// <where_terms>`. Returns the affected row count.
+    ///
+    /// Column names are validated through
+    /// [`crate::database::validate_identifier`].
+    pub async fn increment_each<I, S>(self, columns: I) -> Result<u64, FrameworkError>
+    where
+        I: IntoIterator<Item = (S, i64)>,
+        S: Into<String>,
+    {
+        let owned: Vec<(String, i64)> = columns.into_iter().map(|(c, v)| (c.into(), v)).collect();
+        for (c, _) in &owned {
+            crate::database::validate_identifier(c)?;
+        }
+        if owned.is_empty() {
+            return Ok(0);
+        }
+        self.validate_inputs()?;
+        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+            self.tx_override.as_ref(),
+            self.connection_override.as_deref(),
+            M::default_connection_name(),
+        )
+        .await?;
+        let backend = exec.backend();
+        let mut values: Vec<SeaValue> = Vec::new();
+        let mut n: usize = 0;
+        let mut sql = String::new();
+        sql.push_str("UPDATE ");
+        sql.push_str(M::TABLE);
+        sql.push_str(" SET ");
+        let set_parts: Vec<String> = owned
+            .iter()
+            .map(|(col, step)| {
+                n += 1;
+                let ph = placeholder(backend, n);
+                values.push(SeaValue::BigInt(Some(*step)));
+                format!("{col} = {col} + {ph}")
+            })
+            .collect();
+        sql.push_str(&set_parts.join(", "));
+        if !self.where_terms.is_empty() {
+            sql.push_str(" WHERE ");
+            let parts: Vec<String> = self
+                .where_terms
+                .iter()
+                .map(|t| self.render_where_term(backend, t, &mut values, &mut n))
+                .collect();
+            sql.push_str(&parts.join(" AND "));
+        }
+        let stmt = Statement::from_sql_and_values(backend, &sql, values);
+        let result = exec
+            .run(stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        Ok(result.rows_affected())
+    }
+
+    /// Decrement each column in `columns` by its mapped step. Sugar
+    /// over [`Self::increment_each`] with the step negated.
+    pub async fn decrement_each<I, S>(self, columns: I) -> Result<u64, FrameworkError>
+    where
+        I: IntoIterator<Item = (S, i64)>,
+        S: Into<String>,
+    {
+        let negated: Vec<(String, i64)> =
+            columns.into_iter().map(|(c, v)| (c.into(), -v)).collect();
+        self.increment_each(negated).await
+    }
+
+    /// `INSERT ... ON CONFLICT (unique_by) DO UPDATE SET ...` (Postgres /
+    /// SQLite) / `INSERT ... ON DUPLICATE KEY UPDATE ...` (MySQL).
+    /// Mirrors Laravel's `Builder::upsert`.
+    ///
+    /// `rows` carries the values to insert; `unique_by` carries the
+    /// columns that identify a "duplicate" (the conflict target); when
+    /// `update` is `Some`, only those columns receive the conflict-side
+    /// `SET` clause (defaults to every column in the first row's keyset
+    /// except the unique-by columns when `None`).
+    ///
+    /// Returns the affected row count. Does NOT fire per-row model
+    /// events — use [`Model::create`] / [`Model::update`] from a loop
+    /// for that.
+    pub async fn upsert(
+        self,
+        rows: Vec<Attrs>,
+        unique_by: Vec<&str>,
+        update: Option<Vec<&str>>,
+    ) -> Result<u64, FrameworkError> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        for c in &unique_by {
+            crate::database::validate_identifier(c)?;
+        }
+        if let Some(cs) = &update {
+            for c in cs {
+                crate::database::validate_identifier(c)?;
+            }
+        }
+        // Determine the column order from the first row; all rows must
+        // share the same column set.
+        let cols: Vec<String> = rows[0].iter().map(|(k, _)| k.to_string()).collect();
+        for c in &cols {
+            crate::database::validate_identifier(c)?;
+        }
+        let update_cols: Vec<String> = match update {
+            Some(cs) => cs.iter().map(|s| s.to_string()).collect(),
+            None => cols
+                .iter()
+                .filter(|c| !unique_by.contains(&c.as_str()))
+                .cloned()
+                .collect(),
+        };
+
+        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+            self.tx_override.as_ref(),
+            self.connection_override.as_deref(),
+            M::default_connection_name(),
+        )
+        .await?;
+        let backend = exec.backend();
+
+        let mut values: Vec<SeaValue> = Vec::new();
+        let mut n: usize = 0;
+
+        let mut sql = String::new();
+        sql.push_str("INSERT INTO ");
+        sql.push_str(M::TABLE);
+        sql.push_str(" (");
+        sql.push_str(&cols.join(", "));
+        sql.push_str(") VALUES ");
+        let row_parts: Vec<String> = rows
+            .iter()
+            .map(|attrs| {
+                let phs: Vec<String> = cols
+                    .iter()
+                    .map(|c| {
+                        let v = attrs.get(c).cloned().unwrap_or(Value::Null);
+                        n += 1;
+                        let ph = placeholder(backend, n);
+                        values.push(json_value_to_sea_value(&v));
+                        ph
+                    })
+                    .collect();
+                format!("({})", phs.join(", "))
+            })
+            .collect();
+        sql.push_str(&row_parts.join(", "));
+
+        match backend {
+            DbBackend::Postgres | DbBackend::Sqlite => {
+                sql.push_str(" ON CONFLICT (");
+                sql.push_str(&unique_by.join(", "));
+                sql.push_str(") DO UPDATE SET ");
+                let set_parts: Vec<String> = update_cols
+                    .iter()
+                    .map(|c| format!("{c} = EXCLUDED.{c}"))
+                    .collect();
+                sql.push_str(&set_parts.join(", "));
+            }
+            DbBackend::MySql => {
+                sql.push_str(" ON DUPLICATE KEY UPDATE ");
+                let set_parts: Vec<String> = update_cols
+                    .iter()
+                    .map(|c| format!("{c} = VALUES({c})"))
+                    .collect();
+                sql.push_str(&set_parts.join(", "));
+            }
+        }
+
+        let stmt = Statement::from_sql_and_values(backend, &sql, values);
+        let result = exec
+            .run(stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        Ok(result.rows_affected())
     }
 }
 

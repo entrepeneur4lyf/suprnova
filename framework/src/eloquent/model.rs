@@ -914,6 +914,151 @@ where
         self.increment(column, -by).await
     }
 
+    // ---- Static destroy / is / is_not (Laravel parity) -----------------
+
+    /// Static mass-delete by primary key set. Laravel's
+    /// `Model::destroy([1,2,3])` analogue. Returns the count of rows
+    /// actually removed.
+    ///
+    /// Per-row lifecycle events fire — internally this hydrates each
+    /// matching row via [`Self::find`] and calls `.delete()` on it.
+    /// That preserves the soft-delete inherent override behaviour and
+    /// dispatches `Deleting` / `Deleted` for each row.
+    async fn destroy<I, K>(ids: I) -> Result<u64, FrameworkError>
+    where
+        I: IntoIterator<Item = K> + Send,
+        I::IntoIter: Send,
+        K: Into<<<Self::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType> + Send,
+    {
+        let mut removed: u64 = 0;
+        for id in ids {
+            if let Some(row) = Self::find(id).await? {
+                row.delete().await?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Static force-mass-delete by primary key set. Mirrors
+    /// `Model::forceDestroy([1,2,3])`. Bypasses soft-delete tombstone
+    /// semantics — every matched row is physically removed.
+    async fn force_destroy<I, K>(ids: I) -> Result<u64, FrameworkError>
+    where
+        I: IntoIterator<Item = K> + Send,
+        I::IntoIter: Send,
+        K: Into<<<Self::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType> + Send,
+    {
+        let mut removed: u64 = 0;
+        for id in ids {
+            if let Some(row) = Self::find(id).await? {
+                row.force_delete().await?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Whether two model rows refer to the same database row — same
+    /// `type_name` AND same primary-key value. Mirrors Laravel's
+    /// `Model::is($other)` (which compares both class + key).
+    fn is(&self, other: &Self) -> bool {
+        self.primary_key_value_json() == other.primary_key_value_json()
+    }
+
+    /// Negation of [`Self::is`]. Mirrors `Model::isNot($other)`.
+    fn is_not(&self, other: &Self) -> bool {
+        !self.is(other)
+    }
+
+    /// Filtered serialisation — emit a JSON object minus the named
+    /// columns. Suprnova's Rust-native equivalent of Laravel's
+    /// per-instance `$model->makeHidden($cols)`. The default doesn't
+    /// carry a runtime attribute bag, so the hide list is supplied
+    /// directly at the call site.
+    ///
+    /// ```ignore
+    /// return Json::ok(user.to_array_except(&["password_hash", "remember_token"]));
+    /// ```
+    fn to_array_except(&self, columns: &[&str]) -> serde_json::Value {
+        let mut v = self.to_array();
+        if let Some(map) = v.as_object_mut() {
+            for col in columns {
+                map.remove(*col);
+            }
+        }
+        v
+    }
+
+    /// Filtered serialisation — emit a JSON object containing ONLY
+    /// the named columns. Suprnova's Rust-native equivalent of
+    /// Laravel's `$model->makeVisible($cols)` invoked alongside a
+    /// reset.
+    fn to_array_only(&self, columns: &[&str]) -> serde_json::Value {
+        let full = self.to_array();
+        let mut out = serde_json::Map::new();
+        if let Some(map) = full.as_object() {
+            for col in columns {
+                if let Some(v) = map.get(*col) {
+                    out.insert((*col).to_string(), v.clone());
+                }
+            }
+        }
+        serde_json::Value::Object(out)
+    }
+
+    /// Quiet variant of [`Self::save`] — runs the UPDATE inside a
+    /// [`crate::seed::without_events`] scope so no model lifecycle
+    /// events fire. Mirrors Laravel's `Model::saveQuietly`.
+    async fn save_quietly(&self) -> Result<(), FrameworkError> {
+        crate::seed::without_events(async { self.save().await }).await
+    }
+
+    /// Quiet variant of [`Self::update`] — runs the UPDATE inside a
+    /// [`crate::seed::without_events`] scope.
+    async fn update_quietly(self, attrs: Attrs) -> Result<Self, FrameworkError> {
+        crate::seed::without_events(async { self.update(attrs).await }).await
+    }
+
+    /// Quiet variant of [`Self::delete`].
+    async fn delete_quietly(self) -> Result<(), FrameworkError> {
+        crate::seed::without_events(async { self.delete().await }).await
+    }
+
+    /// Quiet variant of [`Self::force_delete`].
+    async fn force_delete_quietly(self) -> Result<(), FrameworkError> {
+        crate::seed::without_events(async { self.force_delete().await }).await
+    }
+
+    /// Variant of [`Self::update`] that returns
+    /// `FrameworkError::not_found` when the row no longer exists.
+    /// Mirrors Laravel's `Model::updateOrFail`.
+    async fn update_or_fail(self, attrs: Attrs) -> Result<Self, FrameworkError> {
+        // Pre-flight: re-fetch by PK to make the "row vanished mid-flight"
+        // case surface as 404 rather than a noop UPDATE returning the
+        // stale in-memory row.
+        let pk = self.primary_key_value();
+        if Self::find(pk).await?.is_none() {
+            return Err(FrameworkError::not_found(
+                "update_or_fail: row no longer exists",
+            ));
+        }
+        self.update(attrs).await
+    }
+
+    /// Variant of [`Self::delete`] that returns
+    /// `FrameworkError::not_found` when the row no longer exists.
+    /// Mirrors Laravel's `Model::deleteOrFail`.
+    async fn delete_or_fail(self) -> Result<(), FrameworkError> {
+        let pk = self.primary_key_value();
+        if Self::find(pk).await?.is_none() {
+            return Err(FrameworkError::not_found(
+                "delete_or_fail: row no longer exists",
+            ));
+        }
+        self.delete().await
+    }
+
     // --- Hooks the macro-generated impl fills in ---
 
     /// Return this row's primary-key value (typed, for SeaORM lookups).
@@ -1109,7 +1254,56 @@ where
         }
     }
 
+    /// Laravel's `findOr($id, $callback)` — look up by PK; when no row
+    /// matches, run `fallback` and return its result.
+    async fn find_or<K, F, Fut>(id: K, fallback: F) -> Result<Self, FrameworkError>
+    where
+        K: Into<<<Self::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType> + Send,
+        F: FnOnce() -> Fut + Send,
+        Fut: std::future::Future<Output = Result<Self, FrameworkError>> + Send,
+    {
+        match Self::find(id).await? {
+            Some(found) => Ok(found),
+            None => fallback().await,
+        }
+    }
+
+    /// Laravel's `findOrNew($id)` — look up by PK; when no row matches,
+    /// build an unsaved in-memory instance from `defaults`. The
+    /// defaults map seeds the new instance the same way
+    /// [`Self::first_or_new`] does.
+    async fn find_or_new<K>(id: K, defaults: Attrs) -> Result<Self, FrameworkError>
+    where
+        K: Into<<<Self::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType> + Send,
+    {
+        match Self::find(id).await? {
+            Some(found) => Ok(found),
+            None => Self::from_attrs_unsaved(defaults),
+        }
+    }
+
+    /// Laravel's `createOrFirst` — race-safe insert. Try to create the
+    /// row; if it conflicts on a unique constraint, return the
+    /// existing row. The conflict detection here is per-attempt — when
+    /// the create errors with a database error (which on most engines
+    /// indicates a uniqueness violation), we re-fetch by `lookup`.
+    async fn create_or_first(lookup: Attrs, extras: Attrs) -> Result<Self, FrameworkError> {
+        let attrs = lookup.clone().merge(extras);
+        match Self::create(attrs).await {
+            Ok(row) => Ok(row),
+            Err(_) => Self::query()
+                .filter_attrs(&lookup)
+                .first()
+                .await?
+                .ok_or_else(|| {
+                    FrameworkError::internal(
+                        "create_or_first: create failed and the row is not present",
+                    )
+                }),
+        }
+    }
+
     /// Build an unsaved in-memory instance from `attrs`. Used by
-    /// `first_or_new`. The macro fills this in.
+    /// `first_or_new` / `find_or_new`. The macro fills this in.
     fn from_attrs_unsaved(attrs: Attrs) -> Result<Self, FrameworkError>;
 }

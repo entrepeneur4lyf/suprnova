@@ -26,6 +26,7 @@ pub mod relations;
 pub mod scopes;
 pub mod soft_deletes;
 pub mod timestamps;
+pub mod unique_id;
 
 pub use attrs::Attrs;
 pub use builder::{Builder, Direction, IntoColumn, IntoVal};
@@ -51,7 +52,8 @@ pub use relations::{
 };
 pub use scopes::{GlobalScope, ScopeRegistry};
 pub use soft_deletes::SoftDeletes;
-pub use timestamps::Touchable;
+pub use timestamps::{Touchable, touches_disabled, without_touching};
+pub use unique_id::{HasUniqueId, UniqueIdKind};
 
 /// Marker trait emitted by `#[suprnova::model]`. Indicates the struct
 /// is a Suprnova-managed model.

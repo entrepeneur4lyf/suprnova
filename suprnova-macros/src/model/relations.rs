@@ -48,7 +48,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     for rel in input.relations.as_deref().unwrap_or(&[]) {
         relation_methods.push(emit_relation_method(input, rel)?);
         relation_accessors.push(emit_relation_accessors(struct_ident, rel));
-        relation_inventory.push(emit_relation_inventory(struct_ident, rel));
+        relation_inventory.push(emit_relation_inventory(struct_ident, input, rel));
     }
 
     Ok(quote! {
@@ -594,10 +594,17 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
 
 /// Emit the `inventory::submit!(RelationEntry { ... })` for one
 /// declared relation. Phase 8 (Admin) walks this registry to
-/// enumerate every relation in the binary. For `MorphTo` declarations
-/// the target type is the unit type `()` — the per-family enum that
-/// stands in as the "real" target is generated locally by T6.
-fn emit_relation_inventory(struct_ident: &syn::Ident, rel: &RelationDecl) -> TokenStream {
+/// enumerate every relation in the binary; the has/where-has engine
+/// reads the join-metadata fields populated below.
+///
+/// For `MorphTo` declarations the target type is the unit type `()` —
+/// the per-family enum that stands in as the "real" target is
+/// generated locally by T6.
+fn emit_relation_inventory(
+    struct_ident: &syn::Ident,
+    input: &ModelInput,
+    rel: &RelationDecl,
+) -> TokenStream {
     let name_str = rel.name.to_string();
     let parent_type_name = struct_ident.to_string();
     // Mirror `emit_relation_accessors`' kind-aware target choice so
@@ -629,6 +636,227 @@ fn emit_relation_inventory(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
         _ => target_type_lit,
     };
 
+    // ---- Has/where-has join metadata ------------------------------
+    //
+    // Each branch computes the four/seven string slots
+    // (target_table, foreign_key, parent_key, pivot_*, morph_*)
+    // the existence-engine renders into `EXISTS (...)`. We emit
+    // `&'static str` literals — every value is either a parsed
+    // attribute string or a `const` accessor on `EloquentModel`,
+    // which is const-evaluable inside `inventory::submit!`.
+
+    let parent_struct_name = struct_ident.to_string();
+    let parent_struct_snake = to_snake(&parent_struct_name);
+
+    // For most kinds the target table is the related model's
+    // declared `EloquentModel::TABLE`. Through resolves to the FINAL
+    // target (already chosen above by `target_ty`). MorphTo has no
+    // single target table; we emit "" as the per-spec sentinel.
+    let target_table_expr: TokenStream = match rel.kind {
+        RelationKindAttr::MorphTo => quote! { "" },
+        _ => quote! {
+            <#target_ty as ::suprnova::eloquent::EloquentModel>::TABLE
+        },
+    };
+
+    // Parent key (PK on the OWNER's side). LK override applies to the
+    // has-family relations. BelongsTo's "parent_key" maps to the OWNED
+    // model's PK column ("id" by default). All others default to "id".
+    let parent_key_str = match rel.kind {
+        RelationKindAttr::HasOne
+        | RelationKindAttr::HasMany
+        | RelationKindAttr::MorphOne
+        | RelationKindAttr::MorphMany
+        | RelationKindAttr::BelongsToMany
+        | RelationKindAttr::MorphToMany
+        | RelationKindAttr::MorphedByMany
+        | RelationKindAttr::HasOneThrough
+        | RelationKindAttr::HasManyThrough => lk_override(rel).unwrap_or("id").to_string(),
+        // BelongsTo: parent_key is the COLUMN on the related table the
+        // child's FK references (defaults to "id").
+        RelationKindAttr::BelongsTo => lk_override(rel).unwrap_or("id").to_string(),
+        // MorphTo: parent_key is the PK on the (variable) target
+        // table — Laravel default "id".
+        RelationKindAttr::MorphTo => "id".to_string(),
+    };
+
+    // Foreign key — what the child / pivot / morph row carries.
+    let foreign_key_str = match rel.kind {
+        RelationKindAttr::HasOne | RelationKindAttr::HasMany => fk_override(rel)
+            .map(str::to_string)
+            .unwrap_or_else(|| default_has_fk(&parent_struct_name)),
+        RelationKindAttr::BelongsTo => fk_override(rel)
+            .map(str::to_string)
+            .unwrap_or_else(|| default_belongs_to_fk(target_ty)),
+        RelationKindAttr::MorphOne | RelationKindAttr::MorphMany => {
+            format!("{}_id", morph_name_or_default(rel))
+        }
+        RelationKindAttr::MorphTo => format!("{}_id", morph_name_or_default(rel)),
+        // Pivot kinds: the existence-engine joins through the pivot
+        // table; the top-level "foreign_key" slot isn't the discriminating
+        // join. Emit "" so the engine selects the pivot path.
+        RelationKindAttr::BelongsToMany
+        | RelationKindAttr::MorphToMany
+        | RelationKindAttr::MorphedByMany => String::new(),
+        // Through: first_key on the intermediate, falling back to
+        // `<snake(parent)>_id`. The engine uses this for the
+        // intermediate-side join.
+        RelationKindAttr::HasOneThrough | RelationKindAttr::HasManyThrough => {
+            first_key_override(rel)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{}_id", parent_struct_snake))
+        }
+    };
+
+    let (pivot_table_str, pivot_parent_key_str, pivot_related_key_str) = match rel.kind {
+        RelationKindAttr::BelongsToMany => {
+            // Pivot table: either the user-declared `pivot_table = "..."`
+            // override OR the pivot type's `EloquentModel::TABLE` const.
+            // We can't read the const inside the macro; emit a token
+            // tree at submission time.
+            let pivot_table_token: TokenStream = match pivot_table_override(rel) {
+                Some(s) => {
+                    let lit = s.to_string();
+                    quote! { #lit }
+                }
+                None => {
+                    let pivot_ty = rel
+                        .through
+                        .as_ref()
+                        .expect("parser guarantees BelongsToMany declares `Pivot` after `Target`");
+                    quote! { <#pivot_ty as ::suprnova::eloquent::EloquentModel>::TABLE }
+                }
+            };
+            let parent_pivot_col = pivot_fk_override(rel)
+                .map(str::to_string)
+                .unwrap_or_else(|| default_has_fk(&parent_struct_name));
+            let related_pivot_col = pivot_related_override(rel)
+                .map(str::to_string)
+                .unwrap_or_else(|| default_belongs_to_fk(target_ty));
+            return emit_inventory_token(
+                struct_ident,
+                target_ty,
+                &name_str,
+                &kind_variant,
+                &parent_type_name,
+                &target_type_name,
+                &target_table_expr,
+                "",
+                &parent_key_str,
+                &pivot_table_token,
+                &parent_pivot_col,
+                &related_pivot_col,
+                "",
+                "",
+            );
+        }
+        RelationKindAttr::MorphToMany | RelationKindAttr::MorphedByMany => {
+            let pivot_table_token: TokenStream = match pivot_table_override(rel) {
+                Some(s) => {
+                    let lit = s.to_string();
+                    quote! { #lit }
+                }
+                None => {
+                    let pivot_ty = rel.through.as_ref().expect(
+                        "parser guarantees MorphToMany/MorphedByMany declares `Pivot` after `Target`",
+                    );
+                    quote! { <#pivot_ty as ::suprnova::eloquent::EloquentModel>::TABLE }
+                }
+            };
+            let morph_name = morph_name_or_default(rel);
+            let morph_col = format!("{morph_name}_id");
+            let related_col = pivot_related_override(rel)
+                .map(str::to_string)
+                .unwrap_or_else(|| default_belongs_to_fk(target_ty));
+            let parent_morph_type_col = format!("{morph_name}_type");
+            // For MorphToMany the parent IS the morph side; the
+            // discriminator value is THIS model's morph_type string.
+            // For MorphedByMany the related model is the morph side;
+            // we honour the parser-required `target_morph_type` option.
+            let morph_type_value_str = match rel.kind {
+                RelationKindAttr::MorphToMany => morph_type_of(input),
+                RelationKindAttr::MorphedByMany => target_morph_type_override(rel)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| morph_type_of(input)),
+                _ => String::new(),
+            };
+            // For MorphedByMany the pivot's <parent>_id column points
+            // at the related, and the morph column points at the
+            // parent (the morph side). Swap parent/related pivot keys.
+            let (pivot_parent_col, pivot_related_col) = match rel.kind {
+                RelationKindAttr::MorphedByMany => (related_col.clone(), morph_col.clone()),
+                _ => (morph_col.clone(), related_col.clone()),
+            };
+            return emit_inventory_token(
+                struct_ident,
+                target_ty,
+                &name_str,
+                &kind_variant,
+                &parent_type_name,
+                &target_type_name,
+                &target_table_expr,
+                "",
+                &parent_key_str,
+                &pivot_table_token,
+                &pivot_parent_col,
+                &pivot_related_col,
+                &parent_morph_type_col,
+                &morph_type_value_str,
+            );
+        }
+        _ => (String::new(), String::new(), String::new()),
+    };
+
+    let (morph_type_column_str, morph_type_value_str) = match rel.kind {
+        RelationKindAttr::MorphOne | RelationKindAttr::MorphMany => {
+            let morph_name = morph_name_or_default(rel);
+            (format!("{morph_name}_type"), morph_type_of(input))
+        }
+        RelationKindAttr::MorphTo => {
+            let morph_name = morph_name_or_default(rel);
+            (format!("{morph_name}_type"), String::new())
+        }
+        _ => (String::new(), String::new()),
+    };
+
+    emit_inventory_token(
+        struct_ident,
+        target_ty,
+        &name_str,
+        &kind_variant,
+        &parent_type_name,
+        &target_type_name,
+        &target_table_expr,
+        &foreign_key_str,
+        &parent_key_str,
+        &quote! { #pivot_table_str },
+        &pivot_parent_key_str,
+        &pivot_related_key_str,
+        &morph_type_column_str,
+        &morph_type_value_str,
+    )
+}
+
+/// Single emission point for the inventory token. Keeps the kind-arms
+/// in [`emit_relation_inventory`] readable — every branch tail-calls
+/// here with the per-kind values.
+#[allow(clippy::too_many_arguments)]
+fn emit_inventory_token(
+    struct_ident: &syn::Ident,
+    target_ty: &syn::Type,
+    name_str: &str,
+    kind_variant: &TokenStream,
+    parent_type_name: &str,
+    target_type_name: &str,
+    target_table_expr: &TokenStream,
+    foreign_key: &str,
+    parent_key: &str,
+    pivot_table_expr: &TokenStream,
+    pivot_parent_key: &str,
+    pivot_related_key: &str,
+    morph_type_column: &str,
+    morph_type_value: &str,
+) -> TokenStream {
     quote! {
         ::suprnova::inventory::submit! {
             ::suprnova::RelationEntry {
@@ -638,6 +866,14 @@ fn emit_relation_inventory(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
                 kind: #kind_variant,
                 parent_type_name: #parent_type_name,
                 target_type_name: #target_type_name,
+                target_table: #target_table_expr,
+                foreign_key: #foreign_key,
+                parent_key: #parent_key,
+                pivot_table: #pivot_table_expr,
+                pivot_parent_key: #pivot_parent_key,
+                pivot_related_key: #pivot_related_key,
+                morph_type_column: #morph_type_column,
+                morph_type_value: #morph_type_value,
             }
         }
     }

@@ -193,6 +193,31 @@ pub trait Relation {
 /// typed per-relation match arm in its `__eager_load` dispatcher
 /// instead). The type-erased `fn() -> TypeId` shape keeps the entry
 /// `Copy` so `inventory::submit!` accepts it as a const initialiser.
+///
+/// ## Has/where-has join metadata
+///
+/// The `target_table` / `foreign_key` / `parent_key` /
+/// `pivot_*` / `morph_*` fields carry the runtime join metadata the
+/// existence-engine ([`Builder::has`], [`Builder::where_has`], etc.) and
+/// the `where_belongs_to` / `where_morphed_to` family need to render
+/// correlated `EXISTS (...)` subqueries.
+///
+/// Field semantics by [`RelationKind`]:
+///
+/// | Kind                | target_table          | foreign_key                       | parent_key                | pivot_*                                              | morph_*                                                |
+/// |---------------------|-----------------------|-----------------------------------|---------------------------|------------------------------------------------------|--------------------------------------------------------|
+/// | HasOne / HasMany    | child table           | child column (FK → parent.pk)     | parent column (PK)        | — / — / —                                            | — / —                                                  |
+/// | BelongsTo           | parent table          | child column (FK → parent.pk)     | parent column (PK)        | — / — / —                                            | — / —                                                  |
+/// | BelongsToMany       | related table         | unused                            | parent column (PK)        | pivot table / pivot col → parent / pivot col → related| — / —                                                  |
+/// | HasOneThrough/Many  | final target table    | through table's FK                | parent column (PK)        | through table / — / through→target FK                | — / —                                                  |
+/// | MorphOne / MorphMany| child table           | `<morph>_id` column               | parent column (PK)        | — / — / —                                            | `<morph>_type` / parent's morph type string            |
+/// | MorphTo             | `""` (variable)       | child's `<morph>_id`              | child column (PK)         | — / — / —                                            | child's `<morph>_type` / `""`                          |
+/// | MorphToMany         | related table         | unused                            | parent column (PK)        | pivot table / `<morph>_id` / `<related>_id`          | `<morph>_type` / parent's morph type string            |
+/// | MorphedByMany       | related table         | unused                            | parent column (PK)        | pivot table / `<related>_id` / `<morph>_id`          | `<morph>_type` / related's morph type string           |
+///
+/// `""` (empty string) indicates "not applicable for this kind" — never
+/// `None`, because `inventory::submit!` requires every field to be
+/// const-evaluable.
 #[derive(Debug, Clone, Copy)]
 pub struct RelationEntry {
     /// `TypeId::of::<L>` — the owning model.
@@ -211,6 +236,28 @@ pub struct RelationEntry {
     /// `"<morph>"` — the per-family enum type name lives in the
     /// generated code, not in the entry.
     pub target_type_name: &'static str,
+    /// Target table name for the existence subquery. See the table
+    /// above for per-kind semantics.
+    pub target_table: &'static str,
+    /// FK / join column on the related side. See the table above.
+    pub foreign_key: &'static str,
+    /// PK / local key on the parent side. See the table above.
+    pub parent_key: &'static str,
+    /// Pivot table name (m2m / through families). `""` otherwise.
+    pub pivot_table: &'static str,
+    /// Pivot column pointing at the parent. `""` when not a pivot kind.
+    pub pivot_parent_key: &'static str,
+    /// Pivot column pointing at the related / final target. `""` when
+    /// not a pivot kind.
+    pub pivot_related_key: &'static str,
+    /// `<morph>_type` discriminator column (morph kinds). `""` otherwise.
+    pub morph_type_column: &'static str,
+    /// Stable string used in the `<morph>_type` column for THIS side of
+    /// the relation (Laravel morph map / FQCN). `""` when not a morph
+    /// kind, or when the discriminator value is unknown at the parent's
+    /// macro expansion site (`MorphTo` — the value lives on the child
+    /// row itself).
+    pub morph_type_value: &'static str,
 }
 
 inventory::collect!(RelationEntry);

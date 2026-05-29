@@ -266,6 +266,12 @@ pub struct ModelInput {
     /// in [`crate::observer`] (T2b) or the per-model `Self::observe()`
     /// shim. The attribute does NOT auto-call `observe()`.
     pub observers: Option<ObserversAttr>,
+    /// `unique_id = "uuid"` / `"uuid_v4"` / `"ulid"` — declares this
+    /// model's primary key as a generated string ID. The macro auto-
+    /// populates the PK in the create path before INSERT. Mirrors
+    /// Laravel's `HasUuids` / `HasUlids` / `HasVersion4Uuids` trait
+    /// family.
+    pub unique_id: Option<String>,
 }
 
 impl ModelInput {
@@ -545,6 +551,7 @@ impl ModelInput {
             relations: attrs.relations,
             morph_type: attrs.morph_type,
             observers: attrs.observers,
+            unique_id: attrs.unique_id,
         })
     }
 
@@ -719,6 +726,7 @@ struct ModelAttrs {
     relations: Option<Vec<RelationDecl>>,
     morph_type: Option<String>,
     observers: Option<ObserversAttr>,
+    unique_id: Option<String>,
 }
 
 impl Parse for ModelAttrs {
@@ -771,6 +779,26 @@ impl Parse for ModelAttrs {
                     "touches" => out.touches = Some(parse_str_array(input)?),
                     "relations" => out.relations = Some(parse_relations_map(input)?),
                     "morph_type" => out.morph_type = Some(input.parse::<LitStr>()?.value()),
+                    "unique_id" => {
+                        let lit = input.parse::<LitStr>()?;
+                        let val = lit.value();
+                        // Validate at parse-time so a typo lands on
+                        // the attribute, not on a noisy generated
+                        // code site.
+                        match val.as_str() {
+                            "uuid" | "uuid_v7" | "uuid_v4" | "ulid" => {}
+                            other => {
+                                return Err(syn::Error::new(
+                                    lit.span(),
+                                    format!(
+                                        "unknown `unique_id` strategy: `{other}`. \
+                                         Allowed: `uuid`, `uuid_v7`, `uuid_v4`, `ulid`."
+                                    ),
+                                ));
+                            }
+                        }
+                        out.unique_id = Some(val);
+                    }
                     "observers" => {
                         // observers = [Type1, Type2] — bracketed
                         // expression list. Each entry is parsed as a

@@ -42,7 +42,7 @@ sha2 = "0.11"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry", "smallvec", "parking_lot"] }
-uuid = { version = "1", features = ["v4", "v5", "fast-rng", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "v7", "fast-rng", "serde"] }
 dashmap = "6"
 torii = { git = "https://github.com/entrepeneur4lyf/suprnova-torii-rs.git", default-features = false, features = ["seaorm-sqlite", "seaorm-postgres", "seaorm-mysql", "password", "oauth", "passkey", "magic-link"] }
 webauthn-rs = { version = "0.5", features = ["resident-key-support", "danger-allow-state-serialisation"] }

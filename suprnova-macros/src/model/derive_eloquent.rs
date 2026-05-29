@@ -77,14 +77,29 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 }
             }
         }
-        (None, None) => quote! {
-            fn fillable_filter() -> ::suprnova::eloquent::Fillable {
-                // T4 default — guard the macro-parsed PK name (NOT a
-                // hardcoded "id") so models with `primary_key = "uid"`
-                // still have their PK protected from mass assignment.
-                ::suprnova::eloquent::Fillable::guarded(::std::vec![#pk_name])
+        (None, None) => {
+            // Default: guard the macro-parsed PK name so models with
+            // `primary_key = "uid"` still have their PK protected from
+            // mass assignment.
+            //
+            // Exception: `#[model(unique_id = "...")]` models opt the
+            // PK back into the fillable surface. The id is a generated
+            // string and Laravel allows caller-supplied overrides for
+            // `HasUuids` / `HasUlids` models — Suprnova matches that.
+            if input.unique_id.is_some() {
+                quote! {
+                    fn fillable_filter() -> ::suprnova::eloquent::Fillable {
+                        ::suprnova::eloquent::Fillable::allow_all()
+                    }
+                }
+            } else {
+                quote! {
+                    fn fillable_filter() -> ::suprnova::eloquent::Fillable {
+                        ::suprnova::eloquent::Fillable::guarded(::std::vec![#pk_name])
+                    }
+                }
             }
-        },
+        }
         (Some(_), Some(_)) => unreachable!(
             "fillable / guarded mutual exclusion validated at parse time (parse.rs:67-72)"
         ),
@@ -325,6 +340,51 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     let created_col_ident = quote::format_ident!("{}", input.created_at);
     let updated_col_ident = quote::format_ident!("{}", input.updated_at);
 
+    // ---- unique_id PK generation (HasUuids / HasUlids analogue) -------
+    //
+    // When `#[model(unique_id = "uuid" | "uuid_v4" | "ulid")]` is set,
+    // the macro emits two artifacts:
+    //
+    //   1. `impl HasUniqueId for #struct_ident` — exposes the kind
+    //      and the per-model generator override hook.
+    //   2. A pre-INSERT inject block (`unique_id_inject_apply`) that
+    //      checks whether the user supplied the PK; if not, the
+    //      generated ID is set as a fresh string into the PK column.
+    let unique_id_kind_token = input.unique_id.as_deref().map(|s| match s {
+        "uuid" | "uuid_v7" => quote! { ::suprnova::eloquent::UniqueIdKind::UuidV7 },
+        "uuid_v4" => quote! { ::suprnova::eloquent::UniqueIdKind::UuidV4 },
+        "ulid" => quote! { ::suprnova::eloquent::UniqueIdKind::Ulid },
+        _ => quote! { ::suprnova::eloquent::UniqueIdKind::UuidV7 }, // parser validates
+    });
+    let unique_id_impl = if let Some(kind) = &unique_id_kind_token {
+        quote! {
+            impl ::suprnova::eloquent::HasUniqueId for #struct_ident {
+                const UNIQUE_ID_KIND: ::suprnova::eloquent::UniqueIdKind = #kind;
+            }
+        }
+    } else {
+        quote! {}
+    };
+    let unique_id_inject_apply = if unique_id_kind_token.is_some() {
+        quote! {
+            // If the caller did NOT supply the PK column (NotSet on
+            // the ActiveModel), generate a fresh string ID and stamp
+            // it in. Mirrors Laravel's HasUuids/HasUlids `creating`
+            // hook behaviour exactly: caller-supplied IDs win,
+            // generator fills the gap.
+            if matches!(
+                am.#pk_ident,
+                ::suprnova::sea_orm::ActiveValue::NotSet
+            ) {
+                am.#pk_ident = ::suprnova::sea_orm::Set(
+                    <Self as ::suprnova::eloquent::HasUniqueId>::new_unique_id().into()
+                );
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let timestamp_inject_apply = if timestamps_enabled {
         quote! {
             // Always bump updated_at — covers create() and
@@ -375,6 +435,12 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             #[::suprnova::__async_trait::async_trait]
             impl ::suprnova::eloquent::Touchable for #struct_ident {
                 async fn touch(&self) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
+                    // Honour the `without_touching` scope: when the
+                    // task-local flag is on, touch() is a no-op.
+                    // Mirrors Laravel's `Model::withoutTouching`.
+                    if ::suprnova::eloquent::touches_disabled() {
+                        return ::core::result::Result::Ok(());
+                    }
                     let now = ::suprnova::chrono::Utc::now();
                     let mut am = <<#module_name::Entity as ::suprnova::EntityTrait>::ActiveModel
                         as ::core::default::Default>::default();
@@ -384,8 +450,6 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                             &now,
                         )?,
                     );
-                    // T11: route through ExecutorChoice so touches inside
-                    // a `DB::transaction` scope land in the active tx.
                     let exec = ::suprnova::database::transaction::ExecutorChoice::resolve()?;
                     exec.update_active(am)
                         .await
@@ -845,6 +909,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     }
                 }
                 #timestamp_inject_apply
+                #unique_id_inject_apply
                 ::core::result::Result::Ok(())
             }
 
@@ -865,6 +930,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         #touchable_impl
         #touches_marker
         #soft_deletes_impl
+        #unique_id_impl
 
         // Persistable bridge for the Eloquent-facing struct.
         //

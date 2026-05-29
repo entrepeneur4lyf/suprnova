@@ -3512,3 +3512,300 @@ the raw select path with aggregates, give the expression a typed
 context: either use a `CAST(... AS BIGINT)` wrapper or read the
 column with a typed `DB::table(...).count()` / `.max(...)` helper
 that uses `query_one` + `try_get` under the hood.
+
+## Laravel-13 parity — relation-existence + cheap shortcuts
+
+This section documents the Laravel-13 parity sweep that landed across
+the builder + Model trait. Every method here mirrors a named Laravel
+surface; the dual-API naming follows Suprnova's standing convention
+(Laravel-shape name first, idiomatic Rust alias second).
+
+### Relation-existence filters (`has` / `where_has` / `where_belongs_to`)
+
+The biggest gap closed by the sweep is the correlated `EXISTS (...)`
+family. These methods constrain the parent query by the existence (or
+absence, or count) of related rows, without joining the relation into
+the outer SELECT.
+
+```rust
+use suprnova::Model;
+
+// Users who have at least one post.
+let users = User::query().has("posts").get().await?;
+
+// Users who have NO posts.
+let empty = User::query().doesnt_have("posts").get().await?;
+
+// Users with >= 3 posts (Laravel `has("posts", ">=", 3)`).
+let prolific = User::query().has_count("posts", ">=", 3).get().await?;
+
+// Inner constraint via closure — restrict the EXISTS subquery body.
+let recent = User::query()
+    .where_has::<Post, _>("posts", |q| q.filter_op("created_at", ">=", "2026-01-01"))
+    .get()
+    .await?;
+
+// One-column shortcut — equivalent to `where_has` with a tiny closure.
+let with_pub = User::query()
+    .where_relation("posts", "published", true)
+    .get()
+    .await?;
+
+// Belongs-to direct join (no EXISTS — FK lives on this table).
+let posts = Post::query().where_belongs_to("author", author.id).get().await?;
+```
+
+All variants compose with `or_*` and `*_doesnt_have` companions:
+
+- `has` / `or_has` / `has_count` / `doesnt_have` / `or_doesnt_have`
+- `where_has` / `or_where_has` / `where_doesnt_have` / `or_where_doesnt_have`
+- `where_relation` / `where_relation_op` / `or_where_relation`
+- `where_belongs_to`
+
+The engine reads relation metadata from the macro-generated
+`RelationEntry` inventory: join columns, pivot tables, morph
+discriminators all flow through automatically. Three subquery shapes
+are rendered:
+
+- **Has** — `EXISTS (SELECT 1 FROM child WHERE child.fk = parent.pk)`
+- **Pivot** — `EXISTS (SELECT 1 FROM pivot INNER JOIN target ON ... WHERE pivot.parent_fk = parent.pk)`
+- **Morph** — has/pivot shape plus `AND target.<morph>_type = '<value>'`
+
+Unknown relation names render the safe-fail form (`EXISTS (SELECT 1
+WHERE 1 = 0)`), which evaluates to `FALSE` and returns zero rows. A
+typo never leaks a full-table scan.
+
+### `MorphTo` divergence
+
+Laravel's `MorphTo` inverse (`whereMorphedTo`, `whereHasMorph`) walks
+multiple target tables because the morph child carries a `*_type`
+discriminator that picks one of N possible parents. Suprnova's
+`MorphTo` lowers to a per-family enum at macro expansion time — the
+target type is statically a `<Family>Morph { Variant1(...), ... }`,
+not a single SQL table. The existence engine can't render one fixed
+`EXISTS (SELECT 1 FROM <table>)` for that case because there is no
+single table.
+
+Recommended migration: do the existence check at the morph-child level
+instead. Where Laravel writes:
+
+```php
+Comment::whereHasMorph('commentable', [Post::class], fn ($q) => $q->where('published', true))
+```
+
+Suprnova writes:
+
+```rust
+Comment::query()
+    .filter("commentable_type", "post")
+    .where_has::<Post, _>("commentable_post", |q| q.filter("published", true))
+    .get()
+    .await?;
+```
+
+The narrower-typed form gives full IDE completion on the inner
+builder, which the loosely-typed `whereHasMorph` cannot.
+
+### Cheap builder shortcuts
+
+```rust
+// PK filters.
+User::query().where_key(7).first().await?;        // sugar for filter("id", 7)
+User::query().where_key_not(7).get().await?;      // sugar for filter_op("id", "!=", 7)
+// Rust-idiomatic aliases: filter_key / filter_key_not.
+
+// Order by created_at.
+Post::query().latest().get().await?;              // ORDER BY created_at DESC
+Post::query().oldest().get().await?;              // ORDER BY created_at ASC
+Post::query().latest_by("published_at").get().await?;  // named column
+
+// Exact-one matching.
+let one = User::query().filter("email", e).sole().await?;          // errors on 0 or >1
+let val: i64 = User::query().filter("id", 1).sole_value("views").await?;
+let v: i64 = User::query().filter("name", "x").value_or_fail("views").await?;
+
+// Eager-load opt-outs.
+User::query().with(["posts","tags"]).without(["tags"]).get().await?;
+User::query().with_only(["posts"]).get().await?;   // wipes the plan first
+
+// Fully-qualified columns (for joins).
+Builder::<User>::qualify_column("name");           // -> "users.name"
+Builder::<User>::qualify_columns(["name", "id"]);  // -> ["users.name", "users.id"]
+```
+
+### Mass mutation — `update_all` / `delete_all` / `upsert` / `*_each`
+
+These hit the database directly with a single statement and do NOT
+fire per-row model events. Use them when scope-narrowing is sufficient
+and you don't need lifecycle hooks; for per-row hooks iterate with
+`.get()` and call `.update()` / `.delete()` per row.
+
+```rust
+// Mass UPDATE.
+let n = User::query()
+    .filter("active", false)
+    .update_all(attrs! { archived_at: Utc::now() })
+    .await?;
+
+// Mass DELETE.
+let n = Session::query()
+    .filter_op("expires_at", "<", cutoff)
+    .delete_all()
+    .await?;
+
+// INSERT ... ON CONFLICT (Postgres / SQLite) / ON DUPLICATE KEY UPDATE (MySQL).
+let n = Counter::query()
+    .upsert(
+        vec![attrs! { key: "page_views", n: 1 }, attrs! { key: "signups", n: 1 }],
+        vec!["key"],                  // conflict target
+        Some(vec!["n"]),              // update columns; None = every non-unique column
+    )
+    .await?;
+
+// Atomic increment/decrement against a scope.
+User::query()
+    .filter("id", 7)
+    .increment_each(vec![("views", 1), ("likes", 1)])
+    .await?;
+
+User::query()
+    .filter("id", 7)
+    .decrement_each(vec![("balance", 100)])
+    .await?;
+```
+
+### Static `Model` helpers
+
+```rust
+// Mass-destroy by PK set. Per-row events fire (each row goes through
+// .delete() so soft-delete tombstone semantics + Deleting/Deleted
+// dispatch are honoured).
+let removed: u64 = User::destroy(vec![1i64, 2, 3]).await?;
+let removed: u64 = User::force_destroy(vec![1i64, 2, 3]).await?;
+
+// Identity comparison by PK.
+assert!(alice.is(&also_alice));
+assert!(alice.is_not(&bob));
+```
+
+### `*Quietly` variants — suppress lifecycle events
+
+Sugar over `seed::without_events`. The five static lifecycle events
+(`Saving`/`Creating`/`Updating`/`Deleting`/`Restoring`) and the
+non-cancellable after-events both short-circuit inside the scope.
+
+```rust
+user.save_quietly().await?;            // no Saving / Updated / Saved
+user.update_quietly(attrs).await?;
+user.delete_quietly().await?;
+user.force_delete_quietly().await?;
+```
+
+### `*_or_fail` variants
+
+Explicit error on the not-found case. Useful in invariant-checking
+code paths where a missing row is a bug.
+
+```rust
+let user = user.update_or_fail(attrs).await?;   // not_found if row deleted mid-flight
+user.delete_or_fail().await?;
+```
+
+### Filtered serialisation — `to_array_except` / `to_array_only`
+
+Suprnova's Rust-native replacement for Laravel's per-instance
+`makeHidden` / `makeVisible`. The Eloquent struct doesn't carry a
+runtime attribute bag, so the column list is supplied at the call
+site:
+
+```rust
+return Json::ok(user.to_array_except(&["password_hash", "remember_token"]));
+return Json::ok(user.to_array_only(&["id", "name", "email"]));
+```
+
+**Divergence note.** Laravel's per-instance `makeHidden` mutates state
+that propagates when the model is nested inside a parent's `toArray()`
+call. Suprnova's filter is terminal — it produces a `serde_json::Value`
+and doesn't affect future serialisations of `self`. For
+declarative-and-permanent visibility control, use the `#[model(hidden
+= [...])]` / `#[model(visible = [...])]` attributes.
+
+### UUID / ULID primary keys — `#[model(unique_id = "...")]`
+
+Suprnova's analogue of Laravel's `HasUuids` / `HasUlids` /
+`HasVersion4Uuids` trait family. Set the attribute, type the PK as
+`String`, and the macro auto-populates the ID before INSERT.
+
+```rust
+#[model(
+    table = "users",
+    primary_key = "id",
+    key_type = "String",
+    auto_increment = false,
+    unique_id = "uuid",      // or "uuid_v4", "ulid"
+)]
+pub struct User {
+    pub id: String,
+    pub email: String,
+}
+
+// Auto-populated:
+let u = User::create(attrs! { email: "a@b.com" }).await?;
+// u.id is a fresh UUID v7.
+
+// Caller-supplied IDs still win (matches Laravel's HasUuids behaviour).
+let u = User::create(attrs! { id: "...", email: "..." }).await?;
+```
+
+Supported strategies:
+
+- `"uuid"` / `"uuid_v7"` — UUID v7 (timestamp-ordered, recommended;
+  matches Laravel 11+'s default `Str::uuid7()`)
+- `"uuid_v4"` — random UUID (matches `HasVersion4Uuids`)
+- `"ulid"` — lowercase 26-char Crockford-base32 ULID
+
+The macro emits an `impl HasUniqueId for YourStruct` block exposing
+`UNIQUE_ID_KIND` and a `new_unique_id()` hook you can override on the
+type for a custom generator (e.g. prefixed IDs like `usr_<uuid>`).
+
+### `find_or` / `find_or_new` / `create_or_first`
+
+Round out the `FirstOrCreate` trait surface.
+
+```rust
+// Look up by PK; run fallback if not found.
+let user = User::find_or(id, || async {
+    User::create(attrs! { id, name: "guest" }).await
+}).await?;
+
+// Look up by PK; build an unsaved instance from defaults if not found.
+let user = User::find_or_new(id, attrs! { name: "draft" }).await?;
+// user.id == 0 here — the instance is in-memory only.
+
+// Race-safe insert: try create, fall back to fetch on conflict.
+let user = User::create_or_first(
+    attrs! { email: "race@x.com" },
+    attrs! { name: "race winner" },
+).await?;
+```
+
+### `without_touching` scope
+
+The Suprnova analogue of Laravel's `Model::withoutTouching`. Inside
+the scope, every `model.touch().await` call short-circuits — useful
+when running data migrations or batch jobs that mutate timestamps
+through other paths.
+
+```rust
+use suprnova::eloquent::without_touching;
+
+without_touching(async {
+    // .touch() calls here are no-ops.
+    for post in posts {
+        post.touch().await?;
+    }
+}).await;
+```
+
+The scope is `tokio::task_local`-backed, so concurrent requests on
+other tasks continue to honour their own scope (or its absence).
