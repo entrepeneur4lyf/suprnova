@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 use serial_test::serial;
 use std::sync::atomic::{AtomicI64, Ordering};
 use suprnova::bus::command::{Command, Handler};
-use suprnova::bus::testing::{assert_dispatched, install_fake};
+use suprnova::bus::testing::{
+    assert_dispatched, assert_dispatched_times, assert_not_dispatched, assert_nothing_dispatched,
+    install_fake,
+};
 use suprnova::bus::{Bus, Dispatched};
 use suprnova::{FrameworkError, async_trait};
 
@@ -81,4 +84,58 @@ async fn bus_fake_captures_dispatched_commands_without_executing() {
     let r = Bus::dispatch(AddCommand { a: 9, b: 9 }).await.unwrap();
     assert!(matches!(r, Dispatched::Captured));
     assert_dispatched::<AddCommand>(|c| c.a == 9 && c.b == 9);
+}
+
+#[tokio::test]
+#[serial]
+async fn bus_fake_assert_not_dispatched_passes_when_no_match() {
+    let _guard = install_fake();
+    let _ = Bus::dispatch(AddCommand { a: 1, b: 1 }).await.unwrap();
+    assert_not_dispatched::<AddCommand>(|c| c.a == 99);
+}
+
+#[tokio::test]
+#[serial]
+#[should_panic(expected = "expected no dispatched AddCommand but found 1")]
+async fn bus_fake_assert_not_dispatched_panics_when_match_exists() {
+    let _guard = install_fake();
+    let _ = Bus::dispatch(AddCommand { a: 7, b: 7 }).await.unwrap();
+    assert_not_dispatched::<AddCommand>(|c| c.a == 7 && c.b == 7);
+}
+
+#[tokio::test]
+#[serial]
+async fn bus_fake_assert_dispatched_times_matches_exact_count() {
+    let _guard = install_fake();
+    let _ = Bus::dispatch(AddCommand { a: 1, b: 1 }).await.unwrap();
+    let _ = Bus::dispatch(AddCommand { a: 1, b: 1 }).await.unwrap();
+    let _ = Bus::dispatch(AddCommand { a: 2, b: 2 }).await.unwrap();
+    assert_dispatched_times::<AddCommand>(|c| c.a == 1 && c.b == 1, 2);
+    assert_dispatched_times::<AddCommand>(|c| c.a == 2 && c.b == 2, 1);
+    assert_dispatched_times::<AddCommand>(|c| c.a == 999, 0);
+}
+
+#[tokio::test]
+#[serial]
+#[should_panic(expected = "expected 5 dispatched AddCommand but found 1")]
+async fn bus_fake_assert_dispatched_times_panics_on_mismatch() {
+    let _guard = install_fake();
+    let _ = Bus::dispatch(AddCommand { a: 1, b: 1 }).await.unwrap();
+    assert_dispatched_times::<AddCommand>(|_| true, 5);
+}
+
+#[tokio::test]
+#[serial]
+async fn bus_fake_assert_nothing_dispatched_passes_on_empty_fake() {
+    let _guard = install_fake();
+    assert_nothing_dispatched();
+}
+
+#[tokio::test]
+#[serial]
+#[should_panic(expected = "expected no dispatched commands but found 1")]
+async fn bus_fake_assert_nothing_dispatched_panics_when_any_dispatched() {
+    let _guard = install_fake();
+    let _ = Bus::dispatch(AddCommand { a: 1, b: 1 }).await.unwrap();
+    assert_nothing_dispatched();
 }
