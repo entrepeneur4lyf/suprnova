@@ -66,6 +66,10 @@ pub struct CookieOptions {
     pub path: String,
     pub domain: Option<String>,
     pub max_age: Option<Duration>,
+    /// Emit the `Partitioned` (CHIPS) attribute. Independent of
+    /// `SameSite`; browsers that don't recognise it silently ignore
+    /// the attribute.
+    pub partitioned: bool,
 }
 
 impl Default for CookieOptions {
@@ -77,6 +81,7 @@ impl Default for CookieOptions {
             path: "/".to_string(),
             domain: None,
             max_age: None,
+            partitioned: false,
         }
     }
 }
@@ -171,6 +176,15 @@ impl Cookie {
         self
     }
 
+    /// Toggle the `Partitioned` (CHIPS) attribute. Browsers that
+    /// support CHIPS scope the cookie to the embedding top-level
+    /// site, isolating it from the unpartitioned third-party-cookie
+    /// jar; browsers that don't simply ignore the attribute.
+    pub fn partitioned(mut self, value: bool) -> Self {
+        self.options.partitioned = value;
+        self
+    }
+
     /// Build the Set-Cookie header value
     pub fn to_header_value(&self) -> String {
         let mut parts = vec![format!(
@@ -207,6 +221,10 @@ impl Cookie {
 
         if let Some(max_age) = self.options.max_age {
             parts.push(format!("Max-Age={}", max_age.as_secs()));
+        }
+
+        if self.options.partitioned {
+            parts.push("Partitioned".to_string());
         }
 
         parts.join("; ")

@@ -172,6 +172,48 @@ impl SessionMiddleware {
         Self { config, store }
     }
 
+    /// Construct the middleware AND spawn a background task that
+    /// calls [`SessionStore::gc`] once per `interval`. The Tokio
+    /// equivalent of Laravel's `StartSession::collectGarbage` lottery
+    /// — a real spawned task instead of a 2/100 chance per request.
+    ///
+    /// Errors from `gc()` are logged at `warn!` and do not kill the
+    /// loop. Apps that want explicit scheduling control should keep
+    /// using `new` / `with_store` and register their own
+    /// [`crate::Schedule`] entry.
+    pub fn install_with_gc(config: SessionConfig, interval: std::time::Duration) -> Self {
+        let me = Self::new(config);
+        let store = me.store.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                match store.gc().await {
+                    Ok(removed) if removed > 0 => {
+                        tracing::debug!(removed, "session gc removed expired rows");
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "session gc failed");
+                    }
+                }
+            }
+        });
+        me
+    }
+
+    /// Convenience: spawn a once-per-hour `gc()` background task and
+    /// return the middleware. Drop-in replacement for `new(config)` in
+    /// production bootstrap code.
+    pub fn install(config: SessionConfig) -> Self {
+        Self::install_with_gc(config, std::time::Duration::from_secs(3600))
+    }
+
+    /// Read access to the bound session store. Lets callers feed the
+    /// same store into a `Schedule` entry without rebuilding it.
+    pub fn store(&self) -> Arc<dyn SessionStore> {
+        self.store.clone()
+    }
+
     /// Build the outbound session cookie. Returns `Err` if `Crypt`
     /// failed to encrypt the session id — which by design only happens
     /// when `Crypt` is not initialized.
@@ -188,7 +230,18 @@ impl SessionMiddleware {
             .http_only(self.config.cookie_http_only)
             .secure(self.config.cookie_secure)
             .path(&self.config.cookie_path)
-            .max_age(self.config.lifetime);
+            .partitioned(self.config.cookie_partitioned);
+
+        // `expire_on_close = true` → omit `Max-Age` so the browser
+        // forgets the cookie when the window closes. Mirrors
+        // Laravel's `session.expire_on_close`.
+        if !self.config.expire_on_close {
+            cookie = cookie.max_age(self.config.lifetime);
+        }
+
+        if let Some(ref domain) = self.config.cookie_domain {
+            cookie = cookie.domain(domain);
+        }
 
         cookie = match self.config.cookie_same_site.to_lowercase().as_str() {
             "strict" => cookie.same_site(SameSite::Strict),
@@ -227,7 +280,12 @@ pub fn create_remember_cookie(
         .http_only(true)
         .secure(config.cookie_secure)
         .path(&config.cookie_path)
+        .partitioned(config.cookie_partitioned)
         .max_age(max_age);
+
+    if let Some(ref domain) = config.cookie_domain {
+        cookie = cookie.domain(domain);
+    }
 
     cookie = match config.cookie_same_site.to_lowercase().as_str() {
         "strict" => cookie.same_site(SameSite::Strict),
@@ -247,10 +305,15 @@ pub fn create_remember_cookie(
 /// "clear cookie" shape, but consumers should not depend on it.
 #[doc(hidden)]
 pub fn create_forget_remember_cookie(config: &SessionConfig) -> Cookie {
-    Cookie::forget(super::super::auth::remember::COOKIE_NAME)
+    let mut cookie = Cookie::forget(super::super::auth::remember::COOKIE_NAME)
         .path(&config.cookie_path)
         .secure(config.cookie_secure)
-        .same_site(SameSite::Lax)
+        .partitioned(config.cookie_partitioned)
+        .same_site(SameSite::Lax);
+    if let Some(ref domain) = config.cookie_domain {
+        cookie = cookie.domain(domain);
+    }
+    cookie
 }
 
 #[async_trait]
@@ -507,6 +570,19 @@ pub fn invalidate_session() {
 /// Helper to get the CSRF token from current session
 pub fn get_csrf_token() -> Option<String> {
     session().map(|s| s.csrf_token)
+}
+
+/// Mint a new CSRF token for the current session without otherwise
+/// touching session data. Mirrors Laravel's `Store::regenerateToken`
+/// (`Illuminate/Session/Store.php:755-758`). Returns the new token
+/// (or `None` when no session scope is installed).
+pub fn regenerate_csrf_token() -> Option<String> {
+    session_mut(|session| {
+        let token = generate_csrf_token();
+        session.csrf_token = token.clone();
+        session.dirty = true;
+        token
+    })
 }
 
 /// Helper to check if user is authenticated

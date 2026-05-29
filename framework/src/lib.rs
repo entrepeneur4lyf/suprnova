@@ -212,7 +212,10 @@ pub use schedule::{CronExpression, DayOfWeek, Schedule, Task, TaskBuilder, TaskE
 pub use seed::Seeder;
 pub use server::{Server, handle_request};
 pub use session::{
-    SessionConfig, SessionData, SessionMiddleware, SessionStore, session, session_mut,
+    DatabaseSessionDriver, SessionConfig, SessionData, SessionMiddleware, SessionStore,
+    auth_user_id, clear_auth_user, destroy_all_for_user, generate_csrf_token, generate_session_id,
+    get_csrf_token, invalidate_session, is_authenticated, is_valid_session_id,
+    regenerate_csrf_token, regenerate_session_id, session, session_mut, set_auth_user,
 };
 pub use sse::SseEvent;
 pub use supervisor::{RestartPolicy, Supervisor, SupervisorEntry, SupervisorRegistry};
