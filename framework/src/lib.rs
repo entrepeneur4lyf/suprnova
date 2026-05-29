@@ -187,7 +187,10 @@ pub use pagination::{
     Pagination, Paginator,
 };
 pub use queue::{BackoffSchedule, Envelope, EnvelopeError, Job, Queue};
-pub use rate_limit::{BackendErrorPolicy, RateLimitMiddleware, RateLimiter, SlidingWindowConfig};
+pub use rate_limit::{
+    BackendErrorPolicy, GlobalLimit, Limit, LimitResult, RateLimitMiddleware, RateLimiter,
+    RateLimiterDriver, SlidingWindowConfig, ThrottleRequestsMiddleware, Unlimited,
+};
 pub use resources::{
     AsRelationshipValue, IncludeResolutionError, IncludeTree, IntoJsonResource, JsonApiBuilder,
     JsonApiResponse, PushIncluded, RelationshipValue, RequestFieldsetSet, Resource,

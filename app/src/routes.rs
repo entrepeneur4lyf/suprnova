@@ -4,8 +4,9 @@ use suprnova::broadcasting::{
     BroadcastHub, BroadcastingWsHandler, ChannelRegistry, InMemoryBroadcastHub,
 };
 use suprnova::{
-    AuthMiddleware as SessionAuthMiddleware, RateLimitMiddleware, RateLimiter, SlidingWindowConfig,
-    container::App, delete, get, group, post, rate_limit::memory::InMemoryRateLimiter, routes, ws,
+    AuthMiddleware as SessionAuthMiddleware, RateLimitMiddleware, RateLimiterDriver,
+    SlidingWindowConfig, container::App, delete, get, group, post,
+    rate_limit::memory::InMemoryRateLimiter, routes, ws,
 };
 
 use crate::broadcasting::{ChatChannel, UserRegisteredChannel};
@@ -149,7 +150,7 @@ routes! {
         // (production path); fall back to a fresh in-memory limiter so
         // tests that assemble the router by hand without running
         // bootstrap::register() keep working.
-        let limiter: Arc<dyn RateLimiter> = App::resolve_make::<dyn RateLimiter>()
+        let limiter: Arc<dyn RateLimiterDriver> = App::resolve_make::<dyn RateLimiterDriver>()
             .unwrap_or_else(|_| Arc::new(InMemoryRateLimiter::new()));
         RateLimitMiddleware::new(
             limiter,

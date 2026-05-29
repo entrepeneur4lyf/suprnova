@@ -18,7 +18,7 @@ use hyper_util::rt::TokioIo;
 use suprnova::http::text;
 use suprnova::rate_limit::memory::InMemoryRateLimiter;
 use suprnova::rate_limit::{
-    BackendErrorPolicy, RateLimitMiddleware, RateLimiter, SlidingWindowConfig,
+    BackendErrorPolicy, RateLimitMiddleware, RateLimiterDriver, SlidingWindowConfig,
 };
 use suprnova::{FrameworkError, MiddlewareRegistry, Router, async_trait, handle_request};
 
@@ -94,7 +94,7 @@ async fn get(addr: SocketAddr, path: &str) -> (u16, Option<String>) {
 /// The 429 response must include a `Retry-After` header.
 #[tokio::test]
 async fn middleware_enforces_per_route_quota_and_returns_429_with_retry_after() {
-    let limiter: Arc<dyn RateLimiter> = Arc::new(InMemoryRateLimiter::new());
+    let limiter: Arc<dyn RateLimiterDriver> = Arc::new(InMemoryRateLimiter::new());
     let cfg = SlidingWindowConfig {
         max_requests: 2,
         window: Duration::from_secs(60),
@@ -127,7 +127,7 @@ async fn middleware_enforces_per_route_quota_and_returns_429_with_retry_after() 
 /// the key closure drives bucket selection independently of routing.
 #[tokio::test]
 async fn middleware_key_fn_drives_bucket_selection() {
-    let limiter: Arc<dyn RateLimiter> = Arc::new(InMemoryRateLimiter::new());
+    let limiter: Arc<dyn RateLimiterDriver> = Arc::new(InMemoryRateLimiter::new());
     let cfg = SlidingWindowConfig {
         max_requests: 2,
         window: Duration::from_secs(60),
@@ -157,7 +157,7 @@ async fn middleware_key_fn_drives_bucket_selection() {
 struct FailingLimiter;
 
 #[async_trait]
-impl RateLimiter for FailingLimiter {
+impl RateLimiterDriver for FailingLimiter {
     async fn try_acquire(
         &self,
         _key: &str,
@@ -203,7 +203,7 @@ where
 /// the request actually reached it — a 200 alone could come from anywhere.
 #[tokio::test]
 async fn backend_error_fails_open_by_default_and_runs_handler() {
-    let limiter: Arc<dyn RateLimiter> = Arc::new(FailingLimiter);
+    let limiter: Arc<dyn RateLimiterDriver> = Arc::new(FailingLimiter);
     let cfg = SlidingWindowConfig {
         max_requests: 2,
         window: Duration::from_secs(60),
@@ -233,7 +233,7 @@ async fn backend_error_fails_open_by_default_and_runs_handler() {
 /// returning 503 for an unrelated reason.
 #[tokio::test]
 async fn backend_error_fails_closed_returns_503_and_skips_handler() {
-    let limiter: Arc<dyn RateLimiter> = Arc::new(FailingLimiter);
+    let limiter: Arc<dyn RateLimiterDriver> = Arc::new(FailingLimiter);
     let cfg = SlidingWindowConfig {
         max_requests: 2,
         window: Duration::from_secs(60),

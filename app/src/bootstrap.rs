@@ -124,7 +124,7 @@ pub async fn register() {
     // avatar upload endpoint) functional in dev/prod.
     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
 
-    // Bootstrap rate-limit driver so App::resolve_make::<dyn RateLimiter>()
+    // Bootstrap rate-limit driver so App::resolve_make::<dyn RateLimiterDriver>()
     // succeeds when routes::register() runs immediately after bootstrap.
     // Server::run also calls bootstrap_from_env() later — that call is
     // idempotent (guarded by has_binding) so there is no double-init.

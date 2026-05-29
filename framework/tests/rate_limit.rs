@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use suprnova::rate_limit::memory::InMemoryRateLimiter;
-use suprnova::rate_limit::{RateLimiter, SlidingWindowConfig};
+use suprnova::rate_limit::{RateLimiterDriver, SlidingWindowConfig};
 
 fn cfg(max: u32, window_secs: u64) -> SlidingWindowConfig {
     SlidingWindowConfig {
@@ -12,7 +12,7 @@ fn cfg(max: u32, window_secs: u64) -> SlidingWindowConfig {
 
 #[tokio::test(start_paused = true)]
 async fn allows_up_to_max_within_window_then_rejects() {
-    let limiter: Arc<dyn RateLimiter> = Arc::new(InMemoryRateLimiter::new());
+    let limiter: Arc<dyn RateLimiterDriver> = Arc::new(InMemoryRateLimiter::new());
     let key = "user:1";
     let c = cfg(3, 10);
 
@@ -27,7 +27,7 @@ async fn allows_up_to_max_within_window_then_rejects() {
 
 #[tokio::test(start_paused = true)]
 async fn window_slides_so_old_hits_expire() {
-    let limiter: Arc<dyn RateLimiter> = Arc::new(InMemoryRateLimiter::new());
+    let limiter: Arc<dyn RateLimiterDriver> = Arc::new(InMemoryRateLimiter::new());
     let key = "user:2";
     let c = cfg(2, 10);
 
@@ -44,7 +44,7 @@ async fn window_slides_so_old_hits_expire() {
 
 #[tokio::test(start_paused = true)]
 async fn distinct_keys_have_independent_buckets() {
-    let limiter: Arc<dyn RateLimiter> = Arc::new(InMemoryRateLimiter::new());
+    let limiter: Arc<dyn RateLimiterDriver> = Arc::new(InMemoryRateLimiter::new());
     let c = cfg(1, 60);
     assert!(limiter.try_acquire("a", &c).await.unwrap());
     assert!(limiter.try_acquire("b", &c).await.unwrap());
@@ -54,7 +54,7 @@ async fn distinct_keys_have_independent_buckets() {
 
 #[tokio::test(start_paused = true)]
 async fn retry_after_reflects_oldest_entry_in_window() {
-    let limiter: Arc<dyn RateLimiter> = Arc::new(InMemoryRateLimiter::new());
+    let limiter: Arc<dyn RateLimiterDriver> = Arc::new(InMemoryRateLimiter::new());
     let c = cfg(1, 30);
     assert!(limiter.try_acquire("k", &c).await.unwrap());
 

@@ -2,7 +2,7 @@
 
 use crate::error::FrameworkError;
 use crate::rate_limit::algorithm::Bucket;
-use crate::rate_limit::{RateLimiter, SlidingWindowConfig};
+use crate::rate_limit::{RateLimiterDriver, SlidingWindowConfig};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -28,7 +28,7 @@ impl Default for InMemoryRateLimiter {
 }
 
 #[async_trait]
-impl RateLimiter for InMemoryRateLimiter {
+impl RateLimiterDriver for InMemoryRateLimiter {
     async fn try_acquire(
         &self,
         key: &str,

@@ -207,11 +207,16 @@ impl CacheStore for InMemoryCache {
             .write()
             .map_err(|_| FrameworkError::internal("Cache lock poisoned"))?;
 
-        let current: i64 = store
+        // Preserve the existing entry's TTL on increment — matches Redis
+        // `INCR` semantics, which never resets the key's expiration. The
+        // rate-limit fixed-window counter relies on this: the counter
+        // shares its TTL with the `:timer` deadline so both ages out
+        // together when the window ends.
+        let (current, expires_at): (i64, Option<Instant>) = store
             .get(&key)
             .filter(|e| !e.is_expired())
-            .and_then(|e| e.value.parse().ok())
-            .unwrap_or(0);
+            .map(|e| (e.value.parse().unwrap_or(0), e.expires_at))
+            .unwrap_or((0, None));
 
         let new_value = current + amount;
 
@@ -219,7 +224,7 @@ impl CacheStore for InMemoryCache {
             key,
             CacheEntry {
                 value: new_value.to_string(),
-                expires_at: None,
+                expires_at,
             },
         );
 

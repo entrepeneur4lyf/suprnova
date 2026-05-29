@@ -1,6 +1,9 @@
-//! Sliding-window rate limiter.
+//! Rate limiting — two complementary surfaces.
 //!
-//! Per-key window: each key tracks a deque of hit timestamps. On every
+//! ## Sliding-window driver SPI
+//!
+//! [`RateLimiterDriver`] is the storage SPI for a sliding-window
+//! algorithm: each key tracks a deque of hit timestamps. On every
 //! `try_acquire`, evict entries older than `now - window`, then if the
 //! remaining count is below `max_requests`, append `now` and accept;
 //! otherwise reject.
@@ -8,11 +11,36 @@
 //! The in-memory driver uses `tokio::time::Instant` so `start_paused`
 //! tests can use `tokio::time::advance` to drive the clock. The Redis
 //! driver uses `chrono::Utc::now().timestamp_millis()` with a Lua
-//! script for atomic check-and-record.
+//! script for atomic check-and-record. [`RateLimitMiddleware`] is the
+//! HTTP wrapper around the driver and is what most application code
+//! reaches for to throttle a route.
+//!
+//! ## Laravel-shape facade
+//!
+//! [`RateLimiter`] (the struct, not the driver trait) mirrors
+//! `Illuminate\Cache\RateLimiter` — a Cache-backed fixed-window counter
+//! API. Use it for the `Cache::add(timer)` + `Cache::increment(counter)`
+//! workflow when you want named limiters, `attempt()` callbacks, and
+//! `X-RateLimit-*` response headers. [`ThrottleRequestsMiddleware`] is
+//! the HTTP wrapper for named limiters and is the closest analogue of
+//! Laravel's `throttle:api` route middleware.
+//!
+//! The two surfaces coexist deliberately: the driver SPI is what
+//! Suprnova natively shipped and is the right shape for "one slot per
+//! request" sliding-window enforcement against arbitrary storage; the
+//! Cache-backed facade is what Laravel apps expect and what the named
+//! limiter / response-callback pattern needs.
 
 pub mod algorithm;
+pub mod laravel;
+pub mod limit;
 pub mod memory;
 pub mod redis;
+pub mod throttle;
+
+pub use laravel::{NamedLimiterRegistry, RateLimiter};
+pub use limit::{GlobalLimit, Limit, LimitResult, Unlimited};
+pub use throttle::ThrottleRequestsMiddleware;
 
 use crate::error::FrameworkError;
 use async_trait::async_trait;
@@ -24,8 +52,15 @@ pub struct SlidingWindowConfig {
     pub window: Duration,
 }
 
+/// Storage SPI for the sliding-window rate-limiter algorithm.
+///
+/// Suprnova's native surface, separate from the Laravel-shape
+/// [`RateLimiter`] facade (Cache-backed fixed-window counter).
+/// Implementations: [`memory::InMemoryRateLimiter`] and
+/// [`redis::RedisRateLimiter`]. [`RateLimitMiddleware`] is the HTTP
+/// wrapper that drives this trait.
 #[async_trait]
-pub trait RateLimiter: Send + Sync {
+pub trait RateLimiterDriver: Send + Sync {
     /// Try to acquire one slot for `key` under `config`. Returns `Ok(true)`
     /// if accepted (slot consumed); `Ok(false)` if rejected.
     async fn try_acquire(
@@ -51,10 +86,10 @@ use crate::container::App;
 
 /// Wire the in-memory rate limiter as the default. Idempotent.
 pub async fn bootstrap_default() {
-    if App::has_binding::<dyn RateLimiter>() {
+    if App::has_binding::<dyn RateLimiterDriver>() {
         return;
     }
-    App::bind::<dyn RateLimiter>(std::sync::Arc::new(memory::InMemoryRateLimiter::new()));
+    App::bind::<dyn RateLimiterDriver>(std::sync::Arc::new(memory::InMemoryRateLimiter::new()));
 }
 
 /// Read `RATE_LIMIT_DRIVER` env and configure the matching driver. Falls back
@@ -68,7 +103,7 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
             let prefix = std::env::var("RATE_LIMIT_PREFIX").unwrap_or_else(|_| "suprnova:".into());
             let d = redis::RedisRateLimiter::connect(&url, &prefix).await?;
-            App::bind::<dyn RateLimiter>(std::sync::Arc::new(d));
+            App::bind::<dyn RateLimiterDriver>(std::sync::Arc::new(d));
         }
         other => {
             tracing::warn!(driver = %other, "unknown RATE_LIMIT_DRIVER, falling back to memory");
@@ -140,7 +175,7 @@ pub struct RateLimitMiddleware<F>
 where
     F: Fn(&Request) -> String + Send + Sync + 'static,
 {
-    limiter: Arc<dyn RateLimiter>,
+    limiter: Arc<dyn RateLimiterDriver>,
     config: SlidingWindowConfig,
     key_fn: F,
     on_backend_error: BackendErrorPolicy,
@@ -155,7 +190,11 @@ where
     /// * `limiter` — the rate-limiter backend (in-memory or Redis)
     /// * `config`  — window duration and per-key request cap
     /// * `key_fn`  — closure that maps each incoming request to a bucket key string
-    pub fn new(limiter: Arc<dyn RateLimiter>, config: SlidingWindowConfig, key_fn: F) -> Self {
+    pub fn new(
+        limiter: Arc<dyn RateLimiterDriver>,
+        config: SlidingWindowConfig,
+        key_fn: F,
+    ) -> Self {
         Self {
             limiter,
             config,

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use suprnova::container::App;
 use suprnova::queue::Queue;
-use suprnova::rate_limit::{RateLimiter, SlidingWindowConfig};
+use suprnova::rate_limit::{RateLimiterDriver, SlidingWindowConfig};
 
 use serde::{Deserialize, Serialize};
 use suprnova::{FrameworkError, Job, async_trait};
@@ -37,7 +37,7 @@ async fn defaults_bind_in_memory_queue_and_rate_limiter() {
     Queue::push(NoopJob).await.unwrap();
 
     // Rate limiter must resolve through the container.
-    let limiter: Arc<dyn RateLimiter> = App::resolve_make::<dyn RateLimiter>().unwrap();
+    let limiter: Arc<dyn RateLimiterDriver> = App::resolve_make::<dyn RateLimiterDriver>().unwrap();
     assert!(
         limiter
             .try_acquire(

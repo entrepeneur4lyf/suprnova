@@ -2,7 +2,7 @@
 //! to evict, ZCARD to count. Atomic via a single Lua eval per call.
 
 use crate::error::FrameworkError;
-use crate::rate_limit::{RateLimiter, SlidingWindowConfig};
+use crate::rate_limit::{RateLimiterDriver, SlidingWindowConfig};
 use async_trait::async_trait;
 use redis::Script;
 use redis::aio::ConnectionManager;
@@ -29,7 +29,7 @@ impl RedisRateLimiter {
 }
 
 #[async_trait]
-impl RateLimiter for RedisRateLimiter {
+impl RateLimiterDriver for RedisRateLimiter {
     async fn try_acquire(
         &self,
         key: &str,
