@@ -9,6 +9,31 @@
 //! Operations outside an active scope are silent no-ops — early-boot
 //! code, tests without middleware setup, and background tasks that
 //! choose not to install a scope all keep working without panics.
+//! When a mutation falls on no scope it emits a `tracing::trace!`
+//! event on the `suprnova::context` target so misordered middleware
+//! and missing-propagation bugs are observable in instrumented runs
+//! without changing the no-panic contract.
+//!
+//! ### Propagating into spawned tasks
+//!
+//! Tokio task-locals do not flow through [`tokio::spawn`]: a child
+//! task starts with an empty `CONTEXT` and `Context::get` returns
+//! `None`. Use [`Context::current`] to snapshot the live store and
+//! [`Context::scope`] to re-enter it inside the child:
+//!
+//! ```ignore
+//! if let Some(store) = suprnova::context::Context::current() {
+//!     tokio::spawn(suprnova::context::Context::scope(store, async move {
+//!         // `Context::get`, `query_param`, etc. now see the parent bag.
+//!     }));
+//! }
+//! ```
+//!
+//! [`ContextStore`] holds `Arc<DashMap>` handles, so the propagated
+//! store is *live-shared* with the parent — writes from either side
+//! are visible to the other for as long as the child holds the clone.
+//! This is what audit/logging spawns want; if you need an isolated
+//! snapshot, clone the maps explicitly.
 
 use dashmap::DashMap;
 use serde::{Serialize, de::DeserializeOwned};
@@ -78,17 +103,59 @@ thread_local! {
 pub struct Context;
 
 impl Context {
+    /// Snapshot the active context store, or `None` if no scope is
+    /// installed on the current task.
+    ///
+    /// The returned [`ContextStore`] shares the parent's underlying
+    /// maps via `Arc`, so it can be moved into a [`tokio::spawn`]ed
+    /// task and re-entered via [`Self::scope`] to give the child task
+    /// access to the same `data` / `hidden` / `query` bags. See the
+    /// module-level docs for the propagation pattern.
+    pub fn current() -> Option<ContextStore> {
+        CONTEXT.try_with(|store| store.clone()).ok()
+    }
+
+    /// Enter `store` as the active context for the duration of `fut`.
+    ///
+    /// Thin wrapper around `CONTEXT.scope(store, fut)` so callers can
+    /// hand the spawned future to [`tokio::spawn`] without naming the
+    /// task-local directly:
+    ///
+    /// ```ignore
+    /// if let Some(store) = Context::current() {
+    ///     tokio::spawn(Context::scope(store, async move { /* ... */ }));
+    /// }
+    /// ```
+    pub fn scope<F>(
+        store: ContextStore,
+        fut: F,
+    ) -> tokio::task::futures::TaskLocalFuture<ContextStore, F>
+    where
+        F: std::future::Future,
+    {
+        CONTEXT.scope(store, fut)
+    }
+
     /// Set `key` to `value` (replacing any existing entry).
     pub fn add<K, V>(key: K, value: V)
     where
         K: Into<String>,
         V: Serialize,
     {
-        let _ = CONTEXT.try_with(|store| {
-            if let Ok(v) = serde_json::to_value(value) {
-                store.data.insert(key.into(), v);
-            }
-        });
+        if CONTEXT
+            .try_with(|store| {
+                if let Ok(v) = serde_json::to_value(value) {
+                    store.data.insert(key.into(), v);
+                }
+            })
+            .is_err()
+        {
+            tracing::trace!(
+                target: "suprnova::context",
+                op = "add",
+                "Context mutation discarded: no active scope on this task",
+            );
+        }
     }
 
     /// Read `key` and deserialize. Returns `None` if absent, outside a
@@ -113,22 +180,31 @@ impl Context {
         K: Into<String>,
         V: Serialize,
     {
-        let _ = CONTEXT.try_with(|store| {
-            let key = key.into();
-            let new_val = serde_json::to_value(value).ok();
-            let Some(new_val) = new_val else { return };
-            store
-                .data
-                .entry(key)
-                .and_modify(|existing| {
-                    if let Value::Array(arr) = existing {
-                        arr.push(new_val.clone());
-                    } else {
-                        *existing = Value::Array(vec![existing.clone(), new_val.clone()]);
-                    }
-                })
-                .or_insert_with(|| Value::Array(vec![new_val]));
-        });
+        if CONTEXT
+            .try_with(|store| {
+                let key = key.into();
+                let new_val = serde_json::to_value(value).ok();
+                let Some(new_val) = new_val else { return };
+                store
+                    .data
+                    .entry(key)
+                    .and_modify(|existing| {
+                        if let Value::Array(arr) = existing {
+                            arr.push(new_val.clone());
+                        } else {
+                            *existing = Value::Array(vec![existing.clone(), new_val.clone()]);
+                        }
+                    })
+                    .or_insert_with(|| Value::Array(vec![new_val]));
+            })
+            .is_err()
+        {
+            tracing::trace!(
+                target: "suprnova::context",
+                op = "push",
+                "Context mutation discarded: no active scope on this task",
+            );
+        }
     }
 
     /// True if `key` is set in the visible bag.
@@ -140,10 +216,19 @@ impl Context {
 
     /// Remove `key` from both the visible and hidden bags.
     pub fn forget(key: &str) {
-        let _ = CONTEXT.try_with(|store| {
-            store.data.remove(key);
-            store.hidden.remove(key);
-        });
+        if CONTEXT
+            .try_with(|store| {
+                store.data.remove(key);
+                store.hidden.remove(key);
+            })
+            .is_err()
+        {
+            tracing::trace!(
+                target: "suprnova::context",
+                op = "forget",
+                "Context mutation discarded: no active scope on this task",
+            );
+        }
     }
 
     /// Snapshot the visible bag. Returns an empty map outside a scope.
@@ -166,11 +251,20 @@ impl Context {
         K: Into<String>,
         V: Serialize,
     {
-        let _ = CONTEXT.try_with(|store| {
-            if let Ok(v) = serde_json::to_value(value) {
-                store.hidden.insert(key.into(), v);
-            }
-        });
+        if CONTEXT
+            .try_with(|store| {
+                if let Ok(v) = serde_json::to_value(value) {
+                    store.hidden.insert(key.into(), v);
+                }
+            })
+            .is_err()
+        {
+            tracing::trace!(
+                target: "suprnova::context",
+                op = "hidden_add",
+                "Context mutation discarded: no active scope on this task",
+            );
+        }
     }
 
     /// Read `key` from the hidden bag.
@@ -370,5 +464,124 @@ mod tests {
             .await;
         assert_eq!(result, Some("42".to_string()));
         Context::test_clear_query();
+    }
+
+    #[tokio::test]
+    async fn current_returns_none_outside_scope() {
+        assert!(Context::current().is_none());
+    }
+
+    #[tokio::test]
+    async fn current_snapshots_active_store() {
+        CONTEXT
+            .scope(ContextStore::default(), async {
+                Context::add("k", "v");
+                let snap = Context::current().expect("scope active");
+                // The snapshot shares the same backing Arc, so writes
+                // made *before* the snapshot are visible through it.
+                assert_eq!(
+                    snap.data.get("k").map(|v| v.value().clone()),
+                    Some(json!("v")),
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn spawn_without_propagation_loses_context() {
+        // Locks the gap the propagation helper closes: a bare
+        // `tokio::spawn` inside a scope sees an empty `CONTEXT`.
+        CONTEXT
+            .scope(ContextStore::default(), async {
+                Context::add("request_id", "abc-123");
+
+                let child = tokio::spawn(async {
+                    // No scope inherited — reads see nothing.
+                    Context::get::<String>("request_id")
+                });
+
+                let observed = child.await.expect("spawned task joined");
+                assert_eq!(observed, None);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn spawn_with_current_then_scope_propagates_context() {
+        // The recommended propagation pattern: snapshot via
+        // `Context::current()` and re-enter via `Context::scope` in
+        // the child. The shared `Arc<DashMap>` makes the parent's
+        // writes visible to the child.
+        CONTEXT
+            .scope(ContextStore::default(), async {
+                Context::add("request_id", "abc-123");
+                Context::hidden_add("user_id", 99i64);
+
+                let store = Context::current().expect("scope active");
+                let child = tokio::spawn(Context::scope(store, async {
+                    (
+                        Context::get::<String>("request_id"),
+                        Context::hidden_get::<i64>("user_id"),
+                    )
+                }));
+
+                let (rid, uid) = child.await.expect("spawned task joined");
+                assert_eq!(rid, Some("abc-123".to_string()));
+                assert_eq!(uid, Some(99));
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn propagated_store_shares_query_bag() {
+        // `query_param` reads should also flow through, since the
+        // query bag is part of the same `ContextStore`.
+        Context::test_clear_query();
+        let mut q = HashMap::new();
+        q.insert("page".to_string(), "5".to_string());
+        let store = ContextStore::with_query(q);
+
+        CONTEXT
+            .scope(store, async {
+                let snap = Context::current().expect("scope active");
+                let child =
+                    tokio::spawn(Context::scope(snap, async { Context::query_param("page") }));
+                assert_eq!(child.await.unwrap(), Some("5".to_string()));
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn out_of_scope_mutations_emit_trace_event() {
+        // Locks the "silent loss" gap: mutating ops still no-op as
+        // documented, but they emit a `tracing::trace!` so the bug is
+        // observable in instrumented runs.
+        Context::add("k", "v");
+        Context::push("stack", json!(1));
+        Context::hidden_add("secret", "x");
+        Context::forget("k");
+
+        assert!(logs_contain("Context mutation discarded"));
+        assert!(logs_contain("op=\"add\""));
+        assert!(logs_contain("op=\"push\""));
+        assert!(logs_contain("op=\"hidden_add\""));
+        assert!(logs_contain("op=\"forget\""));
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn in_scope_mutations_do_not_emit_trace_event() {
+        // The trace event is gated on the no-scope branch; the happy
+        // path stays silent.
+        CONTEXT
+            .scope(ContextStore::default(), async {
+                Context::add("k", "v");
+                Context::push("stack", json!(1));
+                Context::hidden_add("secret", "x");
+                Context::forget("k");
+            })
+            .await;
+        assert!(!logs_contain("Context mutation discarded"));
     }
 }
