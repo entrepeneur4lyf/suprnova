@@ -70,6 +70,21 @@ impl WorkflowContext {
         let step_index = self.inner.step_index.fetch_add(1, Ordering::SeqCst);
 
         if let Some(existing) = store::load_step(workflow_id, step_index, step_name).await? {
+            // Workflows must be deterministic. If the same step at the same
+            // index is replayed with different serialized input, the recorded
+            // output (if any) belongs to a different invocation and reusing
+            // it would silently corrupt downstream steps. Fail loud rather
+            // than masking the contract violation by either returning the
+            // wrong cached output (Succeeded branch) or quietly overwriting
+            // the input column (Running branch).
+            if existing.input != input_json {
+                return Err(FrameworkError::internal(format!(
+                    "Workflow step input mismatch at index {} ('{}'): cached input does not match replay input. \
+                     Workflow steps must be deterministic.",
+                    step_index, step_name
+                )));
+            }
+
             if let Some(status) = StepStatus::from_str(&existing.status)
                 && status == StepStatus::Succeeded
             {

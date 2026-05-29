@@ -245,6 +245,7 @@ mod tests {
     static ALWAYS_CALLS: AtomicUsize = AtomicUsize::new(0);
     static FLAKY_CALLS: AtomicUsize = AtomicUsize::new(0);
     static CACHE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static INPUT_MISMATCH_CALLS: AtomicUsize = AtomicUsize::new(0);
 
     #[workflow_step]
     async fn always_step() -> Result<i32, FrameworkError> {
@@ -326,6 +327,81 @@ mod tests {
 
         assert_eq!(value, 42);
         assert_eq!(CACHE_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    // Replaying the same step name+index with a *different* serialized input
+    // must fail loud rather than silently returning the cached output from
+    // the prior input. Without the determinism guard, the second call would
+    // return the cached `42` even though the caller passed input `7` —
+    // corrupting any downstream step that branches on this step's output.
+    #[tokio::test]
+    async fn test_step_replay_with_mismatched_input_errors() {
+        let _db = setup_db().await;
+        INPUT_MISMATCH_CALLS.store(0, Ordering::SeqCst);
+
+        let handle = store::insert_workflow("input-mismatch", "{}", 3)
+            .await
+            .expect("workflow insert");
+
+        // First pass: record a succeeded step with input `5`.
+        let ctx = WorkflowContext::new(handle.id(), Duration::from_secs(30));
+        let ctx_inner = ctx.clone();
+        let first = ctx
+            .enter(async move {
+                ctx_inner
+                    .run_step_with_input(
+                        "mismatch-step",
+                        serde_json::to_string(&5_i32).unwrap(),
+                        || async {
+                            INPUT_MISMATCH_CALLS.fetch_add(1, Ordering::SeqCst);
+                            Ok::<_, FrameworkError>(42_i32)
+                        },
+                    )
+                    .await
+            })
+            .await
+            .expect("first run records the step");
+        assert_eq!(first, 42);
+        assert_eq!(INPUT_MISMATCH_CALLS.load(Ordering::SeqCst), 1);
+
+        // Replay with a different input at the same step name+index.
+        // Must return an error rather than the stale `42`.
+        let ctx2 = WorkflowContext::new(handle.id(), Duration::from_secs(30));
+        let ctx2_inner = ctx2.clone();
+        let replayed = ctx2
+            .enter(async move {
+                ctx2_inner
+                    .run_step_with_input(
+                        "mismatch-step",
+                        serde_json::to_string(&7_i32).unwrap(),
+                        || async {
+                            INPUT_MISMATCH_CALLS.fetch_add(1, Ordering::SeqCst);
+                            Ok::<_, FrameworkError>(999_i32)
+                        },
+                    )
+                    .await
+            })
+            .await;
+
+        let err = replayed.expect_err(
+            "replay with mismatched input must error, not silently return the cached output",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("input mismatch"),
+            "error must explain the determinism violation, got: {msg}"
+        );
+        assert!(
+            msg.contains("deterministic"),
+            "error must reference the determinism contract, got: {msg}"
+        );
+        // The step closure must NOT have run on the failed replay — the
+        // guard short-circuits before the user function is invoked.
+        assert_eq!(
+            INPUT_MISMATCH_CALLS.load(Ordering::SeqCst),
+            1,
+            "step closure must not run when input mismatch is detected"
+        );
     }
 
     #[tokio::test]
