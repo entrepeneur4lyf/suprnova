@@ -1,13 +1,15 @@
 //! Core trait definitions for the JSON:API resource layer.
 
 use super::include_tree::IncludeTree;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// Implemented by `#[derive(Data)] #[json_resource("<type>")]` types.
 ///
 /// Mirrors the JSON:API resource object shape: every resource has a
 /// `type`, a stringified `id`, an `attributes` object, and optional
-/// `relationships`. The derive macro emits this impl from the field set.
+/// `relationships`, `links`, and `meta` members. The derive macro emits
+/// this impl from the field set; `resource_links` and `resource_meta`
+/// have empty defaults that hand-rolled impls can override.
 pub trait IntoJsonResource: Send + Sync {
     /// JSON:API `type` member (always identical across instances).
     fn resource_type() -> &'static str
@@ -38,6 +40,34 @@ pub trait IntoJsonResource: Send + Sync {
         include_tree: &IncludeTree,
         out: &mut Vec<Value>,
     ) -> Result<(), IncludeResolutionError>;
+
+    /// Optional per-resource `links` member (spec §5.2.7). Empty by
+    /// default; override to provide `self`, `related`, etc. links on
+    /// this specific resource object.
+    ///
+    /// Mirrors Laravel's `JsonApiResource::toLinks(Request)`.
+    fn resource_links(&self) -> Map<String, Value> {
+        Map::new()
+    }
+
+    /// Optional per-resource `meta` member (spec §5.2.7). Empty by
+    /// default; override to provide non-standard metadata that is
+    /// specific to this resource instance.
+    ///
+    /// Mirrors Laravel's `JsonApiResource::toMeta(Request)`.
+    fn resource_meta(&self) -> Map<String, Value> {
+        Map::new()
+    }
+
+    /// Optional top-level `meta` member contributed by this resource
+    /// during rendering (spec §5.1.2). Empty by default. Used when a
+    /// resource itself wants to attach top-level metadata regardless
+    /// of how the response is constructed.
+    ///
+    /// Mirrors Laravel's `JsonResource::with(Request)`.
+    fn resource_top_level_meta(&self) -> Map<String, Value> {
+        Map::new()
+    }
 }
 
 /// A JSON:API relationship value.

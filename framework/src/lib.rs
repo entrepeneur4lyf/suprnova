@@ -192,9 +192,10 @@ pub use rate_limit::{
     RateLimiterDriver, SlidingWindowConfig, ThrottleRequestsMiddleware, Unlimited,
 };
 pub use resources::{
-    AsRelationshipValue, IncludeResolutionError, IncludeTree, IntoJsonResource, JsonApiBuilder,
-    JsonApiResponse, PushIncluded, RelationshipValue, RequestFieldsetSet, Resource,
-    ResourceIdentifier, current_fieldset, scope_fieldset,
+    AsRelationshipValue, IncludeResolutionError, IncludeTree, IntoJsonResource, JsonApi,
+    JsonApiBuilder, JsonApiInfo, JsonApiResponse, Maybe, MissingValue, PushIncluded,
+    RelationshipValue, RequestFieldsetSet, Resource, ResourceIdentifier, current_fieldset,
+    insert_maybe, scope_fieldset, strip_missing_values,
 };
 pub use routing::{
     // Internal functions used by macros (hidden from docs)

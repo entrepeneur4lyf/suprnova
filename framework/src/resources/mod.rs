@@ -19,18 +19,39 @@
 //! let user = UserResource { /* ... */ };
 //! Resource::single(user).render().await
 //! ```
+//!
+//! # Laravel parity
+//!
+//! - `Resource::single` / `Resource::collection` / `Resource::paginated`
+//!   are the Suprnova analogues of Laravel's `JsonResource::make`,
+//!   `JsonResource::collection`, and the paginated dispatch in
+//!   `ResourceCollection::toResponse`.
+//! - [`JsonApi`] is a Laravel-shape alias for [`Resource`].
+//! - Per-response chainable mutators ([`JsonApiResponse::additional`],
+//!   [`JsonApiResponse::with_meta`], [`JsonApiResponse::with_link`],
+//!   [`JsonApiResponse::with_jsonapi`], [`JsonApiResponse::status`])
+//!   mirror Laravel's `additional()`, `with()`, and
+//!   `ResourceResponse::calculateStatus` family.
+//! - [`Maybe`] / [`MissingValue`] are the conditional-attribute pattern
+//!   from `Illuminate\Http\Resources\ConditionallyLoadsAttributes`.
+//! - [`JsonApiInfo`] is the typed form of Laravel's
+//!   `JsonApiResource::configure(version, ext, profile, meta)` call.
 
 pub mod builder;
 pub mod errors;
 pub mod fieldset;
 pub mod include_tree;
+pub mod jsonapi_info;
+pub mod maybe;
 pub mod response;
 pub mod trait_def;
 
 pub use builder::{JsonApiBuilder, render_resource_object};
 pub use fieldset::{REQUEST_FIELDSET, RequestFieldsetSet, current_fieldset, scope_fieldset};
 pub use include_tree::IncludeTree;
-pub use response::{JsonApiResponse, Resource};
+pub use jsonapi_info::JsonApiInfo;
+pub use maybe::{Maybe, MissingValue, insert_maybe, strip_missing_values};
+pub use response::{JsonApi, JsonApiResponse, Resource};
 pub use trait_def::{
     IncludeResolutionError, IntoJsonResource, RelationshipValue, ResourceIdentifier,
 };
