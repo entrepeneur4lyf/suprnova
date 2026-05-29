@@ -258,6 +258,34 @@ pub fn route_with_params(name: &str, params: &HashMap<String, String>) -> Option
     }))
 }
 
+/// Reverse-lookup a route name from a matched route pattern.
+///
+/// `pattern` is the matchit route template (e.g. `/users/{id}`) that
+/// the router returned for the current request. Returns the registered
+/// name (e.g. `"users.show"`) if one was assigned via `.name(...)` /
+/// [`register_route_name`], or `None` for unnamed routes.
+///
+/// The name registry is keyed `name → pattern` so this performs an O(n)
+/// scan over registered names. n is typically small (most apps register
+/// well under a thousand routes); the scan cost is negligible compared
+/// to the surrounding request lifecycle and avoids a second map.
+///
+/// Powers [`crate::http::Request::route_is`] and Inertia's
+/// previous-route flash plumbing.
+pub fn route_name_for_pattern(pattern: &str) -> Option<String> {
+    let registry = ROUTE_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
+    let guard = match registry.read() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    for (name, registered) in guard.iter() {
+        if registered == pattern {
+            return Some(name.clone());
+        }
+    }
+    None
+}
+
 /// Type alias for route handlers
 pub type BoxedHandler =
     Box<dyn Fn(Request) -> Pin<Box<dyn Future<Output = Response> + Send>> + Send + Sync>;

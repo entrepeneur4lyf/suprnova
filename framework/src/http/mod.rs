@@ -1,3 +1,4 @@
+pub mod abort;
 pub mod body;
 pub mod cookie;
 mod extract;
@@ -6,6 +7,7 @@ mod request;
 mod response;
 pub mod upload;
 
+pub use abort::{abort as abort_with, abort_if, abort_unless};
 pub use body::{collect_body, parse_form, parse_json};
 pub use cookie::{Cookie, CookieOptions, SameSite, parse_cookies};
 pub use extract::{FromParam, FromRequest};

@@ -271,25 +271,56 @@ FrameworkError::domain("Custom error", 418);
 
 ### Error Response Format
 
-Errors are returned as JSON with appropriate structure:
+Errors are returned as JSON in Laravel's canonical envelope: `message`, an optional `errors` map (for validation-style per-field detail), and a `request_id` correlating to the structured logs.
 
 ```json
 // Parameter error (400)
 {
-  "error": "Missing required parameter: user_id"
+  "message": "Missing required parameter: user_id",
+  "request_id": "01J3T7..."
 }
 
 // Validation error (422)
 {
-  "error": "Validation failed",
-  "field": "email",
-  "message": "Invalid email format"
+  "message": "The given data was invalid.",
+  "errors": {
+    "email": ["Invalid email format"],
+    "password": ["Password must be at least 8 characters"]
+  },
+  "request_id": "01J3T7..."
 }
 
-// Generic error
+// Generic 4xx
 {
-  "error": "Error message here"
+  "message": "Error message here",
+  "request_id": "01J3T7..."
 }
+
+// 5xx (production)
+{
+  "message": "Internal Server Error",
+  "request_id": "01J3T7..."
+}
+
+// 5xx (APP_DEBUG=true)
+{
+  "message": "Internal Server Error",
+  "debug_message": "actual error detail",
+  "request_id": "01J3T7..."
+}
+```
+
+In production (`APP_DEBUG=false`), 5xx responses always emit the generic `Internal Server Error` message; the underlying detail flows to logs and the `ErrorOccurred` event but never to the wire. With `APP_DEBUG=true`, a `debug_message` field is added for development visibility — frontends MUST NOT key on this field, because `message` stays generic in both modes.
+
+### Aborting from a handler
+
+`abort_with` / `abort_if` / `abort_unless` (re-exported from the crate root) produce a `FrameworkError` that renders through the same envelope above. They're the idiomatic Rust equivalent of Laravel's `abort($code, $message)`:
+
+```rust
+use suprnova::{abort_if, abort_unless};
+
+abort_if(id == "0", 404, "User not found")?;
+abort_unless(authorized, 403, "Forbidden")?;
 ```
 
 ### Implementing HttpError Trait
@@ -393,20 +424,157 @@ pub async fn process(_req: Request) -> Response {
 }
 ```
 
+## Bulk headers and cookies
+
+Both `HttpResponse` and the `Response` (`Result`) chain expose Laravel-style bulk-header and cookie builders.
+
+```rust
+use suprnova::{Cookie, HttpResponse, Response, ResponseExt};
+
+// On HttpResponse directly:
+let r = HttpResponse::text("ok")
+    .with_headers([
+        ("X-A", "1"),
+        ("X-B", "2"),
+        ("X-Rate-Limit", "60"),
+    ])
+    .with_cookies([
+        Cookie::new("session", "abc"),
+        Cookie::new("user_id", "42"),
+    ])
+    .without_header("X-Internal-Debug")
+    .without_cookie("legacy_session");
+
+// Same methods are available through the ResponseExt chain on `Response`:
+let r: Response = Ok(HttpResponse::text("ok"))
+    .with_headers([("X-A", "1"), ("X-B", "2")])
+    .cookie(Cookie::new("session", "abc"));
+```
+
+| Method | Behavior |
+|--------|---------|
+| `.header(name, value)` | Append a header (allows duplicates for `Set-Cookie`). |
+| `.replace_header(name, value)` | Collapse any prior values and set one. |
+| `.with_headers([(k, v), ...])` | Append many at once. Accepts `HashMap`, `Vec`, or array literal. |
+| `.without_header(name)` | Remove all occurrences of a header (case-insensitive). |
+| `.header_value(name)` | Read back the first-set header (useful in tests). |
+| `.cookie(Cookie)` | Attach one cookie. |
+| `.with_cookies([Cookie, ...])` | Attach many. |
+| `.without_cookie(name)` | Schedule deletion (`Cookie::forget`-equivalent). |
+
+## Redirect builders
+
+`Redirect` covers Laravel's full redirector surface — including session-aware flows.
+
+### Targets
+
+```rust
+use suprnova::Redirect;
+
+Redirect::to("/dashboard");           // explicit URL or path
+Redirect::route("users.show").with("id", "42"); // named route + params
+Redirect::away("https://external.example.com");  // explicit external URL
+Redirect::refresh("/current/path");   // re-display current path
+Redirect::back("/login");             // session.previous_url, fallback to "/login"
+Redirect::intended("/home");          // session pull("url.intended"), one-shot
+```
+
+`Redirect::back` and `Redirect::intended` read the session if one is available; without a session scope they cleanly fall through to the supplied default.
+
+To pre-populate the intended target (typically from auth middleware before redirecting to `/login`):
+
+```rust
+Redirect::set_intended_url("/admin/users");
+```
+
+### Status
+
+```rust
+Redirect::to("/x").permanent();          // 301
+Redirect::to("/x").status(303);          // 303 (See Other), or 307 / 308
+```
+
+### Session flashes
+
+Redirect builders carry their own flash bag that's drained into the session on conversion to `Response`. This lets handlers attach status messages, repopulate form input, and surface validation errors all in one chain:
+
+```rust
+Redirect::back("/users/new")
+    .with("status", "User created")        // single key/value
+    .with_input([                          // repopulate form
+        ("email", "shawn@example.com"),
+        ("name", "Shawn"),
+    ])
+    .with_errors([                         // default error bag
+        ("email", "Must be unique"),
+    ])
+    .with_errors_bag("login", [            // named error bag
+        ("password", "Required"),
+    ])
+```
+
+The receiving page reads these back through `session.get(...)` (for `with(...)`), `session.get_old_input(...)` (for `with_input(...)`), and the bag map drained by `session.pull_errors_flash()` (for `with_errors(...)` / `with_errors_bag(...)`). The Inertia response layer consumes the errors-flash automatically — the `errors` prop on every Inertia response is seeded from the session, so a `Redirect::back().with_errors(...)` flow surfaces messages on the destination page without any extra handler wiring. The `X-Inertia-Error-Bag` request header still scopes the prop under a named bag for multi-form pages.
+
+### Cookies, headers, fragments
+
+```rust
+use suprnova::Cookie;
+
+Redirect::route("billing.show")
+    .with_cookies([Cookie::new("welcome", "yes")])
+    .with_headers([("X-Trace", "abc")])
+    .with_fragment("invoices")    // append #invoices
+    .without_fragment()           // OR strip any prior #fragment
+```
+
+`with_fragment` accepts the fragment with or without a leading `#`. Calling `with_fragment` after `without_fragment` re-attaches one.
+
+### Preserve fragment across the redirect
+
+For Inertia apps where the destination should preserve the *originating* URL hash (`#section`), use `preserve_fragment`:
+
+```rust
+Redirect::route("dashboard.index").preserve_fragment().into()
+```
+
+This flashes `_inertia.preserve_fragment = true` into the session; the next Inertia response reads it and emits `preserveFragment: true` in its page object.
+
 ## Summary
 
 | Feature | Usage |
 |---------|-------|
 | JSON response | `HttpResponse::json(value)` or `json_response!({...})` |
 | Text response | `HttpResponse::text(str)` or `text_response!(str)` |
+| HTML response | `HttpResponse::html(str)` |
+| SSE stream | `HttpResponse::sse(stream)` |
 | Set status | `.status(code)` |
 | Add header | `.header(name, value)` |
+| Bulk headers | `.with_headers([(k, v), ...])` |
+| Remove header | `.without_header(name)` |
+| Attach cookie | `.cookie(Cookie)` |
+| Bulk cookies | `.with_cookies([Cookie, ...])` |
+| Forget cookie | `.without_cookie(name)` |
 | Simple redirect | `Redirect::to(path).into()` |
-| Named redirect | `redirect!("route.name").into()` |
+| Named redirect | `redirect!("route.name").into()` or `Redirect::route("name")` |
+| Back redirect | `Redirect::back(fallback)` |
+| Intended redirect | `Redirect::intended(default)` |
+| Set intended target | `Redirect::set_intended_url(url)` |
+| External URL | `Redirect::away(url)` |
+| Refresh | `Redirect::refresh(path)` |
 | With route params | `.with("key", "value")` |
 | With query params | `.query("key", "value")` |
+| Flash data | `.with(key, value)` |
+| Flash input | `.with_input([(k, v), ...])` |
+| Flash errors | `.with_errors([(k, msg), ...])` |
+| Named error bag | `.with_errors_bag(bag, [(k, msg)])` |
+| Cookies on redirect | `.cookie(c)`, `.with_cookies([...])` |
+| Headers on redirect | `.header(k, v)`, `.with_headers([...])` |
+| Append fragment | `.with_fragment("section")` |
+| Strip fragment | `.without_fragment()` |
 | Permanent redirect | `.permanent()` |
+| Custom status | `.status(303)` |
+| Abort early | `abort_with(code, msg)`, `abort_if(cond, code, msg)`, `abort_unless(cond, code, msg)` |
 | Not found error | `AppError::not_found(msg)` |
 | Bad request | `AppError::bad_request(msg)` |
 | Unauthorized | `AppError::unauthorized(msg)` |
-| Custom status | `AppError::new(msg).status(code)` |
+| Custom status (error) | `AppError::new(msg).status(code)` |

@@ -450,6 +450,129 @@ export default function CreateTodo() {
 > For more information on TypeScript type generation, see [TypeScript Types](/frontend/typescript-types).
 
 
+## Request Accessors
+
+Beyond the validated-form pattern above, the `Request` type carries Laravel-style accessors for inspecting the wire-level request — URL, headers, query string, content negotiation, route metadata, and client IP. These are useful in middleware, in handlers that want raw access alongside a `FormRequest`, and in any place where validated parsing isn't the right tool.
+
+### URL and path
+
+| Method | Returns | Notes |
+|--------|---------|-------|
+| `req.path()` | `&str` | Raw URI path. |
+| `req.decoded_path()` | `String` | Path with percent-escapes resolved. |
+| `req.segments()` | `Vec<String>` | Path split on `/`, empty segments dropped. |
+| `req.segment(index, default)` | `Option<String>` | 1-based segment access. |
+| `req.url()` | `String` | Scheme + host + path (no query string). |
+| `req.full_url()` | `String` | URL + query string. |
+| `req.full_url_with_query(&[("k","v")])` | `String` | Append or override query keys. |
+| `req.full_url_without_query(&["k"])` | `String` | Strip query keys. |
+
+```rust
+use suprnova::{handler, json_response, Request, Response};
+
+#[handler]
+pub async fn show(req: Request) -> Response {
+    if req.is(&["admin/*"]) {
+        // path matches the admin/* wildcard
+    }
+    json_response!({ "url": req.full_url() })
+}
+```
+
+### Host, scheme, IP
+
+| Method | Returns | Source order |
+|--------|---------|--------------|
+| `req.host()` | `Option<String>` | `X-Forwarded-Host` → `Host` → URI authority. |
+| `req.http_host()` | `Option<String>` | Host plus port when non-default. |
+| `req.scheme_and_http_host()` | `Option<String>` | `scheme://host:port`. |
+| `req.scheme()` | `&'static str` | `"https"` when [`secure`] is true, else `"http"`. |
+| `req.secure()` | `bool` | URI scheme → `X-Forwarded-Proto` → `X-Forwarded-Ssl: on`. |
+| `req.ip()` | `Option<String>` | `X-Forwarded-For[0]` → `X-Real-IP` → peer addr. |
+| `req.ips()` | `Vec<String>` | Full chain: proxy headers, then peer addr. |
+| `req.user_agent()` | `Option<&str>` | `User-Agent` header. |
+| `req.port()` | `Option<u16>` | Host header port → `X-Forwarded-Port` → URI port. |
+
+### Headers and method
+
+| Method | Returns |
+|--------|---------|
+| `req.has_header("X-Foo")` | `bool` |
+| `req.bearer_token()` | `Option<String>` (last `Bearer ` substring, comma-trimmed) |
+| `req.is_method("POST")` | `bool` (case-insensitive) |
+| `req.ajax()` | `X-Requested-With: XMLHttpRequest` |
+| `req.pjax()` | Truthy `X-PJAX` header |
+| `req.prefetch()` | `X-Moz`, `Purpose`, or `Sec-Purpose` = `prefetch` |
+
+### Content negotiation
+
+```rust
+if req.is_json() { /* Content-Type carries /json or +json */ }
+if req.expects_json() { /* AJAX without Accept narrowing, or Accept prefers JSON */ }
+if req.wants_json() { /* Accept header tops with JSON */ }
+if req.accepts_html() { /* Accept allows text/html */ }
+
+let preferred = req.prefers(&["application/json", "text/html"]);
+let acceptable = req.acceptable_content_types();
+```
+
+`accepts(&[ty])` matches both bare types and `application/<vendor>+json`-style suffixes. `accepts_any_content_type()` returns true when there is no Accept header or the top preference is `*/*`.
+
+### Query string
+
+```rust
+let id: Option<String> = req.query_param("id");
+let map = req.query_params(); // HashMap<String, String>
+
+// Typed query parse via serde
+#[derive(serde::Deserialize)]
+struct SearchQuery { page: u32, q: String }
+let q: SearchQuery = req.query_into()?;
+```
+
+### Route metadata
+
+After the router dispatches a request, the matched pattern is recorded on the request:
+
+```rust
+if req.route_is(&["users.show", "users.*"]) {
+    // we're inside the users.show or users.* route
+}
+
+let pattern = req.route_pattern(); // Some("/users/{id}")
+let name = req.route_name();       // Some("users.show")
+```
+
+`route_is(&[...])` accepts `*` wildcards (Laravel's `Str::is` semantics).
+
+## Aborting early
+
+For early-exit error handling without the full `Response` envelope, the `abort_with` / `abort_if` / `abort_unless` helpers return a `FrameworkError` that renders through the standard `From<FrameworkError> for HttpResponse` pipeline. They compose with `?` directly:
+
+```rust
+use suprnova::{abort_if, abort_unless, abort_with, handler, json_response, Request, Response};
+
+#[handler]
+pub async fn show(req: Request) -> Response {
+    let id = req.param("id")?;
+
+    // 404 when the resource is missing.
+    abort_if(id == "0", 404, "User not found")?;
+
+    // 403 when the caller is unauthenticated.
+    abort_unless(req.has_header("Authorization"), 403, "Login required")?;
+
+    // Or raise a status unconditionally:
+    if some_condition() {
+        return Err(abort_with(418, "I'm a teapot").unwrap_err().into());
+    }
+
+    json_response!({ "id": id })
+}
+```
+
+`abort_if` / `abort_unless` return `Ok(())` when the condition is false, so the `?` continues normally.
+
 ## Summary
 
 | Feature | Description |
@@ -460,5 +583,21 @@ export default function CreateTodo() {
 | Error format | Laravel/Inertia-compatible 422 JSON |
 | Authorization | Override `authorize()` method |
 | Auto content-type | Detects JSON vs form-urlencoded |
+| URL accessors | `url`, `full_url`, `segments`, `decoded_path` |
+| Host/IP | `host`, `http_host`, `ip`, `ips`, `secure` |
+| Headers | `has_header`, `bearer_token`, `user_agent` |
+| Content negotiation | `accepts`, `prefers`, `is_json`, `wants_json` |
+| Query string | `query_param`, `query_params`, `query_into` |
+| Route metadata | `route_pattern`, `route_name`, `route_is` |
+| Abort helpers | `abort_with`, `abort_if`, `abort_unless` |
 | TypeScript types | Add `#[derive(InertiaProps)]` for type generation |
 | Type-safe forms | Use generated types with `useForm<T>` |
+
+## Untyped input bag — divergence from Laravel
+
+Laravel exposes a synchronous, merged input bag — `$req->input('field')`, `$req->all()`, `$req->only(['a','b'])`, `$req->boolean('flag')` — pulled from query string and parsed body together. Suprnova **does not** ship that surface. The reason:
+
+- Suprnova's body is consume-once, async, and typed via `FormRequest`. Forcing a synchronous `all()` would require reading the body up front, which has memory and DoS implications very different from PHP's per-request lifecycle.
+- The typed alternative (`#[request]` + `FormRequest`) gives compile-time field names, validation, and content-type-aware parsing — exactly the safety net PHP's untyped bag lacks.
+
+The accessors above (`query_param`, `query_into`, `bearer_token`, header readers) cover the cases where Laravel users reach for the bag against query / header / route state. For body-side access, define a `#[request]` struct.

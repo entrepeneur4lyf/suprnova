@@ -156,8 +156,9 @@ pub use http::upload::{
     upload_tempfiles_spilled_total,
 };
 pub use http::{
-    Cookie, CookieOptions, FormRequest, FromParam, FromRequest, HttpResponse, Redirect, Request,
-    Response, ResponseExt, SameSite, json, text,
+    Cookie, CookieOptions, FormRequest, FromParam, FromRequest, HttpResponse, Redirect,
+    RedirectRouteBuilder, Request, Response, ResponseExt, SameSite, abort_if, abort_unless,
+    abort_with, json, text,
 };
 pub use http_client::{
     ClientResponse, FailOnRealCallsGuard, Http, RecordedRequest, RequestBuilder, assert_not_sent,
@@ -237,7 +238,7 @@ pub use routing::{
 };
 pub use schedule::{CronExpression, DayOfWeek, Schedule, Task, TaskBuilder, TaskEntry, TaskResult};
 pub use seed::Seeder;
-pub use server::{Server, handle_request};
+pub use server::{Server, handle_request, handle_request_with_peer};
 pub use session::{
     DatabaseSessionDriver, SessionConfig, SessionData, SessionMiddleware, SessionStore,
     auth_user_id, clear_auth_user, destroy_all_for_user, generate_csrf_token, generate_session_id,

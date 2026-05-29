@@ -404,6 +404,45 @@ impl SessionData {
         }
     }
 
+    /// Drain the per-bag validation-errors flash bags written by
+    /// [`crate::http::Redirect::with_errors`] /
+    /// [`crate::http::Redirect::with_errors_bag`]. Returns a JSON
+    /// `Map<bag_name, errors_object>` shaped like Laravel's
+    /// `ViewErrorBag` (the per-bag value is `{ field: [messages] }`).
+    ///
+    /// Bag keys are recovered by walking the session for
+    /// `_flash.old.errors.<bag>` entries (the standard flash-age path
+    /// writes flashes to `.new.*` and ages them to `.old.*` on the
+    /// next request — so by the time an Inertia response handles the
+    /// redirect destination, the flash is in `.old.*`).
+    ///
+    /// Called by `InertiaResponse::resolve` to seed the `errors` prop
+    /// so a `redirect()->withErrors(...)` flow naturally surfaces
+    /// validation messages on the destination page.
+    pub fn pull_errors_flash(&mut self) -> serde_json::Map<String, serde_json::Value> {
+        let prefix = "_flash.old.errors.";
+        // Collect matching keys first to avoid borrowing `self.data`
+        // mutably while iterating it.
+        let keys: Vec<String> = self
+            .data
+            .keys()
+            .filter(|k| k.starts_with(prefix))
+            .cloned()
+            .collect();
+        let mut out = serde_json::Map::new();
+        for full_key in keys {
+            let bag = match full_key.strip_prefix(prefix) {
+                Some(b) => b.to_string(),
+                None => continue,
+            };
+            if let Some(value) = self.data.remove(&full_key) {
+                self.dirty = true;
+                out.insert(bag, value);
+            }
+        }
+        out
+    }
+
     /// Read the previous URL the user visited. Mirrors Laravel's
     /// `Store::previousUrl()` (`Store.php:791-794`). The previous URL
     /// is written by [`crate::session::SessionMiddleware`] on every

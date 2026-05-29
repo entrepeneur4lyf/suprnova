@@ -327,7 +327,7 @@ impl Server {
                     // practice; if they do happen, the per-iteration
                     // warn + 50ms sleep keeps the loop visible without
                     // dropping the server.
-                    let (stream, _) = match accept {
+                    let (stream, peer_socket) = match accept {
                         Ok(pair) => pair,
                         Err(err) => {
                             tracing::warn!(
@@ -341,6 +341,11 @@ impl Server {
                             continue;
                         }
                     };
+                    // Capture the peer IP off the accepted TCP socket so
+                    // every request served on this connection can report
+                    // its connecting address via `Request::ip()` as the
+                    // trusted fallback when no proxy header is present.
+                    let peer_ip: Option<std::net::IpAddr> = Some(peer_socket.ip());
                     let io = TokioIo::new(stream);
                     let router = router.clone();
                     let middleware = middleware.clone();
@@ -350,7 +355,7 @@ impl Server {
                             let router = router.clone();
                             let middleware = middleware.clone();
                             async move {
-                                Ok::<_, Infallible>(handle_request(router, middleware, req).await)
+                                Ok::<_, Infallible>(handle_request_with_peer(router, middleware, req, peer_ip).await)
                             }
                         });
 
@@ -509,6 +514,21 @@ pub async fn handle_request(
     middleware_registry: Arc<MiddlewareRegistry>,
     req: hyper::Request<hyper::body::Incoming>,
 ) -> hyper::Response<ServerBody> {
+    handle_request_with_peer(router, middleware_registry, req, None).await
+}
+
+/// Same as [`handle_request`] but accepts the connecting peer's IP
+/// address. Called by the production accept loop in [`Server::run`]
+/// (`accepted_socket.peer_addr().ip()`); test harnesses and in-process
+/// callers that don't have a real TCP peer use [`handle_request`]
+/// directly, in which case `Request::ip()` falls through to the proxy
+/// headers (or returns `None` when neither is present).
+pub async fn handle_request_with_peer(
+    router: Arc<Router>,
+    middleware_registry: Arc<MiddlewareRegistry>,
+    req: hyper::Request<hyper::body::Incoming>,
+    peer_ip: Option<std::net::IpAddr>,
+) -> hyper::Response<ServerBody> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
 
@@ -522,7 +542,7 @@ pub async fn handle_request(
     if hyper_tungstenite::is_upgrade_request(&req)
         && let Some(ws_match) = router.match_ws(&path)
     {
-        return handle_ws_upgrade(req, ws_match, middleware_registry).await;
+        return handle_ws_upgrade(req, ws_match, middleware_registry, peer_ip).await;
     }
 
     // Built-in health check endpoint at /_suprnova/health
@@ -531,7 +551,10 @@ pub async fn handle_request(
         // The health endpoint short-circuits before the middleware chain,
         // so it resolves and echoes `X-Request-Id` itself to keep liveness
         // probes correlatable with logs — same contract as routed paths.
-        let request = Request::new(req);
+        let mut request = Request::new(req);
+        if let Some(ip) = peer_ip {
+            request = request.with_peer_addr(ip);
+        }
         let request_id = crate::logging::request_id::resolve_request_id(&request);
         let query = request.query().unwrap_or("").to_string();
         return health_response(&query, &request_id).await;
@@ -584,6 +607,7 @@ pub async fn handle_request(
                             req,
                             method,
                             &path,
+                            peer_ip,
                         )),
                     )
                     .await
@@ -639,7 +663,18 @@ async fn handle_request_inner(
     req: hyper::Request<hyper::body::Incoming>,
     method: hyper::Method,
     path: &str,
+    peer_ip: Option<std::net::IpAddr>,
 ) -> hyper::Response<ServerBody> {
+    // Helper: stamp the peer IP on a freshly-constructed Request if the
+    // accept loop captured one. Stays an `Option` because in-process
+    // callers (the testing harness, the WS upgrade replay) may invoke
+    // `handle_request` directly without a real TCP peer.
+    let stamp_peer = |r: Request| -> Request {
+        match peer_ip {
+            Some(ip) => r.with_peer_addr(ip),
+            None => r,
+        }
+    };
     // RFC 9110 §9.3.2: a HEAD request that lacks an explicit handler falls
     // back to GET inside `Router::match_route`. The middleware list for
     // such a request must come from the GET registration, not from an
@@ -655,7 +690,11 @@ async fn handle_request_inner(
 
     match router.match_route(&method, path) {
         Some((pattern, handler, params)) => {
-            let request = Request::new(req).with_params(params);
+            let request = stamp_peer(
+                Request::new(req)
+                    .with_params(params)
+                    .with_route_pattern(pattern.clone()),
+            );
 
             // Resolve the request id ONCE for this request. The same id is
             // handed to the middleware (which scopes it) and to
@@ -710,7 +749,8 @@ async fn handle_request_inner(
         None => {
             // Check for fallback handler
             if let Some((fallback_handler, fallback_middleware)) = router.get_fallback() {
-                let request = Request::new(req).with_params(std::collections::HashMap::new());
+                let request =
+                    stamp_peer(Request::new(req).with_params(std::collections::HashMap::new()));
                 let request_id = crate::logging::request_id::resolve_request_id(&request);
 
                 // Build middleware chain for fallback
@@ -749,7 +789,8 @@ async fn handle_request_inner(
                 // request id. This mirrors the fallback branch above — the
                 // only difference is the terminal handler is a static 404
                 // rather than a user-supplied fallback.
-                let request = Request::new(req).with_params(std::collections::HashMap::new());
+                let request =
+                    stamp_peer(Request::new(req).with_params(std::collections::HashMap::new()));
                 let request_id = crate::logging::request_id::resolve_request_id(&request);
 
                 let mut chain = MiddlewareChain::new();
@@ -859,6 +900,7 @@ async fn handle_ws_upgrade(
     mut req: hyper::Request<hyper::body::Incoming>,
     ws_match: crate::routing::WsMatch,
     middleware_registry: Arc<MiddlewareRegistry>,
+    peer_ip: Option<std::net::IpAddr>,
 ) -> hyper::Response<ServerBody> {
     use crate::middleware::MiddlewareChain;
     use crate::routing::BoxedHandler;
@@ -903,7 +945,12 @@ async fn handle_ws_upgrade(
     // construct via Request::new(req) so headers and cookies are
     // intact for the handler.
     let path = req.uri().path().to_string();
-    let initial_request = Request::new(req).with_params(params);
+    let mut initial_request = Request::new(req)
+        .with_params(params)
+        .with_route_pattern(pattern.clone());
+    if let Some(ip) = peer_ip {
+        initial_request = initial_request.with_peer_addr(ip);
+    }
 
     // Resolve the request id once for the whole upgrade. It is echoed on
     // the 101 handshake response, threaded into the connection span and

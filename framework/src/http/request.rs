@@ -32,6 +32,17 @@ pub struct Request {
     parts: hyper::http::request::Parts,
     body: BodyState,
     params: HashMap<String, String>,
+    /// The matched route pattern (e.g. `/users/{id}`), if the router
+    /// dispatched this request through a named or pattern-based match.
+    /// Threaded in by the server after `Router::match_route` succeeds so
+    /// downstream code can ask which route handled the request via
+    /// [`Request::route_pattern`] / [`Request::route_name`] /
+    /// [`Request::route_is`].
+    route_pattern: Option<String>,
+    /// The peer's IP address. Set by the server from the accepted-TCP
+    /// `SocketAddr` when available, and consulted by [`Request::ip`] as
+    /// the trusted fallback when no proxy header is present.
+    peer_addr: Option<std::net::IpAddr>,
 }
 
 impl Request {
@@ -41,11 +52,32 @@ impl Request {
             parts,
             body: BodyState::Streaming(body),
             params: HashMap::new(),
+            route_pattern: None,
+            peer_addr: None,
         }
     }
 
     pub fn with_params(mut self, params: HashMap<String, String>) -> Self {
         self.params = params;
+        self
+    }
+
+    /// Record the matched route pattern (e.g. `/users/{id}`) on the
+    /// request. Called by the server after `Router::match_route`
+    /// resolves a pattern; downstream accessors
+    /// ([`Request::route_pattern`], [`Request::route_name`],
+    /// [`Request::route_is`]) read it back.
+    pub fn with_route_pattern(mut self, pattern: impl Into<String>) -> Self {
+        self.route_pattern = Some(pattern.into());
+        self
+    }
+
+    /// Record the connecting peer's IP address on the request. Called
+    /// by the server from the accepted-TCP `SocketAddr`. Used as the
+    /// trusted fallback by [`Request::ip`] when no proxy header is
+    /// configured / present.
+    pub fn with_peer_addr(mut self, addr: std::net::IpAddr) -> Self {
+        self.peer_addr = Some(addr);
         self
     }
 
@@ -143,6 +175,564 @@ impl Request {
     /// ```
     pub fn cookie(&self, name: &str) -> Option<String> {
         self.cookies().get(name).cloned()
+    }
+
+    /// Returns `true` when a header with `name` is present (any value).
+    /// Mirrors Laravel's `Request::hasHeader($key)`. Case-insensitive,
+    /// matching hyper's `HeaderMap` semantics.
+    pub fn has_header(&self, name: &str) -> bool {
+        self.parts.headers.contains_key(name)
+    }
+
+    /// Read the bearer token from the `Authorization` header. Mirrors
+    /// Laravel's `Request::bearerToken()`. Returns the substring after
+    /// the LAST `Bearer ` (case-insensitive), stripped to the comma
+    /// boundary if any (e.g. `Bearer foo, x=y` → `foo`). Returns `None`
+    /// when the header is missing or does not carry a `Bearer ` prefix.
+    pub fn bearer_token(&self) -> Option<String> {
+        let raw = self.header("Authorization")?;
+        // Mirror Laravel's `strripos` lookup: last occurrence of `Bearer `,
+        // case-insensitive.
+        let lower = raw.to_ascii_lowercase();
+        let needle = "bearer ";
+        let pos = lower.rfind(needle)?;
+        let after = &raw[pos + needle.len()..];
+        // Cut at the first comma (token list boundary) and trim
+        // surrounding whitespace.
+        let tok = after.split(',').next().unwrap_or("").trim();
+        if tok.is_empty() {
+            None
+        } else {
+            Some(tok.to_string())
+        }
+    }
+
+    /// Returns `true` when the HTTP method equals `method`
+    /// (case-insensitive). Mirrors Laravel's `Request::isMethod($method)`.
+    pub fn is_method(&self, method: &str) -> bool {
+        self.parts.method.as_str().eq_ignore_ascii_case(method)
+    }
+
+    /// Convenience: returns `true` when this is an XHR / AJAX request
+    /// — the standard `X-Requested-With: XMLHttpRequest` header set by
+    /// every browser XHR library. Mirrors Laravel's `Request::ajax()` /
+    /// `Symfony Request::isXmlHttpRequest()`.
+    pub fn ajax(&self) -> bool {
+        self.header("X-Requested-With")
+            .map(|v| v.eq_ignore_ascii_case("XMLHttpRequest"))
+            .unwrap_or(false)
+    }
+
+    /// Returns `true` when the `X-PJAX` header is set to a truthy
+    /// value. Mirrors Laravel's `Request::pjax()`.
+    pub fn pjax(&self) -> bool {
+        match self.header("X-PJAX") {
+            None => false,
+            Some(v) => {
+                let v = v.trim();
+                !v.is_empty() && !v.eq_ignore_ascii_case("false") && v != "0"
+            }
+        }
+    }
+
+    /// Returns `true` when the request is a prefetch hint — covers the
+    /// Mozilla legacy `X-Moz: prefetch` and the modern `Purpose` /
+    /// `Sec-Purpose: prefetch` family. Mirrors Laravel's
+    /// `Request::prefetch()`.
+    pub fn prefetch(&self) -> bool {
+        let matches = |raw: Option<&str>| {
+            raw.map(|v| v.eq_ignore_ascii_case("prefetch"))
+                .unwrap_or(false)
+        };
+        matches(self.header("X-Moz"))
+            || matches(self.header("Purpose"))
+            || matches(self.header("Sec-Purpose"))
+    }
+
+    /// Returns `true` when the request is being served over HTTPS.
+    ///
+    /// Resolution order:
+    /// 1. URI scheme on the request line (set by hyper when TLS is
+    ///    terminated in-process).
+    /// 2. `X-Forwarded-Proto` (single-value or first comma-split
+    ///    value, case-insensitive) — covers the common terminating-proxy
+    ///    deployment.
+    /// 3. `X-Forwarded-Ssl: on` — older proxies (nginx legacy default).
+    ///
+    /// Mirrors Laravel's `Request::secure()` /
+    /// `Symfony Request::isSecure()`. No header-trust gating because
+    /// upstream Suprnova does not have a configurable trusted-proxy
+    /// list yet; consumers behind an untrusted edge must strip these
+    /// headers at the proxy layer (the same precaution Laravel docs
+    /// recommend pre-`TrustProxies`).
+    pub fn secure(&self) -> bool {
+        if let Some(scheme) = self.parts.uri.scheme_str()
+            && scheme.eq_ignore_ascii_case("https")
+        {
+            return true;
+        }
+        if let Some(proto) = self.header("X-Forwarded-Proto") {
+            let first = proto.split(',').next().unwrap_or("").trim();
+            if first.eq_ignore_ascii_case("https") {
+                return true;
+            }
+        }
+        if let Some(ssl) = self.header("X-Forwarded-Ssl")
+            && ssl.trim().eq_ignore_ascii_case("on")
+        {
+            return true;
+        }
+        false
+    }
+
+    /// URI scheme. Returns `"https"` when [`Request::secure`] is true,
+    /// else `"http"`. Mirrors Symfony's `getScheme()`.
+    pub fn scheme(&self) -> &'static str {
+        if self.secure() { "https" } else { "http" }
+    }
+
+    /// Get the connecting peer IP address.
+    ///
+    /// Resolution order:
+    /// 1. `X-Forwarded-For` — first non-empty comma-split value.
+    /// 2. `X-Real-IP` — single value.
+    /// 3. The TCP peer address recorded by the server
+    ///    ([`Request::with_peer_addr`]) when no proxy header is set.
+    ///
+    /// Returns `None` only when both the proxy headers and the
+    /// peer-addr accessor are absent (e.g. tests that construct a
+    /// `Request` directly from `Request::new(...)` without threading
+    /// the peer). Mirrors Laravel's `Request::ip()` /
+    /// `Symfony Request::getClientIp()`.
+    pub fn ip(&self) -> Option<String> {
+        if let Some(xff) = self.header("X-Forwarded-For") {
+            let first = xff.split(',').next().unwrap_or("").trim();
+            if !first.is_empty() {
+                return Some(first.to_string());
+            }
+        }
+        if let Some(real) = self.header("X-Real-IP") {
+            let v = real.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+        self.peer_addr.map(|ip| ip.to_string())
+    }
+
+    /// Full client IP chain, parsed from `X-Forwarded-For` plus the
+    /// recorded peer address. Order: leftmost (originating client) →
+    /// rightmost (closest hop). Mirrors Laravel's `Request::ips()` /
+    /// `Symfony Request::getClientIps()`.
+    pub fn ips(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if let Some(xff) = self.header("X-Forwarded-For") {
+            for piece in xff.split(',') {
+                let t = piece.trim();
+                if !t.is_empty() {
+                    out.push(t.to_string());
+                }
+            }
+        }
+        if let Some(real) = self.header("X-Real-IP") {
+            let t = real.trim();
+            if !t.is_empty() && !out.iter().any(|v| v == t) {
+                out.push(t.to_string());
+            }
+        }
+        if let Some(peer) = self.peer_addr {
+            let s = peer.to_string();
+            if !out.iter().any(|v| v == &s) {
+                out.push(s);
+            }
+        }
+        out
+    }
+
+    /// Read the `User-Agent` header. Returns `None` when absent or
+    /// non-UTF-8. Mirrors Laravel's `Request::userAgent()`.
+    pub fn user_agent(&self) -> Option<&str> {
+        self.header("User-Agent")
+    }
+
+    /// The host name (no port, no scheme). Resolution: `X-Forwarded-Host`
+    /// first, then `Host` header, then URI authority host. Mirrors
+    /// Symfony's `getHost()`.
+    pub fn host(&self) -> Option<String> {
+        if let Some(fhost) = self.header("X-Forwarded-Host") {
+            let first = fhost.split(',').next().unwrap_or("").trim();
+            if !first.is_empty() {
+                return Some(strip_port(first).to_string());
+            }
+        }
+        if let Some(h) = self.header("Host") {
+            return Some(strip_port(h).to_string());
+        }
+        self.parts.uri.host().map(|s| s.to_string())
+    }
+
+    /// The HTTP host being requested — host plus port when the port is
+    /// non-default for the scheme. Mirrors Symfony's `getHttpHost()`.
+    pub fn http_host(&self) -> Option<String> {
+        let host = self.host()?;
+        let scheme = self.scheme();
+        let port = self.port();
+        let default_port = match scheme {
+            "https" => 443,
+            _ => 80,
+        };
+        if let Some(p) = port
+            && p != default_port
+        {
+            Some(format!("{host}:{p}"))
+        } else {
+            Some(host)
+        }
+    }
+
+    /// Scheme + host + port as a single string. Mirrors Symfony's
+    /// `getSchemeAndHttpHost()`.
+    pub fn scheme_and_http_host(&self) -> Option<String> {
+        let host = self.http_host()?;
+        Some(format!("{}://{host}", self.scheme()))
+    }
+
+    /// The port the client is connecting to. Resolution: explicit
+    /// `:port` on the Host (or X-Forwarded-Host) header → explicit
+    /// `X-Forwarded-Port` → URI authority port → `None` (caller treats
+    /// as the scheme default).
+    pub fn port(&self) -> Option<u16> {
+        let host_header = self
+            .header("X-Forwarded-Host")
+            .and_then(|v| v.split(',').next())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.header("Host"));
+        if let Some(h) = host_header
+            && let Some(p) = port_of(h)
+        {
+            return Some(p);
+        }
+        if let Some(port) = self.header("X-Forwarded-Port")
+            && let Ok(p) = port.trim().parse::<u16>()
+        {
+            return Some(p);
+        }
+        self.parts.uri.port_u16()
+    }
+
+    /// Decoded path: the request path with percent escapes resolved.
+    /// Mirrors Laravel's `Request::decodedPath()`.
+    pub fn decoded_path(&self) -> String {
+        percent_encoding::percent_decode_str(self.path())
+            .decode_utf8_lossy()
+            .into_owned()
+    }
+
+    /// Get the path segments (split on `/`, empty segments dropped).
+    /// 1-based access via [`Request::segment`]. Mirrors Laravel's
+    /// `Request::segments()`.
+    pub fn segments(&self) -> Vec<String> {
+        self.decoded_path()
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// Get a path segment by **1-based** index, or `default` when out
+    /// of range. Mirrors Laravel's `Request::segment($index, $default)`.
+    pub fn segment(&self, index: usize, default: Option<&str>) -> Option<String> {
+        if index == 0 {
+            return default.map(|s| s.to_string());
+        }
+        let segments = self.segments();
+        segments
+            .get(index - 1)
+            .cloned()
+            .or_else(|| default.map(|s| s.to_string()))
+    }
+
+    /// Get the URL of the request (no query string, trailing `/`
+    /// stripped). Mirrors Laravel's `Request::url()`.
+    pub fn url(&self) -> String {
+        let scheme_host = self.scheme_and_http_host().unwrap_or_default();
+        let path = self.path();
+        let stripped = if path.len() > 1 {
+            path.trim_end_matches('/')
+        } else {
+            path
+        };
+        format!("{scheme_host}{stripped}")
+    }
+
+    /// Get the full URL (URL + `?` + query string when present).
+    /// Mirrors Laravel's `Request::fullUrl()`.
+    pub fn full_url(&self) -> String {
+        match self.query() {
+            Some(q) if !q.is_empty() => format!("{}?{}", self.url(), q),
+            _ => self.url(),
+        }
+    }
+
+    /// Build the full URL with extra/overridden query params merged in.
+    /// Mirrors Laravel's `Request::fullUrlWithQuery($query)`.
+    pub fn full_url_with_query<K, V>(&self, extra: &[(K, V)]) -> String
+    where
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        super::response::append_query_params(&self.full_url(), extra)
+    }
+
+    /// Build the full URL with the given query keys removed. Mirrors
+    /// Laravel's `Request::fullUrlWithoutQuery($keys)`.
+    pub fn full_url_without_query<K: AsRef<str>>(&self, keys: &[K]) -> String {
+        let url = self.url();
+        let q = match self.query() {
+            Some(q) if !q.is_empty() => q,
+            _ => return url,
+        };
+        let drop: std::collections::HashSet<&str> = keys.iter().map(|k| k.as_ref()).collect();
+        let pairs: Vec<(String, String)> = url::form_urlencoded::parse(q.as_bytes())
+            .filter(|(k, _)| !drop.contains(k.as_ref()))
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        if pairs.is_empty() {
+            return url;
+        }
+        let encoded = url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .finish();
+        format!("{url}?{encoded}")
+    }
+
+    /// Parse the query string into a fresh HashMap. Repeated keys are
+    /// flattened to the last value (the standard `application/x-www-
+    /// form-urlencoded` convention). For typed access, prefer
+    /// [`Request::query_into`] with a `serde::Deserialize` target.
+    /// Mirrors Laravel's `Request::query()` (untyped form).
+    pub fn query_params(&self) -> HashMap<String, String> {
+        let q = match self.query() {
+            Some(q) if !q.is_empty() => q,
+            _ => return HashMap::new(),
+        };
+        url::form_urlencoded::parse(q.as_bytes())
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect()
+    }
+
+    /// Look up a single query string value by key. Returns `None` when
+    /// the key is absent. Mirrors Laravel's
+    /// `Request::query($key, $default)`.
+    pub fn query_param(&self, key: &str) -> Option<String> {
+        let q = self.query()?;
+        for (k, v) in url::form_urlencoded::parse(q.as_bytes()) {
+            if k == key {
+                return Some(v.into_owned());
+            }
+        }
+        None
+    }
+
+    /// Returns `true` when a query string key is present.
+    pub fn has_query(&self, key: &str) -> bool {
+        self.query_param(key).is_some()
+    }
+
+    /// Deserialize the query string into a typed struct.
+    /// Mirrors Laravel's typed query access (commonly used through
+    /// validated form requests in PHP, but Suprnova users reach for
+    /// this directly when they only care about query params).
+    pub fn query_into<T: DeserializeOwned>(&self) -> Result<T, FrameworkError> {
+        let q = self.query().unwrap_or("");
+        serde_urlencoded::from_str(q)
+            .map_err(|e| FrameworkError::domain(format!("query parse: {e}"), 422))
+    }
+
+    /// Returns the matched route pattern (e.g. `/users/{id}`) when the
+    /// router dispatched this request, or `None` for the fallback
+    /// branch / direct test construction.
+    pub fn route_pattern(&self) -> Option<&str> {
+        self.route_pattern.as_deref()
+    }
+
+    /// Returns the matched route's registered NAME (the value from
+    /// `.name("users.show")`) when one was set, or `None` for an
+    /// unnamed route or an unmatched request. Mirrors Laravel's
+    /// `Request::route()->getName()`.
+    pub fn route_name(&self) -> Option<String> {
+        let pattern = self.route_pattern.as_deref()?;
+        crate::routing::route_name_for_pattern(pattern)
+    }
+
+    /// Determine if the route name matches a given pattern (literal,
+    /// or `*` wildcard via `str::is`). Mirrors Laravel's
+    /// `Request::routeIs(...)`.
+    pub fn route_is(&self, patterns: &[&str]) -> bool {
+        let name = match self.route_name() {
+            Some(n) => n,
+            None => return false,
+        };
+        patterns.iter().any(|p| glob_match(p, &name))
+    }
+
+    /// Determine if the current request path matches any of the given
+    /// patterns. Each pattern may contain `*` wildcards. Mirrors
+    /// Laravel's `Request::is(...)`.
+    pub fn is(&self, patterns: &[&str]) -> bool {
+        let path = self.decoded_path();
+        let stripped = path.trim_start_matches('/');
+        patterns
+            .iter()
+            .any(|p| glob_match(p.trim_start_matches('/'), stripped))
+    }
+
+    /// Determine if the current full URL matches any of the given
+    /// patterns. Each pattern may contain `*` wildcards. Mirrors
+    /// Laravel's `Request::fullUrlIs(...)`.
+    pub fn full_url_is(&self, patterns: &[&str]) -> bool {
+        let full = self.full_url();
+        patterns.iter().any(|p| glob_match(p, &full))
+    }
+
+    /// Determine if the request body is sending JSON (Content-Type
+    /// contains `/json` or `+json`). Mirrors Laravel's
+    /// `Request::isJson()`.
+    pub fn is_json(&self) -> bool {
+        self.header("content-type")
+            .map(|v| {
+                let v = v.to_ascii_lowercase();
+                v.contains("/json") || v.contains("+json")
+            })
+            .unwrap_or(false)
+    }
+
+    /// Determine if the current request expects a JSON response.
+    /// Mirrors Laravel's `Request::expectsJson()`.
+    pub fn expects_json(&self) -> bool {
+        (self.ajax() && !self.pjax() && self.accepts_any_content_type()) || self.wants_json()
+    }
+
+    /// Determine if the current request prefers JSON. Mirrors
+    /// Laravel's `Request::wantsJson()`.
+    pub fn wants_json(&self) -> bool {
+        let types = self.acceptable_content_types();
+        match types.first() {
+            None => false,
+            Some(t) => {
+                let lower = t.to_ascii_lowercase();
+                lower.contains("/json") || lower.contains("+json")
+            }
+        }
+    }
+
+    /// Return the list of acceptable content types in priority order,
+    /// derived from the `Accept` header (q-value sorted descending).
+    /// Mirrors Laravel's `Request::getAcceptableContentTypes()`.
+    pub fn acceptable_content_types(&self) -> Vec<String> {
+        let raw = match self.header("Accept") {
+            Some(v) => v,
+            None => return Vec::new(),
+        };
+        parse_accept(raw)
+    }
+
+    /// Determine if the request accepts ANY of the given content
+    /// types. Mirrors Laravel's `Request::accepts($contentTypes)`.
+    pub fn accepts(&self, content_types: &[&str]) -> bool {
+        let accepts = self.acceptable_content_types();
+        if accepts.is_empty() {
+            return true;
+        }
+        for accept in &accepts {
+            let bare = accept.split(';').next().unwrap_or(accept).trim();
+            if bare == "*/*" || bare == "*" {
+                return true;
+            }
+            let accept_lc = bare.to_ascii_lowercase();
+            for ty in content_types {
+                let ty_lc = ty.to_ascii_lowercase();
+                if Self::matches_type(&accept_lc, &ty_lc)
+                    || accept_lc == format!("{}/*", ty_lc.split('/').next().unwrap_or(""))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Pick the most suitable response content type from the offered
+    /// list, based on the request's `Accept` header. Returns `None`
+    /// when none match. Mirrors Laravel's `Request::prefers($types)`.
+    pub fn prefers(&self, content_types: &[&str]) -> Option<String> {
+        let accepts = self.acceptable_content_types();
+        for accept in &accepts {
+            let bare = accept.split(';').next().unwrap_or(accept).trim();
+            if bare == "*/*" || bare == "*" {
+                return content_types.first().map(|s| s.to_string());
+            }
+            let accept_lc = bare.to_ascii_lowercase();
+            for ty in content_types {
+                let ty_lc = ty.to_ascii_lowercase();
+                if Self::matches_type(&ty_lc, &accept_lc)
+                    || accept_lc == format!("{}/*", ty_lc.split('/').next().unwrap_or(""))
+                {
+                    return Some((*ty).to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Returns `true` when the request accepts any content type
+    /// (no Accept header, or `*/*` / `*` as the top preference).
+    /// Mirrors Laravel's `Request::acceptsAnyContentType()`.
+    pub fn accepts_any_content_type(&self) -> bool {
+        let acceptable = self.acceptable_content_types();
+        acceptable.is_empty()
+            || matches!(
+                acceptable.first().map(|s| s.as_str()),
+                Some("*/*") | Some("*")
+            )
+    }
+
+    /// Convenience: returns `true` when the request accepts JSON
+    /// (`application/json`). Mirrors Laravel's `Request::acceptsJson()`.
+    pub fn accepts_json(&self) -> bool {
+        self.accepts(&["application/json"])
+    }
+
+    /// Convenience: returns `true` when the request accepts HTML
+    /// (`text/html`). Mirrors Laravel's `Request::acceptsHtml()`.
+    pub fn accepts_html(&self) -> bool {
+        self.accepts(&["text/html"])
+    }
+
+    /// Compare two content types where the wildcard `+suffix` form is
+    /// tolerated (e.g. `application/json` matches
+    /// `application/foo+json`). Mirrors Laravel's
+    /// `Request::matchesType()`.
+    fn matches_type(actual: &str, ty: &str) -> bool {
+        if actual == ty {
+            return true;
+        }
+        let actual_split: Vec<&str> = actual.split('/').collect();
+        if actual_split.len() == 2 {
+            let prefix = actual_split[0];
+            let suffix = actual_split[1];
+            // e.g. actual = application/json, ty = application/foo+json
+            // should match — checking ty matches pattern `<prefix>/.+\+<suffix>`
+            if let Some((ty_prefix, ty_rest)) = ty.split_once('/')
+                && ty_prefix == prefix
+                && let Some((_, ty_suffix)) = ty_rest.rsplit_once('+')
+                && ty_suffix == suffix
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Get the Inertia version from request headers
@@ -364,4 +954,186 @@ impl Request {
 pub struct RequestParts {
     pub params: HashMap<String, String>,
     pub content_type: Option<String>,
+}
+
+/// Strip a `:port` suffix from a host string, handling IPv6 brackets
+/// (`[::1]:8080` → `[::1]`). Mirrors the host-only resolution Laravel
+/// gets from Symfony's `HeaderUtils::parseAuthority`.
+fn strip_port(host: &str) -> &str {
+    let host = host.trim();
+    if let Some(rest) = host.strip_prefix('[') {
+        // IPv6: take through the closing `]`, drop anything after.
+        if let Some(end) = rest.find(']') {
+            return &host[..end + 2];
+        }
+        return host;
+    }
+    match host.rfind(':') {
+        Some(i) => &host[..i],
+        None => host,
+    }
+}
+
+/// Parse a `:port` from a host string. None when absent or unparseable.
+fn port_of(host: &str) -> Option<u16> {
+    let host = host.trim();
+    let suffix = if let Some(rest) = host.strip_prefix('[') {
+        // IPv6 in brackets: parse after `]:`.
+        let end = rest.find(']')?;
+        let after = &rest[end + 1..];
+        after.strip_prefix(':')?
+    } else {
+        // IPv4 or hostname: only one `:` means the suffix is a port;
+        // anything else is an unbracketed IPv6 literal (which has
+        // multiple `:` characters) and has no port.
+        if host.matches(':').count() != 1 {
+            return None;
+        }
+        let idx = host.rfind(':')?;
+        let suffix = &host[idx + 1..];
+        if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        suffix
+    };
+    suffix.parse().ok()
+}
+
+/// Parse an `Accept` header into a list of content types in priority
+/// order. Bare media types (no `q=`) are kept in source order ahead of
+/// any explicitly lower-q items. Mirrors Symfony's `AcceptHeader`
+/// q-sort, simplified to the subset Laravel exposes.
+fn parse_accept(raw: &str) -> Vec<String> {
+    let mut entries: Vec<(usize, f32, String)> = Vec::new();
+    for (idx, piece) in raw.split(',').enumerate() {
+        let piece = piece.trim();
+        if piece.is_empty() {
+            continue;
+        }
+        let mut q: f32 = 1.0;
+        // Pull out any `q=` parameter; bare params (no =) pass through
+        // into the type string as-is.
+        for param in piece.split(';').skip(1) {
+            let p = param.trim();
+            if let Some(qv) = p.strip_prefix("q=") {
+                q = qv.parse().unwrap_or(1.0);
+            } else if let Some(qv) = p.strip_prefix("Q=") {
+                q = qv.parse().unwrap_or(1.0);
+            }
+        }
+        entries.push((idx, q, piece.to_string()));
+    }
+    // Sort by q descending, preserving source order as the tie-break.
+    entries.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
+    entries.into_iter().map(|(_, _, s)| s).collect()
+}
+
+/// Simple `*`-wildcard pattern match used by [`Request::is`] and
+/// [`Request::route_is`]. Mirrors Laravel's `Str::is($pattern, $value)`
+/// — `*` matches any sequence (including empty). No `?` single-char or
+/// regex semantics; Laravel doesn't either.
+fn glob_match(pattern: &str, value: &str) -> bool {
+    if pattern == value || pattern == "*" {
+        return true;
+    }
+    if !pattern.contains('*') {
+        return pattern == value;
+    }
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let mut idx = 0usize;
+    for (i, part) in parts.iter().enumerate() {
+        if i == 0 {
+            // First segment must anchor the start unless it's empty
+            // (pattern began with `*`).
+            if !value[idx..].starts_with(part) {
+                return false;
+            }
+            idx += part.len();
+        } else if i == parts.len() - 1 {
+            // Last segment must anchor the end.
+            if !value[idx..].ends_with(part) {
+                return false;
+            }
+        } else if part.is_empty() {
+            // Consecutive `**` collapses — no-op.
+            continue;
+        } else {
+            match value[idx..].find(part) {
+                Some(off) => idx += off + part.len(),
+                None => return false,
+            }
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod url_helper_tests {
+    use super::*;
+
+    #[test]
+    fn strip_port_handles_ipv4_and_hostname() {
+        assert_eq!(strip_port("example.com"), "example.com");
+        assert_eq!(strip_port("example.com:8080"), "example.com");
+        assert_eq!(strip_port("127.0.0.1:9000"), "127.0.0.1");
+    }
+
+    #[test]
+    fn strip_port_handles_ipv6_brackets() {
+        assert_eq!(strip_port("[::1]"), "[::1]");
+        assert_eq!(strip_port("[::1]:8080"), "[::1]");
+        assert_eq!(strip_port("[2001:db8::1]:443"), "[2001:db8::1]");
+    }
+
+    #[test]
+    fn port_of_returns_expected() {
+        assert_eq!(port_of("example.com"), None);
+        assert_eq!(port_of("example.com:8080"), Some(8080));
+        assert_eq!(port_of("[::1]:9090"), Some(9090));
+        // Bare IPv6 without brackets must NOT be misread as port:
+        assert_eq!(port_of("::1"), None);
+    }
+
+    #[test]
+    fn parse_accept_sorts_by_q_descending() {
+        let parsed = parse_accept("text/html;q=0.5, application/json;q=0.9, */*;q=0.1");
+        assert_eq!(
+            parsed,
+            vec![
+                "application/json;q=0.9".to_string(),
+                "text/html;q=0.5".to_string(),
+                "*/*;q=0.1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_accept_preserves_source_order_for_ties() {
+        let parsed = parse_accept("text/html, application/xhtml+xml, application/json");
+        assert_eq!(
+            parsed,
+            vec![
+                "text/html".to_string(),
+                "application/xhtml+xml".to_string(),
+                "application/json".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn glob_match_literals_and_wildcards() {
+        assert!(glob_match("users.*", "users.show"));
+        assert!(glob_match("users.*", "users.index"));
+        assert!(!glob_match("users.*", "posts.show"));
+        assert!(glob_match("admin/*", "admin/users"));
+        assert!(glob_match("api/*/users", "api/v1/users"));
+        assert!(!glob_match("api/*/users", "api/v1/posts"));
+        assert!(glob_match("*", "anything"));
+        assert!(glob_match("exact", "exact"));
+        assert!(!glob_match("exact", "Exact"));
+    }
 }

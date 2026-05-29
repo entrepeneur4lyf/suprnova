@@ -923,12 +923,19 @@ async fn resolve_props(
     let mut metadata = PageMetadata::default();
 
     // `errors` is always present per the Inertia v3 contract. Seed
-    // with an empty object so the key exists even if no resolver
-    // writes errors. The `X-Inertia-Error-Bag` wrapping happens AFTER
-    // all props resolve — see the bottom of this function. Doing it
-    // post-resolution means a handler that injects errors via
-    // `.with("errors", {...})` still gets correctly scoped.
-    materialized.insert("errors".to_string(), Value::Object(serde_json::Map::new()));
+    // with whatever the session has flashed under the canonical bag
+    // keys (`errors.<bag>` — written by [`crate::http::Redirect::with_errors`]),
+    // or an empty object when nothing flashed. The `X-Inertia-Error-Bag`
+    // wrapping happens AFTER all props resolve — see the bottom of this
+    // function. Doing it post-resolution means a handler that injects
+    // errors via `.with("errors", {...})` still gets correctly scoped.
+    //
+    // The session lookup is bounded to a single bag prefix scan and is
+    // a no-op outside a `SessionMiddleware` scope (silently produces
+    // the empty object).
+    let session_errors: serde_json::Map<String, Value> =
+        crate::session::session_mut(|s| s.pull_errors_flash()).unwrap_or_default();
+    materialized.insert("errors".to_string(), Value::Object(session_errors));
 
     let mut tasks: Vec<TaskFuture> = Vec::new();
 

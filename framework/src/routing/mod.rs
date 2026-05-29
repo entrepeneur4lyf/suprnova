@@ -29,6 +29,6 @@ pub use macros::{
 };
 pub use router::{
     BoxedHandler, MultiMethodRouteBuilder, RouteBuilder, Router, WsMatch,
-    clear_route_names_for_test, register_route_name, route, route_with_params,
-    try_register_route_name,
+    clear_route_names_for_test, register_route_name, route, route_name_for_pattern,
+    route_with_params, try_register_route_name,
 };

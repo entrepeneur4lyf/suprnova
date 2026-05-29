@@ -180,6 +180,51 @@ impl HttpResponse {
         self
     }
 
+    /// Add multiple headers at once. Mirrors Laravel's
+    /// `Response::withHeaders($headers)`. The iterator may be any
+    /// `IntoIterator` over `(K, V)` pairs (e.g. a `HashMap`,
+    /// `Vec<(&str, &str)>`, or an array literal). Existing headers are
+    /// not deduplicated — append-only, matching Laravel's `setCookie`
+    /// plus `set('X-Foo', ...)` semantics that allow same-name repeats
+    /// for `Set-Cookie`.
+    pub fn with_headers<I, K, V>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        for (k, v) in headers {
+            self.headers.push((k.into(), v.into()));
+        }
+        self
+    }
+
+    /// Remove every header with the given name (case-insensitive).
+    /// Mirrors Laravel's `Response::withoutHeader($key)`.
+    pub fn without_header(mut self, name: &str) -> Self {
+        self.headers.retain(|(n, _)| !n.eq_ignore_ascii_case(name));
+        self
+    }
+
+    /// Read a header value off this response (FIRST occurrence —
+    /// matches the typical Laravel test assertion `response()->headers->get(...)`).
+    /// Returns `None` if no such header was set.
+    pub fn header_value(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Replace any prior occurrences of `name` with a single value.
+    /// Mirrors Laravel's `Response::header($key, $value, replace=true)`.
+    pub fn replace_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        let name = name.into();
+        self.headers.retain(|(n, _)| !n.eq_ignore_ascii_case(&name));
+        self.headers.push((name, value.into()));
+        self
+    }
+
     /// Add a Set-Cookie header to the response
     ///
     /// # Example
@@ -193,6 +238,27 @@ impl HttpResponse {
     /// ```
     pub fn cookie(self, cookie: Cookie) -> Self {
         self.header("Set-Cookie", cookie.to_header_value())
+    }
+
+    /// Attach multiple cookies in one call. Mirrors Laravel's
+    /// `Response::withCookies([...])`. Each cookie becomes its own
+    /// `Set-Cookie` header — same wire shape as repeated `.cookie()`
+    /// calls.
+    pub fn with_cookies<I>(mut self, cookies: I) -> Self
+    where
+        I: IntoIterator<Item = Cookie>,
+    {
+        for c in cookies {
+            self = self.cookie(c);
+        }
+        self
+    }
+
+    /// Schedule a cookie deletion alongside this response. Equivalent
+    /// to `.cookie(Cookie::forget(name))`. Mirrors Laravel's
+    /// `Response::withoutCookie($name)`.
+    pub fn without_cookie(self, name: impl Into<String>) -> Self {
+        self.cookie(Cookie::forget(name))
     }
 
     /// Wrap this response in Ok() for use as Response type
@@ -285,6 +351,26 @@ impl Default for HttpResponse {
 pub trait ResponseExt {
     fn status(self, code: u16) -> Self;
     fn header(self, name: impl Into<String>, value: impl Into<String>) -> Self;
+    /// Attach multiple headers from any `(K, V)` iterator. Mirrors
+    /// Laravel's `Response::withHeaders([...])`.
+    fn with_headers<I, K, V>(self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>;
+    /// Remove every occurrence of a header (case-insensitive). Mirrors
+    /// Laravel's `Response::withoutHeader($key)`.
+    fn without_header(self, name: &str) -> Self;
+    /// Attach a cookie. Mirrors Laravel's `Response::withCookie($c)`.
+    fn cookie(self, cookie: Cookie) -> Self;
+    /// Attach multiple cookies. Mirrors Laravel's
+    /// `Response::withCookies([...])`.
+    fn with_cookies<I>(self, cookies: I) -> Self
+    where
+        I: IntoIterator<Item = Cookie>;
+    /// Queue a cookie deletion. Mirrors Laravel's
+    /// `Response::withoutCookie($name)`.
+    fn without_cookie(self, name: impl Into<String>) -> Self;
 }
 
 impl ResponseExt for Response {
@@ -294,6 +380,34 @@ impl ResponseExt for Response {
 
     fn header(self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.map(|r| r.header(name, value))
+    }
+
+    fn with_headers<I, K, V>(self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.map(|r| r.with_headers(headers))
+    }
+
+    fn without_header(self, name: &str) -> Self {
+        self.map(|r| r.without_header(name))
+    }
+
+    fn cookie(self, cookie: Cookie) -> Self {
+        self.map(|r| r.cookie(cookie))
+    }
+
+    fn with_cookies<I>(self, cookies: I) -> Self
+    where
+        I: IntoIterator<Item = Cookie>,
+    {
+        self.map(|r| r.with_cookies(cookies))
+    }
+
+    fn without_cookie(self, name: impl Into<String>) -> Self {
+        self.map(|r| r.without_cookie(name))
     }
 }
 
@@ -308,6 +422,27 @@ pub struct Redirect {
     /// in its page object. Maps to Laravel's
     /// `redirect(...)->preserveFragment()`.
     preserve_fragment: bool,
+    /// Flash payload to write into the session when this redirect is
+    /// converted to a Response. Populated by [`Redirect::with`],
+    /// [`Redirect::with_input`], [`Redirect::with_errors`]. Each entry
+    /// is `(session_key, json_value)`; the session's flash queue marks
+    /// the key as new-flash so it survives one more request.
+    flash: Vec<(String, serde_json::Value)>,
+    /// Cookies to attach to the redirect response. Mirrors Laravel's
+    /// `RedirectResponse::withCookies([...])`.
+    cookies: Vec<Cookie>,
+    /// Extra headers to attach. Mirrors Laravel's
+    /// `RedirectResponse::withHeaders([...])`.
+    headers: Vec<(String, String)>,
+    /// Optional URL fragment to append (replacing any pre-existing
+    /// `#frag` on the location). Mirrors Laravel's
+    /// `RedirectResponse::withFragment($fragment)`.
+    fragment: Option<String>,
+    /// When `Some(())`, drop any pre-existing `#frag` from the URL.
+    /// Mutually exclusive with `fragment`: a subsequent
+    /// `withFragment(...)` re-attaches one. Mirrors Laravel's
+    /// `RedirectResponse::withoutFragment()`.
+    strip_fragment: bool,
 }
 
 impl Redirect {
@@ -318,6 +453,11 @@ impl Redirect {
             query_params: Vec::new(),
             status: 302,
             preserve_fragment: false,
+            flash: Vec::new(),
+            cookies: Vec::new(),
+            headers: Vec::new(),
+            fragment: None,
+            strip_fragment: false,
         }
     }
 
@@ -329,7 +469,58 @@ impl Redirect {
             query_params: Vec::new(),
             status: 302,
             preserve_fragment: false,
+            flash: Vec::new(),
+            cookies: Vec::new(),
+            headers: Vec::new(),
+            fragment: None,
+            strip_fragment: false,
         }
+    }
+
+    /// Create a new redirect response to an external URL — no route
+    /// resolution, no host-relative shenanigans, just the raw URL.
+    /// Mirrors Laravel's `redirect()->away($url)`.
+    pub fn away(url: impl Into<String>) -> Self {
+        Self::to(url)
+    }
+
+    /// Refresh the current URL (302 to the requesting path). Mirrors
+    /// Laravel's `redirect()->refresh()`. Caller supplies the current
+    /// path because Suprnova handlers always have it in hand
+    /// (`req.path()`) — that avoids a hidden session/request lookup
+    /// here.
+    pub fn refresh(path: impl Into<String>) -> Self {
+        Self::to(path)
+    }
+
+    /// Redirect back to the URL the session recorded as `previousUrl`.
+    /// If no previous URL is on the session, falls back to `fallback`.
+    /// Mirrors Laravel's `redirect()->back($status, $headers, $fallback)`.
+    pub fn back(fallback: impl Into<String>) -> Self {
+        let target = crate::session::session()
+            .and_then(|s| s.previous_url())
+            .unwrap_or_else(|| fallback.into());
+        Self::to(target)
+    }
+
+    /// Redirect to the URL the session pulled (and removed) under
+    /// `url.intended`. Mirrors Laravel's
+    /// `redirect()->intended($default)`. Pulls — not gets — so the
+    /// intended URL only fires once.
+    pub fn intended(default: impl Into<String>) -> Self {
+        let target = crate::session::session_mut(|s| s.pull::<String>("url.intended"))
+            .flatten()
+            .unwrap_or_else(|| default.into());
+        Self::to(target)
+    }
+
+    /// Record the current URL as the session's "intended" target.
+    /// Subsequent calls to [`Redirect::intended`] use it. Mirrors
+    /// Laravel's `Redirector::setIntendedUrl($url)`. No-op outside a
+    /// `SessionMiddleware` scope.
+    pub fn set_intended_url(url: impl Into<String>) {
+        let url = url.into();
+        crate::session::session_mut(|s| s.put("url.intended", url));
     }
 
     /// Add a query parameter
@@ -341,6 +532,151 @@ impl Redirect {
     /// Set status to 301 (Moved Permanently)
     pub fn permanent(mut self) -> Self {
         self.status = 301;
+        self
+    }
+
+    /// Set an arbitrary status code (302 by default; common alternates
+    /// are 303 See Other, 307 Temporary Redirect, 308 Permanent
+    /// Redirect). Mirrors Laravel's `RedirectResponse::setStatusCode`.
+    pub fn status(mut self, code: u16) -> Self {
+        self.status = code;
+        self
+    }
+
+    /// Flash a single key/value into the session, surviving exactly
+    /// one more request. Mirrors Laravel's
+    /// `RedirectResponse::with($key, $value)`. The value is serialized
+    /// to JSON so anything `serde::Serialize` works (strings, numbers,
+    /// nested maps, etc.).
+    pub fn with(mut self, key: impl Into<String>, value: impl serde::Serialize) -> Self {
+        let value = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
+        self.flash.push((key.into(), value));
+        self
+    }
+
+    /// Flash an input bag for the next request. The receiving page
+    /// reads it back via `session.get_old_input(key)`. Mirrors
+    /// Laravel's `RedirectResponse::withInput($input)`.
+    pub fn with_input<I, K, V>(mut self, input: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: serde::Serialize,
+    {
+        let map: std::collections::HashMap<String, serde_json::Value> = input
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k.into(),
+                    serde_json::to_value(v).unwrap_or(serde_json::Value::Null),
+                )
+            })
+            .collect();
+        // Use the OLD_INPUT_KEY constant indirectly via flash_input —
+        // session's API guards the canonical key.
+        self.flash.push((
+            "__suprnova_input_flash".into(),
+            serde_json::to_value(map).unwrap_or(serde_json::Value::Null),
+        ));
+        self
+    }
+
+    /// Flash a validation-errors bag. The receiving page reads it
+    /// through Suprnova's session or via Inertia's auto-shared
+    /// `errors` prop. Mirrors Laravel's
+    /// `RedirectResponse::withErrors($errors, $bag)`. The default bag
+    /// name (`"default"`) matches Laravel's behavior when no bag is
+    /// specified.
+    pub fn with_errors<I, K, V>(self, errors: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.with_errors_bag("default", errors)
+    }
+
+    /// Same as [`with_errors`] but writes into a NAMED bag. Mirrors
+    /// Laravel's `RedirectResponse::withErrors($errors, $bag)`.
+    pub fn with_errors_bag<I, K, V>(mut self, bag: impl Into<String>, errors: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        let map: std::collections::HashMap<String, Vec<String>> =
+            errors
+                .into_iter()
+                .fold(std::collections::HashMap::new(), |mut acc, (k, v)| {
+                    acc.entry(k.into()).or_default().push(v.into());
+                    acc
+                });
+        // Stored under `errors.<bag>` to match Laravel's ViewErrorBag
+        // structure (a top-level `errors` flash whose value is a
+        // bag-keyed map of fields).
+        let key = format!("errors.{}", bag.into());
+        self.flash.push((
+            key,
+            serde_json::to_value(map).unwrap_or(serde_json::Value::Null),
+        ));
+        self
+    }
+
+    /// Attach a single cookie. Mirrors Laravel's
+    /// `RedirectResponse::withCookie($cookie)`. The cookie is set on
+    /// the redirect response, not on the destination.
+    pub fn cookie(mut self, cookie: Cookie) -> Self {
+        self.cookies.push(cookie);
+        self
+    }
+
+    /// Attach multiple cookies. Mirrors Laravel's
+    /// `RedirectResponse::withCookies([$cookie1, $cookie2])`.
+    pub fn with_cookies<I>(mut self, cookies: I) -> Self
+    where
+        I: IntoIterator<Item = Cookie>,
+    {
+        self.cookies.extend(cookies);
+        self
+    }
+
+    /// Attach an extra header to the redirect response. Mirrors
+    /// Laravel's `RedirectResponse::header($key, $value)`.
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Attach multiple headers. Mirrors Laravel's
+    /// `RedirectResponse::withHeaders([...])`.
+    pub fn with_headers<I, K, V>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        for (k, v) in headers {
+            self.headers.push((k.into(), v.into()));
+        }
+        self
+    }
+
+    /// Append a `#fragment` to the redirect URL, replacing any existing
+    /// one. Mirrors Laravel's `RedirectResponse::withFragment($fragment)`.
+    /// Accepts the fragment with OR without a leading `#`.
+    pub fn with_fragment(mut self, fragment: impl Into<String>) -> Self {
+        let raw = fragment.into();
+        let cleaned = raw.trim_start_matches('#').to_string();
+        self.fragment = Some(cleaned);
+        self.strip_fragment = false;
+        self
+    }
+
+    /// Remove any pre-existing `#fragment` from the redirect URL.
+    /// Mirrors Laravel's `RedirectResponse::withoutFragment()`.
+    pub fn without_fragment(mut self) -> Self {
+        self.strip_fragment = true;
+        self.fragment = None;
         self
     }
 
@@ -361,7 +697,9 @@ impl Redirect {
     }
 
     fn build_url(&self) -> String {
-        append_query_params(&self.location, &self.query_params)
+        let mut url = append_query_params(&self.location, &self.query_params);
+        url = apply_fragment(url, self.strip_fragment, self.fragment.as_deref());
+        url
     }
 }
 
@@ -423,13 +761,74 @@ fn flash_preserve_fragment_if_set(preserve: bool) {
     }
 }
 
+/// Apply the `with_fragment` / `without_fragment` selection to a URL.
+/// Used by both `Redirect::build_url` and `RedirectRouteBuilder::build_url`
+/// so a redirect builder built either way honors the same fragment
+/// rules.
+///
+/// - `strip` removes any pre-existing `#frag` (matches Laravel's
+///   `withoutFragment`).
+/// - `replace`, when `Some(f)`, drops any pre-existing `#frag` first
+///   and then appends `#f` (matches Laravel's `withFragment`).
+/// - Neither set: URL passes through unchanged.
+fn apply_fragment(mut url: String, strip: bool, replace: Option<&str>) -> String {
+    let needs_change = strip || replace.is_some();
+    if needs_change && let Some(i) = url.find('#') {
+        url.truncate(i);
+    }
+    if let Some(frag) = replace {
+        url.push('#');
+        url.push_str(frag);
+    }
+    url
+}
+
+/// Drain a `Redirect`'s pending flash bag into the live session.
+/// Splits the input-bag entry off so it lands under the canonical
+/// `_old_input` key Laravel's `Store::flashInput` writes — that's how
+/// the receiving page reads it back via `Session::getOldInput`.
+fn drain_flash(flash: Vec<(String, serde_json::Value)>) {
+    if flash.is_empty() {
+        return;
+    }
+    crate::session::session_mut(|s| {
+        for (key, value) in flash {
+            if key == "__suprnova_input_flash" {
+                // Convert the value back into a HashMap and route
+                // through the canonical Store::flashInput path so
+                // session.get_old_input works on the receiving end.
+                if let serde_json::Value::Object(map) = value {
+                    let h: std::collections::HashMap<String, serde_json::Value> =
+                        map.into_iter().collect();
+                    s.flash_input(h);
+                }
+            } else {
+                s.flash(&key, value);
+            }
+        }
+    });
+}
+
 /// Auto-convert Redirect to Response
 impl From<Redirect> for Response {
     fn from(redirect: Redirect) -> Response {
+        // Resolve the URL first while `redirect` is fully owned and
+        // borrow-clean — `build_url` reads `location`, `query_params`,
+        // and `fragment`. Subsequent `drain_flash` moves the flash bag
+        // out, so the URL must be computed before that.
+        let url = redirect.build_url();
         flash_preserve_fragment_if_set(redirect.preserve_fragment);
-        Ok(HttpResponse::new()
+        drain_flash(redirect.flash);
+        let mut response = HttpResponse::new()
             .status(redirect.status)
-            .header("Location", redirect.build_url()))
+            .header("Location", url);
+        for (k, v) in redirect.headers {
+            response = response.header(k, v);
+        }
+        for cookie in redirect.cookies {
+            response = response.cookie(cookie);
+        }
+        Ok(response)
     }
 }
 
@@ -440,10 +839,21 @@ pub struct RedirectRouteBuilder {
     query_params: Vec<(String, String)>,
     status: u16,
     preserve_fragment: bool,
+    /// Flash payload to write into the session when this redirect is
+    /// converted to a Response. Mirrors [`Redirect`]'s field — kept
+    /// separate so both builder paths can use the same flash API
+    /// (`with`, `with_input`, `with_errors`) without sharing a struct.
+    flash: Vec<(String, serde_json::Value)>,
+    cookies: Vec<Cookie>,
+    headers: Vec<(String, String)>,
+    fragment: Option<String>,
+    strip_fragment: bool,
 }
 
 impl RedirectRouteBuilder {
-    /// Add a route parameter value
+    /// Add a route parameter value. Mirrors Laravel's positional
+    /// `redirect()->route($name, $params)`; chain one or more `.with`
+    /// calls to set each `{key}` placeholder in the route template.
     pub fn with(mut self, key: &str, value: impl Into<String>) -> Self {
         self.params.insert(key.to_string(), value.into());
         self
@@ -461,6 +871,128 @@ impl RedirectRouteBuilder {
         self
     }
 
+    /// Set an arbitrary status code (default 302). Common alternates
+    /// are 303 / 307 / 308.
+    pub fn status(mut self, code: u16) -> Self {
+        self.status = code;
+        self
+    }
+
+    /// Flash a single key/value into the session for one more request.
+    /// Mirrors Laravel's `RedirectResponse::with`. Distinct from
+    /// [`with`] (the route-param builder), which lives at the
+    /// route-parameter level — use `flash` here for session flashes.
+    pub fn flash(mut self, key: impl Into<String>, value: impl serde::Serialize) -> Self {
+        let value = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
+        self.flash.push((key.into(), value));
+        self
+    }
+
+    /// Flash an input bag (same shape as [`Redirect::with_input`]).
+    pub fn with_input<I, K, V>(mut self, input: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: serde::Serialize,
+    {
+        let map: std::collections::HashMap<String, serde_json::Value> = input
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k.into(),
+                    serde_json::to_value(v).unwrap_or(serde_json::Value::Null),
+                )
+            })
+            .collect();
+        self.flash.push((
+            "__suprnova_input_flash".into(),
+            serde_json::to_value(map).unwrap_or(serde_json::Value::Null),
+        ));
+        self
+    }
+
+    /// Flash a validation-errors bag under the default bag.
+    pub fn with_errors<I, K, V>(self, errors: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.with_errors_bag("default", errors)
+    }
+
+    /// Flash a validation-errors bag under a named bag.
+    pub fn with_errors_bag<I, K, V>(mut self, bag: impl Into<String>, errors: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        let map: std::collections::HashMap<String, Vec<String>> =
+            errors
+                .into_iter()
+                .fold(std::collections::HashMap::new(), |mut acc, (k, v)| {
+                    acc.entry(k.into()).or_default().push(v.into());
+                    acc
+                });
+        let key = format!("errors.{}", bag.into());
+        self.flash.push((
+            key,
+            serde_json::to_value(map).unwrap_or(serde_json::Value::Null),
+        ));
+        self
+    }
+
+    /// Attach a single cookie.
+    pub fn cookie(mut self, cookie: Cookie) -> Self {
+        self.cookies.push(cookie);
+        self
+    }
+
+    /// Attach multiple cookies.
+    pub fn with_cookies<I>(mut self, cookies: I) -> Self
+    where
+        I: IntoIterator<Item = Cookie>,
+    {
+        self.cookies.extend(cookies);
+        self
+    }
+
+    /// Attach an extra header.
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Attach multiple headers.
+    pub fn with_headers<I, K, V>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        for (k, v) in headers {
+            self.headers.push((k.into(), v.into()));
+        }
+        self
+    }
+
+    /// Append a `#fragment` to the resolved URL.
+    pub fn with_fragment(mut self, fragment: impl Into<String>) -> Self {
+        let raw = fragment.into();
+        let cleaned = raw.trim_start_matches('#').to_string();
+        self.fragment = Some(cleaned);
+        self.strip_fragment = false;
+        self
+    }
+
+    /// Strip any `#fragment` from the resolved URL.
+    pub fn without_fragment(mut self) -> Self {
+        self.strip_fragment = true;
+        self.fragment = None;
+        self
+    }
+
     /// Carry the URL fragment across this redirect. See
     /// [`Redirect::preserve_fragment`] for details.
     pub fn preserve_fragment(mut self) -> Self {
@@ -472,7 +1004,9 @@ impl RedirectRouteBuilder {
         use crate::routing::route_with_params;
 
         let url = route_with_params(&self.name, &self.params)?;
-        Some(append_query_params(&url, &self.query_params))
+        let mut url = append_query_params(&url, &self.query_params);
+        url = apply_fragment(url, self.strip_fragment, self.fragment.as_deref());
+        Some(url)
     }
 }
 
@@ -483,13 +1017,26 @@ impl From<RedirectRouteBuilder> for Response {
         // return a 500 and intentionally skip the flash — otherwise
         // a stray `_inertia.preserve_fragment` would land on whatever
         // page the user navigates to next.
-        let url = redirect.build_url().ok_or_else(|| {
-            HttpResponse::text(format!("Route '{}' not found", redirect.name)).status(500)
-        })?;
+        let url = match redirect.build_url() {
+            Some(u) => u,
+            None => {
+                return Err(
+                    HttpResponse::text(format!("Route '{}' not found", redirect.name)).status(500),
+                );
+            }
+        };
         flash_preserve_fragment_if_set(redirect.preserve_fragment);
-        Ok(HttpResponse::new()
+        drain_flash(redirect.flash);
+        let mut response = HttpResponse::new()
             .status(redirect.status)
-            .header("Location", url))
+            .header("Location", url);
+        for (k, v) in redirect.headers {
+            response = response.header(k, v);
+        }
+        for cookie in redirect.cookies {
+            response = response.cookie(cookie);
+        }
+        Ok(response)
     }
 }
 
