@@ -3089,7 +3089,12 @@ where
         // present. Outside a tx, leaves use the same pool we pass here;
         // inside a tx, this `db` is effectively ignored.
         if !eager_specs.is_empty() && !out.is_empty() {
-            let eager_db = DB::connection()?;
+            let eager_db = crate::eloquent::relations::eager::resolve_eager_connection(
+                self.tx_override.as_ref(),
+                self.connection_override.as_deref(),
+                M::default_connection_name(),
+            )
+            .await?;
             crate::eloquent::relations::eager::apply_eager_specs::<M>(
                 &mut out,
                 eager_specs,

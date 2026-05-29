@@ -409,7 +409,7 @@ where
     /// runs. Listeners on (1) / (2) may mutate the in-flight `Attrs`
     /// through the `Arc<tokio::sync::Mutex<Attrs>>` they receive.
     async fn create(attrs: Attrs) -> Result<Self, FrameworkError> {
-        let filtered = Self::fillable_filter().apply(attrs);
+        let filtered = Self::fillable_filter().apply_checked(attrs)?;
         // Wrap the filtered attrs in an Arc<Mutex<_>> so cancellable
         // listeners (Creating, Saving) can mutate the in-flight
         // values before the INSERT runs.
@@ -508,7 +508,7 @@ where
     /// `Updated` / `Saved` after.
     async fn update(self, attrs: Attrs) -> Result<Self, FrameworkError> {
         let previous = self.clone();
-        let filtered = Self::fillable_filter().apply(attrs);
+        let filtered = Self::fillable_filter().apply_checked(attrs)?;
         let shared = std::sync::Arc::new(tokio::sync::Mutex::new(filtered));
 
         Self::__dispatch_updating(&previous, shared.clone()).await?;
@@ -656,7 +656,7 @@ where
         attrs: Attrs,
     ) -> Result<Self, FrameworkError> {
         let previous = self.clone();
-        let filtered = Self::fillable_filter().apply(attrs);
+        let filtered = Self::fillable_filter().apply_checked(attrs)?;
         let shared = std::sync::Arc::new(tokio::sync::Mutex::new(filtered));
 
         Self::__dispatch_updating(&previous, shared.clone()).await?;
@@ -711,7 +711,7 @@ where
         tx: &crate::database::Transaction,
         attrs: Attrs,
     ) -> Result<Self, FrameworkError> {
-        let filtered = Self::fillable_filter().apply(attrs);
+        let filtered = Self::fillable_filter().apply_checked(attrs)?;
         let shared = std::sync::Arc::new(tokio::sync::Mutex::new(filtered));
         Self::__dispatch_creating(shared.clone()).await?;
         Self::__dispatch_saving(shared.clone(), true).await?;

@@ -172,11 +172,58 @@ pub async fn prune_all_dry() -> Result<u64, FrameworkError> {
 /// Run a single registered pruner by type name. Returns
 /// `Ok(Some(rowcount))` on success, `Ok(None)` when no pruner is
 /// registered for the name, `Err(...)` when the pruner itself fails.
+///
+/// Errors when two or more distinct prunable impls share the same
+/// last-segment `type_name` — the `--model=Session` flag is keyed by
+/// that string and inventory iteration order is link-time, so silently
+/// running whichever entry the iterator yields first would route
+/// `model:prune --model=Session` to a nondeterministic pruner. The
+/// error names both colliding type identities so the dev can rename
+/// one. Distinct registrations that share both `type_name` AND the
+/// underlying `run` fn pointer (same logical impl emitted twice by
+/// macro re-expansion in one crate) are not a collision.
 pub async fn prune_one(type_name: &str, dry_run: bool) -> Result<Option<u64>, FrameworkError> {
-    for entry in pruners() {
-        if entry.type_name == type_name {
-            return Ok(Some((entry.run)(dry_run).await?));
+    let chosen = find_pruner_by_type_name(pruners(), type_name)?;
+    match chosen {
+        Some(entry) => Ok(Some((entry.run)(dry_run).await?)),
+        None => Ok(None),
+    }
+}
+
+/// Pure version of the `prune_one` selection step. Exposed
+/// `pub(crate)` so the tests can drive duplicate detection without
+/// polluting the process-wide inventory.
+pub(crate) fn find_pruner_by_type_name<'a, I>(
+    entries: I,
+    type_name: &str,
+) -> Result<Option<&'a PrunerEntry>, FrameworkError>
+where
+    I: IntoIterator<Item = &'a PrunerEntry>,
+{
+    let mut hit: Option<&PrunerEntry> = None;
+    for entry in entries {
+        if entry.type_name != type_name {
+            continue;
+        }
+        match hit {
+            None => hit = Some(entry),
+            Some(prev) => {
+                // Same `run` fn pointer = same logical pruner re-
+                // registered (macro re-expansion in one crate is
+                // possible). Distinct fn pointers = a genuine
+                // collision: two prunable impls both want
+                // `--model=<type_name>`.
+                if (prev.run as usize) != (entry.run as usize) {
+                    return Err(FrameworkError::internal(format!(
+                        "pruner registry: type `{type_name}` is registered \
+                         by two distinct `#[suprnova::prunable]` impls — \
+                         rename one of the colliding models so \
+                         `model:prune --model={type_name}` stays \
+                         deterministic"
+                    )));
+                }
+            }
         }
     }
-    Ok(None)
+    Ok(hit)
 }

@@ -37,7 +37,10 @@ pub use casts::{
     AsTimestamp, Cast, DynCast, IntoDynCast,
 };
 pub use collection::Collection;
-pub use fillable::{Fillable, unguarded};
+pub use fillable::{
+    Fillable, prevent_silently_discarding_attributes, preventing_silently_discarding_attributes,
+    unguarded,
+};
 pub use lazy::LazyCollection;
 pub use model::{FirstOrCreate, Model, ReplicateExt};
 pub use prunable::{

@@ -329,8 +329,9 @@ pub use eloquent::{
     LazyCollection, MassPrunable, Model, ModelEntry, MorphMany, MorphOne, MorphTo, MorphToMany,
     MorphTypeEntry, MorphedByMany, Prunable, PrunerEntry, Relation, RelationEntry, RelationKind,
     ReplicateExt, ScopeRegistry, SoftDeletes, Touchable, find_model_by_table, find_morph_type,
-    find_morph_type_by_id, find_relation, models, morph_types, prune_all, prune_all_dry, prune_one,
-    relations, relations_of, unguarded,
+    find_morph_type_by_id, find_relation, models, morph_types,
+    prevent_silently_discarding_attributes, preventing_silently_discarding_attributes, prune_all,
+    prune_all_dry, prune_one, relations, relations_of, unguarded,
 };
 // Phase 10C T1 — model lifecycle events. The 16 per-type event
 // structs (`Created`, `Saving`, ...) are macro-emitted into each

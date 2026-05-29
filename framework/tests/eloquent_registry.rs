@@ -56,8 +56,12 @@ fn model_entry_fields_round_trip() {
 
 #[test]
 fn lookup_by_table_finds_entry() {
-    let entry = suprnova::eloquent::find_model_by_table("test_registry_posts");
+    let entry = suprnova::eloquent::find_model_by_table("test_registry_posts").unwrap();
     assert!(entry.is_some());
     assert_eq!(entry.unwrap().type_name, "TestRegistryPost");
-    assert!(suprnova::eloquent::find_model_by_table("nope").is_none());
+    assert!(
+        suprnova::eloquent::find_model_by_table("nope")
+            .unwrap()
+            .is_none()
+    );
 }

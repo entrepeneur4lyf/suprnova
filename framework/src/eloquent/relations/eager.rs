@@ -36,9 +36,45 @@ use std::any::Any;
 
 use sea_orm::DatabaseConnection;
 
+use crate::database::DbConnection;
+use crate::database::transaction::ExecutorChoice;
 use crate::eloquent::builder::EagerSpec;
 use crate::eloquent::relations::{AggregateKind, EagerLoadDispatch};
 use crate::error::FrameworkError;
+
+/// Resolve a [`DbConnection`] to thread through the eager-load
+/// dispatchers, honoring per-model / per-builder routing the same way
+/// the parent SELECT did.
+///
+/// The trait-level `EagerLoadDispatch::eager_load` signature takes a
+/// `&DatabaseConnection` argument that the macro-emitted leaf arms
+/// largely ignore — every leaf re-resolves via
+/// [`ExecutorChoice::resolve_read`] internally so ambient `CURRENT_TX`
+/// (and the per-target-model default connection) take effect at the
+/// SQL leaf. But the orchestrator still has to hand SOMETHING down.
+/// Historically it called [`crate::DB::connection`] unconditionally,
+/// which fails when an app registers only named / per-model
+/// connections and never installed a default pool. Resolve via the
+/// executor chain instead so the default pool isn't a hard
+/// prerequisite for eager loading.
+///
+/// Inside a transaction the `Tx` variant doesn't produce a pool handle;
+/// fall back to [`crate::DB::connection`] in that case. Being inside a
+/// transaction implies the default pool exists (you opened the tx
+/// against it), so this fallback never fires on the "no default pool"
+/// configuration the new path is meant to support.
+pub(crate) async fn resolve_eager_connection(
+    tx_override: Option<&crate::database::TxHandle>,
+    connection_override: Option<&str>,
+    model_default_conn: Option<&'static str>,
+) -> Result<DbConnection, FrameworkError> {
+    let exec =
+        ExecutorChoice::resolve_read(tx_override, connection_override, model_default_conn).await?;
+    match exec {
+        ExecutorChoice::Pool(conn) => Ok(conn),
+        ExecutorChoice::Tx(_) => crate::database::DB::connection(),
+    }
+}
 
 /// Walk an eager-load plan against a slice of parent rows. Each spec
 /// dispatches into the appropriate per-model entrypoint; multi-spec

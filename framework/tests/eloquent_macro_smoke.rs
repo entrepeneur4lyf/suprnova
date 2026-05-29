@@ -41,6 +41,7 @@ fn column_from_name_round_trips() {
 #[test]
 fn macro_registers_model_in_inventory() {
     let entry = suprnova::find_model_by_table("smoke_users")
+        .expect("registry lookup should not error")
         .expect("SmokeUser should register via #[model]");
     assert_eq!(entry.type_name, "SmokeUser");
     assert_eq!(entry.primary_key, "id");
@@ -59,6 +60,8 @@ pub struct UuidThing {
 
 #[test]
 fn custom_primary_key_attribute() {
-    let entry = suprnova::find_model_by_table("uuid_things").expect("registered");
+    let entry = suprnova::find_model_by_table("uuid_things")
+        .expect("registry lookup should not error")
+        .expect("registered");
     assert_eq!(entry.primary_key, "uid");
 }

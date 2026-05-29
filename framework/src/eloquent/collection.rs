@@ -440,9 +440,26 @@ impl<'a, T> IntoIterator for &'a Collection<T> {
 ///
 /// These methods are also useful on plain `Vec<M>` via a `Collection`
 /// wrap: `let mut c = Collection::from(rows); c.load(["posts"]).await?;`.
+///
+/// The `M: Model` bound on this impl block is satisfied by every
+/// `#[suprnova::model]` struct automatically (the macro emits both
+/// `EagerLoadDispatch` and `Model` for every annotated type). Real
+/// user code never picks up just `EagerLoadDispatch`. The bound is
+/// required so [`Self::load`] can consult `M::default_connection_name()`
+/// — eager loading must honour `#[model(connection = "...")]` routing
+/// in the same way the parent `Builder::get` does.
 impl<M> Collection<M>
 where
-    M: EagerLoadDispatch + Send + Sync,
+    M: EagerLoadDispatch + Send + Sync + Model,
+    M: From<<M::Entity as sea_orm::EntityTrait>::Model>,
+    <M::Entity as sea_orm::EntityTrait>::Model: From<M>
+        + sea_orm::IntoActiveModel<<M::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + serde::Serialize
+        + Send
+        + Sync,
+    <M::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<M::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
 {
     /// Eager-load the named relations onto every row in the
     /// collection. Issues one query per top-level relation regardless
@@ -474,7 +491,12 @@ where
         if specs.is_empty() || self.0.is_empty() {
             return Ok(());
         }
-        let db = crate::database::DB::connection()?;
+        let db = crate::eloquent::relations::eager::resolve_eager_connection(
+            None,
+            None,
+            M::default_connection_name(),
+        )
+        .await?;
         crate::eloquent::relations::eager::apply_eager_specs::<M>(&mut self.0, specs, db.inner())
             .await
     }
@@ -506,7 +528,12 @@ where
         if paths.is_empty() || self.0.is_empty() {
             return Ok(());
         }
-        let db = crate::database::DB::connection()?;
+        let db = crate::eloquent::relations::eager::resolve_eager_connection(
+            None,
+            None,
+            M::default_connection_name(),
+        )
+        .await?;
         for path in paths {
             load_missing_path::<M>(&mut self.0, &path, db.inner()).await?;
         }
