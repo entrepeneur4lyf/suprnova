@@ -1,12 +1,14 @@
 //! Mailable registry — maps `mailable_name` to a deserializer for queue dispatch.
 //!
 //! [`AnyMailable`] is the object-safe shadow of [`Mailable`]: it forwards
-//! `render_html` / `render_text` / `subject` / `from` / `attachments` so the
-//! queued path (which only has a boxed `Box<dyn AnyMailable>` after factory
-//! deserialization) still gets the mailable's full Tera context via the
-//! trait's defaulted render methods. The factory closure captures the
-//! concrete `M`, so the trait-method dispatch through the box preserves
-//! access to `serde_json::to_value(self)` for the rendering context.
+//! `render_html` / `render_text` / `subject` / `from` / `attachments` /
+//! `tags` / `metadata` / `priority` / `headers` / `return_path` so the
+//! queued path (which only has a boxed `Box<dyn AnyMailable>` after
+//! factory deserialization) still gets the mailable's full Tera context
+//! via the trait's defaulted render methods AND the per-provider hints.
+//! The factory closure captures the concrete `M`, so the trait-method
+//! dispatch through the box preserves access to `serde_json::to_value(self)`
+//! for the rendering context.
 //!
 //! # v1 simplification: function pointers, not boxed `Fn`
 //!
@@ -21,7 +23,7 @@ use crate::lock;
 use crate::mail::address::{Address, Attachment};
 use crate::mail::mailable::Mailable;
 use crate::mail::transport::OutgoingMessage;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
 
 /// Factory type for the mailable registry. v1 uses `fn(...)` rather than
@@ -40,6 +42,11 @@ pub trait AnyMailable: Send + Sync {
     fn render_text(&self) -> Result<Option<String>, FrameworkError>;
     fn from(&self) -> Option<Address>;
     fn attachments(&self) -> Vec<Attachment>;
+    fn tags(&self) -> Vec<String>;
+    fn metadata(&self) -> BTreeMap<String, String>;
+    fn priority(&self) -> Option<u8>;
+    fn headers(&self) -> Vec<(String, String)>;
+    fn return_path(&self) -> Option<Address>;
 }
 
 impl<M: Mailable> AnyMailable for M {
@@ -57,6 +64,21 @@ impl<M: Mailable> AnyMailable for M {
     }
     fn attachments(&self) -> Vec<Attachment> {
         <M as Mailable>::attachments(self)
+    }
+    fn tags(&self) -> Vec<String> {
+        <M as Mailable>::tags(self)
+    }
+    fn metadata(&self) -> BTreeMap<String, String> {
+        <M as Mailable>::metadata(self)
+    }
+    fn priority(&self) -> Option<u8> {
+        <M as Mailable>::priority(self)
+    }
+    fn headers(&self) -> Vec<(String, String)> {
+        <M as Mailable>::headers(self)
+    }
+    fn return_path(&self) -> Option<Address> {
+        <M as Mailable>::return_path(self)
     }
 }
 
@@ -104,6 +126,7 @@ pub fn build(
 /// concrete mailable type by name (the object-safe `AnyMailable` trait
 /// cannot expose `M::mailable_name()` because that method requires
 /// `Self: Sized`).
+#[allow(clippy::too_many_arguments)]
 pub fn render_outgoing(
     any: &dyn AnyMailable,
     mailable_name: &str,
@@ -112,6 +135,11 @@ pub fn render_outgoing(
     bcc: Vec<Address>,
     reply_to: Vec<Address>,
     from_override: Option<Address>,
+    extra_tags: Vec<String>,
+    extra_metadata: BTreeMap<String, String>,
+    extra_priority: Option<u8>,
+    extra_headers: Vec<(String, String)>,
+    return_path_override: Option<Address>,
 ) -> Result<OutgoingMessage, FrameworkError> {
     let from = from_override
         .or_else(|| any.from())
@@ -123,6 +151,28 @@ pub fn render_outgoing(
             "mail: {mailable_name} has no text or html body — define text_template_source or html_template_source on the Mailable"
         )));
     }
+
+    // Merge mailable-level + builder-level hints. Builder wins on key
+    // collisions in `metadata`; tags / headers union and de-dupe.
+    let mut tags = any.tags();
+    for t in extra_tags {
+        if !tags.contains(&t) {
+            tags.push(t);
+        }
+    }
+    let mut metadata = any.metadata();
+    for (k, v) in extra_metadata {
+        metadata.insert(k, v);
+    }
+    let mut headers = any.headers();
+    for (k, v) in extra_headers {
+        if !headers.iter().any(|(hk, hv)| hk == &k && hv == &v) {
+            headers.push((k, v));
+        }
+    }
+    let priority = extra_priority.or_else(|| any.priority());
+    let return_path = return_path_override.or_else(|| any.return_path());
+
     Ok(OutgoingMessage {
         from,
         to,
@@ -133,5 +183,10 @@ pub fn render_outgoing(
         html,
         text,
         attachments: any.attachments(),
+        tags,
+        metadata,
+        priority,
+        headers,
+        return_path,
     })
 }

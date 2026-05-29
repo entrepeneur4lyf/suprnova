@@ -72,6 +72,25 @@ struct SesBody {
     reply_to_addresses: Vec<String>,
     #[serde(rename = "Content")]
     content: SesContent,
+    #[serde(rename = "EmailTags", skip_serializing_if = "Vec::is_empty")]
+    email_tags: Vec<SesTag>,
+    #[serde(
+        rename = "FeedbackForwardingEmailAddress",
+        skip_serializing_if = "Option::is_none"
+    )]
+    feedback_forwarding_email_address: Option<String>,
+}
+
+/// SES tags are key/value pairs. Both Suprnova `tags` (Vec<String>) and
+/// `metadata` (BTreeMap) merge here: bare tags become `{Name: "_tag_<idx>", Value: t}`,
+/// metadata becomes `{Name: k, Value: v}`. The duplicated keys are
+/// disambiguated by Suprnova-side ordering.
+#[derive(Serialize)]
+struct SesTag {
+    #[serde(rename = "Name")]
+    name: String,
+    #[serde(rename = "Value")]
+    value: String,
 }
 
 #[derive(Serialize)]
@@ -213,6 +232,24 @@ impl MailTransport for SesMailTransport {
             SesContent::Raw(SesRaw { data: encoded })
         };
 
+        // SES tag rule: Name/Value chars are restricted (alphanumeric +
+        // `_`, `-`). We pass `tag` values raw and prefix synthetic keys
+        // with `tag_` so callers using SES-restricted character sets
+        // don't surprise the JSON API. Metadata flows through as-is.
+        let mut email_tags: Vec<SesTag> = Vec::new();
+        for (i, t) in msg.tags.iter().enumerate() {
+            email_tags.push(SesTag {
+                name: format!("tag_{i}"),
+                value: t.clone(),
+            });
+        }
+        for (k, v) in &msg.metadata {
+            email_tags.push(SesTag {
+                name: k.clone(),
+                value: v.clone(),
+            });
+        }
+
         let body = SesBody {
             from_email_address: msg.from.to_string(),
             destination: SesDestination {
@@ -222,6 +259,8 @@ impl MailTransport for SesMailTransport {
             },
             reply_to_addresses: addrs_only(&msg.reply_to),
             content,
+            email_tags,
+            feedback_forwarding_email_address: msg.return_path.as_ref().map(|a| a.to_string()),
         };
         let body_bytes = serde_json::to_vec(&body)
             .map_err(|e| FrameworkError::internal(format!("SES encode: {e}")))?;

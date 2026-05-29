@@ -6,6 +6,7 @@ use crate::mail::http_provider::{err, shared_client};
 use crate::mail::transport::{MailTransport, OutgoingMessage};
 use async_trait::async_trait;
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 const DEFAULT_ENDPOINT: &str = "https://api.postmarkapp.com/email";
 
@@ -88,6 +89,21 @@ struct PostmarkBody<'a> {
     text_body: Option<&'a str>,
     #[serde(rename = "Attachments", skip_serializing_if = "Vec::is_empty")]
     attachments: Vec<PostmarkAttachment<'a>>,
+    /// Postmark accepts ONE tag per message; we send the first.
+    #[serde(rename = "Tag", skip_serializing_if = "Option::is_none")]
+    tag: Option<&'a str>,
+    #[serde(rename = "Metadata", skip_serializing_if = "BTreeMap::is_empty")]
+    metadata: BTreeMap<String, String>,
+    #[serde(rename = "Headers", skip_serializing_if = "Vec::is_empty")]
+    headers: Vec<PmHeader<'a>>,
+}
+
+#[derive(Serialize)]
+struct PmHeader<'a> {
+    #[serde(rename = "Name")]
+    name: &'a str,
+    #[serde(rename = "Value")]
+    value: &'a str,
 }
 
 #[derive(Serialize)]
@@ -122,6 +138,23 @@ impl MailTransport for PostmarkMailTransport {
             })
             .collect();
 
+        // Postmark headers are an array of {Name, Value} objects. We
+        // build a flat vec from the message's headers plus any
+        // priority value (Postmark has no first-class priority field,
+        // but a custom `X-Priority` header is conventional).
+        let priority_str = msg.priority.map(|p| p.to_string()).unwrap_or_default();
+        let mut headers_vec: Vec<PmHeader> = msg
+            .headers
+            .iter()
+            .map(|(n, v)| PmHeader { name: n, value: v })
+            .collect();
+        if msg.priority.is_some() {
+            headers_vec.push(PmHeader {
+                name: "X-Priority",
+                value: priority_str.as_str(),
+            });
+        }
+
         let body = PostmarkBody {
             from: msg.from.to_string(),
             to: join(&msg.to),
@@ -132,6 +165,9 @@ impl MailTransport for PostmarkMailTransport {
             html_body: msg.html.as_deref(),
             text_body: msg.text.as_deref(),
             attachments,
+            tag: msg.tags.first().map(|s| s.as_str()),
+            metadata: msg.metadata.clone(),
+            headers: headers_vec,
         };
 
         let resp = shared_client()

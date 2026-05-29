@@ -264,7 +264,10 @@ pub use auth_flows::{
 };
 #[doc(hidden)]
 pub use clap as __clap;
-pub use mail::{Address, Attachment, Mail, MailFake, Mailable, SendMailJob};
+pub use mail::{
+    Address, Attachment, Mail, MailBuilder, MailFake, Mailable, MessageSending, MessageSent,
+    OutgoingMessage, QueuedSnapshot, SendMailJob,
+};
 // Phase 13 — feature flags.
 //
 // `Feature`, `Evaluator`, and `EvaluatorRef` re-export cleanly at the

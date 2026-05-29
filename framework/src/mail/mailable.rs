@@ -1,9 +1,11 @@
 //! Mailable trait + registry.
 //!
 //! A `Mailable` is a serializable struct that knows its subject, template
-//! source(s), optional sender override, and attachments. Mail::send and
-//! Mail::queue both consume Mailable; the queue path stores the mailable
-//! JSON in the FROZEN envelope and reconstructs via the registry on dispatch.
+//! source(s), optional sender override, attachments, and per-message
+//! provider hints (tags, metadata, priority, custom headers, return path).
+//! Mail::send and Mail::queue both consume Mailable; the queue path stores
+//! the mailable JSON in the FROZEN envelope and reconstructs via the
+//! registry on dispatch.
 //!
 //! # Template syntax
 //!
@@ -20,6 +22,7 @@ use crate::error::FrameworkError;
 use crate::mail::address::{Address, Attachment};
 use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
+use std::collections::BTreeMap;
 
 #[async_trait]
 pub trait Mailable: Serialize + DeserializeOwned + Send + Sync + 'static {
@@ -67,6 +70,39 @@ pub trait Mailable: Serialize + DeserializeOwned + Send + Sync + 'static {
 
     fn attachments(&self) -> Vec<Attachment> {
         Vec::new()
+    }
+
+    /// Provider tags — matches Laravel `Mailable::tag()`. Postmark `Tag`,
+    /// SES `Tags`, SendGrid `categories`, Mailgun `o:tag`, Resend `tags`.
+    /// Default empty.
+    fn tags(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Provider metadata — matches Laravel `Mailable::metadata()`.
+    /// Postmark `Metadata`, SES `Tags` (k/v), SendGrid `custom_args`,
+    /// Mailgun `v:` prefixed variables, Resend headers. Default empty.
+    fn metadata(&self) -> BTreeMap<String, String> {
+        BTreeMap::new()
+    }
+
+    /// Message priority (1 = highest, 5 = lowest). Matches Laravel
+    /// `Mailable::priority()`. Default `None` (unset).
+    fn priority(&self) -> Option<u8> {
+        None
+    }
+
+    /// Custom MIME headers. Matches Laravel's envelope `Headers` /
+    /// `withSymfonyMessage(fn ($m) => $m->getHeaders()->add(...))`.
+    /// Default empty.
+    fn headers(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    /// Return-Path / Bounce-To address. Matches Laravel
+    /// `Mailable::alwaysReturnPath` (per-mailable variant). Default `None`.
+    fn return_path(&self) -> Option<Address> {
+        None
     }
 
     /// Render the subject. When `subject_template_source` returns `Some`,

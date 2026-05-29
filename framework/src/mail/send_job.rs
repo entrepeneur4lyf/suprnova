@@ -2,9 +2,11 @@
 //! and `Mail::later` dispatches via the Phase 5A FROZEN envelope.
 //!
 //! The job carries the routed recipients + the mailable's `(name, payload)`
-//! pair. On `handle`, the worker rebuilds the mailable through the
-//! [`mailable_registry`], renders via the same Tera-defaulted path as
-//! `Mail::send`, and ships through the bound mail transport.
+//! pair, plus per-builder tags / metadata / priority / headers /
+//! return-path that the caller layered on top. On `handle`, the worker
+//! rebuilds the mailable through the [`mailable_registry`], renders via
+//! the same Tera-defaulted path as `Mail::send`, and ships through the
+//! bound mail transport.
 
 use crate::error::FrameworkError;
 use crate::mail::mailable_registry;
@@ -12,6 +14,7 @@ use crate::mail::{Address, Mail, dispatch_with_telemetry};
 use crate::queue::Job;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SendMailJob {
@@ -22,6 +25,16 @@ pub struct SendMailJob {
     pub from_override: Option<Address>,
     pub mailable_name: String,
     pub mailable_payload: serde_json::Value,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, String>,
+    #[serde(default)]
+    pub priority: Option<u8>,
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    #[serde(default)]
+    pub return_path: Option<Address>,
 }
 
 #[async_trait]
@@ -40,7 +53,16 @@ impl Job for SendMailJob {
             self.bcc,
             self.reply_to,
             self.from_override,
+            self.tags,
+            self.metadata,
+            self.priority,
+            self.headers,
+            self.return_path,
         )?;
+        // Apply Mail::always_* defaults on the queue side too. Without
+        // this the queue path would bypass `always_from` / `always_to`
+        // / etc., creating an observable divergence from `Mail::send`.
+        let msg = Mail::apply_always_defaults(msg);
         let transport = Mail::current_transport()?;
         dispatch_with_telemetry(transport.as_ref(), &msg).await
     }

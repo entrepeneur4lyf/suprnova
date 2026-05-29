@@ -62,25 +62,47 @@ fn join(addrs: &[Address]) -> String {
 /// Build the common Mailgun field set shared by the form-encoded and
 /// multipart code paths. Kept as a single function so the two paths can't
 /// drift on field names or order.
-fn build_form_fields(msg: &OutgoingMessage) -> Vec<(&'static str, String)> {
-    let mut form: Vec<(&'static str, String)> = Vec::with_capacity(16);
-    form.push(("from", msg.from.to_string()));
-    form.push(("to", join(&msg.to)));
+///
+/// Mailgun field name conventions:
+/// * `o:tag` — tag (repeatable; we send one per tag)
+/// * `o:tracking` etc — option params (not surfaced here)
+/// * `v:<name>` — message variables (Mailgun's metadata mechanism)
+/// * `h:<header-name>` — custom MIME headers
+/// * `h:X-Priority` — used by Mailgun for explicit priority
+fn build_form_fields(msg: &OutgoingMessage) -> Vec<(String, String)> {
+    let mut form: Vec<(String, String)> = Vec::with_capacity(32);
+    form.push(("from".into(), msg.from.to_string()));
+    form.push(("to".into(), join(&msg.to)));
     if !msg.cc.is_empty() {
-        form.push(("cc", join(&msg.cc)));
+        form.push(("cc".into(), join(&msg.cc)));
     }
     if !msg.bcc.is_empty() {
-        form.push(("bcc", join(&msg.bcc)));
+        form.push(("bcc".into(), join(&msg.bcc)));
     }
     if !msg.reply_to.is_empty() {
-        form.push(("h:Reply-To", join(&msg.reply_to)));
+        form.push(("h:Reply-To".into(), join(&msg.reply_to)));
     }
-    form.push(("subject", msg.subject.clone()));
+    form.push(("subject".into(), msg.subject.clone()));
     if let Some(h) = &msg.html {
-        form.push(("html", h.clone()));
+        form.push(("html".into(), h.clone()));
     }
     if let Some(t) = &msg.text {
-        form.push(("text", t.clone()));
+        form.push(("text".into(), t.clone()));
+    }
+    for tag in &msg.tags {
+        form.push(("o:tag".into(), tag.clone()));
+    }
+    for (k, v) in &msg.metadata {
+        form.push((format!("v:{k}"), v.clone()));
+    }
+    for (k, v) in &msg.headers {
+        form.push((format!("h:{k}"), v.clone()));
+    }
+    if let Some(p) = msg.priority {
+        form.push(("h:X-Priority".into(), p.to_string()));
+    }
+    if let Some(rp) = &msg.return_path {
+        form.push(("h:Return-Path".into(), rp.to_string()));
     }
     form
 }

@@ -149,6 +149,11 @@ async fn mail_queue_unregistered_mailable_surfaces_unknown_error_from_job() {
         from_override: None,
         mailable_name: "TotallyUnregisteredMailable".to_string(),
         mailable_payload: serde_json::json!({}),
+        tags: vec![],
+        metadata: Default::default(),
+        priority: None,
+        headers: vec![],
+        return_path: None,
     };
     let err = job.handle().await.unwrap_err();
     let msg = format!("{err}");

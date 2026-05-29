@@ -6,6 +6,7 @@ use crate::mail::http_provider::{err, shared_client};
 use crate::mail::transport::{MailTransport, OutgoingMessage};
 use async_trait::async_trait;
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 const DEFAULT_ENDPOINT: &str = "https://api.sendgrid.com/v3/mail/send";
 
@@ -51,6 +52,12 @@ struct SgBody<'a> {
     content: Vec<SgContent<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     attachments: Vec<SgAttachment<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    categories: Vec<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    custom_args: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    headers: BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -149,6 +156,24 @@ impl MailTransport for SendGridMailTransport {
             );
         }
 
+        // SendGrid headers: caller-set headers go directly into the
+        // `headers` object. Priority maps to `X-Priority` (SendGrid has
+        // no first-class priority knob). Categories carry tags;
+        // `custom_args` carries metadata.
+        let mut headers: BTreeMap<String, String> = msg
+            .headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if let Some(p) = msg.priority {
+            headers.insert("X-Priority".into(), p.to_string());
+        }
+        let custom_args: BTreeMap<String, String> = msg
+            .metadata
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
         let body = SgBody {
             personalizations: vec![SgPersonalization {
                 to: msg.to.iter().map(to_sg).collect(),
@@ -160,6 +185,9 @@ impl MailTransport for SendGridMailTransport {
             subject: &msg.subject,
             content,
             attachments,
+            categories: msg.tags.clone(),
+            custom_args,
+            headers,
         };
 
         let resp = shared_client()

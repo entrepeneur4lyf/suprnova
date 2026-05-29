@@ -180,17 +180,16 @@ impl Channel for MailChannel {
         let from = rendering
             .from
             .unwrap_or_else(|| Address::new("noreply@localhost"));
-        let msg = OutgoingMessage {
-            from,
-            to: vec![route.into()],
-            cc: rendering.cc,
-            bcc: rendering.bcc,
-            reply_to: rendering.reply_to,
-            subject: rendering.subject,
-            html: rendering.html,
-            text: rendering.text,
-            attachments: rendering.attachments,
-        };
+        let mut msg = OutgoingMessage::new(from);
+        msg.to = vec![route.into()];
+        msg.cc = rendering.cc;
+        msg.bcc = rendering.bcc;
+        msg.reply_to = rendering.reply_to;
+        msg.subject = rendering.subject;
+        msg.html = rendering.html;
+        msg.text = rendering.text;
+        msg.attachments = rendering.attachments;
+        let msg = Mail::apply_always_defaults(msg);
 
         let transport = Mail::current_transport()?;
         dispatch_with_telemetry(transport.as_ref(), &msg).await

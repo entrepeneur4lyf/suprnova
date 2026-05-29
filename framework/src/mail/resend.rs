@@ -7,6 +7,7 @@ use crate::mail::http_provider::{err, shared_client};
 use crate::mail::transport::{MailTransport, OutgoingMessage};
 use async_trait::async_trait;
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 const DEFAULT_ENDPOINT: &str = "https://api.resend.com/emails";
 
@@ -59,6 +60,10 @@ struct RsBody<'a> {
     text: Option<&'a str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     attachments: Vec<RsAttachment<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<RsTag<'a>>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    headers: BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -66,6 +71,11 @@ struct RsAttachment<'a> {
     filename: &'a str,
     content: String, // base64
     content_type: &'a str,
+}
+
+#[derive(Serialize)]
+struct RsTag<'a> {
+    name: &'a str,
 }
 
 fn addr_str(a: &Address) -> String {
@@ -86,6 +96,23 @@ impl MailTransport for ResendMailTransport {
             })
             .collect();
 
+        // Resend tags are a list of `{name, value}` objects; the
+        // Suprnova model carries plain strings, so we send the
+        // tag-name only. Metadata maps to provider headers (Resend has
+        // no first-class metadata field — `headers` is the standard
+        // pass-through). Caller-set custom headers union over metadata.
+        let tags: Vec<RsTag> = msg.tags.iter().map(|t| RsTag { name: t }).collect();
+        let mut headers: BTreeMap<String, String> = BTreeMap::new();
+        for (k, v) in &msg.metadata {
+            headers.insert(format!("X-Metadata-{k}"), v.clone());
+        }
+        for (k, v) in &msg.headers {
+            headers.insert(k.clone(), v.clone());
+        }
+        if let Some(p) = msg.priority {
+            headers.insert("X-Priority".into(), p.to_string());
+        }
+
         let body = RsBody {
             from: addr_str(&msg.from),
             to: msg.to.iter().map(addr_str).collect(),
@@ -96,6 +123,8 @@ impl MailTransport for ResendMailTransport {
             html: msg.html.as_deref(),
             text: msg.text.as_deref(),
             attachments,
+            tags,
+            headers,
         };
 
         let resp = shared_client()

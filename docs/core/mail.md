@@ -297,6 +297,208 @@ The per-message override on `MailBuilder` (`.from(("Operations", "ops@example.co
 
 `MailBuilder::send` is at-most-once: if the transport fails halfway through dispatching to two providers, you cannot retry without risking double-send. `MailBuilder::queue` rides the Phase 5A FROZEN envelope, which supports idempotency keys and worker-level retry. For any mail you must not lose AND must not double-send, queue with a stable idempotency key tied to the originating event.
 
+## One-off Messages: `Mail::raw` and `Mail::html`
+
+When the mail is a single transactional ping that doesn't justify a full `Mailable` struct, two shortcuts skip the boilerplate:
+
+```rust
+use suprnova::mail::Mail;
+
+// Plain text
+Mail::raw("Your code is 12345", |b| {
+    b.to("alice@example.org")
+        .subject("Verification code")
+        .from("auth@example.com")
+}).await?;
+
+// HTML
+Mail::html("<p>Hello, <b>world</b></p>", |b| {
+    b.to("alice@example.org")
+        .subject("Hi")
+        .from("hello@example.com")
+}).await?;
+```
+
+The closure receives a [`MailBuilder`] preloaded with the body and lets you layer recipients, subject, sender, tags, metadata, priority, and any other [`MailBuilder`] fluent method on top. These paths bypass the `Mailable` trait entirely — useful for one-shot test pings and short transactional notes.
+
+## Global Defaults: `always_from`, `always_reply_to`, `always_to`, `always_return_path`
+
+Mirroring Laravel's `Mailer::alwaysFrom` / `alwaysReplyTo` / `alwaysTo` / `alwaysReturnPath`, the Mail facade exposes four global setters:
+
+```rust
+use suprnova::mail::{Address, Mail};
+
+// At boot:
+Mail::always_from(Address::new("noreply@example.com").with_name("Acme"))?;
+Mail::always_reply_to(Address::new("support@example.com"))?;
+Mail::always_return_path(Address::new("bounce@example.com"))?;
+
+// Local-dev "single inbox" — route ALL mail to one address, drop CC/BCC:
+Mail::always_to(Address::new("dev-inbox@example.com"))?;
+
+// Roll everything back (tests typically call this at teardown):
+Mail::forget_always()?;
+```
+
+Precedence is conservative — defaults only apply when the dispatched message lacks an explicit value:
+
+| Field | Default applies when |
+|-------|---------------------|
+| `always_from` | Message `from` is the framework default `noreply@localhost` |
+| `always_reply_to` | Message has no explicit `reply_to` |
+| `always_to` | Always — routes every message to this address, clears CC/BCC |
+| `always_return_path` | Message has no explicit `return_path` |
+
+The same precedence applies on the queue path: queued mailables go through `apply_always_defaults` at worker dispatch time, so direct sends and queued sends converge on identical envelope shapes.
+
+## Tags, Metadata, Priority, Headers, Return-Path
+
+Every dispatched message can carry Laravel-style provider hints — tags, metadata key/values, RFC-2076 priority, custom MIME headers, and a Sender / bounce-to address. They forward to the HTTP providers' native fields (Postmark `Tag` / `Metadata` / `Headers`, SES `EmailTags`, SendGrid `categories` / `custom_args` / `headers`, Mailgun `o:tag` / `v:` / `h:`, Resend `tags` / `headers`) and to SMTP as RFC 5322 headers.
+
+Two ways to attach them — at the Mailable level for per-type defaults, or per-message on the builder:
+
+```rust
+use suprnova::async_trait;
+use suprnova::mail::{Mailable, PRIORITY_HIGH};
+use std::collections::BTreeMap;
+
+#[async_trait]
+impl Mailable for OrderShipped {
+    fn mailable_name() -> &'static str { "OrderShipped" }
+    fn subject(&self) -> String { format!("Order #{} shipped", self.order_id) }
+    fn text_template_source(&self) -> Option<String> { Some("...".into()) }
+
+    fn tags(&self) -> Vec<String> { vec!["transactional".into(), "order".into()] }
+    fn metadata(&self) -> BTreeMap<String, String> {
+        let mut m = BTreeMap::new();
+        m.insert("order_id".into(), self.order_id.to_string());
+        m
+    }
+    fn priority(&self) -> Option<u8> { Some(PRIORITY_HIGH) }
+    fn headers(&self) -> Vec<(String, String)> {
+        vec![("X-Origin".into(), "warehouse".into())]
+    }
+}
+```
+
+```rust
+// Per-message on the builder. Builder wins on metadata-key collisions; tags + headers union.
+Mail::to(&user.email)
+    .tag("campaign-spring")
+    .metadata("ab_variant", "B")
+    .priority(1)
+    .header("X-Source", "promo-feed")
+    .return_path("bounce@example.com")
+    .send(WelcomeEmail { name: user.name.clone() })
+    .await?;
+```
+
+Constants for the five priority levels live at `suprnova::mail::{PRIORITY_HIGHEST, PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_LOW, PRIORITY_LOWEST}` — same `1..=5` integer scale Laravel uses.
+
+## Inspecting Captured Messages
+
+`OutgoingMessage` carries Laravel-style inspection helpers — useful for both test assertions and runtime audit logging:
+
+```rust
+fn audit_outgoing(m: &suprnova::mail::OutgoingMessage) {
+    if m.has_tag("transactional") && m.has_to("alice@example.org") { /* ... */ }
+    if m.has_metadata("order_id") { /* ... */ }
+    if m.has_subject("Welcome") { /* ... */ }
+    if m.has_attachment("invoice.pdf") { /* ... */ }
+    if m.has_header("X-Source", "promo-feed") { /* ... */ }
+}
+```
+
+Recipient checks are case-insensitive on email; metadata, tag, subject, and attachment-filename checks are exact.
+
+## Test Fake: Expanded Surface
+
+`Mail::fake()` covers BOTH the sent and queued tracks. Sent mail (via `MailBuilder::send`) lands in the in-memory transport; queued mail (via `.queue` / `.later`) lands in the fake's queue buffer.
+
+```rust
+use suprnova::mail::Mail;
+
+#[tokio::test]
+async fn boot_dispatches_welcome() {
+    let fake = Mail::fake();
+
+    onboard_user("alice@example.org").await.unwrap();
+
+    // Sent-side
+    fake.assert_sent_count(1);
+    fake.assert_sent(|m| m.has_to("alice@example.org") && m.subject.starts_with("Welcome"));
+    fake.assert_sent_to("alice@example.org");
+    fake.assert_not_sent(|m| m.subject.contains("Password reset"));
+
+    // Queued-side (for delayed mails)
+    fake.assert_queued("WelcomeFollowup");
+    fake.assert_queued_to("alice@example.org");
+    fake.assert_queued_count(1);
+
+    // Composite
+    fake.assert_outgoing_count(2);   // sent + queued
+    fake.assert_not_outgoing("PasswordReset");
+}
+```
+
+Additional helpers:
+
+| Helper | Purpose |
+|--------|---------|
+| `fake.captured()` | All sent messages |
+| `fake.count()` | Sent count |
+| `fake.queued()` | All queued `QueuedSnapshot`s |
+| `fake.queued_count()` | Queued count |
+| `fake.outgoing_count()` | Sent + queued |
+| `fake.sent(predicate)` | Filter sent by predicate |
+| `fake.sent_to(email)` | Filter sent by recipient |
+| `fake.queued_named(name)` | Queued mailables of a given name |
+| `fake.queued_to(email)` | Queued mailables to recipient |
+| `fake.assert_sent_count(n)` | Exact sent count |
+| `fake.assert_queued_count(n)` | Exact queued count |
+| `fake.assert_outgoing_count(n)` | Exact total |
+| `fake.assert_nothing_sent()` | Empty sent buffer |
+| `fake.assert_nothing_queued()` | Empty queued buffer |
+| `fake.assert_nothing_outgoing()` | Both empty |
+| `fake.assert_sent_to(email)` | At least one sent to recipient |
+| `fake.assert_not_sent_to(email)` | None sent to recipient |
+| `fake.assert_queued(name)` | At least one queued of name |
+| `fake.assert_queued_with(name, fn)` | At least one queued of name matching predicate |
+| `fake.assert_queued_to(email)` | At least one queued to recipient |
+| `fake.assert_not_queued(name)` | None queued of name |
+
+`QueuedSnapshot::decode::<M>()` deserializes the payload back into the concrete `M`, so type-checked predicates work without bespoke decode boilerplate.
+
+## Events: `MessageSending` and `MessageSent`
+
+Every successful dispatch fires two framework events:
+
+- `MessageSending` — immediately BEFORE the transport call. Listeners observe the message shape (recipients, subject, tags, body-shape flags).
+- `MessageSent` — immediately AFTER a successful transport call. Listeners observe the same shape; failed sends do not emit this event.
+
+```rust
+use suprnova::events::EventFacade;
+use suprnova::mail::MessageSent;
+
+EventFacade::listen::<MessageSent, _>(Arc::new(MyAuditListener)).await?;
+```
+
+Unlike Laravel, the dispatcher does **not** model a cancellation channel — listeners cannot suppress a send by returning `false`. The intent for these events is observability (audit logging, sampled tracing, metrics). To gate sends, refuse at the Mailable layer (override `render_html`/`render_text` to return an error) or wrap the `MailBuilder::send` call with an explicit guard.
+
+## Multi-recipient Convenience: `Mail::cc` and `Mail::bcc`
+
+The Mail facade exposes three entry points — `to`, `cc`, `bcc` — that all return a fresh `MailBuilder`. Use whichever matches the dominant routing intent:
+
+```rust
+// Start with a cc / bcc when the message is primarily an audit copy.
+Mail::cc("manager@example.com")
+    .to("alice@example.org")
+    .send(OrderShipped { /* ... */ })
+    .await?;
+```
+
+The same fluent surface applies regardless of which entry point you start with.
+
 ### Test against `Mail::fake()`, not against the bound transport
 
 `Mail::fake()` installs a process-local capture transport for the duration of the RAII guard and restores whatever was bound before. Tests using it do not need to clear globals on every entry/exit — drop semantics handle that. Combine `#[serial_test::serial]` with `Mail::fake()` for tests that mutate the transport global; concurrent tests would clobber each other otherwise.

@@ -4,6 +4,7 @@ use crate::error::FrameworkError;
 use crate::mail::address::Address;
 use crate::mail::transport::{MailTransport, OutgoingMessage};
 use async_trait::async_trait;
+use lettre::message::header::{HeaderName, HeaderValue};
 use lettre::message::{
     Attachment as LettreAttachment, Mailbox, Message, MultiPart, SinglePart, header::ContentType,
 };
@@ -73,6 +74,34 @@ impl MailTransport for SmtpMailTransport {
             builder = builder.reply_to(address_to_mailbox(a)?);
         }
 
+        // Tags / metadata / priority / return-path / custom headers
+        // ride on RFC 5322 headers so a backend MTA can route on them.
+        for (name, value) in &msg.headers {
+            builder = builder.raw_header(custom_header(name, value)?);
+        }
+        if let Some(p) = msg.priority {
+            builder = builder.raw_header(custom_header("X-Priority", &p.to_string())?);
+            // Importance: 1-2 = High, 3 = Normal, 4-5 = Low.
+            let imp = match p {
+                1..=2 => "High",
+                4..=5 => "Low",
+                _ => "Normal",
+            };
+            builder = builder.raw_header(custom_header("Importance", imp)?);
+        }
+        for t in &msg.tags {
+            builder = builder.raw_header(custom_header("X-Tag", t)?);
+        }
+        for (k, v) in &msg.metadata {
+            builder = builder.raw_header(custom_header(
+                format!("X-Metadata-{k}").as_str(),
+                v.as_str(),
+            )?);
+        }
+        if let Some(rp) = &msg.return_path {
+            builder = builder.raw_header(custom_header("Return-Path", &rp.to_string())?);
+        }
+
         let multipart = build_body(msg)?;
         let email = builder
             .multipart(multipart)
@@ -88,6 +117,12 @@ impl MailTransport for SmtpMailTransport {
     fn name(&self) -> &'static str {
         "smtp"
     }
+}
+
+fn custom_header(name: &str, value: &str) -> Result<HeaderValue, FrameworkError> {
+    let header_name = HeaderName::new_from_ascii(name.to_string())
+        .map_err(|e| FrameworkError::internal(format!("smtp header name {name}: {e}")))?;
+    Ok(HeaderValue::new(header_name, value.to_string()))
 }
 
 fn address_to_mailbox(a: &Address) -> Result<Mailbox, FrameworkError> {
