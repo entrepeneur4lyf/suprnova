@@ -128,7 +128,12 @@ pub use error::{AppError, FrameworkError, HttpError, ValidationErrors};
 pub use events::{ErrorOccurred, Event, EventDispatcher, EventFacade, Listener, QueuedListener};
 pub use factory::{Factory, FactoryBuilder, Persistable, Sequence, persist_via_seaorm};
 pub use filesystem::{AzBlobConfig, GcsConfig, S3Config, Storage, copy_between_disks};
-pub use hashing::{DEFAULT_COST as HASH_DEFAULT_COST, hash, needs_rehash, verify};
+pub use hashing::{
+    Algorithm as HashAlgorithm, Argon2Options, Argon2iHasher, Argon2idHasher, BcryptHasher,
+    BcryptOptions, DEFAULT_COST as HASH_DEFAULT_COST, DEFAULT_ROUNDS as HASH_DEFAULT_ROUNDS,
+    HashConfig, HashInfo, Hasher, MAX_BCRYPT_PASSWORD_BYTES, hash, info as hash_info, is_hashed,
+    needs_rehash, verify,
+};
 pub use http::body::{
     DEFAULT_MAX_REQUEST_BODY_BYTES, collect_body_with_cap, global_max_request_body_bytes,
     set_global_max_request_body_bytes,

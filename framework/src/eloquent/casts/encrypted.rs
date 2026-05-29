@@ -319,44 +319,33 @@ where
 
 // ---- AsHashed ------------------------------------------------------------
 
-/// Cast a plaintext `String` to a bcrypt hash on write. The runtime
-/// value is the hashed string — there is no reverse direction.
+/// Cast a plaintext `String` to a hashed string on write using the
+/// active driver (`HASH_DRIVER` — bcrypt by default; argon2i / argon2id
+/// also supported). The runtime value is the hashed string — there is no
+/// reverse direction.
 ///
 /// ## Idempotence
 ///
-/// `to_storage` is idempotent: a value that already looks like a bcrypt
-/// hash (`$2a$`, `$2b$`, or `$2y$` prefix and the canonical 60-character
-/// length) passes through unchanged. Without this guard, a roundtrip
-/// like `User::find(id).await?.save().await?` would re-hash the existing
-/// hash into a hash-of-hash, breaking `verify(plain, stored)` and
-/// invalidating every existing password.
+/// `to_storage` is idempotent: a value that already looks like ANY
+/// recognised hash (bcrypt `$2*$`, argon2i / argon2id PHC) passes through
+/// unchanged. Without this guard, a roundtrip like
+/// `User::find(id).await?.save().await?` would re-hash the existing hash
+/// into a hash-of-hash, breaking `verify(plain, stored)` and invalidating
+/// every existing password.
 ///
-/// Laravel's `hashed` cast does the same idempotence check via
-/// `Hash::info($value)['algoName'] !== 'unknown'`. This impl is the
-/// Rust equivalent — restricted to bcrypt (the framework's only built-in
-/// hasher) and verifying both the prefix and the exact length.
+/// Mirrors Laravel's `hashed` cast: the idempotence check uses
+/// `Hash::isHashed($value)`, which returns true for any recognised
+/// algorithm.
 pub struct AsHashed;
-
-impl AsHashed {
-    /// True if `v` matches the canonical bcrypt output format: one of
-    /// `$2a$`, `$2b$`, `$2y$` followed by exactly 56 trailing characters
-    /// (cost + salt + digest), giving a total length of 60. Any other
-    /// input is treated as plaintext that needs to be hashed.
-    fn looks_like_bcrypt_hash(v: &str) -> bool {
-        if v.len() != 60 {
-            return false;
-        }
-        v.starts_with("$2a$") || v.starts_with("$2b$") || v.starts_with("$2y$")
-    }
-}
 
 impl Cast for AsHashed {
     type Runtime = String;
     type Storage = String;
 
     fn to_storage(v: &String) -> Result<String, FrameworkError> {
-        // Idempotent on re-save: skip rehashing an already-hashed value.
-        if Self::looks_like_bcrypt_hash(v) {
+        // Idempotent on re-save: skip rehashing an already-hashed value
+        // regardless of algorithm.
+        if crate::hashing::is_hashed(v) {
             return Ok(v.clone());
         }
         // `hashing::hash` already returns Result<String, FrameworkError> —
@@ -417,11 +406,11 @@ mod tests {
 
     #[test]
     fn as_hashed_treats_canonical_bcrypt_as_already_hashed() {
-        // Build a canonical 60-char bcrypt-shaped string: `$2b$12$` (7
-        // chars) + 53 trailing chars (22-char salt + 31-char digest).
+        // Build a canonical 60-char bcrypt-shaped string and confirm the
+        // algorithm-agnostic `is_hashed` recognises it.
         let canonical = format!("$2b$12${}", "a".repeat(53));
         assert_eq!(canonical.len(), 60);
-        assert!(AsHashed::looks_like_bcrypt_hash(&canonical));
+        assert!(crate::hashing::is_hashed(&canonical));
     }
 
     #[test]
@@ -429,16 +418,16 @@ mod tests {
         // Plaintext prefix that looks bcrypt-y but isn't the right
         // length — must NOT be treated as already-hashed.
         let fake = "$2b$short-not-a-real-hash".to_string();
-        assert!(!AsHashed::looks_like_bcrypt_hash(&fake));
+        assert!(!crate::hashing::is_hashed(&fake));
     }
 
     #[test]
     fn as_hashed_rejects_wrong_prefix_even_at_60_chars() {
-        // 60 chars but wrong prefix — not bcrypt, must rehash.
+        // 60 chars but wrong prefix — not a recognised hash, must rehash.
         let mut s = "$2c$".to_string();
         s.push_str(&"x".repeat(56));
         assert_eq!(s.len(), 60);
-        assert!(!AsHashed::looks_like_bcrypt_hash(&s));
+        assert!(!crate::hashing::is_hashed(&s));
     }
 
     #[test]
@@ -448,7 +437,25 @@ mod tests {
         let y = format!("$2y$12${}", "x".repeat(53));
         assert_eq!(a.len(), 60);
         assert_eq!(y.len(), 60);
-        assert!(AsHashed::looks_like_bcrypt_hash(&a));
-        assert!(AsHashed::looks_like_bcrypt_hash(&y));
+        assert!(crate::hashing::is_hashed(&a));
+        assert!(crate::hashing::is_hashed(&y));
+    }
+
+    #[test]
+    fn as_hashed_treats_argon_hash_as_already_hashed() {
+        // Algorithm-agnostic — once we support argon2id via HASH_DRIVER,
+        // the cast must not re-hash a stored argon2id digest into a
+        // bcrypt-of-argon-of-argon-of-… chain on every save.
+        use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
+        let salt = SaltString::generate(&mut OsRng);
+        let h = argon2::Argon2::default()
+            .hash_password(b"password", &salt)
+            .unwrap()
+            .to_string();
+        assert!(h.starts_with("$argon2id$"));
+        assert!(crate::hashing::is_hashed(&h));
+        // `to_storage` must pass it through unchanged.
+        let pass_through = AsHashed::to_storage(&h).expect("idempotent");
+        assert_eq!(pass_through, h);
     }
 }
