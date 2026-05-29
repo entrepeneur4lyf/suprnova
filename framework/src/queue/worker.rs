@@ -30,11 +30,25 @@ use crate::lock;
 use crate::queue::Job;
 use crate::queue::driver::QueueDriver;
 use crate::queue::retry::next_delay;
+use crate::telemetry::Metrics;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+/// Counter name for settlement (ack/nack) failures. Operators can alert on a
+/// non-zero rate here: a single failure means at-least-once delivery may
+/// re-deliver a successful side effect (ack) or lose attempt accounting (nack).
+///
+/// Emitted with attributes `operation` (`"ack"` | `"nack"`), `driver`
+/// (driver type-name from `QueueDriver::name`), `job` (the `Job::job_name`),
+/// and `outcome` (`"success"` for a successful run whose ack failed,
+/// `"dead_letter"` for a settled-failed job whose ack failed, `"retry"` for
+/// a retried-failure whose nack failed, `"timeout_dead_letter"` for a
+/// timeout-exhausted ack failure, `"timeout_retry"` for a timeout-nack
+/// failure).
+const METRIC_SETTLEMENT_FAILURES: &str = "queue.settlement.failures";
 
 type Dispatcher =
     Arc<dyn Fn(serde_json::Value) -> BoxFuture<'static, Result<(), FrameworkError>> + Send + Sync>;
@@ -225,6 +239,12 @@ pub async fn run_worker(
                         "queue ack failed after successful run; \
                          job may be re-delivered (at-least-once)"
                     );
+                    Metrics::counter(METRIC_SETTLEMENT_FAILURES).inc_with(&[
+                        ("operation", "ack"),
+                        ("driver", driver.name()),
+                        ("job", env.job_name.as_str()),
+                        ("outcome", "success"),
+                    ]);
                 } else {
                     tracing::debug!(job = %env.job_name, id = %env.id, "queue job ok");
                 }
@@ -247,6 +267,12 @@ pub async fn run_worker(
                             "queue ack failed for dead-lettered job; \
                              reservation may stay until visibility expiry"
                         );
+                        Metrics::counter(METRIC_SETTLEMENT_FAILURES).inc_with(&[
+                            ("operation", "ack"),
+                            ("driver", driver.name()),
+                            ("job", env.job_name.as_str()),
+                            ("outcome", "dead_letter"),
+                        ]);
                     }
                 } else {
                     let delay = next_delay(&env.backoff, env.attempts, None);
@@ -268,6 +294,12 @@ pub async fn run_worker(
                             "queue nack failed; reservation may be redelivered \
                              after visibility expiry without bumped attempts"
                         );
+                        Metrics::counter(METRIC_SETTLEMENT_FAILURES).inc_with(&[
+                            ("operation", "nack"),
+                            ("driver", driver.name()),
+                            ("job", env.job_name.as_str()),
+                            ("outcome", "retry"),
+                        ]);
                     }
                 }
             }
@@ -291,6 +323,12 @@ pub async fn run_worker(
                             "queue ack failed for timed-out dead-lettered job; \
                              reservation may stay until visibility expiry"
                         );
+                        Metrics::counter(METRIC_SETTLEMENT_FAILURES).inc_with(&[
+                            ("operation", "ack"),
+                            ("driver", driver.name()),
+                            ("job", env.job_name.as_str()),
+                            ("outcome", "timeout_dead_letter"),
+                        ]);
                     }
                 } else {
                     let delay = next_delay(&env.backoff, env.attempts, None);
@@ -312,6 +350,12 @@ pub async fn run_worker(
                             "queue nack failed after timeout; reservation may be \
                              redelivered after visibility expiry without bumped attempts"
                         );
+                        Metrics::counter(METRIC_SETTLEMENT_FAILURES).inc_with(&[
+                            ("operation", "nack"),
+                            ("driver", driver.name()),
+                            ("job", env.job_name.as_str()),
+                            ("outcome", "timeout_retry"),
+                        ]);
                     }
                 }
             }
