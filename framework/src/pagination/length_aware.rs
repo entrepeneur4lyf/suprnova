@@ -11,8 +11,8 @@ use serde::Serialize;
 ///
 /// ## JSON shape
 ///
-/// Mirrors Laravel's `LengthAwarePaginator::toArray()` so it ships
-/// directly to Inertia / JSON consumers:
+/// The derived `Serialize` impl emits the data slice plus the offset/
+/// counter fields:
 ///
 /// ```json
 /// {
@@ -28,6 +28,19 @@ use serde::Serialize;
 /// ```
 ///
 /// `path` is omitted when unset.
+///
+/// This shape is **not** identical to Laravel's
+/// `LengthAwarePaginator::toArray()` — Laravel additionally emits
+/// `first_page_url`, `last_page_url`, `next_page_url`,
+/// `prev_page_url`, and a `links` array of `{url, label, page,
+/// active}` descriptors. Suprnova's URL generation lives on the
+/// response-shape constructors that own URL context:
+/// [`Inertia::paginate`](crate::inertia::Inertia::paginate) (Inertia
+/// scroll metadata — page identifiers, not absolute URLs) and
+/// [`Resource::paginated`](crate::resources::Resource::paginated)
+/// (JSON:API `links.{self,first,last,prev,next}`). The raw `Serialize`
+/// shape is for explicit-shape consumers (custom JSON envelopes, test
+/// assertions, telemetry payloads) that don't need URL fields.
 #[derive(Debug, Clone, Serialize)]
 pub struct LengthAwarePaginator<T> {
     /// The rows on the current page.
@@ -175,6 +188,53 @@ impl<T> LengthAwarePaginator<T> {
     pub fn has_more_pages(&self) -> bool {
         self.current_page < self.last_page
     }
+
+    /// `true` when the paginator is on the first page (or before it,
+    /// for a defensively low page value). Equivalent to Laravel's
+    /// `AbstractPaginator::onFirstPage`.
+    pub fn on_first_page(&self) -> bool {
+        self.current_page <= 1
+    }
+
+    /// `true` when the paginator is on the last page (no further
+    /// `?page=N` will yield rows). Equivalent to Laravel's
+    /// `AbstractPaginator::onLastPage`.
+    ///
+    /// An empty result set (`total == 0`) returns `true` — there is
+    /// no "next page" to fetch, which is what Laravel returns too
+    /// (`onLastPage` ↔ `!hasMorePages`, and `hasMorePages` is `false`
+    /// when `lastPage == 0`).
+    pub fn on_last_page(&self) -> bool {
+        !self.has_more_pages()
+    }
+
+    /// `true` when there are enough rows to span multiple pages.
+    /// Equivalent to Laravel's `AbstractPaginator::hasPages`:
+    /// either we're not on page 1 (so a previous page exists) or
+    /// there are more pages to fetch.
+    pub fn has_pages(&self) -> bool {
+        self.current_page != 1 || self.has_more_pages()
+    }
+
+    /// `true` when the page slice contains no rows. Equivalent to
+    /// Laravel's `AbstractPaginator::isEmpty`.
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    /// `true` when the page slice contains at least one row.
+    /// Equivalent to Laravel's `AbstractPaginator::isNotEmpty`.
+    pub fn is_not_empty(&self) -> bool {
+        !self.data.is_empty()
+    }
+
+    /// Number of rows on the current page slice. Equivalent to
+    /// Laravel's `AbstractPaginator::count` (the `Countable`
+    /// implementation). Not the total — for that use the `total`
+    /// field directly.
+    pub fn count(&self) -> usize {
+        self.data.len()
+    }
 }
 
 #[cfg(test)]
@@ -293,5 +353,60 @@ mod tests {
         let p = LengthAwarePaginator::new(vec![1, 2], 20, 10, 1);
         let json = serde_json::to_value(&p).unwrap();
         assert!(json.get("path").is_none());
+    }
+
+    #[test]
+    fn on_first_page_predicate() {
+        // page 1 → on first page, not on last
+        let p = LengthAwarePaginator::new(vec![1; 10], 25, 10, 1);
+        assert!(p.on_first_page());
+        assert!(!p.on_last_page());
+        assert!(p.has_pages());
+        // page 2 → not on first, not on last (3 pages over 25 rows)
+        let p = LengthAwarePaginator::new(vec![1; 10], 25, 10, 2);
+        assert!(!p.on_first_page());
+        assert!(!p.on_last_page());
+        assert!(p.has_pages());
+        // page 3 → not on first, on last
+        let p = LengthAwarePaginator::new(vec![1; 5], 25, 10, 3);
+        assert!(!p.on_first_page());
+        assert!(p.on_last_page());
+        assert!(p.has_pages());
+    }
+
+    #[test]
+    fn empty_paginator_is_on_first_and_last_page_and_has_no_pages() {
+        // total == 0 → last_page is 0; on_first_page is true (page 1
+        // clamp); on_last_page is also true (no more pages); has_pages
+        // is false (no need to render any page links).
+        let p: LengthAwarePaginator<i32> = LengthAwarePaginator::new(vec![], 0, 10, 1);
+        assert!(p.on_first_page());
+        assert!(p.on_last_page());
+        assert!(!p.has_pages());
+        assert!(p.is_empty());
+        assert!(!p.is_not_empty());
+        assert_eq!(p.count(), 0);
+    }
+
+    #[test]
+    fn single_page_has_no_extra_pages() {
+        // 5 rows fits on a 10-per-page page → last_page = 1 → on first
+        // AND on last AND no extra pages, but the slice is not empty.
+        let p = LengthAwarePaginator::new(vec![1; 5], 5, 10, 1);
+        assert!(p.on_first_page());
+        assert!(p.on_last_page());
+        assert!(!p.has_pages());
+        assert!(!p.is_empty());
+        assert!(p.is_not_empty());
+        assert_eq!(p.count(), 5);
+    }
+
+    #[test]
+    fn count_tracks_data_length_not_total() {
+        // count() reports the page slice size, not the total row count.
+        // Page 3 of 10/page over 25 rows holds only 5 rows.
+        let p = LengthAwarePaginator::new(vec![1; 5], 25, 10, 3);
+        assert_eq!(p.count(), 5);
+        assert_eq!(p.total, 25);
     }
 }

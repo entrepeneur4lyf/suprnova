@@ -66,6 +66,23 @@ impl CursorDirection {
 /// `path` is omitted when unset; `next_cursor` and `prev_cursor` are
 /// emitted as `null` (not omitted) so client schemas can rely on the
 /// field's presence.
+///
+/// This shape is **not** identical to Laravel's
+/// `CursorPaginator::toArray()` — Laravel additionally emits
+/// `next_page_url` and `prev_page_url` (absolute URLs derived from
+/// `path` + cursor). Suprnova routes URL generation through the
+/// response-shape constructors that own URL context:
+/// [`Inertia::paginate`](crate::inertia::Inertia::paginate) (cursor
+/// scroll metadata) and
+/// [`Resource::paginated`](crate::resources::Resource::paginated)
+/// (JSON:API `links.{prev,next}` via
+/// [`Paginated`](crate::pagination::Paginated)). The raw `Serialize`
+/// shape stays minimal for explicit-shape consumers.
+///
+/// Laravel's `Cursor::encode()` is a base64-JSON plaintext payload;
+/// Suprnova's cursor is AES-256-GCM encrypted via `Crypt` so the
+/// keyset boundary can't be tampered with by the client. See
+/// [`Self::encode_value`] / [`Self::decode_value`].
 #[derive(Debug, Clone, Serialize)]
 pub struct CursorPaginator<T> {
     /// The rows on this page.
@@ -128,6 +145,57 @@ impl<T> CursorPaginator<T> {
     pub fn with_cursor_name(mut self, name: impl Into<String>) -> Self {
         self.cursor_name = Some(name.into());
         self
+    }
+
+    /// `true` when the paginator is on the first page (the entry call
+    /// had no cursor, so there's nothing behind us).
+    /// Equivalent to Laravel's `CursorPaginator::onFirstPage`.
+    pub fn on_first_page(&self) -> bool {
+        self.prev_cursor.is_none()
+    }
+
+    /// `true` when the paginator is on the last page (no further
+    /// rows past this one). Equivalent to Laravel's
+    /// `CursorPaginator::onLastPage`.
+    pub fn on_last_page(&self) -> bool {
+        self.next_cursor.is_none()
+    }
+
+    /// `true` when there is at least one more page to fetch (forward
+    /// or backward). Equivalent to Laravel's
+    /// `CursorPaginator::hasMorePages`, except that Laravel's cursor
+    /// paginator considers itself "has more" only forward; Suprnova's
+    /// cursor paginator is bidirectional and reports either direction
+    /// as a "more page" — matching the bidirectional surface levelled
+    /// in the 2026-05-29 closure.
+    pub fn has_more_pages(&self) -> bool {
+        self.next_cursor.is_some() || self.prev_cursor.is_some()
+    }
+
+    /// `true` when there are enough rows to span multiple pages.
+    /// Equivalent to Laravel's `CursorPaginator::hasPages`:
+    /// either we're not on the first page or there are more pages to
+    /// fetch.
+    pub fn has_pages(&self) -> bool {
+        !self.on_first_page() || self.has_more_pages()
+    }
+
+    /// `true` when the page slice contains no rows. Equivalent to
+    /// Laravel's `AbstractCursorPaginator::isEmpty`.
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    /// `true` when the page slice contains at least one row.
+    /// Equivalent to Laravel's `AbstractCursorPaginator::isNotEmpty`.
+    pub fn is_not_empty(&self) -> bool {
+        !self.data.is_empty()
+    }
+
+    /// Number of rows on the current page slice. Equivalent to
+    /// Laravel's `AbstractCursorPaginator::count`.
+    pub fn count(&self) -> usize {
+        self.data.len()
     }
 }
 
@@ -867,5 +935,55 @@ mod tests {
         let bad = r#"{"t":"BigInt","v":1,"d":"sideways"}"#;
         let wire = Crypt::encrypt_string(bad).unwrap();
         assert!(CursorPaginator::<i32>::decode_value(&wire).is_err());
+    }
+
+    fn cursor_with(next: Option<&str>, prev: Option<&str>, data: Vec<i32>) -> CursorPaginator<i32> {
+        CursorPaginator::new(
+            data,
+            10,
+            next.map(|s| s.to_string()),
+            prev.map(|s| s.to_string()),
+        )
+    }
+
+    #[test]
+    fn predicates_track_cursor_presence() {
+        // First page — has next, no prev.
+        let p = cursor_with(Some("NEXT"), None, vec![1, 2, 3]);
+        assert!(p.on_first_page());
+        assert!(!p.on_last_page());
+        assert!(p.has_more_pages());
+        assert!(p.has_pages());
+        // Middle page — both cursors present.
+        let p = cursor_with(Some("NEXT"), Some("PREV"), vec![4, 5, 6]);
+        assert!(!p.on_first_page());
+        assert!(!p.on_last_page());
+        assert!(p.has_more_pages());
+        assert!(p.has_pages());
+        // Last page — prev cursor, no next.
+        let p = cursor_with(None, Some("PREV"), vec![7, 8]);
+        assert!(!p.on_first_page());
+        assert!(p.on_last_page());
+        assert!(p.has_more_pages());
+        assert!(p.has_pages());
+        // Single page — neither cursor present.
+        let p = cursor_with(None, None, vec![1, 2]);
+        assert!(p.on_first_page());
+        assert!(p.on_last_page());
+        assert!(!p.has_more_pages());
+        assert!(!p.has_pages());
+    }
+
+    #[test]
+    fn empty_and_count_predicates() {
+        let p: CursorPaginator<i32> = cursor_with(None, None, vec![]);
+        assert!(p.is_empty());
+        assert!(!p.is_not_empty());
+        assert_eq!(p.count(), 0);
+
+        let p = cursor_with(Some("N"), None, vec![10, 20, 30]);
+        assert!(!p.is_empty());
+        assert!(p.is_not_empty());
+        assert_eq!(p.count(), 3);
     }
 }
