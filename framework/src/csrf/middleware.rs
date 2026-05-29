@@ -612,8 +612,10 @@ mod tests {
     #[test]
     fn test_with_session_config_maps_same_site_strings_like_session_middleware() {
         let mk = |s: &str| {
-            let mut cfg = crate::session::SessionConfig::default();
-            cfg.cookie_same_site = s.to_string();
+            let cfg = crate::session::SessionConfig {
+                cookie_same_site: s.to_string(),
+                ..Default::default()
+            };
             CsrfMiddleware::new()
                 .with_session_config(&cfg)
                 .build_xsrf_cookie("t")
