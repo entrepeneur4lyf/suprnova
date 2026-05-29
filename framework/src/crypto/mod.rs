@@ -230,6 +230,21 @@ impl Crypt {
         Self::previous_key_count() > 0
     }
 
+    /// Return the raw 32 bytes of the currently-active encryption key,
+    /// or `None` when `Crypt` is uninitialized. Internal hook for
+    /// derive-key consumers within the framework — signed-URL HMAC,
+    /// password-reset token HMAC, future SDK signing helpers.
+    ///
+    /// **Not exported.** The bytes are sensitive — callers must treat
+    /// them as material for an HMAC or KDF, never log or expose them.
+    /// `EncryptionKey` keeps its `Debug` redacted; this accessor does
+    /// the same by returning a `Vec<u8>` that holds no `Debug` trace
+    /// of its contents (`Vec<u8>: Debug` prints the bytes, but no
+    /// `Vec<u8>` produced here is ever Debug-printed inside the crate).
+    pub(crate) fn current_key_bytes() -> Option<Vec<u8>> {
+        CRYPT_RING.get().map(|r| r.current.as_bytes().to_vec())
+    }
+
     /// Test-and-internal hook: decrypt a string AND report which key
     /// in the ring succeeded. Exposed at `pub(crate)` so tests in the
     /// same crate (and the macro-generated `From<inner::Model>` could,

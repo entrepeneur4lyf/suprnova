@@ -455,6 +455,29 @@ impl Middleware for SessionMiddleware {
             }
         }
 
+        // Capture the current URL before `next()` consumes the
+        // request. We write it to the session under `_previous.url`
+        // AFTER the handler runs, but only when the response indicates
+        // a normal GET HTML page (200/300-range, not an Inertia
+        // partial, not an AJAX endpoint). This mirrors Laravel's
+        // `StartSession::storeCurrentUrl` behaviour and is what
+        // [`Redirect::back`] reads.
+        let is_get = *request.method() == hyper::Method::GET;
+        let is_inertia = request.is_inertia();
+        let wants_json = request
+            .headers()
+            .get("accept")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.contains("application/json") && !v.contains("text/html"))
+            .unwrap_or(false);
+        let current_url = {
+            let path = request.path().to_string();
+            match request.uri().query() {
+                Some(q) if !q.is_empty() => format!("{path}?{q}"),
+                _ => path,
+            }
+        };
+
         // Bind both the session and the pending-cookies slot to
         // `tokio::task_local!` so they survive `.await` points that
         // resume on a different worker thread. Handlers read/write
@@ -468,7 +491,31 @@ impl Middleware for SessionMiddleware {
             .await;
 
         // Take the potentially-modified session back out of the slot.
-        let session = slot.lock().unwrap().take();
+        let mut session = slot.lock().unwrap().take();
+
+        // Record the current URL as `_previous.url` if this turned out
+        // to be a "real" HTML page navigation — successful, GET, not
+        // Inertia partial, not JSON-API. Drives `Redirect::back`.
+        //
+        // We only write when the value would change. Same-URL navigations
+        // (a GET that returns to the same page on retry, a duplicate
+        // request) leave the session clean — that preserves the
+        // "unmodified session never gets a fail-closed write" invariant
+        // exercised by the session-persistence regression tests.
+        let response_status = match &response {
+            Ok(r) | Err(r) => r.status_code(),
+        };
+        let is_redirect = (300..400).contains(&response_status);
+        let is_success = (200..300).contains(&response_status);
+        if is_get
+            && !is_inertia
+            && !wants_json
+            && (is_success || is_redirect)
+            && let Some(ref mut s) = session
+            && s.previous_url().as_deref() != Some(current_url.as_str())
+        {
+            s.set_previous_url(&current_url);
+        }
 
         // Drain pending cookies — both the ones queued from the
         // middleware (remember-me rotation / clear) and any queued by

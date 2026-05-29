@@ -228,13 +228,23 @@ pub use routing::{
     GroupRoute,
     GroupRouter,
     IntoGroupItem,
+    ResourceAction,
+    ResourceController,
+    ResourceRoutes,
     RouteBuilder,
     RouteDefBuilder,
     Router,
+    SignatureVerdict,
     WsRouteDef,
     clear_route_names_for_test,
+    redirect,
+    redirect_to,
     route,
+    sign_route,
+    sign_url,
+    url,
     validate_route_path,
+    verify_signature,
 };
 pub use schedule::{CronExpression, DayOfWeek, Schedule, Task, TaskBuilder, TaskEntry, TaskResult};
 pub use seed::Seeder;

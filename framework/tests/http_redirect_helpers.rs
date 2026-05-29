@@ -94,9 +94,21 @@ async fn away_is_alias_for_to() {
 }
 
 #[tokio::test]
-async fn refresh_uses_provided_path() {
-    let url = into_response_url(Redirect::refresh("/current/path"));
-    assert_eq!(url, "/current/path");
+#[serial]
+async fn refresh_uses_session_previous_url() {
+    let slot = new_session_slot_for_test();
+    session_scope_for_test(slot, async {
+        session_mut(|s| s.set_previous_url("/current/path"));
+        let url = into_response_url(Redirect::refresh());
+        assert_eq!(url, "/current/path");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn refresh_falls_back_to_root_when_no_session() {
+    let url = into_response_url(Redirect::refresh());
+    assert_eq!(url, "/");
 }
 
 #[tokio::test]

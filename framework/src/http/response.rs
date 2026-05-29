@@ -1,4 +1,5 @@
 use super::cookie::Cookie;
+use crate::error::FrameworkError;
 use bytes::Bytes;
 use futures::Stream;
 use http_body_util::combinators::BoxBody;
@@ -477,41 +478,95 @@ impl Redirect {
         }
     }
 
-    /// Create a new redirect response to an external URL — no route
-    /// resolution, no host-relative shenanigans, just the raw URL.
-    /// Mirrors Laravel's `redirect()->away($url)`.
+    /// Redirect to the previous URL recorded in the session, or
+    /// `fallback` if none is recorded.
+    ///
+    /// Mirrors Laravel's `redirect()->back($status = 302, $headers,
+    /// $fallback)` from `Illuminate/Routing/Redirector.php:45`. Reads
+    /// the previous URL from
+    /// [`SessionData::previous_url`](crate::session::SessionData::previous_url),
+    /// which [`SessionMiddleware`](crate::session::SessionMiddleware)
+    /// writes on every successful GET request (Inertia partials and
+    /// JSON-API responses are skipped).
+    ///
+    /// Use this in form-submit handlers to bounce the user back to
+    /// where they came from after a successful POST, or in validation-
+    /// failure paths to keep the user on the form page.
+    pub fn back(fallback: impl Into<String>) -> Self {
+        let dest = crate::session::session()
+            .and_then(|s| s.previous_url())
+            .unwrap_or_else(|| fallback.into());
+        Self::to(dest)
+    }
+
+    /// Redirect to an absolute external URL. Behaviour-identical to
+    /// [`Self::to`] but the name signals "this is going off-site"
+    /// — handy when reviewers want to spot external-redirect sinks
+    /// for open-redirect audits.
+    ///
+    /// Mirrors Laravel's `redirect()->away($path, $status, $headers)`
+    /// from `Illuminate/Routing/Redirector.php:124`.
     pub fn away(url: impl Into<String>) -> Self {
         Self::to(url)
     }
 
-    /// Refresh the current URL (302 to the requesting path). Mirrors
-    /// Laravel's `redirect()->refresh()`. Caller supplies the current
-    /// path because Suprnova handlers always have it in hand
-    /// (`req.path()`) — that avoids a hidden session/request lookup
-    /// here.
-    pub fn refresh(path: impl Into<String>) -> Self {
-        Self::to(path)
-    }
-
-    /// Redirect back to the URL the session recorded as `previousUrl`.
-    /// If no previous URL is on the session, falls back to `fallback`.
-    /// Mirrors Laravel's `redirect()->back($status, $headers, $fallback)`.
-    pub fn back(fallback: impl Into<String>) -> Self {
-        let target = crate::session::session()
+    /// Redirect to the current URL.
+    ///
+    /// Mirrors Laravel's `redirect()->refresh($status, $headers)` from
+    /// `Illuminate/Routing/Redirector.php:57`. Useful after a POST that
+    /// mutates state on the current page — refreshing avoids the
+    /// "browser asks to resubmit POST" warning.
+    ///
+    /// Resolves the current URL from the active request scope. Pass an
+    /// explicit `Request` reference via [`Self::refresh_for`] when no
+    /// scope is active.
+    pub fn refresh() -> Self {
+        // The previous URL doubles as "what page were we on" — the
+        // session middleware writes it before the handler runs.
+        let dest = crate::session::session()
             .and_then(|s| s.previous_url())
-            .unwrap_or_else(|| fallback.into());
-        Self::to(target)
+            .unwrap_or_else(|| "/".to_string());
+        Self::to(dest)
     }
 
-    /// Redirect to the URL the session pulled (and removed) under
-    /// `url.intended`. Mirrors Laravel's
-    /// `redirect()->intended($default)`. Pulls — not gets — so the
-    /// intended URL only fires once.
+    /// Variant of [`Self::refresh`] that takes the [`crate::http::Request`]
+    /// explicitly. Useful in handlers that have already moved the
+    /// request out of `&Request` form. Builds the redirect target from
+    /// the request's path + query string.
+    pub fn refresh_for(request: &crate::http::Request) -> Self {
+        Self::to(crate::routing::url::current(request))
+    }
+
+    /// Redirect a guest user to a login (or other) URL, storing the
+    /// originally-requested URL as the "intended" destination.
+    ///
+    /// Mirrors Laravel's `redirect()->guest($path, $status, $headers,
+    /// $secure)` from `Illuminate/Routing/Redirector.php:71`.
+    ///
+    /// Pass the inbound `request` so the originally-requested URL can
+    /// be recovered after authentication via
+    /// [`Self::intended`]. The intended URL is flashed
+    /// to the session under `url.intended` (Laravel's key).
+    pub fn guest(request: &crate::http::Request, login_path: impl Into<String>) -> Self {
+        let intended = crate::routing::url::current(request);
+        crate::session::session_mut(|s| {
+            s.put("url.intended", intended);
+        });
+        Self::to(login_path)
+    }
+
+    /// Redirect to the "intended" URL stored by [`Self::guest`], or to
+    /// `default` if no intended URL is recorded.
+    ///
+    /// Mirrors Laravel's `redirect()->intended($default, $status,
+    /// $headers, $secure)` from `Illuminate/Routing/Redirector.php:95`.
+    /// The intended URL is consumed (pulled from the session) so a
+    /// subsequent call falls back to `default`.
     pub fn intended(default: impl Into<String>) -> Self {
-        let target = crate::session::session_mut(|s| s.pull::<String>("url.intended"))
+        let dest = crate::session::session_mut(|s| s.pull::<String>("url.intended"))
             .flatten()
             .unwrap_or_else(|| default.into());
-        Self::to(target)
+        Self::to(dest)
     }
 
     /// Record the current URL as the session's "intended" target.
@@ -521,6 +576,35 @@ impl Redirect {
     pub fn set_intended_url(url: impl Into<String>) {
         let url = url.into();
         crate::session::session_mut(|s| s.put("url.intended", url));
+    }
+
+    /// Sign and redirect to a named route.
+    ///
+    /// Convenience wrapper: builds the signed URL via
+    /// [`crate::routing::url::signed_route`] and redirects to it. Useful
+    /// for one-shot ephemeral URLs (password reset, email verification,
+    /// download links) where you want to mint and immediately redirect
+    /// the user.
+    ///
+    /// Returns an `Err` redirect when the route name is not registered
+    /// or signing fails (encryption key not installed). The caller can
+    /// `?`-propagate the error since [`Redirect`] converts to a
+    /// `Response` cleanly.
+    pub fn signed_route(name: &str, params: &[(&str, &str)]) -> Result<Self, FrameworkError> {
+        let url = crate::routing::url::signed_route(name, params)?;
+        Ok(Self::to(url))
+    }
+
+    /// Temporary-sign and redirect to a named route. Sibling of
+    /// [`Self::signed_route`] with an explicit `expires_at_epoch_seconds`.
+    pub fn temporary_signed_route(
+        name: &str,
+        params: &[(&str, &str)],
+        expires_at_epoch_seconds: i64,
+    ) -> Result<Self, FrameworkError> {
+        let url =
+            crate::routing::url::temporary_signed_route(name, params, expires_at_epoch_seconds)?;
+        Ok(Self::to(url))
     }
 
     /// Add a query parameter

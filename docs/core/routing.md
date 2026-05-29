@@ -618,3 +618,260 @@ routes! {
 | Nested groups | `group!(..., { group!(...) })` | Nest groups with inherited middleware |
 | Group middleware | `.middleware(M)` | Apply middleware to all group routes |
 | Fallback route | `fallback!(handler)` | Custom handler when no routes match |
+
+## Resource routing
+
+Standard 7-action REST surface, generated from a controller trait. Laravel
+parity for `Route::resource()` / `Route::apiResource()`.
+
+```rust
+use suprnova::{Router, ResourceAction, ResourceController, Request, Response, HttpResponse};
+use std::pin::Pin;
+use std::future::Future;
+
+struct PostsCtl;
+
+impl ResourceController for PostsCtl {
+    fn index(&self, _req: Request) -> Pin<Box<dyn Future<Output = Response> + Send>> {
+        Box::pin(async { Ok(HttpResponse::text("list")) })
+    }
+    fn show(&self, _req: Request) -> Pin<Box<dyn Future<Output = Response> + Send>> {
+        Box::pin(async { Ok(HttpResponse::text("one")) })
+    }
+    // store / update / destroy / create / edit default to 404.
+}
+
+let router: Router = Router::new()
+    .resource("posts", PostsCtl)
+    .into();
+```
+
+`resource()` registers seven routes (the standard REST verbs); methods you don't
+override return 404. Use `api_resource()` to drop `create` and `edit` (the
+form-rendering routes that an API client doesn't need).
+
+### Default route names
+
+| Verb     | Path                  | Trait method | Name           |
+|----------|-----------------------|--------------|----------------|
+| GET      | `/posts`              | `index`      | `posts.index`  |
+| GET      | `/posts/create`       | `create`     | `posts.create` |
+| POST     | `/posts`              | `store`      | `posts.store`  |
+| GET      | `/posts/{post}`       | `show`       | `posts.show`   |
+| GET      | `/posts/{post}/edit`  | `edit`       | `posts.edit`   |
+| PUT      | `/posts/{post}`       | `update`     | `posts.update` |
+| DELETE   | `/posts/{post}`       | `destroy`    | `posts.destroy`|
+
+### Restricting + renaming
+
+```rust
+Router::new()
+    .resource("posts", PostsCtl)
+    .only(&[ResourceAction::Index, ResourceAction::Show])      // pin to two verbs
+    .names([("index", "posts.list")])                           // override default name
+    .parameter("post_id")                                       // {post} → {post_id}
+    .into()
+```
+
+`.keep(...)` is a Rust-side alias for `.only(...)`. `.drop(...)` is the alias
+for `.except(...)`. `.rename(...)` is the alias for `.names(...)`.
+
+### Bulk registration
+
+```rust
+Router::new()
+    .resources([
+        ("posts",    Box::new(PostsCtl)    as Box<dyn ResourceController>),
+        ("comments", Box::new(CommentsCtl) as Box<dyn ResourceController>),
+    ])
+    .api_resources([("authors", Box::new(AuthorsCtl) as Box<dyn ResourceController>)])
+```
+
+## Signed URLs
+
+HMAC-signed URLs for password resets, email verification, ephemeral downloads.
+Laravel parity for `URL::signedRoute()`, `URL::temporarySignedRoute()`,
+`URL::hasValidSignature()`.
+
+### Minting
+
+```rust
+use suprnova::url;
+
+// Permanent signed URL — never expires.
+let url = url::signed_route("password.reset", &[("user", "42")])?;
+// → /password/reset/42?signature=abc...
+
+// Temporary signed URL — expires at the given epoch second.
+let one_hour = chrono::Utc::now().timestamp() + 3600;
+let url = url::temporary_signed_route("verify.email", &[("user", "42")], one_hour)?;
+// → /verify/email/42?expires=1748803600&signature=def...
+```
+
+The signature is HMAC-SHA256 over the canonical (path + sorted query) form,
+using the framework's APP_KEY. Query parameters are sorted so equivalent URLs
+hash identically regardless of caller insertion order.
+
+### Verifying
+
+```rust
+use suprnova::url;
+
+async fn handle_reset(request: Request) -> Response {
+    if !url::has_valid_signature(&request)? {
+        return Err(HttpResponse::text("Invalid signature").status(403));
+    }
+    // ...
+}
+```
+
+`signature_verdict(&request)` returns a [`SignatureVerdict`] for the
+`Valid` / `Expired` / `Invalid` three-way split. Use it to render a
+"this link has expired — request a new one" page rather than a generic 403.
+
+### Wire format
+
+| Component | Source                                                 |
+|-----------|--------------------------------------------------------|
+| Algorithm | HMAC-SHA256                                            |
+| Key       | Active APP_KEY (`Crypt::current_key_bytes`, opaque)    |
+| Payload   | `path?<sorted-query>` (path + lexicographically-sorted pairs) |
+| Encoding  | Hex-encoded 64-character digest                        |
+| Comparison| Constant-time via `subtle::ConstantTimeEq`             |
+
+The payload OMITS any pre-existing `signature` parameter and re-emits a fresh
+`expires` from the call arguments — callers cannot extend an existing URL's
+expiry without invalidating the signature.
+
+Fragments (`#section`) are stripped before signing because browsers never
+transmit them back to the server. Signing over them would invalidate every
+link the moment a client adds an anchor.
+
+## URL generation helpers
+
+Lightweight `url::` namespace for absolute-URL building and request-URL
+reads. Mirrors Laravel's `url()` facade.
+
+```rust
+use suprnova::url;
+
+let absolute = url::to("/dashboard");     // → "https://app.test/dashboard"
+let https    = url::secure("/login");     // upgrade http→https
+let here     = url::current(&request);    // "/foo?bar=1"
+let full     = url::full(&request);       // "https://app.test/foo?bar=1"
+let prev     = url::previous("/");        // session-recorded previous URL, or "/"
+```
+
+| Helper           | Mirrors Laravel               | Notes                          |
+|------------------|-------------------------------|--------------------------------|
+| `url::to(path)`  | `url($path)` / `url()->to()`  | Joins to `APP_URL`             |
+| `url::secure(path)` | `url()->secure($path)`     | Forces `https://`              |
+| `url::current(req)` | `url()->current()`         | Path + query of current request|
+| `url::full(req)`    | `url()->full()`            | Absolute current URL           |
+| `url::previous(fb)` | `url()->previous($fb)`     | From session `_previous.url`   |
+| `url::signed_route(n, p)` | `URL::signedRoute(...)` | Permanent signed URL          |
+| `url::temporary_signed_route(n, p, t)` | `URL::temporarySignedRoute(...)` | Time-limited |
+| `url::has_valid_signature(req)` | `URL::hasValidSignature(...)` | Boolean verification |
+| `url::signature_verdict(req)` | (no Laravel sibling) | 3-way Valid/Expired/Invalid |
+
+### Excluded from parity (intentional)
+
+- `asset()` / `secureAsset()` / `assetFrom()` — assets are served by Vite +
+  filesystem disks; building URLs through a separate `URL::asset()` channel
+  would split the asset story across two systems.
+- `action()` — Laravel's controller-action-string routing has no Rust analogue.
+  Suprnova handlers are functions; you reach for `route("name", ...)` instead.
+
+## Redirect helpers
+
+Top-level `Redirect::*` constructors plus `redirect()` / `redirect_to()`
+free functions. Laravel parity for the `redirect()` / `Redirector` family.
+
+```rust
+use suprnova::{Redirect, redirect, redirect_to};
+
+// Free functions
+redirect()                       // → /
+redirect_to("/dashboard")        // → /dashboard
+
+// Named routes
+Redirect::route("users.show").with("id", "42")
+
+// Session-aware
+Redirect::back("/")              // url::previous, fallback /
+Redirect::intended("/dashboard") // ?intended URL or default
+Redirect::guest(&req, "/login")  // store current as intended, redirect
+
+// Off-site
+Redirect::away("https://stripe.com/checkout/xyz")
+
+// Refresh
+Redirect::refresh()              // back to last GET URL
+Redirect::refresh_for(&req)      // back to request URL explicitly
+
+// Signed
+Redirect::signed_route("download.invoice", &[("id", "42")])?
+Redirect::temporary_signed_route("verify.email", &[("user", "1")], expires_at)?
+```
+
+| Constructor              | Mirrors Laravel                       | Notes                                  |
+|--------------------------|---------------------------------------|----------------------------------------|
+| `Redirect::to(p)`        | `redirect()->to($p)` / `redirect($p)` | Static target                          |
+| `Redirect::route(n)`     | `redirect()->route($n)`               | Named-route lookup                     |
+| `Redirect::back(fb)`     | `redirect()->back()`                  | Session previous URL                   |
+| `Redirect::away(u)`      | `redirect()->away($u)`                | External URL semantics                 |
+| `Redirect::refresh()`    | `redirect()->refresh()`               | Current URL via session                |
+| `Redirect::guest(...)`   | `redirect()->guest($p)`               | Stores `url.intended`                  |
+| `Redirect::intended(d)`  | `redirect()->intended($default)`      | Pulls `url.intended` (consumed)        |
+| `Redirect::signed_route(n,p)` | `redirect()->signedRoute(...)`   | Mints + redirects                      |
+| `Redirect::temporary_signed_route(n,p,t)` | `redirect()->temporarySignedRoute(...)` | Time-limited |
+
+### Previous URL tracking
+
+`Redirect::back` reads from `_previous.url` written by
+`SessionMiddleware` on every successful HTML GET request. Inertia
+partials, JSON-API requests (`Accept: application/json` without
+`text/html`), and non-2xx/3xx responses are skipped. The session is
+marked dirty only when the URL actually changes, so back-to-back GETs to
+the same page leave the session clean (the "transient store outage
+must not force-fail clean requests" invariant still holds).
+
+## Router-level redirects + views
+
+```rust
+// Register a route that just emits a redirect.
+Router::new()
+    .redirect("/old-pricing", "/pricing", 302)
+    .permanent_redirect("/legacy", "/new")
+
+// Register a route that renders an Inertia page with constant props.
+Router::new()
+    .view("/about", "About", serde_json::json!({ "team_size": 4 }))
+```
+
+Laravel parity for `Route::redirect(...)`, `Route::permanentRedirect(...)`,
+`Route::view(...)`. Suprnova's `view` renders an Inertia component (the
+framework's first-class templating system) instead of Blade — the user-visible
+behaviour is the same: register a static route that returns a page without
+writing a handler function.
+
+## Multi-method routes
+
+```rust
+use hyper::Method;
+
+Router::new()
+    .methods(&[Method::PUT, Method::PATCH], "/posts/{id}", update_post)
+    .name("posts.update")
+    .middleware(AuthMiddleware)
+
+Router::new()
+    .any("/webhooks/inbound", inbound_handler)
+    .name("webhooks.inbound")
+```
+
+`Router::any(...)` registers the handler against all seven common HTTP methods
+(GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS). `Router::methods(&[...], ...)` lets
+you pick a subset. `.name(...)` and `.middleware(...)` fan across every
+registered verb so reverse lookup returns the same URL regardless of method.
+

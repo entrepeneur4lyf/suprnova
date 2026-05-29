@@ -172,6 +172,15 @@ async fn dirty_session_write_failure_fails_closed_500() {
 /// activity-timestamp bump. (This passing also proves `Crypt` is
 /// installed — otherwise the top-of-handle guard would 500 here too,
 /// which confirms the sibling test's 500 is genuinely our branch.)
+///
+/// Note on POST: this test originally drove a GET request, but the
+/// `SessionMiddleware` now writes `_previous.url` on successful HTML
+/// GETs (Laravel's `StartSession::storeCurrentUrl` behaviour, which
+/// powers `Redirect::back`). That makes every GET a "dirty" mutation
+/// even when the handler doesn't touch the session. POST keeps the
+/// original semantics: no `_previous.url` write, so an untouched session
+/// stays clean — letting the read-only-store-outage assertion below
+/// still pin the clean-write branch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn clean_session_write_failure_passes_through() {
     use suprnova::middleware::{Middleware, Next};
@@ -184,7 +193,7 @@ async fn clean_session_write_failure_passes_through() {
         Arc::new(move |_req| Box::pin(async move { Ok(suprnova::HttpResponse::text("ok")) }));
 
     let middleware = SessionMiddleware::with_store(test_config(), Arc::new(FailingStore));
-    let response = middleware.handle(get_request().await, next).await;
+    let response = middleware.handle(post_request().await, next).await;
 
     let ok = match response {
         Ok(r) => r,
@@ -198,4 +207,49 @@ async fn clean_session_write_failure_passes_through() {
         200,
         "clean-session write failure must not change the handler's success status"
     );
+}
+
+/// POST-equivalent of [`get_request`]. The middleware skips its
+/// `_previous.url` write on non-GET verbs, so a POST-driven test exercises
+/// the "unmodified session" branch even after the GET-side
+/// previous-URL write landed.
+async fn post_request() -> suprnova::Request {
+    use bytes::Bytes;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use std::convert::Infallible;
+    use suprnova::Request;
+    use tokio::io::AsyncWriteExt;
+    use tokio::sync::oneshot;
+
+    let http_bytes = b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n".to_vec();
+
+    let (req_tx, req_rx) = oneshot::channel::<Request>();
+    let req_tx = std::sync::Mutex::new(Some(req_tx));
+    let (client_io, server_io) = tokio::io::duplex(http_bytes.len() + 64 * 1024);
+
+    tokio::spawn(async move {
+        let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+            let wrapped = Request::new(req);
+            if let Ok(mut guard) = req_tx.lock()
+                && let Some(tx) = guard.take()
+            {
+                let _ = tx.send(wrapped);
+            }
+            async {
+                Ok::<_, Infallible>(hyper::Response::new(http_body_util::Full::new(
+                    Bytes::from_static(b""),
+                )))
+            }
+        });
+        let _ = http1::Builder::new()
+            .serve_connection(TokioIo::new(server_io), svc)
+            .await;
+    });
+
+    let mut client = client_io;
+    client.write_all(&http_bytes).await.unwrap();
+    drop(client);
+    req_rx.await.expect("request to be captured")
 }

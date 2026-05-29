@@ -1347,6 +1347,86 @@ impl Router {
     pub fn has_explicit_head(&self, path: &str) -> bool {
         self.head_routes.at(path).is_ok()
     }
+
+    /// Register a redirecting route. A `GET` to `from` responds with
+    /// `status` (default 302) and `Location: to`.
+    ///
+    /// Mirrors Laravel's `Route::redirect($from, $to, $status = 302)` from
+    /// `Illuminate/Routing/Router.php:258`. Useful for permanent URL
+    /// migrations, deprecated paths, and surfacing redirects at the
+    /// route layer instead of inside a controller body.
+    ///
+    /// The destination is a literal path (or absolute URL); no parameter
+    /// substitution. For redirects that need to resolve a named route,
+    /// register a normal handler and return [`crate::Redirect::route`].
+    ///
+    /// # Panics
+    ///
+    /// Panics on duplicate registration. See [`Router::get`] for the
+    /// boot-time-fail-loud rationale. `status` must be a valid 3xx code
+    /// (300..400) — values outside that range are clamped to 302.
+    pub fn redirect(self, from: &str, to: &str, status: u16) -> Router {
+        let status = if (300..400).contains(&status) {
+            status
+        } else {
+            302
+        };
+        let to_owned = to.to_string();
+        self.get(from, move |_req: Request| {
+            let target = to_owned.clone();
+            async move {
+                Ok(crate::http::HttpResponse::new()
+                    .status(status)
+                    .header("Location", target))
+            }
+        })
+        .into()
+    }
+
+    /// Register a permanent-redirecting route (status 301). Convenience
+    /// wrapper over [`Router::redirect`] with a `301` status. Mirrors
+    /// Laravel's `Route::permanentRedirect($from, $to)` from
+    /// `Illuminate/Routing/Router.php:272`.
+    pub fn permanent_redirect(self, from: &str, to: &str) -> Router {
+        self.redirect(from, to, 301)
+    }
+
+    /// Register a static-page route that renders an Inertia component
+    /// with constant props.
+    ///
+    /// Suprnova's analogue of Laravel's `Route::view($uri, $view,
+    /// $data)` (`Illuminate/Routing/Router.php:287`). Laravel's `view`
+    /// route renders a Blade template; Suprnova renders an Inertia
+    /// page component (SvelteKit/React/Vue), because the framework's
+    /// templating system is Inertia, not Blade.
+    ///
+    /// Useful for static pages (about/terms/privacy) where the handler
+    /// would otherwise be a one-line `Inertia::render("About", json!({...}))`
+    /// — this saves the function definition.
+    ///
+    /// # Panics
+    ///
+    /// Panics on duplicate registration.
+    pub fn view(self, path: &str, component: &'static str, props: serde_json::Value) -> Router {
+        let component = component.to_string();
+        self.get(path, move |req: Request| {
+            let component = component.clone();
+            let props = props.clone();
+            async move {
+                let mut response = crate::inertia::InertiaResponse::new(component);
+                if let serde_json::Value::Object(map) = props {
+                    for (k, v) in map {
+                        response = response.with(&k, v);
+                    }
+                }
+                response
+                    .resolve(&req)
+                    .await
+                    .map_err(crate::http::HttpResponse::from)
+            }
+        })
+        .into()
+    }
 }
 
 impl Default for Router {
