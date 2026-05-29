@@ -794,7 +794,7 @@ async fn execute_chain_safely(
 /// common payload shapes are `&'static str` (literal panic messages)
 /// and `String` (`format!`-built panic messages). Anything else
 /// returns a generic placeholder so the logging path stays infallible.
-fn panic_payload_message(p: &Box<dyn std::any::Any + Send>) -> String {
+pub(crate) fn panic_payload_message(p: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = p.downcast_ref::<&'static str>() {
         (*s).to_string()
     } else if let Some(s) = p.downcast_ref::<String>() {
@@ -1193,7 +1193,10 @@ fn check_origin_policy(
                 .get(hyper::header::ORIGIN)
                 .and_then(|v| v.to_str().ok())
                 .ok_or("missing Origin header")?;
-            if list.iter().any(|allowed| allowed.eq_ignore_ascii_case(origin)) {
+            if list
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(origin))
+            {
                 Ok(())
             } else {
                 Err("Origin not in AllowList")

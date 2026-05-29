@@ -50,7 +50,9 @@ use crate::config::Config;
 use crate::error::FrameworkError;
 use crate::workflow::types::ClaimedWorkflow;
 use chrono::{Duration as ChronoDuration, Utc};
+use futures::FutureExt;
 use rand::RngExt;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
@@ -162,7 +164,33 @@ async fn process_claimed_workflow(
 
     let ctx = WorkflowContext::new(claimed.id, Duration::from_secs(config.lock_timeout_secs));
 
-    let result = ctx.enter(async { (entry.run)(&claimed.input).await }).await;
+    // Run the workflow body inside a panic boundary so a panicking handler
+    // does not strand the row. The spawn site only logs Err returns; a panic
+    // would otherwise unwind the spawned task and skip the requeue/mark_failed
+    // path entirely, leaving status='running' until the lease expires —
+    // and the lease itself only matters now that `claim_next_workflow`
+    // reclaims expired-running rows. The boundary mirrors the request-path
+    // pattern in `server::execute_chain_safely`: catch the unwind, downcast
+    // the payload, fold into the existing Err arm so the row goes through
+    // the same retry/fail accounting as a returned `FrameworkError`.
+    let body = AssertUnwindSafe(ctx.enter(async { (entry.run)(&claimed.input).await }));
+    let result = match body.catch_unwind().await {
+        Ok(inner) => inner,
+        Err(panic) => {
+            let msg = crate::server::panic_payload_message(&panic);
+            tracing::error!(
+                workflow_id = claimed.id,
+                workflow_name = %claimed.name,
+                attempts = claimed.attempts,
+                max_attempts = claimed.max_attempts,
+                panic = %msg,
+                "workflow handler panicked — routing through retry/fail path"
+            );
+            Err(FrameworkError::internal(format!(
+                "workflow handler panicked: {msg}"
+            )))
+        }
+    };
 
     match result {
         Ok(output) => {
@@ -244,6 +272,11 @@ mod tests {
     #[workflow]
     async fn name_norm_workflow(value: i32) -> Result<i32, FrameworkError> {
         Ok(value)
+    }
+
+    #[workflow]
+    async fn panicking_workflow() -> Result<i32, FrameworkError> {
+        panic!("boom");
     }
 
     #[tokio::test]
@@ -344,6 +377,197 @@ mod tests {
         let record = store::get_workflow_record(handle.id()).await.unwrap();
         let expected = format!("{}::{}", module_path!(), "name_norm_workflow");
         assert_eq!(record.name, expected);
+    }
+
+    // A panicking workflow handler must NOT strand the row in 'running'.
+    // With attempts < max_attempts, the panic is routed through the same
+    // requeue arm as a returned Err, so the row goes back to Pending with
+    // the panic message stamped in the error column. When the attempt
+    // budget is exhausted, the row lands in Failed instead. Verifies
+    // `process_claimed_workflow` returns Ok(()) in both cases (the panic
+    // was caught and folded into the result accounting).
+    #[tokio::test]
+    async fn test_panic_requeues_under_budget() {
+        let _db = setup_db().await;
+
+        let workflow_name = format!("{}::{}", module_path!(), "panicking_workflow");
+        let input = serde_json::to_string(&()).unwrap();
+
+        // max_attempts = 3, attempts will increment to 1 after mark_running,
+        // so 1 < 3 — the requeue arm fires.
+        let handle = store::insert_workflow(&workflow_name, &input, 3)
+            .await
+            .expect("insert workflow");
+
+        let claimed = store::mark_running(handle.id(), "test-worker", Duration::from_secs(30))
+            .await
+            .expect("mark running");
+        assert_eq!(claimed.attempts, 1);
+        assert_eq!(claimed.max_attempts, 3);
+
+        let config = WorkflowConfig::from_env();
+        process_claimed_workflow(claimed, Arc::new(config), "test-worker")
+            .await
+            .expect(
+                "process_claimed_workflow returned Err — the panic boundary should have caught it",
+            );
+
+        let status = store::get_workflow_status(handle.id()).await.unwrap();
+        assert_eq!(status, WorkflowStatus::Pending, "row must be requeued");
+
+        let record = store::get_workflow_record(handle.id()).await.unwrap();
+        let err = record
+            .error
+            .expect("error column should carry panic message");
+        assert!(
+            err.contains("boom"),
+            "panic payload 'boom' must reach the error column, got: {err}"
+        );
+        assert!(
+            err.contains("panicked"),
+            "error must record that it came from a panic, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_panic_marks_failed_when_budget_exhausted() {
+        let _db = setup_db().await;
+
+        let workflow_name = format!("{}::{}", module_path!(), "panicking_workflow");
+        let input = serde_json::to_string(&()).unwrap();
+
+        // max_attempts = 1: after mark_running, attempts = 1, so 1 < 1 is
+        // false and the mark_failed arm fires.
+        let handle = store::insert_workflow(&workflow_name, &input, 1)
+            .await
+            .expect("insert workflow");
+
+        let claimed = store::mark_running(handle.id(), "test-worker", Duration::from_secs(30))
+            .await
+            .expect("mark running");
+        assert_eq!(claimed.attempts, 1);
+        assert_eq!(claimed.max_attempts, 1);
+
+        let config = WorkflowConfig::from_env();
+        process_claimed_workflow(claimed, Arc::new(config), "test-worker")
+            .await
+            .expect(
+                "process_claimed_workflow returned Err — the panic boundary should have caught it",
+            );
+
+        let status = store::get_workflow_status(handle.id()).await.unwrap();
+        assert_eq!(status, WorkflowStatus::Failed, "row must be marked failed");
+
+        let record = store::get_workflow_record(handle.id()).await.unwrap();
+        let err = record
+            .error
+            .expect("error column should carry panic message");
+        assert!(
+            err.contains("boom"),
+            "panic payload 'boom' must reach the error column, got: {err}"
+        );
+    }
+
+    // Crash recovery: a worker that died mid-flight leaves a row in
+    // status='running' whose `locked_until` lease eventually expires.
+    // `claim_next_workflow` must reclaim that row so another worker can
+    // pick the workflow up. SQLite is filtered out at the top of
+    // `claim_next_workflow` (the SQL uses FOR UPDATE SKIP LOCKED +
+    // returning, Postgres-only), so this test is env-gated on a real
+    // Postgres reachable via `DATABASE_URL`. Ignored by default; ran in
+    // CI environments that provision a Postgres for the workflow suite.
+    #[tokio::test]
+    #[ignore = "requires Postgres at DATABASE_URL"]
+    async fn test_claim_reclaims_expired_running_row() {
+        use crate::container::testing::TestContainer;
+        use crate::database::DbConnection;
+        use crate::database::config::DatabaseConfig;
+        use sea_orm::ConnectionTrait;
+
+        let Some(pg_url) = postgres_url_or_skip("claim_reclaims_expired_running_row") else {
+            return;
+        };
+
+        let _guard = TestContainer::fake();
+        let config = DatabaseConfig::builder()
+            .url(&pg_url)
+            .max_connections(2)
+            .min_connections(1)
+            .logging(false)
+            .build();
+        let conn = DbConnection::connect(&config).await.expect("pg connect");
+
+        // The migrator's `create_index` calls are not `if_not_exists`,
+        // so re-running against the same database fails on duplicate
+        // index names. Drop the tables first so this test is idempotent
+        // against a long-lived Postgres instance.
+        conn.inner()
+            .execute_unprepared("DROP TABLE IF EXISTS workflow_steps")
+            .await
+            .ok();
+        conn.inner()
+            .execute_unprepared("DROP TABLE IF EXISTS workflows")
+            .await
+            .ok();
+
+        TestMigrator::up(conn.inner(), None)
+            .await
+            .expect("migrate workflows tables");
+
+        TestContainer::singleton(conn.clone());
+
+        // Insert a workflow row, then manually mark it 'running' with an
+        // already-expired lease — simulating a worker that crashed and
+        // never released its lock.
+        let handle = store::insert_workflow("recoverable", "{}", 3)
+            .await
+            .expect("insert workflow");
+
+        conn.inner()
+            .execute_unprepared(&format!(
+                "UPDATE workflows
+                 SET status='running',
+                     attempts=1,
+                     worker_id='dead-worker',
+                     locked_until=NOW() - INTERVAL '1 hour',
+                     started_at=NOW() - INTERVAL '1 hour'
+                 WHERE id={}",
+                handle.id()
+            ))
+            .await
+            .expect("simulate crashed worker");
+
+        let cfg = WorkflowConfig::from_env();
+        let claimed = store::claim_next_workflow("recovery-worker", &cfg)
+            .await
+            .expect("claim_next_workflow")
+            .expect("expected to reclaim the expired-running row");
+
+        assert_eq!(claimed.id, handle.id());
+        assert_eq!(
+            claimed.attempts, 2,
+            "reclaimed row must have its attempt counter incremented"
+        );
+
+        let record = store::get_workflow_record(handle.id()).await.unwrap();
+        assert_eq!(record.status, WorkflowStatus::Running.as_str());
+        assert_eq!(record.worker_id.as_deref(), Some("recovery-worker"));
+    }
+
+    fn postgres_url_or_skip(test_name: &str) -> Option<String> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) if url.starts_with("postgres://") || url.starts_with("postgresql://") => {
+                Some(url)
+            }
+            Ok(_) => {
+                eprintln!("[{test_name}] skipping: DATABASE_URL is not a Postgres URL");
+                None
+            }
+            Err(_) => {
+                eprintln!("[{test_name}] skipping: DATABASE_URL not set");
+                None
+            }
+        }
     }
 
     async fn setup_db() -> TestDatabase {

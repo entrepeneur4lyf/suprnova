@@ -135,6 +135,17 @@ pub async fn claim_next_workflow(
     let lock_until =
         Utc::now().naive_utc() + ChronoDuration::seconds(config.lock_timeout_secs as i64);
 
+    // Eligible-row predicate covers two cases:
+    //   1. status='pending' rows ready to run (next_run_at elapsed, no live lock).
+    //   2. status='running' rows whose `locked_until` lease has expired — the
+    //      worker that owned them is presumed dead (process crash, hard kill,
+    //      or panic that escaped the spawn boundary before our catch_unwind
+    //      net was added). Reclaiming these is what turns `locked_until` from
+    //      a hint into actual crash recovery; without it, a single crashed
+    //      worker strands its in-flight row forever.
+    // FOR UPDATE SKIP LOCKED keeps concurrent workers from racing on the
+    // same row; the outer UPDATE increments attempts so a reclaimed crash
+    // counts toward max_attempts the same way a returned error would.
     let sql = r#"
         UPDATE workflows
         SET status = 'running',
@@ -146,9 +157,15 @@ pub async fn claim_next_workflow(
         WHERE id = (
             SELECT id
             FROM workflows
-            WHERE status = 'pending'
-              AND (next_run_at IS NULL OR next_run_at <= NOW())
-              AND (locked_until IS NULL OR locked_until <= NOW())
+            WHERE (
+                (status = 'pending'
+                 AND (next_run_at IS NULL OR next_run_at <= NOW())
+                 AND (locked_until IS NULL OR locked_until <= NOW()))
+                OR
+                (status = 'running'
+                 AND locked_until IS NOT NULL
+                 AND locked_until <= NOW())
+            )
             ORDER BY id
             FOR UPDATE SKIP LOCKED
             LIMIT 1
