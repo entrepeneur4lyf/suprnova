@@ -46,6 +46,7 @@ fn ws_route_with_explicit_config_surfaces_it() {
         max_message_size: 1024,
         max_frame_size: 512,
         max_missed_pings: 1,
+        ..Default::default()
     };
     let router = Router::new().ws_with_config("/ws/fast", NoopHandler, cfg);
     let m = router.match_ws("/ws/fast").expect("matches");
@@ -63,6 +64,7 @@ fn ws_with_middleware_and_config_surfaces_both() {
         max_message_size: 8192,
         max_frame_size: 4096,
         max_missed_pings: 5,
+        ..Default::default()
     };
     let router = Router::new().ws_with_middleware_and_config(
         "/ws/combined",
@@ -89,6 +91,7 @@ mod ws_macro_with_config {
             max_message_size: 2048,
             max_frame_size: 1024,
             max_missed_pings: 3,
+            ..Default::default()
         }),
     }
 }

@@ -14,6 +14,7 @@ use suprnova::broadcasting::{
 };
 use suprnova::http::Request;
 use suprnova::routing::Router;
+use suprnova::ws::{OriginPolicy, WsConfig};
 use tokio::net::TcpListener;
 use tokio::time::{Duration as TokioDuration, timeout};
 use tokio_tungstenite::tungstenite::Message;
@@ -62,7 +63,17 @@ async fn spawn_presence_server() -> u16 {
     let registry = Arc::new(registry);
 
     let handler = BroadcastingWsHandler::new(hub.clone(), registry.clone());
-    let router = Arc::new(Router::new().ws("/ws/presence", handler));
+    // The tokio-tungstenite test client doesn't send `Origin`; opt out of the
+    // production-default `OriginPolicy::SameOrigin` so the presence flow is
+    // what's under test.
+    let router = Arc::new(Router::new().ws_with_config(
+        "/ws/presence",
+        handler,
+        WsConfig {
+            origin_policy: OriginPolicy::AllowAny,
+            ..Default::default()
+        },
+    ));
     let middleware = Arc::new(suprnova::middleware::MiddlewareRegistry::new());
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

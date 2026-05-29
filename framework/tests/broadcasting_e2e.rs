@@ -14,7 +14,19 @@ use suprnova::broadcasting::{
 use suprnova::http::Request;
 use suprnova::middleware::MiddlewareRegistry;
 use suprnova::routing::Router;
+use suprnova::ws::{OriginPolicy, WsConfig};
 use suprnova::{Event, EventFacade, text};
+
+/// `tokio-tungstenite::connect_async` doesn't send `Origin`, so the
+/// production-default `OriginPolicy::SameOrigin` would 403 every test.
+/// Opt into `AllowAny` for these tests — they exercise broadcasting
+/// semantics, not browser CSRF defense.
+fn open_ws_config() -> WsConfig {
+    WsConfig {
+        origin_policy: OriginPolicy::AllowAny,
+        ..Default::default()
+    }
+}
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -92,7 +104,9 @@ async fn spawn_broadcasting_server() -> (u16, Arc<InMemoryBroadcastHub>) {
 
     let handler = BroadcastingWsHandler::new(hub.clone(), registry.clone());
 
-    let router = Arc::new(Router::new().ws("/ws/broadcast", handler));
+    let router = Arc::new(
+        Router::new().ws_with_config("/ws/broadcast", handler, open_ws_config()),
+    );
     let middleware = Arc::new(MiddlewareRegistry::new());
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -613,7 +627,7 @@ async fn spawn_toothers_server() -> (u16, Arc<InMemoryBroadcastHub>) {
     let handler = BroadcastingWsHandler::new(hub.clone(), registry);
     let router: Arc<Router> = Arc::new(
         Router::new()
-            .ws("/ws/broadcast", handler)
+            .ws_with_config("/ws/broadcast", handler, open_ws_config())
             .get("/ping", |_req: Request| async {
                 EventFacade::dispatch(RoomPing { n: 1 }).await.ok();
                 text("ok")
