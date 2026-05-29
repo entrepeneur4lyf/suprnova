@@ -40,7 +40,7 @@
 
 pub mod middleware;
 
-pub use middleware::CsrfMiddleware;
+pub use middleware::{CsrfMiddleware, OriginPolicy};
 
 use crate::session::get_csrf_token;
 

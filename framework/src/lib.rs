@@ -82,7 +82,7 @@ pub use config::{AppConfig, Config, Environment, ServerConfig, env, env_optional
 pub use container::{App, Container};
 pub use context::{Context, ContextStore};
 pub use crypto::{Crypt, EncryptionKey};
-pub use csrf::{CsrfMiddleware, csrf_field, csrf_meta_tag, csrf_token};
+pub use csrf::{CsrfMiddleware, OriginPolicy, csrf_field, csrf_meta_tag, csrf_token};
 pub use data::{
     Field, IncludeError, IncludeMiddleware, IsRelationLoaded, RequestIncludeSet,
     current_include_set, scope_include_set,
