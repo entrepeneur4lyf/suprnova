@@ -249,9 +249,7 @@ fn validate_strict_endpoint(url: &Url) -> Result<(), WebPushError> {
         ".invalid",
     ];
     if BLOCKED_EXACT.contains(&host_trimmed)
-        || BLOCKED_SUFFIXES
-            .iter()
-            .any(|s| host_trimmed.ends_with(s))
+        || BLOCKED_SUFFIXES.iter().any(|s| host_trimmed.ends_with(s))
     {
         return Err(WebPushError::Internal(format!(
             "subscription endpoint host '{domain}' is not a valid push service host"

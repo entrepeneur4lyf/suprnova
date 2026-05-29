@@ -104,9 +104,7 @@ async fn spawn_broadcasting_server() -> (u16, Arc<InMemoryBroadcastHub>) {
 
     let handler = BroadcastingWsHandler::new(hub.clone(), registry.clone());
 
-    let router = Arc::new(
-        Router::new().ws_with_config("/ws/broadcast", handler, open_ws_config()),
-    );
+    let router = Arc::new(Router::new().ws_with_config("/ws/broadcast", handler, open_ws_config()));
     let middleware = Arc::new(MiddlewareRegistry::new());
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -214,8 +212,8 @@ async fn parameterized_channel_threads_params_to_authorize() {
     expect_connected(&mut ws).await;
 
     // room.42 → the pattern `room.{id}` matches, authorize sees id=="42" → allowed.
-    let sub = serde_json::to_string(&json!({ "action": "subscribe", "channel": "room.42" }))
-        .unwrap();
+    let sub =
+        serde_json::to_string(&json!({ "action": "subscribe", "channel": "room.42" })).unwrap();
     ws.send(Message::text(sub)).await.unwrap();
     let frame = read_server_frame(&mut ws).await;
     assert_eq!(frame["action"], "subscribed");
@@ -229,8 +227,8 @@ async fn parameterized_channel_threads_params_to_authorize() {
     assert_eq!(frame["channel"], "room.42");
 
     // room.99 → same pattern, authorize sees id=="99" → denied.
-    let sub = serde_json::to_string(&json!({ "action": "subscribe", "channel": "room.99" }))
-        .unwrap();
+    let sub =
+        serde_json::to_string(&json!({ "action": "subscribe", "channel": "room.99" })).unwrap();
     ws.send(Message::text(sub)).await.unwrap();
     let frame = read_server_frame(&mut ws).await;
     assert_eq!(frame["action"], "error");

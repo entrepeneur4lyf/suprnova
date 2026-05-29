@@ -295,8 +295,7 @@ impl ChannelRegistry {
                 if !is_pattern(pat) {
                     return None;
                 }
-                match_channel_pattern(pat, name)
-                    .map(|params| (pat.clone(), Arc::clone(ch), params))
+                match_channel_pattern(pat, name).map(|params| (pat.clone(), Arc::clone(ch), params))
             })
             .max_by(|a, b| {
                 pattern_literal_count(&a.0)
@@ -376,7 +375,9 @@ mod tests {
     #[test]
     fn resolve_pattern_captures_params() {
         let mut r = ChannelRegistry::new();
-        r.register(DummyChannel { name: "orders.{id}" });
+        r.register(DummyChannel {
+            name: "orders.{id}",
+        });
         let (ch, params) = r.resolve("orders.42").expect("pattern match");
         assert_eq!(ch.name(), "orders.{id}");
         assert_eq!(params.get("id"), Some("42"));
@@ -397,7 +398,9 @@ mod tests {
     #[test]
     fn resolve_exact_beats_pattern_but_other_values_fall_through() {
         let mut r = ChannelRegistry::new();
-        r.register(DummyChannel { name: "orders.{id}" });
+        r.register(DummyChannel {
+            name: "orders.{id}",
+        });
         r.register(DummyChannel {
             name: "orders.featured",
         });
@@ -415,7 +418,9 @@ mod tests {
     fn resolve_most_specific_pattern_wins() {
         let mut r = ChannelRegistry::new();
         r.register(DummyChannel { name: "{a}.{b}" }); // 0 literal segments
-        r.register(DummyChannel { name: "orders.{id}" }); // 1 literal — more specific
+        r.register(DummyChannel {
+            name: "orders.{id}",
+        }); // 1 literal — more specific
         let (ch, params) = r.resolve("orders.5").expect("match");
         assert_eq!(ch.name(), "orders.{id}");
         assert_eq!(params.get("id"), Some("5"));
@@ -424,7 +429,9 @@ mod tests {
     #[test]
     fn resolve_segment_count_mismatch_is_no_match() {
         let mut r = ChannelRegistry::new();
-        r.register(DummyChannel { name: "orders.{id}" });
+        r.register(DummyChannel {
+            name: "orders.{id}",
+        });
         assert!(r.resolve("orders").is_none()); // too few segments
         assert!(r.resolve("orders.1.extra").is_none()); // too many segments
     }

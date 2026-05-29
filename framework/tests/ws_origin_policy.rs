@@ -104,12 +104,13 @@ fn ws_config(policy: OriginPolicy) -> WsConfig {
 }
 
 /// Build a tungstenite client request with a custom `Origin` header.
-fn ws_request_with_origin(url: &str, origin: &str) -> tokio_tungstenite::tungstenite::handshake::client::Request {
+fn ws_request_with_origin(
+    url: &str,
+    origin: &str,
+) -> tokio_tungstenite::tungstenite::handshake::client::Request {
     let mut req = url.into_client_request().expect("valid ws url");
-    req.headers_mut().insert(
-        "Origin",
-        origin.parse().expect("valid Origin header"),
-    );
+    req.headers_mut()
+        .insert("Origin", origin.parse().expect("valid Origin header"));
     req
 }
 
@@ -278,9 +279,7 @@ async fn handler_err_sends_close_1011() {
             Err(_) => continue,
         }
     }
-    let frame = close_frame.expect(
-        "handler Err must trigger a Close frame within the deadline",
-    );
+    let frame = close_frame.expect("handler Err must trigger a Close frame within the deadline");
     assert_eq!(
         frame.code,
         CloseCode::Error,

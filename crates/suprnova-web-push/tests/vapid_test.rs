@@ -127,10 +127,7 @@ fn sign_rejects_ttl_above_24h() {
     let err = signer
         .sign("https://example.org", "mailto:a@b.com", 24 * 3600 + 1)
         .unwrap_err();
-    assert!(
-        format!("{err}").contains("exceeds RFC 8292"),
-        "got: {err}"
-    );
+    assert!(format!("{err}").contains("exceeds RFC 8292"), "got: {err}");
 }
 
 #[test]

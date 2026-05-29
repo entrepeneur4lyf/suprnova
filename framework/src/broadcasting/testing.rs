@@ -41,10 +41,7 @@ impl RecordingBroadcastHub {
     /// Every envelope published so far, in publish order. Poison-safe (returns
     /// an empty vec if the lock was poisoned, never panics).
     pub fn broadcasts(&self) -> Vec<BroadcastEnvelope> {
-        self.published
-            .lock()
-            .map(|v| v.clone())
-            .unwrap_or_default()
+        self.published.lock().map(|v| v.clone()).unwrap_or_default()
     }
 
     /// Number of envelopes published so far.
@@ -122,8 +119,12 @@ mod tests {
         let hub = RecordingBroadcastHub::new();
         hub.assert_nothing_broadcast();
 
-        hub.publish(BroadcastEnvelope::new("chat.1", "Msg", json!({ "t": "hi" })))
-            .await;
+        hub.publish(BroadcastEnvelope::new(
+            "chat.1",
+            "Msg",
+            json!({ "t": "hi" }),
+        ))
+        .await;
 
         hub.assert_broadcast("chat.1", "Msg");
         assert_eq!(hub.count(), 1);
