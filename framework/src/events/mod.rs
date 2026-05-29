@@ -36,6 +36,11 @@ pub mod testing;
 pub use builtins::ErrorOccurred;
 pub use dispatcher::{Event as EventFacade, EventDispatcher};
 pub use queued_listener::QueuedListener;
+pub use testing::{
+    EventFakeGuard, assert_dispatched, assert_dispatched_once, assert_dispatched_times,
+    assert_listening, assert_not_dispatched, assert_nothing_dispatched, dispatched,
+    dispatched_count, dispatched_events, has_dispatched,
+};
 
 use crate::FrameworkError;
 use async_trait::async_trait;
@@ -66,6 +71,37 @@ pub trait Event: Send + Sync + Clone + 'static + std::fmt::Debug {
 #[async_trait]
 pub trait Listener<E: Event>: Send + Sync + 'static {
     async fn handle(&self, event: &E) -> Result<(), FrameworkError>;
+}
+
+/// A subscriber bundles a related set of listener registrations behind one
+/// bootstrap call. Mirrors Laravel's `EventServiceProvider` subscriber pattern:
+/// instead of registering ten listeners individually in `bootstrap.rs`, a
+/// single struct implements `Subscriber` and registers them all from its
+/// `subscribe` method.
+///
+/// ```ignore
+/// use suprnova::{EventFacade, Subscriber, EventDispatcher};
+/// use std::sync::Arc;
+///
+/// pub struct UserEventSubscriber;
+///
+/// #[suprnova::async_trait]
+/// impl Subscriber for UserEventSubscriber {
+///     async fn subscribe(self: Arc<Self>, d: &EventDispatcher) {
+///         d.listen::<UserRegistered, _>(Arc::new(SendWelcomeEmail)).await;
+///         d.listen::<UserDeleted, _>(Arc::new(CleanupUserData)).await;
+///     }
+/// }
+///
+/// // In bootstrap.rs:
+/// EventFacade::subscribe(Arc::new(UserEventSubscriber)).await;
+/// ```
+#[async_trait]
+pub trait Subscriber: Send + Sync + 'static {
+    /// Attach every listener this subscriber owns to the dispatcher.
+    /// `self` is `Arc<Self>` so listeners that need to share state with the
+    /// subscriber can clone the `Arc` and capture it.
+    async fn subscribe(self: Arc<Self>, dispatcher: &EventDispatcher);
 }
 
 /// Trait-object compatible bridge between concrete listeners and the
