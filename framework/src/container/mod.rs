@@ -300,6 +300,23 @@ impl App {
         }
     }
 
+    /// Register an existing instance as a shared singleton.
+    ///
+    /// Laravel-named alias of [`App::singleton`] — mirrors
+    /// `$container->instance($abstract, $instance)`. In Laravel this is the
+    /// "I already constructed this thing, just remember it" call; Suprnova's
+    /// `singleton` accepts a value directly so the two share the same
+    /// implementation. Provided so code migrating from Laravel keeps reading
+    /// fluently.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// App::instance(DatabaseConnection::new(&url));
+    /// ```
+    pub fn instance<T: Any + Send + Sync + 'static>(value: T) {
+        Self::singleton(value);
+    }
+
     /// Register a factory binding (new instance per resolution)
     ///
     /// # Example
@@ -551,6 +568,24 @@ impl App {
             .and_then(|c| c.read().ok())
             .map(|c| c.has_binding::<T>())
             .unwrap_or(false)
+    }
+
+    /// Laravel-named alias for [`App::has`] — `bound::<T>()` returns true
+    /// when a concrete type is registered with the container.
+    ///
+    /// Laravel's `$container->bound($abstract)` answers a single question
+    /// over both type-bindings and trait-bindings. Suprnova keeps the two
+    /// pools type-distinct ([`App::has`] for concrete `T`, [`App::bound`]
+    /// for trait objects via [`App::bound_binding`]), so each call lands
+    /// on the correct map without runtime string lookup.
+    pub fn bound<T: Any + 'static>() -> bool {
+        Self::has::<T>()
+    }
+
+    /// Laravel-named alias for [`App::has_binding`] — `bound_binding::<dyn
+    /// Trait>()` returns true when a trait binding is registered.
+    pub fn bound_binding<T: ?Sized + 'static>() -> bool {
+        Self::has_binding::<T>()
     }
 
     /// Boot all auto-registered services.
