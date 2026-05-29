@@ -248,7 +248,7 @@ fn validate_strict_endpoint(url: &Url) -> Result<(), WebPushError> {
         ".example",
         ".invalid",
     ];
-    if BLOCKED_EXACT.iter().any(|h| host_trimmed == *h)
+    if BLOCKED_EXACT.contains(&host_trimmed)
         || BLOCKED_SUFFIXES
             .iter()
             .any(|s| host_trimmed.ends_with(s))
