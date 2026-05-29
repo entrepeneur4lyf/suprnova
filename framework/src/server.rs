@@ -929,6 +929,24 @@ async fn handle_ws_upgrade(
         return forbidden_text(&format!("websocket upgrade rejected: {reason}"));
     }
 
+    // Pick the negotiated subprotocol (if any) BEFORE hyper_tungstenite
+    // consumes the request. `accepted_protocols` empty (the default)
+    // skips negotiation entirely; an empty `Sec-WebSocket-Protocol`
+    // response header is the same as omitting it. If the client offered
+    // protocols but none matched, we proceed without echoing one — RFC
+    // 6455 §4.2.2 requires the browser to fail the connection in that
+    // case (which is correct: speaking the wrong protocol silently is
+    // worse than no upgrade).
+    let negotiated_protocol = if !config.accepted_protocols.is_empty() {
+        let client_offer = req
+            .headers()
+            .get(hyper::header::SEC_WEBSOCKET_PROTOCOL)
+            .and_then(|v| v.to_str().ok());
+        crate::ws::negotiate_subprotocol(&config.accepted_protocols, client_offer)
+    } else {
+        None
+    };
+
     // hyper_tungstenite::upgrade MUST come before Request::new because
     // it needs `&mut req` before we consume `req`.
     let (mut response, websocket) =
@@ -939,6 +957,22 @@ async fn handle_ws_upgrade(
                 return bad_request_text(&format!("websocket upgrade failed: {e}"));
             }
         };
+
+    // Echo the negotiated protocol on the 101 handshake response. Done
+    // here rather than as a header on the original 101 because
+    // hyper_tungstenite owns the response shape — we mutate the
+    // returned `response` the same way we do for `x-request-id`. If
+    // the protocol value somehow fails to build a HeaderValue, leave
+    // the header off rather than panic; that surfaces as "client gets
+    // 101 without subprotocol" and browsers will refuse the connection,
+    // which is the safe failure mode.
+    if let Some(proto) = negotiated_protocol.as_deref()
+        && let Ok(value) = hyper::header::HeaderValue::from_str(proto)
+    {
+        response
+            .headers_mut()
+            .insert(hyper::header::SEC_WEBSOCKET_PROTOCOL, value);
+    }
 
     // Build the framework's Request from the upgrade request. The
     // body is empty for an upgrade request (RFC 6455); we still
@@ -1113,10 +1147,20 @@ async fn handle_ws_upgrade(
                 tracing::info!("websocket connected");
 
                 let missed_pings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-                let socket = crate::ws::WsSocket::from_stream_with_heartbeat(
+                let mut socket = crate::ws::WsSocket::from_stream_with_heartbeat(
                     ws_stream,
                     missed_pings.clone(),
                 );
+                // The forwarder task is spawned inside `from_stream_*`
+                // and detached. Pull its JoinHandle out NOW so we can
+                // await it after the handler returns and `outbound` is
+                // dropped — without this, the handler task (which IS
+                // tracked in WS_TASKS) reports done before the close
+                // handshake completes, and a graceful shutdown can
+                // truncate the final close frame. `take` is one-shot,
+                // and we own the only WsSocket reference here.
+                let forwarder_handle = socket.take_forwarder_handle();
+
                 // One bridge task feeds two senders: heartbeat clones
                 // `outbound`, and we keep `outbound` itself for the
                 // final close frame. When both senders drop, the
@@ -1180,6 +1224,17 @@ async fn handle_ws_upgrade(
                 // forwarder reads None → calls sink.close(), completing
                 // the WebSocket close handshake.
                 drop(outbound);
+
+                // Wait for the forwarder to finish draining and close
+                // the sink. With `outbound` (and the heartbeat sender)
+                // already dropped, the forwarder will see channel-close
+                // and self-terminate quickly. Awaiting it here means
+                // WS_TASKS's drain on shutdown transitively covers the
+                // forwarder — the handler future doesn't resolve until
+                // the close handshake has been flushed to the wire.
+                if let Some(handle) = forwarder_handle {
+                    let _ = handle.await;
+                }
             }
             Err(e) => {
                 tracing::error!(error = %e, "hyper upgrade failed");

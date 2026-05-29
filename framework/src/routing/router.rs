@@ -1251,6 +1251,17 @@ impl Router {
         middleware: Vec<BoxedMiddleware>,
         config: Option<crate::ws::WsConfig>,
     ) -> Result<Router, FrameworkError> {
+        // Fail boot loud if the explicit per-route config carries a
+        // runtime-fatal invariant violation (zero ping_interval,
+        // zero max_missed_pings). The `None` arm picks up the framework
+        // default, which is validated by a unit test in `ws::mod`.
+        if let Some(cfg) = config.as_ref()
+            && let Err(reason) = cfg.validate()
+        {
+            return Err(FrameworkError::internal(format!(
+                "Failed to register WS route '{path}': {reason}"
+            )));
+        }
         let converted = crate::routing::macros::convert_route_params(path);
         self.ws_routes
             .insert(&converted, (converted.clone(), handler, middleware, config))

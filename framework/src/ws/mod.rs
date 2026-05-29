@@ -102,6 +102,32 @@ pub struct WsConfig {
     /// Origin header policy enforced at upgrade time. See [`OriginPolicy`].
     /// Default: [`OriginPolicy::SameOrigin`].
     pub origin_policy: OriginPolicy,
+    /// Accepted application-level subprotocols for `Sec-WebSocket-Protocol`
+    /// negotiation. Empty (the default) skips negotiation — the upgrade
+    /// response omits `Sec-WebSocket-Protocol` and the client falls back
+    /// to its default protocol handling.
+    ///
+    /// When non-empty, the upgrade picks the first client-offered token
+    /// (read from the request's `Sec-WebSocket-Protocol` header, in client
+    /// preference order per RFC 6455 §4.2.2) that appears in this list,
+    /// and echoes it on the 101 handshake response. If the client offered
+    /// protocols but none match the accepted list, the upgrade still
+    /// succeeds with no `Sec-WebSocket-Protocol` header — RFC 6455
+    /// requires browsers to fail the connection in that case, which is
+    /// the correct behavior (a server that proceeds without negotiating
+    /// would be silently speaking the wrong protocol).
+    ///
+    /// Compare case-insensitively on protocol tokens; protocol names are
+    /// ASCII per the RFC.
+    ///
+    /// ```rust,ignore
+    /// use suprnova::ws::WsConfig;
+    /// let cfg = WsConfig {
+    ///     accepted_protocols: vec!["graphql-transport-ws".into(), "graphql-ws".into()],
+    ///     ..Default::default()
+    /// };
+    /// ```
+    pub accepted_protocols: Vec<String>,
 }
 
 impl Default for WsConfig {
@@ -118,6 +144,7 @@ impl Default for WsConfig {
             max_frame_size: 64 * 1024,
             max_missed_pings: 2,
             origin_policy: OriginPolicy::default(),
+            accepted_protocols: Vec::new(),
         }
     }
 }
@@ -133,6 +160,39 @@ impl WsConfig {
         cfg.max_message_size = Some(self.max_message_size);
         cfg.max_frame_size = Some(self.max_frame_size);
         cfg
+    }
+
+    /// Validate the config's runtime-fatal invariants. Run at WS
+    /// registration time so a misconfigured route fails boot rather
+    /// than panicking inside the per-connection task at first use:
+    ///
+    /// - `ping_interval` is non-zero. `tokio::time::interval(Duration::ZERO)`
+    ///   panics on construction; the heartbeat task would tear down the
+    ///   process the first time the route was hit.
+    /// - `max_missed_pings` is non-zero. A zero threshold means the very
+    ///   first ping send increments past the bound and closes the
+    ///   connection with 1011 before the peer ever has a chance to pong —
+    ///   effectively "drop every connection on its first heartbeat tick".
+    ///   Routes that want to disable close-on-no-pong should set this to
+    ///   [`usize::MAX`], which the heartbeat path documents.
+    ///
+    /// Size knobs (`max_message_size`, `max_frame_size`) are intentionally
+    /// not validated here: their safety is a per-deployment policy, not a
+    /// runtime invariant, and the public-safe defaults plus
+    /// [`WsConfig::generous`] cover the two common shapes. See the field
+    /// docs on `WsConfig` for the rationale.
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
+        if self.ping_interval.is_zero() {
+            return Err(
+                "WsConfig.ping_interval must be > 0 (tokio::time::interval panics on Duration::ZERO)",
+            );
+        }
+        if self.max_missed_pings == 0 {
+            return Err(
+                "WsConfig.max_missed_pings must be >= 1 (0 closes every connection on its first ping); set usize::MAX to disable close-on-no-pong",
+            );
+        }
+        Ok(())
     }
 
     /// Generous-limit variant of [`WsConfig::default`] for trusted
@@ -159,6 +219,45 @@ impl WsConfig {
             ..Self::default()
         }
     }
+}
+
+/// Negotiate a single `Sec-WebSocket-Protocol` token from the client's
+/// offer list and the route's `accepted_protocols` list.
+///
+/// `client_offer` is the raw `Sec-WebSocket-Protocol` header value the
+/// client sent: a comma-separated list of protocol tokens in client
+/// preference order (RFC 6455 §4.2.2). `accepted` is the server's list
+/// of acceptable protocols (the route's `WsConfig::accepted_protocols`).
+///
+/// Returns the first client-offered protocol that appears in `accepted`,
+/// matched case-insensitively per RFC 6455 (protocol tokens are ASCII).
+/// The returned value preserves the casing from `accepted` so the
+/// server's canonical spelling is what the client sees on the 101.
+///
+/// Returns `None` when:
+/// - `accepted` is empty (negotiation disabled — server is protocol-agnostic),
+/// - the client did not send `Sec-WebSocket-Protocol` (`client_offer` is `None`),
+/// - none of the client's offered tokens overlap with `accepted`.
+pub(crate) fn negotiate_subprotocol(
+    accepted: &[String],
+    client_offer: Option<&str>,
+) -> Option<String> {
+    if accepted.is_empty() {
+        return None;
+    }
+    let offer = client_offer?;
+    for token in offer.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        for accept in accepted {
+            if accept.eq_ignore_ascii_case(token) {
+                return Some(accept.clone());
+            }
+        }
+    }
+    None
 }
 
 /// Type-erased boxed handler used internally by the router.
@@ -193,5 +292,109 @@ mod tests {
         // Other fields stay aligned with the public defaults.
         assert_eq!(cfg.ping_interval, WsConfig::default().ping_interval);
         assert_eq!(cfg.max_missed_pings, WsConfig::default().max_missed_pings);
+    }
+
+    /// Default config must pass validation — a default ctor that
+    /// produces an invalid config would block every registration.
+    #[test]
+    fn default_config_is_valid() {
+        WsConfig::default().validate().expect("default valid");
+        WsConfig::generous().validate().expect("generous valid");
+    }
+
+    /// `tokio::time::interval(Duration::ZERO)` panics on construction,
+    /// so the heartbeat would tear down the connection task the first
+    /// time the route was hit. We refuse the config at registration
+    /// time instead.
+    #[test]
+    fn zero_ping_interval_rejected() {
+        let cfg = WsConfig {
+            ping_interval: std::time::Duration::ZERO,
+            ..Default::default()
+        };
+        let err = cfg.validate().expect_err("zero ping_interval invalid");
+        assert!(err.contains("ping_interval"), "msg: {err}");
+    }
+
+    /// `max_missed_pings = 0` means the very first ping send increments
+    /// past the threshold and closes the connection with 1011 before
+    /// the peer can possibly pong. That's not a useful runtime mode —
+    /// to disable close-on-no-pong, use `usize::MAX`.
+    #[test]
+    fn zero_max_missed_pings_rejected() {
+        let cfg = WsConfig {
+            max_missed_pings: 0,
+            ..Default::default()
+        };
+        let err = cfg.validate().expect_err("zero max_missed_pings invalid");
+        assert!(err.contains("max_missed_pings"), "msg: {err}");
+    }
+
+    #[test]
+    fn usize_max_missed_pings_disables_close_and_is_valid() {
+        let cfg = WsConfig {
+            max_missed_pings: usize::MAX,
+            ..Default::default()
+        };
+        cfg.validate()
+            .expect("usize::MAX is the documented disable");
+    }
+
+    /// Empty `accepted_protocols` skips negotiation regardless of
+    /// what the client offered — the upgrade proceeds protocol-agnostic.
+    #[test]
+    fn negotiate_returns_none_when_accepted_empty() {
+        assert_eq!(negotiate_subprotocol(&[], Some("graphql-ws")), None);
+        assert_eq!(negotiate_subprotocol(&[], None), None);
+    }
+
+    #[test]
+    fn negotiate_returns_none_when_client_offers_nothing() {
+        let accepted = vec!["graphql-ws".to_string()];
+        assert_eq!(negotiate_subprotocol(&accepted, None), None);
+    }
+
+    /// Client preference order wins: when the client offers multiple,
+    /// we pick the FIRST client offer that the server accepts.
+    #[test]
+    fn negotiate_picks_first_client_offer_in_accepted_list() {
+        let accepted = vec!["graphql-transport-ws".to_string(), "graphql-ws".to_string()];
+        // Client prefers graphql-ws; we honor that even though
+        // graphql-transport-ws comes first in accepted.
+        let pick = negotiate_subprotocol(&accepted, Some("graphql-ws, graphql-transport-ws"));
+        assert_eq!(pick.as_deref(), Some("graphql-ws"));
+    }
+
+    #[test]
+    fn negotiate_skips_unknown_client_offers() {
+        let accepted = vec!["jsonrpc-2.0".to_string()];
+        let pick = negotiate_subprotocol(&accepted, Some("mqtt, jsonrpc-2.0, custom-x"));
+        assert_eq!(pick.as_deref(), Some("jsonrpc-2.0"));
+    }
+
+    /// Case-insensitive match per RFC 6455; preserve server casing in
+    /// the response so the client sees the canonical spelling.
+    #[test]
+    fn negotiate_case_insensitive_and_preserves_server_case() {
+        let accepted = vec!["GraphQL-WS".to_string()];
+        let pick = negotiate_subprotocol(&accepted, Some("graphql-ws"));
+        assert_eq!(pick.as_deref(), Some("GraphQL-WS"));
+    }
+
+    #[test]
+    fn negotiate_returns_none_on_no_overlap() {
+        let accepted = vec!["graphql-ws".to_string()];
+        assert_eq!(
+            negotiate_subprotocol(&accepted, Some("jsonrpc-2.0, mqtt")),
+            None
+        );
+    }
+
+    #[test]
+    fn negotiate_tolerates_extra_whitespace_and_empty_tokens() {
+        let accepted = vec!["jsonrpc-2.0".to_string()];
+        // Header per RFC 7230 allows OWS around list separators.
+        let pick = negotiate_subprotocol(&accepted, Some("  , jsonrpc-2.0 ,  ,"));
+        assert_eq!(pick.as_deref(), Some("jsonrpc-2.0"));
     }
 }
