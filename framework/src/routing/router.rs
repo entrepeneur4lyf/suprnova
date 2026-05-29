@@ -1734,6 +1734,16 @@ mod tests {
     //!
     //! Findings F1, F5, F6, F7, F8 from
     //! `docs/superpowers/audit-2026-05/DOMAIN-01-router-and-dispatch.md`.
+    //!
+    //! **Route-name registry isolation.** Every test that registers a route
+    //! name (`.name(...)` / `register_route_name`) or resolves one (`route` /
+    //! `route_with_params`) shares the process-global `ROUTE_REGISTRY`, so they
+    //! all carry `#[serial_test::serial(route_registry)]`. The hazard is
+    //! `clear_route_names_for_test`'s global drain: without the shared key it
+    //! can interleave between a registration and the lookup (or conflict panic)
+    //! that depends on it, wiping a binding mid-test. A new name-touching test
+    //! MUST join this serial group. Tests that only drive `Router::match_route`
+    //! touch a local `Router`, not the global table, and need no key.
 
     use super::*;
     use crate::http::text;
@@ -1777,6 +1787,7 @@ mod tests {
     /// `.name(...)` must resolve via `route(name, &[...])` to the same URL
     /// the macro path would produce.
     #[test]
+    #[serial_test::serial(route_registry)]
     fn fluent_named_colon_route_resolves_via_route_helper() {
         let _ = Router::new()
             .get("/posts/:slug", h)
@@ -1790,6 +1801,7 @@ mod tests {
     /// containing `/`, `?`, `#`, or `&` would corrupt the generated URL
     /// (open-redirect / path-injection class).
     #[test]
+    #[serial_test::serial(route_registry)]
     fn route_percent_encodes_reserved_path_characters() {
         let _ = Router::new()
             .get("/users/{id}", h)
@@ -1805,6 +1817,7 @@ mod tests {
     /// F5: question-mark, hash, ampersand are not allowed to inject query
     /// string or fragment into the URL.
     #[test]
+    #[serial_test::serial(route_registry)]
     fn route_percent_encodes_query_and_fragment_delimiters() {
         let _ = Router::new()
             .get("/posts/{slug}", h)
@@ -1821,6 +1834,7 @@ mod tests {
     /// F5: unreserved characters pass through unchanged so URLs stay
     /// readable when the slug is well-formed.
     #[test]
+    #[serial_test::serial(route_registry)]
     fn route_preserves_unreserved_characters() {
         let _ = Router::new()
             .get("/posts/{slug}", h)
@@ -1834,6 +1848,7 @@ mod tests {
     /// security-shaped bug.
     #[test]
     #[should_panic(expected = "Route name 'users.duplicate'")]
+    #[serial_test::serial(route_registry)]
     fn duplicate_route_name_panics() {
         let _ = Router::new()
             .get("/a", h)
@@ -1847,6 +1862,7 @@ mod tests {
     /// route may be registered on every test that calls
     /// `routes::register()`.
     #[test]
+    #[serial_test::serial(route_registry)]
     fn registering_same_name_same_path_is_idempotent() {
         register_route_name("idempotent.example", "/foo/{id}");
         register_route_name("idempotent.example", "/foo/{id}");
@@ -1856,6 +1872,7 @@ mod tests {
 
     /// F5: `route_with_params` (HashMap path) shares the same encoding.
     #[test]
+    #[serial_test::serial(route_registry)]
     fn route_with_params_percent_encodes_values() {
         let _ = Router::new()
             .get("/redirect/{target}", h)
@@ -1877,6 +1894,7 @@ mod tests {
     /// (callers can detect the missing param visually) and that the
     /// re-encoded form contains the original placeholder unchanged.
     #[test]
+    #[serial_test::serial(route_registry)]
     fn route_leaves_unfilled_placeholders_in_place() {
         let _ = Router::new().get("/{a}/{b}", h).name("two.params.test");
         let url = route("two.params.test", &[("a", "x")]);
@@ -2097,6 +2115,7 @@ mod tests {
     /// this explicitly: "one name binding per `any` registration
     /// (not seven)".
     #[test]
+    #[serial_test::serial(route_registry)]
     fn any_route_name_registers_once_and_resolves() {
         let _ = Router::new()
             .any("/webhooks/inbound", h)
@@ -2145,12 +2164,14 @@ mod tests {
 
     /// `clear_route_names_for_test` drains the process-global
     /// registry: a name registered, then cleared, no longer resolves.
-    /// The serial-test attribute keeps this from racing other tests
-    /// that touch the same global table.
     ///
-    /// Uses unique names (`clear.test.*`) so even when the serial
-    /// attribute is dropped or skipped by a future re-org, this
-    /// test's effects stay isolated from other tests' name bindings.
+    /// `clear()` wipes the *entire* table, not just this test's
+    /// `clear.test.*` keys — so the `route_registry` serial key is what
+    /// actually isolates it. Every other registry-touching test shares
+    /// that key (see the module docstring); without that, this global
+    /// drain could land between another test's registration and its
+    /// lookup or conflict panic and make it spuriously fail. The unique
+    /// names only keep *this* test's own assertions unambiguous.
     #[test]
     #[serial_test::serial(route_registry)]
     fn clear_route_names_drains_the_process_global_registry() {
