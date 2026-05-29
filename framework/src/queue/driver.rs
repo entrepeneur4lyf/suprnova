@@ -51,6 +51,60 @@ pub trait QueueDriver: Send + Sync {
         requeue_delay: Duration,
     ) -> Result<(), FrameworkError>;
 
+    /// Total count of envelopes currently held by this driver
+    /// (pending + delayed + reserved). Mirrors Laravel's
+    /// `Queue::size($queue)`.
+    ///
+    /// Default implementation returns `Err` describing the unsupported
+    /// operation — drivers that can answer the count cheaply override.
+    async fn size(&self) -> Result<u64, FrameworkError> {
+        Err(FrameworkError::internal(format!(
+            "queue driver '{}' does not implement size()",
+            self.name()
+        )))
+    }
+
+    /// Count of envelopes whose `available_at <= now` and which are not
+    /// currently reserved. Mirrors Laravel's `pendingSize($queue)`.
+    /// Defaults to [`size`] minus the reserved/delayed counts.
+    async fn pending_size(&self) -> Result<u64, FrameworkError> {
+        let total = self.size().await?;
+        let reserved = self.reserved_size().await.unwrap_or(0);
+        let delayed = self.delayed_size().await.unwrap_or(0);
+        Ok(total.saturating_sub(reserved).saturating_sub(delayed))
+    }
+
+    /// Count of envelopes whose `available_at > now`. Mirrors
+    /// `delayedSize($queue)`.
+    async fn delayed_size(&self) -> Result<u64, FrameworkError> {
+        Ok(0)
+    }
+
+    /// Count of currently-reserved envelopes (popped, not yet acked).
+    /// Mirrors `reservedSize($queue)`.
+    async fn reserved_size(&self) -> Result<u64, FrameworkError> {
+        Ok(0)
+    }
+
+    /// Drop every envelope, returning the number removed. Mirrors
+    /// `Queue::clear($queue)` and the `ClearableQueue` contract.
+    async fn clear(&self) -> Result<u64, FrameworkError> {
+        Err(FrameworkError::internal(format!(
+            "queue driver '{}' does not implement clear()",
+            self.name()
+        )))
+    }
+
+    /// Push every envelope in one shot. Mirrors `Queue::bulk($jobs, ...)`.
+    /// Default implementation pushes serially; backends with native bulk
+    /// push (sea-streamer pipeline, DB multi-row insert) may override.
+    async fn bulk_push(&self, envs: Vec<Envelope>) -> Result<(), FrameworkError> {
+        for env in envs {
+            self.push(env).await?;
+        }
+        Ok(())
+    }
+
     /// Driver name for logs/admin. Default uses type name.
     fn name(&self) -> &'static str {
         std::any::type_name::<Self>()

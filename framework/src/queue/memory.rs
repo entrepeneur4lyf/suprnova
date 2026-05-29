@@ -246,6 +246,51 @@ impl QueueDriver for MemoryQueueDriver {
         Ok(())
     }
 
+    async fn size(&self) -> Result<u64, FrameworkError> {
+        let visible = {
+            let g = lock::lock(&self.inner)?;
+            (g.visible.len() + g.reserved.len()) as u64
+        };
+        let delayed = self.delayed.lock().await.len() as u64;
+        Ok(visible + delayed)
+    }
+
+    async fn pending_size(&self) -> Result<u64, FrameworkError> {
+        let g = lock::lock(&self.inner)?;
+        Ok(g.visible.len() as u64)
+    }
+
+    async fn delayed_size(&self) -> Result<u64, FrameworkError> {
+        Ok(self.delayed.lock().await.len() as u64)
+    }
+
+    async fn reserved_size(&self) -> Result<u64, FrameworkError> {
+        let g = lock::lock(&self.inner)?;
+        Ok(g.reserved.len() as u64)
+    }
+
+    async fn clear(&self) -> Result<u64, FrameworkError> {
+        let dropped_visible_reserved = {
+            let mut g = lock::lock(&self.inner)?;
+            let n = (g.visible.len() + g.reserved.len()) as u64;
+            g.visible.clear();
+            g.reserved.clear();
+            n
+        };
+        let delayed_dropped = {
+            let mut dq = self.delayed.lock().await;
+            let n = dq.len() as u64;
+            dq.clear();
+            n
+        };
+        // Visibility DelayQueue is reservation accounting only — clearing
+        // the visible/reserved maps makes its expirations no-ops, but
+        // emptying it too prevents stale reservation tokens from firing
+        // future reclaim events.
+        self.visibility.lock().await.clear();
+        Ok(dropped_visible_reserved + delayed_dropped)
+    }
+
     fn name(&self) -> &'static str {
         "memory"
     }

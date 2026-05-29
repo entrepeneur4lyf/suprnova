@@ -188,7 +188,16 @@ pub use pagination::{
     CursorDirection, CursorPaginator, IntoInertiaScroll, LengthAwarePaginator, Paginated,
     Pagination, Paginator,
 };
-pub use queue::{BackoffSchedule, Envelope, EnvelopeError, Job, Queue};
+pub use queue::{
+    BackoffSchedule, Batch, BatchCallback, BatchOptions, BatchRepository, ChainLink,
+    DatabaseFailedJobStore, DatabaseQueueDriver, Envelope, EnvelopeError, FailOnException,
+    FailedJob, FailedJobStore, Job, JobMiddleware, JobMiddlewareNext, JobOutcome, ManuallyFailed,
+    MaxAttemptsExceeded, MemoryBatchRepository, MemoryFailedJobStore, MemoryQueueDriver,
+    NullFailedJobStore, NullQueueDriver, PendingBatch, PendingChain, Queue, QueueDriver,
+    RateLimited, RedisQueueDriver, Reservation, ReservationToken, Skip, SkipIfBatchCancelled,
+    SyncQueueDriver, ThrottlesExceptions, TimeoutExceeded, UpdatedBatchJobCounts,
+    WithoutOverlapping,
+};
 pub use rate_limit::{
     BackendErrorPolicy, GlobalLimit, Limit, LimitResult, RateLimitMiddleware, RateLimiter,
     RateLimiterDriver, SlidingWindowConfig, ThrottleRequestsMiddleware, Unlimited,

@@ -105,4 +105,15 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
     {
         Duration::from_secs(300)
     }
+
+    /// Middleware pipeline wrapping the handler. Returned in order, outermost
+    /// first — i.e. `vec![Throttle, RateLimit]` runs `Throttle` first, then
+    /// `RateLimit`, then the handler. Mirrors Laravel's `$job->middleware()`.
+    /// Default: empty pipeline (handler runs directly).
+    fn middleware() -> Vec<std::sync::Arc<dyn crate::queue::middleware::JobMiddleware>>
+    where
+        Self: Sized,
+    {
+        Vec::new()
+    }
 }

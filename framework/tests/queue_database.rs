@@ -45,6 +45,8 @@ fn env(name: &str) -> Envelope {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        batch_id: None,
+        chain_remaining: Vec::new(),
     }
 }
 

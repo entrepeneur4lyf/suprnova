@@ -1,21 +1,46 @@
 //! Queue subsystem: facade, drivers, envelope, worker.
 
+pub mod batch;
+pub mod chain;
 pub mod database;
 pub mod driver;
 pub mod envelope;
+pub mod errors;
+pub mod events;
+pub mod failed;
 pub mod job;
 pub mod memory;
+pub mod middleware;
+pub mod null;
+pub mod outcome;
 pub mod redis;
 pub mod retry;
+pub mod sync;
 pub mod testing;
 pub mod worker;
 
+pub use batch::{
+    Batch, BatchCallback, BatchOptions, BatchRepository, MemoryBatchRepository, PendingBatch,
+    UpdatedBatchJobCounts,
+};
+pub use chain::{ChainLink, PendingChain};
 pub use database::DatabaseQueueDriver;
 pub use driver::{QueueDriver, Reservation, ReservationToken};
 pub use envelope::{CURRENT_SCHEMA_VERSION, Envelope, EnvelopeError};
+pub use errors::{ManuallyFailed, MaxAttemptsExceeded, TimeoutExceeded};
+pub use failed::{
+    DatabaseFailedJobStore, FailedJob, FailedJobStore, MemoryFailedJobStore, NullFailedJobStore,
+};
 pub use job::{BackoffSchedule, Job};
 pub use memory::MemoryQueueDriver;
+pub use middleware::{
+    FailOnException, JobMiddleware, Next as JobMiddlewareNext, RateLimited, Skip,
+    SkipIfBatchCancelled, ThrottlesExceptions, WithoutOverlapping,
+};
+pub use null::NullQueueDriver;
+pub use outcome::JobOutcome;
 pub use redis::RedisQueueDriver;
+pub use sync::SyncQueueDriver;
 
 use crate::error::FrameworkError;
 use crate::lock;
@@ -24,6 +49,16 @@ use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 
 static DRIVER: RwLock<Option<Arc<dyn QueueDriver>>> = RwLock::new(None);
+
+/// Process-wide name for the current queue connection. Carried in queue
+/// lifecycle events so listeners can distinguish driver instances when an
+/// app runs multiple connections at once.
+static CONNECTION_NAME: RwLock<Option<String>> = RwLock::new(None);
+
+/// Cache key for the cross-worker restart signal. Worker checks the
+/// timestamp every loop iteration; if it's newer than the worker's
+/// startup time, the worker exits.
+const RESTART_SIGNAL_KEY: &str = "queue:restart-signal";
 
 /// `Queue` facade.
 ///
@@ -41,8 +76,21 @@ impl Queue {
             return testing::record::<J>(&job, now);
         }
         let env = envelope_for::<J>(&job, now)?;
+        let _ = crate::events::EventFacade::dispatch(events::JobQueueing {
+            job_name: J::job_name().into(),
+            connection: Self::connection_name(),
+        })
+        .await;
         let drv = current_driver()?;
-        drv.push(env).await
+        let env_id = env.id;
+        drv.push(env).await?;
+        let _ = crate::events::EventFacade::dispatch(events::JobQueued {
+            id: env_id,
+            job_name: J::job_name().into(),
+            connection: Self::connection_name(),
+        })
+        .await;
+        Ok(())
     }
 
     /// Push a typed job available at `available_at`. Driver is responsible
@@ -55,8 +103,21 @@ impl Queue {
             return testing::record::<J>(&job, available_at);
         }
         let env = envelope_for::<J>(&job, available_at)?;
+        let _ = crate::events::EventFacade::dispatch(events::JobQueueing {
+            job_name: J::job_name().into(),
+            connection: Self::connection_name(),
+        })
+        .await;
         let drv = current_driver()?;
-        drv.push(env).await
+        let env_id = env.id;
+        drv.push(env).await?;
+        let _ = crate::events::EventFacade::dispatch(events::JobQueued {
+            id: env_id,
+            job_name: J::job_name().into(),
+            connection: Self::connection_name(),
+        })
+        .await;
+        Ok(())
     }
 
     /// Convenience: push with a delay from `now`.
@@ -136,6 +197,198 @@ impl Queue {
             .await?;
 
         Ok(matches!(outcome, crate::idempotency::Idempotent::Fresh(())))
+    }
+
+    /// Push every job in `jobs` onto the queue. Mirrors Laravel's
+    /// `Queue::bulk($jobs, $data, $queue)`. Each job is encoded and
+    /// committed via the driver's [`QueueDriver::bulk_push`] hook (with a
+    /// serial-push default).
+    pub async fn bulk<J: Job + Clone>(jobs: Vec<J>) -> Result<(), FrameworkError> {
+        if testing::is_active() {
+            let now = Utc::now();
+            for j in jobs {
+                testing::record::<J>(&j, now)?;
+            }
+            return Ok(());
+        }
+        let now = Utc::now();
+        let mut envs = Vec::with_capacity(jobs.len());
+        for j in jobs {
+            envs.push(envelope_for::<J>(&j, now)?);
+        }
+        let drv = current_driver()?;
+        drv.bulk_push(envs).await
+    }
+
+    /// Begin a queued batch builder. Mirrors `Bus::batch([...])`.
+    ///
+    /// Add jobs with `.add(job)`, register `then`/`catch`/`finally`
+    /// callbacks by name, then `.dispatch()` to push every job through
+    /// the configured driver under one batch id.
+    pub fn batch() -> PendingBatch {
+        PendingBatch::new()
+    }
+
+    /// Begin a queued chain builder. Mirrors `Bus::chain([...])`.
+    pub fn chain() -> PendingChain {
+        PendingChain::new()
+    }
+
+    /// Total envelopes currently held by the driver
+    /// (pending + delayed + reserved).
+    pub async fn size() -> Result<u64, FrameworkError> {
+        current_driver()?.size().await
+    }
+
+    /// Envelopes whose `available_at <= now` and which are not reserved.
+    pub async fn pending_size() -> Result<u64, FrameworkError> {
+        current_driver()?.pending_size().await
+    }
+
+    /// Envelopes whose `available_at > now`.
+    pub async fn delayed_size() -> Result<u64, FrameworkError> {
+        current_driver()?.delayed_size().await
+    }
+
+    /// Envelopes currently held by an unfinished reservation.
+    pub async fn reserved_size() -> Result<u64, FrameworkError> {
+        current_driver()?.reserved_size().await
+    }
+
+    /// Drop every envelope on the configured driver. Returns the number
+    /// of envelopes removed. Mirrors `Queue::clear($queue)`.
+    pub async fn clear() -> Result<u64, FrameworkError> {
+        current_driver()?.clear().await
+    }
+
+    /// Broadcast a restart signal to every worker on this connection.
+    /// Workers poll the cache key once per loop and exit cleanly when
+    /// the signal's timestamp is newer than their startup time. Mirrors
+    /// Laravel's `php artisan queue:restart`.
+    ///
+    /// Requires the cache subsystem to be bootstrapped (the signal lives
+    /// in [`Cache`](crate::cache::Cache)). The timestamp is stored in
+    /// milliseconds so tightly-clustered `restart()` calls in tests are
+    /// distinguishable.
+    pub async fn restart() -> Result<(), FrameworkError> {
+        let now = Utc::now().timestamp_millis();
+        crate::cache::Cache::put(RESTART_SIGNAL_KEY, &now, None).await?;
+        Ok(())
+    }
+
+    /// Read the latest restart-signal millisecond timestamp set by
+    /// [`Queue::restart`]. Returns `None` when no signal has been issued.
+    pub async fn restart_signal() -> Result<Option<i64>, FrameworkError> {
+        crate::cache::Cache::get::<i64>(RESTART_SIGNAL_KEY).await
+    }
+
+    /// Replace the failed-jobs store (where the worker writes dead-lettered
+    /// envelopes). Defaults to [`MemoryFailedJobStore`] when not set.
+    pub fn set_failed_store(store: Arc<dyn FailedJobStore>) {
+        failed::install(store);
+    }
+
+    /// Read the configured failed-jobs store. Returns `None` when none has
+    /// been wired (in which case the worker still dead-letters via tracing
+    /// but doesn't persist a record).
+    pub fn failed_store() -> Option<Arc<dyn FailedJobStore>> {
+        failed::current()
+    }
+
+    /// Re-enqueue a previously dead-lettered job by id. Loads the
+    /// envelope from the configured [`FailedJobStore`], resets its
+    /// `attempts`, `available_at`, and `idempotency_key`, pushes it
+    /// through the configured driver, then deletes the failed-job
+    /// record. Mirrors `php artisan queue:retry <id>`.
+    ///
+    /// Returns `Ok(true)` when the record was retried, `Ok(false)` when
+    /// the id had no record in the store.
+    pub async fn retry_failed(id: Uuid) -> Result<bool, FrameworkError> {
+        let store = failed::current().ok_or_else(|| {
+            FrameworkError::internal(
+                "Queue::retry_failed requires a failed-jobs store; call \
+                 Queue::set_failed_store(...) first",
+            )
+        })?;
+        let Some(record) = store.find(id).await? else {
+            return Ok(false);
+        };
+        let mut env = Envelope::from_json(&record.envelope_json)
+            .map_err(|e| FrameworkError::internal(format!("retry_failed: decode envelope: {e}")))?;
+        env.attempts = 0;
+        env.available_at = Utc::now();
+        env.idempotency_key = None;
+        let drv = current_driver()?;
+        drv.push(env).await?;
+        store.forget(id).await?;
+        Ok(true)
+    }
+
+    /// Re-enqueue every failed-job record (optionally only those older
+    /// than `before`). Returns the number of records retried. Mirrors
+    /// `php artisan queue:retry all` plus `queue:flush` semantics: each
+    /// retried envelope is pushed AND removed from the store.
+    pub async fn retry_all_failed(
+        before: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<u64, FrameworkError> {
+        let store = failed::current().ok_or_else(|| {
+            FrameworkError::internal(
+                "Queue::retry_all_failed requires a failed-jobs store; call \
+                 Queue::set_failed_store(...) first",
+            )
+        })?;
+        let records = store.all().await?;
+        let drv = current_driver()?;
+        let mut count: u64 = 0;
+        for record in records {
+            if let Some(cutoff) = before
+                && record.failed_at >= cutoff
+            {
+                continue;
+            }
+            let Ok(mut env) = Envelope::from_json(&record.envelope_json) else {
+                continue;
+            };
+            env.attempts = 0;
+            env.available_at = Utc::now();
+            env.idempotency_key = None;
+            drv.push(env).await?;
+            store.forget(record.id).await?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Replace the batch repository. Defaults to [`MemoryBatchRepository`]
+    /// on first use.
+    pub fn set_batch_repository(repo: Arc<dyn BatchRepository>) {
+        batch::install_repository(repo);
+    }
+
+    /// Read the configured batch repository.
+    pub fn batch_repository() -> Option<Arc<dyn BatchRepository>> {
+        batch::current_repository()
+    }
+
+    /// Set the connection name carried in queue lifecycle events. Defaults
+    /// to the driver's `name()` if not overridden.
+    pub fn set_connection_name(name: impl Into<String>) {
+        if let Ok(mut g) = CONNECTION_NAME.write() {
+            *g = Some(name.into());
+        }
+    }
+
+    /// Resolve the connection name for events: explicit override → driver
+    /// name → "default".
+    pub fn connection_name() -> String {
+        if let Ok(g) = CONNECTION_NAME.read()
+            && let Some(n) = g.as_ref()
+        {
+            return n.clone();
+        }
+        current_driver()
+            .map(|d| d.name().to_string())
+            .unwrap_or_else(|_| "default".into())
     }
 
     /// Replace the registered driver. Primarily for boot-time wiring;
@@ -249,6 +502,16 @@ fn envelope_for<J: Job>(
     job: &J,
     available_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<Envelope, FrameworkError> {
+    build_envelope::<J>(job, available_at)
+}
+
+/// Build an envelope for the typed job. Used by [`Queue::push`] and by
+/// [`PendingBatch::add`] / [`PendingChain::add`]. `pub(crate)` because
+/// external code goes through the facade.
+pub(crate) fn build_envelope<J: Job>(
+    job: &J,
+    available_at: chrono::DateTime<chrono::Utc>,
+) -> Result<Envelope, FrameworkError> {
     let payload = serde_json::to_value(job)
         .map_err(|e| FrameworkError::internal(format!("encode job: {e}")))?;
     let timeout_secs = J::timeout().map(|d| d.as_secs());
@@ -265,5 +528,7 @@ fn envelope_for<J: Job>(
         timeout_secs,
         fail_on_timeout: J::fail_on_timeout(),
         idempotency_key: None,
+        batch_id: None,
+        chain_remaining: Vec::new(),
     })
 }

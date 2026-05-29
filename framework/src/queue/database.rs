@@ -264,6 +264,105 @@ impl QueueDriver for DatabaseQueueDriver {
         Ok(())
     }
 
+    async fn size(&self) -> Result<u64, FrameworkError> {
+        let row = self
+            .db
+            .query_one(Statement::from_string(
+                self.backend(),
+                format!("SELECT COUNT(*) FROM {}", self.table),
+            ))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("queue size: {e}")))?;
+        let n: i64 = match row {
+            Some(r) => r
+                .try_get_by_index(0)
+                .map_err(|e| FrameworkError::internal(format!("queue size col: {e}")))?,
+            None => 0,
+        };
+        Ok(n.max(0) as u64)
+    }
+
+    async fn pending_size(&self) -> Result<u64, FrameworkError> {
+        let now = Utc::now().timestamp();
+        let row = self
+            .db
+            .query_one(Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "SELECT COUNT(*) FROM {} \
+                     WHERE available_at <= ? \
+                       AND (reserved_until IS NULL OR reserved_until <= ?)",
+                    self.table
+                ),
+                vec![sea_orm::Value::from(now), sea_orm::Value::from(now)],
+            ))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("queue pending_size: {e}")))?;
+        let n: i64 = match row {
+            Some(r) => r
+                .try_get_by_index(0)
+                .map_err(|e| FrameworkError::internal(format!("queue pending_size col: {e}")))?,
+            None => 0,
+        };
+        Ok(n.max(0) as u64)
+    }
+
+    async fn delayed_size(&self) -> Result<u64, FrameworkError> {
+        let now = Utc::now().timestamp();
+        let row = self
+            .db
+            .query_one(Statement::from_sql_and_values(
+                self.backend(),
+                format!("SELECT COUNT(*) FROM {} WHERE available_at > ?", self.table),
+                vec![sea_orm::Value::from(now)],
+            ))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("queue delayed_size: {e}")))?;
+        let n: i64 = match row {
+            Some(r) => r
+                .try_get_by_index(0)
+                .map_err(|e| FrameworkError::internal(format!("queue delayed_size col: {e}")))?,
+            None => 0,
+        };
+        Ok(n.max(0) as u64)
+    }
+
+    async fn reserved_size(&self) -> Result<u64, FrameworkError> {
+        let now = Utc::now().timestamp();
+        let row = self
+            .db
+            .query_one(Statement::from_sql_and_values(
+                self.backend(),
+                format!(
+                    "SELECT COUNT(*) FROM {} \
+                     WHERE reserved_until IS NOT NULL AND reserved_until > ?",
+                    self.table
+                ),
+                vec![sea_orm::Value::from(now)],
+            ))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("queue reserved_size: {e}")))?;
+        let n: i64 = match row {
+            Some(r) => r
+                .try_get_by_index(0)
+                .map_err(|e| FrameworkError::internal(format!("queue reserved_size col: {e}")))?,
+            None => 0,
+        };
+        Ok(n.max(0) as u64)
+    }
+
+    async fn clear(&self) -> Result<u64, FrameworkError> {
+        let r = self
+            .db
+            .execute(Statement::from_string(
+                self.backend(),
+                format!("DELETE FROM {}", self.table),
+            ))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("queue clear: {e}")))?;
+        Ok(r.rows_affected())
+    }
+
     fn name(&self) -> &'static str {
         "database"
     }
