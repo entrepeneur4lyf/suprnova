@@ -318,8 +318,9 @@ pub use notifications::channels::mail::{
 };
 pub use notifications::channels::webpush::WebPushChannel;
 pub use notifications::{
-    Channel, DynNotification, Notifiable, Notification, NotificationDispatcher,
-    NotificationFactory, Notify, SendNotificationJob,
+    AnonymousNotifiable, Channel, DynNotification, Notifiable, Notification,
+    NotificationDispatcher, NotificationFactory, NotificationFailed, NotificationSending,
+    NotificationSent, Notify, NotifyFakeGuard, SendNotificationJob, StoredNotification,
 };
 
 pub use ws::{WebSocketHandler, WsConfig, WsSocket};

@@ -12,10 +12,25 @@
 //!
 //! Concrete channels (Mail, Database, WebPush) land in Tasks 17 and 18.
 
+pub mod anonymous;
 pub mod channels;
+pub mod database_read;
+pub mod events;
 pub mod notify_job;
+pub mod testing;
 
+pub use anonymous::AnonymousNotifiable;
+pub use database_read::{
+    StoredNotification, all_for, delete_for, mark_all_as_read, mark_as_read, mark_as_unread,
+    read_for, unread_for,
+};
+pub use events::{NotificationFailed, NotificationSending, NotificationSent};
 pub use notify_job::SendNotificationJob;
+pub use testing::{
+    FakeRecord, NotifyFakeGuard, assert_count, assert_nothing_sent, assert_nothing_sent_to,
+    assert_sent, assert_sent_named, assert_sent_times, assert_sent_to, assert_sent_to_on,
+    recorded as recorded_notifications,
+};
 
 use crate::error::FrameworkError;
 use crate::lock;
@@ -56,6 +71,27 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 
     /// JSON-serializable payload the channel will deliver / persist.
     fn data(&self) -> serde_json::Value;
+
+    /// Per-channel veto. The dispatcher consults this immediately before
+    /// invoking the channel; returning `false` skips that channel for this
+    /// recipient. Default: always send. Mirrors Laravel's
+    /// `Notification::shouldSend($notifiable, $channel)` short-circuit. The
+    /// veto runs ahead of the `NotificationSending` event so the trait-level
+    /// decision wins over listener-level veto without dispatching the event
+    /// unnecessarily.
+    fn should_send(&self, _channel: &str) -> bool {
+        true
+    }
+
+    /// Post-send hook, invoked once per channel that completed successfully.
+    /// Default: no-op. Mirrors Laravel's
+    /// `Notification::afterSending($notifiable, $channel, $response)` — minus
+    /// `$response` because Suprnova channels return `Result<(), …>` rather
+    /// than a per-channel response object. Errors raised here propagate the
+    /// same way as channel errors (short-circuits the remaining channels).
+    fn after_sending(&self, _channel: &str) -> Result<(), FrameworkError> {
+        Ok(())
+    }
 }
 
 /// Object-safe view of a [`Notification`].
@@ -140,6 +176,16 @@ impl NotificationDispatcher {
     /// channels, dispatch each side via the queue (idempotency keys at the
     /// envelope layer protect against double-sends on retry).
     ///
+    /// Lifecycle events:
+    /// - [`NotificationSending`](events::NotificationSending) fires immediately before each channel's
+    ///   `deliver` runs. A listener that returns an error is treated as a
+    ///   per-channel veto — the channel is skipped, remaining channels
+    ///   continue.
+    /// - [`NotificationSent`](events::NotificationSent) fires after a successful delivery.
+    /// - [`NotificationFailed`](events::NotificationFailed) fires when delivery returned an error; the
+    ///   underlying error then propagates per the first-failure-stops
+    ///   contract.
+    ///
     /// Telemetry: wraps the fan-out in a `notification.dispatch` info
     /// span. The span carries the notification name + declared channel
     /// count; per-channel sends emit their own events inside the span
@@ -174,9 +220,68 @@ impl NotificationDispatcher {
                 let Some(route) = recipient.route_for(channel_name) else {
                     continue;
                 };
-                if let Err(e) = channel.deliver(&route, notification).await {
-                    result = Err(e);
-                    break;
+
+                // Trait-level per-channel veto. Mirrors Laravel's
+                // `shouldSend` short-circuit; runs ahead of the
+                // `NotificationSending` event so listener veto and trait
+                // veto are independent and the event isn't dispatched
+                // when the trait already vetoed.
+                if !notification.should_send(channel_name) {
+                    continue;
+                }
+
+                let data = notification.data();
+                let payload_name = N::notification_name().to_string();
+                let channel_str = channel_name.to_string();
+                let route_owned = route.clone();
+
+                // Sending event — listener errors veto the channel.
+                let sending = events::NotificationSending {
+                    notification: payload_name.clone(),
+                    channel: channel_str.clone(),
+                    route: route_owned.clone(),
+                    data: data.clone(),
+                };
+                if let Err(veto) = crate::events::EventFacade::dispatch(sending).await {
+                    tracing::debug!(
+                        channel = %channel_str,
+                        notification = %payload_name,
+                        reason = %veto,
+                        "NotificationSending listener veto; skipping channel"
+                    );
+                    continue;
+                }
+
+                match channel.deliver(&route, notification).await {
+                    Ok(()) => {
+                        if let Err(e) = notification.after_sending(channel_name) {
+                            result = Err(e);
+                            break;
+                        }
+                        let _ = crate::events::EventFacade::dispatch_best_effort(
+                            events::NotificationSent {
+                                notification: payload_name.clone(),
+                                channel: channel_str.clone(),
+                                route: route_owned.clone(),
+                                data: data.clone(),
+                            },
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        let _ = crate::events::EventFacade::dispatch_best_effort(
+                            events::NotificationFailed {
+                                notification: payload_name.clone(),
+                                channel: channel_str.clone(),
+                                route: route_owned.clone(),
+                                data: data.clone(),
+                                error: e.to_string(),
+                            },
+                        )
+                        .await;
+                        result = Err(e);
+                        break;
+                    }
                 }
             }
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -281,6 +386,11 @@ impl Notify {
     /// Queue a notification for asynchronous delivery via the bound
     /// dispatcher. Pre-resolves the per-channel routes from `recipient` so
     /// the worker does not need a `Notifiable` handle at execute time.
+    ///
+    /// Under [`Notify::fake`] the notification is recorded for each
+    /// declared channel that resolves a route — no queue push, no channel
+    /// execution. Channels with no matching route are skipped, mirroring
+    /// the dispatcher's `route_for(channel).is_none()` behaviour.
     pub async fn queue<N, R>(recipient: &R, notification: N) -> Result<(), FrameworkError>
     where
         N: Notification,
@@ -293,6 +403,22 @@ impl Notify {
                 routes.insert((*c).to_string(), r);
             }
         }
+
+        if testing::is_active() {
+            let data = notification.data();
+            for c in &channels {
+                if let Some(route) = routes.get(*c) {
+                    testing::record(testing::FakeRecord {
+                        notification: N::notification_name().to_string(),
+                        channel: (*c).to_string(),
+                        route: route.clone(),
+                        data: data.clone(),
+                    });
+                }
+            }
+            return Ok(());
+        }
+
         let payload = serde_json::to_value(&notification)
             .map_err(|e| FrameworkError::internal(format!("Notify::queue encode: {e}")))?;
         let job = SendNotificationJob {
@@ -308,12 +434,72 @@ impl Notify {
     /// bound dispatcher. Returns on the first channel error per the
     /// dispatcher contract — channels that already succeeded are not
     /// rolled back.
+    ///
+    /// Under [`Notify::fake`] the notification is recorded per declared
+    /// channel that resolved a route; the bound dispatcher is never
+    /// consulted. Channels whose `route_for(channel)` returns `None` are
+    /// skipped to match the real dispatcher.
     pub async fn send<N, R>(recipient: &R, notification: &N) -> Result<(), FrameworkError>
     where
         N: Notification,
         R: Notifiable + ?Sized,
     {
+        if testing::is_active() {
+            let data = notification.data();
+            for c in notification.channels() {
+                if let Some(route) = recipient.route_for(c) {
+                    testing::record(testing::FakeRecord {
+                        notification: N::notification_name().to_string(),
+                        channel: c.to_string(),
+                        route,
+                        data: data.clone(),
+                    });
+                }
+            }
+            return Ok(());
+        }
         let dispatcher = dispatcher_for_queue()?;
         dispatcher.notify(recipient, notification).await
+    }
+
+    /// Install the notification fake for the current test. Returns an RAII
+    /// guard that uninstalls on drop. While the guard is live, every
+    /// `Notify::send` / `Notify::queue` records the dispatch instead of
+    /// running channels or enqueuing a job.
+    ///
+    /// The guard holds a process-wide serialization mutex, so parallel
+    /// tests cannot share the fake store.
+    pub fn fake() -> NotifyFakeGuard {
+        testing::install_fake()
+    }
+
+    /// Begin a one-off `(channel, route)` notification to an on-demand
+    /// (`AnonymousNotifiable`) recipient. Returns an
+    /// [`AnonymousNotifiable`] (or an error if the channel is `"database"`,
+    /// which has no on-demand semantics). Send the notification with
+    /// [`Notify::send`] / [`Notify::queue`] just like a model-backed
+    /// recipient.
+    ///
+    /// ```ignore
+    /// let recipient = Notify::route("mail", "ops@example.com")?;
+    /// Notify::send(&recipient, &IncidentNotification { id: 7 }).await?;
+    /// ```
+    pub fn route(
+        channel: impl Into<String>,
+        route: impl Into<String>,
+    ) -> Result<AnonymousNotifiable, FrameworkError> {
+        AnonymousNotifiable::new().route(channel, route)
+    }
+
+    /// Like [`Notify::route`] but accepts multiple `(channel, route)` pairs
+    /// in one call. The `"database"` channel is rejected verbatim, matching
+    /// Laravel's `Notification::routes(...)` semantics.
+    pub fn routes<I, C, R>(pairs: I) -> Result<AnonymousNotifiable, FrameworkError>
+    where
+        I: IntoIterator<Item = (C, R)>,
+        C: Into<String>,
+        R: Into<String>,
+    {
+        AnonymousNotifiable::new().routes(pairs)
     }
 }
