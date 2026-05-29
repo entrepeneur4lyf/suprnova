@@ -861,17 +861,54 @@ where
             bootstrap_fn().await;
         }
 
+        let worker = crate::workflow::WorkflowWorker::new();
+        let cancel = tokio_util::sync::CancellationToken::new();
+
         println!("==============================================");
         println!("  suprnova Workflow Worker");
         println!("==============================================");
-        println!();
-        println!("  Press Ctrl+C to stop");
-        println!();
+        println!("  worker_id: {}", worker.worker_id());
+        println!("  Press Ctrl+C to stop (in-flight workflows will drain)");
         println!("==============================================");
 
-        if let Err(e) = crate::workflow::WorkflowWorker::work_loop().await {
-            eprintln!("Workflow worker error: {e}");
-            std::process::exit(1);
+        // Mirror the queue worker shutdown pattern: spawn the worker on a
+        // task so we can race it against Ctrl-C without blocking the
+        // signal future. On signal we cancel the token and await the
+        // task; the worker's drain loop awaits every in-flight workflow
+        // before returning Ok(()).
+        let cancel_for_worker = cancel.clone();
+        let mut handle =
+            tokio::spawn(async move { worker.run_with_cancel(cancel_for_worker).await });
+
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("suprnova: workflow worker shutting down (Ctrl-C).");
+                cancel.cancel();
+                match handle.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        eprintln!("Workflow worker error during drain: {e}");
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        eprintln!("Workflow worker task panicked during drain: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            res = &mut handle => {
+                match res {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        eprintln!("Workflow worker error: {e}");
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        eprintln!("Workflow worker task panicked: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
         }
     }
 

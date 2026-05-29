@@ -3,6 +3,17 @@
 //! Provides a Postgres-backed durable workflow system with step persistence
 //! and automatic retries. Inspired by Laravel queues and DBOS.
 //!
+//! # Delivery semantics
+//!
+//! Step bodies run with **at-least-once** semantics. The framework
+//! persists step outputs durably and replays from cache on retry, but
+//! it cannot observe a step's side effects. A crash after a step's
+//! external action but before `mark_step_succeeded` commits will cause
+//! the step body to run again on the next claim. Treat every step body
+//! as idempotent (conditional writes, idempotency keys to external
+//! APIs, `INSERT ... ON CONFLICT DO NOTHING`, etc.). See
+//! `docs/workflows.md` for patterns.
+//!
 //! # Example
 //!
 //! ```rust,ignore
@@ -28,7 +39,7 @@
 //!
 //! // Enqueue a workflow
 //! // let handle = start_workflow!(welcome_flow, 123).await?;
-//! // handle.wait().await?;
+//! // handle.wait_with_timeout(Duration::from_secs(30)).await?;
 //!
 //! // Run worker (separate process):
 //! // suprnova workflow:work
@@ -37,6 +48,7 @@
 pub mod config;
 pub mod context;
 pub mod entities;
+pub mod migrations;
 #[doc(hidden)]
 pub mod registry;
 pub mod store;
@@ -56,7 +68,8 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
+use tokio_util::sync::CancellationToken;
 
 /// RAII guard that aborts the wrapped task on drop.
 ///
@@ -100,9 +113,13 @@ fn spawn_lease_heartbeat(workflow_id: i64, lock_timeout: Duration) -> AbortOnDro
     AbortOnDrop(handle)
 }
 
-/// Start a workflow by name with serialized input JSON
+/// Start a workflow by name with serialized input JSON.
+///
+/// Uses [`registry::find_strict`] so a duplicate `#[workflow]`
+/// registration aborts the enqueue with a clear error rather than
+/// silently picking whichever copy the linker happened to put first.
 pub async fn start_named(name: &str, input: &str) -> Result<WorkflowHandle, FrameworkError> {
-    if registry::find(name).is_none() {
+    if registry::find_strict(name)?.is_none() {
         return Err(FrameworkError::internal(format!(
             "Workflow '{}' is not registered",
             name
@@ -136,13 +153,36 @@ impl Default for WorkflowWorker {
 }
 
 impl WorkflowWorker {
-    /// Create a worker with config from environment
+    /// Create a worker with config from environment.
+    ///
+    /// Boot-time invariants are checked here: duplicate `#[workflow]`
+    /// registrations are detected, and the config is validated. A
+    /// misconfiguration that would deadlock the worker (`concurrency=0`,
+    /// negative `retry_backoff_secs`, etc.) is caught with `.expect` at
+    /// boot, not at first job pickup, so a failed config crashes the
+    /// daemon visibly instead of letting it hang quietly. Callers that
+    /// want non-panicking handling can use [`Self::with_config`] after
+    /// calling `WorkflowConfig::validate` themselves.
     pub fn new() -> Self {
         let config = Config::get::<WorkflowConfig>().unwrap_or_default();
+        // Clamp + warn happens inside `from_env`; this re-check guards
+        // programmatic configs that bypassed it.
+        if let Err(err) = config.validate() {
+            tracing::error!(error = %err, "WorkflowConfig validation failed");
+            panic!("WorkflowConfig validation failed: {err}");
+        }
+        if let Err(err) = registry::assert_no_duplicates() {
+            tracing::error!(error = %err, "duplicate workflow registrations detected at worker boot");
+            panic!("{err}");
+        }
         Self::with_config(config)
     }
 
-    /// Create a worker with a custom config
+    /// Create a worker with a custom config.
+    ///
+    /// Does **not** validate the config or check the registry — callers
+    /// that need those invariants should run [`WorkflowConfig::validate`]
+    /// and [`registry::assert_no_duplicates`] themselves.
     pub fn with_config(config: WorkflowConfig) -> Self {
         let random: u64 = rand::rng().random();
         let worker_id = format!("{}-{}", std::process::id(), random);
@@ -152,40 +192,145 @@ impl WorkflowWorker {
         }
     }
 
-    /// Run the worker loop indefinitely
-    pub async fn work_loop() -> Result<(), FrameworkError> {
-        Self::new().run().await
+    /// Worker id (process-id + random suffix) used to stamp claimed rows.
+    pub fn worker_id(&self) -> &str {
+        &self.worker_id
     }
 
-    async fn run(self) -> Result<(), FrameworkError> {
+    /// Run the worker loop indefinitely.
+    ///
+    /// Internally constructs a never-cancelled token and delegates to
+    /// [`Self::run_with_cancel`]. Used by the `workflow:work` command
+    /// which sets up its own Ctrl-C handling at the binary layer.
+    pub async fn work_loop() -> Result<(), FrameworkError> {
+        Self::new().run(CancellationToken::new()).await
+    }
+
+    /// Run with an external cancellation token.
+    ///
+    /// When the token fires the worker stops pulling new claims and
+    /// awaits every in-flight task in its `JoinSet` before returning.
+    /// This is the path the application binary should use so SIGINT /
+    /// SIGTERM cleanly drains the worker instead of orphaning in-flight
+    /// workflows.
+    pub async fn run_with_cancel(self, cancel: CancellationToken) -> Result<(), FrameworkError> {
+        self.run(cancel).await
+    }
+
+    async fn run(self, cancel: CancellationToken) -> Result<(), FrameworkError> {
         let poll = Duration::from_millis(self.config.poll_interval_ms);
         let semaphore = Arc::new(Semaphore::new(self.config.concurrency));
+        let mut in_flight: JoinSet<()> = JoinSet::new();
+
+        tracing::info!(
+            worker_id = %self.worker_id,
+            concurrency = self.config.concurrency,
+            poll_interval_ms = self.config.poll_interval_ms,
+            lock_timeout_secs = self.config.lock_timeout_secs,
+            max_attempts = self.config.max_attempts,
+            retry_backoff_secs = self.config.retry_backoff_secs,
+            "workflow worker started"
+        );
 
         loop {
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
-            let claim = store::claim_next_workflow(&self.worker_id, &self.config).await;
+            // Drain finished tasks every iteration so the JoinSet never
+            // grows without bound between cancellation rounds. This also
+            // surfaces any task panic that escaped `process_claimed_workflow`
+            // (it shouldn't — there's a catch_unwind inside — but the
+            // tracing event makes the leak observable).
+            while let Some(joined) = in_flight.try_join_next() {
+                if let Err(err) = joined
+                    && err.is_panic()
+                {
+                    tracing::error!(
+                        error = %err,
+                        "workflow worker task panicked outside the catch_unwind boundary"
+                    );
+                }
+            }
+
+            if cancel.is_cancelled() {
+                tracing::info!(
+                    worker_id = %self.worker_id,
+                    in_flight = in_flight.len(),
+                    "workflow worker draining in-flight tasks before exit"
+                );
+                while let Some(joined) = in_flight.join_next().await {
+                    if let Err(err) = joined
+                        && err.is_panic()
+                    {
+                        tracing::error!(
+                            error = %err,
+                            "workflow worker task panicked during drain"
+                        );
+                    }
+                }
+                tracing::info!(worker_id = %self.worker_id, "workflow worker stopped");
+                return Ok(());
+            }
+
+            // Acquire-or-cancel: if the token fires while every slot is
+            // taken we must not block on the semaphore — the next iter
+            // would never see `is_cancelled`. Race the permit against
+            // the cancel signal.
+            let permit = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => continue,
+                permit = semaphore.clone().acquire_owned() => permit.unwrap(),
+            };
+
+            // Race the claim against cancellation too — if the DB is
+            // slow and Ctrl-C fires, we shouldn't wait a full claim
+            // round-trip to exit.
+            let claim = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    drop(permit);
+                    continue;
+                }
+                res = store::claim_next_workflow(&self.worker_id, &self.config) => res,
+            };
 
             match claim {
                 Ok(Some(claimed)) => {
                     let config = self.config.clone();
                     let worker_id = self.worker_id.clone();
-                    tokio::spawn(async move {
+                    let workflow_id = claimed.id;
+                    let workflow_name = claimed.name.clone();
+                    in_flight.spawn(async move {
                         if let Err(err) =
                             process_claimed_workflow(claimed, config, &worker_id).await
                         {
-                            eprintln!("Workflow execution error: {}", err);
+                            tracing::error!(
+                                workflow_id,
+                                workflow_name = %workflow_name,
+                                error = %err,
+                                "workflow execution returned error after settlement; row state is likely consistent but inspect manually"
+                            );
                         }
                         drop(permit);
                     });
                 }
                 Ok(None) => {
                     drop(permit);
-                    tokio::time::sleep(poll).await;
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => continue,
+                        _ = tokio::time::sleep(poll) => {}
+                    }
                 }
                 Err(err) => {
-                    eprintln!("Workflow claim error: {}", err);
+                    tracing::error!(
+                        worker_id = %self.worker_id,
+                        error = %err,
+                        "workflow claim failed; backing off"
+                    );
                     drop(permit);
-                    tokio::time::sleep(poll).await;
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => continue,
+                        _ = tokio::time::sleep(poll) => {}
+                    }
                 }
             }
         }
@@ -846,6 +991,123 @@ mod tests {
         let record = store::get_workflow_record(handle.id()).await.unwrap();
         assert_eq!(record.status, WorkflowStatus::Running.as_str());
         assert_eq!(record.worker_id.as_deref(), Some("recovery-worker"));
+    }
+
+    // A cancelled worker must drain in-flight workflows before returning.
+    // Spawns a worker that has no rows to claim (so it idles in the
+    // poll/sleep path), cancels the token, and asserts run_with_cancel
+    // resolves cleanly to Ok(()) — i.e. the cancellation path exits the
+    // loop rather than blocking on the semaphore or the next claim.
+    #[tokio::test]
+    async fn test_worker_run_with_cancel_returns_cleanly() {
+        let _db = setup_db().await;
+
+        let mut config = WorkflowConfig::from_env();
+        // Tighten poll so the loop reaches a cancellation check fast.
+        config.poll_interval_ms = 20;
+        let worker = WorkflowWorker::with_config(config);
+        let cancel = CancellationToken::new();
+        let cancel_for_worker = cancel.clone();
+
+        let handle = tokio::spawn(async move { worker.run_with_cancel(cancel_for_worker).await });
+
+        // Let the worker reach its idle/sleep path.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        cancel.cancel();
+
+        // The worker must return within a small window after cancel.
+        // 1s budget covers the longest path (poll round-trip + drain).
+        let result = tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("worker did not exit within 1s of cancellation")
+            .expect("worker task panicked");
+
+        result.expect("run_with_cancel must return Ok on graceful drain");
+    }
+
+    // wait_with_timeout must return a timeout error when the workflow
+    // never reaches Succeeded/Failed within the deadline. We point the
+    // handle at a workflow id that doesn't exist; status() returns
+    // FrameworkError("Workflow not found"), so the inner future returns
+    // Err immediately. To test the timeout path itself, we create a
+    // valid pending workflow and never let any worker pick it up.
+    #[tokio::test]
+    async fn test_wait_with_timeout_fires_on_stuck_workflow() {
+        let _db = setup_db().await;
+
+        let handle = store::insert_workflow("stuck", "{}", 3)
+            .await
+            .expect("insert workflow");
+
+        // No worker is running, the workflow will sit at Pending. A
+        // 250 ms timeout must fire and the call must return an error
+        // mentioning the timeout.
+        let start = std::time::Instant::now();
+        let err = handle
+            .wait_with_timeout(Duration::from_millis(250))
+            .await
+            .expect_err("wait_with_timeout must error on a stuck workflow");
+        let elapsed = start.elapsed();
+
+        let msg = err.to_string();
+        assert!(
+            msg.to_lowercase().contains("timed out") || msg.to_lowercase().contains("timeout"),
+            "error must reference the timeout, got: {msg}"
+        );
+        // The timeout must actually have fired around the deadline,
+        // not after polling forever. 3 s ceiling tolerates CI jitter
+        // while still failing if the timeout was ignored entirely.
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "wait_with_timeout must respect the deadline; elapsed = {:?}",
+            elapsed
+        );
+    }
+
+    // Once the workflow reaches Succeeded, wait_with_timeout returns
+    // it without hitting the deadline. Regression for the case where
+    // the timeout wrapper swallows the Ok branch.
+    #[tokio::test]
+    async fn test_wait_with_timeout_returns_finished_status() {
+        let _db = setup_db().await;
+
+        let handle = store::insert_workflow("quick", "{}", 3)
+            .await
+            .expect("insert workflow");
+
+        // Mark the row as Succeeded directly — no worker involvement.
+        store::mark_succeeded(handle.id(), "\"done\"")
+            .await
+            .expect("mark succeeded");
+
+        let status = handle
+            .wait_with_timeout(Duration::from_secs(1))
+            .await
+            .expect("wait must succeed on an already-finished workflow");
+        assert_eq!(status, WorkflowStatus::Succeeded);
+    }
+
+    // Framework-owned migrations are exposed so consumer apps can
+    // register the schema without copying the table definitions.
+    // Regression: the modules existed but weren't re-exported under
+    // the `migrations` submodule.
+    #[test]
+    fn test_framework_migrations_are_exposed() {
+        use sea_orm_migration::MigrationName;
+        let wf = migrations::CreateWorkflowsTable;
+        let st = migrations::CreateWorkflowStepsTable;
+        assert!(
+            wf.name().contains("workflows"),
+            "workflows migration name must reference the table: {}",
+            wf.name()
+        );
+        assert!(
+            st.name().contains("workflow_steps"),
+            "workflow_steps migration name must reference the table: {}",
+            st.name()
+        );
+        // Names must be distinct so the migrator doesn't dedupe them.
+        assert_ne!(wf.name(), st.name());
     }
 
     fn postgres_url_or_skip(test_name: &str) -> Option<String> {
