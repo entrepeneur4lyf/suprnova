@@ -218,6 +218,94 @@ impl Cache {
         store.has(key).await
     }
 
+    /// Determine if an item does NOT exist in the cache. Mirror of
+    /// Laravel's `Cache::missing($key)`; semantically `!has(key)`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// if Cache::missing("user:1").await? {
+    ///     warm_cache_for_user(1).await?;
+    /// }
+    /// ```
+    pub async fn missing(key: &str) -> Result<bool, FrameworkError> {
+        Ok(!Self::has(key).await?)
+    }
+
+    /// Retrieve an item from the cache AND delete it in one call. Mirrors
+    /// Laravel's `Cache::pull($key)`. Returns `None` if the key was absent.
+    ///
+    /// **Not atomic** across the get and forget — same shape as Laravel's
+    /// `Repository::pull` (PHP-side it's also a non-atomic
+    /// `get`-then-`forget` pair). For an atomic dequeue, wrap the call in
+    /// a `Cache::lock` around the read.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // One-shot consumption: drain the pending notice for this user
+    /// let notice: Option<String> = Cache::pull(&format!("notice:{}", uid)).await?;
+    /// ```
+    pub async fn pull<T: DeserializeOwned>(key: &str) -> Result<Option<T>, FrameworkError> {
+        let value = Self::get::<T>(key).await?;
+        if value.is_some() {
+            Self::forget(key).await?;
+        }
+        Ok(value)
+    }
+
+    /// Store a value only if the key is not already present. Mirrors
+    /// Laravel's `Cache::add($key, $value, $ttl)`. Returns `true` if the
+    /// value was written, `false` if the key already existed (or had not
+    /// yet expired).
+    ///
+    /// **Not atomic** across the existence check and the write — same shape
+    /// as Laravel's `Repository::add` fallback for stores without a native
+    /// `add` (Laravel framework `Cache/Repository.php:476-490`). The
+    /// "atomic add" upgrade is a `CacheStore::add_raw` trait method using
+    /// Redis `SET NX` + an in-memory `entry().or_insert_with()`; documented
+    /// in `docs/parity/cache.md`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Only the first writer wins this slot; subsequent callers see false
+    /// let won = Cache::add("daily:winner", &user_id, Some(Duration::from_secs(86_400))).await?;
+    /// if won { send_winner_email(user_id).await?; }
+    /// ```
+    pub async fn add<T: Serialize>(
+        key: &str,
+        value: &T,
+        ttl: Option<Duration>,
+    ) -> Result<bool, FrameworkError> {
+        if Self::has(key).await? {
+            return Ok(false);
+        }
+        Self::put(key, value, ttl).await?;
+        Ok(true)
+    }
+
+    /// Alias of [`Cache::remember_forever`]. Mirrors Laravel's
+    /// `Cache::sear($key, $callback)`. Ships under the Laravel-side name
+    /// for migration ergonomics; `remember_forever` is the Rust-side name
+    /// and is the more discoverable spelling.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let settings = Cache::sear("config:settings", || async {
+    ///     load_settings_from_database().await
+    /// }).await?;
+    /// ```
+    pub async fn sear<T, F, Fut>(key: &str, default: F) -> Result<T, FrameworkError>
+    where
+        T: Serialize + DeserializeOwned,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, FrameworkError>>,
+    {
+        Self::remember_forever(key, default).await
+    }
+
     /// Remove an item from the cache
     ///
     /// Returns `true` if the item existed and was removed.
@@ -415,6 +503,13 @@ pub struct LockGuard {
 impl LockGuard {
     /// The ownership token for this lock.
     pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// Laravel-side alias of [`LockGuard::token`]. Matches the spelling in
+    /// `Illuminate\Cache\Lock::owner()` so migrating call sites read the
+    /// same way; the underlying value is identical to `token()`.
+    pub fn owner(&self) -> &str {
         &self.token
     }
 
