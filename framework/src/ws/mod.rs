@@ -85,9 +85,16 @@ pub enum OriginPolicy {
 pub struct WsConfig {
     /// Interval between framework-sent pings. Default 30s.
     pub ping_interval: std::time::Duration,
-    /// Max message size in bytes. Default 64 MiB.
+    /// Max reassembled message size in bytes. Default 1 MiB —
+    /// safe for public, browser-facing endpoints. Routes that
+    /// expect larger payloads (file upload, audio streaming,
+    /// trusted internal feeds) should raise this explicitly, or
+    /// start from [`WsConfig::generous`].
     pub max_message_size: usize,
-    /// Max single-frame size in bytes. Default 16 MiB.
+    /// Max single-frame size in bytes. Default 64 KiB — fits
+    /// typical chat / notification frames with headroom. Routes
+    /// sending unfragmented large frames should raise this
+    /// explicitly, or start from [`WsConfig::generous`].
     pub max_frame_size: usize,
     /// Consecutive missed pongs before the connection is closed
     /// with code 1011. Default: 2. Set to `usize::MAX` to disable.
@@ -101,8 +108,14 @@ impl Default for WsConfig {
     fn default() -> Self {
         Self {
             ping_interval: std::time::Duration::from_secs(30),
-            max_message_size: 64 * 1024 * 1024,
-            max_frame_size: 16 * 1024 * 1024,
+            // Public-endpoint-safe defaults. Each upgraded
+            // connection costs a tungstenite buffer sized to
+            // `max_message_size`, so generous defaults are a DoS
+            // foot-gun on routes open to the internet. Trusted
+            // feeds opt into the higher limits via
+            // [`WsConfig::generous`].
+            max_message_size: 1024 * 1024,
+            max_frame_size: 64 * 1024,
             max_missed_pings: 2,
             origin_policy: OriginPolicy::default(),
         }
@@ -121,7 +134,64 @@ impl WsConfig {
         cfg.max_frame_size = Some(self.max_frame_size);
         cfg
     }
+
+    /// Generous-limit variant of [`WsConfig::default`] for trusted
+    /// internal feeds (server-to-server fan-out, bulk data export,
+    /// large binary transfers). Raises `max_message_size` to 64 MiB
+    /// and `max_frame_size` to 16 MiB; other fields keep their
+    /// defaults.
+    ///
+    /// Do not use on routes reachable from the public internet
+    /// without an explicit decision — every active connection
+    /// reserves a buffer sized to `max_message_size`, and these
+    /// limits multiply across concurrent sockets.
+    ///
+    /// ```rust,ignore
+    /// use suprnova::ws::WsConfig;
+    /// let cfg = WsConfig::generous();
+    /// assert_eq!(cfg.max_message_size, 64 * 1024 * 1024);
+    /// assert_eq!(cfg.max_frame_size, 16 * 1024 * 1024);
+    /// ```
+    pub fn generous() -> Self {
+        Self {
+            max_message_size: 64 * 1024 * 1024,
+            max_frame_size: 16 * 1024 * 1024,
+            ..Self::default()
+        }
+    }
 }
 
 /// Type-erased boxed handler used internally by the router.
 pub type BoxedWebSocketHandler = Arc<dyn WebSocketHandler>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sanity bound on the default. Public WebSocket endpoints
+    /// reserve a buffer per connection sized to `max_message_size`;
+    /// a generous default is a DoS foot-gun. If a future change
+    /// raises this above 4 MiB without flipping the policy
+    /// (e.g. lazy buffers, per-route opt-in), this test forces
+    /// the decision to be explicit.
+    #[test]
+    fn default_max_message_size_is_safe_for_public_endpoints() {
+        assert!(
+            WsConfig::default().max_message_size <= 4 * 1024 * 1024,
+            "WsConfig::default().max_message_size = {} — public WS \
+             defaults must stay <= 4 MiB; use WsConfig::generous() for \
+             trusted-feed deployments",
+            WsConfig::default().max_message_size
+        );
+    }
+
+    #[test]
+    fn generous_raises_message_and_frame_limits() {
+        let cfg = WsConfig::generous();
+        assert_eq!(cfg.max_message_size, 64 * 1024 * 1024);
+        assert_eq!(cfg.max_frame_size, 16 * 1024 * 1024);
+        // Other fields stay aligned with the public defaults.
+        assert_eq!(cfg.ping_interval, WsConfig::default().ping_interval);
+        assert_eq!(cfg.max_missed_pings, WsConfig::default().max_missed_pings);
+    }
+}

@@ -123,19 +123,21 @@ Common close codes: `1000` (normal), `1008` (policy violation), `1011` (internal
 
 ## `WsConfig`
 
-`WsConfig` controls per-connection behavior. In v1, the defaults are applied globally to every WebSocket connection. Per-route config lands in Phase 7B.
+`WsConfig` controls per-connection behavior. Defaults aim at public, browser-facing endpoints — every active connection reserves a tungstenite buffer sized to `max_message_size`, so the framework defaults small and lets routes that need more raise the limits explicitly.
 
 | Field               | Default  | Type       | Effect |
 |---------------------|----------|------------|--------|
 | `ping_interval`     | 30s      | `Duration` | How often the framework sends a Ping frame to keep the connection alive. |
-| `max_message_size`  | 64 MiB   | `usize`    | Maximum reassembled message size in bytes. Messages larger than this are rejected. |
-| `max_frame_size`    | 16 MiB   | `usize`    | Maximum single WebSocket frame size in bytes. |
+| `max_message_size`  | 1 MiB    | `usize`    | Maximum reassembled message size in bytes. Messages larger than this are rejected. |
+| `max_frame_size`    | 64 KiB   | `usize`    | Maximum single WebSocket frame size in bytes. |
+| `max_missed_pings`  | 2        | `usize`    | Consecutive missed Pongs before the framework closes the connection with code 1011. |
+| `origin_policy`     | `SameOrigin` | `OriginPolicy` | Origin-header policy enforced at upgrade time. |
 
 **Recommended overrides by use case:**
 
-- **Chat / notifications** — the defaults are fine. You may lower `ping_interval` to 15s if your load balancer has an aggressive idle-connection timeout.
-- **Large binary transfers** (file upload over WebSocket, audio streams) — raise `max_message_size` and `max_frame_size` to match your expected payload size. A 256 MiB audio file needs `max_message_size: 256 * 1024 * 1024`.
-- **High-frequency low-latency data** (real-time cursor positions, game state) — the defaults are fine. Lower `ping_interval` only if your infrastructure requires it; more pings consume bandwidth on connections that are already receiving many frames per second.
+- **Chat / notifications / cursor positions** — the defaults are fine. You may lower `ping_interval` to 15s if your load balancer has an aggressive idle-connection timeout.
+- **Trusted internal feeds** (server-to-server fan-out, bulk export, large binary transfers) — start from [`WsConfig::generous()`], which raises `max_message_size` to 64 MiB and `max_frame_size` to 16 MiB while keeping other defaults. Routes published to the public internet should not use `generous()` without an explicit decision: per-connection buffers multiply across concurrent sockets.
+- **Specific oversize payload** (e.g. one route that uploads 256 MiB audio files) — set the fields directly: `max_message_size: 256 * 1024 * 1024`. Don't apply the larger limit to routes that don't need it.
 
 The config struct is `Default`-constructible and all fields are public:
 
@@ -143,14 +145,23 @@ The config struct is `Default`-constructible and all fields are public:
 use std::time::Duration;
 use suprnova::ws::WsConfig;
 
+// Public default — safe for browser-facing endpoints.
 let config = WsConfig {
     ping_interval: Duration::from_secs(15),
-    max_message_size: 128 * 1024 * 1024, // 128 MiB
-    max_frame_size: 32 * 1024 * 1024,    // 32 MiB
+    ..Default::default()
 };
+
+// Trusted-feed factory — raises message + frame caps.
+let trusted = WsConfig::generous();
+assert_eq!(trusted.max_message_size, 64 * 1024 * 1024);
+assert_eq!(trusted.max_frame_size, 16 * 1024 * 1024);
 ```
 
-Per-route application of a custom `WsConfig` is not yet wired — the framework currently uses `WsConfig::default()` for every connection. Phase 7B adds the `.config(WsConfig { ... })` builder on a WebSocket route entry.
+A per-route override is applied via `.config(WsConfig { ... })` on the WS route entry (see [`Router::ws_with_config`] and the [Per-Route WsConfig section in broadcasting docs]). Routes without an override inherit `WsConfig::default()`.
+
+[`WsConfig::generous()`]: https://docs.rs/suprnova/latest/suprnova/ws/struct.WsConfig.html#method.generous
+[`Router::ws_with_config`]: https://docs.rs/suprnova/latest/suprnova/routing/struct.Router.html#method.ws_with_config
+[Per-Route WsConfig section in broadcasting docs]: ./broadcasting.md#per-route-wsconfig
 
 ## Path Parameters
 

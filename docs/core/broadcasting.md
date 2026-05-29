@@ -387,10 +387,23 @@ The four configurable fields and their typical use cases:
 |-------|---------|----------|
 | `ping_interval` | 30s | Chat routes: shorten to 5–10s to detect dead mobile connections quickly. Bulk-data streaming: lengthen to reduce overhead. |
 | `max_missed_pings` | 2 | Set to `1` for chat where a single missed Pong should close immediately. Set to `3+` for flaky mobile networks where brief gaps are expected. |
-| `max_message_size` | 64 KB | Increase for file-transfer or rich-media channels. Keep tight for chat to prevent abuse. |
-| `max_frame_size` | 16 KB | Usually left at default; raise only when the client sends unfragmented large frames. |
+| `max_message_size` | 1 MiB | Public-endpoint-safe default. Increase for file-transfer or rich-media channels; for trusted internal feeds use `WsConfig::generous()` (64 MiB cap). |
+| `max_frame_size` | 64 KiB | Sized for chat / notification frames with headroom. Raise when the client sends unfragmented large frames; or start from `WsConfig::generous()` (16 MiB cap). |
 
 When no `.config(...)` is provided, the route inherits `WsConfig::default()`. Explicit per-route config always wins over the process-wide default.
+
+For routes serving trusted internal feeds (server-to-server fanout, large binary transfers) start from the trusted-feed factory and adjust:
+
+```rust
+use suprnova::ws::WsConfig;
+use std::time::Duration;
+
+ws!("/ws/internal/firehose", FirehoseHandler::new())
+    .config(WsConfig {
+        ping_interval: Duration::from_secs(10),
+        ..WsConfig::generous() // 64 MiB message / 16 MiB frame
+    })
+```
 
 ## Presence Channels
 

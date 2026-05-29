@@ -187,6 +187,92 @@ async fn missing_ws_route_returns_normal_404() {
     );
 }
 
+/// Proves [`WsConfig::generous`] actually raises the per-route limit
+/// past the public-safe default of 1 MiB. The default config would
+/// reject a 2 MiB message; the generous config accepts it and
+/// round-trips it through the echo handler.
+#[tokio::test]
+async fn generous_config_round_trips_a_2_mib_message() {
+    // Trusted-feed limits + AllowAny so tokio-tungstenite (no Origin
+    // header) can connect. `..WsConfig::generous()` carries the 64 MiB
+    // message + 16 MiB frame caps from the trusted-feed factory.
+    let cfg = WsConfig {
+        origin_policy: OriginPolicy::AllowAny,
+        ..WsConfig::generous()
+    };
+
+    let router = Arc::new(Router::new().ws_with_config("/ws/echo", EchoHandler, cfg));
+    let middleware = Arc::new(MiddlewareRegistry::new());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("local_addr").port();
+
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let io = hyper_util::rt::TokioIo::new(stream);
+            let router = router.clone();
+            let middleware = middleware.clone();
+            tokio::spawn(async move {
+                let service = hyper::service::service_fn(move |req| {
+                    let router = router.clone();
+                    let middleware = middleware.clone();
+                    async move {
+                        Ok::<_, std::convert::Infallible>(
+                            suprnova::server::handle_request(router, middleware, req).await,
+                        )
+                    }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(io, service)
+                    .with_upgrades()
+                    .await;
+            });
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let url = format!("ws://127.0.0.1:{port}/ws/echo");
+    // tokio-tungstenite enforces its own per-message cap on the
+    // client side; raise it past the 2 MiB body + "echo: " prefix
+    // so the reply isn't capped by the client.
+    let client_cfg = {
+        let mut c = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
+        c.max_message_size = Some(8 * 1024 * 1024);
+        c.max_frame_size = Some(8 * 1024 * 1024);
+        c
+    };
+    let request = tokio_tungstenite::tungstenite::handshake::client::Request::builder()
+        .uri(&url)
+        .header("Host", format!("127.0.0.1:{port}"))
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header(
+            "Sec-WebSocket-Key",
+            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+        )
+        .body(())
+        .expect("build handshake request");
+    let (mut ws, _) =
+        tokio_tungstenite::connect_async_with_config(request, Some(client_cfg), false)
+            .await
+            .expect("connect to generous endpoint");
+
+    // 2 MiB payload — comfortably over the 1 MiB public default,
+    // comfortably under the 64 MiB generous cap.
+    let payload: String = "x".repeat(2 * 1024 * 1024);
+    ws.send(Message::text(payload.clone())).await.expect("send");
+    let reply = ws.next().await.expect("recv").expect("no error");
+    let reply_text = reply.to_text().expect("text reply").to_string();
+    assert_eq!(reply_text.len(), "echo: ".len() + payload.len());
+    assert!(reply_text.starts_with("echo: "));
+    assert!(reply_text.ends_with(&payload[payload.len() - 16..]));
+    ws.close(None).await.expect("clean close");
+}
+
 #[tokio::test]
 async fn idle_connection_survives_quiet_period_and_can_still_send() {
     // Verify the heartbeat machinery's presence doesn't BREAK an
