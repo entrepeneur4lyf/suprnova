@@ -891,8 +891,10 @@ fn queue_fake_active() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn always_defaults_round_trip() {
         let _ = Mail::forget_always();
         assert_eq!(Mail::always_from("a@b.c").unwrap(), None);
@@ -904,6 +906,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn apply_always_defaults_sets_from_when_default_is_noreply() {
         let _ = Mail::forget_always();
         let _ = Mail::always_from(Address::new("ops@example.com"));
@@ -914,6 +917,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn apply_always_defaults_preserves_explicit_from() {
         let _ = Mail::forget_always();
         let _ = Mail::always_from(Address::new("ops@example.com"));
@@ -925,6 +929,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn apply_always_to_overrides_to_and_clears_cc_bcc() {
         let _ = Mail::forget_always();
         let _ = Mail::always_to(Address::new("inbox@example.com"));
@@ -941,6 +946,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn apply_always_reply_to_only_when_empty() {
         let _ = Mail::forget_always();
         let _ = Mail::always_reply_to(Address::new("support@example.com"));
@@ -958,6 +964,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn apply_always_return_path_when_unset() {
         let _ = Mail::forget_always();
         let _ = Mail::always_return_path(Address::new("bounce@example.com"));
