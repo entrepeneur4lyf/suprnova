@@ -78,3 +78,42 @@ fn encrypt_t_round_trip() {
     let decoded: Payload = Crypt::decrypt(&wire).unwrap();
     assert_eq!(decoded, payload);
 }
+
+#[test]
+fn appears_encrypted_matches_real_ciphertext() {
+    // A real `Crypt::encrypt_string` output is always recognised by
+    // `appears_encrypted`. Mirrors the contract Laravel relies on in
+    // its `EncryptCookies` middleware to skip already-encrypted
+    // cookies on the egress pass.
+    let _g = TEST_LOCK.lock().unwrap();
+    ensure_key();
+    let wire = Crypt::encrypt_string("hello").unwrap();
+    assert!(Crypt::appears_encrypted(&wire));
+    // Even the empty plaintext, encrypted, is recognised — the
+    // ciphertext still carries nonce + tag.
+    let wire_empty = Crypt::encrypt_string("").unwrap();
+    assert!(Crypt::appears_encrypted(&wire_empty));
+}
+
+#[test]
+fn appears_encrypted_rejects_plaintext_and_short_payloads() {
+    // No Crypt::init required — `appears_encrypted` is a static
+    // shape check, never touches the keyring.
+    assert!(!Crypt::appears_encrypted("plain text with spaces"));
+    assert!(!Crypt::appears_encrypted(""));
+    // Valid base64 but too short to be a nonce+tag (28 bytes min).
+    assert!(!Crypt::appears_encrypted("YWJj")); // "abc" — 3 bytes
+    // Non-base64-url characters.
+    assert!(!Crypt::appears_encrypted("not/valid+base64="));
+}
+
+#[test]
+fn previous_key_count_accessors_agree() {
+    // The bool/usize accessors must always agree. We can't assert
+    // exact zero because other test files in the same process may
+    // have installed a keyring with previous keys.
+    let _g = TEST_LOCK.lock().unwrap();
+    ensure_key();
+    let n = Crypt::previous_key_count();
+    assert_eq!(Crypt::has_previous_keys(), n > 0);
+}

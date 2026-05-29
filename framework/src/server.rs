@@ -136,7 +136,32 @@ impl Server {
             .map(|c| c.environment)
             .unwrap_or_else(crate::config::Environment::detect);
         let app_key = std::env::var("APP_KEY").ok();
-        let app_key_previous = std::env::var("APP_KEY_PREVIOUS").ok();
+        // Suprnova canonical name is `APP_KEY_PREVIOUS`; Laravel uses
+        // `APP_PREVIOUS_KEYS`. Accept either so a Laravel app's `.env`
+        // dropped into a Suprnova deploy continues to graceful-decrypt
+        // legacy data without an operator-side rename. The canonical
+        // name wins if BOTH are set, with a `tracing::warn!` to surface
+        // the misconfiguration — silently preferring one over the other
+        // would mask a half-rotated secret.
+        let app_key_previous = match (
+            std::env::var("APP_KEY_PREVIOUS").ok(),
+            std::env::var("APP_PREVIOUS_KEYS").ok(),
+        ) {
+            (Some(canonical), Some(laravel)) => {
+                if canonical.trim() != laravel.trim() {
+                    tracing::warn!(
+                        "APP_KEY_PREVIOUS and APP_PREVIOUS_KEYS are both set with \
+                         different values. Using APP_KEY_PREVIOUS (Suprnova \
+                         canonical name); APP_PREVIOUS_KEYS is ignored. Drop the \
+                         duplicate from your environment."
+                    );
+                }
+                Some(canonical)
+            }
+            (Some(canonical), None) => Some(canonical),
+            (None, Some(laravel)) => Some(laravel),
+            (None, None) => None,
+        };
         let boot_ring = crate::crypto::resolve_boot_keyring(
             &environment,
             app_key.as_deref(),

@@ -186,6 +186,50 @@ impl Crypt {
         Ok(value)
     }
 
+    /// Heuristic check that `value` *looks like* a payload produced by
+    /// [`Self::encrypt_string`] or [`Self::encrypt`] — URL-safe base64
+    /// (no padding) over at least `nonce || tag` bytes.
+    ///
+    /// Mirrors Laravel's `Encrypter::appearsEncrypted`, which their
+    /// `EncryptCookies` middleware uses to skip already-encrypted
+    /// cookies on the egress pass. **This is not a tamper check** — it
+    /// never calls into AES-GCM, so it cannot distinguish a valid
+    /// ciphertext from random bytes of the right shape. Callers that
+    /// need authentication must call [`Self::decrypt_string`] /
+    /// [`Self::decrypt`] and handle the error.
+    ///
+    /// Returns `false` for any input that does not decode as URL-safe
+    /// base64 or whose decoded length is shorter than `12 + 16` bytes
+    /// (GCM nonce + tag), since such a payload can never be a valid
+    /// AEAD ciphertext under this wire format.
+    pub fn appears_encrypted(value: &str) -> bool {
+        const MIN_AEAD: usize = 12 + 16; // nonce + GCM tag
+        URL_SAFE_NO_PAD
+            .decode(value.trim())
+            .map(|bytes| bytes.len() >= MIN_AEAD)
+            .unwrap_or(false)
+    }
+
+    /// Number of `APP_KEY_PREVIOUS` keys installed alongside the
+    /// current one. Returns `0` if `Crypt` is uninitialized or no
+    /// previous keys were supplied at boot.
+    ///
+    /// Mirrors the *cardinality* of Laravel's
+    /// `Encrypter::getPreviousKeys()`. We deliberately do NOT expose
+    /// the key bytes themselves — `EncryptionKey`'s `Debug` impl
+    /// redacts (see `key.rs:67`) so the keyring stays opaque from
+    /// every safe surface.
+    pub fn previous_key_count() -> usize {
+        CRYPT_RING.get().map(|r| r.previous.len()).unwrap_or(0)
+    }
+
+    /// Whether any `APP_KEY_PREVIOUS` entry is installed. Shorthand
+    /// for `Self::previous_key_count() > 0`. Useful when an operator
+    /// dashboard wants to surface "rotation in progress."
+    pub fn has_previous_keys() -> bool {
+        Self::previous_key_count() > 0
+    }
+
     /// Test-and-internal hook: decrypt a string AND report which key
     /// in the ring succeeded. Exposed at `pub(crate)` so tests in the
     /// same crate (and the macro-generated `From<inner::Model>` could,
