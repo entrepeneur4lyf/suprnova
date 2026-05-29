@@ -6989,6 +6989,7 @@ dependencies = [
  "qrcode",
  "rand 0.10.1",
  "redis 1.2.1",
+ "regex",
  "reqwest 0.13.4",
  "rust_decimal",
  "sea-orm",

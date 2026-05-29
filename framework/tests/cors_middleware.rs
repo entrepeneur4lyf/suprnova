@@ -241,3 +241,141 @@ async fn unrouted_get_still_returns_404() {
     assert_eq!(status, 404);
     assert_eq!(body, "404 Not Found");
 }
+
+/// CORS with `paths(["api/*"])` set: a cross-origin request to `/api/data`
+/// is decorated; a cross-origin request to `/web/data` (out-of-scope) is
+/// NOT decorated, even though the origin would otherwise be allowed.
+#[tokio::test]
+async fn paths_scoping_restricts_cors_to_matching_routes() {
+    let registry = MiddlewareRegistry::new().append(CorsMiddleware::new(
+        CorsConfig::allow_origins(["https://app.example"]).paths(["api/*"]),
+    ));
+    let router: Router = Router::new()
+        .get("/api/data", |_req| async { text("api") })
+        .get("/web/data", |_req| async { text("web") })
+        .into();
+    let addr = spawn_server(router, registry, 4).await;
+
+    let (status, headers, body) = request(
+        addr,
+        "GET",
+        "/api/data",
+        &[("Origin", "https://app.example")],
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "api");
+    assert_eq!(
+        headers
+            .get("access-control-allow-origin")
+            .map(String::as_str),
+        Some("https://app.example"),
+        "in-scope path must get CORS headers"
+    );
+
+    let (status, headers, body) = request(
+        addr,
+        "GET",
+        "/web/data",
+        &[("Origin", "https://app.example")],
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "web");
+    assert!(
+        !headers.contains_key("access-control-allow-origin"),
+        "out-of-scope path must NOT get CORS headers"
+    );
+}
+
+/// A preflight to a `paths`-out-of-scope route is NOT short-circuited by
+/// the CORS middleware — it falls through to the (missing) handler and
+/// becomes a 404. This proves `paths` correctly gates BOTH preflight
+/// handling and actual-response decoration.
+#[tokio::test]
+async fn paths_scoping_lets_out_of_scope_preflight_fall_through() {
+    let registry = MiddlewareRegistry::new().append(CorsMiddleware::new(
+        CorsConfig::allow_origins(["https://app.example"]).paths(["api/*"]),
+    ));
+    let addr = spawn_server(router(), registry, 2).await;
+
+    let (status, headers, _body) = request(
+        addr,
+        "OPTIONS",
+        "/web/no-route",
+        &[
+            ("Origin", "https://app.example"),
+            ("Access-Control-Request-Method", "POST"),
+        ],
+    )
+    .await;
+    assert_eq!(status, 404);
+    assert!(!headers.contains_key("access-control-allow-origin"));
+}
+
+/// A `skip_when` predicate that fires for `X-Internal` headers makes the
+/// middleware forward the request directly, with no CORS decoration —
+/// even though the origin would otherwise be allowed.
+#[tokio::test]
+async fn skip_when_predicate_short_circuits_cors() {
+    let registry = MiddlewareRegistry::new().append(CorsMiddleware::new(
+        CorsConfig::allow_origins(["https://app.example"])
+            .skip_when(|req| req.header("X-Internal").is_some()),
+    ));
+    let addr = spawn_server(router(), registry, 2).await;
+
+    let (status, headers, body) = request(
+        addr,
+        "GET",
+        "/api/data",
+        &[("Origin", "https://app.example"), ("X-Internal", "yes")],
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "data");
+    assert!(
+        !headers.contains_key("access-control-allow-origin"),
+        "skip_when must prevent CORS decoration"
+    );
+}
+
+/// Regex `allow_origin_patterns` allows dynamic subdomains. A pattern
+/// like `https://*.staging.example` lets any matching origin through
+/// while still rejecting non-matching origins.
+#[tokio::test]
+async fn allow_origin_patterns_match_dynamic_subdomain() {
+    let registry = MiddlewareRegistry::new().append(CorsMiddleware::new(
+        CorsConfig::allow_origins(Vec::<String>::new())
+            .allow_origin_patterns([r"https://[a-z0-9-]+\.staging\.example"]),
+    ));
+    let addr = spawn_server(router(), registry, 3).await;
+
+    let (status, headers, _body) = request(
+        addr,
+        "GET",
+        "/api/data",
+        &[("Origin", "https://pr-42.staging.example")],
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        headers
+            .get("access-control-allow-origin")
+            .map(String::as_str),
+        Some("https://pr-42.staging.example"),
+        "pattern-matched origin must be echoed back"
+    );
+
+    let (status, headers, _body) = request(
+        addr,
+        "GET",
+        "/api/data",
+        &[("Origin", "https://evil.example")],
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(
+        !headers.contains_key("access-control-allow-origin"),
+        "non-matching origin must NOT be echoed back"
+    );
+}

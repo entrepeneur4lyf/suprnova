@@ -32,6 +32,49 @@
 //! ever produced. This is why CORS must be installed **globally**, not
 //! per-route.
 //!
+//! # Scope which paths get CORS
+//!
+//! Laravel's `cors.php` config has a `paths` array (`['api/*', ...]`) that
+//! limits CORS application to specific URL patterns. Suprnova mirrors this
+//! with [`CorsConfig::paths`]: when set, only matching requests get CORS
+//! treatment; everything else passes through untouched. Patterns support
+//! `*` as a multi-segment wildcard (Laravel's `Str::is` semantics).
+//!
+//! ```rust,ignore
+//! CorsConfig::allow_origins(["https://app.example"])
+//!     .paths(["api/*", "sanctum/csrf-cookie"])
+//! ```
+//!
+//! With no `paths`, CORS runs on every request (the Suprnova default — the
+//! cleaner choice when CORS is the only thing this middleware does).
+//!
+//! # Skip via predicate
+//!
+//! For request-shape predicates that don't fit a path pattern (e.g. skip
+//! based on a header, or only run CORS in production), use
+//! [`CorsConfig::skip_when`]:
+//!
+//! ```rust,ignore
+//! CorsConfig::any_origin()
+//!     .skip_when(|req| req.header("X-Internal").is_some())
+//! ```
+//!
+//! Mirrors Laravel's `HandleCors::skipWhen(Closure)` but on the policy
+//! rather than as global mutable state. Multiple `skip_when` callbacks are
+//! ANDed-as-OR: any one returning `true` skips CORS.
+//!
+//! # Regex origin patterns
+//!
+//! Laravel's `cors.php` has `allowed_origins_patterns` for regex matching
+//! ("allow any `*.example.com` subdomain"). Suprnova surfaces this as
+//! [`CorsConfig::allow_origin_patterns`]: anchored regexes that, in addition
+//! to the literal [`CorsConfig::allow_origins`] list, count as allowed.
+//!
+//! ```rust,ignore
+//! CorsConfig::allow_origins(["https://app.example"])
+//!     .allow_origin_patterns([r"^https://[a-z0-9-]+\.staging\.example$"])
+//! ```
+//!
 //! # No permissive default — pick an origin policy explicitly
 //!
 //! There is intentionally no `Default` for [`CorsConfig`]. A reflexively
@@ -48,13 +91,23 @@
 //! (and likewise reflects requested headers instead of `*`), so the
 //! invalid combination can never be emitted.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use regex::Regex;
 
 use crate::Request;
 use crate::http::{HttpResponse, Response};
 use crate::middleware::{Middleware, Next};
+
+/// Predicate invoked per request to decide if CORS should be skipped.
+///
+/// Returning `true` short-circuits the middleware and forwards the request
+/// directly to the next layer with no CORS handling (no preflight answer,
+/// no header decoration). Mirrors Laravel's
+/// `HandleCors::skipWhen(Closure)`.
+pub type SkipPredicate = Arc<dyn Fn(&Request) -> bool + Send + Sync>;
 
 /// Which origins a [`CorsConfig`] permits.
 #[derive(Debug, Clone)]
@@ -84,14 +137,40 @@ pub enum AllowedHeaders {
 /// Build one with [`CorsConfig::allow_origins`] (a fixed allowlist) or
 /// [`CorsConfig::any_origin`] (explicit `*`), then refine with the builder
 /// methods. See the [module docs](self) for the design rationale.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CorsConfig {
     origins: AllowedOrigins,
+    origin_patterns: Vec<Regex>,
+    paths: Vec<String>,
     methods: Vec<String>,
     headers: AllowedHeaders,
     exposed_headers: Vec<String>,
     allow_credentials: bool,
     max_age: Option<Duration>,
+    skip_callbacks: Vec<SkipPredicate>,
+}
+
+impl std::fmt::Debug for CorsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CorsConfig")
+            .field("origins", &self.origins)
+            .field(
+                "origin_patterns",
+                &self
+                    .origin_patterns
+                    .iter()
+                    .map(|r| r.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .field("paths", &self.paths)
+            .field("methods", &self.methods)
+            .field("headers", &self.headers)
+            .field("exposed_headers", &self.exposed_headers)
+            .field("allow_credentials", &self.allow_credentials)
+            .field("max_age", &self.max_age)
+            .field("skip_callbacks", &self.skip_callbacks.len())
+            .finish()
+    }
 }
 
 fn default_methods() -> Vec<String> {
@@ -99,6 +178,55 @@ fn default_methods() -> Vec<String> {
         .iter()
         .map(|s| s.to_string())
         .collect()
+}
+
+/// Anchor a user-supplied regex with `^` / `$` if missing. Half-anchored
+/// patterns produce surprising matches (`https://evil.com/?u=app.example`
+/// would match `https://.*\.example`), so we always anchor to whole-string
+/// match.
+fn anchor_regex(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 2);
+    if !raw.starts_with('^') {
+        out.push('^');
+    }
+    out.push_str(raw);
+    if !raw.ends_with('$') {
+        out.push('$');
+    }
+    out
+}
+
+/// Match a Laravel-style URL path pattern against a request path. `*` in
+/// the pattern matches any run of characters (including `/`), mirroring
+/// Laravel's `Str::is`. A leading `/` on either side is normalized so
+/// `"api/*"` and `"/api/*"` both match `"/api/posts"`.
+fn path_pattern_matches(pattern: &str, path: &str) -> bool {
+    let pattern = pattern.trim_start_matches('/');
+    let path = path.trim_start_matches('/');
+
+    if pattern == "*" {
+        return true;
+    }
+    if !pattern.contains('*') {
+        return pattern == path;
+    }
+
+    // Translate `*` to `.*`, escape every other regex metacharacter.
+    let mut re = String::with_capacity(pattern.len() + 4);
+    re.push('^');
+    for ch in pattern.chars() {
+        if ch == '*' {
+            re.push_str(".*");
+        } else if ch.is_ascii_alphanumeric() || ch == '/' || ch == '-' || ch == '_' {
+            re.push(ch);
+        } else {
+            // Escape regex metacharacters in literal segments.
+            re.push('\\');
+            re.push(ch);
+        }
+    }
+    re.push('$');
+    Regex::new(&re).map(|r| r.is_match(path)).unwrap_or(false)
 }
 
 impl CorsConfig {
@@ -115,11 +243,14 @@ impl CorsConfig {
     {
         Self {
             origins: AllowedOrigins::List(origins.into_iter().map(Into::into).collect()),
+            origin_patterns: Vec::new(),
+            paths: Vec::new(),
             methods: default_methods(),
             headers: AllowedHeaders::Any,
             exposed_headers: Vec::new(),
             allow_credentials: false,
             max_age: None,
+            skip_callbacks: Vec::new(),
         }
     }
 
@@ -130,12 +261,108 @@ impl CorsConfig {
     pub fn any_origin() -> Self {
         Self {
             origins: AllowedOrigins::Any,
+            origin_patterns: Vec::new(),
+            paths: Vec::new(),
             methods: default_methods(),
             headers: AllowedHeaders::Any,
             exposed_headers: Vec::new(),
             allow_credentials: false,
             max_age: None,
+            skip_callbacks: Vec::new(),
         }
+    }
+
+    /// Restrict CORS to a fixed list of URL path patterns. The Laravel
+    /// `cors.php` `paths` config maps directly to this builder. Patterns
+    /// support `*` as a multi-segment wildcard ([Laravel's `Str::is`]
+    /// semantics — `*` is greedy across `/`).
+    ///
+    /// With no `paths` set (the default), CORS runs on every request. With
+    /// at least one pattern set, only matching requests get CORS treatment
+    /// (preflights AND actual-response decoration); everything else flows
+    /// through untouched.
+    ///
+    /// A leading `/` is normalized away so `"api/*"` and `"/api/*"` are
+    /// equivalent — matches Laravel's behavior, where path patterns are
+    /// host-relative.
+    ///
+    /// [Laravel's `Str::is`]: https://laravel.com/docs/13.x/strings#method-str-is
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// CorsConfig::allow_origins(["https://app.example"])
+    ///     .paths(["api/*", "sanctum/csrf-cookie"])
+    /// ```
+    pub fn paths<I, S>(mut self, patterns: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.paths = patterns.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Allow origins matching any of the given regex patterns, in addition
+    /// to the literal entries in [`CorsConfig::allow_origins`]. Mirrors
+    /// Laravel's `allowed_origins_patterns` config knob — useful for
+    /// dynamic subdomains (`https://*.example.com`), preview environments,
+    /// or per-tenant origins.
+    ///
+    /// Patterns are anchored automatically: `^` and `$` are prepended /
+    /// appended if missing, so `r"https://.*\.example\.com"` and
+    /// `r"^https://.*\.example\.com$"` are equivalent.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any pattern fails to compile. CORS policy compiles at
+    /// startup, so an invalid pattern is a config bug to surface
+    /// immediately rather than fail-open at request time.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// CorsConfig::allow_origins(["https://app.example"])
+    ///     .allow_origin_patterns([r"^https://[a-z0-9-]+\.staging\.example$"])
+    /// ```
+    pub fn allow_origin_patterns<I, S>(mut self, patterns: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.origin_patterns = patterns
+            .into_iter()
+            .map(|p| {
+                let raw = p.as_ref();
+                let anchored = anchor_regex(raw);
+                Regex::new(&anchored)
+                    .unwrap_or_else(|e| panic!("invalid CORS origin pattern {raw:?}: {e}"))
+            })
+            .collect();
+        self
+    }
+
+    /// Register a predicate that skips CORS for matching requests. Mirrors
+    /// Laravel's `HandleCors::skipWhen(Closure)`, but as part of the
+    /// policy rather than global mutable state.
+    ///
+    /// The predicate runs first thing in [`CorsMiddleware::handle`]; on
+    /// `true` the request is forwarded directly to the next layer with no
+    /// CORS handling. Multiple `skip_when` callbacks may be registered;
+    /// any one returning `true` skips CORS.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// CorsConfig::any_origin()
+    ///     .skip_when(|req| req.header("X-Internal-Call").is_some())
+    /// ```
+    pub fn skip_when<F>(mut self, predicate: F) -> Self
+    where
+        F: Fn(&Request) -> bool + Send + Sync + 'static,
+    {
+        self.skip_callbacks.push(Arc::new(predicate));
+        self
     }
 
     /// Override the methods advertised in `Access-Control-Allow-Methods`.
@@ -183,6 +410,52 @@ impl CorsConfig {
         self
     }
 
+    /// Laravel-named alias for [`Self::allow_credentials`]; matches the
+    /// `supports_credentials` key in Laravel's `cors.php` config.
+    pub fn supports_credentials(self, allow: bool) -> Self {
+        self.allow_credentials(allow)
+    }
+
+    /// Laravel-named alias for [`Self::methods`]; matches `allowed_methods`
+    /// in Laravel's `cors.php` config.
+    pub fn allowed_methods<I, S>(self, methods: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.methods(methods)
+    }
+
+    /// Laravel-named alias for [`Self::allow_headers`]; matches
+    /// `allowed_headers` in Laravel's `cors.php` config.
+    pub fn allowed_headers<I, S>(self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allow_headers(headers)
+    }
+
+    /// Laravel-named alias for [`Self::expose_headers`]; matches
+    /// `exposed_headers` in Laravel's `cors.php` config.
+    pub fn exposed_headers<I, S>(self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.expose_headers(headers)
+    }
+
+    /// Laravel-named alias for [`Self::allow_origin_patterns`]; matches
+    /// `allowed_origins_patterns` in Laravel's `cors.php` config.
+    pub fn allowed_origins_patterns<I, S>(self, patterns: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.allow_origin_patterns(patterns)
+    }
+
     /// How long (`Access-Control-Max-Age`) the browser may cache the
     /// preflight result.
     pub fn max_age(mut self, age: Duration) -> Self {
@@ -190,12 +463,41 @@ impl CorsConfig {
         self
     }
 
-    /// Whether `origin` is permitted by this policy.
+    /// Laravel-style integer-seconds alias for [`Self::max_age`]. The
+    /// `cors.php` `max_age` value is in seconds; this overload lets users
+    /// pass the same `u64` they would have set in Laravel.
+    pub fn max_age_secs(self, seconds: u64) -> Self {
+        self.max_age(Duration::from_secs(seconds))
+    }
+
+    /// Whether `origin` is permitted by this policy. Consults the literal
+    /// allow-list AND any compiled origin patterns; either matching is
+    /// enough.
     fn is_origin_allowed(&self, origin: &str) -> bool {
         match &self.origins {
-            AllowedOrigins::Any => true,
-            AllowedOrigins::List(list) => list.iter().any(|o| o == origin),
+            AllowedOrigins::Any => return true,
+            AllowedOrigins::List(list) => {
+                if list.iter().any(|o| o == origin) {
+                    return true;
+                }
+            }
         }
+        self.origin_patterns.iter().any(|re| re.is_match(origin))
+    }
+
+    /// Whether `path` matches any of the configured `paths` patterns. With
+    /// no patterns configured, every path matches — Suprnova's default,
+    /// since the middleware is opt-in by registration.
+    fn path_matches(&self, path: &str) -> bool {
+        if self.paths.is_empty() {
+            return true;
+        }
+        self.paths.iter().any(|p| path_pattern_matches(p, path))
+    }
+
+    /// Whether any registered `skip_when` predicate matches `request`.
+    fn should_skip(&self, request: &Request) -> bool {
+        self.skip_callbacks.iter().any(|cb| cb(request))
     }
 
     /// The `Access-Control-Allow-Origin` value to emit for `origin`, or
@@ -312,6 +614,15 @@ impl CorsMiddleware {
 #[async_trait]
 impl Middleware for CorsMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
+        // Skip-when predicates and `paths` scoping short-circuit the
+        // middleware entirely — the request just flows through to the
+        // next layer with no CORS treatment. Matches Laravel's
+        // `HandleCors`, which returns `$next($request)` early when
+        // `hasMatchingPath` is false or a `skipWhen` callback fires.
+        if self.config.should_skip(&request) || !self.config.path_matches(request.path()) {
+            return next(request).await;
+        }
+
         let origin = request.header("Origin").map(|s| s.to_string());
 
         // Preflight = OPTIONS carrying Access-Control-Request-Method. A bare
@@ -472,5 +783,126 @@ mod tests {
             None,
             "a `*` ACAO is identical for every origin, so no Vary is needed"
         );
+    }
+
+    // -- regex origin patterns --------------------------------------------
+
+    #[test]
+    fn origin_pattern_matches_wildcard_subdomain() {
+        let cfg = CorsConfig::allow_origins(["https://app.example"])
+            .allow_origin_patterns([r"https://[a-z0-9-]+\.staging\.example"]);
+        assert_eq!(
+            cfg.resolve_acao("https://app.example").as_deref(),
+            Some("https://app.example"),
+            "literal entry still matches"
+        );
+        assert_eq!(
+            cfg.resolve_acao("https://feature-1.staging.example")
+                .as_deref(),
+            Some("https://feature-1.staging.example"),
+            "pattern entry matches"
+        );
+        assert_eq!(
+            cfg.resolve_acao("https://evil.example"),
+            None,
+            "neither literal nor pattern matches"
+        );
+    }
+
+    #[test]
+    fn origin_patterns_auto_anchor_to_whole_string() {
+        // Without anchoring, "https://.*\.example" would naively match
+        // "https://evil.com/redirect?u=https://app.example".
+        let cfg = CorsConfig::allow_origins(Vec::<String>::new())
+            .allow_origin_patterns([r"https://[a-z]+\.example"]);
+        assert_eq!(
+            cfg.resolve_acao("https://app.example").as_deref(),
+            Some("https://app.example")
+        );
+        assert_eq!(
+            cfg.resolve_acao("https://evil.example/?u=https://app.example"),
+            None,
+            "auto-anchor must reject half-matches"
+        );
+    }
+
+    #[test]
+    fn allowed_origins_patterns_alias_works() {
+        // Laravel-named alias delegates to the same surface.
+        let cfg = CorsConfig::allow_origins(Vec::<String>::new())
+            .allowed_origins_patterns([r"https://api-v\d+\.example"]);
+        assert!(cfg.is_origin_allowed("https://api-v2.example"));
+        assert!(!cfg.is_origin_allowed("https://api-vX.example"));
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid CORS origin pattern")]
+    fn invalid_origin_pattern_panics_at_config_time() {
+        // Fail loud at boot, not silently at request time.
+        let _ = CorsConfig::any_origin().allow_origin_patterns(["[unclosed-class"]);
+    }
+
+    // -- paths scoping ----------------------------------------------------
+
+    #[test]
+    fn path_pattern_handles_wildcard_suffix() {
+        assert!(path_pattern_matches("api/*", "/api/users"));
+        assert!(path_pattern_matches("api/*", "/api/users/42"));
+        assert!(!path_pattern_matches("api/*", "/web/users"));
+    }
+
+    #[test]
+    fn path_pattern_handles_wildcard_anywhere() {
+        assert!(path_pattern_matches("api/*/posts", "/api/v2/posts"));
+        assert!(!path_pattern_matches("api/*/posts", "/api/v2/comments"));
+    }
+
+    #[test]
+    fn path_pattern_handles_literal_match() {
+        assert!(path_pattern_matches(
+            "sanctum/csrf-cookie",
+            "/sanctum/csrf-cookie"
+        ));
+        assert!(!path_pattern_matches(
+            "sanctum/csrf-cookie",
+            "/sanctum/csrf-token"
+        ));
+    }
+
+    #[test]
+    fn path_pattern_normalizes_leading_slash() {
+        // Both `"api/*"` and `"/api/*"` work the same way.
+        assert!(path_pattern_matches("/api/*", "/api/users"));
+        assert!(path_pattern_matches("api/*", "api/users"));
+    }
+
+    #[test]
+    fn path_pattern_lone_star_matches_anything() {
+        assert!(path_pattern_matches("*", "/anything/at/all"));
+        assert!(path_pattern_matches("*", "/"));
+    }
+
+    #[test]
+    fn path_matches_returns_true_when_no_paths_configured() {
+        let cfg = CorsConfig::any_origin();
+        assert!(cfg.path_matches("/anything"));
+    }
+
+    #[test]
+    fn path_matches_filters_to_configured_paths() {
+        let cfg = CorsConfig::any_origin().paths(["api/*", "sanctum/csrf-cookie"]);
+        assert!(cfg.path_matches("/api/users"));
+        assert!(cfg.path_matches("/sanctum/csrf-cookie"));
+        assert!(!cfg.path_matches("/web/login"));
+    }
+
+    // -- helper utilities -------------------------------------------------
+
+    #[test]
+    fn anchor_regex_preserves_existing_anchors() {
+        assert_eq!(anchor_regex("^https://app$"), "^https://app$");
+        assert_eq!(anchor_regex("^https://app"), "^https://app$");
+        assert_eq!(anchor_regex("https://app$"), "^https://app$");
+        assert_eq!(anchor_regex("https://app"), "^https://app$");
     }
 }
