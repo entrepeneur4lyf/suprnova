@@ -135,11 +135,7 @@ async fn get(addr: SocketAddr) -> (u16, HashMap<String, String>, String) {
         })
         .collect();
     let bytes = body.collect().await.unwrap().to_bytes();
-    (
-        status,
-        headers,
-        String::from_utf8_lossy(&bytes).to_string(),
-    )
+    (status, headers, String::from_utf8_lossy(&bytes).to_string())
 }
 
 #[tokio::test]

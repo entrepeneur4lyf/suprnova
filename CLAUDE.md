@@ -124,7 +124,7 @@ themselves; the consumer picks via env or programmatic config.
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **suprnova** (13767 symbols, 27547 relationships, 230 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **suprnova** (14410 symbols, 28965 relationships, 240 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
