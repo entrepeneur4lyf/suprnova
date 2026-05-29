@@ -56,6 +56,49 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
+use tokio::task::JoinHandle;
+
+/// RAII guard that aborts the wrapped task on drop.
+///
+/// Wraps the workflow heartbeat task so the lease-renewal loop is guaranteed
+/// to stop the moment `process_claimed_workflow` returns or panics — even if
+/// a later `?` early-returns from one of the settlement arms. Without this,
+/// a leaked heartbeat would keep extending `locked_until` for a workflow no
+/// worker is actually running, blocking reclamation forever.
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Spawn the heartbeat task that extends the workflow lease at half the
+/// lock-timeout interval while a workflow body executes.
+///
+/// Returns an `AbortOnDrop` guard. Drop or let-go-of-scope to stop the
+/// heartbeat. The interval is `max(lock_timeout / 2, 1s)` so very small
+/// timeouts still produce sane tick rates instead of busy-looping.
+fn spawn_lease_heartbeat(workflow_id: i64, lock_timeout: Duration) -> AbortOnDrop {
+    let interval = std::cmp::max(lock_timeout / 2, Duration::from_secs(1));
+    let handle = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        // First tick fires immediately; skip it so we don't refresh the
+        // lease the worker just set in `claim_next_workflow`.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            if let Err(err) = store::refresh_lock(workflow_id, lock_timeout).await {
+                tracing::warn!(
+                    workflow_id,
+                    error = %err,
+                    "workflow lease heartbeat failed; another worker may reclaim this row"
+                );
+            }
+        }
+    });
+    AbortOnDrop(handle)
+}
 
 /// Start a workflow by name with serialized input JSON
 pub async fn start_named(name: &str, input: &str) -> Result<WorkflowHandle, FrameworkError> {
@@ -162,7 +205,22 @@ async fn process_claimed_workflow(
         }
     };
 
-    let ctx = WorkflowContext::new(claimed.id, Duration::from_secs(config.lock_timeout_secs));
+    let lock_timeout = Duration::from_secs(config.lock_timeout_secs);
+    let ctx = WorkflowContext::new(claimed.id, lock_timeout);
+
+    // Extend the workflow lease while the body runs so long-running steps
+    // do not get reclaimed mid-flight by another worker. The pre/post-step
+    // refreshes in `WorkflowContext::run_step_with_input` cover the step
+    // boundaries, but they do nothing while a step future is awaiting
+    // (network I/O, sleeps, retries). Without this, a step that takes
+    // longer than `lock_timeout_secs` (default 30s) lets
+    // `claim_next_workflow` reclaim the workflow under our feet.
+    //
+    // The guard aborts the heartbeat task on drop. That's load-bearing —
+    // each settle arm uses `?`, so an early return must not leak the
+    // heartbeat task and have it keep extending `locked_until` for a
+    // workflow nobody is running.
+    let _heartbeat = spawn_lease_heartbeat(claimed.id, lock_timeout);
 
     // Run the workflow body inside a panic boundary so a panicking handler
     // does not strand the row. The spawn site only logs Err returns; a panic
@@ -278,6 +336,23 @@ mod tests {
     #[workflow]
     async fn panicking_workflow() -> Result<i32, FrameworkError> {
         panic!("boom");
+    }
+
+    // Sleep duration for the heartbeat regression test below.
+    // Long enough to outlive the 2s lease the test sets, short enough to
+    // keep the test snappy.
+    const SLOW_STEP_SLEEP_MS: u64 = 2_500;
+
+    #[workflow_step]
+    async fn slow_step() -> Result<i32, FrameworkError> {
+        tokio::time::sleep(Duration::from_millis(SLOW_STEP_SLEEP_MS)).await;
+        Ok(7)
+    }
+
+    #[workflow]
+    async fn slow_workflow() -> Result<i32, FrameworkError> {
+        let v = slow_step().await?;
+        Ok(v)
     }
 
     #[tokio::test]
@@ -541,6 +616,149 @@ mod tests {
         assert!(
             err.contains("boom"),
             "panic payload 'boom' must reach the error column, got: {err}"
+        );
+    }
+
+    // A workflow body that outlives the lock-timeout window must not
+    // strand its row to reclamation. The fix: a heartbeat task spawned
+    // inside `process_claimed_workflow` extends `locked_until` at half
+    // the lock-timeout interval until the body resolves. Without the
+    // heartbeat, the only mid-body lease refreshes are the per-step
+    // pre/post refreshes in `WorkflowContext::run_step_with_input` —
+    // a single step that runs longer than `lock_timeout_secs` would
+    // therefore go the entire `f().await` window with the lease frozen
+    // at the value set by the pre-step refresh, and another worker can
+    // reclaim it under our feet.
+    //
+    // The regression check counts DISTINCT `locked_until` values seen
+    // during the workflow body, excluding the pre-step refresh (which
+    // happens before the step starts and is unrelated to the heartbeat).
+    // Snapshot strategy:
+    //
+    //   * baseline = locked_until once the pre-step refresh has landed
+    //     (status='running' on a step row and step started_at populated).
+    //     This factors out the per-step refresh path so its single bump
+    //     can't false-pass the test.
+    //   * Then poll the row while the step is sleeping and record every
+    //     distinct locked_until > baseline that appears before the body
+    //     completes.
+    //
+    // With heartbeat: at least one tick fires during the 2.5s sleep
+    // (interval = lock_timeout/2 = 1s), so at least one post-baseline
+    // value lands → advances ≥ 1.
+    //
+    // Without heartbeat: nothing refreshes the lease between the
+    // pre-step refresh and the step's completion, so no post-baseline
+    // value appears → advances = 0 and the assertion fails.
+    //
+    // Backend-agnostic: this test never calls `claim_next_workflow`
+    // (Postgres-only), only `process_claimed_workflow` + `refresh_lock`,
+    // both SQLite-compatible.
+    #[tokio::test]
+    async fn test_long_running_step_extends_lease() {
+        let _db = setup_db().await;
+
+        let workflow_name = format!("{}::{}", module_path!(), "slow_workflow");
+        let input = serde_json::to_string(&()).unwrap();
+
+        let handle = store::insert_workflow(&workflow_name, &input, 3)
+            .await
+            .expect("insert workflow");
+
+        // Mark the row running with a short 2s lease.
+        let claimed = store::mark_running(handle.id(), "test-worker", Duration::from_secs(2))
+            .await
+            .expect("mark running");
+
+        // Drive the body in the background so we can poll the row from
+        // this task while the step is still sleeping.
+        let mut config = WorkflowConfig::from_env();
+        config.lock_timeout_secs = 2;
+        let worker_id = "test-worker".to_string();
+        let workflow_id = handle.id();
+        let body = tokio::spawn(async move {
+            process_claimed_workflow(claimed, Arc::new(config), &worker_id).await
+        });
+
+        // Wait for the pre-step refresh to land (the step row appears
+        // with status='running' and started_at set). That value of
+        // locked_until becomes our baseline — anything strictly greater
+        // than this in the polling loop below can only have been
+        // written by the heartbeat.
+        let baseline_lock = {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                if std::time::Instant::now() >= deadline {
+                    panic!("step row never appeared with status='running'");
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let step = store::load_step(workflow_id, 0, "slow_step")
+                    .await
+                    .expect("load step");
+                if let Some(s) = step
+                    && s.status == StepStatus::Running.as_str()
+                    && s.started_at.is_some()
+                {
+                    // Step has started — capture the workflow lease as
+                    // it stands after the pre-step refresh.
+                    let record = store::get_workflow_record(workflow_id)
+                        .await
+                        .expect("load workflow record");
+                    break record
+                        .locked_until
+                        .expect("pre-step refresh should set locked_until");
+                }
+            }
+        };
+
+        // Count distinct post-baseline locked_until values that appear
+        // while the body is still running. Heartbeat firings show up
+        // here; pre-step / post-step refreshes do not (pre-step is
+        // baseline, post-step lands after status changes away from
+        // 'running').
+        let mut post_baseline_advances: std::collections::BTreeSet<chrono::NaiveDateTime> =
+            std::collections::BTreeSet::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let record = store::get_workflow_record(workflow_id)
+                .await
+                .expect("poll workflow record");
+            if record.status != WorkflowStatus::Running.as_str() {
+                // Body has settled — post-step refresh and mark_succeeded
+                // have either fired or are about to. Stop counting; we
+                // only care about mid-body advances.
+                break;
+            }
+            if let Some(current) = record.locked_until
+                && current > baseline_lock
+            {
+                post_baseline_advances.insert(current);
+            }
+        }
+
+        assert!(
+            !post_baseline_advances.is_empty(),
+            "expected heartbeat to extend locked_until at least once while the long-running step \
+             was executing; baseline (post-pre-step-refresh) = {baseline_lock}, no advance observed"
+        );
+
+        // The body must still settle cleanly — the heartbeat guard
+        // must abort the renewal task on drop, leaving the final
+        // `mark_succeeded` write authoritative and the row in
+        // Succeeded.
+        body.await
+            .expect("workflow body task panicked")
+            .expect("process_claimed_workflow returned Err");
+
+        let status = store::get_workflow_status(workflow_id).await.unwrap();
+        assert_eq!(
+            status,
+            WorkflowStatus::Succeeded,
+            "workflow must reach Succeeded after the heartbeat-guarded body completes"
         );
     }
 
