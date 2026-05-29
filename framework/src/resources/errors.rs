@@ -66,7 +66,12 @@ impl FrameworkError {
                 None => Value::Null,
             },
         );
-        if status >= 500 && crate::config::AppConfig::from_env().is_debug() {
+        // Gated through `Config::is_debug` so a programmatically-
+        // registered `AppConfig` (e.g. forced fail-closed for a staging
+        // environment) wins over the env-derived default. Falls back to
+        // env-derived AppConfig if the repository hasn't been seeded
+        // yet — which is fail-closed in production-shaped envs.
+        if status >= 500 && crate::config::Config::is_debug() {
             meta.insert("debug_message".into(), Value::String(full_message));
         }
         err_obj.insert("meta".into(), Value::Object(meta));

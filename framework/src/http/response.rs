@@ -623,11 +623,13 @@ impl From<crate::error::FrameworkError> for HttpResponse {
                     None => serde_json::Value::Null,
                 },
             );
-            // Dev-only detail. Gated behind APP_DEBUG=true.
-            // The `message` field stays generic in both modes; this is
-            // strictly additive for developers, never to be parsed by
-            // production clients.
-            if status >= 500 && crate::config::AppConfig::from_env().is_debug() {
+            // Dev-only detail. Gated behind the registered AppConfig's
+            // debug flag (falling back to env-derived AppConfig if the
+            // repository isn't seeded yet — `Config::is_debug` handles
+            // that resolution). The `message` field stays generic in
+            // both modes; this is strictly additive for developers,
+            // never to be parsed by production clients.
+            if status >= 500 && crate::config::Config::is_debug() {
                 obj.insert(
                     "debug_message".to_string(),
                     serde_json::Value::String(message.clone()),

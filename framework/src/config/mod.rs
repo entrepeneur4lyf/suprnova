@@ -133,9 +133,21 @@ impl Config {
         Self::environment().is_development()
     }
 
-    /// Check if debug mode is enabled
+    /// Check if debug mode is enabled.
+    ///
+    /// Resolution order: a programmatically-registered `AppConfig` wins;
+    /// otherwise we fall back to `AppConfig::from_env()`, which reads
+    /// `APP_DEBUG` and — if that env var is also unset — applies the
+    /// env-aware default (true in Local/Development/Testing, false
+    /// elsewhere). This keeps loud-by-default DX on the
+    /// repository-not-yet-seeded boot/test path while staying fail-closed
+    /// in production-shaped environments. The previous fallback was a
+    /// hardcoded `true`, which silently leaked `debug_message` bodies
+    /// from the JSON error renderers on uninitialized paths.
     pub fn is_debug() -> bool {
-        Config::get::<AppConfig>().map(|c| c.debug).unwrap_or(true)
+        Config::get::<AppConfig>()
+            .unwrap_or_else(AppConfig::from_env)
+            .is_debug()
     }
 
     /// Deserialize the current process's environment into a typed
