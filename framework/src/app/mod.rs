@@ -246,6 +246,63 @@ pub(crate) async fn evaluate_due_once(
     (results, any_failed)
 }
 
+/// Environment variable that opts the default `serve` / `web:run` auto-migrate
+/// path back into the legacy log-and-continue behaviour.
+///
+/// Unset (or set to any non-truthy value) keeps the production-safe default:
+/// migration errors abort the process before the HTTP server boots. Set to
+/// `true` / `1` / `yes` / `on` (case-insensitive, trimmed) to log a warning
+/// and continue.
+pub(crate) const AUTO_MIGRATE_BEST_EFFORT_ENV: &str = "SUPRNOVA_AUTO_MIGRATE_BEST_EFFORT";
+
+/// Parse the truthiness of [`AUTO_MIGRATE_BEST_EFFORT_ENV`].
+///
+/// Accepts `true`, `1`, `yes`, `on` (case-insensitive, surrounding whitespace
+/// stripped). Everything else — including `false`, `0`, empty strings, and the
+/// `None` returned by [`std::env::var`] when the variable is unset — yields
+/// `false` so the production-safe fail-closed path is the default.
+///
+/// Extracted as a pure function so the parsing contract is unit-testable
+/// without mutating the process-global environment.
+pub(crate) fn parse_auto_migrate_best_effort(value: Option<&str>) -> bool {
+    value
+        .map(|v| {
+            let v = v.trim();
+            v.eq_ignore_ascii_case("true")
+                || v.eq_ignore_ascii_case("yes")
+                || v.eq_ignore_ascii_case("on")
+                || v == "1"
+        })
+        .unwrap_or(false)
+}
+
+/// Apply the fail-closed-by-default auto-migration policy to a `Migrator::up`
+/// result.
+///
+/// When `best_effort` is `false` (the default), a migration error is returned
+/// as-is so the caller can abort the server boot. When `best_effort` is
+/// `true`, the error is logged to stderr and swallowed so the caller can
+/// continue into the server.
+///
+/// Extracted as a pure function so the policy is unit-testable without going
+/// through `std::process::exit` or spinning up a real `Application::run`.
+pub(crate) fn resolve_auto_migration(
+    outcome: Result<(), sea_orm::DbErr>,
+    best_effort: bool,
+) -> Result<(), sea_orm::DbErr> {
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(e) if best_effort => {
+            eprintln!(
+                "suprnova: WARNING — auto-migrate failed in best-effort mode, server will boot \
+                 against the current schema: {e}"
+            );
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Format a single background-task completion for the scheduler daemon's
 /// stderr log. Failures (handler `Err`, task panic, or `JoinError` from
 /// cancellation) print a single line; success completions are silent so
@@ -591,6 +648,19 @@ where
             })
     }
 
+    /// Auto-migrate path for the default `serve` / `web:run` arms.
+    ///
+    /// **Fails closed by default.** If `Migrator::up` returns an error the
+    /// process aborts with `exit(1)` rather than booting the HTTP server
+    /// against a partially-migrated schema. The matching no-server paths
+    /// (`migrate`, `migrate:status`, `migrate:rollback`, `migrate:fresh`)
+    /// already exit on error; this brings the server entry into the same
+    /// contract.
+    ///
+    /// Operators who deliberately want the old log-and-continue behaviour
+    /// can opt in by setting [`AUTO_MIGRATE_BEST_EFFORT_ENV`] to one of the
+    /// truthy values accepted by [`parse_auto_migrate_best_effort`]. The
+    /// process then logs a warning and continues into the server boot.
     async fn run_migrations_silent<Migrator: MigratorTrait>() {
         // If the configured migrator has no migrations (the default
         // `NoMigrator`, or any app-defined migrator with an empty set),
@@ -601,9 +671,18 @@ where
         if Migrator::migrations().is_empty() {
             return;
         }
+        let best_effort =
+            parse_auto_migrate_best_effort(env::var(AUTO_MIGRATE_BEST_EFFORT_ENV).ok().as_deref());
         let db = Self::get_database_connection().await;
-        if let Err(e) = Migrator::up(&db, None).await {
-            eprintln!("Warning: Migration failed: {}", e);
+        let outcome = Migrator::up(&db, None).await;
+        if let Err(e) = resolve_auto_migration(outcome, best_effort) {
+            eprintln!("suprnova: migration failed: {e}");
+            eprintln!(
+                "suprnova: refusing to start the server against a partially-migrated schema. \
+                 Fix the failing migration, or set {AUTO_MIGRATE_BEST_EFFORT_ENV}=true to keep \
+                 the previous best-effort behaviour, or pass --no-migrate to skip auto-migration."
+            );
+            std::process::exit(1);
         }
     }
 
@@ -1214,5 +1293,124 @@ mod tests {
                 env::set_var("DATABASE_URL", prior);
             }
         }
+    }
+
+    /// `SUPRNOVA_AUTO_MIGRATE_BEST_EFFORT` parsing: unset, empty, and
+    /// non-truthy values must keep the production-safe fail-closed default.
+    #[test]
+    fn parse_auto_migrate_best_effort_defaults_to_false() {
+        assert!(!parse_auto_migrate_best_effort(None));
+        assert!(!parse_auto_migrate_best_effort(Some("")));
+        assert!(!parse_auto_migrate_best_effort(Some("   ")));
+        assert!(!parse_auto_migrate_best_effort(Some("false")));
+        assert!(!parse_auto_migrate_best_effort(Some("0")));
+        assert!(!parse_auto_migrate_best_effort(Some("no")));
+        assert!(!parse_auto_migrate_best_effort(Some("off")));
+    }
+
+    /// The full truthy alphabet: `true` / `1` / `yes` / `on`, mixed case,
+    /// trimmed of surrounding whitespace.
+    #[test]
+    fn parse_auto_migrate_best_effort_accepts_truthy_values() {
+        for v in [
+            "true", "TRUE", "True", "  true  ", "1", " 1 ", "yes", "YES", "on", "On",
+        ] {
+            assert!(
+                parse_auto_migrate_best_effort(Some(v)),
+                "{v:?} should enable best-effort mode",
+            );
+        }
+    }
+
+    /// Success outcomes pass through both modes; this pins the contract so
+    /// future refactors can't accidentally swap the arms.
+    #[test]
+    fn resolve_auto_migration_passes_success_through() {
+        assert!(resolve_auto_migration(Ok(()), false).is_ok());
+        assert!(resolve_auto_migration(Ok(()), true).is_ok());
+    }
+
+    /// Regression for `app-serve-fails-open`: with the default
+    /// (best_effort=false), a migration error must propagate so the caller
+    /// (`run_migrations_silent`) can `exit(1)` instead of booting the server
+    /// against a half-migrated schema.
+    #[test]
+    fn resolve_auto_migration_default_fails_closed_on_error() {
+        let err = sea_orm::DbErr::Migration("create_users_table: column already exists".into());
+        let outcome = resolve_auto_migration(Err(err), false);
+        assert!(
+            outcome.is_err(),
+            "default mode must surface the migration error so the server aborts",
+        );
+    }
+
+    /// Best-effort opt-in (the SUPRNOVA_AUTO_MIGRATE_BEST_EFFORT=true escape
+    /// hatch) preserves the legacy log-and-continue behaviour for operators
+    /// who explicitly want it.
+    #[test]
+    fn resolve_auto_migration_best_effort_swallows_error() {
+        let err = sea_orm::DbErr::Migration("create_users_table: column already exists".into());
+        let outcome = resolve_auto_migration(Err(err), true);
+        assert!(
+            outcome.is_ok(),
+            "best-effort mode must swallow the migration error so the server still boots",
+        );
+    }
+
+    /// End-to-end variant of the fix: route a real `Migrator::up` failure
+    /// through the same policy gate `run_migrations_silent` uses. Uses a
+    /// migrator whose first migration deliberately fails so the result is a
+    /// real `DbErr`, not a hand-rolled one. Connects to `sqlite::memory:`
+    /// directly to avoid `get_database_connection`'s `exit(1)` on missing
+    /// `DATABASE_URL`.
+    #[tokio::test]
+    async fn resolve_auto_migration_routes_real_migrator_failure() {
+        struct FailingMigration;
+
+        impl MigrationName for FailingMigration {
+            fn name(&self) -> &str {
+                "m_app_serve_fails_open_regression_failing_migration"
+            }
+        }
+
+        #[async_trait]
+        impl MigrationTrait for FailingMigration {
+            async fn up(&self, _manager: &SchemaManager) -> Result<(), sea_orm::DbErr> {
+                Err(sea_orm::DbErr::Migration(
+                    "intentional failure for app-serve-fails-open regression test".into(),
+                ))
+            }
+
+            async fn down(&self, _manager: &SchemaManager) -> Result<(), sea_orm::DbErr> {
+                Ok(())
+            }
+        }
+
+        struct FailingMigrator;
+
+        #[async_trait]
+        impl MigratorTrait for FailingMigrator {
+            fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+                vec![Box::new(FailingMigration)]
+            }
+        }
+
+        let db = sea_orm::Database::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite should connect");
+
+        // Default mode: server boot would abort.
+        let outcome = FailingMigrator::up(&db, None).await;
+        assert!(
+            resolve_auto_migration(outcome, false).is_err(),
+            "default fail-closed mode must propagate a real Migrator::up failure",
+        );
+
+        // Best-effort opt-in: same error, swallowed.
+        let outcome = FailingMigrator::up(&db, None).await;
+        assert!(
+            resolve_auto_migration(outcome, true).is_ok(),
+            "best-effort opt-in must swallow a real Migrator::up failure",
+        );
     }
 }
