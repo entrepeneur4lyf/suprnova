@@ -149,6 +149,24 @@ async fn factory_create_with_override_persists_overridden_field() {
     assert_eq!(row.name, "Alice From Override");
 }
 
+#[tokio::test]
+#[serial]
+async fn factory_create_one_forces_single_even_if_count_was_set() {
+    let (_guard, conn) = fresh_db().await;
+
+    // count(5) sets the builder count, create_one discards it.
+    let user = UserFactory::new()
+        .count(5)
+        .create_one()
+        .await
+        .expect("create_one persists exactly one");
+    assert!(user.id > 0);
+
+    // Only one row landed in the DB — count was discarded.
+    let row_count = toy_user::Entity::find().all(&conn).await.unwrap().len();
+    assert_eq!(row_count, 1, "create_one ignored count(5) and inserted 1");
+}
+
 /// Explicit-connection variant — bypass `DB::connection()` entirely
 /// and persist against a connection the caller controls. Useful for
 /// integration tests that need to coordinate two distinct databases

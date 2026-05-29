@@ -72,6 +72,16 @@ pub trait Factory {
             factory_fn: Self::definition,
         }
     }
+
+    /// Sugar for `Self::new().count(n)`. Matches Laravel's
+    /// `Factory::times(int)` API for the "I want N of these" pattern
+    /// without the extra method call.
+    fn times(n: usize) -> FactoryBuilder<Self::Model>
+    where
+        Self: Sized,
+    {
+        Self::new().count(n)
+    }
 }
 
 /// Boxed override closure shape — extracted into a type alias so the
@@ -113,6 +123,40 @@ impl<M> FactoryBuilder<M> {
         self
     }
 
+    /// Prepend an override closure to the front of the chain. The
+    /// override runs BEFORE any other registered override, so
+    /// downstream `with(...)` calls win on the same field.
+    ///
+    /// Mirrors Laravel's `Factory::prependState($state)` — useful
+    /// when a state method wants to set a default that a caller can
+    /// still override with a later `with(...)`.
+    pub fn prepend<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&mut M) + Send + Sync + 'static,
+    {
+        self.overrides.insert(0, Box::new(f));
+        self
+    }
+
+    /// Conditional builder extension — applies `f` to the builder
+    /// only if `cond` is true; otherwise returns the builder
+    /// unchanged. Mirrors Laravel's `Conditionable::when($cond, $cb)`
+    /// for the "thread a flag through a chain" pattern without
+    /// breaking the fluent style.
+    ///
+    /// ```ignore
+    /// UserFactory::times(10)
+    ///     .with(|u| u.active = true)
+    ///     .when(seed_admins, |b| b.with(|u| u.role = "admin".into()))
+    ///     .create_many().await?;
+    /// ```
+    pub fn when<F>(self, cond: bool, f: F) -> Self
+    where
+        F: FnOnce(Self) -> Self,
+    {
+        if cond { f(self) } else { self }
+    }
+
     /// Build a single in-memory instance. Runs every registered
     /// override against the produced value. Does NOT persist —
     /// see [`persist::FactoryBuilder::create`] for the persisted
@@ -123,6 +167,16 @@ impl<M> FactoryBuilder<M> {
             o(&mut model);
         }
         model
+    }
+
+    /// Force-single in-memory build — discards any prior `count(n)`
+    /// and produces exactly one instance. Equivalent to
+    /// `self.count(1).make()`, but reads cleaner when a shared state
+    /// method has set `count` internally and the caller wants one.
+    ///
+    /// Mirrors Laravel's `Factory::makeOne($attrs)`.
+    pub fn make_one(self) -> M {
+        self.count(1).make()
     }
 
     /// Build `count` instances in memory, applying overrides to each.
@@ -158,6 +212,15 @@ where
     /// defaulted columns resolved, etc.).
     pub async fn create(self) -> Result<M, crate::error::FrameworkError> {
         self.make().persist().await
+    }
+
+    /// Force-single persisted build — discards any prior `count(n)`
+    /// and produces exactly one persisted instance. Equivalent to
+    /// `self.count(1).create().await`.
+    ///
+    /// Mirrors Laravel's `Factory::createOne($attrs)`.
+    pub async fn create_one(self) -> Result<M, crate::error::FrameworkError> {
+        self.count(1).create().await
     }
 
     /// Build `count` instances + persist each in turn. Returns every

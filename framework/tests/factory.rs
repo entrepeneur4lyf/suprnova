@@ -113,6 +113,70 @@ fn factory_with_applies_to_every_instance_in_make_many() {
 }
 
 #[test]
+fn factory_times_is_sugar_for_new_then_count() {
+    let users = UserFactory::times(7).make_many();
+    assert_eq!(
+        users.len(),
+        7,
+        "times(n) sets the count so make_many produces n"
+    );
+}
+
+#[test]
+fn factory_prepend_runs_before_with_so_with_wins() {
+    let user = UserFactory::new()
+        .with(|u| u.name = "Late".into())
+        .prepend(|u| u.name = "Early".into())
+        .make();
+    assert_eq!(
+        user.name, "Late",
+        "prepend(...) runs first, with(...) runs after — so the with override wins"
+    );
+}
+
+#[test]
+fn factory_prepend_chain_preserves_relative_order_of_each_group() {
+    // Two prepends + two withs — prepends in reverse-call order at
+    // the front (last prepended ends up index 0), withs at the back
+    // in call order. Concrete: prepend "A" then prepend "B" → order
+    // is [B, A, …withs…]. The final name reflects the last override
+    // applied (the latest `with`).
+    let user = UserFactory::new()
+        .prepend(|u| u.name = "A".into())
+        .prepend(|u| u.name = "B".into())
+        .with(|u| u.name = "C".into())
+        .with(|u| u.name = "D".into())
+        .make();
+    assert_eq!(user.name, "D", "last with(...) is the final write");
+}
+
+#[test]
+fn factory_when_true_applies_the_extension() {
+    let user = UserFactory::new()
+        .when(true, |b| b.with(|u| u.admin = true))
+        .make();
+    assert!(user.admin, "when(true) ran the extension");
+}
+
+#[test]
+fn factory_when_false_is_a_noop() {
+    let user = UserFactory::new()
+        .when(false, |b| b.with(|u| u.admin = true))
+        .make();
+    assert!(!user.admin, "when(false) skipped the extension");
+}
+
+#[test]
+fn factory_make_one_forces_single_even_if_count_was_set() {
+    // count(50) sets the builder count, but make_one discards it.
+    // The return type is `M`, not `Vec<M>`, so the test asserts a
+    // single shape compiles + the value is well-formed.
+    let user = UserFactory::new().count(50).make_one();
+    assert!(!user.name.is_empty());
+    assert!(user.email.contains('@'));
+}
+
+#[test]
 fn sequence_returns_monotonic_values_starting_at_one() {
     let seq = Sequence::new();
     assert_eq!(seq.next(), 1);
