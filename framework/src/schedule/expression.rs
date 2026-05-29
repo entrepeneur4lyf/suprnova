@@ -273,6 +273,12 @@ impl CronExpression {
     /// helper's `# Panics` contract was previously unenforced — the cron parser
     /// accepts any `u32` without range-checking — so a bad step silently
     /// produced a never-firing schedule; this validates the contract.)
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when `n` is outside `1..=59` (the cron minute field
+    /// width). Cron step values must be positive and below the field width;
+    /// for coarser intervals use [`hourly`](Self::hourly) or similar helpers.
     pub fn try_every_n_minutes(n: u32) -> Result<Self, String> {
         if !(1..=59).contains(&n) {
             return Err(format!(
@@ -299,6 +305,11 @@ impl CronExpression {
 
     /// Fallible sibling of [`hourly_at`](Self::hourly_at): returns `Err`
     /// instead of panicking when `minute` is outside `0..=59`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when `minute` is outside `0..=59` (the cron minute
+    /// field width).
     pub fn try_hourly_at(minute: u32) -> Result<Self, String> {
         if minute > 59 {
             return Err(format!(
@@ -333,6 +344,12 @@ impl CronExpression {
     /// of panicking when a numeric `HH:MM` segment is out of range. Mirrors
     /// `daily_at`'s lenient parsing otherwise (non-`HH:MM` → [`daily`](Self::daily),
     /// non-numeric segment → `0`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when `time` is a well-formed `"HH:MM"` whose hour is
+    /// outside `0..=23` or whose minute is outside `0..=59`. Lenient
+    /// parsing is preserved for non-`HH:MM` strings and non-numeric segments.
     pub fn try_daily_at(time: &str) -> Result<Self, String> {
         let parts: Vec<&str> = time.split(':').collect();
         if parts.len() == 2 {
@@ -384,6 +401,12 @@ impl CronExpression {
 
     /// Fallible sibling of [`monthly_on`](Self::monthly_on): returns `Err`
     /// instead of panicking when `day` is outside `1..=31`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when `day` is outside `1..=31` (the cron day-of-month
+    /// field width). Months without a 31st silently skip — that is
+    /// cron-standard behaviour.
     pub fn try_monthly_on(day: u32) -> Result<Self, String> {
         if !(1..=31).contains(&day) {
             return Err(format!("monthly_on: `day` must be in 1..=31, got {day}"));

@@ -104,13 +104,24 @@ impl TaskBuilder {
     /// ```
     ///
     /// # Panics
-    /// Panics if the cron expression is invalid.
+    ///
+    /// Panics if the cron expression is invalid (wrong field count, unparseable
+    /// step / range / list / numeric segment). Use [`try_cron`](Self::try_cron)
+    /// for a fallible alternative.
     pub fn cron(mut self, expression: &str) -> Self {
         self.expression = CronExpression::parse(expression).expect("Invalid cron expression");
         self
     }
 
-    /// Try to set a custom cron expression, returning an error if invalid
+    /// Fallible sibling of [`cron`](Self::cron): returns `Err` instead of
+    /// panicking when the expression is invalid.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` with a descriptive message when [`CronExpression::parse`]
+    /// rejects `expression` — i.e. when the expression does not have exactly
+    /// 5 whitespace-separated fields, or any field contains an unparseable
+    /// numeric segment (step, range bound, list element, or single value).
     pub fn try_cron(mut self, expression: &str) -> Result<Self, String> {
         self.expression = CronExpression::parse(expression)?;
         Ok(self)
@@ -164,6 +175,11 @@ impl TaskBuilder {
     /// ```rust,ignore
     /// .hourly_at(30) // Every hour at XX:30
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if `minute` is outside the cron minute range `0..=59`. Use
+    /// [`try_hourly_at`](Self::try_hourly_at) for a fallible alternative.
     pub fn hourly_at(mut self, minute: u32) -> Self {
         self.expression = CronExpression::hourly_at(minute);
         self
@@ -171,6 +187,11 @@ impl TaskBuilder {
 
     /// Fallible sibling of [`hourly_at`](Self::hourly_at): returns `Err`
     /// instead of panicking when `minute` is outside `0..=59`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when `minute` is outside `0..=59` (the cron minute
+    /// field width). Delegates to [`CronExpression::try_hourly_at`].
     pub fn try_hourly_at(mut self, minute: u32) -> Result<Self, String> {
         self.expression = CronExpression::try_hourly_at(minute)?;
         Ok(self)
@@ -212,6 +233,14 @@ impl TaskBuilder {
     /// ```rust,ignore
     /// .daily_at("13:00") // Daily at 1:00 PM
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if `time` is a well-formed `"HH:MM"` whose numeric segments
+    /// are out of cron range (hour `0..=23`, minute `0..=59`). A non-`HH:MM`
+    /// string falls back to [`daily`](Self::daily); a non-numeric segment
+    /// is treated as `0`. Use [`try_daily_at`](Self::try_daily_at) for a
+    /// fallible alternative.
     pub fn daily_at(mut self, time: &str) -> Self {
         self.expression = CronExpression::daily_at(time);
         self
@@ -219,6 +248,14 @@ impl TaskBuilder {
 
     /// Fallible sibling of [`daily_at`](Self::daily_at): returns `Err` instead
     /// of panicking when a numeric `HH:MM` segment is out of cron range.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when `time` is a well-formed `"HH:MM"` whose hour is
+    /// outside `0..=23` or whose minute is outside `0..=59`. Lenient parsing
+    /// is preserved: a non-`HH:MM` string yields the equivalent of
+    /// [`daily`](Self::daily); a non-numeric segment is treated as `0`.
+    /// Delegates to [`CronExpression::try_daily_at`].
     pub fn try_daily_at(mut self, time: &str) -> Result<Self, String> {
         self.expression = CronExpression::try_daily_at(time)?;
         Ok(self)
@@ -230,6 +267,12 @@ impl TaskBuilder {
     /// ```rust,ignore
     /// .twice_daily(1, 13) // At 1:00 AM and 1:00 PM
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if either `first_hour` or `second_hour` is outside the cron
+    /// hour range `0..=23`. Use [`try_twice_daily`](Self::try_twice_daily)
+    /// for a fallible alternative.
     pub fn twice_daily(self, first_hour: u32, second_hour: u32) -> Self {
         self.try_twice_daily(first_hour, second_hour)
             .expect("twice_daily: both hours must be in the cron hour range 0..=23")
@@ -237,6 +280,11 @@ impl TaskBuilder {
 
     /// Fallible sibling of [`twice_daily`](Self::twice_daily): returns `Err`
     /// instead of panicking when either hour is outside `0..=23`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when either `first_hour` or `second_hour` is outside
+    /// `0..=23` (the cron hour field width).
     pub fn try_twice_daily(mut self, first_hour: u32, second_hour: u32) -> Result<Self, String> {
         if first_hour > 23 || second_hour > 23 {
             return Err(format!(
@@ -356,6 +404,12 @@ impl TaskBuilder {
     /// ```rust,ignore
     /// .monthly_on(15) // On the 15th of each month
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if `day` is outside `1..=31`. Use
+    /// [`try_monthly_on`](Self::try_monthly_on) for a fallible alternative.
+    /// Months without a 31st silently skip — that is cron-standard behaviour.
     pub fn monthly_on(mut self, day: u32) -> Self {
         self.expression = CronExpression::monthly_on(day);
         self
@@ -363,6 +417,11 @@ impl TaskBuilder {
 
     /// Fallible sibling of [`monthly_on`](Self::monthly_on): returns `Err`
     /// instead of panicking when `day` is outside `1..=31`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when `day` is outside `1..=31`. Delegates to
+    /// [`CronExpression::try_monthly_on`].
     pub fn try_monthly_on(mut self, day: u32) -> Result<Self, String> {
         self.expression = CronExpression::try_monthly_on(day)?;
         Ok(self)
