@@ -592,6 +592,15 @@ where
     }
 
     async fn run_migrations_silent<Migrator: MigratorTrait>() {
+        // If the configured migrator has no migrations (the default
+        // `NoMigrator`, or any app-defined migrator with an empty set),
+        // skip the database connection entirely. This is the default
+        // `serve`/`web:run` arm, and a framework app without a database
+        // should boot successfully without `DATABASE_URL` being set.
+        // Explicit subcommands like `migrate` continue to require it.
+        if Migrator::migrations().is_empty() {
+            return;
+        }
         let db = Self::get_database_connection().await;
         if let Err(e) = Migrator::up(&db, None).await {
             eprintln!("Warning: Migration failed: {}", e);
@@ -1164,5 +1173,46 @@ mod tests {
         assert_eq!(by_name.get("inline-ok"), Some(&true));
         assert_eq!(by_name.get("bg-ok"), Some(&true));
         assert_eq!(by_name.get("bg-err"), Some(&false));
+    }
+
+    /// `Application::new().run()` defaults to `NoMigrator`, whose
+    /// `migrations()` returns an empty vec. The default `serve`/`web:run`
+    /// arm calls `run_migrations_silent::<M>()` before booting the server;
+    /// a framework app without a database must boot without `DATABASE_URL`
+    /// being set.
+    ///
+    /// Without the empty-migrations short-circuit in `run_migrations_silent`,
+    /// `get_database_connection()` calls `std::process::exit(1)` when the
+    /// env var is missing — that would terminate the entire test binary,
+    /// not just fail this single test, so a passing run is itself the
+    /// regression signal.
+    ///
+    /// The `remove_var` is load-bearing: if the ambient environment has
+    /// `DATABASE_URL` set, the unfixed path would skip the exit and
+    /// silently succeed, making the test green against the bug. We gate
+    /// with `#[serial_test::serial]` because the env is process-wide.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn no_migrator_default_serve_does_not_require_database_url() {
+        let prior = env::var("DATABASE_URL").ok();
+        // SAFETY: edition 2024 marks env mutation `unsafe`; we serialize
+        // with `#[serial_test::serial]` so no concurrent test reads it,
+        // and we restore the prior value before returning.
+        unsafe {
+            env::remove_var("DATABASE_URL");
+        }
+
+        // With the fix in place this call returns immediately because
+        // `NoMigrator::migrations()` is empty; without the fix this would
+        // terminate the test binary via `std::process::exit(1)` inside
+        // `get_database_connection`.
+        Application::<NoMigrator>::run_migrations_silent::<NoMigrator>().await;
+
+        // SAFETY: same justification as above.
+        unsafe {
+            if let Some(prior) = prior {
+                env::set_var("DATABASE_URL", prior);
+            }
+        }
     }
 }
