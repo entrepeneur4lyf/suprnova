@@ -26,6 +26,7 @@
 //! # }
 //! ```
 
+mod disk;
 mod path_guard;
 mod registry;
 pub mod streaming;
@@ -33,6 +34,7 @@ pub mod streaming;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
+pub use disk::{ChecksumAlgorithm, DiskExt};
 pub use streaming::copy_between_disks;
 
 use crate::FrameworkError;
@@ -413,6 +415,33 @@ impl Storage {
         let layered = layer_fn(raw);
         registry::register(name, layered);
         Ok(())
+    }
+
+    /// Drop a registered disk by name, returning whether it was present.
+    ///
+    /// Mirrors Laravel's `FilesystemManager::forgetDisk`. Useful for
+    /// configuration reloads or tests that need to swap a disk implementation
+    /// at runtime without spinning up [`Storage::fake`].
+    pub fn forget(name: &str) -> bool {
+        registry::forget(name)
+    }
+
+    /// Drop every registered disk.
+    ///
+    /// Mirrors Laravel's `FilesystemManager::purge()` (which clears every
+    /// disk when called without arguments). Production code rarely needs
+    /// this; tests should prefer [`Storage::fake`], which combines a purge
+    /// with a process-wide mutex.
+    pub fn purge() {
+        registry::purge()
+    }
+
+    /// Return the sorted names of every currently-registered disk.
+    ///
+    /// Handy for diagnostic endpoints, admin dashboards, and tests that need
+    /// to assert the boot-time disk set.
+    pub fn disks() -> Vec<String> {
+        registry::names()
     }
 
     /// Install a fake (in-memory, isolated) storage environment for the

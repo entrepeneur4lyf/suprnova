@@ -147,6 +147,10 @@ iso_currency = { version = "0.5.3", features = ["with-serde"] }
 percent-encoding = "2.3.2"
 httpdate = "1.0.3"
 argon2 = "0.5.3"
+md-5 = "0.11.0"
+sha1 = "0.11.0"
+hex = "0.4.3"
+digest = "0.11.3"
 
 [features]
 default = ["testing"]

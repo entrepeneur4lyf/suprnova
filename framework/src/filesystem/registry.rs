@@ -66,6 +66,48 @@ pub(crate) fn reset() {
     *guard = None;
 }
 
+/// Drop a single named disk from the registry, returning whether it was
+/// present. Mirrors Laravel's `FilesystemManager::forgetDisk`. Safe to call
+/// from production code — applications occasionally need to drop and
+/// re-register a disk at runtime (e.g. after a configuration reload).
+pub(crate) fn forget(name: &str) -> bool {
+    let mut guard = REGISTRY
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .as_mut()
+        .map(|m| m.remove(name).is_some())
+        .unwrap_or(false)
+}
+
+/// Drop every registered disk. Mirrors Laravel's
+/// `FilesystemManager::purge()` (which clears every disk when called
+/// without arguments).
+pub(crate) fn purge() {
+    let mut guard = REGISTRY
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(m) = guard.as_mut() {
+        m.clear();
+    }
+}
+
+/// Return the names of every currently-registered disk. Useful for
+/// diagnostics, admin views, and tests.
+pub(crate) fn names() -> Vec<String> {
+    let guard = REGISTRY
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .as_ref()
+        .map(|m| {
+            let mut v: Vec<String> = m.keys().cloned().collect();
+            v.sort();
+            v
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
