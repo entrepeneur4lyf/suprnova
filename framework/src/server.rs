@@ -822,6 +822,20 @@ async fn handle_ws_upgrade(
     let heartbeat_interval = config.ping_interval;
     let tungstenite_config = config.to_tungstenite_config();
 
+    // Enforce the configured `OriginPolicy` BEFORE the protocol upgrade. The
+    // upgrade response is a 101 that the browser commits to; rejecting after
+    // upgrade leaves the peer holding a stillborn socket. Rejecting before
+    // keeps the response a clean HTTP 403 with no upgrade. SameOrigin is the
+    // default — a browser WS request without a matching `Origin` lands here.
+    if let Err(reason) = check_origin_policy(&config.origin_policy, req.headers()) {
+        tracing::warn!(
+            route = %pattern,
+            reason = reason,
+            "websocket upgrade rejected by Origin policy"
+        );
+        return forbidden_text(&format!("websocket upgrade rejected: {reason}"));
+    }
+
     // hyper_tungstenite::upgrade MUST come before Request::new because
     // it needs `&mut req` before we consume `req`.
     let (mut response, websocket) =
@@ -1045,7 +1059,23 @@ async fn handle_ws_upgrade(
                         tracing::info!("websocket disconnected (ok)");
                     }
                     Err(e) => {
-                        tracing::error!(error = %e, "websocket handler returned error");
+                        // The `WebSocketHandler` trait docs (see
+                        // `framework/src/ws/mod.rs`) promise that an
+                        // `Err(_)` return closes the connection with
+                        // code 1011 (internal error). Without an
+                        // explicit Close frame here the peer would see
+                        // the protocol-default 1005 / 1006 — the
+                        // documented contract is silently broken.
+                        // Send Close(1011) explicitly, mirroring the
+                        // Ok path's Close(1000), then drop `outbound`.
+                        let close = tokio_tungstenite::tungstenite::Message::Close(Some(
+                            tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                                code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Error,
+                                reason: tokio_tungstenite::tungstenite::Utf8Bytes::from_static("internal error"),
+                            },
+                        ));
+                        let _ = outbound.send(close).await;
+                        tracing::error!(error = %e, "websocket handler returned error — sent Close 1011");
                     }
                 }
                 // Drop outbound so the bridge task exits and the
@@ -1103,6 +1133,99 @@ fn bad_request_text(msg: &str) -> hyper::Response<ServerBody> {
                 .boxed(),
         )
         .expect("build 400 response")
+}
+
+fn forbidden_text(msg: &str) -> hyper::Response<ServerBody> {
+    hyper::Response::builder()
+        .status(hyper::StatusCode::FORBIDDEN)
+        .body(
+            Full::new(Bytes::from(msg.to_string()))
+                .map_err(|never| match never {})
+                .boxed(),
+        )
+        .expect("build 403 response")
+}
+
+/// Enforce the configured [`OriginPolicy`](crate::ws::OriginPolicy) against
+/// the upgrade request's headers. Called by [`handle_ws_upgrade`] before
+/// [`hyper_tungstenite::upgrade`] commits to the protocol switch.
+///
+/// Browser WebSocket requests always carry an `Origin` header; this is the
+/// only readily-available CSRF defense for the upgrade path (no
+/// fetch-style token check applies). Non-browser clients are out of scope
+/// for `SameOrigin` — routes that serve them use `AllowAny` or a curated
+/// `AllowList`.
+///
+/// On rejection, returns a short `Err(&str)` reason suitable for logging.
+fn check_origin_policy(
+    policy: &crate::ws::OriginPolicy,
+    headers: &hyper::HeaderMap,
+) -> Result<(), &'static str> {
+    use crate::ws::OriginPolicy;
+    match policy {
+        OriginPolicy::AllowAny => Ok(()),
+        OriginPolicy::SameOrigin => {
+            let origin = headers
+                .get(hyper::header::ORIGIN)
+                .and_then(|v| v.to_str().ok())
+                .ok_or("missing Origin header")?;
+            let origin_url = url::Url::parse(origin).map_err(|_| "malformed Origin")?;
+            let origin_host = origin_url.host_str().ok_or("Origin has no host")?;
+            let origin_port = origin_url.port();
+            let host_header = headers
+                .get(hyper::header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .ok_or("missing Host header")?;
+            let (host_name, host_port_opt) = split_host_header(host_header);
+            // Origin's host comparison is case-insensitive (DNS is); port is
+            // compared exact-or-default. If `Origin` omitted port the URL
+            // crate returns `None` — match against the Host's port too.
+            if !origin_host.eq_ignore_ascii_case(host_name) {
+                return Err("Origin host does not match Host header");
+            }
+            if origin_port != host_port_opt {
+                return Err("Origin port does not match Host header");
+            }
+            Ok(())
+        }
+        OriginPolicy::AllowList(list) => {
+            let origin = headers
+                .get(hyper::header::ORIGIN)
+                .and_then(|v| v.to_str().ok())
+                .ok_or("missing Origin header")?;
+            if list.iter().any(|allowed| allowed.eq_ignore_ascii_case(origin)) {
+                Ok(())
+            } else {
+                Err("Origin not in AllowList")
+            }
+        }
+    }
+}
+
+/// Split a `Host:` header value into `(host, port)`. Handles bracketed IPv6
+/// literals (`"[::1]:8080"` → `("[::1]", Some(8080))`) and bare names
+/// (`"example.com"` → `("example.com", None)`).
+fn split_host_header(host_header: &str) -> (&str, Option<u16>) {
+    if let Some(rest) = host_header.strip_prefix('[') {
+        // IPv6 literal: "[host]:port" or "[host]".
+        if let Some(end) = rest.find(']') {
+            let host = &host_header[..=end + 1]; // include the closing ']'
+            let after = &rest[end + 1..]; // starts with ":port" or ""
+            if let Some(port_str) = after.strip_prefix(':') {
+                let port = port_str.parse().ok();
+                return (host, port);
+            }
+            return (host, None);
+        }
+        // Malformed — fall through to the colon split.
+    }
+    match host_header.rsplit_once(':') {
+        Some((host, port_str)) => {
+            let port = port_str.parse().ok();
+            (host, port)
+        }
+        None => (host_header, None),
+    }
 }
 
 fn convert_response_body(

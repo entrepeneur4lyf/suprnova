@@ -45,6 +45,41 @@ pub trait WebSocketHandler: Send + Sync + 'static {
     async fn handle(&self, socket: WsSocket, request: Request) -> Result<(), FrameworkError>;
 }
 
+/// Origin-header validation policy applied at WebSocket upgrade time.
+///
+/// Browsers always send an `Origin` header on WebSocket handshakes. Unlike
+/// `fetch()` / `XMLHttpRequest`, browser WebSocket requests are not protected
+/// by CSRF token middleware (the upgrade carries no token), so a same-origin
+/// check on `Origin` is the only thing standing between a malicious page and
+/// a privileged WS endpoint on a logged-in user's session. The framework
+/// enforces this policy before [`hyper_tungstenite::upgrade`](https://docs.rs/hyper-tungstenite)
+/// is called; a policy-violation returns HTTP 403 with no upgrade.
+///
+/// Non-browser clients (servers, CLIs, native apps) typically don't send an
+/// `Origin` header. Routes that serve non-browser clients exclusively should
+/// use [`OriginPolicy::AllowAny`]; routes serving both browsers and non-
+/// browsers should use [`OriginPolicy::AllowList`] with the production
+/// frontend origins.
+#[derive(Clone, Debug, Default)]
+pub enum OriginPolicy {
+    /// Default. Allow upgrades only when the request's `Origin` host (and
+    /// port, if present in `Origin`) matches the request's `Host` header.
+    /// A missing `Origin` is rejected. Scheme is not compared (TLS is
+    /// terminated upstream of a typical Suprnova process, so the server
+    /// can't reliably tell whether the public scheme was https or http).
+    #[default]
+    SameOrigin,
+    /// Skip origin validation. Suitable for non-browser endpoints (server-
+    /// to-server, native apps, test mocks). DO NOT use this for browser
+    /// endpoints that touch authenticated state.
+    AllowAny,
+    /// Allow upgrades only when the request's `Origin` header value is an
+    /// exact case-insensitive match for one of the supplied origins. Each
+    /// entry is the full `scheme://host[:port]` form a browser would send
+    /// (e.g. `"https://app.example.com"`).
+    AllowList(Vec<String>),
+}
+
 /// Per-route WebSocket configuration.
 #[derive(Clone, Debug)]
 pub struct WsConfig {
@@ -57,6 +92,9 @@ pub struct WsConfig {
     /// Consecutive missed pongs before the connection is closed
     /// with code 1011. Default: 2. Set to `usize::MAX` to disable.
     pub max_missed_pings: usize,
+    /// Origin header policy enforced at upgrade time. See [`OriginPolicy`].
+    /// Default: [`OriginPolicy::SameOrigin`].
+    pub origin_policy: OriginPolicy,
 }
 
 impl Default for WsConfig {
@@ -66,6 +104,7 @@ impl Default for WsConfig {
             max_message_size: 64 * 1024 * 1024,
             max_frame_size: 16 * 1024 * 1024,
             max_missed_pings: 2,
+            origin_policy: OriginPolicy::default(),
         }
     }
 }

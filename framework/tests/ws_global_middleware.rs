@@ -23,7 +23,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use suprnova::http::{HttpResponse, Request};
-use suprnova::ws::{WebSocketHandler, WsSocket};
+use suprnova::ws::{OriginPolicy, WebSocketHandler, WsConfig, WsSocket};
 use suprnova::{FrameworkError, Middleware, MiddlewareRegistry, Next, Response, Router};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
@@ -68,7 +68,17 @@ impl Middleware for CapturingGlobalMiddleware {
 /// Spawn the framework server with an explicit middleware registry on a
 /// free port behind a hyper http1 loop with `.with_upgrades()`.
 async fn spawn_test_server(registry: MiddlewareRegistry) -> u16 {
-    let router = Arc::new(Router::new().ws("/ws/echo", EchoHandler));
+    // The tokio-tungstenite test client doesn't send `Origin`; opt out of the
+    // default `OriginPolicy::SameOrigin` so this test focuses on global-
+    // middleware behavior rather than CSRF defense.
+    let router = Arc::new(Router::new().ws_with_config(
+        "/ws/echo",
+        EchoHandler,
+        WsConfig {
+            origin_policy: OriginPolicy::AllowAny,
+            ..Default::default()
+        },
+    ));
     let middleware = Arc::new(registry);
 
     let listener = TcpListener::bind("127.0.0.1:0")

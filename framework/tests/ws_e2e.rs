@@ -14,9 +14,21 @@ use suprnova::FrameworkError;
 use suprnova::http::Request;
 use suprnova::middleware::MiddlewareRegistry;
 use suprnova::routing::Router;
-use suprnova::ws::{WebSocketHandler, WsSocket};
+use suprnova::ws::{OriginPolicy, WebSocketHandler, WsConfig, WsSocket};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
+
+/// The tokio-tungstenite test client doesn't send an `Origin` header by
+/// default, so the production-default `OriginPolicy::SameOrigin` would
+/// 403 every test. Opt into `AllowAny` for these tests — they're not
+/// exercising browser CSRF semantics. See `ws_origin_policy.rs` for the
+/// dedicated coverage of `SameOrigin` / `AllowList`.
+fn open_ws_config() -> WsConfig {
+    WsConfig {
+        origin_policy: OriginPolicy::AllowAny,
+        ..Default::default()
+    }
+}
 
 struct EchoHandler;
 
@@ -32,7 +44,7 @@ impl WebSocketHandler for EchoHandler {
 
 async fn spawn_test_server() -> u16 {
     // Router::ws returns Router directly — no .build() / .into() needed.
-    let router = Arc::new(Router::new().ws("/ws/echo", EchoHandler));
+    let router = Arc::new(Router::new().ws_with_config("/ws/echo", EchoHandler, open_ws_config()));
     let middleware = Arc::new(MiddlewareRegistry::new());
 
     let listener = TcpListener::bind("127.0.0.1:0")

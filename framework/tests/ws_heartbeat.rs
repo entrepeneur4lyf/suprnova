@@ -33,7 +33,7 @@ use std::time::Duration;
 use suprnova::FrameworkError;
 use suprnova::http::Request;
 use suprnova::routing::Router;
-use suprnova::ws::{WebSocketHandler, WsSocket};
+use suprnova::ws::{OriginPolicy, WebSocketHandler, WsConfig, WsSocket};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -50,7 +50,16 @@ impl WebSocketHandler for EchoHandler {
 }
 
 async fn spawn_test_server() -> u16 {
-    let router = Arc::new(Router::new().ws("/ws/echo", EchoHandler));
+    // The tokio-tungstenite test client doesn't send `Origin`; opt out of the
+    // default `OriginPolicy::SameOrigin` so this test can run.
+    let router = Arc::new(Router::new().ws_with_config(
+        "/ws/echo",
+        EchoHandler,
+        WsConfig {
+            origin_policy: OriginPolicy::AllowAny,
+            ..Default::default()
+        },
+    ));
     let middleware = Arc::new(suprnova::middleware::MiddlewareRegistry::new());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
