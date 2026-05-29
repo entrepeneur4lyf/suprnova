@@ -138,6 +138,35 @@ impl CacheStore for InMemoryCache {
         Ok(())
     }
 
+    async fn add_raw(
+        &self,
+        key: &str,
+        value: &str,
+        ttl: Option<Duration>,
+    ) -> Result<bool, FrameworkError> {
+        let pkey = self.prefixed_key(key);
+
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| FrameworkError::internal("Cache lock poisoned"))?;
+
+        // Atomic: hold the write lock across the existence check and the
+        // insert so two concurrent `add_raw` calls cannot both succeed.
+        let occupied = store.get(&pkey).map(|e| !e.is_expired()).unwrap_or(false);
+        if occupied {
+            return Ok(false);
+        }
+        store.insert(
+            pkey,
+            CacheEntry {
+                value: value.to_string(),
+                expires_at: ttl.map(|d| Instant::now() + d),
+            },
+        );
+        Ok(true)
+    }
+
     async fn has(&self, key: &str) -> Result<bool, FrameworkError> {
         let key = self.prefixed_key(key);
 

@@ -110,6 +110,41 @@ impl CacheStore for RedisCache {
         self.default_ttl
     }
 
+    async fn add_raw(
+        &self,
+        key: &str,
+        value: &str,
+        ttl: Option<Duration>,
+    ) -> Result<bool, FrameworkError> {
+        let mut conn = self.conn.clone();
+        let pkey = self.prefixed_key(key);
+
+        // Atomic via SET NX [EX ttl] — Redis writes the value only when
+        // the key does not exist. Returns the string "OK" on success and
+        // nil (Option::None) on contention.
+        let res: Option<String> = if let Some(d) = ttl {
+            redis::cmd("SET")
+                .arg(&pkey)
+                .arg(value)
+                .arg("NX")
+                .arg("EX")
+                .arg(d.as_secs())
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| FrameworkError::internal(format!("Cache add error: {e}")))?
+        } else {
+            redis::cmd("SET")
+                .arg(&pkey)
+                .arg(value)
+                .arg("NX")
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| FrameworkError::internal(format!("Cache add error: {e}")))?
+        };
+
+        Ok(res.is_some())
+    }
+
     async fn has(&self, key: &str) -> Result<bool, FrameworkError> {
         let mut conn = self.conn.clone();
         let key = self.prefixed_key(key);

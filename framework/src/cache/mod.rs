@@ -259,12 +259,18 @@ impl Cache {
     /// value was written, `false` if the key already existed (or had not
     /// yet expired).
     ///
-    /// **Not atomic** across the existence check and the write — same shape
-    /// as Laravel's `Repository::add` fallback for stores without a native
-    /// `add` (Laravel framework `Cache/Repository.php:476-490`). The
-    /// "atomic add" upgrade is a `CacheStore::add_raw` trait method using
-    /// Redis `SET NX` + an in-memory `entry().or_insert_with()`; documented
-    /// in `docs/parity/cache.md`.
+    /// **Atomic** on the built-in backends — `InMemoryCache` holds a
+    /// write-lock across the existence check + insert, `RedisCache` uses
+    /// `SET NX [EX ttl]`. Custom `CacheStore` implementations that do not
+    /// override `CacheStore::add_raw` fall back to a non-atomic
+    /// check-then-put (matching Laravel's `Repository::add` fallback in
+    /// `Cache/Repository.php:476-490` for PHP stores without a native
+    /// `add`).
+    ///
+    /// `None` ttl resolves to the configured store default — same shape
+    /// as `Cache::put`. Pass an explicit `Duration` to bypass the
+    /// default, or use `Cache::add(key, &value, None)` with no
+    /// `CACHE_DEFAULT_TTL` for "forever-unless-overwritten".
     ///
     /// # Example
     ///
@@ -278,11 +284,11 @@ impl Cache {
         value: &T,
         ttl: Option<Duration>,
     ) -> Result<bool, FrameworkError> {
-        if Self::has(key).await? {
-            return Ok(false);
-        }
-        Self::put(key, value, ttl).await?;
-        Ok(true)
+        let store = Self::store()?;
+        let json = serde_json::to_string(value)
+            .map_err(|e| FrameworkError::internal(format!("Cache serialize error: {}", e)))?;
+        let effective_ttl = ttl.or_else(|| store.default_ttl());
+        store.add_raw(key, &json, effective_ttl).await
     }
 
     /// Alias of [`Cache::remember_forever`]. Mirrors Laravel's

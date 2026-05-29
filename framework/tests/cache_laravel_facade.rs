@@ -135,6 +135,44 @@ async fn add_threads_ttl_through_to_put() {
     );
 }
 
+#[tokio::test]
+async fn add_raw_is_atomic_against_concurrent_writers_on_in_memory() {
+    // Direct CacheStore::add_raw exercise — the in-memory backend must
+    // hold its write lock across the existence check + insert. Two
+    // racing add_raw calls for the same key must yield exactly one
+    // winner.
+    let store: Arc<dyn CacheStore> = Arc::new(InMemoryCache::with_prefix("atomic-add:"));
+
+    // 32 racers attempting to write to the same key with distinct
+    // values; collect the boolean returns.
+    let mut handles = Vec::new();
+    for i in 0..32 {
+        let s = Arc::clone(&store);
+        let v = format!("racer-{i}");
+        handles.push(tokio::spawn(async move {
+            s.add_raw("contested", &v, None).await.unwrap()
+        }));
+    }
+
+    let mut wins = 0usize;
+    for h in handles {
+        if h.await.unwrap() {
+            wins += 1;
+        }
+    }
+    assert_eq!(
+        wins, 1,
+        "exactly one concurrent add_raw must win; got {wins} winners"
+    );
+
+    // The stored value must be one of the racers, not a torn write.
+    let stored = store.get_raw("contested").await.unwrap().unwrap();
+    assert!(
+        stored.starts_with("racer-"),
+        "stored value `{stored}` must be one of the racer-N values"
+    );
+}
+
 // --- Cache::sear (alias of remember_forever) -----------------------------
 
 #[tokio::test]

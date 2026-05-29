@@ -36,6 +36,31 @@ pub trait CacheStore: Send + Sync {
         ttl: Option<Duration>,
     ) -> Result<(), FrameworkError>;
 
+    /// Atomic "store if not present" — write `value` for `key` only when
+    /// no value is currently present (or the existing value has
+    /// expired). Returns `true` if the value was written, `false` if the
+    /// key was already occupied.
+    ///
+    /// `None` ttl means **no expiration**, same contract as
+    /// [`CacheStore::put_raw`].
+    ///
+    /// The default implementation does a non-atomic check-then-put for
+    /// custom stores; built-in backends (`InMemoryCache`, `RedisCache`)
+    /// override with their native atomic primitive (`entry()` /
+    /// `SET NX EX`).
+    async fn add_raw(
+        &self,
+        key: &str,
+        value: &str,
+        ttl: Option<Duration>,
+    ) -> Result<bool, FrameworkError> {
+        if self.has(key).await? {
+            return Ok(false);
+        }
+        self.put_raw(key, value, ttl).await?;
+        Ok(true)
+    }
+
     /// The default TTL configured for `Cache::put` / `Cache::tags_put`
     /// when callers pass `None`. The facade reads this to resolve its
     /// own default; the store itself never substitutes it. `None` means
