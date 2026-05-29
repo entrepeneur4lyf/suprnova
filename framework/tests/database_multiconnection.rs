@@ -391,6 +391,7 @@ async fn db_facade_named_connection_escapes() {
     DB::statement_on(
         "aux_warehouse",
         "CREATE TABLE t12_aux (id INTEGER PRIMARY KEY, label TEXT NOT NULL)",
+        Vec::<sea_orm::Value>::new(),
     )
     .await
     .unwrap();

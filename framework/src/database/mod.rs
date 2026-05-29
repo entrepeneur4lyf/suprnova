@@ -41,6 +41,7 @@ pub mod connection;
 pub mod connection_registry;
 pub mod db_facade;
 pub mod dynamic_row;
+pub mod events;
 pub mod identifier;
 pub mod model;
 pub mod query_builder;
@@ -48,13 +49,17 @@ pub mod route_binding;
 pub mod testing;
 pub mod transaction;
 
-pub use config::{DatabaseConfig, DatabaseConfigBuilder, DatabaseType};
+pub use config::{DatabaseConfig, DatabaseConfigBuilder, DatabaseType, UrlSource};
 pub use connection::DbConnection;
 pub use connection_registry::{
     ConnectionRegistry, PRIMARY_CONNECTION_NAME, READ_REPLICA_CONNECTION_NAME,
 };
 pub use db_facade::DbTableBuilder;
 pub use dynamic_row::DynamicRow;
+pub use events::{
+    ConnectionEstablished, DatabaseBusy, QueryExecuted, QueryListener, ReadWriteType,
+    TransactionBeginning, TransactionCommitted, TransactionRolledBack,
+};
 pub use identifier::{validate_identifier, validate_sql_operator};
 pub use model::{EntityExt, EntityExtMut};
 pub use query_builder::QueryBuilder;

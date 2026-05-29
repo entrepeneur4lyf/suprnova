@@ -38,7 +38,22 @@ use crate::database::dynamic_row::DynamicRow;
 use crate::eloquent::Collection;
 use crate::eloquent::attrs::Attrs;
 use crate::eloquent::builder::Direction;
-use sea_orm::{DbBackend, FromQueryResult, JsonValue, Statement, Value as SeaValue};
+use sea_orm::{DbBackend, JsonValue, Statement, Value as SeaValue};
+
+/// Materialise a SeaORM `QueryResult` as a [`DynamicRow`]. Mirrors the
+/// shape `JsonValue::find_by_statement` produces (a JSON object per
+/// row) but goes through the executor's instrumented `query_all` /
+/// `query_one` so QueryExecuted observation works. Returns `None`
+/// when the row doesn't parse as an object — matching the prior
+/// `filter_map` behaviour on `JsonValue`.
+fn query_result_to_dynamic_row(qr: &sea_orm::QueryResult) -> Option<DynamicRow> {
+    use sea_orm::FromQueryResult;
+    let v = JsonValue::from_query_result(qr, "").ok()?;
+    match v {
+        serde_json::Value::Object(map) => Some(DynamicRow::from_map(map)),
+        _ => None,
+    }
+}
 
 /// Standalone query builder returned by
 /// [`DB::table(name)`](crate::DB::table). Mirrors the where / order /
@@ -164,19 +179,12 @@ impl DbTableBuilder {
     }
 
     /// Execute the SELECT and return every matching row as a
-    /// [`Collection<DynamicRow>`]. Uses
-    /// [`sea_orm::JsonValue::find_by_statement`] under the hood so
-    /// column shape is discovered at runtime.
+    /// [`Collection<DynamicRow>`]. Materialises rows through the
+    /// instrumented executor helpers — emits
+    /// [`QueryExecuted`](crate::database::events::QueryExecuted) on
+    /// every call.
     pub async fn get(self) -> Result<Collection<DynamicRow>, FrameworkError> {
-        // Audit HIGH `database` #2: validate every identifier and
-        // operator before rendering SQL. Values stay parameterised by
-        // SeaORM; identifiers can't be parameterised, so the validator
-        // is the only thing standing between user input and the SQL
-        // string.
         self.validate_inputs()?;
-        // T11/T12: route through resolve_read so `DB::table` reads
-        // honour the ambient `DB::transaction` scope, the per-builder
-        // `.on(name)` override, and `__read_replica__` auto-routing.
         let exec = crate::database::transaction::ExecutorChoice::resolve_read(
             None,
             self.connection_override.as_deref(),
@@ -187,22 +195,14 @@ impl DbTableBuilder {
         let (sql, values) = self.render_select(backend);
         let stmt = Statement::from_sql_and_values(backend, &sql, values);
 
-        let rows = match &exec {
-            crate::database::transaction::ExecutorChoice::Tx(t) => {
-                JsonValue::find_by_statement(stmt).all(t.as_ref()).await
-            }
-            crate::database::transaction::ExecutorChoice::Pool(c) => {
-                JsonValue::find_by_statement(stmt).all(c.inner()).await
-            }
-        }
-        .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let rows = exec
+            .query_all(stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
 
         let dyn_rows: Vec<DynamicRow> = rows
-            .into_iter()
-            .filter_map(|v| match v {
-                serde_json::Value::Object(map) => Some(DynamicRow::from_map(map)),
-                _ => None,
-            })
+            .iter()
+            .filter_map(query_result_to_dynamic_row)
             .collect();
 
         Ok(Collection::from_vec(dyn_rows))
@@ -569,31 +569,82 @@ impl DB {
         sql: &str,
         values: impl IntoIterator<Item = SeaValue>,
     ) -> Result<Vec<DynamicRow>, FrameworkError> {
-        // T11/T12: route through resolve_read so raw selects honour
-        // the ambient `DB::transaction` scope AND `__read_replica__`
-        // auto-routing. Use `DB::select_on(name, ...)` to pin to a
-        // specific named connection.
         let exec =
             crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?;
         let backend = exec.backend();
         let stmt =
             Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());
-        let rows = match &exec {
-            crate::database::transaction::ExecutorChoice::Tx(t) => {
-                JsonValue::find_by_statement(stmt).all(t.as_ref()).await
-            }
-            crate::database::transaction::ExecutorChoice::Pool(c) => {
-                JsonValue::find_by_statement(stmt).all(c.inner()).await
-            }
-        }
-        .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let rows = exec
+            .query_all(stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(rows
             .into_iter()
-            .filter_map(|v| match v {
-                serde_json::Value::Object(map) => Some(DynamicRow::from_map(map)),
-                _ => None,
-            })
+            .filter_map(|qr| query_result_to_dynamic_row(&qr))
             .collect())
+    }
+
+    /// Run a raw SELECT and return the FIRST row (or `None`).
+    /// Mirrors Laravel's `DB::selectOne($sql, $bindings)`.
+    pub async fn select_one(
+        sql: &str,
+        values: impl IntoIterator<Item = SeaValue>,
+    ) -> Result<Option<DynamicRow>, FrameworkError> {
+        let exec =
+            crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?;
+        let backend = exec.backend();
+        let stmt =
+            Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());
+        let row = exec
+            .query_one(stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        Ok(row.as_ref().and_then(query_result_to_dynamic_row))
+    }
+
+    /// Run a raw SELECT, return the FIRST column of the FIRST row.
+    /// Mirrors Laravel's `DB::scalar($sql, $bindings)`.
+    ///
+    /// `T` must implement `sea_orm::TryGetable` — the framework
+    /// re-exports the trait at the crate root.
+    ///
+    /// ```rust,ignore
+    /// let count: i64 = DB::scalar("SELECT COUNT(*) FROM users", vec![]).await?;
+    /// let name: String = DB::scalar("SELECT name FROM users LIMIT 1", vec![]).await?;
+    /// ```
+    pub async fn scalar<T>(
+        sql: &str,
+        values: impl IntoIterator<Item = SeaValue>,
+    ) -> Result<T, FrameworkError>
+    where
+        T: sea_orm::TryGetable,
+    {
+        let exec =
+            crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?;
+        let backend = exec.backend();
+        let stmt =
+            Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());
+        let row = exec
+            .query_one(stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?
+            .ok_or_else(|| FrameworkError::database("DB::scalar: query returned no rows"))?;
+        row.try_get_by_index::<T>(0)
+            .map_err(|e| FrameworkError::database(format!("DB::scalar: {e}")))
+    }
+
+    /// Run a raw INSERT statement. Returns `true` when at least one row
+    /// was affected, `false` otherwise. Mirrors Laravel's
+    /// `DB::insert($sql, $bindings)`.
+    ///
+    /// For builder-style inserts that return the inserted PK use
+    /// [`DB::table`] + [`DbTableBuilder::insert`] instead.
+    pub async fn insert(
+        sql: &str,
+        values: impl IntoIterator<Item = SeaValue>,
+    ) -> Result<bool, FrameworkError> {
+        let rows = DB::affecting_statement(sql, values).await?;
+        Ok(rows > 0)
     }
 
     /// Run a raw UPDATE and return the number of rows affected.
@@ -614,25 +665,75 @@ impl DB {
         DB::affecting_statement(sql, values).await
     }
 
-    /// Run a DDL statement (or any statement that takes no bindings).
-    /// Discards the result — use this for `CREATE INDEX`, `ALTER
-    /// TABLE`, `VACUUM`, etc.
-    pub async fn statement(sql: &str) -> Result<(), FrameworkError> {
-        // T11/T12: route through resolve_write — DDL is a write-shape
-        // op and should never land on `__read_replica__`. Inside
-        // `DB::transaction`, the tx connection wins (transactions
-        // bypass replica auto-routing absolutely).
+    /// Run a SQL statement with bindings. Returns `true` when the
+    /// statement was accepted by the driver, `false` otherwise. The
+    /// `bindings` close the `?` / `$N` placeholders in `sql`.
+    ///
+    /// Use for DDL with bindings, or any statement that doesn't fit
+    /// the `select` / `insert` / `update` / `delete` shape. For DDL
+    /// with no bindings, [`Self::unprepared`] is the explicit form.
+    pub async fn statement(
+        sql: &str,
+        values: impl IntoIterator<Item = SeaValue>,
+    ) -> Result<bool, FrameworkError> {
+        let exec =
+            crate::database::transaction::ExecutorChoice::resolve_write(None, None, None).await?;
+        let backend = exec.backend();
+        let stmt =
+            Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());
+        exec.run(stmt)
+            .await
+            .map(|_| true)
+            .map_err(|e| FrameworkError::database(e.to_string()))
+    }
+
+    /// Run a raw, unprepared SQL statement (no placeholder binding).
+    /// Mirrors Laravel's `DB::unprepared($sql)`. The string is
+    /// executed VERBATIM — never splice user input into it.
+    ///
+    /// Necessary for DDL on backends that reject parameter-bound
+    /// statements: `CREATE INDEX`, `ALTER TABLE`, `VACUUM`, etc.
+    pub async fn unprepared(sql: &str) -> Result<bool, FrameworkError> {
         use sea_orm::ConnectionTrait;
         let exec =
             crate::database::transaction::ExecutorChoice::resolve_write(None, None, None).await?;
-        match &exec {
+        // Emit QueryExecuted for unprepared statements as well — they
+        // are still queries from the observer's perspective.
+        if super::events::is_dispatching() || !super::events::query_observation_active() {
+            return match &exec {
+                crate::database::transaction::ExecutorChoice::Tx(t) => {
+                    t.execute_unprepared(sql).await
+                }
+                crate::database::transaction::ExecutorChoice::Pool(c) => {
+                    c.inner().execute_unprepared(sql).await
+                }
+            }
+            .map(|_| true)
+            .map_err(|e| FrameworkError::database(e.to_string()));
+        }
+        let start = std::time::Instant::now();
+        let res = match &exec {
             crate::database::transaction::ExecutorChoice::Tx(t) => t.execute_unprepared(sql).await,
             crate::database::transaction::ExecutorChoice::Pool(c) => {
                 c.inner().execute_unprepared(sql).await
             }
-        }
-        .map(|_| ())
-        .map_err(|e| FrameworkError::database(e.to_string()))
+        };
+        let elapsed = start.elapsed();
+        let result_for_event: Result<(), String> = match &res {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        };
+        let event = super::events::QueryExecuted {
+            sql: sql.to_string(),
+            bindings: vec![],
+            time: elapsed,
+            connection_name: super::PRIMARY_CONNECTION_NAME.to_string(),
+            read_write_type: Some(super::events::ReadWriteType::Write),
+            result: result_for_event,
+        };
+        super::transaction::emit_query_executed(event).await;
+        res.map(|_| true)
+            .map_err(|e| FrameworkError::database(e.to_string()))
     }
 
     /// Run a raw statement that produces a `rows_affected` result.
@@ -685,21 +786,13 @@ impl DB {
         let backend = exec.backend();
         let stmt =
             Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());
-        let rows = match &exec {
-            crate::database::transaction::ExecutorChoice::Tx(t) => {
-                JsonValue::find_by_statement(stmt).all(t.as_ref()).await
-            }
-            crate::database::transaction::ExecutorChoice::Pool(c) => {
-                JsonValue::find_by_statement(stmt).all(c.inner()).await
-            }
-        }
-        .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let rows = exec
+            .query_all(stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(rows
             .into_iter()
-            .filter_map(|v| match v {
-                serde_json::Value::Object(map) => Some(DynamicRow::from_map(map)),
-                _ => None,
-            })
+            .filter_map(|qr| query_result_to_dynamic_row(&qr))
             .collect())
     }
 
@@ -707,24 +800,24 @@ impl DB {
     /// named connection. Useful for backend-specific DDL on a read
     /// replica (e.g. `CREATE INDEX` on a follower that's been promoted
     /// to standalone).
-    pub async fn statement_on(conn_name: &str, sql: &str) -> Result<(), FrameworkError> {
-        use sea_orm::ConnectionTrait;
-        // resolve_write — DDL is write-shape; the override pins it to
-        // the named connection but in-tx semantics still win.
+    pub async fn statement_on(
+        conn_name: &str,
+        sql: &str,
+        values: impl IntoIterator<Item = SeaValue>,
+    ) -> Result<bool, FrameworkError> {
         let exec = crate::database::transaction::ExecutorChoice::resolve_write(
             None,
             Some(conn_name),
             None,
         )
         .await?;
-        match &exec {
-            crate::database::transaction::ExecutorChoice::Tx(t) => t.execute_unprepared(sql).await,
-            crate::database::transaction::ExecutorChoice::Pool(c) => {
-                c.inner().execute_unprepared(sql).await
-            }
-        }
-        .map(|_| ())
-        .map_err(|e| FrameworkError::database(e.to_string()))
+        let backend = exec.backend();
+        let stmt =
+            Statement::from_sql_and_values(backend, sql, values.into_iter().collect::<Vec<_>>());
+        exec.run(stmt)
+            .await
+            .map(|_| true)
+            .map_err(|e| FrameworkError::database(e.to_string()))
     }
 
     /// Phase 10C T12 — `DB::affecting_statement` variant pinned to the
@@ -749,5 +842,258 @@ impl DB {
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(result.rows_affected())
+    }
+}
+
+// ---- Observability ------------------------------------------------------
+
+impl DB {
+    /// Register a `Fn(&QueryExecuted)` listener that fires after every
+    /// query routed through the instrumented executor helpers. Mirrors
+    /// Laravel's `DB::listen(function (QueryExecuted $event) { ... })`.
+    ///
+    /// Coverage today: every raw helper on this facade
+    /// (`select`/`select_one`/`scalar`/`insert`/`update`/`delete`/
+    /// `statement`/`affecting_statement`/`unprepared`) and every
+    /// terminal method on [`DbTableBuilder`]. The Eloquent ORM
+    /// execution path matches the executor's `Tx`/`Pool` arms directly
+    /// today; adopting the helpers (and therefore observation) is
+    /// tracked on the Eloquent module.
+    ///
+    /// Listeners run synchronously inside the executor helper. A
+    /// failing or slow listener WILL slow the query — keep them light
+    /// and non-blocking. The complementary
+    /// [`EventFacade::listen::<QueryExecuted, _>(...)`](crate::EventFacade::listen)
+    /// path runs through `dispatch_best_effort` and tolerates errors;
+    /// prefer it for anything that can fail.
+    ///
+    /// Re-entrancy: a listener that itself issues a database query
+    /// will NOT re-fire `QueryExecuted` for that nested query — the
+    /// inner call short-circuits to skip emission.
+    pub fn listen<F>(callback: F) -> Result<(), FrameworkError>
+    where
+        F: Fn(&crate::database::events::QueryExecuted) + Send + Sync + 'static,
+    {
+        let mut reg = crate::lock::write(crate::database::events::listeners())?;
+        reg.listeners.push(std::sync::Arc::new(callback));
+        Ok(())
+    }
+
+    /// Remove every `DB::listen` callback. Does NOT touch
+    /// `EventFacade::listen` listeners — those go through
+    /// [`EventFacade::forget`](crate::EventFacade) (the dispatcher's
+    /// per-event forget surface).
+    pub fn flush_listeners() -> Result<(), FrameworkError> {
+        let mut reg = crate::lock::write(crate::database::events::listeners())?;
+        reg.listeners.clear();
+        Ok(())
+    }
+
+    /// Enable the in-memory query log. Every query that fires
+    /// [`QueryExecuted`](crate::database::events::QueryExecuted) will
+    /// be appended to a buffer drainable via [`Self::get_query_log`].
+    ///
+    /// **The buffer is unbounded**: every captured query grows it.
+    /// Use [`Self::flush_query_log`] periodically — or
+    /// [`Self::disable_query_log`] when done — to release memory.
+    pub fn enable_query_log() -> Result<(), FrameworkError> {
+        let mut log = crate::database::events::query_log()
+            .lock()
+            .map_err(|e| FrameworkError::internal(format!("query_log lock poisoned: {e}")))?;
+        log.enabled = true;
+        Ok(())
+    }
+
+    /// Disable the in-memory query log. Existing buffered entries are
+    /// retained; call [`Self::flush_query_log`] to drop them. Mirrors
+    /// Laravel's `DB::disableQueryLog`.
+    pub fn disable_query_log() -> Result<(), FrameworkError> {
+        let mut log = crate::database::events::query_log()
+            .lock()
+            .map_err(|e| FrameworkError::internal(format!("query_log lock poisoned: {e}")))?;
+        log.enabled = false;
+        Ok(())
+    }
+
+    /// True when the query log is currently active. Mirrors Laravel's
+    /// `DB::logging()`.
+    pub fn logging() -> bool {
+        crate::database::events::query_log()
+            .lock()
+            .map(|l| l.enabled)
+            .unwrap_or(false)
+    }
+
+    /// Snapshot the captured query log. Returns a `Vec` of every
+    /// `QueryExecuted` event since the log was enabled (or last
+    /// flushed). Does NOT drain the buffer — call
+    /// [`Self::flush_query_log`] to clear it.
+    pub fn get_query_log() -> Result<Vec<crate::database::events::QueryExecuted>, FrameworkError> {
+        let log = crate::database::events::query_log()
+            .lock()
+            .map_err(|e| FrameworkError::internal(format!("query_log lock poisoned: {e}")))?;
+        Ok(log.entries.clone())
+    }
+
+    /// Drop every captured entry from the query log. The log stays
+    /// enabled — new queries will still be appended. Mirrors Laravel's
+    /// `DB::flushQueryLog`.
+    pub fn flush_query_log() -> Result<(), FrameworkError> {
+        let mut log = crate::database::events::query_log()
+            .lock()
+            .map_err(|e| FrameworkError::internal(format!("query_log lock poisoned: {e}")))?;
+        log.entries.clear();
+        Ok(())
+    }
+}
+
+// ---- Connection metadata ------------------------------------------------
+
+impl DB {
+    /// Return the database name extracted from the configured URL.
+    /// Mirrors Laravel's `DB::connection()->getDatabaseName()` —
+    /// returns the path component of the URL ("forge" for
+    /// `postgres://u:p@host/forge"`, the file name for SQLite paths).
+    ///
+    /// Errors when [`DB::init`] has not been called.
+    pub fn database_name() -> Result<String, FrameworkError> {
+        let cfg = crate::Config::get::<crate::database::DatabaseConfig>().ok_or_else(|| {
+            FrameworkError::internal(
+                "DatabaseConfig not registered; call Config::register(DatabaseConfig::from_env()) first",
+            )
+        })?;
+        Ok(parse_database_name(&cfg.url))
+    }
+
+    /// Return the driver name as a lower-case kebab-style string:
+    /// `"postgres"`, `"mysql"`, `"sqlite"`. Mirrors Laravel's
+    /// `DB::connection()->getDriverName()`.
+    pub fn driver_name() -> Result<&'static str, FrameworkError> {
+        let cfg = crate::Config::get::<crate::database::DatabaseConfig>().ok_or_else(|| {
+            FrameworkError::internal(
+                "DatabaseConfig not registered; call Config::register(DatabaseConfig::from_env()) first",
+            )
+        })?;
+        Ok(match cfg.database_type() {
+            crate::database::DatabaseType::Postgres => "postgres",
+            crate::database::DatabaseType::Mysql => "mysql",
+            crate::database::DatabaseType::Sqlite => "sqlite",
+            crate::database::DatabaseType::Unknown => "unknown",
+        })
+    }
+
+    /// Return the human-readable driver title — `"Postgres"`, `"MySQL"`,
+    /// `"SQLite"`, `"Unknown"`. Mirrors Laravel's
+    /// `DB::connection()->getDriverTitle()`.
+    pub fn driver_title() -> Result<&'static str, FrameworkError> {
+        let cfg = crate::Config::get::<crate::database::DatabaseConfig>().ok_or_else(|| {
+            FrameworkError::internal(
+                "DatabaseConfig not registered; call Config::register(DatabaseConfig::from_env()) first",
+            )
+        })?;
+        Ok(match cfg.database_type() {
+            crate::database::DatabaseType::Postgres => "Postgres",
+            crate::database::DatabaseType::Mysql => "MySQL",
+            crate::database::DatabaseType::Sqlite => "SQLite",
+            crate::database::DatabaseType::Unknown => "Unknown",
+        })
+    }
+
+    /// Query the live database for its server version string. Issues
+    /// a backend-specific introspection query:
+    ///
+    /// - Postgres / MySQL: `SELECT VERSION()`.
+    /// - SQLite: `SELECT sqlite_version()`.
+    ///
+    /// Mirrors Laravel's `DB::connection()->getServerVersion()`.
+    pub async fn server_version() -> Result<String, FrameworkError> {
+        let exec =
+            crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?;
+        let backend = exec.backend();
+        let sql = match backend {
+            DbBackend::Postgres | DbBackend::MySql => "SELECT VERSION() AS v",
+            DbBackend::Sqlite => "SELECT sqlite_version() AS v",
+        };
+        let stmt = Statement::from_sql_and_values(backend, sql, Vec::<SeaValue>::new());
+        let row = exec
+            .query_one(stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?
+            .ok_or_else(|| FrameworkError::database("DB::server_version: query returned no row"))?;
+        row.try_get::<String>("", "v")
+            .map_err(|e| FrameworkError::database(format!("DB::server_version: {e}")))
+    }
+}
+
+/// Extract the database name from a SeaORM-style connection URL.
+/// Used by [`DB::database_name`]; pulled out as a free function for
+/// the unit test.
+///
+/// - `postgres://u:p@host/forge?sslmode=require` → `"forge"`
+/// - `mysql://u:p@host:3306/laravel` → `"laravel"`
+/// - `sqlite://./database.db` → `"./database.db"`
+/// - `sqlite::memory:` → `":memory:"`
+fn parse_database_name(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("sqlite://") {
+        return rest.split('?').next().unwrap_or(rest).to_string();
+    }
+    if let Some(rest) = url.strip_prefix("sqlite:") {
+        return rest.split('?').next().unwrap_or(rest).to_string();
+    }
+    // For postgres / mysql, the path component starts at the FIRST
+    // single-slash AFTER the host segment. Skip past the scheme + the
+    // authority `//user:pass@host:port/`, then take everything up to
+    // the query string.
+    if let Some(after_scheme) = url.split_once("://") {
+        let after = after_scheme.1;
+        if let Some((_, after_host)) = after.split_once('/') {
+            return after_host
+                .split('?')
+                .next()
+                .unwrap_or(after_host)
+                .to_string();
+        }
+    }
+    String::new()
+}
+
+#[cfg(test)]
+mod parse_database_name_tests {
+    use super::parse_database_name;
+
+    #[test]
+    fn postgres_url() {
+        assert_eq!(
+            parse_database_name("postgres://user:pass@localhost:5432/myapp"),
+            "myapp"
+        );
+        assert_eq!(
+            parse_database_name("postgres://localhost/db?sslmode=require"),
+            "db"
+        );
+    }
+
+    #[test]
+    fn mysql_url() {
+        assert_eq!(
+            parse_database_name("mysql://root:secret@127.0.0.1:3306/laravel"),
+            "laravel"
+        );
+    }
+
+    #[test]
+    fn sqlite_file() {
+        assert_eq!(
+            parse_database_name("sqlite://./database.db"),
+            "./database.db"
+        );
+        assert_eq!(parse_database_name("sqlite::memory:"), ":memory:");
+        assert_eq!(parse_database_name("sqlite://./db?mode=rwc"), "./db");
+    }
+
+    #[test]
+    fn unknown_url() {
+        assert_eq!(parse_database_name(""), "");
+        assert_eq!(parse_database_name("not a url"), "");
     }
 }

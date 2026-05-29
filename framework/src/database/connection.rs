@@ -69,9 +69,27 @@ impl DbConnection {
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
 
-        Ok(Self {
+        let result = Self {
             inner: Arc::new(conn),
-        })
+        };
+        // Fire ConnectionEstablished. The default pool reaches this
+        // path with __primary__ semantics; named pools also flow
+        // through here from ConnectionRegistry::register. Listeners
+        // observe the connection name; failures are logged-only —
+        // a listener bug must not block the pool from coming up.
+        let event = crate::database::events::ConnectionEstablished {
+            connection_name: crate::database::PRIMARY_CONNECTION_NAME.to_string(),
+        };
+        if crate::EventFacade::has_listeners::<crate::database::events::ConnectionEstablished>()
+            && let Err(e) = crate::EventFacade::dispatch_best_effort(event).await
+        {
+            tracing::warn!(
+                target: "suprnova::database",
+                error = %e,
+                "ConnectionEstablished listener returned error; ignoring",
+            );
+        }
+        Ok(result)
     }
 
     /// Wrap an existing SeaORM `DatabaseConnection` as a `DbConnection`.

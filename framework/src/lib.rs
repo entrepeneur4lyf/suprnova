@@ -88,9 +88,11 @@ pub use data::{
     current_include_set, scope_include_set, with_include_overrides,
 };
 pub use database::{
-    AutoRouteBinding, ConnectionRegistry, DB, Database, DatabaseConfig, DatabaseType, DbConnection,
-    DbTableBuilder, DynamicRow, EntityExt, EntityExtMut, PRIMARY_CONNECTION_NAME,
-    READ_REPLICA_CONNECTION_NAME, RouteBinding, Transaction, TxHandle,
+    AutoRouteBinding, ConnectionEstablished, ConnectionRegistry, DB, Database, DatabaseBusy,
+    DatabaseConfig, DatabaseType, DbConnection, DbTableBuilder, DynamicRow, EntityExt,
+    EntityExtMut, PRIMARY_CONNECTION_NAME, QueryExecuted, QueryListener,
+    READ_REPLICA_CONNECTION_NAME, ReadWriteType, RouteBinding, Transaction, TransactionBeginning,
+    TransactionCommitted, TransactionRolledBack, TxHandle, UrlSource,
 };
 pub use torii_integration::{
     LockoutStatus, Session, SessionToken, ToriiConfig, User, UserId, init_torii,

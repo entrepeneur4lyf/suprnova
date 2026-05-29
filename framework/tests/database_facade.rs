@@ -283,7 +283,7 @@ async fn db_select_projects_named_columns() {
 #[tokio::test]
 async fn db_statement_runs_ddl() {
     let _db = setup_audit_table().await;
-    DB::statement("CREATE INDEX idx_audit_actor ON audit_log(actor_id)")
+    DB::unprepared("CREATE INDEX idx_audit_actor ON audit_log(actor_id)")
         .await
         .unwrap();
 

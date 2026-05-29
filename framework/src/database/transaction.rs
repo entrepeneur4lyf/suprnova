@@ -281,7 +281,9 @@ impl ExecutorChoice {
     }
 
     /// Execute a SeaORM-built `Select<E>` and materialise every
-    /// matching row into `E::Model`.
+    /// matching row into `E::Model`. Emits
+    /// [`QueryExecuted`](crate::database::events::QueryExecuted) when
+    /// observation is active.
     #[doc(hidden)]
     pub async fn select_all<E>(
         &self,
@@ -290,14 +292,34 @@ impl ExecutorChoice {
     where
         E: sea_orm::EntityTrait,
     {
-        match self {
+        if super::events::is_dispatching() || !super::events::query_observation_active() {
+            return match self {
+                ExecutorChoice::Tx(t) => q.all(t.as_ref()).await,
+                ExecutorChoice::Pool(c) => q.all(c.inner()).await,
+            };
+        }
+        let stmt = sea_orm::QueryTrait::build(&q, self.backend());
+        let (sql, bindings) = (stmt.sql.clone(), stmt_bindings_strings(&stmt));
+        let start = std::time::Instant::now();
+        let res = match self {
             ExecutorChoice::Tx(t) => q.all(t.as_ref()).await,
             ExecutorChoice::Pool(c) => q.all(c.inner()).await,
-        }
+        };
+        let elapsed = start.elapsed();
+        finish_query_event(
+            sql,
+            bindings,
+            elapsed,
+            super::events::ReadWriteType::Read,
+            &res,
+        )
+        .await;
+        res
     }
 
     /// Execute a SeaORM-built `Select<E>` and materialise at most one
-    /// row into `E::Model`.
+    /// row into `E::Model`. See [`Self::select_all`] for the
+    /// observability contract.
     #[doc(hidden)]
     pub async fn select_one<E>(
         &self,
@@ -306,15 +328,34 @@ impl ExecutorChoice {
     where
         E: sea_orm::EntityTrait,
     {
-        match self {
+        if super::events::is_dispatching() || !super::events::query_observation_active() {
+            return match self {
+                ExecutorChoice::Tx(t) => q.one(t.as_ref()).await,
+                ExecutorChoice::Pool(c) => q.one(c.inner()).await,
+            };
+        }
+        let stmt = sea_orm::QueryTrait::build(&q, self.backend());
+        let (sql, bindings) = (stmt.sql.clone(), stmt_bindings_strings(&stmt));
+        let start = std::time::Instant::now();
+        let res = match self {
             ExecutorChoice::Tx(t) => q.one(t.as_ref()).await,
             ExecutorChoice::Pool(c) => q.one(c.inner()).await,
-        }
+        };
+        let elapsed = start.elapsed();
+        finish_query_event(
+            sql,
+            bindings,
+            elapsed,
+            super::events::ReadWriteType::Read,
+            &res,
+        )
+        .await;
+        res
     }
 
     /// Execute a SeaORM-built `Select<E>` as a `COUNT(*)` and return the
-    /// total matching row count. Routes through the active transaction or
-    /// the pool like [`Self::select_all`].
+    /// total matching row count. See [`Self::select_all`] for the
+    /// observability contract.
     #[doc(hidden)]
     pub async fn select_count<E>(&self, q: sea_orm::Select<E>) -> Result<u64, sea_orm::DbErr>
     where
@@ -322,47 +363,143 @@ impl ExecutorChoice {
         E::Model: Send + Sync,
     {
         use sea_orm::PaginatorTrait;
-        match self {
+        if super::events::is_dispatching() || !super::events::query_observation_active() {
+            return match self {
+                ExecutorChoice::Tx(t) => q.count(t.as_ref()).await,
+                ExecutorChoice::Pool(c) => q.count(c.inner()).await,
+            };
+        }
+        let stmt = sea_orm::QueryTrait::build(&q, self.backend());
+        let (sql, bindings) = (stmt.sql.clone(), stmt_bindings_strings(&stmt));
+        let start = std::time::Instant::now();
+        let res = match self {
             ExecutorChoice::Tx(t) => q.count(t.as_ref()).await,
             ExecutorChoice::Pool(c) => q.count(c.inner()).await,
-        }
+        };
+        let elapsed = start.elapsed();
+        finish_query_event(
+            sql,
+            bindings,
+            elapsed,
+            super::events::ReadWriteType::Read,
+            &res,
+        )
+        .await;
+        res
     }
 
     /// Execute a prepared `Statement` that produces rows.
+    ///
+    /// Emits [`QueryExecuted`](crate::database::events::QueryExecuted)
+    /// to every registered listener — `DB::listen` callback, dispatcher
+    /// listener, and the in-memory query log. Re-entrancy guarded:
+    /// a listener that re-queries does not re-fire QueryExecuted.
     #[doc(hidden)]
     pub async fn query_all(
         &self,
         stmt: sea_orm::Statement,
     ) -> Result<Vec<sea_orm::QueryResult>, sea_orm::DbErr> {
-        match self {
-            ExecutorChoice::Tx(t) => t.query_all(stmt).await,
-            ExecutorChoice::Pool(c) => c.inner().query_all(stmt).await,
-        }
+        self.run_instrumented(stmt, Some(super::events::ReadWriteType::Read), |s, e| {
+            Box::pin(async move {
+                match e {
+                    ExecutorChoice::Tx(t) => t.query_all(s).await,
+                    ExecutorChoice::Pool(c) => c.inner().query_all(s).await,
+                }
+            })
+        })
+        .await
     }
 
     /// Execute a prepared `Statement` that produces at most one row.
+    /// See [`Self::query_all`] for the observability contract.
     #[doc(hidden)]
     pub async fn query_one(
         &self,
         stmt: sea_orm::Statement,
     ) -> Result<Option<sea_orm::QueryResult>, sea_orm::DbErr> {
-        match self {
-            ExecutorChoice::Tx(t) => t.query_one(stmt).await,
-            ExecutorChoice::Pool(c) => c.inner().query_one(stmt).await,
-        }
+        self.run_instrumented(stmt, Some(super::events::ReadWriteType::Read), |s, e| {
+            Box::pin(async move {
+                match e {
+                    ExecutorChoice::Tx(t) => t.query_one(s).await,
+                    ExecutorChoice::Pool(c) => c.inner().query_one(s).await,
+                }
+            })
+        })
+        .await
     }
 
     /// Execute a prepared `Statement` that doesn't produce rows
-    /// (INSERT / UPDATE / DELETE / DDL).
+    /// (INSERT / UPDATE / DELETE / DDL). See [`Self::query_all`] for
+    /// the observability contract.
     #[doc(hidden)]
     pub async fn run(
         &self,
         stmt: sea_orm::Statement,
     ) -> Result<sea_orm::ExecResult, sea_orm::DbErr> {
-        match self {
-            ExecutorChoice::Tx(t) => t.execute(stmt).await,
-            ExecutorChoice::Pool(c) => c.inner().execute(stmt).await,
+        self.run_instrumented(stmt, Some(super::events::ReadWriteType::Write), |s, e| {
+            Box::pin(async move {
+                match e {
+                    ExecutorChoice::Tx(t) => t.execute(s).await,
+                    ExecutorChoice::Pool(c) => c.inner().execute(s).await,
+                }
+            })
+        })
+        .await
+    }
+
+    /// Generic helper that runs a Statement and emits `QueryExecuted`
+    /// to every registered observer. Shared by `query_all`, `query_one`,
+    /// and `run` so the dispatch shape is in exactly one place.
+    ///
+    /// Listener errors are observational: the closure's result is
+    /// returned to the caller verbatim regardless of listener outcome.
+    /// Re-entrancy is guarded — listeners that themselves run queries
+    /// will not re-fire QueryExecuted.
+    async fn run_instrumented<F, T>(
+        &self,
+        stmt: sea_orm::Statement,
+        rw: Option<super::events::ReadWriteType>,
+        f: F,
+    ) -> Result<T, sea_orm::DbErr>
+    where
+        F: for<'a> FnOnce(
+            sea_orm::Statement,
+            &'a Self,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<T, sea_orm::DbErr>> + Send + 'a>,
+        >,
+    {
+        // Fast path: if no observer is active OR we're already inside
+        // a listener dispatch, skip the SQL/binding capture entirely.
+        if super::events::is_dispatching() || !super::events::query_observation_active() {
+            return f(stmt, self).await;
         }
+        // Capture SQL/bindings BEFORE the call (the Statement is moved
+        // into `f`). Cloning here is the cost of observability — gated
+        // by the active-observer check above.
+        let sql = stmt.sql.clone();
+        let bindings: Vec<String> = stmt
+            .values
+            .as_ref()
+            .map(|v| v.0.iter().map(|val| format!("{val:?}")).collect())
+            .unwrap_or_default();
+        let start = std::time::Instant::now();
+        let res = f(stmt, self).await;
+        let elapsed = start.elapsed();
+        let result_for_event: Result<(), String> = match &res {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        };
+        let event = super::events::QueryExecuted {
+            sql,
+            bindings,
+            time: elapsed,
+            connection_name: super::PRIMARY_CONNECTION_NAME.to_string(),
+            read_write_type: rw,
+            result: result_for_event,
+        };
+        emit_query_executed(event).await;
+        res
     }
 
     /// Insert an active model. Routes through the active transaction
@@ -474,6 +611,9 @@ impl Transaction {
     /// that's the correct behaviour, because committing while
     /// another part of the program might still write through the
     /// same `TxHandle` would create a race.
+    ///
+    /// Fires [`TransactionCommitted`](super::events::TransactionCommitted)
+    /// after a successful commit.
     pub async fn commit(self) -> Result<(), FrameworkError> {
         let tx = Arc::try_unwrap(self.inner).map_err(|_| {
             FrameworkError::internal(
@@ -483,12 +623,20 @@ impl Transaction {
         })?;
         tx.commit()
             .await
-            .map_err(|e| FrameworkError::database(e.to_string()))
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        emit_tx_event(super::events::TransactionCommitted {
+            connection_name: super::PRIMARY_CONNECTION_NAME.to_string(),
+        })
+        .await;
+        Ok(())
     }
 
     /// Roll back the manual transaction returned by
     /// [`DB::begin_transaction`]. Same `Arc::try_unwrap` constraint
     /// as [`Self::commit`].
+    ///
+    /// Fires [`TransactionRolledBack`](super::events::TransactionRolledBack)
+    /// after a successful rollback.
     pub async fn rollback(self) -> Result<(), FrameworkError> {
         let tx = Arc::try_unwrap(self.inner).map_err(|_| {
             FrameworkError::internal(
@@ -498,7 +646,12 @@ impl Transaction {
         })?;
         tx.rollback()
             .await
-            .map_err(|e| FrameworkError::database(e.to_string()))
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        emit_tx_event(super::events::TransactionRolledBack {
+            connection_name: super::PRIMARY_CONNECTION_NAME.to_string(),
+        })
+        .await;
+        Ok(())
     }
 }
 
@@ -570,6 +723,12 @@ impl DB {
             .begin()
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
+        // BEGIN succeeded — fire TransactionBeginning before the
+        // closure runs so listeners observe the open tx.
+        emit_tx_event(super::events::TransactionBeginning {
+            connection_name: super::PRIMARY_CONNECTION_NAME.to_string(),
+        })
+        .await;
         let tx_arc = Arc::new(tx);
 
         let transaction = Transaction {
@@ -599,6 +758,10 @@ impl DB {
                 tx.commit()
                     .await
                     .map_err(|e| FrameworkError::database(e.to_string()))?;
+                emit_tx_event(super::events::TransactionCommitted {
+                    connection_name: super::PRIMARY_CONNECTION_NAME.to_string(),
+                })
+                .await;
                 Ok(value)
             }
             Err(e) => {
@@ -623,6 +786,11 @@ impl DB {
                                  the caller. Common cause: connection lost between \
                                  BEGIN and the failing query.",
                             );
+                        } else {
+                            emit_tx_event(super::events::TransactionRolledBack {
+                                connection_name: super::PRIMARY_CONNECTION_NAME.to_string(),
+                            })
+                            .await;
                         }
                     }
                     Err(arc) => {
@@ -669,6 +837,10 @@ impl DB {
             .begin()
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
+        emit_tx_event(super::events::TransactionBeginning {
+            connection_name: super::PRIMARY_CONNECTION_NAME.to_string(),
+        })
+        .await;
         Ok(Transaction {
             inner: Arc::new(tx),
         })
@@ -735,6 +907,93 @@ impl DB {
         Err(FrameworkError::internal(
             "transaction_with_attempts: loop exited without returning",
         ))
+    }
+}
+
+/// Render every bound value of a `Statement` as a debug string. The
+/// `format!("{val:?}")` representation is the same shape used by
+/// `run_instrumented`; pulled out so `select_all`/`select_one`/
+/// `select_count` can match.
+fn stmt_bindings_strings(stmt: &sea_orm::Statement) -> Vec<String> {
+    stmt.values
+        .as_ref()
+        .map(|v| v.0.iter().map(|val| format!("{val:?}")).collect())
+        .unwrap_or_default()
+}
+
+/// Emit a `QueryExecuted` event from the captured SQL/bindings + an
+/// execution result. Used by the `select_*` helpers; the result is
+/// borrowed (not consumed) so the caller still returns it.
+async fn finish_query_event<T>(
+    sql: String,
+    bindings: Vec<String>,
+    elapsed: std::time::Duration,
+    rw: super::events::ReadWriteType,
+    res: &Result<T, sea_orm::DbErr>,
+) {
+    let result_for_event: Result<(), String> = match res {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    };
+    let event = super::events::QueryExecuted {
+        sql,
+        bindings,
+        time: elapsed,
+        connection_name: super::PRIMARY_CONNECTION_NAME.to_string(),
+        read_write_type: Some(rw),
+        result: result_for_event,
+    };
+    emit_query_executed(event).await;
+}
+
+/// Fan a [`QueryExecuted`](super::events::QueryExecuted) event out to
+/// every registered observer. Three sinks:
+///
+/// 1. Direct `DB::listen(|q| { ... })` callbacks — synchronous.
+/// 2. The in-memory query log when
+///    [`DB::enable_query_log`](crate::DB::enable_query_log) is active.
+/// 3. The framework-wide [`EventDispatcher`](crate::EventDispatcher)
+///    so `EventFacade::listen::<QueryExecuted, _>(...)` works.
+///
+/// The whole call runs inside
+/// [`with_dispatching_flag`](super::events::with_dispatching_flag) so
+/// any listener that re-queries does not re-fire QueryExecuted.
+/// Listener errors at the EventFacade layer are swallowed via
+/// [`dispatch_best_effort`](crate::EventFacade::dispatch_best_effort) —
+/// observation must never fail the query.
+pub(crate) async fn emit_query_executed(event: super::events::QueryExecuted) {
+    super::events::with_dispatching_flag(async move {
+        // (1) Direct DB::listen callbacks. Cloning the registry's
+        // listener Vec keeps the lock window tight; listeners are
+        // Arc-cloned so calling them outside the lock is safe.
+        let callbacks: Vec<super::events::QueryListener> = match super::events::listeners().read() {
+            Ok(reg) => reg.listeners.clone(),
+            Err(_) => Vec::new(),
+        };
+        for cb in callbacks {
+            cb(&event);
+        }
+        // (2) Query log.
+        if let Ok(mut log) = super::events::query_log().lock()
+            && log.enabled
+        {
+            log.entries.push(event.clone());
+        }
+        // (3) EventFacade dispatch. Best-effort — a logging listener
+        // returning Err must not fail the query.
+        if crate::EventFacade::has_listeners::<super::events::QueryExecuted>() {
+            let _ = crate::EventFacade::dispatch_best_effort(event).await;
+        }
+    })
+    .await;
+}
+
+/// Fire a transaction-lifecycle event through `EventFacade`. Best-effort
+/// dispatch — a failing listener does not abort the transaction. The
+/// no-listeners short-circuit makes this a no-op in the common case.
+async fn emit_tx_event<E: crate::Event>(event: E) {
+    if crate::EventFacade::has_listeners::<E>() {
+        let _ = crate::EventFacade::dispatch_best_effort(event).await;
     }
 }
 
