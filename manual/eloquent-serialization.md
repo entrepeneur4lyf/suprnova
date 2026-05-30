@@ -319,7 +319,7 @@ pub async fn show(req: Request) -> Response {
         .map_err(|_| suprnova::FrameworkError::param_parse("id", "i64"))?;
     let user = User::find_or_fail(id).await?;
     let viewer = Auth::user_as::<User>().await?;
-    let viewing_self = viewer.as_deref().map(|v| v.id) == Some(user.id);
+    let viewing_self = viewer.as_ref().map(|v| v.id) == Some(user.id);
 
     let body = if viewing_self {
         user.to_array()

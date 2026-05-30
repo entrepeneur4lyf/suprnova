@@ -521,23 +521,24 @@ assert!(published.is_public);
 Reach for `make` whenever the test doesn't care that the row exists.
 Reach for `create` when you'll query the row back, when a foreign key
 needs a real id, or when you're populating fixtures for a sub-system
-that reads the DB. Note that `create_many` persists sequentially — if a
-later insert fails, the prior inserts are NOT rolled back. `create` /
-`create_many` use the framework's bound `DB::connection()` directly,
-so they do **not** participate in an ambient `DB::transaction(...)`
-scope. If you need atomicity across a batch of factory inserts, drop
-down to `make_many` + `persist_via_seaorm` against the transaction
-handle:
+that reads the DB. Note that `create_many` persists sequentially — if
+a later insert fails, the prior inserts are NOT rolled back. `create`
+/ `create_many` go through the `Persistable` blanket, which talks to
+the framework's bound `DB::connection()` directly — they do **not**
+join an ambient `DB::transaction(...)` scope. If you need atomicity
+across a batch of inserts, drop into the Model trait's
+`Model::create(attrs!{...})` inside the closure (that path routes
+through the same executor that honours `CURRENT_TX`):
 
 ```rust
-use suprnova::{DB, factory::persist_via_seaorm};
+use suprnova::{DB, Model, attrs};
 
-DB::transaction(|tx| Box::pin(async move {
-    for user in UserFactory::times(50).make_many() {
-        persist_via_seaorm(user, tx).await?;
-    }
-    for post in PostFactory::times(200).make_many() {
-        persist_via_seaorm(post, tx).await?;
+DB::transaction(|_tx| Box::pin(async move {
+    for i in 0..50 {
+        User::create(attrs!{
+            name: format!("user-{i}"),
+            email: format!("user-{i}@example.test"),
+        }).await?;
     }
     Ok::<_, suprnova::FrameworkError>(())
 })).await?;
