@@ -1,120 +1,184 @@
 # Actions
 
-Actions in suprnova are injectable service classes that encapsulate your application's business logic. Inspired by Laravel's single-action classes, actions promote clean code organization by separating business logic from controllers. The `#[injectable]` macro provides automatic dependency injection and singleton registration.
+An action in Suprnova is a struct with one job: hold a single piece of
+business logic behind one method. It's the Rust analogue of Laravel's
+single-action invokable controllers — `RegisterUser`, `PublishPost`,
+`ChargeInvoice`. The action lives in `src/actions/`, carries the
+`#[injectable]` attribute so the container can resolve it, and exposes
+an `execute(...)` method that controllers (and jobs, and other actions)
+call. There is no `#[action]` macro and no framework-side enforcement
+of "one method" — the shape is a convention, and `#[injectable]` is the
+machinery that makes the convention painless.
 
-## Generating Actions
+```rust
+use suprnova::{injectable, FrameworkError};
 
-The fastest way to create a new action is using the suprnova CLI:
+#[injectable]
+pub struct RegisterUserAction {
+    // Inject dependencies as fields — see "Dependencies" below
+}
+
+impl RegisterUserAction {
+    pub async fn execute(&self, email: &str) -> Result<String, FrameworkError> {
+        tracing::info!(action = "RegisterUser", email, "executed");
+        Ok(format!("registered: {email}"))
+    }
+}
+```
+
+Resolve it from a handler with `App::resolve::<RegisterUserAction>()?`
+and you've split your domain logic away from the HTTP layer without
+inventing a service-layer base class. That's the whole pattern.
+
+## Generating an action
 
 ```bash
-suprnova make:action CreateUser
+suprnova make:action RegisterUser
 ```
 
-This command will:
-1. Create `src/actions/create_user.rs` with an action stub
-2. Update `src/actions/mod.rs` to export the new action
+The CLI normalises the name to PascalCase, appends `Action` if the
+suffix is missing, then snake-cases the filename. So:
 
-```bash Examples
-# Creates create_user.rs in src/actions/
-suprnova make:action CreateUser
+| `make:action <Name>` | Struct name | File |
+|---|---|---|
+| `RegisterUser` | `RegisterUserAction` | `src/actions/register_user_action.rs` |
+| `SendNotification` | `SendNotificationAction` | `src/actions/send_notification_action.rs` |
+| `ProcessPayment` | `ProcessPaymentAction` | `src/actions/process_payment_action.rs` |
+| `ChargeInvoiceAction` | `ChargeInvoiceAction` | `src/actions/charge_invoice_action.rs` |
 
-# Creates send_notification.rs in src/actions/
-suprnova make:action SendNotification
+The generator writes the file and adds a `pub mod register_user_action;`
+line to `src/actions/mod.rs`. The emitted stub compiles immediately:
 
-# Action name is converted to snake_case for the file
-suprnova make:action ProcessPayment  # Creates process_payment.rs
-```
+```rust
+//! register_user_action action
 
-```rust Generated File
-//! CreateUser action
+use suprnova::{injectable, FrameworkError};
 
-use suprnova::injectable;
-
+/// RegisterUserAction
+///
+/// Single-responsibility command resolved from the container. Inject any
+/// dependencies as fields and the `#[injectable]` macro wires them at
+/// resolve time.
 #[injectable]
-pub struct CreateUserAction {
-    // Dependencies injected via container
+pub struct RegisterUserAction {
+    // Add injected dependencies as fields here, e.g.
+    // db: suprnova::DbConnection,
 }
 
-impl CreateUserAction {
-    pub fn execute(&self) {
-        // TODO: Implement action logic
+impl RegisterUserAction {
+    /// Execute the action.
+    pub async fn execute(&self) -> Result<String, FrameworkError> {
+        Ok("RegisterUserAction executed".to_string())
     }
 }
 ```
 
-## Action Structure
+The signature — `async fn execute(&self) -> Result<_, FrameworkError>` —
+is the production-safe shape: async, returning a `Result` that converts
+through `?` straight into an `HttpResponse` at the call site. The body
+is a placeholder; swap it for the real workflow.
 
-Actions are structs marked with `#[injectable]` that contain business logic:
+## The `#[injectable]` attribute
+
+`#[injectable]` is the only piece of framework machinery the action
+pattern relies on. It expands into three things:
+
+1. A `#[derive(Clone)]` on the struct (and `Default` when there are no
+   `#[inject]` fields).
+2. An `inventory::submit!` entry so boot can discover the type.
+3. An auto-registration closure that `App::singleton_if_absent` runs
+   once during `boot_services()`.
+
+The macro's contract:
+
+| Struct shape | Behaviour |
+|---|---|
+| Unit struct (`pub struct Foo;`) | Derives `Default + Clone`, registers `Default::default()` |
+| Named fields, none `#[inject]` | Derives `Default + Clone`, registers `Default::default()` |
+| Named fields with `#[inject]` | Derives `Clone` only; each `#[inject]` field is resolved from the container at boot, non-inject fields default |
+| Tuple struct | Rejected at compile time — "use named fields instead" |
+
+A resolved action is a clone of the stored singleton. The cost is one
+`Clone` per `App::resolve::<Action>()?` call, which for a unit struct or
+a struct of `Arc`-wrapped services is a handful of refcount bumps. Heavy
+state belongs behind `Arc<dyn …>` services that the action injects, not
+inside the action itself.
+
+### `#[inject]` happens at boot, not per call
+
+When the framework boots, `App::boot_services()` walks every
+`#[injectable]` registration and runs them in a fixed-point retry loop.
+Each entry tries to resolve its `#[inject]` fields from the container.
+If a dependency hasn't been registered yet, the entry defers to the next
+iteration. The loop runs until either every entry succeeds or no
+progress is made — and on failure the framework returns a structured
+error naming the unresolvable type or the cycle.
+
+The practical consequence: **`App::resolve::<MyAction>()` clones the
+already-constructed singleton**. It does not run `#[inject]` resolution
+on every call. Anything injectable that an action depends on must itself
+be registered before the action — either via its own `#[injectable]`
+attribute, or by a manual `App::bind` / `App::singleton` in your
+`bootstrap()` function. The retry loop handles inventory ordering for
+you; it does not invent missing services.
+
+## Using an action from a controller
+
+The standard handler shape: resolve, execute, render.
 
 ```rust
-use suprnova::injectable;
+use suprnova::{App, Request, Response, ResponseExt, json_response};
 
-#[injectable]
-pub struct ExampleAction {
-    // Optional: injected dependencies
-}
+use crate::actions::register_user_action::RegisterUserAction;
 
-impl ExampleAction {
-    pub fn execute(&self) -> String {
-        "Hello from ExampleAction!".to_string()
-    }
+pub async fn store(_req: Request) -> Response {
+    let action = App::resolve::<RegisterUserAction>()?;
+    let result = action.execute("alice@example.com").await?;
+
+    json_response!({ "ok": true, "result": result }).status(201)
 }
 ```
 
-### The `#[injectable]` Macro
+Both `?` points work because both error types convert into
+`HttpResponse` via `From` impls — `App::resolve` returns
+`Result<T, FrameworkError>` and the framework error converter handles
+the rest. Missing service registration surfaces as a 500 with the
+service name in the structured log, not a panic. See
+[Error Model](error-model.md) for the full picture.
 
-The `#[injectable]` macro provides powerful dependency injection:
+If you'd rather avoid the `?` on the resolve — for example in a path
+that should hard-fail at boot time — `App::get::<RegisterUserAction>()`
+returns `Option<T>` and you can `.expect("registered at boot")` to
+fail loudly if you got the wiring wrong.
 
-- **Automatic registration**: Actions are automatically registered as singletons in the container
-- **Zero boilerplate**: No manual container configuration required
-- **Compile-time safety**: Type-safe dependency resolution
+## Async actions that touch the database
 
-## Using Actions in Controllers
-
-Resolve actions from the container using `App::resolve()`:
-
-```rust
-use suprnova::{App, Request, Response, json_response};
-use crate::actions::example_action::ExampleAction;
-
-pub async fn index(_req: Request) -> Response {
-    // Resolve the action from the container
-    let action = App::resolve::<ExampleAction>()?;
-
-    // Execute the action
-    let message = action.execute();
-
-    json_response!({
-        "message": message
-    })
-}
-```
-
-The `?` operator handles the case where the action isn't registered, returning an appropriate error response.
-
-## Async Actions
-
-Actions can be async for database operations and other I/O tasks:
+This is the path most actions actually take — load or write through an
+Eloquent model. Lift the body from your domain; the surface is the
+same.
 
 ```rust
-use suprnova::injectable;
-use suprnova::database::{Model, ModelMut};
-use suprnova::error::FrameworkError;
-use sea_orm::Set;
-use crate::models::todos;
+use suprnova::{attrs, injectable, FrameworkError, Model};
+
+use crate::models::todos::Todo;
 
 #[injectable]
-pub struct CreateTodoAction;
+pub struct CreateRandomTodoAction;
 
-impl CreateTodoAction {
-    pub async fn execute(&self, title: String) -> Result<todos::Model, FrameworkError> {
-        let new_todo = todos::ActiveModel {
-            title: Set(title),
-            description: Set(None),
-            ..Default::default()
-        };
+impl CreateRandomTodoAction {
+    pub async fn execute(&self) -> Result<Todo, FrameworkError> {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            % 10000;
 
-        todos::Entity::insert_one(new_todo).await
+        Todo::create(attrs! {
+            title: format!("Todo #{}", n),
+            description: format!("created at {}", n),
+            done: false,
+        })
+        .await
     }
 }
 
@@ -122,220 +186,212 @@ impl CreateTodoAction {
 pub struct ListTodosAction;
 
 impl ListTodosAction {
-    pub async fn execute(&self) -> Result<Vec<todos::Model>, FrameworkError> {
-        todos::Entity::all().await
+    pub async fn execute(&self) -> Result<Vec<Todo>, FrameworkError> {
+        Ok(<Todo as suprnova::eloquent::Model>::all().await?.into_vec())
     }
 }
 ```
 
-Using async actions in controllers:
+`Todo::create(attrs!{...})` and `Todo::all()` come from the
+`#[suprnova::model]` macro. See [Eloquent](eloquent.md) for the model
+surface. Note that `Model::all()` returns a `Collection<Todo>` — the
+example calls `.into_vec()` to hand the controller a plain `Vec`; you
+can also return the `Collection` directly and let the serialiser render
+it.
+
+Wiring those into a controller:
 
 ```rust
-use suprnova::{App, Request, Response, json_response};
-use crate::actions::todo_action::{CreateTodoAction, ListTodosAction};
+use suprnova::{App, Request, Response, ResponseExt, json_response};
 
-pub async fn index(_req: Request) -> Response {
-    let action = App::resolve::<ListTodosAction>()?;
-    let todos = action.execute().await?;
+use crate::actions::todo_action::{CreateRandomTodoAction, ListTodosAction};
 
-    json_response!({
-        "todos": todos
-    })
+pub async fn create_random(_req: Request) -> Response {
+    let action = App::resolve::<CreateRandomTodoAction>()?;
+    let todo = action.execute().await?;
+    json_response!({ "ok": true, "todo": todo }).status(201)
 }
 
-pub async fn store(_req: Request) -> Response {
-    let action = App::resolve::<CreateTodoAction>()?;
-    let todo = action.execute("New Todo".to_string()).await?;
-
-    json_response!({
-        "todo": todo
-    })
+pub async fn list(_req: Request) -> Response {
+    let action = App::resolve::<ListTodosAction>()?;
+    let todos = action.execute().await?;
+    json_response!({ "ok": true, "todos": todos })
 }
 ```
 
-## Actions with Dependencies
+Two `?` per handler; the controller stays a thin adapter between HTTP
+and the domain.
 
-Actions can have dependencies injected via the `#[inject]` attribute:
+## Dependencies via `#[inject]`
+
+When an action needs collaborators — a mailer, a logger, a domain
+service — declare them as fields and tag each with `#[inject]`:
 
 ```rust
-use suprnova::injectable;
+use suprnova::{injectable, FrameworkError};
+
+use crate::services::{MailerService, LoggerService};
 
 #[injectable]
-pub struct SendEmailAction {
+pub struct SendWelcomeEmailAction {
     #[inject]
     mailer: MailerService,
     #[inject]
     logger: LoggerService,
 }
 
-impl SendEmailAction {
-    pub async fn execute(&self, to: &str, subject: &str, body: &str) -> Result<(), Error> {
-        self.logger.info(&format!("Sending email to {}", to));
-        self.mailer.send(to, subject, body).await
+impl SendWelcomeEmailAction {
+    pub async fn execute(&self, to: &str) -> Result<(), FrameworkError> {
+        self.logger.info(&format!("welcome → {to}"));
+        self.mailer.send_welcome(to).await
     }
 }
 ```
 
-Dependencies are automatically resolved from the container when the action is resolved.
+Both `MailerService` and `LoggerService` must themselves be
+container-registered before this action boots — either with their own
+`#[injectable]` attribute, or by a `bootstrap()` call:
 
-## When to Use Actions
+```rust
+// In src/bootstrap.rs
+App::singleton(MailerService::from_env()?);
+App::singleton(LoggerService::default());
+```
 
-Actions are ideal for:
+If either dependency is missing when boot runs the fixed-point loop,
+boot returns an error naming the unresolved type and the framework
+exits non-zero rather than starting with a half-wired container.
 
-| Use Case | Example |
-|----------|---------|
-| Business operations | `CreateOrderAction`, `ProcessPaymentAction` |
-| Data transformations | `CalculateTotalsAction`, `GenerateReportAction` |
+Non-`#[inject]` fields fall back to `Default::default()`, so you can
+mix injected dependencies with plain state without writing a
+constructor.
+
+## When to use an action
+
+The rule of thumb: an action exists when the same piece of work is (or
+might be) triggered from more than one entry point. A registration flow
+that runs from both an HTTP route and a queued job belongs in
+`RegisterUserAction`. A one-off "render this index page" handler does
+not need an action — keep it in the controller.
+
+| Good fit | Example |
+|---|---|
+| Multi-step business operations | `RegisterUserAction`, `CheckoutAction` |
+| Work shared between HTTP + queue | `IssueRefundAction` (dispatched both ways) |
+| Logic worth testing without a request | `CalculateTotalsAction` |
 | External integrations | `SendEmailAction`, `SyncInventoryAction` |
-| Complex queries | `SearchProductsAction`, `GetDashboardStatsAction` |
-| Multi-step processes | `RegisterUserAction`, `CheckoutAction` |
+| Anything the controller would otherwise inline + duplicate | rule-of-three trigger |
 
-### Actions vs Controllers
+Compared to a controller, an action is reusable, has no `Request`
+binding, and is trivial to call from a test (`App::resolve` + `await`).
+A controller stays an HTTP-aware boundary that knows how to translate
+an action's result into a `Response`.
 
-| Controllers | Actions |
-|-------------|---------|
-| Handle HTTP requests | Contain business logic |
-| Route-specific | Reusable across routes |
-| Thin and focused | Rich domain logic |
-| Call actions | Called by controllers |
+| Controller | Action |
+|---|---|
+| Handles one route | Reusable across routes, jobs, schedules |
+| Knows about `Request` / `Response` | Knows about your domain types |
+| Returns `Response` | Returns `Result<T, FrameworkError>` |
+| Calls actions | Called by controllers (and others) |
 
-## File Organization
+## Actions, the bus, and queues
 
-The standard file structure for actions:
+Actions are not the only place business logic can live — the
+[Bus](bus.md) handles dispatched commands with typed outputs, and the
+[Queue](queues.md) handles work that should run on a worker. Choose by
+how the work is invoked:
+
+| You want… | Reach for |
+|---|---|
+| Synchronous business logic, callable from a controller or a job | **Action** (`#[injectable]` + `execute`) |
+| A typed command with a registered handler, callable via `Bus::dispatch` | [Bus](bus.md) |
+| Durable, retried, off-task work | [Queue](queues.md) |
+
+Mixing is fine: a `BusHandler` or a `Job` often just resolves an action
+and calls its `execute`. The action holds the domain logic; the bus or
+queue holds the dispatch metadata.
+
+## File layout
+
+What `make:action` emits, plus the room to group:
 
 ```
 src/
 ├── actions/
-│   ├── mod.rs              # Re-export all actions
-│   ├── example_action.rs   # Example action
-│   ├── todo_action.rs      # Todo-related actions
-│   ├── user/               # Grouped user actions
-│   │   ├── mod.rs
-│   │   ├── create_user.rs
-│   │   └── update_user.rs
-│   └── order/              # Grouped order actions
+│   ├── mod.rs                          // pub mod register_user_action;
+│   ├── register_user_action.rs
+│   ├── send_welcome_email_action.rs
+│   └── billing/                        // group by domain when the dir grows
 │       ├── mod.rs
-│       ├── create_order.rs
-│       └── process_payment.rs
+│       ├── charge_invoice_action.rs
+│       └── issue_refund_action.rs
 ├── controllers/
 └── main.rs
 ```
 
-**src/actions/mod.rs:**
-```rust
-pub mod example_action;
-pub mod todo_action;
-pub mod user;
-pub mod order;
-```
+Nothing in the framework requires this layout; the generator writes
+into `src/actions/` because that's the convention. Move an action to
+`src/billing/actions/` and it'll keep working — `#[injectable]` is
+location-agnostic.
 
-## Practical Examples
+## Testing an action
 
-### User Registration Action
-
-```rust
-use suprnova::injectable;
-use suprnova::error::FrameworkError;
-use sea_orm::Set;
-use crate::models::users;
-
-#[injectable]
-pub struct RegisterUserAction;
-
-impl RegisterUserAction {
-    pub async fn execute(
-        &self,
-        email: String,
-        password: String,
-        name: String,
-    ) -> Result<users::Model, FrameworkError> {
-        // Hash password (simplified)
-        let hashed_password = hash_password(&password);
-
-        let new_user = users::ActiveModel {
-            email: Set(email),
-            password: Set(hashed_password),
-            name: Set(name),
-            ..Default::default()
-        };
-
-        users::Entity::insert_one(new_user).await
-    }
-}
-
-fn hash_password(password: &str) -> String {
-    // Password hashing logic
-    format!("hashed_{}", password)
-}
-```
-
-### Action with Return Types
+Because an action is just a container-resolvable struct with an `async`
+method, the test surface is `App::resolve` + `await`. The same
+`TestDatabase` test fixture used elsewhere works here:
 
 ```rust
-use suprnova::injectable;
+use suprnova::{describe, expect, test, App};
+use suprnova::testing::TestDatabase;
 
-pub struct DashboardStats {
-    pub total_users: i64,
-    pub total_orders: i64,
-    pub revenue: f64,
-}
+use crate::actions::todo_action::ListTodosAction;
+use crate::models::todos::Todo;
 
-#[injectable]
-pub struct GetDashboardStatsAction;
+describe!("ListTodosAction", {
+    test!("returns all todos", async fn(_db: TestDatabase) {
+        Todo::create(suprnova::attrs! { title: "Test", description: "", done: false })
+            .await
+            .unwrap();
 
-impl GetDashboardStatsAction {
-    pub async fn execute(&self) -> Result<DashboardStats, FrameworkError> {
-        // Fetch statistics from database
-        let total_users = users::Entity::count().await?;
-        let total_orders = orders::Entity::count().await?;
-        let revenue = orders::Entity::sum_revenue().await?;
+        let action = App::resolve::<ListTodosAction>().unwrap();
+        let todos = action.execute().await.unwrap();
 
-        Ok(DashboardStats {
-            total_users,
-            total_orders,
-            revenue,
-        })
-    }
-}
+        expect!(todos).to_have_length(1);
+    });
+});
 ```
 
-### Using Multiple Actions in a Controller
+See [Testing](testing.md) for the full `describe!` / `test!` / `expect!`
+surface and for `TestContainer::fake` when you want to inject a
+fake-mailer or fake-gateway into an action under test.
 
-```rust
-use suprnova::{App, Request, Response, json_response};
-use crate::actions::{
-    user::GetUserAction,
-    order::GetUserOrdersAction,
-    notification::MarkNotificationsReadAction,
-};
+## Why Suprnova diverges
 
-pub async fn dashboard(req: Request) -> Response {
-    let user_id = req.param("id")?;
+Laravel single-action controllers — classes with a `__invoke` method
+in `App\Actions\` — are constructed per request. The container
+resolves the class, runs constructor injection, and the instance is
+thrown away when the response leaves. PHP's process-per-request model
+makes that essentially free.
 
-    // Resolve and execute multiple actions
-    let get_user = App::resolve::<GetUserAction>()?;
-    let get_orders = App::resolve::<GetUserOrdersAction>()?;
-    let mark_read = App::resolve::<MarkNotificationsReadAction>()?;
+Suprnova actions are container-resident singletons: built once at boot
+with `#[inject]` fields resolved then, cloned out on every
+`App::resolve`. The pattern fits Rust because cloning a struct of
+`Arc`-wrapped services costs a few refcount bumps, while
+constructing-and-discarding a struct on every request would force every
+field through allocation. The Laravel-shaped convention — one struct,
+one method, named for the operation — survives intact; the wiring under
+it is shaped for Tokio.
 
-    let user = get_user.execute(user_id).await?;
-    let orders = get_orders.execute(user_id).await?;
-    mark_read.execute(user_id).await?;
+The other intentional split: controllers stay free functions (see
+[Controllers](controllers.md)), so the HTTP layer is a pure
+request-to-response transform with no DI surface of its own.
+Constructor-style injection happens at the `#[injectable]` boundary,
+inside the action, where it belongs.
 
-    json_response!({
-        "user": user,
-        "orders": orders
-    })
-}
-```
+## Next
 
-## Summary
-
-| Feature | Usage |
-|---------|-------|
-| Generate action | `suprnova make:action Name` |
-| Make injectable | `#[injectable]` on struct |
-| Inject dependency | `#[inject]` on field |
-| Resolve action | `App::resolve::<ActionType>()?` |
-| Sync execute | `action.execute()` |
-| Async execute | `action.execute().await?` |
-| File location | `src/actions/` |
+- [Controllers](controllers.md) — the HTTP-facing free functions that resolve and call actions
+- [Service Container](container.md) — what `App::resolve`, `App::singleton`, and the three-layer lookup actually do
+- [Bus](bus.md) — typed command dispatch when you want a registered handler instead of a resolved action
+- [Testing](testing.md) — `App::resolve` + `TestContainer::fake` for hermetic action tests
+- [Error Model](error-model.md) — how `?` on `App::resolve::<Action>()?` and `action.execute().await?` collapses into a clean response
