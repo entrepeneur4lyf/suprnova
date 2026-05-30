@@ -614,17 +614,18 @@ impl Seeder for BaseSeeder {
 }
 ```
 
-Register the seeder in `bootstrap.rs` so the framework's `db:seed`
-command knows about it:
+Register the seeder in `bootstrap.rs` so the per-project `console`
+binary's `db:seed` command knows about it:
 
 ```rust
 suprnova::seed::register::<crate::seeders::BaseSeeder>();
 ```
 
-Run with the `suprnova` binary:
+Run through the project's `console` binary (every scaffolded app
+ships one at `src/bin/console.rs`):
 
 ```bash
-suprnova db:seed
+cargo run --bin console -- db:seed
 ```
 
 Seeders run in registration order. Idempotency is the seeder's

@@ -365,9 +365,9 @@ unconditionally, re-running it produces duplicates. The two standard ways to
 make a seeder safe to re-run:
 
 - **Reset first.** Local dev's "wipe and reseed" loop usually does
-  `console migrate:fresh && console db:seed` — `migrate:fresh` drops and
-  rebuilds every table, so the seeder always starts from empty. This is the
-  shape most projects use day to day.
+  `suprnova migrate:fresh && cargo run --bin console -- db:seed` —
+  `migrate:fresh` drops and rebuilds every table, so the seeder always
+  starts from empty. This is the shape most projects use day to day.
 - **Upsert / check-first.** For a seeder that must coexist with existing
   data (a default admin account in production, the canonical list of
   countries), guard the insert with a lookup or use an upsert query.
