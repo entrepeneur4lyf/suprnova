@@ -9,6 +9,7 @@
     - [From Rust Web](from-rust-web.md)
     - [Installation](installation.md)
     - [Quickstart](quickstart.md)
+    - [Development](development.md)
     - [Configuration](configuration.md)
     - [Directory Structure](structure.md)
     - [Frontend](frontend.md)
