@@ -45,6 +45,11 @@ The `DB` facade ships the full Laravel 13 raw escape surface. Every
 helper goes through the same instrumented executor — every call fires
 `QueryExecuted` (see [Observability](#observability)).
 
+Bindings are `sea_orm::Value` — one of the few sea_orm types the
+framework intentionally does NOT re-mask, because every value that hits
+the wire goes through it. `Value::from(...)` works for every primitive
+the database understands.
+
 ```rust
 use suprnova::DB;
 use sea_orm::Value;
@@ -117,16 +122,20 @@ with typed accessors:
 for row in users {
     let id: i64 = row.get_int("id")?;
     let name: String = row.get_string("name")?;
-    let active: Option<bool> = row.get_optional_bool("active")?;
-    // Deserialise an arbitrary T:
+    let nickname: Option<String> = row.get_optional_string("nickname")?;
+    let score: Option<i64> = row.get_optional_int("score")?;
+    // Deserialise an arbitrary T (chrono::DateTime, your own struct, etc.):
     let prefs: UserPrefs = row.get_as("prefs")?;
 }
 ```
 
 `get_*` errors when the column is absent OR null. `get_optional_*`
-errors only when absent and returns `Ok(None)` for SQL NULL. See
-[DynamicRow](dynamic_row.rs.md) for the full
-accessor surface.
+errors only when absent and returns `Ok(None)` for SQL NULL. The full
+accessor list is `get_int` / `get_string` / `get_bool` / `get_float` /
+`get_value` / `get_as<T>` plus `get_optional_string` /
+`get_optional_int`; for nullable types without a dedicated
+`get_optional_*` reach for `get_value` + a `serde_json::Value` match,
+or `get_as::<Option<T>>`.
 
 ## Model-less query builder — `DB::table`
 
@@ -245,10 +254,20 @@ DB::transaction_with_attempts(5, |_tx| {
 ### Manual form
 
 ```rust
+use suprnova::{DB, attrs};
+
 let tx = DB::begin_transaction().await?;
 
-User::create(/* ... */, &tx).await?;
-Order::create(/* ... */, &tx).await?;
+// Per-model: the `*_with_tx` shims pin one CRUD op to the manual tx.
+User::create_with_tx(&tx, attrs! { name: "alice" }).await?;
+Order::create_with_tx(&tx, attrs! { user_id: 1, total: 30 }).await?;
+
+// Per-query: `Builder::with_tx(&tx)` pins a builder chain.
+let stale = Order::query()
+    .filter("status", "pending")
+    .with_tx(&tx)
+    .get()
+    .await?;
 
 if some_condition() {
     tx.rollback().await?;
@@ -257,11 +276,17 @@ if some_condition() {
 }
 ```
 
-Manual mode does NOT install the task-local — scope individual
-operations through the transaction with `Builder::with_tx(&tx)` or
-the `Model::*_with_tx` shims. Holding a `Transaction` handle pins one
-pool connection for its lifetime; pre-load any rows you need to read
-BEFORE the `begin_transaction()` call, especially on SQLite.
+Manual mode does NOT install the task-local — every operation that
+should run inside the transaction has to opt in, either via
+`Builder::with_tx(&tx)` on a chained query or one of the
+`Model::*_with_tx` shims (`create_with_tx`, `save_with_tx`,
+`delete_with_tx`, etc.). Operations that forget to opt in run against
+the global pool and are NOT part of the transaction.
+
+Holding a `Transaction` handle pins one pool connection for its
+lifetime; pre-load any rows you need to read BEFORE the
+`begin_transaction()` call, especially on SQLite (single shared
+connection).
 
 ### Savepoints
 
@@ -474,7 +499,7 @@ Reserved names:
 - `__read_replica__` — well-known read replica. ANY connection
   registered under this name takes over read routing.
 
-See [eloquent.md → Multi-connection routing](eloquent.md) for the
+See [eloquent.md → Multi-connection routing](eloquent.md#multi-connection-routing) for the
 full precedence chain (builder tx override → ambient tx → builder
 `on(name)` → model default → `__read_replica__` → primary).
 
@@ -511,6 +536,19 @@ the connection registry is wiped — no cross-test leakage. Tests that
 mutate process-wide state (the registry, the listener registry, the
 query log) should be annotated `#[serial_test::serial]` so they don't
 collide.
+
+## Next
+
+- [Eloquent](eloquent.md) — the typed `#[suprnova::model]` ORM that
+  sits on top of this layer
+- [Migrations](migrations.md) — `Migrator`, `make:migration`, and the
+  `db:sync` workflow
+- [Database Testing](database-testing.md) — `TestDatabase`, fixture
+  loading, and serial-test annotations
+- [Events](events.md) — the dispatcher behind `QueryExecuted` /
+  `TransactionCommitted` listeners
+- [Configuration](configuration.md) — registering `DatabaseConfig`
+  alongside the rest of your typed config
 
 ## Surface index
 
