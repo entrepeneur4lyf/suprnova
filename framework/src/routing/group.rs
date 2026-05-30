@@ -100,7 +100,16 @@ impl GroupBuilder {
     pub fn try_finalize(mut self) -> Result<Router, FrameworkError> {
         // Insert all group routes into the outer router with the prefix
         for route in self.group_routes {
-            let raw_full = format!("{}{}", self.prefix, route.path);
+            // Match the macro-group special-case: a child path of `/`
+            // means "the group root itself", so `group("/api", |r|
+            // r.get("/", ...))` registers `/api`, not `/api/`. Without
+            // this branch the fluent and macro surfaces would produce
+            // visibly different route tables for the same intent.
+            let raw_full = if route.path == "/" {
+                self.prefix.clone()
+            } else {
+                format!("{}{}", self.prefix, route.path)
+            };
             let full_path = convert_route_params(&raw_full);
 
             // Insert into the appropriate method router using pub(crate)
@@ -564,5 +573,30 @@ mod tests {
         let _ = Router::new()
             .group("/api", |r| r.methods(&[Method::GET, bad], "/x", h))
             .finalize();
+    }
+
+    /// Child path `/` inside a fluent group registers the group prefix
+    /// itself, not `prefix + "/"`. Mirrors the macro-group special case
+    /// so visually-equivalent macro and fluent definitions produce the
+    /// same route table.
+    #[test]
+    fn fluent_group_root_child_path_collapses_to_prefix() {
+        let router: Router = Router::new().group("/api", |r| r.get("/", h)).into();
+        assert!(
+            router.match_route(&Method::GET, "/api").is_some(),
+            "fluent group with child path '/' must register at the group prefix",
+        );
+        assert!(
+            router.match_route(&Method::GET, "/api/").is_none(),
+            "fluent group with child path '/' must NOT register at prefix + '/'",
+        );
+    }
+
+    /// Non-root child paths still concatenate normally.
+    #[test]
+    fn fluent_group_non_root_child_path_concatenates() {
+        let router: Router = Router::new().group("/api", |r| r.get("/users", h)).into();
+        assert!(router.match_route(&Method::GET, "/api/users").is_some());
+        assert!(router.match_route(&Method::GET, "/api").is_none());
     }
 }

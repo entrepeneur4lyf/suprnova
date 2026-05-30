@@ -1084,29 +1084,29 @@ impl RedirectRouteBuilder {
         self
     }
 
-    fn build_url(&self) -> Option<String> {
-        use crate::routing::route_with_params;
+    fn build_url(&self) -> Result<String, crate::routing::RouteUrlError> {
+        use crate::routing::try_route_with_params;
 
-        let url = route_with_params(&self.name, &self.params)?;
+        let url = try_route_with_params(&self.name, &self.params)?;
         let mut url = append_query_params(&url, &self.query_params);
         url = apply_fragment(url, self.strip_fragment, self.fragment.as_deref());
-        Some(url)
+        Ok(url)
     }
 }
 
 /// Auto-convert RedirectRouteBuilder to Response
 impl From<RedirectRouteBuilder> for Response {
     fn from(redirect: RedirectRouteBuilder) -> Response {
-        // Route lookup runs first; if the named route is missing, we
-        // return a 500 and intentionally skip the flash — otherwise
-        // a stray `_inertia.preserve_fragment` would land on whatever
-        // page the user navigates to next.
+        // Route lookup runs first; if the named route is missing OR if
+        // any required path parameter is absent, we return a 500 and
+        // intentionally skip the flash — otherwise a stray
+        // `_inertia.preserve_fragment` would land on whatever page the
+        // user navigates to next, and a `Location` header containing
+        // a raw `{placeholder}` is unsafe to ship to a browser.
         let url = match redirect.build_url() {
-            Some(u) => u,
-            None => {
-                return Err(
-                    HttpResponse::text(format!("Route '{}' not found", redirect.name)).status(500),
-                );
+            Ok(u) => u,
+            Err(e) => {
+                return Err(HttpResponse::text(e.to_string()).status(500));
             }
         };
         flash_preserve_fragment_if_set(redirect.preserve_fragment);

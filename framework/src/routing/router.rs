@@ -39,7 +39,7 @@ use crate::middleware::{BoxedMiddleware, Middleware, into_boxed};
 use crate::ws::BoxedWebSocketHandler;
 use hyper::Method;
 use matchit::Router as MatchitRouter;
-use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -181,6 +181,47 @@ fn lookup_route(name: &str) -> Option<String> {
     map.get(name).cloned()
 }
 
+/// Decode the captured `(key, value)` pairs from a successful
+/// `matchit` match.
+///
+/// matchit captures raw segment bytes from `hyper::Uri::path()`, which
+/// is the already-percent-encoded request target. The router matches
+/// against that raw form so encoded segment delimiters (`%2F`) stay
+/// inside a single segment instead of being misinterpreted as a path
+/// separator — that's the right matching policy and must NOT change.
+/// Handlers however expect Laravel-shaped, decoded values:
+/// `route("posts.show", &[("slug", "a/b")])` percent-encodes to
+/// `/posts/a%2Fb`, and the handler that receives that request must
+/// see `"a/b"` from `req.param("slug")` (round-trip).
+///
+/// Decoding is lossy on invalid UTF-8 (percent-encoded bytes that do
+/// not form a valid UTF-8 sequence become the Unicode replacement
+/// character via `decode_utf8_lossy`). That matches `serde_urlencoded`
+/// behaviour for query strings and is safer than ignoring the param.
+fn decode_matched_params<'k, 'v, I>(pairs: I) -> HashMap<String, String>
+where
+    I: IntoIterator<Item = (&'k str, &'v str)>,
+{
+    pairs
+        .into_iter()
+        .map(|(k, v)| {
+            (
+                k.to_string(),
+                percent_decode_str(v).decode_utf8_lossy().into_owned(),
+            )
+        })
+        .collect()
+}
+
+/// Substitute parameter placeholders in a route pattern.
+///
+/// Unfilled placeholders are preserved verbatim (`/{a}/{b}` with only
+/// `a` supplied becomes `/x/{b}`); the lenient form is the
+/// long-standing default and lets callers spot the missing parameter
+/// when staring at a URL. [`substitute_strict`] is the strict sibling
+/// that returns the list of unfilled placeholder names instead, used
+/// by redirects so a missing param surfaces as a 500 rather than as
+/// a `Location` header with `{name}` baked into it.
 fn substitute<F>(pattern: &str, mut next_value: F) -> String
 where
     F: FnMut(&str) -> Option<String>,
@@ -207,6 +248,48 @@ where
     }
     out.push_str(rest);
     out
+}
+
+/// Strict sibling of [`substitute`]: substitute placeholders, and
+/// return `Err` carrying the (ordered, deduplicated) list of
+/// unfilled placeholder names if any required substitution was
+/// missing. The substituted-so-far prefix is discarded — callers
+/// only care that the URL is unsafe to emit.
+fn substitute_strict<F>(pattern: &str, mut next_value: F) -> Result<String, Vec<String>>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut out = String::with_capacity(pattern.len() + 16);
+    let mut rest = pattern;
+    let mut missing: Vec<String> = Vec::new();
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        rest = &rest[open + 1..];
+        let Some(close) = rest.find('}') else {
+            // Malformed pattern (unclosed `{`); treat the remainder as
+            // a literal in the lenient form and report the leading
+            // token as missing.
+            out.push('{');
+            out.push_str(rest);
+            if !missing.iter().any(|m| m == rest) {
+                missing.push(rest.to_string());
+            }
+            return Err(missing);
+        };
+        let key = &rest[..close];
+        if let Some(encoded) = next_value(key) {
+            out.push_str(&encoded);
+        } else if !missing.iter().any(|m| m == key) {
+            missing.push(key.to_string());
+        }
+        rest = &rest[close + 1..];
+    }
+    out.push_str(rest);
+    if missing.is_empty() {
+        Ok(out)
+    } else {
+        Err(missing)
+    }
 }
 
 /// Generate a URL for a named route with parameters.
@@ -256,6 +339,94 @@ pub fn route_with_params(name: &str, params: &HashMap<String, String>) -> Option
             .get(key)
             .map(|v| utf8_percent_encode(v, PATH_SEGMENT_ENCODE).to_string())
     }))
+}
+
+/// Error returned by [`try_route`] / [`try_route_with_params`] when a
+/// named route cannot be resolved to a complete URL.
+///
+/// The strict route helpers surface this so callers (notably
+/// `Redirect::route`) refuse to emit a `Location` header containing a
+/// raw `{placeholder}` segment when a required path parameter is
+/// missing. The lenient [`route`] / [`route_with_params`] helpers
+/// preserve the placeholder verbatim, which is fine for debug logging
+/// but unsafe to ship to a browser as a redirect target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteUrlError {
+    /// No route is registered under this name.
+    NameNotFound(String),
+    /// The route exists but one or more required path parameters
+    /// were not supplied. The vec contains the placeholder names in
+    /// pattern order (deduplicated).
+    MissingParams {
+        /// The route name that was looked up.
+        name: String,
+        /// Names of the placeholders that had no matching value.
+        missing: Vec<String>,
+    },
+}
+
+impl std::fmt::Display for RouteUrlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NameNotFound(name) => {
+                write!(f, "Route '{name}' not found")
+            }
+            Self::MissingParams { name, missing } => {
+                write!(
+                    f,
+                    "Route '{name}' is missing required path parameter(s): {}",
+                    missing.join(", "),
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for RouteUrlError {}
+
+/// Strict sibling of [`route`]: returns `Err(RouteUrlError)` when the
+/// name is unknown OR when any `{placeholder}` in the pattern lacks a
+/// matching value, instead of silently leaving the placeholder in the
+/// generated URL.
+///
+/// Use this whenever the URL is going to land somewhere a user
+/// follows (a `Location` header, a redirect, an email link). Use
+/// [`route`] when a partial URL is acceptable (debug logging, dev
+/// dashboards).
+pub fn try_route(name: &str, params: &[(&str, &str)]) -> Result<String, RouteUrlError> {
+    let path_pattern =
+        lookup_route(name).ok_or_else(|| RouteUrlError::NameNotFound(name.into()))?;
+    substitute_strict(&path_pattern, |key| {
+        params
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| utf8_percent_encode(v, PATH_SEGMENT_ENCODE).to_string())
+    })
+    .map_err(|missing| RouteUrlError::MissingParams {
+        name: name.into(),
+        missing,
+    })
+}
+
+/// Strict sibling of [`route_with_params`]: returns
+/// `Err(RouteUrlError)` when the name is unknown OR when any
+/// `{placeholder}` in the pattern lacks a matching value. See
+/// [`try_route`] for when to prefer the strict surface.
+pub fn try_route_with_params(
+    name: &str,
+    params: &HashMap<String, String>,
+) -> Result<String, RouteUrlError> {
+    let path_pattern =
+        lookup_route(name).ok_or_else(|| RouteUrlError::NameNotFound(name.into()))?;
+    substitute_strict(&path_pattern, |key| {
+        params
+            .get(key)
+            .map(|v| utf8_percent_encode(v, PATH_SEGMENT_ENCODE).to_string())
+    })
+    .map_err(|missing| RouteUrlError::MissingParams {
+        name: name.into(),
+        missing,
+    })
 }
 
 /// Reverse-lookup a route name from a matched route pattern.
@@ -1323,11 +1494,7 @@ impl Router {
                 // for HEAD requests at the server boundary regardless of
                 // which arm matched.
                 if let Ok(matched) = self.head_routes.at(path) {
-                    let params: HashMap<String, String> = matched
-                        .params
-                        .iter()
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                        .collect();
+                    let params = decode_matched_params(matched.params.iter());
                     let (pattern, handler) = matched.value;
                     return Some((pattern.clone(), handler.clone(), params));
                 }
@@ -1338,11 +1505,7 @@ impl Router {
         };
 
         router.at(path).ok().map(|matched| {
-            let params: HashMap<String, String> = matched
-                .params
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect();
+            let params = decode_matched_params(matched.params.iter());
             let (pattern, handler) = matched.value;
             (pattern.clone(), handler.clone(), params)
         })
@@ -2018,6 +2181,100 @@ mod tests {
         let _ = Router::new().get("/{a}/{b}", h).name("two.params.test");
         let url = route("two.params.test", &[("a", "x")]);
         assert_eq!(url, Some("/x/{b}".to_string()));
+    }
+
+    /// Strict variant returns `Err(MissingParams)` listing the unfilled
+    /// placeholders so callers (notably `Redirect::route`) can refuse to
+    /// emit a `Location` header containing `{name}` instead of a real
+    /// value.
+    #[test]
+    #[serial_test::serial(route_registry)]
+    fn try_route_reports_missing_params() {
+        let _ = Router::new().get("/{a}/{b}", h).name("try.two.params.test");
+        let err = try_route("try.two.params.test", &[("a", "x")]).expect_err("must report missing");
+        match err {
+            RouteUrlError::MissingParams { name, missing } => {
+                assert_eq!(name, "try.two.params.test");
+                assert_eq!(missing, vec!["b".to_string()]);
+            }
+            other => panic!("expected MissingParams, got {other:?}"),
+        }
+    }
+
+    /// Strict variant returns `Err(NameNotFound)` when the route is
+    /// unregistered, instead of `None`.
+    #[test]
+    #[serial_test::serial(route_registry)]
+    fn try_route_reports_unknown_name() {
+        let err =
+            try_route("try.absolutely.not.registered", &[]).expect_err("must report unknown name");
+        assert!(
+            matches!(err, RouteUrlError::NameNotFound(ref n) if n == "try.absolutely.not.registered")
+        );
+    }
+
+    /// Happy path: strict variant returns `Ok(url)` matching the
+    /// lenient form.
+    #[test]
+    #[serial_test::serial(route_registry)]
+    fn try_route_happy_path_matches_lenient() {
+        let _ = Router::new().get("/users/{id}", h).name("try.users.show");
+        let url = try_route("try.users.show", &[("id", "42")]).expect("must resolve");
+        assert_eq!(url, "/users/42");
+    }
+
+    /// HashMap-keyed strict variant reports missing parameters too.
+    #[test]
+    #[serial_test::serial(route_registry)]
+    fn try_route_with_params_reports_missing() {
+        let _ = Router::new().get("/posts/{slug}", h).name("try.posts.show");
+        let params: HashMap<String, String> = HashMap::new();
+        let err =
+            try_route_with_params("try.posts.show", &params).expect_err("must report missing");
+        match err {
+            RouteUrlError::MissingParams { name, missing } => {
+                assert_eq!(name, "try.posts.show");
+                assert_eq!(missing, vec!["slug".to_string()]);
+            }
+            other => panic!("expected MissingParams, got {other:?}"),
+        }
+    }
+
+    /// Percent-encoded captured params are decoded before reaching the
+    /// handler. A slug `a/b` is encoded by `route()` to `a%2Fb`; the
+    /// handler must see `a/b` when it reads `req.param("slug")` so the
+    /// round-trip is observable to application code (Laravel parity:
+    /// `Request::route('slug')` returns the decoded value).
+    ///
+    /// Matching itself still operates on the raw URI path — only the
+    /// extracted *value* is decoded — so encoded segment delimiters
+    /// (`%2F`) cannot inject an extra path separator into matchit's
+    /// tree.
+    #[test]
+    fn match_route_decodes_percent_encoded_param_values() {
+        let router: Router = Router::new().get("/posts/:slug", h).into();
+        let m = router.match_route(&Method::GET, "/posts/a%2Fb");
+        let (_pattern, _h, params) = m.expect("must match");
+        assert_eq!(params.get("slug"), Some(&"a/b".to_string()));
+    }
+
+    /// Multi-byte UTF-8 values round-trip through encode/decode.
+    #[test]
+    fn match_route_decodes_utf8_param_values() {
+        let router: Router = Router::new().get("/u/:name", h).into();
+        // "café" → "caf%C3%A9"
+        let m = router.match_route(&Method::GET, "/u/caf%C3%A9");
+        let (_pattern, _h, params) = m.expect("must match");
+        assert_eq!(params.get("name"), Some(&"café".to_string()));
+    }
+
+    /// HEAD-falls-back-to-GET path also decodes params.
+    #[test]
+    fn match_route_head_fallback_decodes_param_values() {
+        let router: Router = Router::new().get("/h/:slug", h).into();
+        let m = router.match_route(&Method::HEAD, "/h/a%2Fb");
+        let (_pattern, _h, params) = m.expect("HEAD must fall back to GET");
+        assert_eq!(params.get("slug"), Some(&"a/b".to_string()));
     }
 
     // ---- PATCH / HEAD / OPTIONS verb coverage (audit #350) ------------

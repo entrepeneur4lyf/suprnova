@@ -32,9 +32,9 @@ pub use macros::{
 };
 pub use resource::{ResourceAction, ResourceController, ResourceRoutes};
 pub use router::{
-    BoxedHandler, MultiMethodRouteBuilder, RouteBuilder, Router, WsMatch,
+    BoxedHandler, MultiMethodRouteBuilder, RouteBuilder, RouteUrlError, Router, WsMatch,
     clear_route_names_for_test, register_route_name, route, route_name_for_pattern,
-    route_with_params, try_register_route_name,
+    route_with_params, try_register_route_name, try_route, try_route_with_params,
 };
 pub use signed::{
     EXPIRES_KEY, SIGNATURE_KEY, SignatureVerdict, sign_route, sign_url, verify_signature,
