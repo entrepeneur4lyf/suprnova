@@ -344,7 +344,7 @@ home module.
 
 | Laravel helper | Suprnova / Rust equivalent | Where |
 |---|---|---|
-| `auth()` | `Auth::user(&req).await?` | [Authentication](authentication.md) |
+| `auth()` | `Auth::user().await?` | [Authentication](authentication.md) |
 | `cache()` | `Cache::get/put/...` | [Cache](cache.md) |
 | `config('app.name')` | `Config::get::<AppConfig>()?.name` | [Configuration](configuration.md) |
 | `csrf_token()` | `csrf_token()` (same name) | [CSRF](csrf.md) |
