@@ -5,7 +5,7 @@ typed `Command` (`{ input, Output type }`), register a `Handler` for it at
 boot, and then any code in the process can call `Bus::dispatch(cmd).await`
 and get back a `Dispatched<T>` carrying the handler's typed result.
 
-Bus pairs with [`Queue`](queue.md.md) — the asynchronous sibling. They are
+Bus pairs with [`Queue`](queues.md) — the asynchronous sibling. They are
 two intentionally separate facades, not one routing dispatcher:
 
 | If you want…                                          | Use            |
@@ -68,11 +68,15 @@ pub trait Command: Serialize + DeserializeOwned + Send + Sync + 'static {
 }
 ```
 
-The `Output` is what the handler returns. It can be any `Send + 'static`
-type, but if you use `Bus::dispatch`/`chain`/`batch` it must also be
-`Serialize + DeserializeOwned` because the bus carries values through a
-JSON registry (the same encode/decode shape used by `Bus::fake()` and by
-the typed handler registry).
+The `Output` is what the handler returns. It only has to be `Send +
+'static` — the real dispatch path keeps values native via
+`Box<dyn Any>`, no serde round-trip. That means non-serde outputs like
+`Bytes`, opaque handles, or an `Arc<Mutex<…>>` round-trip back to the
+caller as live values. The `Serialize + DeserializeOwned` bound on
+`Command` itself is for the fake-capture path: `Bus::fake()` records
+each dispatched command as a `serde_json::Value` so predicate-based
+assertions (`assert_dispatched`, `assert_dispatched_times`) can decode
+and inspect them.
 
 `command_name()` should be a stable string unique per concrete `Command`
 impl. It shows up in `assert_dispatched`/`assert_dispatched_times` failure
@@ -92,7 +96,9 @@ pub trait Handler<C: Command>: Send + Sync + 'static {
 
 Call `Bus::register::<C, H>(handler)` once per command type at boot. The
 registry is global; re-registering the same `C` overwrites the previous
-handler (tests can rely on this to swap implementations).
+handler (tests rely on this to swap implementations) and emits a
+`tracing::warn!` so a duplicate binding from two boot-time service
+registrations is visible in the log.
 
 ```rust
 Bus::register::<ChargeCustomer, _>(ChargeCustomerHandler);
@@ -141,9 +147,12 @@ let charge_ids: Vec<String> = results
     .collect();
 ```
 
-> **Heterogeneous chains** (mixed command types, queued runtime, success
-> kicks off the next command) are tracked as a roadmap item — see
-> `docs/parity/bus.md` "Open questions".
+`Bus::chain` is homogeneous-only by design — the dispatcher returns
+`Dispatched<C::Output>`, which is only well-typed when every input shares
+one `Output`. For Laravel-style heterogeneous chains (mixed job types,
+each step kicking off the next), use [`Queue::chain`](queues.md) — the
+queue boxes each job into a typed envelope and so doesn't have the
+same constraint.
 
 ### `Bus::batch` — concurrent
 
@@ -159,15 +168,21 @@ let results = Bus::batch(vec![
 ]).await;
 ```
 
-> **Heterogeneous, persisted batches** (mixed command types, a real
-> `Batch` handle with progress + callbacks + lifecycle events +
-> `BatchRepository` persistence) are tracked as a roadmap item — see
-> `docs/parity/bus.md` "Open questions".
+`Bus::batch` is homogeneous-only for the same reason as `chain`. For
+heterogeneous, persisted batches with progress callbacks, lifecycle
+events, and a `BatchRepository`, use [`Queue::batch`](queues.md).
 
 ## Testing
 
-Install the fake in a `#[serial]` test (the fake state is process-global
-so concurrent tests must serialize):
+Install the fake at the top of the test. `install_fake()` acquires a
+process-wide `FAKE_SERIAL` mutex for the guard's lifetime, so two
+parallel `Bus::fake()` tests can't clobber each other's captured-store
+— the second blocks until the first guard drops. You still mark the
+test `#[serial]` if a sibling test in the same binary calls real
+`Bus::dispatch`: a real-dispatch caller doesn't acquire `FAKE_SERIAL`,
+so without `#[serial]` it can race a parallel fake test and observe
+`is_active() == true`. `FAKE_SERIAL` removes the fake-vs-fake hazard,
+`#[serial]` removes the real-vs-fake one.
 
 ```rust
 use serial_test::serial;
@@ -200,8 +215,8 @@ missing registered handler before the fake was installed — still surface
 as `Err(_)`.
 
 `install_fake()` returns a `BusFakeGuard`. Drop it (it's RAII) and the
-fake is cleared. Inside `#[serial]`-marked tests, the typical idiom is
-`let _guard = install_fake();` at the top of the test.
+fake is cleared and the `FAKE_SERIAL` mutex is released. The typical
+idiom is `let _guard = install_fake();` at the top of the test.
 
 ### Assertion surface
 
@@ -219,7 +234,7 @@ when the count doesn't match. `assert_nothing_dispatched` panics with
 
 ## When to use `Queue` instead
 
-Reach for [`Queue`](queue.md.md) when you want any of:
+Reach for [`Queue`](queues.md) when you want any of:
 
 - **Durability across restarts.** A queued job survives a process crash
   if the driver is `database` or `redis`.
@@ -246,10 +261,12 @@ A typical app uses both: synchronous request paths dispatch
 result-returning operations through `Bus`, and "fire and forget" /
 durable work pushes through `Queue`.
 
-## See also
+## Next
 
-- [Queue](queue.md.md) — async sibling, drivers, worker, retry policy
-- [Events](events.md.md) — pub/sub dispatcher (one event → many listeners)
-- `docs/parity/bus.md` — Laravel `Illuminate\Bus` ↔ Suprnova parity audit
-  and open questions on net-new subsystems (heterogeneous Batch,
-  heterogeneous Chain, DebounceLock, job middleware)
+- [Queues](queues.md) — async sibling, drivers, worker, retry policy,
+  heterogeneous chains and batches
+- [Events](events.md) — pub/sub dispatcher (one event → many listeners)
+- [Workflows](workflows.md) — long-running stateful work that survives
+  restarts, when a chain isn't enough
+- [Testing](testing.md) — `#[suprnova_test]`, container fakes, and the
+  process-wide serializer pattern used by `Bus::fake()`
