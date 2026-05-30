@@ -1,16 +1,12 @@
 # WebSockets
 
-Suprnova WebSocket routes sit alongside HTTP routes in the same router. You register a path and a handler; the framework detects the `Upgrade: websocket` request at that path, completes the RFC 6455 handshake, and calls your handler with a typed `WsSocket` and the original `Request`. There is no separate WebSocket server to run — WebSocket connections are upgraded from the same hyper listener that serves your HTTP traffic.
+Suprnova WebSocket routes sit alongside HTTP routes in the same router. You register a path and a handler; the framework detects the `Upgrade: websocket` request at that path, runs the same middleware chain an HTTP GET to that path would run, completes the RFC 6455 handshake, and calls your handler with a typed `WsSocket` plus the original `Request`. There is no separate WebSocket server — connections are upgraded from the same hyper listener that serves your HTTP traffic. The framework also tracks every spawned handler in a per-server `JoinSet`, so a graceful shutdown drains in-flight connections before the listener exits.
 
-The handler receives the `Request` that triggered the upgrade. **Headers, raw cookies, captured path parameters, and the query string are all available** — anything that can be read directly off the upgrade request. **Middleware does not run on WebSocket upgrade requests in v1**, so anything that depends on middleware (the thread-local `session()` accessor, `RequestIdMiddleware`-attached request IDs, `AuthMiddleware`-derived identity) is *not* populated. Auth checks happen inline inside the handler — typically via a bearer token or a raw session cookie validated against your session store — and the handler closes the socket explicitly if the caller is unauthorized. Per-route WebSocket middleware lands in Phase 7B.
+## Quick start
 
-When the handler returns `Ok(())`, the framework sends a clean close frame (code 1000) and tears down the connection. When it returns `Err(_)`, the error is logged and the connection closes with code 1011 (internal error). The framework also runs a heartbeat task for each connection — it sends a Ping every 30 seconds by default — so idle connections stay alive through NAT gateways and load balancers without any work on your part.
+Add an `EchoHandler` and register it in `routes!`.
 
-## Quick Start
-
-Add an `EchoHandler` to your app and register it in the route list.
-
-**`src/ws/echo.rs`:**
+`src/ws/echo.rs`:
 
 ```rust
 use async_trait::async_trait;
@@ -29,7 +25,7 @@ impl WebSocketHandler for EchoHandler {
 }
 ```
 
-**`src/routes.rs`** (inside `routes! { ... }`):
+`src/routes.rs` (inside `routes! { ... }`):
 
 ```rust
 ws!("/ws/echo", app_ws::echo::EchoHandler),
@@ -41,9 +37,8 @@ Start the app and connect with `wscat`:
 cargo run --bin app
 ```
 
-```bash
-# In another terminal:
-wscat -c ws://localhost:3000/ws/echo
+```text
+$ wscat -c ws://localhost:3000/ws/echo
 Connected (press CTRL+C to quit)
 > hello
 < echo: hello
@@ -51,11 +46,26 @@ Connected (press CTRL+C to quit)
 < echo: suprnova
 ```
 
-Type any line and the server echoes it back with the `echo: ` prefix. Press `Ctrl+C` to close — `wscat` sends a close frame; the handler's `recv_text()` returns `Ok(None)` and the loop exits cleanly.
+When `recv_text()` returns `Ok(None)` the peer closed the connection; the loop exits, the handler returns `Ok(())`, and the framework sends a clean Close(1000) frame.
+
+## Lifecycle of an upgrade
+
+A WebSocket handshake is an HTTP GET with `Upgrade: websocket`. The framework runs the full request pipeline against it before any frames flow:
+
+1. **Route match.** The router looks up the path in the WS route table; on miss the request falls through to the HTTP fallback.
+2. **Origin policy.** The configured [`OriginPolicy`](#origin-policy) is enforced. A violation returns HTTP 403 with no upgrade.
+3. **Subprotocol negotiation.** If the route has `accepted_protocols`, the first client-offered token that overlaps is echoed on the 101 response.
+4. **Middleware chain.** `RequestIdMiddleware` runs outermost, followed by every globally-registered middleware, followed by the route's per-route middleware. A non-2xx response from any middleware short-circuits the upgrade — the peer receives the HTTP error, and the WebSocket future drops cleanly.
+5. **Handshake.** `hyper_tungstenite::upgrade` produces the future that resolves into a `WebSocketStream`.
+6. **Handler dispatch.** The (possibly middleware-rewritten) `Request` and a freshly-built `WsSocket` are handed to `WebSocketHandler::handle`.
+7. **Heartbeat + handler.** The framework spawns a per-connection heartbeat task and awaits the handler future under a `ws.connection` tracing span carrying the request id.
+8. **Close handshake.** On `Ok(())` the framework sends Close(1000); on `Err(_)` it sends Close(1011 "internal error"). The forwarder is awaited so the close frame is flushed to the wire before the connection's tracked task is reported done.
+
+Return value semantics are inverted from HTTP: there is no body. `Ok(())` means clean disconnect; `Err(_)` is logged and the peer sees Close(1011). Either way the connection tears down.
 
 ## The `WsSocket` API
 
-`WsSocket` is the bidirectional handle the framework passes to your handler. It wraps the underlying tungstenite stream with typed send/recv methods and hides the split-sink/stream complexity.
+`WsSocket` is the bidirectional handle the framework passes to your handler. Internally the underlying tungstenite stream is split into Sink + Stream halves: a forwarder task owns the sink and drains an mpsc; the handler-facing send methods enqueue onto the mpsc. The handler reads directly from the stream half. This split means the framework can also push frames (heartbeat pings, broadcaster fanout) without contending with the handler's send path.
 
 ### `send_text`
 
@@ -64,7 +74,7 @@ socket.send_text("hello").await?;
 socket.send_text(format!("user {id} joined")).await?;
 ```
 
-Enqueues a UTF-8 text frame. Returns `Err` only if the connection is already closed (the remote peer disconnected or you called `close` earlier). The send path is non-blocking from the handler's perspective — frames are forwarded to the sink by an internal task.
+Enqueues a UTF-8 text frame. Returns `Err` only when the connection is already closed.
 
 ### `send_binary`
 
@@ -80,12 +90,17 @@ Enqueues a binary frame. Accepts anything `Into<Vec<u8>>`. Same error semantics 
 while let Some(text) = socket.recv_text().await? {
     // text: String
 }
-// Ok(None) means the peer closed the connection
+// Ok(None) means the peer closed.
 ```
 
-Receives the next text frame. Binary frames, Ping, and Pong frames are skipped automatically — the heartbeat pings the framework sends are handled transparently and never surface here. Returns `Ok(None)` when the peer sends a close frame or the connection drops. Returns `Err` on a protocol-level error.
+Returns the next text message, silently discarding frame kinds a text-only handler isn't expected to care about:
 
-This is the method most handlers should use. If your handler only exchanges text messages, this loop pattern is the entire receive side.
+- `Message::Binary` — peer binary payload
+- `Message::Ping` — peer-initiated ping (tungstenite handles the pong automatically)
+- `Message::Pong` — peer pong reply to a framework heartbeat (the missed-ping counter is reset to zero as a side effect)
+- `Message::Frame` — raw frame variants from server-side contexts; never expected at this layer
+
+A swallowed frame is gone; there is no retroactive way to see it. If the handler needs to observe binary frames or close codes, use [`recv`](#recv) from the very first read.
 
 ### `recv`
 
@@ -102,7 +117,7 @@ while let Some(msg) = socket.recv().await? {
 }
 ```
 
-Receives the next message of any type, including Binary, Ping, Pong, and Close frames. Use this when your protocol mixes text and binary frames, or when you need to inspect close codes. `Ok(None)` means the underlying stream ended.
+Returns the next message of any kind, including Binary, Ping, Pong, and Close. `Pong` still resets the missed-ping counter as a side effect before it's returned. `Ok(None)` means the underlying stream ended.
 
 ### `close`
 
@@ -111,55 +126,20 @@ socket.close(1008, "policy violation").await?;
 return Ok(());
 ```
 
-Sends a close frame with the given code and reason string and returns. Subsequent sends on the same socket will return `Err` because the forwarder task has terminated. Always return `Ok(())` immediately after calling `close` — there is nothing useful to do with the socket after a close frame has been sent.
+Enqueues a close frame and returns. The forwarder writes the frame to the sink, calls `close()` on the sink, and terminates. Subsequent sends on the same socket return `Err` because the forwarder is gone. Always return `Ok(())` immediately after calling `close`.
 
-Common close codes: `1000` (normal), `1008` (policy violation), `1011` (internal server error). The full list is in [RFC 6455 §7.4.1](https://www.rfc-editor.org/rfc/rfc6455#section-7.4.1).
+`close` validates its arguments up front against RFC 6455 §7.4 + §5.5.1:
 
-## `WsConfig`
+- `code` must satisfy `CloseCode::is_allowed()`. Reserved or invalid codes (1004, 1005, 1006, 1015, anything below 1000, anything above 4999) are rejected with `Err` and **no frame is sent** — the connection stays open and the caller can retry with a valid code. Use 1000 for normal closure, 1001-1013 for the defined reasons, 3000-3999 for IANA-registered codes, or 4000-4999 for application-private codes.
+- `reason` is capped at 123 bytes (the 125-byte control-frame limit minus the two-byte code). Longer reasons are rejected without enqueuing anything.
 
-`WsConfig` controls per-connection behavior. Defaults aim at public, browser-facing endpoints — every active connection reserves a tungstenite buffer sized to `max_message_size`, so the framework defaults small and lets routes that need more raise the limits explicitly.
+### Why Suprnova diverges
 
-| Field               | Default  | Type       | Effect |
-|---------------------|----------|------------|--------|
-| `ping_interval`     | 30s      | `Duration` | How often the framework sends a Ping frame to keep the connection alive. |
-| `max_message_size`  | 1 MiB    | `usize`    | Maximum reassembled message size in bytes. Messages larger than this are rejected. |
-| `max_frame_size`    | 64 KiB   | `usize`    | Maximum single WebSocket frame size in bytes. |
-| `max_missed_pings`  | 2        | `usize`    | Consecutive missed Pongs before the framework closes the connection with code 1011. |
-| `origin_policy`     | `SameOrigin` | `OriginPolicy` | Origin-header policy enforced at upgrade time. |
+PHP frameworks bolt WebSocket support on as a separate process (ratchet, soketi, pusher). Suprnova's WebSocket route lives in the same `routes! { ... }` as your HTTP routes, served by the same hyper listener, drained by the same graceful-shutdown path. There is one binary, one config, one deploy. Long-lived connections are first-class because Tokio makes them cheap; the framework doesn't have to apologize for them.
 
-**Recommended overrides by use case:**
+## Path parameters
 
-- **Chat / notifications / cursor positions** — the defaults are fine. You may lower `ping_interval` to 15s if your load balancer has an aggressive idle-connection timeout.
-- **Trusted internal feeds** (server-to-server fan-out, bulk export, large binary transfers) — start from [`WsConfig::generous()`], which raises `max_message_size` to 64 MiB and `max_frame_size` to 16 MiB while keeping other defaults. Routes published to the public internet should not use `generous()` without an explicit decision: per-connection buffers multiply across concurrent sockets.
-- **Specific oversize payload** (e.g. one route that uploads 256 MiB audio files) — set the fields directly: `max_message_size: 256 * 1024 * 1024`. Don't apply the larger limit to routes that don't need it.
-
-The config struct is `Default`-constructible and all fields are public:
-
-```rust
-use std::time::Duration;
-use suprnova::ws::WsConfig;
-
-// Public default — safe for browser-facing endpoints.
-let config = WsConfig {
-    ping_interval: Duration::from_secs(15),
-    ..Default::default()
-};
-
-// Trusted-feed factory — raises message + frame caps.
-let trusted = WsConfig::generous();
-assert_eq!(trusted.max_message_size, 64 * 1024 * 1024);
-assert_eq!(trusted.max_frame_size, 16 * 1024 * 1024);
-```
-
-A per-route override is applied via `.config(WsConfig { ... })` on the WS route entry (see [`Router::ws_with_config`] and the [Per-Route WsConfig section in broadcasting docs]). Routes without an override inherit `WsConfig::default()`.
-
-[`WsConfig::generous()`]: https://docs.rs/suprnova/latest/suprnova/ws/struct.WsConfig.html#method.generous
-[`Router::ws_with_config`]: https://docs.rs/suprnova/latest/suprnova/routing/struct.Router.html#method.ws_with_config
-[Per-Route WsConfig section in broadcasting docs]: ./broadcasting.md#per-route-wsconfig
-
-## Path Parameters
-
-WebSocket routes support the same `{param}` capture syntax as HTTP routes. The captured values are available on the `Request` the handler receives.
+WebSocket routes support the same `{param}` capture syntax as HTTP routes. Captured values are available on the `Request` passed to the handler.
 
 ```rust
 // In routes!:
@@ -176,9 +156,7 @@ pub struct RoomHandler;
 impl WebSocketHandler for RoomHandler {
     async fn handle(&self, mut socket: WsSocket, req: Request) -> Result<(), FrameworkError> {
         let room_id = req.param("id")?;
-
         socket.send_text(format!("joined room {room_id}")).await?;
-
         while let Some(text) = socket.recv_text().await? {
             socket.send_text(format!("[{room_id}] {text}")).await?;
         }
@@ -187,17 +165,37 @@ impl WebSocketHandler for RoomHandler {
 }
 ```
 
-`req.param("id")` returns `Result<&str, ParamError>`. The `?` operator propagates a `FrameworkError::ParamError` if the segment is missing, which closes the connection with code 1011. In practice, if the route matched, the capture is always present — the error path is a safety net against typos in the param name.
+`req.param("id")` returns `Result<&str, ParamError>`; the `?` propagates a `FrameworkError::ParamError` if the segment is missing, which causes the handler to return `Err` and the framework to send Close(1011). In practice the capture is always present when the route matched — the error path is a safety net against param-name typos.
 
-For the full `Request` API — headers, cookies, session, query string — see [the request docs](requests.md.md).
+Express-style `:id` segments are also accepted (`ws!("/ws/rooms/:id", h)`) and convert to matchit-form internally.
 
-## Auth at Connect
+For the full `Request` API — headers, cookies, query string, peer address — see [the request docs](requests.md).
 
-The handler receives the full `Request` from the HTTP upgrade. You can read headers and cookies exactly as you would in an HTTP controller, then close the socket if the caller is not authorized.
+## Per-route middleware
 
-> **v1 caveat: middleware does not run on WebSocket upgrade requests.** Phase 7A's upgrade branch sits *above* the HTTP middleware chain — the upgrade is detected, handed off to the handler, and the middleware chain is bypassed entirely. That means `SessionMiddleware` does not populate the thread-local `session()` accessor for WS connections, and any other middleware you registered does not run either. Per-route WebSocket middleware (including a Phase 7B–native session attach) lands in Phase 7B. Until then, handlers do their auth check inline by reading the raw request directly.
+Chain `.middleware(M)` on the `ws!` entry. Multiple middleware compose left to right and run in the same fixed order an HTTP request to the same path would run: `RequestIdMiddleware` outermost, then every globally registered middleware, then the per-route chain, then the handler.
 
-The pattern for v1 is **bearer-token-in-header** (the most portable choice — `wscat`, browser clients, and load balancers all pass headers cleanly):
+```rust
+ws!("/ws/private", PrivateHandler)
+    .middleware(AuthMiddleware::new())
+    .middleware(RateLimitMiddleware::connections_per_ip(100)),
+```
+
+A non-2xx response from any middleware short-circuits the upgrade. The peer receives the rejection (e.g. 401, 403) with `X-Request-Id` set, the unwoken WebSocket future drops cleanly, and the handler is never called. This is the right layer for transport-level checks: who may open the connection at all, where the connection is coming from, how many concurrent connections per identity.
+
+Middleware can substitute a modified `Request` by calling `next(modified_req)`. The terminator captures whatever the chain ultimately passes through, and that is what the handler sees as its `Request` argument. Middleware that resolves identity (a session lookup, a token check) can attach the result via `Request` extensions; the handler reads it back the same way HTTP controllers do.
+
+Direct-on-`Router` variants (`Router::ws`, `Router::ws_with_middleware`, `Router::ws_with_config`, `Router::ws_with_middleware_and_config`) cover the same surface for code that builds a `Router` outside the macro. Each has a fallible `try_*` sibling that returns `Err(FrameworkError)` on duplicate or malformed patterns instead of panicking.
+
+### Why Suprnova diverges
+
+Most ecosystems either skip middleware on WebSocket upgrades (the Node convention) or force a separate registration ceremony for "WebSocket middleware" (the .NET / Spring convention). Suprnova treats the upgrade as the HTTP GET it actually is: the same chain runs, in the same order, with the same short-circuit semantics. There is no second concept to learn — `AuthMiddleware`, `RateLimitMiddleware`, `RequestIdMiddleware`, `CorsMiddleware` work on WS routes because they work on any route. Origin enforcement is the only extra wrinkle, and it's a property of `WsConfig`, not a separate middleware.
+
+## Auth at connect
+
+The handler receives the middleware-rewritten `Request`. Three patterns work well, in increasing order of integration with the rest of the framework:
+
+**Pattern 1 — inline bearer token in the handler.** Simplest. Works without any auth middleware. `wscat`, browser clients, and load balancers all pass headers cleanly.
 
 ```rust
 use async_trait::async_trait;
@@ -208,23 +206,16 @@ pub struct PrivateChatHandler;
 #[async_trait]
 impl WebSocketHandler for PrivateChatHandler {
     async fn handle(&self, mut socket: WsSocket, req: Request) -> Result<(), FrameworkError> {
-        // Read the Authorization header from the upgrade request and
-        // validate it against your token store. Replace `verify_token`
-        // with your own validation; the framework doesn't run any
-        // middleware here, so this is the only auth gate.
         let Some(token) = req.header("authorization")
             .and_then(|v| v.strip_prefix("Bearer "))
         else {
             socket.close(1008, "missing bearer token").await?;
             return Ok(());
         };
-
         let Some(user_id) = verify_token(token).await else {
             socket.close(1008, "invalid bearer token").await?;
             return Ok(());
         };
-
-        // Handler proceeds for authenticated connections.
         while let Some(text) = socket.recv_text().await? {
             socket.send_text(format!("[user {user_id}] {text}")).await?;
         }
@@ -232,23 +223,130 @@ impl WebSocketHandler for PrivateChatHandler {
     }
 }
 
-async fn verify_token(_token: &str) -> Option<i64> {
-    // Your token-store lookup goes here.
-    Some(42)
+async fn verify_token(_token: &str) -> Option<i64> { Some(42) }
+```
+
+**Pattern 2 — gate the upgrade with a route middleware.** Reject unauthorized opens before any frames flow. Cleaner separation of concerns; the handler only sees authenticated connections.
+
+```rust
+ws!("/ws/private", PrivateChatHandler)
+    .middleware(AuthMiddleware::new()),
+```
+
+`AuthMiddleware` returns 401 on unauthenticated requests; the upgrade is aborted with the rejection response and the handler is never called.
+
+**Pattern 3 — middleware gate plus handler re-read.** Middleware short-circuits unauthorized opens; the handler then re-reads the same credential (token, cookie, etc.) it knows is now present to identify which user just connected:
+
+```rust
+async fn handle(&self, mut socket: WsSocket, req: Request) -> Result<(), FrameworkError> {
+    // Middleware already vetted the bearer; we only get here if it was valid.
+    let token = req.bearer_token().expect("auth middleware vetted bearer presence");
+    let user_id = lookup_user_by_token(&token).await?;
+    // ...
 }
 ```
 
-Cookie-based auth works the same way — `req.cookie("session_id")` returns `Option<String>` from the raw cookie header (no middleware required). You then look the session up in your own session store. If your store uses the framework's `SessionStore` directly, you can resolve it from the container the same way controllers do, just without the thread-local convenience accessor.
+The thread-local accessors that work in HTTP controllers — `session()`, `Auth::user()`, the per-request `Context` bag — are **not** populated inside a WebSocket handler. The middleware chain's task-local scopes unwind when the chain returns; the handler runs in a freshly spawned task that only inherits the request id. Read everything the handler needs directly off the `Request` (headers, cookies via `req.cookie("...")`, captured params, the bearer token via `req.bearer_token()`) — those survive into the handler task.
 
-Always return `Ok(())` after calling `close`. Returning `Err` after a close would log a spurious error; the socket is already closing cleanly.
+## `WsConfig`
 
-Per-route auth middleware — where the framework rejects the upgrade request *before* your handler code runs, and where `SessionMiddleware` attaches the session before `handle()` is invoked — lands in Phase 7B.
+`WsConfig` controls per-connection behavior. Defaults aim at public, browser-facing endpoints — each active connection reserves a tungstenite buffer sized to `max_message_size`, so the framework defaults small and lets routes that need more raise the limits explicitly.
 
-## Production Deployment
+| Field                 | Default        | Type            | Effect |
+|-----------------------|----------------|-----------------|--------|
+| `ping_interval`       | 30s            | `Duration`      | How often the framework sends a Ping frame to keep the connection alive. |
+| `max_message_size`    | 1 MiB          | `usize`         | Maximum reassembled message size in bytes. Larger messages are rejected by tungstenite. |
+| `max_frame_size`      | 64 KiB         | `usize`         | Maximum single WebSocket frame size in bytes. |
+| `max_missed_pings`    | 2              | `usize`         | Consecutive missed Pongs before the heartbeat closes the connection with code 1011. `usize::MAX` disables enforcement. |
+| `origin_policy`       | `SameOrigin`   | `OriginPolicy`  | Origin-header check enforced at upgrade time. See [Origin policy](#origin-policy). |
+| `accepted_protocols`  | `vec![]`       | `Vec<String>`   | Server's accepted `Sec-WebSocket-Protocol` tokens. Empty means no negotiation. See [Subprotocols](#subprotocols). |
 
-The framework handles the WebSocket handshake and all frame I/O. You do not need any extra configuration on the framework side for production.
+Recommended overrides by use case:
 
-**TLS termination happens upstream.** Clients connect to `wss://` on your nginx, Caddy, or load balancer; the proxy strips TLS and forwards plain `ws://` to the framework. The framework does not need a `rustls` feature or a TLS certificate. Per-connection TLS directly to the framework is out of scope for v1 (see below).
+- **Chat / notifications / cursor positions** — defaults are fine. Drop `ping_interval` to 5–10s if your LB has an aggressive idle timeout.
+- **Trusted internal feeds** (server-to-server fan-out, bulk export, large binary transfers) — start from `WsConfig::generous()`, which raises `max_message_size` to 64 MiB and `max_frame_size` to 16 MiB while keeping other defaults.
+- **Specific oversize payload** (one route that uploads 256 MiB audio files) — set the fields directly; don't apply the larger limit to routes that don't need it.
+
+The config struct is `Default`-constructible and every field is public:
+
+```rust
+use std::time::Duration;
+use suprnova::ws::WsConfig;
+
+let chat = WsConfig {
+    ping_interval: Duration::from_secs(5),
+    max_missed_pings: 1,
+    ..Default::default()
+};
+
+let trusted = WsConfig::generous();
+assert_eq!(trusted.max_message_size, 64 * 1024 * 1024);
+assert_eq!(trusted.max_frame_size, 16 * 1024 * 1024);
+```
+
+Apply the override per route either on the `ws!` entry or on `Router::ws_with_config`:
+
+```rust
+ws!("/ws/chat", ChatHandler).config(chat),
+```
+
+`WsConfig` is validated at route registration. A zero `ping_interval` or a zero `max_missed_pings` would corrupt the heartbeat task; both are rejected at boot rather than panicking at first connection.
+
+### Heartbeat and close-on-no-pong
+
+For each upgraded connection the framework spawns a heartbeat task that sends `Ping(b"")` every `ping_interval`. On each tick the missed-ping counter increments; on each peer Pong it resets to zero. If the counter reaches `max_missed_pings`, the heartbeat sends Close(1011 "no pong response") and the connection tears down. Set `max_missed_pings` to `usize::MAX` to disable enforcement (pings still flow, but the connection is never closed for missing pongs).
+
+The first tick is consumed at task start so the peer gets at least one full interval of grace before the first ping.
+
+## Origin policy
+
+Browsers always send an `Origin` header on WebSocket handshakes. Unlike `fetch()` / `XMLHttpRequest`, WebSocket upgrades aren't protected by CSRF token middleware (the handshake carries no token), so a same-origin `Origin` check is the only thing standing between a malicious page and a privileged WS endpoint on a logged-in user's session. The framework enforces the configured policy before `hyper_tungstenite::upgrade` is called; a violation returns HTTP 403 with no upgrade.
+
+```rust
+use suprnova::ws::{OriginPolicy, WsConfig};
+
+let cfg = WsConfig {
+    origin_policy: OriginPolicy::AllowList(vec![
+        "https://app.example.com".into(),
+        "https://admin.example.com".into(),
+    ]),
+    ..Default::default()
+};
+```
+
+| Variant      | Behavior |
+|--------------|----------|
+| `SameOrigin` (default) | Allow only when `Origin`'s host (and port if present) matches the request's `Host` header. Missing `Origin` is rejected. Scheme is not compared (TLS terminates upstream, so the server can't reliably tell whether the public scheme was https or http). |
+| `AllowAny`   | Skip the check. Use only for non-browser endpoints (server-to-server, native apps, test mocks). |
+| `AllowList(Vec<String>)` | Allow only when `Origin` exactly matches (case-insensitive) one of the supplied origins. Each entry is the full `scheme://host[:port]` form a browser would send. |
+
+Non-browser clients (CLI tools, servers, native apps) typically don't send an `Origin` header. Routes that serve such clients exclusively should use `AllowAny`; routes serving both should use `AllowList` enumerating every production frontend origin.
+
+## Subprotocols
+
+A WebSocket subprotocol is an application-level token (e.g. `graphql-transport-ws`, `jsonrpc-2.0`) the client and server agree on during the handshake. Populate `accepted_protocols` to participate:
+
+```rust
+use suprnova::ws::WsConfig;
+
+let cfg = WsConfig {
+    accepted_protocols: vec![
+        "graphql-transport-ws".into(),
+        "graphql-ws".into(),
+    ],
+    ..Default::default()
+};
+```
+
+When the client offers `Sec-WebSocket-Protocol`, the framework picks the first client-offered token (in client preference order per RFC 6455 §4.2.2) that overlaps with `accepted_protocols`, matched case-insensitively, and echoes it on the 101 response. If the client offered protocols but none matched, the upgrade still succeeds with no `Sec-WebSocket-Protocol` header — RFC 6455 then requires the browser to fail the connection client-side, which is the right behavior (a server that proceeded would silently be speaking the wrong protocol).
+
+When `accepted_protocols` is empty, negotiation is skipped entirely — the upgrade response omits `Sec-WebSocket-Protocol` and the client falls back to default protocol handling.
+
+## Production deployment
+
+The framework handles the handshake and frame I/O. You do not need any extra configuration on the framework side for production.
+
+**TLS termination happens upstream.** Clients connect to `wss://` on nginx, Caddy, or the cloud load balancer; the proxy strips TLS and forwards plain `ws://` to the framework. The framework does not need a `rustls` feature or a TLS certificate.
 
 ### nginx
 
@@ -265,7 +363,7 @@ location /ws/ {
 }
 ```
 
-The `proxy_read_timeout` and `proxy_send_timeout` values must be long enough to cover idle connections between heartbeat pings. With the default 30s ping interval, 3600s (one hour) is a comfortable ceiling; lower it if your connections are short-lived.
+`proxy_read_timeout` and `proxy_send_timeout` must be long enough to cover idle gaps between heartbeats. With the default 30s `ping_interval`, 3600s is a comfortable ceiling.
 
 ### Caddy
 
@@ -276,32 +374,37 @@ reverse_proxy /ws/* localhost:3000 {
 }
 ```
 
-Caddy handles the `Upgrade` and `Connection` headers automatically when proxying; the explicit `header_up` directives above are shown for clarity but are not required in all Caddy configurations.
+Caddy handles `Upgrade` / `Connection` automatically when proxying; the explicit `header_up` directives above are for clarity.
 
-### Load balancers (AWS ALB, GCP GLB, etc.)
+### Cloud load balancers (AWS ALB, GCP GLB)
 
-Enable WebSocket support on the listener rule (AWS ALB does this automatically when the target group's protocol is HTTP/1.1 with sticky sessions off). Ensure the idle timeout on the load balancer is at least as long as your `ping_interval`; the framework's heartbeat keeps connections alive, but the load balancer will drop connections that appear idle from its perspective.
+Enable WebSocket support on the listener rule (AWS ALB does this automatically when the target group's protocol is HTTP/1.1 with sticky sessions off). Ensure the load balancer's idle timeout is at least as long as `ping_interval`; the framework's heartbeat keeps the wire active, but the LB drops connections that look idle from its perspective.
 
-## Out of Scope for v1
+## Graceful shutdown
 
-The following items are intentionally deferred:
+Every spawned WebSocket handler is tracked in the server's `WS_TASKS` `JoinSet`. On `Ctrl-C` or an external shutdown signal, the listener stops accepting new connections and `Server::run` drains the set before the process exits. The handler future doesn't resolve until the close handshake has been flushed: after the user's `handle` returns, the framework awaits the forwarder so the final Close(1000) or Close(1011) frame is written to the wire before the connection's task is reported done. In a clean shutdown peers see a normal close, not a TCP reset.
 
-- **Subprotocol negotiation** (`Sec-WebSocket-Protocol` echo) — the framework does not inspect or echo subprotocol headers. Negotiation and per-subprotocol dispatch land in Phase 7B alongside broadcasting.
-
-- **`permessage-deflate` compression** — tungstenite has a `deflate` feature behind a Cargo flag. Enabling it as a configurable toggle is deferred to a future phase.
-
-- **Per-connection TLS (`wss://` directly to the framework)** — TLS termination upstream is the supported deployment model. A future `rustls` feature could expose direct `wss://` without a proxy; it is not in scope for v1.
-
-- **Per-route auth middleware** — today, auth checks happen inside the handler by reading session/cookie state from the `Request` passed in. Per-WS-route `.middleware()` chaining lands in Phase 7B.
-
-- **Close-on-no-pong enforcement** (`max_missed_pings`) — the heartbeat sends Pings but does not yet count missed Pongs or drop the connection after N consecutive misses. Enforcement lands in Phase 7B.
+Completed handles are reaped opportunistically during the lifetime of the server, so the `JoinSet` doesn't grow unbounded under long-running operation.
 
 ## Reference
 
 | Symbol | Purpose |
-|--------|---------|
-| `suprnova::ws::WebSocketHandler` | Trait with `async fn handle(&self, socket: WsSocket, request: Request) -> Result<(), FrameworkError>`. Implement this on your handler struct. `Send + Sync + 'static` bounds required. |
-| `suprnova::ws::WsSocket` | Bidirectional handle passed to the handler. Methods: `send_text`, `send_binary`, `recv_text`, `recv`, `close`. |
-| `suprnova::ws::WsConfig` | Connection configuration: `ping_interval`, `max_message_size`, `max_frame_size`. `Default` impl applies the v1 global defaults. |
-| `Router::ws(path, handler)` | Direct registration on a `Router` value: `Router::new().ws("/ws/echo", EchoHandler)`. Accepts any `WebSocketHandler`. |
-| `ws!(path, Handler)` | Macro form for use inside `routes! { ... }`. Produces a WebSocket route entry. Does not support `.name()` or `.middleware()` in v1. |
+|---|---|
+| `suprnova::ws::WebSocketHandler` | Trait: `async fn handle(&self, socket: WsSocket, request: Request) -> Result<(), FrameworkError>`. `Send + Sync + 'static`. |
+| `suprnova::ws::WsSocket` | Bidirectional handle. Methods: `send_text`, `send_binary`, `recv_text`, `recv`, `close`. `close` validates code + reason length up front. |
+| `suprnova::ws::WsConfig` | Per-connection config. Fields: `ping_interval`, `max_message_size`, `max_frame_size`, `max_missed_pings`, `origin_policy`, `accepted_protocols`. `Default` + `generous()` constructors. Validated at registration. |
+| `suprnova::ws::OriginPolicy` | `SameOrigin` (default), `AllowAny`, `AllowList(Vec<String>)`. Enforced at upgrade time. |
+| `ws!(path, Handler)` | Macro form for `routes! { ... }`. Returns a `WsRouteDef` supporting `.config(WsConfig)` and `.middleware(M)` in either order. |
+| `Router::ws(path, handler)` | Direct registration. Returns `Router`. |
+| `Router::ws_with_config(path, handler, cfg)` | Per-route `WsConfig` override. |
+| `Router::ws_with_middleware(path, handler, mws)` | Per-route middleware list. |
+| `Router::ws_with_middleware_and_config(...)` | Both. |
+| `Router::try_ws*` family | Fallible siblings — return `Err(FrameworkError)` on duplicate or malformed patterns instead of panicking. |
+
+## Next
+
+- [Broadcasting](broadcasting.md) — channels, presence, the wire protocol on top of `ws!`
+- [Server-Sent Events](sse.md) — one-way push for browsers behind strict proxies
+- [Routing](routing.md) — what `routes!` and `ws!` actually expand into
+- [Middleware](middleware.md) — writing middleware that gates HTTP and WS uniformly
+- [Requests](requests.md) — headers, cookies, query, extensions on the `Request` your handler receives
