@@ -4,10 +4,10 @@ Suprnova ships two complementary rate-limit surfaces:
 
 | Surface | Use when... | Backend |
 |---------|-------------|---------|
-| [`RateLimiterDriver`](#sliding-window-driver-spi) + [`RateLimitMiddleware`] | You want strict sliding-window enforcement against arbitrary storage (Redis ZSET, in-memory deque) | `dyn RateLimiterDriver` |
-| [`RateLimiter`](#cache-backed-laravel-shape-facade) + [`ThrottleRequestsMiddleware`] | You want Laravel-shape named limiters, `attempt()` workflow callbacks, or `X-RateLimit-*` response headers | `Cache` store (memory or Redis) |
+| `RateLimiterDriver` + `RateLimitMiddleware` | You want strict sliding-window enforcement against arbitrary storage (Redis ZSET, in-memory deque) | `dyn RateLimiterDriver` |
+| `RateLimiter` + `ThrottleRequestsMiddleware` | You want Laravel-shape named limiters, `attempt()` workflow callbacks, or `X-RateLimit-*` response headers | `Cache` store (memory or Redis) |
 
-Both ship together because each is the right answer to a different question. The sliding-window driver is Suprnova's native shape — one slot per request, no separate timer key, atomic Lua eval on Redis. The Laravel facade is what migrated apps reach for and what the named-limiter / response-callback pattern requires.
+The sliding-window driver is Suprnova's native shape — one slot per request, no separate timer key, atomic Lua eval on Redis. The Laravel facade is what migrated apps reach for and what the named-limiter / response-callback pattern requires. The two coexist by design, and a route can layer both.
 
 ## Sliding-window driver SPI
 
@@ -67,11 +67,22 @@ let mw = RateLimitMiddleware::new(
 .on_backend_error(BackendErrorPolicy::FailClosed);
 ```
 
-On rejection (over quota) it returns HTTP 429 with a `Retry-After` header. On backend error (e.g. Redis unreachable) it dispatches via [`BackendErrorPolicy`]: `FailOpen` (default) passes through with a `warn!`; `FailClosed` returns 503 with `Retry-After: 1` and an `error!` log.
+On rejection (over quota) it returns HTTP 429 with a `Retry-After` header.
+
+### Backend-error policy
+
+`BackendErrorPolicy` governs what happens when the limiter *backend* itself errors — e.g. Redis is unreachable — as distinct from a request legitimately exceeding its quota. The backend cannot make a decision, so the middleware must choose between availability and the limit's guarantee.
+
+| Policy | Behaviour | When to use |
+|--------|-----------|-------------|
+| `FailOpen` (default) | Pass the request through; log at `warn` | Most public APIs — a limiter outage should not take down traffic |
+| `FailClosed` | Reject with HTTP 503 + `Retry-After: 1`; log at `error` | Sensitive routes (login, password reset, payments) where unbounded traffic during a backend outage is worse than briefly rejecting |
+
+Choose with `.on_backend_error(BackendErrorPolicy::FailClosed)` on the middleware. Quota-exhausted requests are always 429 regardless of the policy — the policy only affects backend-error fallthrough.
 
 ## Cache-backed Laravel-shape facade
 
-`RateLimiter` (the struct) mirrors `Illuminate\Cache\RateLimiter`. It's a fixed-window counter built on top of the Suprnova [`Cache`](cache.md.md) facade. Use it for named limiters, `attempt()` workflows, or any time you want the `X-RateLimit-*` headers Laravel apps expect.
+`RateLimiter` (the struct) mirrors `Illuminate\Cache\RateLimiter`. It's a fixed-window counter built on top of the Suprnova [`Cache`](cache.md) facade. Use it for named limiters, `attempt()` workflows, or any time you want the `X-RateLimit-*` headers Laravel apps expect.
 
 ### Storage layout
 
@@ -177,8 +188,8 @@ The data type returned by named-limiter callbacks. Shorthand constructors mirror
 use suprnova::Limit;
 use std::time::Duration;
 
-Limit::per_second(10);              // 10/sec
-Limit::per_minute(60);              // 60/min
+Limit::per_second(10, 1);           // 10 per 1 second (max_attempts, decay_seconds)
+Limit::per_minute(60);              // 60 per minute
 Limit::per_minutes(5, 100);         // 100 per 5 minutes (decay-first, Laravel signature)
 Limit::per_hour(1_000);             // 1000/hr
 Limit::per_hours(6, 5_000);         // 5000 per 6 hours
@@ -269,14 +280,14 @@ let router = Router::new()
 
 ## Configuration
 
-The driver SPI is configured via environment variables; the Cache-backed facade is configured wherever your [`Cache`](cache.md.md) store is configured (memory or Redis).
+The driver SPI is configured via environment variables; the Cache-backed facade is configured wherever your [`Cache`](cache.md) store is configured (memory or Redis).
 
 | Variable | Used by | Default |
 |----------|---------|---------|
 | `RATE_LIMIT_DRIVER` | Driver SPI bootstrap | `memory` |
 | `RATE_LIMIT_REDIS_URL` | Redis driver | `redis://127.0.0.1:6379` |
 | `RATE_LIMIT_PREFIX` | Redis key prefix | `suprnova:` |
-| `CACHE_DRIVER` / `REDIS_URL` / `CACHE_DEFAULT_TTL` / `REDIS_PREFIX` | Cache-backed `RateLimiter` facade (see [`Cache`](cache.md.md)) | various |
+| `CACHE_DRIVER` / `REDIS_URL` / `CACHE_DEFAULT_TTL` / `REDIS_PREFIX` | Cache-backed `RateLimiter` facade (see [`Cache`](cache.md)) | various |
 
 ## Migration from Laravel
 
@@ -296,6 +307,18 @@ The driver SPI is configured via environment variables; the Cache-backed facade 
 | `throttle:60,1` middleware | `ThrottleRequestsMiddleware::with(60, 1, "")` |
 | `X-RateLimit-Limit/Remaining/Reset` + `Retry-After` headers | Same headers, same shape |
 
-[`RateLimitMiddleware`]: ./middleware.md
-[`ThrottleRequestsMiddleware`]: #throttlerequestsmiddleware
-[`BackendErrorPolicy`]: ./middleware.md
+### Why Suprnova diverges
+
+Laravel ships one shape: `Illuminate\Cache\RateLimiter` (Cache-backed fixed-window counter) with `Illuminate\Routing\Middleware\ThrottleRequests` as its HTTP wrapper. Suprnova ships both that shape *and* a native sliding-window driver SPI because two real questions need two real answers.
+
+A Cache-backed counter is the right answer to "I have named limiters, response callbacks, after-callbacks for failed-login-only counting, and I want to be source-compatible with Laravel migrations." It's the wrong answer to "I need exact one-slot-per-request sliding-window enforcement against a Redis ZSET with atomic Lua eval and no separate timer key." That second question is what most Rust services hitting Tokio's concurrency limits actually have, so `RateLimiterDriver` + `RateLimitMiddleware` exist alongside, not behind a feature flag.
+
+The backend-error policy is also a Suprnova addition. Laravel's middleware never surfaces a "the limiter is broken" decision because PHP's per-request lifecycle hides it — the next request gets a fresh process. A long-lived Tokio worker that loses Redis for ten seconds must decide what to do with the requests arriving during that window; `BackendErrorPolicy::FailOpen` (default) vs `FailClosed` is that decision exposed explicitly.
+
+## Next
+
+- [Middleware](middleware.md) — how middleware composes, runs, and short-circuits in the request chain
+- [Cache](cache.md) — the store the Laravel-shape `RateLimiter` facade is built on
+- [Configuration](configuration.md) — typed config for the cache and Redis backends
+- [Auth Flows](auth-flows.md) — `LoginThrottleMiddleware` and the brute-force lockout pattern build on this surface
+- [Error Model](error-model.md) — why `Result<HttpResponse, HttpResponse>` lets the middleware short-circuit cleanly
