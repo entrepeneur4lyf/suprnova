@@ -23,18 +23,18 @@ the server (`Ctrl+C`) — we're going to add a feature.
 
 ## 2. Create the model and migration
 
-`suprnova make:model Link --migration` scaffolds both. Or generate
-them separately:
+There is no dedicated `make:model` command — models are regenerated
+from the schema by `db:sync --regenerate-models` once the migration
+runs. Start with the migration:
 
 ```bash
 suprnova make:migration create_links_table
-suprnova make:model Link
 ```
 
 Open the new migration file under `src/migrations/`:
 
 ```rust
-use suprnova::sea_orm_migration::prelude::*;
+use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -64,7 +64,7 @@ impl MigrationTrait for Migration {
 }
 ```
 
-Then open the model at `src/models/link.rs`:
+Create the model by hand at `src/models/link.rs`:
 
 ```rust
 use chrono::{DateTime, Utc};
@@ -80,7 +80,8 @@ pub struct Link {
 }
 ```
 
-Run the migration:
+Add `pub mod link;` to `src/models/mod.rs` so the new module is
+reachable, then apply the migration and regenerate entities:
 
 ```bash
 suprnova db:sync
@@ -103,10 +104,9 @@ pub struct IndexProps {
     pub links: Vec<Link>,
 }
 
-#[handler]
-pub async fn index(_req: Request) -> Response {
+pub async fn index(req: Request) -> Response {
     let links = Link::query().order_by_desc("created_at").get().await?;
-    inertia_response!("Links/Index", IndexProps { links: links.into_vec() })
+    inertia_response!(&req, "Links/Index", IndexProps { links: links.into_vec() })
 }
 
 #[derive(serde::Deserialize, suprnova::Data, suprnova::Validate)]
@@ -118,7 +118,7 @@ pub struct CreateLink {
 }
 
 #[handler]
-pub async fn store(req: Request, input: CreateLink) -> Response {
+pub async fn store(input: CreateLink) -> Response {
     let link = Link::create(suprnova::attrs! {
         title: input.title,
         url: input.url,
