@@ -119,6 +119,26 @@ struct PasskeyAuthenticationCeremony {
     user_id: UserId,
 }
 
+/// Refuse to mint a ceremony when no `SessionMiddleware` is active.
+///
+/// Without a session, the ceremony selector that `store_*_ceremony`
+/// writes is dropped on the floor, and the matching `finish_*` call
+/// would have no way to retrieve it — the ceremony row would orphan
+/// in `auth_ceremony_tokens` until the TTL prune. Surface the
+/// misconfiguration as an actionable internal error before any DB
+/// writes happen.
+fn require_session_present(facade_call: &'static str) -> Result<(), FrameworkError> {
+    if session_mut(|_| ()).is_some() {
+        return Ok(());
+    }
+    Err(FrameworkError::internal(format!(
+        "{facade_call} invoked outside a session — \
+         mount SessionMiddleware on the route group that handles \
+         this endpoint so the ceremony selector survives the \
+         begin/finish round-trip."
+    )))
+}
+
 /// Store the in-flight registration ceremony in the auth_ceremony_tokens
 /// table and put just the ceremony selector in the session. The session
 /// is no longer the source of truth for the ceremony payload — the table
@@ -127,6 +147,10 @@ struct PasskeyAuthenticationCeremony {
 async fn store_registration_ceremony(
     ceremony: &PasskeyRegistrationCeremony,
 ) -> Result<(), FrameworkError> {
+    // The public `begin_*` facades enforce session presence upfront;
+    // this is a defence-in-depth re-check so a future caller that
+    // bypasses the facade still cannot orphan a row.
+    require_session_present("passkey::store_registration_ceremony")?;
     let selector = uuid::Uuid::new_v4().to_string();
     // 10 minutes is the standard WebAuthn ceremony timeout — generous
     // enough for slow browsers + biometric prompts, short enough that
@@ -178,6 +202,8 @@ async fn take_registration_ceremony() -> Result<PasskeyRegistrationCeremony, Fra
 async fn store_authentication_ceremony(
     ceremony: &PasskeyAuthenticationCeremony,
 ) -> Result<(), FrameworkError> {
+    // Defence-in-depth — the public facade already enforces this.
+    require_session_present("passkey::store_authentication_ceremony")?;
     let selector = uuid::Uuid::new_v4().to_string();
     super::ceremony::issue(
         &selector,
@@ -337,6 +363,12 @@ impl PasskeyAuth {
         email: &str,
     ) -> Result<PasskeyRegistrationChallenge, FrameworkError> {
         let webauthn = webauthn_instance()?;
+
+        // Session-presence check goes BEFORE the
+        // `find_or_create_user_by_email` write so a sessionless caller
+        // cannot side-effect a user row (account-enumeration / probing
+        // hardening) and cannot orphan a ceremony row downstream.
+        require_session_present("passkey::begin_registration")?;
 
         // Get-or-create the user account via the repository layer (no dummy
         // password row created). Registration is the one path where
@@ -504,6 +536,15 @@ impl PasskeyAuth {
     ) -> Result<PasskeyAuthenticationChallenge, FrameworkError> {
         let webauthn = webauthn_instance()?;
 
+        // Session-presence check FIRST — without a session the
+        // ceremony cannot survive past this call, so refuse before
+        // touching torii's user store. Distinct from the
+        // "passkey authentication failed" branch below, which masks
+        // user-existence to defeat enumeration; the
+        // session-misconfig error is for the operator, not the caller,
+        // and surfaces as an internal error.
+        require_session_present("passkey::begin_authentication")?;
+
         // Resolve user — **lookup-only**. Authentication is the wrong
         // place to create accounts on miss (codex review finding #3): a
         // probing attacker who guesses email addresses could otherwise
@@ -660,26 +701,20 @@ impl PasskeyAuth {
                 let updated_bytes = serde_json::to_vec(passkey).map_err(|e| {
                     FrameworkError::internal(format!("passkey: serialize updated passkey: {e}"))
                 })?;
-                // Re-register to update bytes (torii has no update API; delete + add).
-                instance()?
-                    .passkey()
-                    .delete_credential(&stored.credential_id)
-                    .await
-                    .map_err(|e| {
-                        FrameworkError::internal(format!("passkey: delete old credential: {e}"))
-                    })?;
-                instance()?
-                    .passkey()
-                    .register_credential(
-                        &user.id,
-                        stored.credential_id.clone(),
-                        updated_bytes,
-                        stored.name.clone(),
-                    )
-                    .await
-                    .map_err(|e| {
-                        FrameworkError::internal(format!("passkey: update credential: {e}"))
-                    })?;
+                // Persist the new credential blob atomically. Torii's
+                // `PasskeyService` only exposes `register_credential` +
+                // `delete_credential` — a delete+add sequence opens a
+                // window where a storage failure between the two
+                // operations drops a valid credential permanently and
+                // also lets two concurrent finishes race on the
+                // counter. Bypass the two-step API by issuing a
+                // single UPDATE against the underlying `passkeys`
+                // row that torii owns. The framework shares the same
+                // database connection with torii (the
+                // `auth_ceremony_tokens` flow already depends on
+                // this), and the table shape is fixed by torii's
+                // migration `m20250304_000004_create_passkeys_table`.
+                update_passkey_credential_blob(&stored.credential_id, &updated_bytes).await?;
                 updated = true;
                 break;
             }
@@ -700,5 +735,222 @@ impl PasskeyAuth {
             .map_err(|e| FrameworkError::internal(format!("passkey: create session: {e}")))?;
 
         Ok((user, session))
+    }
+}
+
+/// Atomically rewrite the `data_json` blob for a single passkey row,
+/// keyed by the base64-encoded credential id that torii stores.
+///
+/// Torii's `SeaORMPasskeyRepository` writes the credential blob into
+/// `passkeys.data_json` as a JSON object (`{"credential_id":...,
+/// "public_key":..., "name":..., "created_at":..., "last_used_at":...}`)
+/// with the credential id encoded as base64-standard. We mirror that
+/// encoding and rewrite only the `public_key` field so the counter
+/// update lands as a single statement instead of a delete+insert
+/// pair that can drop the credential under storage failure.
+///
+/// Returns:
+/// - `Ok(())` when the UPDATE affected exactly one row.
+/// - `Err(_)` for connection/DB errors and for the
+///   no-rows-affected case — torii's auth path already proved the
+///   credential is in our allow-list, so a missing row at the point
+///   of update is an internal inconsistency, not a user error.
+async fn update_passkey_credential_blob(
+    credential_id: &[u8],
+    updated_passkey_bytes: &[u8],
+) -> Result<(), FrameworkError> {
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use sea_orm::{ConnectionTrait, Statement};
+
+    let conn = crate::database::DB::connection()?;
+    let credential_id_b64 = BASE64_STANDARD.encode(credential_id);
+
+    // First read the current row so we can rewrite only the
+    // `public_key` field of `data_json` while preserving
+    // `credential_id`, `name`, `created_at`, `last_used_at`. We use a
+    // raw SELECT keyed on `credential_id` because the framework does
+    // not depend on torii-storage-seaorm's `passkey::Entity`
+    // privately, and re-deriving the entity here would couple the
+    // framework to torii's migration shape twice.
+    let backend = conn.inner().get_database_backend();
+    let select_stmt = Statement::from_sql_and_values(
+        backend,
+        r#"SELECT "data_json" FROM "passkeys" WHERE "credential_id" = $1"#,
+        [credential_id_b64.clone().into()],
+    );
+    let current_row = conn
+        .inner()
+        .query_one(select_stmt)
+        .await
+        .map_err(|e| FrameworkError::internal(format!("passkey: select credential row: {e}")))?
+        .ok_or_else(|| {
+            FrameworkError::internal(
+                "passkey: credential row vanished between authentication and counter update — \
+                 internal consistency error",
+            )
+        })?;
+
+    let current_data: String = current_row
+        .try_get_by("data_json")
+        .map_err(|e| FrameworkError::internal(format!("passkey: read data_json column: {e}")))?;
+
+    let mut json: serde_json::Value = serde_json::from_str(&current_data)
+        .map_err(|e| FrameworkError::internal(format!("passkey: parse data_json: {e}")))?;
+
+    // Rewrite the `public_key` field with the freshly-updated passkey
+    // blob (counter incremented by webauthn-rs::update_credential).
+    json["public_key"] = serde_json::Value::String(BASE64_STANDARD.encode(updated_passkey_bytes));
+
+    let new_data = json.to_string();
+
+    let update_stmt = Statement::from_sql_and_values(
+        backend,
+        r#"UPDATE "passkeys" SET "data_json" = $1, "updated_at" = $2 WHERE "credential_id" = $3"#,
+        [
+            new_data.into(),
+            chrono::Utc::now().into(),
+            credential_id_b64.into(),
+        ],
+    );
+    let result =
+        conn.inner().execute(update_stmt).await.map_err(|e| {
+            FrameworkError::internal(format!("passkey: update credential blob: {e}"))
+        })?;
+
+    if result.rows_affected() != 1 {
+        return Err(FrameworkError::internal(format!(
+            "passkey: counter update affected {} rows (expected 1) — \
+             credential row may have been deleted concurrently",
+            result.rows_affected()
+        )));
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod credential_blob_tests {
+    use super::*;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use sea_orm::ConnectionTrait;
+
+    async fn fresh_test_db() -> (crate::database::DbConnection, Vec<u8>, Vec<u8>, Vec<u8>) {
+        // Each test gets its own unique in-memory database so we never
+        // collide with the shared `?cache=shared` pool the integration
+        // tests use.
+        let dbname = format!("update-passkey-{}", uuid::Uuid::new_v4());
+        let url = format!("sqlite:file:{dbname}?mode=memory&cache=shared");
+        let cfg = crate::database::DatabaseConfig::builder()
+            .url(&url)
+            .max_connections(2)
+            .min_connections(1)
+            .logging(false)
+            .build();
+        let conn = crate::database::DbConnection::connect(&cfg)
+            .await
+            .expect("connect ephemeral sqlite for passkey blob test");
+
+        // Minimal `passkeys` table mirroring torii's schema. We don't
+        // pull in torii's migrator here — the helper only touches
+        // `credential_id` + `data_json` + `updated_at`.
+        conn.inner()
+            .execute_unprepared(
+                r#"CREATE TABLE "passkeys" (
+                       "id"             INTEGER PRIMARY KEY AUTOINCREMENT,
+                       "user_id"        TEXT NOT NULL,
+                       "credential_id"  TEXT NOT NULL,
+                       "data_json"      TEXT NOT NULL,
+                       "created_at"     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                       "updated_at"     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                   )"#,
+            )
+            .await
+            .expect("create passkeys table");
+
+        let credential_id = vec![1u8, 2, 3, 4, 5];
+        let old_pk = vec![10u8, 11, 12];
+        let new_pk = vec![20u8, 21, 22, 23, 24];
+
+        let credential_id_b64 = BASE64_STANDARD.encode(&credential_id);
+        let data_json = serde_json::json!({
+            "credential_id": credential_id_b64,
+            "public_key": BASE64_STANDARD.encode(&old_pk),
+            "name": "Test Key",
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "last_used_at": serde_json::Value::Null,
+        })
+        .to_string();
+
+        let insert = sea_orm::Statement::from_sql_and_values(
+            conn.inner().get_database_backend(),
+            r#"INSERT INTO "passkeys" ("user_id", "credential_id", "data_json")
+               VALUES ($1, $2, $3)"#,
+            [
+                "usr_test".into(),
+                credential_id_b64.into(),
+                data_json.into(),
+            ],
+        );
+        conn.inner().execute(insert).await.expect("insert row");
+
+        (conn, credential_id, old_pk, new_pk)
+    }
+
+    /// The helper must rewrite the row in place: row count stays 1,
+    /// `public_key` reflects the new bytes, and the credential_id /
+    /// name / created_at fields are preserved.
+    #[tokio::test]
+    async fn update_blob_preserves_row_and_overwrites_public_key() {
+        let (conn, credential_id, _old_pk, new_pk) = fresh_test_db().await;
+        crate::App::singleton(conn.clone());
+
+        update_passkey_credential_blob(&credential_id, &new_pk)
+            .await
+            .expect("update succeeds");
+
+        // Row count must still be exactly 1.
+        let count_stmt = sea_orm::Statement::from_sql_and_values(
+            conn.inner().get_database_backend(),
+            r#"SELECT COUNT(*) AS n FROM "passkeys""#,
+            vec![],
+        );
+        let row = conn.inner().query_one(count_stmt).await.unwrap().unwrap();
+        let n: i64 = row.try_get_by("n").unwrap();
+        assert_eq!(n, 1, "row count must remain 1 after atomic update");
+
+        // `data_json.public_key` must reflect the freshly-encoded
+        // bytes, and the rest of the JSON must survive.
+        let credential_id_b64 = BASE64_STANDARD.encode(&credential_id);
+        let select_stmt = sea_orm::Statement::from_sql_and_values(
+            conn.inner().get_database_backend(),
+            r#"SELECT "data_json" FROM "passkeys" WHERE "credential_id" = $1"#,
+            [credential_id_b64.into()],
+        );
+        let row = conn.inner().query_one(select_stmt).await.unwrap().unwrap();
+        let data: String = row.try_get_by("data_json").unwrap();
+        let json: serde_json::Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(
+            json["public_key"].as_str().unwrap(),
+            BASE64_STANDARD.encode(&new_pk),
+            "public_key must reflect updated bytes"
+        );
+        assert_eq!(json["name"].as_str().unwrap(), "Test Key");
+    }
+
+    /// Calling the helper for a credential that doesn't exist must
+    /// produce an internal error rather than silently no-op.
+    #[tokio::test]
+    async fn update_blob_errors_when_credential_missing() {
+        let (conn, _credential_id, _, new_pk) = fresh_test_db().await;
+        crate::App::singleton(conn);
+
+        let err = update_passkey_credential_blob(&[99u8, 99, 99], &new_pk)
+            .await
+            .expect_err("missing credential must surface an error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("vanished") || msg.contains("0 rows"),
+            "expected vanished/0-rows error, got: {msg}"
+        );
     }
 }

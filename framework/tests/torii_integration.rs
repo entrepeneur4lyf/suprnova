@@ -211,14 +211,90 @@ fn passkey_registration_challenge_returns_options() {
     Lazy::force(&SETUP);
 
     RT.block_on(async {
-        let challenge = Auth::passkey()
-            .begin_registration("alice@example.com")
-            .await
-            .unwrap();
+        let slot = suprnova::session::new_session_slot_for_test();
+        let challenge = suprnova::session::session_scope_for_test(slot, async {
+            Auth::passkey()
+                .begin_registration("alice@example.com")
+                .await
+                .unwrap()
+        })
+        .await;
 
         assert!(!challenge.challenge.is_empty());
         assert_eq!(challenge.user_email, "alice@example.com");
         assert!(!challenge.rp_id.is_empty());
+    });
+}
+
+/// Passkey registration MUST refuse to mint a ceremony when no session
+/// is mounted. Without a session, finish_registration would never see
+/// the selector that begin_registration tried to store, and the
+/// ceremony row would orphan in `auth_ceremony_tokens`. Surface the
+/// misconfiguration as an actionable internal error.
+#[test]
+fn passkey_begin_registration_rejects_when_no_session_mounted() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        // No session_scope_for_test — call directly so `session_mut`
+        // returns None.
+        let err = Auth::passkey()
+            .begin_registration("no-session@example.com")
+            .await
+            .expect_err("sessionless begin_registration must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("outside a session") && msg.contains("SessionMiddleware"),
+            "expected sessionless-misconfig message, got: {msg}"
+        );
+    });
+}
+
+/// Same property for the authentication path: begin_authentication
+/// rejects sessionless callers BEFORE touching torii — the email is
+/// never looked up, so it doesn't matter whether the user exists.
+#[test]
+fn passkey_begin_authentication_rejects_when_no_session_mounted() {
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let err = Auth::passkey()
+            .begin_authentication("never-resolved@example.com")
+            .await
+            .expect_err("sessionless begin_authentication must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("outside a session") && msg.contains("SessionMiddleware"),
+            "expected sessionless-misconfig message, got: {msg}"
+        );
+    });
+}
+
+/// Same property for the OAuth begin path: sessionless callers
+/// receive an actionable internal error instead of an unusable
+/// kickoff + orphaned ceremony row.
+#[test]
+fn oauth_begin_rejects_when_no_session_mounted() {
+    Lazy::force(&SETUP);
+
+    Auth::oauth("github").configure(suprnova::torii_integration::oauth::OAuthProviderConfig {
+        client_id: "test-client".into(),
+        client_secret: "test-secret".into(),
+        redirect_url: "http://localhost:8000/auth/oauth/github/callback".into(),
+        scopes: vec!["user:email".into()],
+        endpoints_override: None,
+    });
+
+    RT.block_on(async {
+        let err = Auth::oauth("github")
+            .begin()
+            .await
+            .expect_err("sessionless OAuth begin must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("outside a session") && msg.contains("SessionMiddleware"),
+            "expected sessionless-misconfig message, got: {msg}"
+        );
     });
 }
 
@@ -1047,6 +1123,7 @@ fn oauth_complete_sends_code_verifier_to_token_endpoint() {
                         authorize: format!("{base}/authorize"),
                         token: format!("{base}/token"),
                         userinfo: format!("{base}/userinfo"),
+                        emails: None,
                     },
                 ),
             },
@@ -1408,6 +1485,287 @@ fn bearer_token_middleware_passes_through_when_token_invalid() {
         assert!(
             response_ok,
             "BearerTokenMiddleware should pass through (no 401) for an invalid token"
+        );
+    });
+}
+
+/// When the GitHub `/user` endpoint omits the primary email (private
+/// email accounts), `complete()` must NOT fall back to `login` or the
+/// opaque provider id. Instead, it must consult `/user/emails` and
+/// pick the row marked `primary: true, verified: true`.
+#[test]
+fn oauth_complete_falls_back_to_user_emails_when_userinfo_email_omitted() {
+    use http_body_util::{BodyExt, Full};
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use std::convert::Infallible;
+
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{addr}");
+
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                tokio::spawn(async move {
+                    let io = TokioIo::new(stream);
+                    let svc = service_fn(|req: hyper::Request<hyper::body::Incoming>| async move {
+                        let path = req.uri().path().to_string();
+                        let method = req.method().to_string();
+                        if path == "/token" && method == "POST" {
+                            let _ = req.into_body().collect().await;
+                            let payload = serde_json::json!({
+                                "access_token": "github-private-email-token",
+                                "token_type": "bearer",
+                            });
+                            return Ok::<_, Infallible>(
+                                hyper::Response::builder()
+                                    .status(200)
+                                    .header("content-type", "application/json")
+                                    .body(Full::new(bytes::Bytes::from(
+                                        serde_json::to_vec(&payload).unwrap(),
+                                    )))
+                                    .unwrap(),
+                            );
+                        }
+                        if path == "/userinfo" {
+                            // Simulate a GitHub `/user` response from a
+                            // private-email account: id is present,
+                            // login is present, email is omitted.
+                            let payload = serde_json::json!({
+                                "id": 9001,
+                                "login": "private-email-user",
+                                "name": "Private Email User"
+                            });
+                            return Ok::<_, Infallible>(
+                                hyper::Response::builder()
+                                    .status(200)
+                                    .header("content-type", "application/json")
+                                    .body(Full::new(bytes::Bytes::from(
+                                        serde_json::to_vec(&payload).unwrap(),
+                                    )))
+                                    .unwrap(),
+                            );
+                        }
+                        if path == "/emails" {
+                            // GitHub `/user/emails` shape: list of
+                            // `{ email, primary, verified, visibility }`.
+                            let payload = serde_json::json!([
+                                {
+                                    "email": "noisy-secondary@example.com",
+                                    "primary": false,
+                                    "verified": true,
+                                    "visibility": null,
+                                },
+                                {
+                                    "email": "verified-primary@example.com",
+                                    "primary": true,
+                                    "verified": true,
+                                    "visibility": "private",
+                                },
+                            ]);
+                            return Ok::<_, Infallible>(
+                                hyper::Response::builder()
+                                    .status(200)
+                                    .header("content-type", "application/json")
+                                    .body(Full::new(bytes::Bytes::from(
+                                        serde_json::to_vec(&payload).unwrap(),
+                                    )))
+                                    .unwrap(),
+                            );
+                        }
+                        Ok::<_, Infallible>(
+                            hyper::Response::builder()
+                                .status(404)
+                                .body(Full::new(bytes::Bytes::new()))
+                                .unwrap(),
+                        )
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, svc)
+                        .await;
+                });
+            }
+        });
+
+        // Use a unique provider name to avoid polluting the github
+        // registration the other tests rely on. Hardcode the GitHub
+        // identifier on the override so the user-facing config doesn't
+        // need to know about the emails endpoint.
+        let provider_name = "github_private_email_test";
+        Auth::oauth(provider_name).configure(
+            suprnova::torii_integration::oauth::OAuthProviderConfig {
+                client_id: "private-email-client".into(),
+                client_secret: "private-email-secret".into(),
+                redirect_url: "http://localhost:8000/auth/oauth/cb".into(),
+                scopes: vec!["user:email".into()],
+                endpoints_override: Some(suprnova::torii_integration::oauth::EndpointOverrides {
+                    authorize: format!("{base}/authorize"),
+                    token: format!("{base}/token"),
+                    userinfo: format!("{base}/userinfo"),
+                    emails: Some(format!("{base}/emails")),
+                }),
+            },
+        );
+
+        let slot = suprnova::session::new_session_slot_for_test();
+        let user = suprnova::session::session_scope_for_test(slot, async {
+            let kickoff = Auth::oauth(provider_name).begin().await.unwrap();
+            let (user, _session) = Auth::oauth(provider_name)
+                .complete("real-code", &kickoff.state)
+                .await
+                .expect("complete must succeed and use the emails-endpoint primary");
+            user
+        })
+        .await;
+
+        assert_eq!(
+            user.email, "verified-primary@example.com",
+            "must pick the primary verified email, not a username or opaque id"
+        );
+    });
+}
+
+/// When neither `/user` nor `/user/emails` yields a verified
+/// address, `complete()` must REFUSE the callback with a 502 rather
+/// than persist a username or opaque id in the email column. This is
+/// the core regression guard for the MEDIUM finding: non-email
+/// fallbacks must never make it to torii.
+#[test]
+fn oauth_complete_refuses_when_no_verified_email_available() {
+    use http_body_util::{BodyExt, Full};
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use std::convert::Infallible;
+
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{addr}");
+
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                tokio::spawn(async move {
+                    let io = TokioIo::new(stream);
+                    let svc = service_fn(|req: hyper::Request<hyper::body::Incoming>| async move {
+                        let path = req.uri().path().to_string();
+                        let method = req.method().to_string();
+                        if path == "/token" && method == "POST" {
+                            let _ = req.into_body().collect().await;
+                            let payload = serde_json::json!({
+                                "access_token": "no-email-token",
+                                "token_type": "bearer",
+                            });
+                            return Ok::<_, Infallible>(
+                                hyper::Response::builder()
+                                    .status(200)
+                                    .header("content-type", "application/json")
+                                    .body(Full::new(bytes::Bytes::from(
+                                        serde_json::to_vec(&payload).unwrap(),
+                                    )))
+                                    .unwrap(),
+                            );
+                        }
+                        if path == "/userinfo" {
+                            // No email field present in the payload.
+                            let payload = serde_json::json!({
+                                "id": 4242,
+                                "login": "noemail",
+                            });
+                            return Ok::<_, Infallible>(
+                                hyper::Response::builder()
+                                    .status(200)
+                                    .header("content-type", "application/json")
+                                    .body(Full::new(bytes::Bytes::from(
+                                        serde_json::to_vec(&payload).unwrap(),
+                                    )))
+                                    .unwrap(),
+                            );
+                        }
+                        if path == "/emails" {
+                            // Only unverified rows — the helper must
+                            // reject and the OAuth flow must refuse.
+                            let payload = serde_json::json!([
+                                {
+                                    "email": "unverified@example.com",
+                                    "primary": true,
+                                    "verified": false,
+                                    "visibility": null,
+                                }
+                            ]);
+                            return Ok::<_, Infallible>(
+                                hyper::Response::builder()
+                                    .status(200)
+                                    .header("content-type", "application/json")
+                                    .body(Full::new(bytes::Bytes::from(
+                                        serde_json::to_vec(&payload).unwrap(),
+                                    )))
+                                    .unwrap(),
+                            );
+                        }
+                        Ok::<_, Infallible>(
+                            hyper::Response::builder()
+                                .status(404)
+                                .body(Full::new(bytes::Bytes::new()))
+                                .unwrap(),
+                        )
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, svc)
+                        .await;
+                });
+            }
+        });
+
+        let provider_name = "github_no_email_test";
+        Auth::oauth(provider_name).configure(
+            suprnova::torii_integration::oauth::OAuthProviderConfig {
+                client_id: "no-email-client".into(),
+                client_secret: "no-email-secret".into(),
+                redirect_url: "http://localhost:8000/auth/oauth/cb".into(),
+                scopes: vec!["user:email".into()],
+                endpoints_override: Some(suprnova::torii_integration::oauth::EndpointOverrides {
+                    authorize: format!("{base}/authorize"),
+                    token: format!("{base}/token"),
+                    userinfo: format!("{base}/userinfo"),
+                    emails: Some(format!("{base}/emails")),
+                }),
+            },
+        );
+
+        let slot = suprnova::session::new_session_slot_for_test();
+        let err = suprnova::session::session_scope_for_test(slot, async {
+            let kickoff = Auth::oauth(provider_name).begin().await.unwrap();
+            Auth::oauth(provider_name)
+                .complete("real-code", &kickoff.state)
+                .await
+        })
+        .await
+        .expect_err("complete must refuse when no verified email is available");
+
+        assert_eq!(
+            err.status_code(),
+            502,
+            "no verified email must map to 502 (bad upstream), got {}: {}",
+            err.status_code(),
+            err,
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("verified email"),
+            "expected verified-email error message, got: {msg}"
         );
     });
 }

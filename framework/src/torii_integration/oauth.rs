@@ -40,6 +40,7 @@
 use std::{
     collections::HashMap,
     sync::{OnceLock, RwLock},
+    time::Duration,
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -97,6 +98,17 @@ pub struct EndpointOverrides {
     pub token: String,
     /// Userinfo endpoint (fetch user profile here).
     pub userinfo: String,
+    /// Optional provider-specific endpoint that returns the user's
+    /// verified email addresses. GitHub's `/user/emails` returns
+    /// `[{ email, primary, verified, visibility }, ...]`; when the
+    /// `/user` userinfo response omits `email` (common for accounts
+    /// that keep their primary email private), the OAuth flow falls
+    /// back to this endpoint and picks the primary verified address.
+    ///
+    /// Only consulted when the userinfo payload's `email` field is
+    /// missing or empty; never used to override a value the userinfo
+    /// payload supplied.
+    pub emails: Option<String>,
 }
 
 /// Process-global registry mapping provider name → config.
@@ -115,6 +127,9 @@ struct ProviderEndpoints {
     token: String,
     /// Userinfo endpoint (fetch user profile here).
     userinfo: String,
+    /// Optional provider-specific emails endpoint (GitHub's
+    /// `/user/emails`). See [`EndpointOverrides::emails`].
+    emails: Option<String>,
 }
 
 /// Return hardcoded well-known endpoints for supported providers.
@@ -126,11 +141,20 @@ fn provider_endpoints(provider: &str) -> Option<ProviderEndpoints> {
             authorize: "https://github.com/login/oauth/authorize".into(),
             token: "https://github.com/login/oauth/access_token".into(),
             userinfo: "https://api.github.com/user".into(),
+            // GitHub's `/user` endpoint omits `email` when the user
+            // has set their primary address to private. The verified
+            // primary email is still available via `/user/emails`
+            // when the `user:email` scope is granted; we fetch it
+            // there before refusing the flow.
+            emails: Some("https://api.github.com/user/emails".into()),
         }),
         "google" => Some(ProviderEndpoints {
             authorize: "https://accounts.google.com/o/oauth2/v2/auth".into(),
             token: "https://oauth2.googleapis.com/token".into(),
             userinfo: "https://www.googleapis.com/oauth2/v3/userinfo".into(),
+            // Google's OIDC userinfo response carries `email` and
+            // `email_verified` directly — no separate emails endpoint.
+            emails: None,
         }),
         _ => None,
     }
@@ -142,6 +166,7 @@ fn provider_endpoints(provider: &str) -> Option<ProviderEndpoints> {
 ///
 /// Redirect the user to [`authorization_url`] and store [`state`] in their
 /// session so it can be verified on the callback.
+#[derive(Debug)]
 pub struct OAuthKickoff {
     /// The provider's authorization URL with all required query parameters.
     pub authorization_url: String,
@@ -231,9 +256,38 @@ impl OAuthAuth {
     ///
     /// - `FrameworkError::Domain { status_code: 400 }` if the provider is
     ///   unknown or not configured.
+    /// - `FrameworkError::Internal` if `begin()` runs outside a request
+    ///   handled by `SessionMiddleware`. The session-binding check in
+    ///   [`Self::complete`] cannot pass without a session pointer, so a
+    ///   sessionless `begin` would otherwise mint an unusable ceremony
+    ///   and a state value the caller can never spend — a server
+    ///   misconfiguration (route missing the middleware) rather than a
+    ///   caller error.
     pub async fn begin(&self) -> Result<OAuthKickoff, FrameworkError> {
         let config = self.config()?;
         let endpoints = self.endpoints_for(&config)?;
+
+        // Establish the session pointer BEFORE issuing the ceremony row
+        // so a sessionless caller cannot orphan a row in
+        // `auth_ceremony_tokens`. `session_mut` returns `None` when the
+        // calling task is not inside `SessionMiddleware`, which is a
+        // server wiring fault — surface it as an internal error with
+        // an actionable message instead of silently succeeding with a
+        // state the caller can never complete().
+        let session_state_key = format!("oauth_state_{}", self.provider);
+        if session_mut(|_| ()).is_none() {
+            return Err(FrameworkError::internal(format!(
+                "OAuth::begin('{}') invoked outside a session — \
+                 mount SessionMiddleware on the route group that handles \
+                 OAuth start endpoints so the session-binding check in \
+                 OAuth::complete can pass.",
+                self.provider,
+            )));
+        }
+        // (Identical wording shape to the passkey facade's
+        // `require_session_present` helper — both errors describe the
+        // same wiring fault and surface as 500 internal so the
+        // operator's log carries an actionable message.)
 
         // Generate a cryptographically random CSRF state token. The
         // state IS the ceremony selector — it's echoed in the
@@ -274,7 +328,6 @@ impl OAuthAuth {
         // state value but not the session cookie cannot complete the
         // flow. The atomic ceremony consume gives single-use on top
         // of the session check.
-        let session_state_key = format!("oauth_state_{}", self.provider);
         session_mut(|s| {
             s.put(&session_state_key, state.clone());
         });
@@ -407,8 +460,19 @@ impl OAuthAuth {
 
         let verifier = payload.pkce_verifier;
 
+        // Both timeouts cap how long a slow or blackholed provider can
+        // tie up the calling task. `connect_timeout` covers DNS +
+        // TCP/TLS handshake; `timeout` is the total per-request budget
+        // (token exchange and userinfo fetch each have their own
+        // `.send()`, so each gets the full budget independently). 30s
+        // matches the framework's outbound HTTP default in
+        // [`crate::http_client`]; OAuth providers are expected to
+        // respond in well under a second, so this is generous but
+        // still bounded.
         let client = Client::builder()
             .user_agent("suprnova-oauth/0.1")
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| FrameworkError::Domain {
                 message: format!("oauth http client build failed: {e}"),
@@ -507,14 +571,69 @@ impl OAuthAuth {
             status_code: 502,
         })?;
 
-        // Derive the email (required by torii). Fall back to login,
-        // then to the provider id — but only after we've proven the
-        // provider id is real and stable.
-        let email = profile
+        // Derive the user's email. Identity attribution keys on
+        // `provider_id` (see HIGH #4), so this is purely the email
+        // address recorded on the torii user row — but it must still
+        // be a real, verified email, never a username or opaque ID:
+        //
+        // 1. If the userinfo response carries `email` and (for OIDC
+        //    providers like Google) `email_verified == true`, use it
+        //    directly.
+        // 2. Otherwise, if the provider exposes a verified-emails
+        //    endpoint (GitHub's `/user/emails`), fetch it and pick
+        //    the primary verified address.
+        // 3. If neither path yields a verified email, refuse the
+        //    callback. We will not write a username, opaque
+        //    provider id, or unverified address into the email
+        //    column.
+        //
+        // Status: 502 because the provider returned a payload we
+        // cannot turn into a valid account identifier; the caller
+        // (browser) did nothing wrong.
+        let userinfo_email_is_verified = match self.provider.as_str() {
+            // Google sets `email_verified: true` on every primary
+            // Google account email; OIDC convention. If they ever
+            // emit `false`, ignore the address.
+            "google" => profile.email_verified.unwrap_or(false),
+            // GitHub's `/user` endpoint does not include an
+            // `email_verified` flag — if `email` is present, GitHub
+            // has already validated it (only verified emails are
+            // ever returned from `/user`). Treat presence as
+            // verified for GitHub specifically.
+            "github" => true,
+            // For provider names the framework does not recognise,
+            // trust the userinfo `email` field if either:
+            //   1. the payload explicitly carries `email_verified: true`
+            //      (OIDC convention), or
+            //   2. no `email_verified` field is present at all — most
+            //      non-OIDC providers (and the integration-test mock
+            //      server) do not emit the flag, and rejecting their
+            //      already-validated `email` field would force every
+            //      custom integration to also wire up an `emails`
+            //      endpoint. An explicit `false` value still rejects.
+            _ => profile.email_verified.unwrap_or(true),
+        };
+
+        let email = match profile
             .email
-            .clone()
-            .or_else(|| profile.login.clone())
-            .unwrap_or_else(|| provider_id.clone());
+            .as_deref()
+            .filter(|e| !e.is_empty() && userinfo_email_is_verified)
+        {
+            Some(addr) => addr.to_string(),
+            None => fetch_verified_primary_email(&client, &endpoints, &token_data.access_token)
+                .await?
+                .ok_or_else(|| FrameworkError::Domain {
+                    message: format!(
+                        "oauth provider '{}' did not supply a verified email — \
+                         the OAuth scope must grant verified-email access \
+                         (e.g. `user:email` for GitHub, `openid email` for \
+                         OIDC providers) and the account must have a \
+                         verified primary address",
+                        self.provider
+                    ),
+                    status_code: 502,
+                })?,
+        };
 
         // Upsert the user in torii's store. Failures here are genuine
         // server faults (DB unreachable, schema drift, etc.) so the 500
@@ -561,6 +680,7 @@ impl OAuthAuth {
                 authorize: override_.authorize.clone(),
                 token: override_.token.clone(),
                 userinfo: override_.userinfo.clone(),
+                emails: override_.emails.clone(),
             });
         }
         provider_endpoints(&self.provider).ok_or_else(|| FrameworkError::Domain {
@@ -678,9 +798,81 @@ struct ProviderProfile {
     /// String user ID (Google `sub`, etc.)
     sub: Option<String>,
     email: Option<String>,
+    /// OIDC `email_verified` claim. Providers that follow OpenID
+    /// Connect (Google, Microsoft, Okta, etc.) emit this flag on the
+    /// userinfo endpoint; we require `true` before accepting
+    /// `email` from the userinfo response.
+    email_verified: Option<bool>,
     name: Option<String>,
     /// GitHub username.
+    #[allow(dead_code)] // retained on the wire — informational only
     login: Option<String>,
+}
+
+/// GitHub `/user/emails` row. Used to recover the primary verified
+/// email when `/user` omits it (private-email accounts).
+#[derive(Deserialize)]
+struct GithubEmailEntry {
+    email: String,
+    primary: bool,
+    verified: bool,
+}
+
+/// Try the provider's emails endpoint to obtain a verified primary
+/// email address.
+///
+/// Returns:
+/// - `Ok(Some(addr))` if the endpoint returns a row marked
+///   `primary == true && verified == true`.
+/// - `Ok(None)` if the provider does not expose an emails endpoint or
+///   the endpoint returns no usable address. The caller is expected
+///   to surface a 502 to the user — we refuse to fall back to a
+///   non-verified address or to a username.
+/// - `Err(_)` if the network call itself fails (timeout, 5xx, parse
+///   error). These are bad-upstream conditions and map to 502.
+async fn fetch_verified_primary_email(
+    client: &Client,
+    endpoints: &ProviderEndpoints,
+    access_token: &str,
+) -> Result<Option<String>, FrameworkError> {
+    let Some(url) = endpoints.emails.as_deref() else {
+        return Ok(None);
+    };
+    let resp = client
+        .get(url)
+        .bearer_auth(access_token)
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "suprnova-oauth/0.1")
+        .send()
+        .await
+        .map_err(|e| FrameworkError::Domain {
+            message: format!("oauth emails endpoint network error: {e}"),
+            status_code: 502,
+        })?;
+
+    if !resp.status().is_success() {
+        let provider_status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let outbound_status = if provider_status.is_client_error() {
+            400
+        } else {
+            502
+        };
+        return Err(FrameworkError::Domain {
+            message: format!("oauth emails endpoint returned {provider_status}: {body}"),
+            status_code: outbound_status,
+        });
+    }
+
+    let entries: Vec<GithubEmailEntry> = resp.json().await.map_err(|e| FrameworkError::Domain {
+        message: format!("oauth emails response parse failed: {e}"),
+        status_code: 502,
+    })?;
+
+    Ok(entries
+        .into_iter()
+        .find(|e| e.primary && e.verified && !e.email.is_empty())
+        .map(|e| e.email))
 }
 
 impl ProviderProfile {
