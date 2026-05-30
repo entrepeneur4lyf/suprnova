@@ -7,7 +7,7 @@ and shards, and a full observability surface that mirrors Laravel 13's
 `DB::listen` / `QueryExecuted` / query log API.
 
 The Eloquent ORM (`use suprnova::eloquent::*`) builds on top of this
-layer and lives in [eloquent.md](eloquent.md.md). When you want a typed
+layer and lives in [eloquent.md](eloquent.md). When you want a typed
 model, go there; when you want a raw query against an unmodeled table
 or want to observe every query the framework runs, this is the page.
 
@@ -474,7 +474,7 @@ Reserved names:
 - `__read_replica__` — well-known read replica. ANY connection
   registered under this name takes over read routing.
 
-See [eloquent.md → Multi-connection routing](eloquent.md.md) for the
+See [eloquent.md → Multi-connection routing](eloquent.md) for the
 full precedence chain (builder tx override → ambient tx → builder
 `on(name)` → model default → `__read_replica__` → primary).
 

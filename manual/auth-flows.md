@@ -1,7 +1,7 @@
 # Auth Flows
 
 The `auth_flows` module is the lifecycle layer that sits on top of [session
-authentication](authentication.md.md). Where the auth module answers "who is
+authentication](authentication.md). Where the auth module answers "who is
 this request", the auth-flows module answers everything that happens *around*
 that question — proving the email address is real, recovering it when the
 password is lost, defending it from credential stuffing, and protecting it
@@ -9,7 +9,7 @@ with a second factor. Five flows ship under one cohesive namespace:
 
 - **`EmailVerification`** — generate, check, and consume torii-backed
   verification tokens; `send_link` dispatches the verification email through
-  the [`Mail`](mail.md.md) facade.
+  the [`Mail`](mail.md) facade.
 - **`PasswordReset`** — request, verify-without-consume, and complete a
   reset. Anti-enumeration semantics on both `request` and `send_link`;
   `complete` dispatches a `PasswordChangedMail` security notification and
@@ -24,7 +24,7 @@ with a second factor. Five flows ship under one cohesive namespace:
   DB-row + bcrypt + single-use-rotation persistent-cookie implementation
   that already shipped with the auth module.
 
-Every flow dispatches transactional mail through Suprnova's [`Mail`](mail.md.md)
+Every flow dispatches transactional mail through Suprnova's [`Mail`](mail.md)
 facade — torii's optional `mailer` feature is intentionally **disabled**. The
 framework owns mail because that's how every other Suprnova subsystem owns
 mail; uniformity wins over a duplicate transport stack.
@@ -150,7 +150,7 @@ all three:
 | `MAIL_FROM` | `"noreply@example.com"` | Envelope `From` on every outgoing message. Override with your verified sender domain. |
 
 The mail driver itself is configured separately via `MAIL_DRIVER` — see the
-[Mail](mail.md.md) docs.
+[Mail](mail.md) docs.
 
 ## Email Verification
 
@@ -468,7 +468,7 @@ the handler make the call directly.
 
 `LoginThrottleMiddleware` is **per-account** — it gates a single email when
 the threshold is crossed. For **per-IP** quotas, layer it with
-[`RateLimitMiddleware`](middleware.md.md). The two compose naturally:
+[`RateLimitMiddleware`](middleware.md). The two compose naturally:
 
 ```rust
 let router = Router::new()
@@ -803,7 +803,7 @@ The design that ships:
 
 In practice the framework's session middleware does the heavy lifting; the
 typical app doesn't call the `remember_me` module directly. The
-[Authentication](authentication.md.md) doc covers the user-facing surface —
+[Authentication](authentication.md) doc covers the user-facing surface —
 the `remember` flag on `Auth::login`, the cookie name, and the lifetime
 knobs.
 
@@ -859,7 +859,7 @@ EventFacade::listen::<AccountLocked, _>(Arc::new(PageOpsOnLockout)).await;
 ```
 
 Listeners run on Tokio's runtime and are dispatched in registration order.
-See the [Events](events.md.md) doc (if your project ships one) and the
+See the [Events](events.md) doc (if your project ships one) and the
 example app's `app/src/listeners/` for the standard pattern.
 
 ## Testing
@@ -973,7 +973,7 @@ Canonical examples — copy from these when writing your own:
 
 Torii ships an optional `mailer` feature for SMTP-based verification email
 delivery. We **disable** it (`framework/Cargo.toml`) because the framework
-already ships a unified [`Mail`](mail.md.md) facade with seven transports
+already ships a unified [`Mail`](mail.md) facade with seven transports
 (log, in-memory, SMTP, plus the five major HTTP providers), test fakes,
 queueing, telemetry, and Mailable templates. Running a second mail stack
 inside torii would split telemetry, double the transport configuration

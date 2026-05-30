@@ -60,7 +60,7 @@ pub async fn start_checkout(
 }
 ```
 
-That `SessionPayload` goes into your Inertia page props. The frontend dispatches on `payload.flow` to render the right widget — see [`payments-frontend.md`](payments-frontend.md.md).
+That `SessionPayload` goes into your Inertia page props. The frontend dispatches on `payload.flow` to render the right widget — see [`payments-frontend.md`](payments-frontend.md).
 
 ## Picking an Adapter
 
@@ -278,7 +278,7 @@ Serialized form of a `StripeElements` payload:
 }
 ```
 
-Return this from your controller as Inertia props. Frontend integration is described in [`payments-frontend.md`](payments-frontend.md.md).
+Return this from your controller as Inertia props. Frontend integration is described in [`payments-frontend.md`](payments-frontend.md).
 
 ## Mirror Tables
 
@@ -460,7 +460,7 @@ pub enum ChargeResult {
 }
 ```
 
-Handle `RequiresClientAction` by returning the payload to your frontend. The frontend renders the 3DS challenge using `client_secret` + `publishable_key`. See [`payments-frontend.md`](payments-frontend.md.md) for the frontend dispatch code.
+Handle `RequiresClientAction` by returning the payload to your frontend. The frontend renders the 3DS challenge using `client_secret` + `publishable_key`. See [`payments-frontend.md`](payments-frontend.md) for the frontend dispatch code.
 
 ## Idempotency Keys
 
@@ -574,5 +574,5 @@ Cashier is Stripe-only by design. Suprnova ships multi-provider out of the box. 
 
 ## What's Next
 
-- [`payments-provider-guide.md`](payments-provider-guide.md.md) — write your own adapter crate end to end
-- [`payments-frontend.md`](payments-frontend.md.md) — Svelte 5, React 19, and Vue 3.5 dispatch-on-flow examples
+- [`payments-provider-guide.md`](payments-provider-guide.md) — write your own adapter crate end to end
+- [`payments-frontend.md`](payments-frontend.md) — Svelte 5, React 19, and Vue 3.5 dispatch-on-flow examples
