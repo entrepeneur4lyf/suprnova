@@ -750,7 +750,7 @@ impl suprnova::resources::IntoJsonResource for ManualPost {
     fn resource_included(
         &self,
         _t: &suprnova::resources::IncludeTree,
-        _o: &mut Vec<Value>,
+        _s: &mut suprnova::resources::IncludedSink,
     ) -> Result<(), suprnova::resources::IncludeResolutionError> {
         Ok(())
     }
@@ -837,7 +837,7 @@ impl suprnova::resources::IntoJsonResource for PostWithTopMeta {
     fn resource_included(
         &self,
         _t: &suprnova::resources::IncludeTree,
-        _o: &mut Vec<Value>,
+        _s: &mut suprnova::resources::IncludedSink,
     ) -> Result<(), suprnova::resources::IncludeResolutionError> {
         Ok(())
     }

@@ -1,7 +1,7 @@
 //! Multi-level `?include=` parse tree for JSON:API compound documents.
 
 use crate::data::RequestIncludeSet;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Parsed tree representation of a multi-level `?include=` query.
 ///
@@ -12,9 +12,18 @@ use std::collections::HashMap;
 ///   comments: {}
 /// }
 /// ```
+///
+/// Children are stored in a `BTreeMap` so iteration order is the
+/// deterministic lexicographic order of include names. The order is
+/// observable only when validating includes against a resource's
+/// allowlist: if multiple invalid include paths are present in one
+/// request, the first one rejected is now stable across runs (instead
+/// of varying with `HashMap`'s randomised iteration). The JSON:API
+/// response itself does not surface this order — `included` is a set,
+/// and the spec assigns no semantic meaning to its member order.
 #[derive(Debug, Default, Clone)]
 pub struct IncludeTree {
-    pub children: HashMap<String, IncludeTree>,
+    pub children: BTreeMap<String, IncludeTree>,
 }
 
 impl IncludeTree {

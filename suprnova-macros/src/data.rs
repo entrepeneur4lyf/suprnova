@@ -1545,7 +1545,7 @@ fn build_into_json_resource(
                 ::suprnova::resources::PushIncluded::push_included(
                     &self.#ident,
                     subtree,
-                    out,
+                    sink,
                 ).map_err(|mut __suprnova_include_err| {
                     __suprnova_include_err.path = ::std::format!(
                         "{}.{}",
@@ -1592,7 +1592,7 @@ fn build_into_json_resource(
             fn resource_included(
                 &self,
                 include_tree: &::suprnova::resources::IncludeTree,
-                out: &mut ::std::vec::Vec<::suprnova::serde_json::Value>,
+                sink: &mut ::suprnova::resources::IncludedSink,
             ) -> ::std::result::Result<(), ::suprnova::resources::IncludeResolutionError> {
                 // Default-deny: reject any include key not in our allowlist.
                 const ALLOWED: &[&str] = &[#(#allowed_include_names),*];

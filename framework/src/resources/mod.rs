@@ -46,7 +46,7 @@ pub mod maybe;
 pub mod response;
 pub mod trait_def;
 
-pub use builder::{JsonApiBuilder, render_resource_object};
+pub use builder::{IncludedSink, JsonApiBuilder, render_resource_object};
 pub use fieldset::{REQUEST_FIELDSET, RequestFieldsetSet, current_fieldset, scope_fieldset};
 pub use include_tree::IncludeTree;
 pub use jsonapi_info::JsonApiInfo;
@@ -56,7 +56,6 @@ pub use trait_def::{
     IncludeResolutionError, IntoJsonResource, RelationshipValue, ResourceIdentifier,
 };
 
-use serde_json::Value;
 use trait_def::IncludeResolutionError as IRE;
 
 // ── AsRelationshipValue ─────────────────────────────────────────────────────
@@ -104,29 +103,34 @@ impl<T: IntoJsonResource> AsRelationshipValue for Option<T> {
 /// Type-class for "push my fully-resolved related resource(s) into
 /// the `included` collection, recursively descending into the
 /// include subtree for nested resources."
+///
+/// `sink` deduplicates by `(type, id)` at push time, so a large
+/// collection that shares relationships across items never materialises
+/// the duplicates — peak memory and CPU stay proportional to the
+/// distinct included resources, not the relationship fan-in.
 pub trait PushIncluded {
-    fn push_included(&self, subtree: &IncludeTree, out: &mut Vec<Value>) -> Result<(), IRE>;
+    fn push_included(&self, subtree: &IncludeTree, sink: &mut IncludedSink) -> Result<(), IRE>;
 }
 
 impl<T: IntoJsonResource> PushIncluded for T {
-    fn push_included(&self, subtree: &IncludeTree, out: &mut Vec<Value>) -> Result<(), IRE> {
+    fn push_included(&self, subtree: &IncludeTree, sink: &mut IncludedSink) -> Result<(), IRE> {
         let fieldset = current_fieldset();
-        out.push(render_resource_object(self, &fieldset));
+        sink.push(render_resource_object(self, &fieldset));
         // Recurse: resolve this resource's own includes per the subtree.
         if !subtree.is_empty() {
-            self.resource_included(subtree, out)?;
+            self.resource_included(subtree, sink)?;
         }
         Ok(())
     }
 }
 
 impl<T: IntoJsonResource> PushIncluded for Vec<T> {
-    fn push_included(&self, subtree: &IncludeTree, out: &mut Vec<Value>) -> Result<(), IRE> {
+    fn push_included(&self, subtree: &IncludeTree, sink: &mut IncludedSink) -> Result<(), IRE> {
         let fieldset = current_fieldset();
         for t in self {
-            out.push(render_resource_object(t, &fieldset));
+            sink.push(render_resource_object(t, &fieldset));
             if !subtree.is_empty() {
-                t.resource_included(subtree, out)?;
+                t.resource_included(subtree, sink)?;
             }
         }
         Ok(())
@@ -134,12 +138,12 @@ impl<T: IntoJsonResource> PushIncluded for Vec<T> {
 }
 
 impl<T: IntoJsonResource> PushIncluded for Option<T> {
-    fn push_included(&self, subtree: &IncludeTree, out: &mut Vec<Value>) -> Result<(), IRE> {
+    fn push_included(&self, subtree: &IncludeTree, sink: &mut IncludedSink) -> Result<(), IRE> {
         if let Some(t) = self {
             let fieldset = current_fieldset();
-            out.push(render_resource_object(t, &fieldset));
+            sink.push(render_resource_object(t, &fieldset));
             if !subtree.is_empty() {
-                t.resource_included(subtree, out)?;
+                t.resource_included(subtree, sink)?;
             }
         }
         Ok(())

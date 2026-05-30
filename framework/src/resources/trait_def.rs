@@ -1,5 +1,6 @@
 //! Core trait definitions for the JSON:API resource layer.
 
+use super::builder::IncludedSink;
 use super::include_tree::IncludeTree;
 use serde_json::{Map, Value};
 
@@ -30,15 +31,19 @@ pub trait IntoJsonResource: Send + Sync {
     /// must be present with `data` linkage).
     fn resource_relationships(&self) -> Vec<(String, RelationshipValue)>;
 
-    /// Push fully-resolved related resources into `out` for the
+    /// Push fully-resolved related resources into `sink` for the
     /// `included` compound document, walking the include tree
     /// recursively. Returns Err with the failing path if any
     /// requested include can't be resolved by this resource's
     /// allow_include allowlist.
+    ///
+    /// `sink` deduplicates by `(type, id)` at push time per
+    /// JSON:API spec section 8, so callers do not need to filter
+    /// duplicates afterwards.
     fn resource_included(
         &self,
         include_tree: &IncludeTree,
-        out: &mut Vec<Value>,
+        sink: &mut IncludedSink,
     ) -> Result<(), IncludeResolutionError>;
 
     /// Optional per-resource `links` member (spec §5.2.7). Empty by

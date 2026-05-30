@@ -1,6 +1,6 @@
 //! `Resource` facade and `JsonApiResponse` pending response type.
 
-use super::builder::{JsonApiBuilder, render_resource_object};
+use super::builder::{IncludedSink, JsonApiBuilder, render_resource_object};
 use super::fieldset::current_fieldset;
 use super::include_tree::IncludeTree;
 use super::jsonapi_info::JsonApiInfo;
@@ -162,20 +162,16 @@ impl Resource {
         let include_set = current_include_set();
         let include_tree = IncludeTree::from_include_set(&include_set);
         let data = render_resource_object(&dto, &fieldset);
-        let mut included = Vec::new();
+        let mut sink = IncludedSink::new();
         let top_level_meta = dto.resource_top_level_meta();
-        let result = dto
-            .resource_included(&include_tree, &mut included)
-            .map(|()| {
-                let mut builder = JsonApiBuilder::single(data);
-                for inc in included {
-                    builder.push_included(inc);
-                }
-                if !top_level_meta.is_empty() {
-                    builder = builder.with_meta_map(top_level_meta);
-                }
-                builder
-            });
+        let result = dto.resource_included(&include_tree, &mut sink).map(|()| {
+            let mut builder = JsonApiBuilder::single(data);
+            builder.absorb_included_sink(sink);
+            if !top_level_meta.is_empty() {
+                builder = builder.with_meta_map(top_level_meta);
+            }
+            builder
+        });
         JsonApiResponse::from_result(result)
     }
 
@@ -187,10 +183,10 @@ impl Resource {
             .iter()
             .map(|d| render_resource_object(d, &fieldset))
             .collect();
-        let mut included = Vec::new();
+        let mut sink = IncludedSink::new();
         let mut first_err: Option<IncludeResolutionError> = None;
         for d in &dtos {
-            if let Err(e) = d.resource_included(&include_tree, &mut included) {
+            if let Err(e) = d.resource_included(&include_tree, &mut sink) {
                 first_err = Some(e);
                 break;
             }
@@ -199,9 +195,7 @@ impl Resource {
             Some(e) => Err(e),
             None => {
                 let mut builder = JsonApiBuilder::collection(data);
-                for inc in included {
-                    builder.push_included(inc);
-                }
+                builder.absorb_included_sink(sink);
                 // Collections take their top-level meta from the first
                 // item, mirroring Laravel's `with($request)` semantics
                 // — every item in an `AnonymousResourceCollection` is
@@ -233,10 +227,10 @@ impl Resource {
             .iter()
             .map(|d| render_resource_object(d, &fieldset))
             .collect();
-        let mut included = Vec::new();
+        let mut sink = IncludedSink::new();
         let mut first_err: Option<IncludeResolutionError> = None;
         for d in items {
-            if let Err(e) = d.resource_included(&include_tree, &mut included) {
+            if let Err(e) = d.resource_included(&include_tree, &mut sink) {
                 first_err = Some(e);
                 break;
             }
@@ -249,9 +243,7 @@ impl Resource {
                 for (rel, href) in paginator.links_iter() {
                     builder = builder.with_link(rel, href);
                 }
-                for inc in included {
-                    builder.push_included(inc);
-                }
+                builder.absorb_included_sink(sink);
                 if let Some(first) = items.first() {
                     let m = first.resource_top_level_meta();
                     if !m.is_empty() {

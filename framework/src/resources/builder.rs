@@ -4,6 +4,66 @@ use super::fieldset::RequestFieldsetSet;
 use super::maybe::strip_missing_values;
 use super::trait_def::{IntoJsonResource, RelationshipValue};
 use serde_json::{Map, Value};
+use std::collections::HashSet;
+
+/// Accumulator for the `included` compound document. Consumers (the
+/// macro-generated `resource_included` impl, the [`super::PushIncluded`]
+/// blanket impls) call [`Self::push`] for every related resource they
+/// resolve. Duplicates by `(type, id)` are dropped at push time per
+/// JSON:API spec section 8, so large collections that share
+/// relationships do not build an O(n) intermediate `Vec<Value>` only to
+/// be deduplicated afterwards.
+#[derive(Default)]
+pub struct IncludedSink {
+    items: Vec<Value>,
+    seen: HashSet<(String, String)>,
+}
+
+impl IncludedSink {
+    /// Empty sink.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Push a rendered resource object. No-op when the `(type, id)`
+    /// pair is already in the sink or the object lacks either member.
+    pub fn push(&mut self, resource: Value) {
+        let key = (
+            resource
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            resource
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        );
+        if key.0.is_empty() || key.1.is_empty() {
+            return;
+        }
+        if self.seen.insert(key) {
+            self.items.push(resource);
+        }
+    }
+
+    /// Drain the sink into a `Vec<Value>` ready for the envelope.
+    pub fn into_items(self) -> Vec<Value> {
+        self.items
+    }
+
+    /// Borrow the deduplicated resource list.
+    pub fn items(&self) -> &[Value] {
+        &self.items
+    }
+
+    /// `true` when no resources have been pushed (or all pushes were
+    /// duplicates / missing identifiers).
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
 
 /// Builder for a JSON:API top-level document. Consumed by
 /// `Resource::single` / `Resource::collection` / `Resource::paginated`
@@ -18,7 +78,7 @@ pub struct JsonApiBuilder {
     additional: Map<String, Value>,
     /// Optional `jsonapi` member (spec §5.1.1).
     jsonapi: Option<Value>,
-    seen_included: std::collections::HashSet<(String, String)>,
+    seen_included: HashSet<(String, String)>,
 }
 
 enum PrimaryData {
@@ -124,6 +184,16 @@ impl JsonApiBuilder {
         }
         if self.seen_included.insert(key) {
             self.included.push(resource);
+        }
+    }
+
+    /// Absorb a pre-deduplicated [`IncludedSink`]. The sink already
+    /// resolved duplicates as resources were rendered; this path folds
+    /// each item through the builder's dedup check so any later
+    /// `push_included` call still rejects collisions.
+    pub(crate) fn absorb_included_sink(&mut self, sink: IncludedSink) {
+        for resource in sink.into_items() {
+            self.push_included(resource);
         }
     }
 
