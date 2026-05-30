@@ -1,576 +1,448 @@
 # Responses
 
-suprnova provides a flexible response system inspired by Laravel, allowing you to create JSON responses, text responses, redirects, and handle errors elegantly. The `Response` type enables using Rust's `?` operator for clean error propagation.
+Every Suprnova handler returns a `Response`, which is an alias for
+`Result<HttpResponse, HttpResponse>`. The `Ok` arm carries the success
+response, the `Err` arm carries an already-rendered error response, and
+the `?` operator collapses any error type that has a `From` into
+`HttpResponse` along the way. This chapter is the practical reference
+for building the `Ok` side — the `HttpResponse` builders, the
+`Redirect` builder, the cookie API, and the `abort_*` short-circuits.
+For the error story see [Error Model](error-model.md) and
+[Error Handling](errors.md).
 
-## The Response Type
+## `HttpResponse` builders
 
-In suprnova, controller handlers return a `Response` type, which is an alias for `Result<HttpResponse, HttpResponse>`:
+`HttpResponse` is the wire-shaped response type. The constructors set
+sensible defaults; the chainable setters override them.
 
-```rust
-pub type Response = Result<HttpResponse, HttpResponse>;
-```
-
-This design allows you to:
-- Return successful responses with `Ok(HttpResponse::...)`
-- Return error responses with `Err(HttpResponse::...)`
-- Use the `?` operator for automatic error conversion
-
-## Creating Responses
-
-### JSON Responses
-
-The most common response type. Use `HttpResponse::json()` or the `json_response!` macro:
+### Body constructors
 
 ```rust
-use suprnova::{HttpResponse, Response, Request};
+use suprnova::{HttpResponse, Response};
 use serde_json::json;
 
-pub async fn index(_req: Request) -> Response {
-    // Using HttpResponse directly
-    Ok(HttpResponse::json(json!({
-        "users": [
-            {"id": 1, "name": "John"},
-            {"id": 2, "name": "Jane"}
-        ]
-    })))
+pub async fn examples() -> Response {
+    // text/plain
+    let _ = HttpResponse::text("OK");
+
+    // application/json (any serde_json::Value)
+    let _ = HttpResponse::json(json!({ "ok": true }));
+
+    // text/html; charset=utf-8
+    let _ = HttpResponse::html("<h1>Hello</h1>");
+
+    // Raw bytes with an explicit content type — used by JSON:API
+    // serialization and any other non-JSON byte body.
+    let _ = HttpResponse::bytes_body(b"PNG...".to_vec(), "image/png");
+
+    Ok(HttpResponse::text("done"))
 }
 ```
 
-Or with the convenient `json_response!` macro:
+Two streaming constructors exist for long-lived responses:
+
+- `HttpResponse::sse(stream)` — Server-Sent Events. Wraps a `Stream` of
+  `SseEvent` values, sets the four required headers
+  (`Content-Type: text/event-stream`, `Cache-Control: no-cache`,
+  `Connection: keep-alive`, `X-Accel-Buffering: no`), and keeps the
+  connection open until the producing stream ends. See
+  [Server-Sent Events](sse.md).
+- `HttpResponse::stream_bytes(stream)` — generic chunked response.
+  Takes a `Stream<Item = Result<Bytes, Infallible>>`. The error type is
+  `Infallible` by design: every producer in the framework turns its own
+  errors into a terminal stream message before the stream ends, because
+  there is no way to surface a transport-level error to the client
+  mid-response.
+
+### Status, headers, cookies
+
+Every builder returns `Self`, so chain freely:
 
 ```rust
-use suprnova::{json_response, Request, Response};
+use suprnova::{Cookie, HttpResponse, Response};
+use serde_json::json;
 
-pub async fn index(_req: Request) -> Response {
-    json_response!({
-        "users": [
-            {"id": 1, "name": "John"},
-            {"id": 2, "name": "Jane"}
-        ]
-    })
+pub async fn created() -> Response {
+    Ok(HttpResponse::json(json!({ "id": 42 }))
+        .status(201)
+        .header("X-Resource-Id", "42")
+        .cookie(Cookie::new("last_id", "42")))
 }
 ```
 
-### Text Responses
+| Method | Behavior |
+|---|---|
+| `.status(code)` | Set the HTTP status. Codes outside `100..=599` downgrade to 500 at the wire boundary with a warning log. |
+| `.header(name, value)` | Append a header. Duplicates allowed (matches `Set-Cookie` semantics). |
+| `.replace_header(name, value)` | Drop any prior occurrences and set one. |
+| `.with_headers([(k, v), ...])` | Append many at once. Accepts any `IntoIterator<Item = (K, V)>`. |
+| `.without_header(name)` | Remove every occurrence (case-insensitive). |
+| `.header_value(name)` | Read back the first-set value. Useful in tests. |
+| `.cookie(Cookie)` | Attach one cookie as `Set-Cookie`. |
+| `.with_cookies([Cookie, ...])` | Attach many. |
+| `.without_cookie(name)` | Schedule a deletion (equivalent to `Cookie::forget(name)`). |
 
-For plain text responses:
+The same chainable setters are available on a `Response` (the
+`Result`) through the `ResponseExt` trait, so the macros stay
+ergonomic:
 
 ```rust
-use suprnova::{HttpResponse, Response, Request};
+use suprnova::{json_response, Cookie, Response, ResponseExt};
 
-pub async fn health(_req: Request) -> Response {
-    Ok(HttpResponse::text("OK"))
+pub async fn list() -> Response {
+    json_response!({ "ok": true })
+        .status(200)
+        .header("X-Total-Count", "42")
+        .cookie(Cookie::new("last_query", "list"))
 }
 ```
 
-Or with the `text_response!` macro:
+`ResponseExt` exposes `.status`, `.header`, `.with_headers`,
+`.without_header`, `.cookie`, `.with_cookies`, and `.without_cookie`.
+
+### Wire-boundary validation
+
+`HttpResponse::into_hyper` runs two safety filters before handing the
+response to hyper:
+
+- **Status range.** Anything outside `100..=599` downgrades to 500 with
+  a `tracing::warn!`. This catches `AppError::status(700)` typos at the
+  boundary instead of letting non-conformant codes reach the wire.
+- **Header CRLF injection.** Every header name and value is validated
+  via hyper's own `HeaderName::try_from` / `HeaderValue::try_from`. Any
+  rejected header is dropped with a warn log and the response is built
+  without it. Attacker-controlled values that get reflected into a
+  header (CORS allow-headers, `X-Forwarded-*`, custom debug headers)
+  cannot split the response.
+
+Both filters are silent in the success path — you only see them in
+logs when something tried to slip through.
+
+## Response macros
+
+Two `Response`-shaped macros exist for the common cases:
 
 ```rust
-use suprnova::{text_response, Request, Response};
+use suprnova::{json_response, text_response, Response};
 
-pub async fn health(_req: Request) -> Response {
+pub async fn json_handler() -> Response {
+    json_response!({ "users": [{ "id": 1, "name": "Alice" }] })
+}
+
+pub async fn text_handler() -> Response {
     text_response!("OK")
 }
 ```
 
-### Setting Status Codes
+Both expand to `Ok(HttpResponse::...)`. Chain `ResponseExt` setters on
+either to adjust status, headers, or cookies.
 
-Chain `.status()` to set the HTTP status code:
+## Cookies
 
-```rust
-use suprnova::{json_response, HttpResponse, Response, ResponseExt};
-
-// On HttpResponse directly
-pub async fn created(_req: Request) -> Response {
-    Ok(HttpResponse::json(json!({"id": 1, "created": true}))
-        .status(201))
-}
-
-// With macros using ResponseExt trait
-pub async fn created_macro(_req: Request) -> Response {
-    json_response!({"id": 1, "created": true})
-        .status(201)
-}
-```
-
-### Adding Headers
-
-Add custom headers with `.header()`:
+`Cookie::new(name, value)` produces a cookie with secure defaults —
+`HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`. Override per cookie:
 
 ```rust
-use suprnova::{HttpResponse, Response};
+use suprnova::Cookie;
+use std::time::Duration;
 
-pub async fn download(_req: Request) -> Response {
-    Ok(HttpResponse::text("file content")
-        .header("Content-Disposition", "attachment; filename=\"data.txt\"")
-        .header("X-Custom-Header", "value"))
-}
+let session = Cookie::new("session_id", "abc123")
+    .http_only(true)
+    .secure(true)
+    .same_site(suprnova::SameSite::Strict)
+    .path("/")
+    .domain("example.com")
+    .max_age(Duration::from_secs(3600))
+    .partitioned(true);
 ```
+
+Three convenience constructors cover common patterns:
+
+- `Cookie::forget(name)` — empty value, `Max-Age=0`. Use this on
+  logout to instruct the browser to drop the cookie.
+- `Cookie::forever(name, value)` — five-year `Max-Age`.
+- `Cookie::encrypted(name, plaintext)` — AES-256-GCM ciphertext bound
+  to the `CryptPurpose::Cookie` AAD so cookie ciphertext cannot be
+  replayed into another framework surface (cursors, 2FA secrets,
+  casts). Requires `APP_KEY` to be set at boot. The companion
+  `Cookie::read_encrypted(wire)` decrypts a value produced by the
+  same path. See [Encryption](encryption.md).
+
+Header serialization percent-encodes every byte that isn't a valid
+cookie-octet per RFC 6265, including all control characters. CRLF in
+a cookie name or value gets encoded, not propagated — header injection
+through cookies is closed at the serializer.
 
 ## Redirects
 
-suprnova provides two ways to create redirects:
-
-### Simple Redirects
-
-Redirect to a specific URL or path:
-
-```rust
-use suprnova::{Redirect, Response};
-
-pub async fn legacy(_req: Request) -> Response {
-    Redirect::to("/new-path").into()
-}
-```
-
-### Named Route Redirects
-
-Redirect to a named route using the `redirect!` macro (with compile-time route validation):
-
-```rust
-use suprnova::{redirect, Response};
-
-pub async fn store(_req: Request) -> Response {
-    // Create user...
-
-    // Redirect to users.index route
-    redirect!("users.index").into()
-}
-```
-
-### Redirects with Parameters
-
-Add route parameters and query strings:
-
-```rust
-use suprnova::{redirect, Response};
-
-pub async fn update(_req: Request) -> Response {
-    // Update user...
-
-    // Redirect to users.show with route parameter
-    redirect!("users.show")
-        .with("id", "123")
-        .into()
-}
-
-pub async fn search(_req: Request) -> Response {
-    // Redirect with query parameters
-    redirect!("users.index")
-        .query("page", "1")
-        .query("sort", "name")
-        .into()
-}
-```
-
-### Permanent Redirects
-
-Use `.permanent()` for 301 redirects (default is 302):
-
-```rust
-use suprnova::{Redirect, Response};
-
-pub async fn old_route(_req: Request) -> Response {
-    Redirect::to("/new-route")
-        .permanent()
-        .into()
-}
-```
-
-## Error Handling
-
-suprnova automatically converts errors to appropriate HTTP responses when using the `?` operator.
-
-### Using the `?` Operator
-
-Errors are automatically converted to JSON error responses:
-
-```rust
-use suprnova::{Request, Response};
-
-pub async fn show(req: Request) -> Response {
-    // This returns a 400 error if the parameter is missing
-    let id = req.param("id")?;
-
-    json_response!({
-        "user_id": id
-    })
-}
-```
-
-### AppError for Custom Errors
-
-Use `AppError` for domain-specific errors with custom status codes:
-
-```rust
-use suprnova::{AppError, FrameworkError, Response};
-
-pub async fn find_user(id: i32) -> Result<User, FrameworkError> {
-    let user = db.find(id);
-
-    if user.is_none() {
-        return Err(AppError::not_found("User not found").into());
-    }
-
-    Ok(user.unwrap())
-}
-```
-
-### AppError Helper Methods
-
-| Method | Status Code | Use Case |
-|--------|-------------|----------|
-| `AppError::new(msg)` | 500 | Generic server error |
-| `AppError::not_found(msg)` | 404 | Resource not found |
-| `AppError::bad_request(msg)` | 400 | Invalid request |
-| `AppError::unauthorized(msg)` | 401 | Authentication required |
-| `AppError::forbidden(msg)` | 403 | Access denied |
-| `AppError::unprocessable(msg)` | 422 | Validation failed |
-| `AppError::conflict(msg)` | 409 | Resource conflict |
-
-### Custom Status Codes
-
-Set any status code with `.status()`:
-
-```rust
-use suprnova::AppError;
-
-let error = AppError::new("Rate limited")
-    .status(429);
-```
-
-### FrameworkError Types
-
-suprnova's `FrameworkError` handles common error scenarios:
-
-```rust
-use suprnova::FrameworkError;
-
-// Service not found (500)
-FrameworkError::service_not_found::<MyService>();
-
-// Missing parameter (400)
-FrameworkError::param("user_id");
-
-// Validation error (422)
-FrameworkError::validation("email", "Invalid email format");
-
-// Database error (500)
-FrameworkError::database("Connection failed");
-
-// Internal error (500)
-FrameworkError::internal("Unexpected error");
-
-// Custom domain error
-FrameworkError::domain("Custom error", 418);
-```
-
-### Error Response Format
-
-Errors are returned as JSON in Laravel's canonical envelope: `message`, an optional `errors` map (for validation-style per-field detail), and a `request_id` correlating to the structured logs.
-
-```json
-// Parameter error (400)
-{
-  "message": "Missing required parameter: user_id",
-  "request_id": "01J3T7..."
-}
-
-// Validation error (422)
-{
-  "message": "The given data was invalid.",
-  "errors": {
-    "email": ["Invalid email format"],
-    "password": ["Password must be at least 8 characters"]
-  },
-  "request_id": "01J3T7..."
-}
-
-// Generic 4xx
-{
-  "message": "Error message here",
-  "request_id": "01J3T7..."
-}
-
-// 5xx (production)
-{
-  "message": "Internal Server Error",
-  "request_id": "01J3T7..."
-}
-
-// 5xx (APP_DEBUG=true)
-{
-  "message": "Internal Server Error",
-  "debug_message": "actual error detail",
-  "request_id": "01J3T7..."
-}
-```
-
-In production (`APP_DEBUG=false`), 5xx responses always emit the generic `Internal Server Error` message; the underlying detail flows to logs and the `ErrorOccurred` event but never to the wire. With `APP_DEBUG=true`, a `debug_message` field is added for development visibility — frontends MUST NOT key on this field, because `message` stays generic in both modes.
-
-### Aborting from a handler
-
-`abort_with` / `abort_if` / `abort_unless` (re-exported from the crate root) produce a `FrameworkError` that renders through the same envelope above. They're the idiomatic Rust equivalent of Laravel's `abort($code, $message)`:
-
-```rust
-use suprnova::{abort_if, abort_unless};
-
-abort_if(id == "0", 404, "User not found")?;
-abort_unless(authorized, 403, "Forbidden")?;
-```
-
-### Implementing HttpError Trait
-
-For custom error types, implement the `HttpError` trait:
-
-```rust
-use suprnova::HttpError;
-
-#[derive(Debug)]
-struct UserNotFoundError {
-    user_id: i32,
-}
-
-impl std::fmt::Display for UserNotFoundError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "User {} not found", self.user_id)
-    }
-}
-
-impl std::error::Error for UserNotFoundError {}
-
-impl HttpError for UserNotFoundError {
-    fn status_code(&self) -> u16 {
-        404
-    }
-}
-```
-
-## Response Macros
-
-suprnova provides convenient macros for creating responses:
-
-| Macro | Description | Example |
-|-------|-------------|---------|
-| `json_response!` | Create a JSON response | `json_response!({"key": "value"})` |
-| `text_response!` | Create a text response | `text_response!("Hello")` |
-| `redirect!` | Redirect to named route | `redirect!("users.index").into()` |
-
-## Complete Example
-
-```rust
-use suprnova::{
-    json_response, redirect, text_response,
-    AppError, FrameworkError, HttpResponse,
-    Request, Response, ResponseExt,
-};
-
-// List users
-pub async fn index(_req: Request) -> Response {
-    json_response!({
-        "users": [
-            {"id": 1, "name": "Alice"},
-            {"id": 2, "name": "Bob"}
-        ]
-    })
-}
-
-// Show a specific user
-pub async fn show(req: Request) -> Response {
-    let id = req.param("id")?;
-
-    // Simulate user lookup
-    if id == "999" {
-        return Err(HttpResponse::json(serde_json::json!({
-            "error": "User not found"
-        })).status(404));
-    }
-
-    json_response!({
-        "id": id,
-        "name": format!("User {}", id)
-    })
-}
-
-// Create a user
-pub async fn store(_req: Request) -> Response {
-    // ... create user logic ...
-
-    // Return 201 Created
-    json_response!({"id": 1, "created": true})
-        .status(201)
-}
-
-// Delete and redirect
-pub async fn destroy(_req: Request) -> Response {
-    // ... delete logic ...
-
-    redirect!("users.index").into()
-}
-
-// Custom error example
-pub async fn process(_req: Request) -> Response {
-    let result = do_something()?;
-
-    if !result.is_valid() {
-        return Err(AppError::unprocessable("Invalid data").into());
-    }
-
-    json_response!({"success": true})
-}
-```
-
-## Bulk headers and cookies
-
-Both `HttpResponse` and the `Response` (`Result`) chain expose Laravel-style bulk-header and cookie builders.
-
-```rust
-use suprnova::{Cookie, HttpResponse, Response, ResponseExt};
-
-// On HttpResponse directly:
-let r = HttpResponse::text("ok")
-    .with_headers([
-        ("X-A", "1"),
-        ("X-B", "2"),
-        ("X-Rate-Limit", "60"),
-    ])
-    .with_cookies([
-        Cookie::new("session", "abc"),
-        Cookie::new("user_id", "42"),
-    ])
-    .without_header("X-Internal-Debug")
-    .without_cookie("legacy_session");
-
-// Same methods are available through the ResponseExt chain on `Response`:
-let r: Response = Ok(HttpResponse::text("ok"))
-    .with_headers([("X-A", "1"), ("X-B", "2")])
-    .cookie(Cookie::new("session", "abc"));
-```
-
-| Method | Behavior |
-|--------|---------|
-| `.header(name, value)` | Append a header (allows duplicates for `Set-Cookie`). |
-| `.replace_header(name, value)` | Collapse any prior values and set one. |
-| `.with_headers([(k, v), ...])` | Append many at once. Accepts `HashMap`, `Vec`, or array literal. |
-| `.without_header(name)` | Remove all occurrences of a header (case-insensitive). |
-| `.header_value(name)` | Read back the first-set header (useful in tests). |
-| `.cookie(Cookie)` | Attach one cookie. |
-| `.with_cookies([Cookie, ...])` | Attach many. |
-| `.without_cookie(name)` | Schedule deletion (`Cookie::forget`-equivalent). |
-
-## Redirect builders
-
-`Redirect` covers Laravel's full redirector surface — including session-aware flows.
+`Redirect` covers the full Laravel redirector surface. Every variant
+implements `From<Redirect> for Response`, so the idiomatic form is
+`Redirect::...().into()`.
 
 ### Targets
 
 ```rust
+use suprnova::{Redirect, redirect_to};
+
+// Explicit URL or path
+let _ = Redirect::to("/dashboard");
+
+// Same thing, slightly shorter free function
+let _ = redirect_to("/dashboard");
+
+// Named route (returns RedirectRouteBuilder)
+let _ = Redirect::route("users.show").with("id", "42");
+
+// Explicit external URL — same as `to`, but the name signals
+// "this is going off-site" for open-redirect audits
+let _ = Redirect::away("https://external.example.com");
+
+// Refresh the page (reads previous URL from the session; falls back
+// to "/" if no session scope is active)
+let _ = Redirect::refresh();
+
+// Same, but taking an explicit Request when no scope is active
+// let _ = Redirect::refresh_for(&request);
+
+// Session previous_url, with fallback when no session is in scope
+let _ = Redirect::back("/login");
+
+// Session-stored intended URL, consumed on read, with fallback
+let _ = Redirect::intended("/home");
+
+// Guest redirect: stashes the current request URL as "intended" and
+// sends the user to a login page
+// let _ = Redirect::guest(&request, "/login");
+```
+
+`Redirect::back`, `Redirect::intended`, `Redirect::guest`, and
+`Redirect::refresh` all integrate with the session. Without a session
+scope they fall through to their defaults silently — handy for
+partial test setups. See [Session](session.md).
+
+### Named-route validation
+
+The `redirect!` proc-macro validates the route name at compile time
+and expands to `Redirect::route(name)`:
+
+```rust
+use suprnova::{redirect, Response};
+
+pub async fn store() -> Response {
+    // Compile fails if "users.index" is not a registered route name;
+    // the error message lists available routes and suggests close matches.
+    redirect!("users.index").into()
+}
+```
+
+### Status codes
+
+```rust
 use suprnova::Redirect;
 
-Redirect::to("/dashboard");           // explicit URL or path
-Redirect::route("users.show").with("id", "42"); // named route + params
-Redirect::away("https://external.example.com");  // explicit external URL
-Redirect::refresh("/current/path");   // re-display current path
-Redirect::back("/login");             // session.previous_url, fallback to "/login"
-Redirect::intended("/home");          // session pull("url.intended"), one-shot
+let _ = Redirect::to("/x").permanent();      // 301
+let _ = Redirect::to("/x").status(303);      // 303, 307, 308, ...
 ```
 
-`Redirect::back` and `Redirect::intended` read the session if one is available; without a session scope they cleanly fall through to the supplied default.
+The default is 302.
 
-To pre-populate the intended target (typically from auth middleware before redirecting to `/login`):
+### Flash data
 
-```rust
-Redirect::set_intended_url("/admin/users");
-```
-
-### Status
+Redirect builders carry their own flash bag. On conversion to a
+`Response` the bag drains into the live session, surviving exactly
+one more request:
 
 ```rust
-Redirect::to("/x").permanent();          // 301
-Redirect::to("/x").status(303);          // 303 (See Other), or 307 / 308
-```
+use suprnova::Redirect;
 
-### Session flashes
-
-Redirect builders carry their own flash bag that's drained into the session on conversion to `Response`. This lets handlers attach status messages, repopulate form input, and surface validation errors all in one chain:
-
-```rust
-Redirect::back("/users/new")
-    .with("status", "User created")        // single key/value
-    .with_input([                          // repopulate form
+let _ = Redirect::back("/users/new")
+    .with("status", "User created")            // single key/value
+    .with_input([                              // repopulate form
         ("email", "shawn@example.com"),
         ("name", "Shawn"),
     ])
-    .with_errors([                         // default error bag
+    .with_errors([                             // default error bag
         ("email", "Must be unique"),
     ])
-    .with_errors_bag("login", [            // named error bag
+    .with_errors_bag("login", [                // named error bag
         ("password", "Required"),
-    ])
+    ]);
 ```
 
-The receiving page reads these back through `session.get(...)` (for `with(...)`), `session.get_old_input(...)` (for `with_input(...)`), and the bag map drained by `session.pull_errors_flash()` (for `with_errors(...)` / `with_errors_bag(...)`). The Inertia response layer consumes the errors-flash automatically — the `errors` prop on every Inertia response is seeded from the session, so a `Redirect::back().with_errors(...)` flow surfaces messages on the destination page without any extra handler wiring. The `X-Inertia-Error-Bag` request header still scopes the prop under a named bag for multi-form pages.
+The receiving page reads these back through `session.get(...)` (for
+`with`), `session.get_old_input(...)` (for `with_input`), and the
+bag map drained by `session.pull_errors_flash()` (for
+`with_errors` / `with_errors_bag`). The Inertia layer consumes the
+errors-flash automatically — every Inertia response's `errors` prop
+is seeded from the session, so `Redirect::back().with_errors(...)`
+surfaces messages on the destination without extra wiring. The
+`X-Inertia-Error-Bag` request header scopes the prop under a named
+bag for multi-form pages.
+
+Note that on `RedirectRouteBuilder` (what `Redirect::route` and
+`redirect!` return), `.with(key, value)` sets a **route parameter**,
+not a flash entry — use `.flash(key, value)` there:
+
+```rust
+use suprnova::redirect;
+
+let _ = redirect!("users.show")
+    .with("id", "42")                          // route param
+    .flash("status", "Updated");               // session flash
+```
 
 ### Cookies, headers, fragments
 
 ```rust
-use suprnova::Cookie;
+use suprnova::{Cookie, Redirect};
 
-Redirect::route("billing.show")
+let _ = Redirect::route("billing.show")
     .with_cookies([Cookie::new("welcome", "yes")])
     .with_headers([("X-Trace", "abc")])
-    .with_fragment("invoices")    // append #invoices
-    .without_fragment()           // OR strip any prior #fragment
+    .with_fragment("invoices")                 // append #invoices
+    .without_fragment();                       // OR strip any prior fragment
 ```
 
-`with_fragment` accepts the fragment with or without a leading `#`. Calling `with_fragment` after `without_fragment` re-attaches one.
+`with_fragment` accepts the fragment with or without a leading `#`.
+Calling `with_fragment` after `without_fragment` re-attaches one.
 
 ### Preserve fragment across the redirect
 
-For Inertia apps where the destination should preserve the *originating* URL hash (`#section`), use `preserve_fragment`:
+For Inertia apps where the destination should preserve the
+*originating* URL hash, use `preserve_fragment`:
 
 ```rust
-Redirect::route("dashboard.index").preserve_fragment().into()
+use suprnova::Redirect;
+
+let _ = Redirect::route("dashboard.index").preserve_fragment();
 ```
 
-This flashes `_inertia.preserve_fragment = true` into the session; the next Inertia response reads it and emits `preserveFragment: true` in its page object.
+On conversion this flashes `_inertia.preserve_fragment = true` into
+the session; the next Inertia response reads the flag and emits
+`preserveFragment: true` in its page object. No session scope — flag
+silently dropped.
 
-## Summary
+### Signed redirects
 
-| Feature | Usage |
-|---------|-------|
-| JSON response | `HttpResponse::json(value)` or `json_response!({...})` |
-| Text response | `HttpResponse::text(str)` or `text_response!(str)` |
-| HTML response | `HttpResponse::html(str)` |
-| SSE stream | `HttpResponse::sse(stream)` |
+Two builders wrap the URL-signing surface for one-shot redirects to
+named routes (password reset, email verification, download links):
+
+```rust
+use suprnova::Redirect;
+
+let r = Redirect::signed_route("downloads.show", &[("id", "42")])?;
+let r = Redirect::temporary_signed_route(
+    "downloads.show",
+    &[("id", "42")],
+    1_700_000_000, // expires_at_epoch_seconds
+)?;
+```
+
+Both return `Result<Redirect, FrameworkError>` — `?`-propagate the
+error since `Redirect` converts to a `Response` cleanly. See
+[URLs](urls.md) for the signing surface.
+
+### Storing the intended URL
+
+`Redirect::set_intended_url` writes the session's intended target
+without performing a redirect — typically called from auth middleware
+before redirecting to `/login`, so a later `Redirect::intended` can
+recover the originally-requested URL:
+
+```rust
+suprnova::Redirect::set_intended_url("/admin/users");
+```
+
+## Aborting from a handler
+
+Three free functions short-circuit a handler at a given status. They
+return `Result<(), FrameworkError>`; combine with `?`:
+
+```rust
+use suprnova::{abort_if, abort_unless, abort_with, json_response, Request, Response};
+
+pub async fn show(req: Request) -> Response {
+    abort_unless(req.user().is_some(), 401, "must be logged in")?;
+    abort_if(req.param("id")? == "0", 404, "User not found")?;
+    abort_with(503, "scheduled maintenance")?;
+    json_response!({ "ok": true })
+}
+```
+
+The underlying error is `FrameworkError::Domain { message, status_code }`,
+so it renders through the same JSON envelope and 5xx sanitisation rules
+as every other error path. Out-of-range status codes are coerced to
+500 by the response renderer. See [Error Model](error-model.md) for
+the full conversion contract.
+
+## Returning errors directly
+
+Because `Response` is `Result<HttpResponse, HttpResponse>`, you can
+return an `Err` arm directly — useful when the response shape is
+already a specific JSON body and you want it on the wire as-is:
+
+```rust
+use suprnova::{HttpResponse, Response};
+use serde_json::json;
+
+pub async fn legacy_lookup() -> Response {
+    Err(HttpResponse::json(json!({
+        "error": "deprecated endpoint",
+    })).status(410))
+}
+```
+
+For anything richer — typed domain errors, validation, observability —
+use the [Error Model](error-model.md) surface (`AppError`,
+`FrameworkError`, `#[domain_error]`).
+
+## Quick reference
+
+| Need | Use |
+|---|---|
+| JSON response | `HttpResponse::json(v)` or `json_response!({...})` |
+| Text response | `HttpResponse::text(s)` or `text_response!(s)` |
+| HTML response | `HttpResponse::html(s)` |
+| Raw bytes + content-type | `HttpResponse::bytes_body(b, "image/png")` |
+| Server-Sent Events | `HttpResponse::sse(stream)` — see [SSE](sse.md) |
+| Chunked stream | `HttpResponse::stream_bytes(stream)` |
 | Set status | `.status(code)` |
-| Add header | `.header(name, value)` |
-| Bulk headers | `.with_headers([(k, v), ...])` |
+| Add header | `.header(k, v)` / `.with_headers([...])` |
 | Remove header | `.without_header(name)` |
-| Attach cookie | `.cookie(Cookie)` |
-| Bulk cookies | `.with_cookies([Cookie, ...])` |
+| Attach cookie | `.cookie(c)` / `.with_cookies([...])` |
 | Forget cookie | `.without_cookie(name)` |
-| Simple redirect | `Redirect::to(path).into()` |
-| Named redirect | `redirect!("route.name").into()` or `Redirect::route("name")` |
+| Simple redirect | `Redirect::to(path).into()` or `redirect_to(path).into()` |
+| Named-route redirect | `redirect!("name").into()` or `Redirect::route("name")` |
 | Back redirect | `Redirect::back(fallback)` |
 | Intended redirect | `Redirect::intended(default)` |
+| Guest redirect (stash intended) | `Redirect::guest(&req, login)` |
 | Set intended target | `Redirect::set_intended_url(url)` |
 | External URL | `Redirect::away(url)` |
-| Refresh | `Redirect::refresh(path)` |
-| With route params | `.with("key", "value")` |
-| With query params | `.query("key", "value")` |
-| Flash data | `.with(key, value)` |
+| Refresh current page | `Redirect::refresh()` / `Redirect::refresh_for(&req)` |
+| Signed-route redirect | `Redirect::signed_route(name, &[(k, v)])?` |
+| Route param on redirect | `.with("key", "value")` |
+| Query param on redirect | `.query("key", "value")` |
+| Flash data | `.with(key, value)` (or `.flash` on `RedirectRouteBuilder`) |
 | Flash input | `.with_input([(k, v), ...])` |
 | Flash errors | `.with_errors([(k, msg), ...])` |
 | Named error bag | `.with_errors_bag(bag, [(k, msg)])` |
-| Cookies on redirect | `.cookie(c)`, `.with_cookies([...])` |
-| Headers on redirect | `.header(k, v)`, `.with_headers([...])` |
 | Append fragment | `.with_fragment("section")` |
 | Strip fragment | `.without_fragment()` |
-| Permanent redirect | `.permanent()` |
-| Custom status | `.status(303)` |
-| Abort early | `abort_with(code, msg)`, `abort_if(cond, code, msg)`, `abort_unless(cond, code, msg)` |
-| Not found error | `AppError::not_found(msg)` |
-| Bad request | `AppError::bad_request(msg)` |
-| Unauthorized | `AppError::unauthorized(msg)` |
-| Custom status (error) | `AppError::new(msg).status(code)` |
+| Preserve fragment (Inertia) | `.preserve_fragment()` |
+| Permanent redirect | `.permanent()` (301) |
+| Custom redirect status | `.status(303)` |
+| Abort early | `abort_with(code, msg)?`, `abort_if(cond, code, msg)?`, `abort_unless(cond, code, msg)?` |
+
+## Next
+
+- [Error Model](error-model.md) — `FrameworkError`, `AppError`,
+  `HttpError`, and the single conversion that renders every error to
+  an `HttpResponse`
+- [Error Handling](errors.md) — practical handler patterns for `?`,
+  `AppError`, and custom domain errors
+- [Server-Sent Events](sse.md) — building and consuming `sse(...)`
+  responses
+- [URLs](urls.md) — signed URLs, named-route resolution, the
+  surface behind `Redirect::signed_route`
+- [Session](session.md) — flash data, intended URLs, the bag
+  `Redirect::with`/`with_input`/`with_errors` writes into
