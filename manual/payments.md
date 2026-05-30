@@ -1,45 +1,76 @@
 # Payments
 
-Suprnova's payments surface is provider-neutral. You pick an adapter crate — Stripe, Paddle, or one you write yourself — register it at boot, and your domain code calls the same five traits regardless of which provider is behind it. Mirror tables in your database are kept in sync by webhooks, so your domain code reads from your own DB rather than hitting the provider API for every query.
+Suprnova's payments surface is provider-neutral. You pick an adapter crate — Stripe, Paddle, or one you write yourself — register it at boot, and your domain code calls the same four core traits (plus an optional fifth for server-side capture) regardless of which provider is behind it. Mirror tables in your database are kept in sync by webhooks, so your domain code reads from your own DB rather than hitting the provider API for every query.
 
-No feature is gated to a single provider. Stripe's direct-capture model and Paddle's Merchant-of-Record model both fit into the same trait contract. The only surface that differs is `Payment` (server-side capture), which is optional — Paddle doesn't need it, so Paddle doesn't implement it.
+No feature is gated to a single provider. Stripe's direct-capture model and Paddle's Merchant-of-Record model both fit into the same trait contract. The only surface that differs is `Payment` (server-side capture), which is optional — Paddle doesn't need it, so Paddle doesn't implement it. Providers advertise their capability by overriding `PaymentProvider::as_payment()` to return `Some(&dyn Payment)`; callers query at runtime.
 
-## Quick Start
+## Why Suprnova diverges
 
-**`Cargo.toml`:**
+Laravel ships Cashier as a first-party Stripe integration in the core docs. It's convenient, but Stripe-only — adding a second provider means forking Cashier or building a parallel surface. Suprnova treats payment providers the way it treats cache and storage drivers: one generic trait set, swappable adapters. Your domain code never names `StripeProvider` or `PaddleProvider`; it calls `provider.subscribe(...)` against `Arc<dyn PaymentProvider>` resolved from a registry, and the provider behind it is one bootstrap change away from being something else.
+
+## Quick start
+
+Add the adapter crate. Until Suprnova ships its v0.1 release, the framework and its adapter crates are consumed by git rather than crates.io:
 
 ```toml
+# Cargo.toml
 [dependencies]
-suprnova-payments-stripe = "0.1"
+suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git" }
+suprnova-payments-stripe = { git = "https://github.com/entrepeneur4lyf/suprnova.git" }
 ```
 
-**`src/bootstrap.rs`:**
+Register the provider and the webhook router at boot. The webhook router is a regular `Router` you compose into your `routes::register()`:
 
 ```rust,ignore
+// src/bootstrap.rs
 use std::sync::Arc;
-use suprnova::payments::{PaymentProviderRegistry, webhook_routes};
+use suprnova::payments::PaymentProviderRegistry;
 use suprnova_payments_stripe::StripeProvider;
 
-pub async fn bootstrap(app: &mut App, db: Arc<DatabaseConnection>) {
+pub async fn register() {
     let stripe = StripeProvider::from_env().expect("Stripe env vars not set");
     PaymentProviderRegistry::bind("stripe", Arc::new(stripe));
-
-    let router = webhook_routes(db.clone());
-    app.merge_router(router);
 }
 ```
 
-**`src/controllers/billing.rs`:**
+```rust,ignore
+// src/routes.rs
+use std::sync::Arc;
+use suprnova::payments::webhook_routes;
+use suprnova::container::App;
+use suprnova::Router;
+use sea_orm::DatabaseConnection;
+
+/// `Application::routes(routes::register)` calls this once at boot.
+/// We start from the payments webhook router, then layer the rest of
+/// the app's routes on top with normal `.get(...)` / `.post(...)` calls.
+pub fn register() -> Router {
+    let db: Arc<DatabaseConnection> = App::get().expect("db not bound");
+
+    webhook_routes(db)
+        .get("/", crate::controllers::home::index)
+        .post("/login", crate::controllers::auth::login)
+        // ... the rest of your routes ...
+        .into()
+}
+```
+
+`webhook_routes(db)` returns a `Router` containing just `POST /webhooks/payments/{provider}`. Because `Router::get` and `Router::post` each return a `RouteBuilder` that converts back to `Router` via `.into()`, chaining on top of the payments router is the most direct way to compose. If you already use the `routes!{}` macro for your normal routes, drop the webhook POST into the same block — `webhook_routes` is a convenience wrapper around one `Router::new().post(...)` call.
+
+In your controller, look up the provider, create a customer, and open a checkout session:
 
 ```rust,ignore
+// src/controllers/billing.rs
 use std::sync::Arc;
 use suprnova::payments::*;
 
 pub async fn start_checkout(
-    provider: Arc<dyn PaymentProvider>,
     user_id: String,
     email: String,
 ) -> PaymentResult<SessionPayload> {
+    let provider = PaymentProviderRegistry::get("stripe")
+        .ok_or_else(|| PaymentError::Internal("stripe not registered".into()))?;
+
     let customer = provider.create_customer(CreateCustomerRequest {
         user_id,
         email,
@@ -60,14 +91,15 @@ pub async fn start_checkout(
 }
 ```
 
-That `SessionPayload` goes into your Inertia page props. The frontend dispatches on `payload.flow` to render the right widget — see [`payments-frontend.md`](payments-frontend.md.md).
+That `SessionPayload` goes into your Inertia page props. The frontend dispatches on `payload.flow` to render the right widget — see [Payments — Frontend Integration](payments-frontend.md).
 
-## Picking an Adapter
+## Picking an adapter
 
 ### Stripe
 
-```bash
-cargo add suprnova-payments-stripe
+```toml
+# Cargo.toml
+suprnova-payments-stripe = { git = "https://github.com/entrepeneur4lyf/suprnova.git" }
 ```
 
 Required env vars:
@@ -96,8 +128,9 @@ Stripe implements all five traits including `Payment` (server-side capture via P
 
 ### Paddle
 
-```bash
-cargo add suprnova-payments-paddle
+```toml
+# Cargo.toml
+suprnova-payments-paddle = { git = "https://github.com/entrepeneur4lyf/suprnova.git" }
 ```
 
 Required env vars:
@@ -130,7 +163,21 @@ PaymentProviderRegistry::bind("paddle", Arc::new(paddle));
 
 Paddle is a Merchant of Record — it manages tax, dunning, and the full subscription lifecycle. It does not expose server-side capture, so `Payment` is not implemented. Calling `provider.as_payment()` returns `None`. Subscriptions are created indirectly: call `Checkout::start_session`, complete the Paddle widget, and the `SubscriptionCreated` webhook arrives to confirm the subscription ID.
 
-## The Five Traits
+## The trait split
+
+`PaymentProvider` is an umbrella that bundles four universal traits — `Checkout`, `Subscription`, `CustomerStore`, `WebhookHandler` — every adapter implements. The fifth trait, `Payment`, is optional: server-side capture only makes sense for gateways like Stripe. Adapters that also implement `Payment` opt in by overriding `PaymentProvider::as_payment()`.
+
+```rust,ignore
+pub trait PaymentProvider: Checkout + Subscription + CustomerStore + WebhookHandler {
+    fn name(&self) -> &'static str;
+
+    /// Returns `Some` if this provider also implements `Payment` (server-capture).
+    /// Default returns `None`.
+    fn as_payment(&self) -> Option<&dyn Payment> {
+        None
+    }
+}
+```
 
 ### `Checkout` — universal, opens the client widget
 
@@ -227,19 +274,31 @@ pub trait CustomerStore: Send + Sync {
 
 `CreateCustomerRequest` takes `user_id`, `email`, `name: Option<String>`, and `metadata: Option<Value>`. `CustomerRef` comes back with `provider_customer_id` — store that alongside your user record to use in subsequent calls.
 
-### `WebhookHandler` — verify signature and parse event
+### `WebhookHandler` — verify, parse, and extract
 
 ```rust,ignore
 #[async_trait]
 pub trait WebhookHandler: Send + Sync {
     fn verify(&self, ctx: &WebhookContext<'_>) -> PaymentResult<()>;
     fn parse_event(&self, body: &[u8]) -> PaymentResult<WebhookEvent>;
+
+    /// Pull entity IDs out of the raw payload so the framework knows which
+    /// mirror rows to hydrate. Default returns an empty `PayloadIds`.
+    fn extract_payload_ids(&self, event: &WebhookEvent) -> PayloadIds;
+
+    /// Build a `PaymentSnapshot` from a payment / invoice event. Default
+    /// returns `None`, which skips the `payments_transactions` upsert.
+    fn extract_payment_snapshot(&self, event: &WebhookEvent) -> Option<PaymentSnapshot>;
+
+    /// Build a `CustomerSnapshot` from a customer event. Default returns
+    /// `None`, which skips the email / metadata refresh on the existing row.
+    fn extract_customer_snapshot(&self, event: &WebhookEvent) -> Option<CustomerSnapshot>;
 }
 ```
 
-In practice you never call these directly — `webhook_routes` calls them automatically for every inbound webhook. They are part of the trait so adapter crates can implement provider-specific signature verification and event parsing in a testable way.
+In practice you never call any of these directly — `webhook_routes` invokes them for every inbound webhook. They live on the trait so adapter crates can implement provider-specific signature verification, event parsing, and payload extraction in a testable way. The `extract_*` methods all have sensible defaults; the shipped Stripe and Paddle adapters override them with provider-shape-aware implementations (Stripe reaches into `data.object.*`, Paddle into `data.*`).
 
-## The Flow-Tagged Inertia Payload
+## The flow-tagged Inertia payload
 
 `start_session` returns a `SessionPayload` enum that serializes to JSON with a `flow` discriminator field. Your frontend switches on `flow` to render the right widget:
 
@@ -260,6 +319,15 @@ pub enum SessionPayload {
         customer_token: Option<String>,
         client_token: String,
     },
+    /// Mobile Money flow — no redirect or embed. Frontend displays a
+    /// user-facing message telling the customer to confirm on their phone
+    /// (USSD prompt or operator app), then polls the provider via
+    /// `provider_transaction_id` for status updates.
+    MobileMoneyPrompt {
+        provider_transaction_id: String,
+        message: String,
+        operator: MobileMoneyOperator,
+    },
     Redirect {
         url: String,
         provider_session_id: String,
@@ -278,24 +346,41 @@ Serialized form of a `StripeElements` payload:
 }
 ```
 
-Return this from your controller as Inertia props. Frontend integration is described in [`payments-frontend.md`](payments-frontend.md.md).
+A `MobileMoneyPrompt` payload looks like this — there is no URL because the customer never leaves your page; the frontend renders `message` and starts polling:
 
-## Mirror Tables
+```json
+{
+  "flow": "mobile_money_prompt",
+  "provider_transaction_id": "ch_mm_...",
+  "message": "Check your phone for the MTN MoMo prompt.",
+  "operator": { "kind": "mtn_momo" }
+}
+```
 
-Six tables are created by the framework migration. Include the migration in your app's migrator:
+Return whichever variant the provider produces from your controller as Inertia props. Frontend integration is described in [Payments — Frontend Integration](payments-frontend.md).
+
+## Mirror tables
+
+Six tables are created by the framework migration. Pull in the public alias and include it in your app's migrator:
 
 ```rust,ignore
-use suprnova::payments::migrations::m_2026_05_22_000001_create_payments_tables::Migration as PaymentsMigration;
+use sea_orm_migration::{MigrationTrait, MigratorTrait};
+use suprnova::payments::migrations::CreatePaymentsTables;
 
+pub struct Migrator;
+
+#[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
         vec![
             // ... your other migrations ...
-            Box::new(PaymentsMigration),
+            Box::new(CreatePaymentsTables),
         ]
     }
 }
 ```
+
+The same module also exports a helper `pub fn migrations() -> Vec<Box<dyn MigrationTrait>>` if you'd rather call that and spread the result into your own list.
 
 ### Table overview
 
@@ -322,18 +407,9 @@ Every table has a `provider_metadata` JSON column. When the framework's neutral 
 
 Domain code reads from the mirror tables, not directly from the provider API. Mutations (create subscription, cancel, etc.) go to the provider; the resulting webhook syncs the mirror tables back. This means there is a brief window between a mutation and the webhook arriving where your mirror tables lag behind. Design your UX to account for this (show "processing" states, rely on the provider's redirect URLs for immediate confirmation).
 
-## Webhook Handling
+## Webhook handling
 
-Mount the webhook ingress route once at bootstrap. The handler for `POST /webhooks/payments/{provider}` is built into the framework:
-
-```rust,ignore
-use std::sync::Arc;
-use suprnova::payments::webhook_routes;
-
-// In your router setup:
-let router = webhook_routes(db.clone());
-app.merge_router(router);
-```
+Mount the webhook ingress route once at bootstrap — see the [Quick start](#quick-start) routes example for the composition pattern. `webhook_routes(db)` returns a `Router` carrying the single `POST /webhooks/payments/{provider}` handler that's built into the framework. You chain your own routes onto it (or call the route's underlying primitives directly inside your own `routes!{}` block).
 
 The framework handler does this for each request:
 
@@ -403,6 +479,53 @@ A subscription/customer event with a missing `subscription_id` / `customer_id` i
 
 Items removed from a subscription on the provider side (e.g. user dropped a seat add-on) are removed from `payments_subscription_items` when the next `subscription.updated` webhook arrives. The provider's `Subscription::get(id)` response is the source of truth on every sync.
 
+## Payment methods beyond cards
+
+`PaymentMethod` is the enum the framework uses for stored methods in `payments_payment_methods` and for any provider that exposes method metadata. It covers the obvious cases — cards, bank transfers, e-wallets — plus regional methods that are first-class in many markets:
+
+```rust,ignore
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PaymentMethod {
+    Card { brand: String, last4: String, exp_month: u8, exp_year: u16 },
+    BankTransfer { bank_name: String, last4: String },
+    EWallet { provider: String, identifier: String },
+    /// Payer identified by phone + operator + country.
+    MobileMoney {
+        operator: MobileMoneyOperator,
+        phone: PhoneNumber,
+        country: CountryCode,
+    },
+    /// Pegged crypto — cash-equivalent for most providers.
+    Stablecoin { asset: StablecoinAsset, network: Option<String> },
+    /// Non-pegged cryptocurrency.
+    Crypto { network: String, address: String },
+    /// Escape hatch for regional / provider-specific methods not yet modeled.
+    Custom { kind: String, descriptor: String },
+}
+
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MobileMoneyOperator {
+    MtnMomo,
+    Mpesa,
+    AirtelMoney,
+    OrangeMoney,
+    Lipila,
+    Custom { identifier: String },
+}
+
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StablecoinAsset {
+    Usdc,
+    Usdt,
+    Dai,
+    Custom { ticker: String },
+}
+```
+
+The named operators and assets are the ones we've enumerated. The `Custom { ... }` variants on each cover regional operators and stablecoins we haven't pinned yet, so adding support for one doesn't force a framework release.
+
+`PhoneNumber` and `CountryCode` are validated DTOs in `suprnova::payments` — they reject malformed input at construction time, which is where you want the failure rather than at the provider call.
+
 ## Money
 
 Amounts are represented as `Money` — an `i64` minor-unit count plus a `Currency`. No `f64` involved.
@@ -460,9 +583,9 @@ pub enum ChargeResult {
 }
 ```
 
-Handle `RequiresClientAction` by returning the payload to your frontend. The frontend renders the 3DS challenge using `client_secret` + `publishable_key`. See [`payments-frontend.md`](payments-frontend.md.md) for the frontend dispatch code.
+Handle `RequiresClientAction` by returning the payload to your frontend. The frontend renders the 3DS challenge using `client_secret` + `publishable_key`. See [Payments — Frontend Integration](payments-frontend.md) for the frontend dispatch code.
 
-## Idempotency Keys
+## Idempotency keys
 
 Every mutating DTO has an optional `idempotency_key: Option<String>`. Set one on retryable network calls:
 
@@ -482,7 +605,7 @@ provider.subscribe(SubscribeRequest {
 
 Stripe honors idempotency keys via the `Idempotency-Key` HTTP header. Paddle has an equivalent mechanism. If a request fails mid-flight and you retry with the same key, the provider returns the original response instead of creating a duplicate charge or subscription.
 
-## The Discriminator Pattern
+## The discriminator pattern
 
 Every adapter that claims to implement `PaymentProvider` must pass the same E2E flow:
 
@@ -543,7 +666,7 @@ async fn discriminator_flow() {
 
 `MockPaymentProvider` does not implement `Payment` — this exercises the same invariant as Paddle. `StripeProvider` and `PaddleProvider` both pass the same flow against the live API in integration tests.
 
-## Multi-Provider Apps
+## Multi-provider apps
 
 Register both adapters at boot and dispatch based on where each customer's record was created:
 
@@ -572,7 +695,10 @@ Cashier is Stripe-only by design. Suprnova ships multi-provider out of the box. 
 | `$user->charge(1999, 'pm_...')` | `payment.charge(ChargeRequest { ... }).await` (if provider supports it) |
 | `$invoice->download()` | Not built-in; read `provider_metadata["invoice_pdf_url"]` from the transactions mirror table |
 
-## What's Next
+## Next
 
-- [`payments-provider-guide.md`](payments-provider-guide.md.md) — write your own adapter crate end to end
-- [`payments-frontend.md`](payments-frontend.md.md) — Svelte 5, React 19, and Vue 3.5 dispatch-on-flow examples
+- [Payments — Stripe Adapter](payments-stripe.md) — the gateway flow in detail: PaymentIntents, webhook signature format, event-type mapping
+- [Payments — Paddle Adapter](payments-paddle.md) — the MoR flow in detail: checkout-driven subscription creation, tax handling, notification verification
+- [Payments — Frontend Integration](payments-frontend.md) — Svelte 5, React 19, and Vue 3.5 dispatch-on-flow examples
+- [Writing a Payment Provider Adapter](payments-provider-guide.md) — build your own adapter crate end to end
+- [Database](database.md) — the SeaORM layer the mirror tables sit on
