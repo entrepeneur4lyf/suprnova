@@ -64,8 +64,10 @@ ceiling without anyone having to remember to add it. Install it in
 
 ```rust
 // src/bootstrap.rs
-use suprnova::{global_middleware, CorsConfig, CorsMiddleware, DB, TimeoutMiddleware};
-use crate::middleware::{LoggingMiddleware, RequestIdMiddleware};
+use suprnova::{
+    global_middleware, CorsConfig, CorsMiddleware, DB, RequestIdMiddleware, TimeoutMiddleware,
+};
+use crate::middleware::LoggingMiddleware;
 
 pub async fn register() {
     DB::init().await.expect("database connect");
@@ -267,7 +269,7 @@ like this:
 
 ```rust
 pub async fn webhook(req: Request) -> Response {
-    let payload: WebhookPayload = req.body_json().await?;
+    let payload: WebhookPayload = req.json().await?;
 
     // Fire-and-forget background work. Survives the request timing out.
     tokio::spawn(async move {
@@ -276,7 +278,7 @@ pub async fn webhook(req: Request) -> Response {
         }
     });
 
-    Ok(HttpResponse::no_content())
+    Ok(HttpResponse::new().status(204))
 }
 ```
 
@@ -297,7 +299,7 @@ pub async fn upload(req: Request) -> Response {
     // Not guaranteed under a timeout.
     tokio::fs::remove_file(&temp_path).await?;
 
-    Ok(HttpResponse::json(&processed)?)
+    Ok(HttpResponse::json(serde_json::to_value(&processed)?))
 }
 ```
 
