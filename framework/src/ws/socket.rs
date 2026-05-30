@@ -200,6 +200,25 @@ impl WsSocket {
     /// Receive the next text message, skipping non-text frames that
     /// the handler isn't expected to care about. Returns `Ok(None)`
     /// when the peer closes or the connection ends.
+    ///
+    /// # What gets silently discarded
+    ///
+    /// This method consumes and drops the following frame kinds before
+    /// returning the next `Text`:
+    ///
+    /// - `Message::Binary` — binary payload from the peer
+    /// - `Message::Ping` — peer-initiated ping (the WebSocket layer
+    ///   handles the corresponding pong automatically)
+    /// - `Message::Pong` — peer pong (the missed-ping counter is reset
+    ///   as a side effect before the frame is discarded)
+    /// - `Message::Frame` — raw frame, only emitted from server-side
+    ///   contexts and never expected at this layer
+    ///
+    /// If your handler needs to observe any of those — e.g. a protocol
+    /// that mixes text and binary, or one that wants to count pings —
+    /// use [`WsSocket::recv`] from the very first read. Once a frame
+    /// has been swallowed by `recv_text` it is gone; there is no
+    /// retroactive way to see it.
     pub async fn recv_text(&mut self) -> Result<Option<String>, FrameworkError> {
         loop {
             match self.receiver.next().await {
@@ -235,14 +254,46 @@ impl WsSocket {
 
     /// Send a close frame. Idempotent — subsequent sends will Err
     /// because the forwarder will have terminated.
+    ///
+    /// # Validation
+    ///
+    /// `code` must be a value tungstenite considers allowed for sending
+    /// (RFC 6455 §7.4). The reserved/non-app codes 1004, 1005, 1006,
+    /// 1015, anything below 1000, and codes above 4999 are rejected
+    /// up front — these would either be silently mangled by the wire
+    /// encoder or violate the protocol. Use 1000 for normal closure,
+    /// 1001-1013 for the defined reasons, 3000-3999 for IANA-registered
+    /// codes, or 4000-4999 for application-private codes.
+    ///
+    /// `reason` is the human-readable close payload. RFC 6455 §5.5.1
+    /// caps the entire control-frame payload at 125 bytes; subtracting
+    /// the two-byte code leaves at most 123 bytes for the UTF-8 reason
+    /// string. Longer reasons are rejected.
+    ///
+    /// Both checks return [`FrameworkError::Internal`] without enqueuing
+    /// anything — the connection stays open and the caller can retry
+    /// with a valid close.
     pub async fn close(
         &mut self,
         code: u16,
         reason: impl Into<String>,
     ) -> Result<(), FrameworkError> {
+        let close_code = CloseCode::from(code);
+        if !close_code.is_allowed() {
+            return Err(FrameworkError::internal(format!(
+                "ws close: code {code} is not allowed for sending (reserved or invalid per RFC 6455)"
+            )));
+        }
+        let reason: String = reason.into();
+        if reason.len() > MAX_CLOSE_REASON_BYTES {
+            return Err(FrameworkError::internal(format!(
+                "ws close: reason is {} bytes, exceeds RFC 6455 limit of {MAX_CLOSE_REASON_BYTES}",
+                reason.len()
+            )));
+        }
         let frame = CloseFrame {
-            code: CloseCode::from(code),
-            reason: reason.into().into(),
+            code: close_code,
+            reason: reason.into(),
         };
         self.sender
             .send(Outbound::Close(frame))
@@ -250,6 +301,14 @@ impl WsSocket {
             .map_err(|_| FrameworkError::internal("ws close: connection already closed"))
     }
 }
+
+/// RFC 6455 §5.5.1 caps a control frame's payload at 125 bytes. A close
+/// frame uses two of those bytes for the status code, leaving 123 bytes
+/// of UTF-8 reason. We validate up front in [`WsSocket::close`] so
+/// callers get a clear error instead of a tungstenite-side
+/// `Error::Protocol` surfacing later (or, depending on the version,
+/// being silently truncated).
+const MAX_CLOSE_REASON_BYTES: usize = 123;
 
 /// Forwarder task: owns the sink half of the WebSocket stream and
 /// drains the outbound mpsc into it. Exits cleanly when the channel
