@@ -295,7 +295,7 @@ Your app reads more on top.
 |---|---|---|
 | `APP_NAME` | `"app"` | Logged at boot, used in some default error messages |
 | `APP_ENV` | `local` | Drives `Environment::detect` and `.env.<suffix>` lookup |
-| `APP_DEBUG` | `false` | Verbose error pages + extra logging |
+| `APP_DEBUG` | env-aware (`false` in production) | Verbose error pages + extra logging |
 | `APP_URL` | `http://localhost:8080` | Base URL for absolute URL generation, signed URLs |
 | `APP_KEY` | none (required in prod) | AES-256 key for `Crypt`, sessions, cursors |
 | `APP_KEY_PREVIOUS` | none | Comma-separated previous keys for rotation (max 8) |
@@ -307,14 +307,13 @@ Your app reads more on top.
 | `DB_CONNECT_TIMEOUT` | `30` (seconds) | sqlx pool connect timeout |
 | `SESSION_LIFETIME` | `120` (minutes) | Session expiry |
 | `SESSION_COOKIE` | `suprnova_session` | Cookie name |
-| `SESSION_SECURE` | `false` | Set `true` in production (HTTPS only) |
+| `SESSION_SECURE` | `true` | Set `Secure` cookie flag. Override to `false` for local-HTTP development. |
 | `SESSION_SAME_SITE` | `Lax` | `Strict`, `Lax`, or `None` |
-| `MAIL_DRIVER` | `smtp` | One of `smtp`, `ses`, `mailgun`, `postmark`, `sendgrid`, `resend`, `log`, `memory` |
+| `MAIL_DRIVER` | `log` | One of `smtp`, `ses`, `mailgun`, `postmark`, `sendgrid`, `resend`, `log`, `memory` |
 | `CACHE_DRIVER` | `memory` | One of `memory`, `redis`, `database` |
-| `QUEUE_DRIVER` | `sync` | One of `sync`, `database`, `redis`, `null` |
+| `QUEUE_DRIVER` | `memory` | One of `memory`, `sync`, `database`, `redis`, `null` |
 | `RATE_LIMIT_DRIVER` | `memory` | One of `memory`, `redis` |
-| `FILESYSTEM_DISK` | `local` | Default Storage::disk() |
-| `LOG_FORMAT` | `pretty` | `pretty` (dev) or `json` (production) |
+| `LOG_FORMAT` | env-aware (`pretty` in dev/local, `json` in production) | `pretty` or `json` |
 | `LOG_LEVEL` | `info` | One of `error`, `warn`, `info`, `debug`, `trace` |
 
 The full audited list lives in [Environment Variables](env-vars.md).
