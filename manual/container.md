@@ -39,9 +39,11 @@ This matters because:
 
 - **Per-request state goes through task-local** — Inertia shared data,
   flash bag, request id. Each request gets its own layer, transparently.
-- **Tests use thread-local** — `TestContainer::fake(|tc| { tc.bind(…); })`
-  binds inside one thread without touching the global container,
-  so parallel tests don't bleed services into each other.
+- **Tests use thread-local** — `let _g = TestContainer::fake();`
+  followed by `TestContainer::bind(...)` binds inside one thread
+  without touching the global container, so parallel tests don't
+  bleed services into each other. The guard clears the test
+  container when it drops.
 - **App-wide services go through global** — bound once at boot,
   resolved everywhere.
 
@@ -58,7 +60,10 @@ have:
 
 ### `App::singleton(value)` — owned, cloned at lookup
 
-For `T: Clone` values that should live forever:
+For any `T: Any + Send + Sync + 'static` value that should live
+forever. The `Clone` bound is on the *getter* (`App::get`), not the
+binding — the value is stored once inside an `Arc` and cloned out of
+that `Arc` on each `get`:
 
 ```rust
 use suprnova::App;
@@ -99,17 +104,22 @@ trait objects.
 When constructing the value should happen at first use (or every time):
 
 ```rust
-App::factory(|| -> Result<HttpClient, FrameworkError> {
+App::factory(|| {
     HttpClient::builder()
         .timeout(Duration::from_secs(30))
         .build()
+        .expect("http client config is hand-rolled and known-good")
 });
 ```
 
-`App::factory` registers a *concrete-type* factory; `App::bind_factory`
-registers a *trait-object* factory. Both invoke the closure outside
-any container lock, so a factory that re-enters the container won't
-deadlock and an expensive constructor won't block other bindings.
+`App::factory` registers a *concrete-type* factory (`Fn() -> T`);
+`App::bind_factory` registers a *trait-object* factory
+(`Fn() -> Arc<T>`). Neither closure returns `Result` — handle
+construction failure inside the closure (panic at boot, or build a
+sentinel value) or use a regular `App::singleton` / `App::bind` after
+constructing the value yourself with `?`. Both invoke the closure
+outside any container lock, so a factory that re-enters the container
+won't deadlock and an expensive constructor won't block other bindings.
 
 ### `App::*_if_absent(value)` — boot-order-friendly registration
 
@@ -146,9 +156,9 @@ let store = App::resolve_make::<dyn KeyValueStore>()?;
 ```
 
 `resolve` and `resolve_make` return
-`Result<T, FrameworkError::ServiceUnresolved(_)>` — useful in handler
-paths where a missing service should surface as a 500 with a proper
-log, not a panic.
+`Result<_, FrameworkError>` (specifically the `ServiceNotFound`
+variant when the lookup misses) — useful in handler paths where a
+missing service should surface as a 500 with a proper log, not a panic.
 
 Membership checks (rarely needed):
 
@@ -179,7 +189,7 @@ pub async fn bootstrap() -> Result<(), FrameworkError> {
 
     // Lazy services (built on first use)
     App::bind_factory::<dyn HttpClient, _>(|| {
-        Ok(Arc::new(ReqwestClient::with_timeout(30)))
+        Arc::new(ReqwestClient::with_timeout(30))
     });
 
     Ok(())
@@ -198,22 +208,27 @@ See [Application Bootstrap](bootstrap.md) for the full boot order.
 
 ## Inertia shared data
 
-The container is also where Inertia shared data lives. Two convenience
-APIs make that explicit:
+The container is also where Inertia shared data lives. Three
+convenience APIs make that explicit:
 
 ```rust
 use suprnova::App;
 
-App::inertia_share("flash", || {
-    let flash = some_flash_function();
-    serde_json::json!({ "message": flash })
+// Eager value — serialised once and reused for every Inertia response.
+App::inertia_share("appName", "Suprnova");
+
+// Lazy value — resolver runs per response. Use for per-request data
+// that needs async work.
+App::inertia_share_lazy("locale", || async {
+    Ok::<_, suprnova::FrameworkError>(detect_locale().await)
 });
 
-App::flash("Saved!");  // shorthand for the common case
+// Push a single flash entry onto the per-request flash bag.
+App::flash("message", "Saved!");
 ```
 
 These read from `Container::inertia()` which returns
-`Arc<InertiaRegistry>` — you can interact with it directly if you
+`&Arc<InertiaRegistry>` — you can interact with it directly if you
 need lower-level access. See [Inertia / Frontend](frontend.md) for
 how the shared data ends up in the page response.
 
@@ -228,21 +243,29 @@ other's flash because their task-local containers don't overlap. The
 binding evaporates when the request's task ends.
 
 **Per-test isolation.** A test that binds a fake mail driver should
-not see a fake bound by a sibling test. `TestContainer::fake(|tc|
-{ tc.bind(...); })` binds inside one thread, so parallel tests stay
-hermetic:
+not see a fake bound by a sibling test. `TestContainer::fake()`
+returns a thread-local guard, and `TestContainer::bind` /
+`TestContainer::singleton` route writes into the active scope.
+Parallel tests stay hermetic:
 
 ```rust
+use std::sync::Arc;
+use suprnova::container::testing::TestContainer;
+use suprnova::suprnova_test;
+
 #[suprnova_test]
 async fn one_test_binds_a_fake() {
-    suprnova::container::testing::TestContainer::fake(|tc| {
-        tc.bind::<dyn Mailer>(Arc::new(FakeMailer::new()));
-    });
+    let _guard = TestContainer::fake();
+    TestContainer::bind::<dyn Mailer>(Arc::new(FakeMailer::new()));
 
     // … this test uses FakeMailer
     // a sibling test running in parallel doesn't see it
 }
 ```
+
+For multi-thread tokio runtimes — where the future may migrate between
+worker threads — use `TestContainer::scope(async { ... })` instead;
+that installs a task-local override that survives the migration.
 
 **Override-at-boot.** Application code can override defaults registered
 by library crates. The `_if_absent` variants and the layered lookup
@@ -269,17 +292,17 @@ let conn = pool.checkout().await?;
 ### Swap a default for a fake in tests
 
 ```rust
+use std::sync::Arc;
+use suprnova::container::testing::TestContainer;
+use suprnova::suprnova_test;
+
 #[suprnova_test]
 async fn order_dispatches_email() {
-    use std::sync::Arc;
-    use suprnova::container::testing::TestContainer;
-
     let fake = Arc::new(FakeEmailGateway::new());
     let fake_for_assert = Arc::clone(&fake);
 
-    TestContainer::fake(|tc| {
-        tc.bind::<dyn EmailGateway>(fake);
-    });
+    let _guard = TestContainer::fake();
+    TestContainer::bind::<dyn EmailGateway>(fake);
 
     place_order(123).await?;
 
@@ -292,9 +315,16 @@ async fn order_dispatches_email() {
 ```rust
 // Builds the embedding model on first request, not at boot.
 App::bind_factory::<dyn EmbeddingModel, _>(|| {
-    Ok(Arc::new(OnnxEmbedding::load_from_disk("/models/all-mini-lm.onnx")?))
+    Arc::new(
+        OnnxEmbedding::load_from_disk("/models/all-mini-lm.onnx")
+            .expect("embedding model must load"),
+    )
 });
 ```
+
+For fallible construction that needs to surface a structured error to
+the operator, build the value yourself in `bootstrap()` with `?` and
+call `App::bind(...)` once it's ready.
 
 ## Why Suprnova diverges
 
