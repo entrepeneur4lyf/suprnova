@@ -48,10 +48,13 @@ own log persistence.
 Use the `tracing` macros in handlers, jobs, middleware, anywhere:
 
 ```rust
+use suprnova::{json_response, session, Request, Response};
 use tracing::{debug, info, warn, error, instrument};
 
-pub async fn checkout(req: suprnova::Request) -> suprnova::Response {
-    let user_id: i64 = req.session::<i64>("user_id").unwrap_or(0);
+pub async fn checkout(_req: Request) -> Response {
+    let user_id: i64 = session()
+        .and_then(|s| s.get::<i64>("user_id"))
+        .unwrap_or(0);
 
     info!(user_id, "checkout starting");
 
@@ -62,7 +65,7 @@ pub async fn checkout(req: suprnova::Request) -> suprnova::Response {
 
     info!(user_id, order_id = order.id, total = order.total_cents, "checkout succeeded");
 
-    suprnova::Response::ok().json(&order)
+    json_response!(order)
 }
 ```
 
