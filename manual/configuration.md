@@ -48,12 +48,10 @@ SESSION_SAME_SITE=Lax
 
 # Mail
 MAIL_DRIVER=smtp             # smtp, ses, mailgun, postmark, sendgrid, resend, log, memory
-MAIL_HOST=localhost
-MAIL_PORT=587
-MAIL_USERNAME=
-MAIL_PASSWORD=
-MAIL_FROM_ADDRESS=hello@example.com
-MAIL_FROM_NAME="Suprnova App"
+MAIL_SMTP_HOST=127.0.0.1
+MAIL_SMTP_PORT=587
+MAIL_SMTP_USER=
+MAIL_SMTP_PASS=
 ```
 
 A sibling `.env.example` ships the same keys with placeholder values —
@@ -205,8 +203,9 @@ let cfg = Config::resolve_prefixed::<ServerConfig>("SERVER_")?;
   vars with the given prefix (the prefix is stripped before
   deserialisation)
 
-Both return `Result` so a missing required field surfaces as
-`FrameworkError::param(...)` instead of a panic.
+Both return `Result<T, FrameworkError>` so a missing required field
+surfaces as a `FrameworkError::Internal` carrying the envy diagnostic
+instead of a panic.
 
 ## Environment-specific config
 
@@ -224,7 +223,7 @@ The `Environment` enum covers the standard set:
 Common branches:
 
 ```rust
-use suprnova::Config;
+use suprnova::{Config, Environment};
 
 if Config::is_production() {
     // strict cookies, real mail driver, etc.
@@ -241,9 +240,11 @@ match Config::environment() {
 }
 ```
 
-`is_debug()` returns `true` when `APP_DEBUG=true` — keep this off in
-production. It controls error-page detail and a few internal
-defaults.
+`is_debug()` returns `true` when `APP_DEBUG=true` is set explicitly,
+or — when `APP_DEBUG` is unset — when the detected environment is
+`Local`, `Development`, or `Testing`. Production, staging, and any
+unrecognised custom environment default to `false`. Keep it off in
+production; it controls error-page detail and a few internal defaults.
 
 ### `APP_KEY` is required in non-development
 
@@ -255,9 +256,12 @@ descriptive error message — there is no silent fallback.
 If you don't have an `APP_KEY` yet:
 
 ```bash
-suprnova key:generate          # writes a fresh key into .env
-suprnova key:generate --show   # prints to stdout without modifying .env
+suprnova key:generate          # prints the key with a hint reminding you to add it to .env
+suprnova key:generate --show   # prints only the key, suitable for `APP_KEY=$(suprnova key:generate --show)`
 ```
+
+Neither form edits `.env` for you — copy the printed key into your
+`.env` (or your secrets manager) yourself.
 
 For key rotation (where old encrypted data must still decrypt during
 the migration window), see [Encryption](encryption.md#key-rotation).
@@ -268,6 +272,8 @@ In tests, register config in the test setup rather than relying on
 `.env`:
 
 ```rust
+use suprnova::suprnova_test;
+
 #[suprnova_test]
 async fn test_with_custom_db() {
     suprnova::Config::register(DatabaseConfig {
@@ -311,7 +317,7 @@ Your app reads more on top.
 | `SESSION_SAME_SITE` | `Lax` | `Strict`, `Lax`, or `None` |
 | `MAIL_DRIVER` | `log` | One of `smtp`, `ses`, `mailgun`, `postmark`, `sendgrid`, `resend`, `log`, `memory` |
 | `CACHE_DRIVER` | `memory` | One of `memory`, `redis`, `database` |
-| `QUEUE_DRIVER` | `memory` | One of `memory`, `sync`, `database`, `redis`, `null` |
+| `QUEUE_DRIVER` | `memory` | One of `memory`, `redis`, `database` (unknown values warn and fall back to `memory`) |
 | `RATE_LIMIT_DRIVER` | `memory` | One of `memory`, `redis` |
 | `LOG_FORMAT` | env-aware (`pretty` in dev/local, `json` in production) | `pretty` or `json` |
 | `LOG_LEVEL` | `info` | One of `error`, `warn`, `info`, `debug`, `trace` |
