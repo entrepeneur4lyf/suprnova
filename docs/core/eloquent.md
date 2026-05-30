@@ -2454,15 +2454,20 @@ fact-of-rotation plus an actionable re-encrypt hint.
 
 **Multi-step rotation.** If you rotate again before completing the
 previous pass, append: `APP_KEY_PREVIOUS=<oldest>,<previous>`. The
-ring tries every previous key in order. There is no upper bound, but
-each fallback adds a single AEAD trial-decrypt — keep the list short
-in steady state.
+ring tries every previous key in order. The list is capped at
+8 entries — a realistic chain is 1-3 (one in-flight rotation, maybe
+one stalled prior roll) and a longer list is almost always a config-
+templating accident; exceeding the cap fails boot with an actionable
+diagnostic rather than silently dropping a key the operator may still
+depend on.
 
 **Constraints.**
 
 - A malformed entry in `APP_KEY_PREVIOUS` fails boot loudly (same as
   a malformed `APP_KEY`) — a half-rotated secret should never
   silently degrade.
+- More than 8 entries in `APP_KEY_PREVIOUS` fails boot loudly —
+  see [`suprnova::crypto::MAX_PREVIOUS_KEYS`].
 - Empty entries in the list (e.g. trailing commas from templated
   config) are tolerated as "no key in this slot" — not an error.
 - The wire format is unchanged from the pre-rotation single-key

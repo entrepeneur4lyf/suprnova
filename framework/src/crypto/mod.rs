@@ -521,11 +521,29 @@ pub fn resolve_boot_keyring(
     Ok(BootKeyRing { current, previous })
 }
 
+/// Maximum number of keys accepted in `APP_KEY_PREVIOUS`.
+///
+/// A realistic rotation chain is 1-3 entries (one in-flight roll, maybe
+/// one stalled prior roll the operator hasn't cleaned up). 8 leaves
+/// generous headroom — nobody is running 8 simultaneous rotations — and
+/// gives the trial-decrypt loop in [`decrypt_with_ring`] a known upper
+/// bound on work per failed decrypt.
+///
+/// Exceeding the cap is a hard boot error, not silent truncation: a
+/// runaway `APP_KEY_PREVIOUS` is almost always a config-templating
+/// accident (duplicated lines, merged secret stores) and the operator
+/// needs to know rather than have the framework discard keys behind
+/// their back — which would leave columns undecryptable with no
+/// diagnostic.
+pub const MAX_PREVIOUS_KEYS: usize = 8;
+
 /// Parse `APP_KEY_PREVIOUS` (or any comma-separated list of base64
 /// keys) into a vector of [`EncryptionKey`]. Empty / whitespace
 /// entries are skipped; the empty-string-overall case yields `Vec::new()`.
 ///
-/// Any malformed entry is an error — see [`resolve_boot_keyring`].
+/// Any malformed entry is an error — see [`resolve_boot_keyring`]. The
+/// list is also capped at [`MAX_PREVIOUS_KEYS`]; exceeding the cap
+/// fails boot with an actionable diagnostic.
 fn parse_previous_keys(raw: Option<&str>) -> Result<Vec<EncryptionKey>, FrameworkError> {
     let Some(raw) = raw else {
         return Ok(Vec::new());
@@ -553,6 +571,16 @@ fn parse_previous_keys(raw: Option<&str>) -> Result<Vec<EncryptionKey>, Framewor
             ))
         })?;
         out.push(key);
+    }
+    if out.len() > MAX_PREVIOUS_KEYS {
+        return Err(FrameworkError::internal(format!(
+            "APP_KEY_PREVIOUS holds {} keys; the maximum is {MAX_PREVIOUS_KEYS}. \
+             A realistic rotation chain is 1-3 entries — a longer list is \
+             almost always a config-templating accident. Trim the list to the \
+             keys still needed for in-flight rotation; once a re-encrypt job \
+             has migrated every row off an old key, drop that entry.",
+            out.len()
+        )));
     }
     Ok(out)
 }
@@ -878,6 +906,63 @@ mod boot_tests {
         let err = resolve_boot_keyring(&Environment::Production, None, Some(&prev))
             .expect_err("no current key in prod must fail closed");
         assert!(format!("{err}").contains("APP_KEY is required"));
+    }
+
+    #[test]
+    fn keyring_accepts_previous_list_at_cap() {
+        // The MAX_PREVIOUS_KEYS cap is inclusive — an operator running
+        // exactly the maximum number of in-flight rotations must still
+        // boot.
+        let app_key = EncryptionKey::generate().to_base64();
+        let entries: Vec<String> = (0..MAX_PREVIOUS_KEYS)
+            .map(|_| EncryptionKey::generate().to_base64())
+            .collect();
+        let combined = entries.join(",");
+        let ring = resolve_boot_keyring(&Environment::Production, Some(&app_key), Some(&combined))
+            .expect("list at the cap must parse");
+        assert_eq!(ring.previous.len(), MAX_PREVIOUS_KEYS);
+    }
+
+    #[test]
+    fn keyring_errors_when_previous_list_exceeds_cap() {
+        // Past the cap, fail loudly with an actionable diagnostic
+        // naming both the count and the cap. Silent truncation would
+        // drop a key the operator may still depend on for an in-flight
+        // re-encrypt job — better to fail boot and let them prune the
+        // list intentionally.
+        let app_key = EncryptionKey::generate().to_base64();
+        let entries: Vec<String> = (0..MAX_PREVIOUS_KEYS + 1)
+            .map(|_| EncryptionKey::generate().to_base64())
+            .collect();
+        let combined = entries.join(",");
+        let err = resolve_boot_keyring(&Environment::Production, Some(&app_key), Some(&combined))
+            .expect_err("over-cap list must fail boot");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(&format!("holds {} keys", MAX_PREVIOUS_KEYS + 1)),
+            "expected count in diagnostic, got: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("maximum is {MAX_PREVIOUS_KEYS}")),
+            "expected cap in diagnostic, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn keyring_cap_ignores_empty_entries() {
+        // The cap is checked AFTER empty-entry skipping, so a
+        // templated config with extra commas (e.g.
+        // `APP_KEY_PREVIOUS=,,,a,,,b,,,`) still parses to just the
+        // non-empty entries and stays under the cap on the real key
+        // count — not the comma count.
+        let app_key = EncryptionKey::generate().to_base64();
+        let k1 = EncryptionKey::generate().to_base64();
+        let k2 = EncryptionKey::generate().to_base64();
+        // Way more commas than MAX_PREVIOUS_KEYS, but only 2 real keys.
+        let combined = format!(",,,{k1},,,{k2},,,");
+        let ring = resolve_boot_keyring(&Environment::Production, Some(&app_key), Some(&combined))
+            .expect("empty commas should not count toward the cap");
+        assert_eq!(ring.previous.len(), 2);
     }
 
     #[test]
