@@ -258,9 +258,39 @@ impl<T> CursorPaginator<T> {
     /// Cursors must be authenticated — there is no plaintext fallback
     /// even if `Crypt` is not initialized (which would itself be a
     /// boot bug). Any attempt to decode an unsigned base64 payload
-    /// errors. Codex review finding #1.
+    /// errors.
+    ///
+    /// # Error shape
+    ///
+    /// Cursors are read directly off the wire (typically the
+    /// `?cursor=…` query string), so attacker-controlled garbage,
+    /// tampered ciphertext, and bit-flipped base64 are the expected
+    /// failure modes — not server bugs. To keep client-triggerable
+    /// failures off the 500 telemetry channel:
+    ///
+    /// - The `Crypt::decrypt_string` step (base64 decode + AEAD tag
+    ///   verification) is downgraded to a 400 `bad_request` carrying a
+    ///   static "Invalid pagination cursor" message. The original
+    ///   cryptographic error is intentionally not surfaced — the
+    ///   client gains no signal about why decryption failed, and
+    ///   operators chasing real `Crypt` problems still see the post-
+    ///   decrypt path's internal errors.
+    /// - The post-decrypt steps (JSON parse, variant-tag dispatch,
+    ///   direction parse) stay 500: any byte sequence that survives
+    ///   AEAD authentication was produced by *us*, so a malformed
+    ///   payload past that point is a framework bug worth telemetry.
+    ///
+    /// The 400 downgrade is gated on `Crypt::is_initialized()`: a
+    /// genuine uninitialized-`Crypt` (would itself be a boot bug) still
+    /// propagates as 500.
     pub fn decode_value(wire: &str) -> Result<(sea_orm::Value, CursorDirection), FrameworkError> {
-        let json = Crypt::decrypt_string(wire)?;
+        let json = Crypt::decrypt_string(wire).map_err(|e| {
+            if Crypt::is_initialized() {
+                FrameworkError::bad_request("Invalid pagination cursor")
+            } else {
+                e
+            }
+        })?;
         let payload: CursorPayload = serde_json::from_str(&json).map_err(|e| {
             FrameworkError::internal(format!("Cursor payload JSON decode failed: {e}"))
         })?;
@@ -835,17 +865,65 @@ mod tests {
     fn cursor_decode_rejects_plain_base64_when_crypt_initialized() {
         // Security regression: when Crypt has a key, an attacker-
         // crafted plain-base64 cursor MUST be rejected.
+        // Authenticated-decrypt failures land as 400 bad_request so
+        // they stay off the 500 telemetry channel.
         let _g = CURSOR_LOCK.lock().unwrap();
         ensure_key();
         let attacker = URL_SAFE_NO_PAD.encode(br#"{"t":"BigInt","v":42,"d":"next"}"#);
-        assert!(CursorPaginator::<i32>::decode_value(&attacker).is_err());
+        let err = CursorPaginator::<i32>::decode_value(&attacker).unwrap_err();
+        assert_eq!(err.status_code(), 400, "got: {err}");
     }
 
     #[test]
     fn cursor_decode_rejects_garbage() {
         let _g = CURSOR_LOCK.lock().unwrap();
         ensure_key();
-        assert!(CursorPaginator::<i32>::decode_value("!!! not base64 !!!").is_err());
+        let err = CursorPaginator::<i32>::decode_value("!!! not base64 !!!").unwrap_err();
+        // Non-base64 noise off the wire is also a client error, not a
+        // server bug — 400, not 500.
+        assert_eq!(err.status_code(), 400, "got: {err}");
+    }
+
+    #[test]
+    fn cursor_decode_tampered_ciphertext_is_400_not_500() {
+        // Flip a bit in a legitimate cursor's ciphertext body so AEAD
+        // tag verification fails on decrypt. The attacker-triggerable
+        // path must land as 400 (client bad input) rather than 500
+        // (server fault).
+        let _g = CURSOR_LOCK.lock().unwrap();
+        ensure_key();
+        let wire = CursorPaginator::<i32>::encode_value(
+            &sea_orm::Value::BigInt(Some(7)),
+            CursorDirection::Next,
+        )
+        .unwrap();
+        // Mangle the last base64 char so the decoded ciphertext bytes
+        // change while still being parseable as base64.
+        let last = wire.chars().last().unwrap();
+        let swap = if last == 'A' { 'B' } else { 'A' };
+        let mut tampered = wire[..wire.len() - 1].to_string();
+        tampered.push(swap);
+        let err = CursorPaginator::<i32>::decode_value(&tampered).unwrap_err();
+        assert_eq!(err.status_code(), 400, "got: {err}");
+    }
+
+    #[test]
+    fn cursor_decode_post_decrypt_garbage_stays_500() {
+        // After AEAD authentication, any payload-shape failure must
+        // have been emitted by us — so it stays a 500 the operator
+        // sees in telemetry, not a 400 the client sees. We synthesize
+        // by encrypting a known-bad JSON payload (e.g. an unknown
+        // variant tag): the ciphertext authenticates as ours but the
+        // post-decrypt step rejects the body.
+        let _g = CURSOR_LOCK.lock().unwrap();
+        ensure_key();
+        let wire = Crypt::encrypt_string("not valid json").unwrap();
+        let err = CursorPaginator::<i32>::decode_value(&wire).unwrap_err();
+        assert_eq!(
+            err.status_code(),
+            500,
+            "post-decrypt parse failures stay 500: {err}"
+        );
     }
 
     #[test]
