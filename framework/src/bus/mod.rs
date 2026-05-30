@@ -82,7 +82,9 @@ pub struct Bus;
 
 impl Bus {
     /// Register a handler for command type `C`. Overwrites any previous handler
-    /// for the same type.
+    /// for the same type and logs a warning when that happens — tests routinely
+    /// re-register, but a duplicate binding from boot usually indicates two
+    /// `register` calls from different service providers.
     ///
     /// The dispatcher path keeps commands and outputs as native Rust values —
     /// no serde round-trip. Only the test-fake path serializes commands (so it
@@ -112,8 +114,15 @@ impl Bus {
         });
         match lock::write(&REGISTRY) {
             Ok(mut g) => {
-                g.get_or_insert_with(HashMap::new)
-                    .insert(TypeId::of::<C>(), dispatcher);
+                let map = g.get_or_insert_with(HashMap::new);
+                if map.insert(TypeId::of::<C>(), dispatcher).is_some() {
+                    tracing::warn!(
+                        command = C::command_name(),
+                        "Bus::register replaced an existing handler for this command type. \
+                         If this fires outside of test setup, two registrations are competing \
+                         and the later one wins."
+                    );
+                }
             }
             Err(_) => {
                 tracing::error!(
@@ -159,6 +168,13 @@ impl Bus {
     }
 
     /// Run commands sequentially, stopping on (and including) the first error.
+    ///
+    /// This is the in-process synchronous helper and is intentionally
+    /// homogeneous over a single command type `C` — the dispatcher returns
+    /// `Dispatched<C::Output>`, which only makes sense when every input
+    /// shares one `Output`. For Laravel-style heterogeneous chains of
+    /// different job types, use [`Queue::chain`](crate::queue::Queue::chain),
+    /// which boxes each job into a queue envelope.
     pub async fn chain<C: Command + Clone>(
         cmds: Vec<C>,
     ) -> Vec<Result<Dispatched<C::Output>, FrameworkError>> {
@@ -175,6 +191,11 @@ impl Bus {
     }
 
     /// Run commands concurrently and collect results in input order.
+    ///
+    /// Like [`chain`](Self::chain), this is the in-process synchronous helper
+    /// and is homogeneous over a single command type `C`. For Laravel-style
+    /// heterogeneous batches of mixed job types, use
+    /// [`Queue::batch`](crate::queue::Queue::batch).
     pub async fn batch<C: Command + Clone>(
         cmds: Vec<C>,
     ) -> Vec<Result<Dispatched<C::Output>, FrameworkError>> {
