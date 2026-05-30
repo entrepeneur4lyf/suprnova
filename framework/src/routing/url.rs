@@ -282,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(crypt_install)]
+    #[serial_test::serial(crypt_install, route_registry)]
     fn signed_route_then_url_verifier_round_trips() {
         ensure_key();
         crate::routing::clear_route_names_for_test();
@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(crypt_install)]
+    #[serial_test::serial(crypt_install, route_registry)]
     fn temporary_signed_route_expires() {
         ensure_key();
         crate::routing::clear_route_names_for_test();

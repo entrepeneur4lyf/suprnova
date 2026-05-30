@@ -408,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(crypt_install)]
+    #[serial_test::serial(crypt_install, route_registry)]
     fn sign_route_resolves_named_route() {
         ensure_key();
         crate::routing::clear_route_names_for_test();
