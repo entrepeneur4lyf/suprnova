@@ -96,10 +96,14 @@ combined step is the dev-loop default; in production you use plain
 `src/controllers/link.rs`:
 
 ```rust
-use suprnova::{Request, Response, handler, inertia_response, json_response, InertiaProps};
+use suprnova::{
+    Data, InertiaProps, Model, Request, Response,
+    handler, inertia_response, json_response,
+};
+use validator::Validate;
 use crate::models::Link;
 
-#[derive(InertiaProps, serde::Serialize)]
+#[derive(InertiaProps)]
 pub struct IndexProps {
     pub links: Vec<Link>,
 }
@@ -109,7 +113,7 @@ pub async fn index(req: Request) -> Response {
     inertia_response!(&req, "Links/Index", IndexProps { links: links.into_vec() })
 }
 
-#[derive(serde::Deserialize, suprnova::Data, suprnova::Validate)]
+#[derive(Data, Validate)]
 pub struct CreateLink {
     #[validate(length(min = 1, max = 200))]
     pub title: String,

@@ -160,10 +160,10 @@ fluent boot pipeline:
 use suprnova::Application;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
     Application::new()
         .config(my_app::config::register)   // ← this calls your registration
-        .bootstrap(my_app::bootstrap::bootstrap)
+        .bootstrap(my_app::bootstrap::register)
         .routes(my_app::routes::register)
         .migrations::<my_app::migrations::Migrator>()
         .run()

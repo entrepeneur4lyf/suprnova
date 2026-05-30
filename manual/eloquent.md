@@ -161,9 +161,16 @@ Function-level macros work alongside the struct attribute:
 - `#[mutator]` on a `fn set_name(&mut self, value: serde_json::Value)`
   makes it an Eloquent mutator. The model's JSON-fill path routes
   through it when `name` is listed in `mutators = [...]`.
-- `#[scope]` on a `fn(query: Builder<Self>) -> Builder<Self>`
-  registers a local scope.
-- `#[global_scope]` registers a global scope.
+- `#[suprnova::scopes(Model)]` on an `impl Model { ... }` block:
+  every method whose signature is
+  `fn name(query: Builder<Self>[, args…]) -> Builder<Self>` becomes
+  both a chainable `.scope_name(args)` on `Builder<Self>` and a
+  `Model::scope_name(args)` shortcut. There is no function-level
+  `#[scope]` form — scopes are declared per impl-block.
+- Global scopes are a runtime registration via the `GlobalScope`
+  trait, applied through `Model::global_scope::<GS>()`. There is no
+  function-level `#[global_scope]` macro — see
+  [Macros](macros.md#suprnova-scopes-model) for the full pattern.
 - `#[prunable]` on `impl Prunable for T { ... }` registers the
   pruner via inventory so `model:prune` finds it.
 
@@ -1248,7 +1255,7 @@ Common options:
 | `with_pivot = ["...", ...]` | `BelongsToMany`, `MorphToMany` | Extra columns on the pivot to surface in the join. |
 | `with_timestamps`          | `BelongsToMany`, `MorphToMany` | Stamp `created_at` / `updated_at` on attach/sync. |
 | `with_default = \|\| { ... }` | `BelongsTo`                 | Closure producing a default when the FK is null OR the parent is missing. |
-| `first_key`, `second_key`, `local_key`, `second_local_key` | `HasOneThrough`, `HasManyThrough` | JOIN key overrides — see the Through section below. |
+| `first_key`, `second_key`, `second_local_key` | `HasOneThrough`, `HasManyThrough` | JOIN key overrides — see the Through section below. |
 | `name = "..."`             | every morph kind              | Morph family name (e.g. `"commentable"`, `"taggable"`). Drives the `<name>_id` / `<name>_type` columns on the child/pivot. |
 | `targets = [T1, T2, ...]`  | `MorphTo`                     | The list of concrete morph targets. The macro emits a `<Name>Morph` enum at the declaration site with one variant per target plus `Unknown(String, i64)`. |
 | `target_morph_type = "..."` | `MorphedByMany`              | The morph-type string identifying the target family on the pivot. |
@@ -1429,15 +1436,18 @@ The dispatcher infers JOIN keys from struct names. Overrides:
 |---------------------|----------------------------------|-------------|
 | `first_key`         | `<snake(parent_struct)>_id`      | Column on intermediate `B` pointing at parent `A`. |
 | `second_key`        | `<snake(intermediate_struct)>_id` | Column on final `R` pointing at intermediate `B`. |
-| `local_key`         | `"id"`                           | Column on parent `A` matched by `first_key`. |
 | `second_local_key`  | `"id"`                           | Column on intermediate `B` matched by `second_key`. Required when `B` uses a non-`id` PK. |
+
+The parent's primary-key column is read from the model's `primary_key`
+declaration (defaulting to `"id"`) — there is no `local_key` override
+on `HasManyThrough` / `HasOneThrough`; change the parent's PK via the
+`#[suprnova::model]` attribute if you need a non-`id` parent key.
 
 ```rust
 #[model(table = "countries", relations = {
     posts: HasManyThrough<crate::models::User, crate::models::Post> {
-        first_key = "country_uuid",
+        first_key = "country_id",
         second_key = "author_id",
-        local_key = "uuid",
     },
 })]
 pub struct Country { /* ... */ }
@@ -2212,7 +2222,8 @@ nums.len();                // 6
 nums.is_empty();           // false
 nums.contains(&4);         // true
 nums.first_where(|n| *n > 3); // Some(&4)
-nums.count_where(|n| *n > 2); // 4
+nums.contains_where(|n| *n > 8); // true
+// For a count, run the predicate inline: `nums.iter().filter(|n| **n > 2).count()` — 4
 ```
 
 Transformations consume `self` and return a new `Collection`:

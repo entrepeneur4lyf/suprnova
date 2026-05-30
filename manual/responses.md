@@ -362,7 +362,7 @@ return `Result<(), FrameworkError>`; combine with `?`:
 use suprnova::{abort_if, abort_unless, abort_with, json_response, Request, Response};
 
 pub async fn show(req: Request) -> Response {
-    abort_unless(req.user().is_some(), 401, "must be logged in")?;
+    abort_unless(Auth::user().await?.is_some(), 401, "must be logged in")?;
     abort_if(req.param("id")? == "0", 404, "User not found")?;
     abort_with(503, "scheduled maintenance")?;
     json_response!({ "ok": true })

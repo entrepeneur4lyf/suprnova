@@ -174,10 +174,10 @@ once at boot:
 
 ```rust
 use std::sync::Arc;
-use suprnova::{App, FrameworkError};
+use suprnova::App;
 use crate::services::{MyService, RealEmailGateway};
 
-pub async fn bootstrap() -> Result<(), FrameworkError> {
+pub async fn register() {
     // Plain singletons
     App::singleton(MyAppConfig {
         max_uploads_per_user: 100,
@@ -191,10 +191,10 @@ pub async fn bootstrap() -> Result<(), FrameworkError> {
     App::bind_factory::<dyn HttpClient, _>(|| {
         Arc::new(ReqwestClient::with_timeout(30))
     });
-
-    Ok(())
 }
 ```
+
+The function name `register` matches the scaffold default (`src/bootstrap.rs::register`); the return type is `()`, not `Result`. Bind errors that happen during boot (e.g. driver connect failures) should propagate via the driver/service constructor, not from `register` itself — see [Application Bootstrap](bootstrap.md) for the full boot wiring.
 
 The framework also calls into the container itself during boot:
 
@@ -285,9 +285,11 @@ let pool = MyResourcePool::connect(url).await?;
 App::bind(Arc::new(pool));
 
 // later:
-let pool = App::make::<MyResourcePool>()?;
+let pool = App::resolve_make::<MyResourcePool>()?;
 let conn = pool.checkout().await?;
 ```
+
+`App::make` returns `Option<Arc<T>>` and pairs with `.expect(...)`; `App::resolve_make` returns `Result<Arc<T>, FrameworkError::ServiceNotFound>` and pairs with `?` in fallible code. Use the one that matches your caller's error story.
 
 ### Swap a default for a fake in tests
 
@@ -304,7 +306,7 @@ async fn order_dispatches_email() {
     let _guard = TestContainer::fake();
     TestContainer::bind::<dyn EmailGateway>(fake);
 
-    place_order(123).await?;
+    place_order(123).await.expect("place_order succeeds");
 
     assert_eq!(fake_for_assert.sent_count(), 1);
 }

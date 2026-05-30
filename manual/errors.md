@@ -351,7 +351,7 @@ available as a method name on user types.)
 use suprnova::{abort_if, abort_unless, abort_with, Request, Response, json_response};
 
 pub async fn show(req: Request) -> Response {
-    abort_unless(req.user().is_some(), 401, "must be logged in")?;
+    abort_unless(Auth::user().await?.is_some(), 401, "must be logged in")?;
     abort_if(req.param("id")? == "0", 404, "User not found")?;
     abort_with(503, "scheduled maintenance")?;
 
@@ -443,7 +443,9 @@ impl Listener<ErrorOccurred> for SentryReporter {
 }
 
 // In bootstrap.rs:
-EventFacade::listen::<ErrorOccurred>(Arc::new(SentryReporter)).await?;
+// `listen` infers both generics from the listener type. It returns
+// `()` (the registration cannot fail), so no `?` and no Result.
+EventFacade::listen::<ErrorOccurred, SentryReporter>(Arc::new(SentryReporter)).await;
 ```
 
 The event carries the raw error message (the wire body is still
@@ -468,13 +470,22 @@ equivalent and renders the same shape.
 ```rust
 let user = users::Entity::find_by_id(id)
     .one(&*DB::get()?)
-    .await?
+    .await
+    .map_err(FrameworkError::from)?
     .ok_or_else(|| FrameworkError::not_found("User"))?;
 ```
 
-Or, with the Eloquent layer:
+`map_err(FrameworkError::from)?` bridges the SeaORM `DbErr` through
+`From<DbErr> for FrameworkError` and then through
+`From<FrameworkError> for HttpResponse`. Rust does not auto-chain
+`From` impls across two hops, so the explicit `.map_err` is required.
+
+Or, with the Eloquent layer (which already wraps SeaORM and returns
+`Result<_, FrameworkError>` directly):
 
 ```rust
+use suprnova::Model;
+
 let user = User::find_or_fail(id).await?;
 ```
 
@@ -483,8 +494,9 @@ let user = User::find_or_fail(id).await?;
 ### Authorize an action
 
 ```rust
-let user = req.user().ok_or(AppError::unauthorized("login required"))?;
-abort_unless(post.owner_id == user.id || user.is_admin, 403,
+let user = Auth::user().await?
+    .ok_or_else(|| AppError::unauthorized("login required"))?;
+abort_unless(post.owner_id == user.id() || user.is_admin(), 403,
     "you don't own this post")?;
 ```
 

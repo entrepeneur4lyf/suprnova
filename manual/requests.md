@@ -86,10 +86,18 @@ pub struct ExampleRequest {
     #[validate(length(min = 8, max = 100))]
     pub password: String,
 
-    // Regex pattern
+    // Regex pattern — PHONE_REGEX must be a `static` or `const`
+    // visible from the validator's expansion point. Declare it once,
+    // typically in the same module:
     #[validate(regex(path = "PHONE_REGEX", message = "Invalid phone number"))]
     pub phone: String,
 }
+
+use once_cell::sync::Lazy;
+use regex::Regex;
+
+static PHONE_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\+?[0-9\s\-()]{7,20}$").unwrap());
 ```
 
 ### Numeric validations
@@ -97,8 +105,9 @@ pub struct ExampleRequest {
 ```rust
 #[request]
 pub struct ProductRequest {
-    // Range validation
-    #[validate(range(min = 0, max = 10000, message = "Price must be between 0 and 10000"))]
+    // Range validation — literals must match the field type. `f64`
+    // takes `0.0` / `10000.0`, not the integer-literal `0` / `10000`.
+    #[validate(range(min = 0.0, max = 10000.0, message = "Price must be between 0 and 10000"))]
     pub price: f64,
 
     // Minimum value
