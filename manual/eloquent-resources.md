@@ -1,22 +1,19 @@
 # JSON:API resources
 
-Suprnova ships a first-class JSON:API resource layer. Mark a
-`#[derive(Data)]` struct with `#[json_resource("type")]` and the
-framework emits a fully-conformant `IntoJsonResource` impl alongside
-the standard Inertia and serde impls — single envelopes, collections,
-paginated collections, sparse fieldsets, compound `included`, and
-multi-level `?include=a.b.c` chains all flow through the same code path.
-
-The two facades — `Resource` and `JsonApi` — are the same type with
-two names. Use whichever matches your house style; Laravel users will
-recognise `JsonApi::single`, Rust users will reach for `Resource::single`.
+Suprnova ships a JSON:API resource layer for typed REST APIs. Mark a
+`#[derive(Data)]` struct with `#[json_resource("type")]` and the framework
+emits an `IntoJsonResource` impl that handles single envelopes, collections,
+paginated collections, sparse fieldsets (`?fields[type]=...`), compound
+`included` documents, and multi-level `?include=a.b.c` chains through the
+same code path. The two facades — `Resource` and `JsonApi` — are the same
+type under two names; use whichever matches your house style.
 
 ## Defining a resource
 
 ```rust
-use suprnova::{Data, Validate};
+use suprnova::Data;
 
-#[derive(Debug, Clone, Data, Validate)]
+#[derive(Debug, Clone, Data)]
 #[json_resource("users")]
 pub struct UserResource {
     pub id: i64,
@@ -52,23 +49,33 @@ pub struct OrderResource {
 Construct a pending response from a handler and call `.render().await`:
 
 ```rust
-use suprnova::Resource;
+use suprnova::{LengthAwarePaginator, Resource};
 
 #[handler]
-async fn show_user(id: i64, db: DB) -> Result<HttpResponse, FrameworkError> {
-    let user: UserResource = User::find(id).await?.into();
+async fn show_user(id: i64) -> Result<HttpResponse, FrameworkError> {
+    let user: UserResource = User::find_or_fail(id).await?.into();
     Resource::single(user).render().await
 }
 
 #[handler]
-async fn list_users(db: DB) -> Result<HttpResponse, FrameworkError> {
+async fn list_users() -> Result<HttpResponse, FrameworkError> {
     let users: Vec<UserResource> = User::all().await?.into_iter().map(Into::into).collect();
     Resource::collection(users).render().await
 }
 
 #[handler]
-async fn paginate_users(db: DB) -> Result<HttpResponse, FrameworkError> {
-    let page = User::query().paginate(10, current_page()).await?;
+async fn paginate_users() -> Result<HttpResponse, FrameworkError> {
+    // `paginate(per_page)` reads `?page=` from the current request automatically.
+    let page = User::query().paginate(10).await?;
+    // Convert the model paginator into a resource paginator field-by-field —
+    // `data` is `pub`, the rest of the counts/links carry over.
+    let page = LengthAwarePaginator::new(
+        page.data.into_iter().map(UserResource::from).collect(),
+        page.total,
+        page.per_page,
+        page.current_page,
+    )
+    .with_base_url("/api/users");
     Resource::paginated(page).render().await
 }
 ```
@@ -206,9 +213,13 @@ automatically.
 ## Compound documents — `?include=` chains
 
 Declare relationship fields with `#[data(allow_include)]`. The framework
-builds an `IncludeTree` from `?include=author.posts.tags,comments`,
-walks every node, and pushes fully-resolved resource objects into
-`included` (deduplicated by `(type, id)`).
+builds an `IncludeTree` from `?include=author.posts.tags,comments`, walks
+every node, and pushes fully-resolved resource objects into `included`.
+Deduplication runs at push time through `IncludedSink`, keyed by
+`(type, id)` per JSON:API spec §8 — so a 1,000-item collection where
+every item shares the same author resolves the author exactly once. Peak
+memory and CPU stay proportional to the distinct included resources,
+not the relationship fan-in.
 
 ```rust
 #[derive(Data)]
@@ -226,8 +237,24 @@ pub struct PostResource {
 ```
 
 A request that names an include path not on this resource's allowlist
-gets a JSON:API 400 errors envelope — Suprnova is stricter than Laravel
-here by design (it matches JSON:API spec §5.2.2 default-deny semantics).
+gets a JSON:API 400 errors envelope.
+
+### Why Suprnova diverges
+
+Two visible divergences from Laravel's `JsonApiResource`:
+
+1. **Strict default-deny for `?include=`.** Laravel's resource layer silently
+   ignores include paths that don't resolve. Suprnova rejects them with a
+   `400 Bad Request` carrying a JSON:API errors envelope. The spec's
+   §5.2.2 default-deny posture is the contract clients can program against;
+   silent ignore hides client bugs and breaks compound-document integrity.
+
+2. **Explicit `.status(code)` / `.created()` instead of auto-201.** Laravel
+   auto-sets `201` from `wasRecentlyCreated` on the underlying Eloquent
+   model. Suprnova decouples the resource DTO from any specific persistence
+   lifecycle, so the status is set on the response object itself —
+   `.created()` when you mean it, `.status(204)` when the response is empty,
+   and so on. A single mutator stays honest under any flow.
 
 ## Pagination
 
@@ -292,8 +319,24 @@ let response = FrameworkError::validation("email", "email is invalid")
 | `IncludeResolutionError` → 400 envelope | strict-mode `?include=` parser |
 
 Top-level re-exports under `suprnova::`: `Resource`, `JsonApi`,
-`JsonApiResponse`, `JsonApiBuilder`, `JsonApiInfo`, `IntoJsonResource`,
-`RelationshipValue`, `ResourceIdentifier`, `IncludeTree`,
-`RequestFieldsetSet`, `Maybe`, `MissingValue`, `insert_maybe`,
-`strip_missing_values`, `AsRelationshipValue`, `PushIncluded`,
-`IncludeResolutionError`, `current_fieldset`, `scope_fieldset`.
+`JsonApiResponse`, `JsonApiBuilder`, `JsonApiInfo`, `IncludedSink`,
+`IntoJsonResource`, `RelationshipValue`, `ResourceIdentifier`,
+`IncludeTree`, `RequestFieldsetSet`, `Maybe`, `MissingValue`,
+`insert_maybe`, `strip_missing_values`, `AsRelationshipValue`,
+`PushIncluded`, `IncludeResolutionError`, `current_fieldset`,
+`scope_fieldset`.
+
+## Next
+
+- [Eloquent serialization](eloquent-serialization.md) — `#[derive(Data)]`,
+  hidden/visible fields, the `toArray` equivalent that feeds resource
+  attributes
+- [Eloquent relationships](eloquent-relationships.md) — what
+  `#[data(allow_include)]` consumes; the typed relation kinds backing
+  compound documents
+- [Pagination](pagination.md) — `LengthAwarePaginator`, `CursorPaginator`,
+  and the `Paginated<T>` trait `Resource::paginated` consumes
+- [Data](data.md) — the `#[derive(Data)]` macro shared with Inertia, the
+  `?include=`/`?fields[type]=` middleware, and `Maybe<T>` patterns
+- [Error model](error-model.md) — how `FrameworkError::into_json_api_response`
+  fits the conversion contract
