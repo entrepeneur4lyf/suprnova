@@ -5,7 +5,9 @@
 //!
 //! [`init_subscriber`] is preserved as a thin wrapper that delegates to
 //! `init_telemetry` with telemetry disabled. Both entry points are
-//! idempotent: a second call is a silent no-op.
+//! idempotent: a second call leaves the existing subscriber in place and
+//! emits a `tracing::warn!` so an operator can see when a fresh
+//! `LogConfig` was NOT applied.
 
 use super::config::{LogConfig, LogFormat};
 use tracing_subscriber::EnvFilter;
@@ -44,9 +46,10 @@ pub(crate) fn build_env_filter(level: &str) -> EnvFilter {
 /// Install the global tracing subscriber from a `LogConfig`. Honors
 /// the `LOG_LEVEL` env-filter syntax (e.g. `"info,sqlx=warn"`).
 ///
-/// Idempotent. Calling more than once is a no-op (the second
-/// install fails inside tracing-subscriber and we ignore the error
-/// — convenient for tests).
+/// Idempotent. Calling more than once leaves the existing global
+/// subscriber in place; the second attempt is reported through that
+/// subscriber as a `tracing::warn!` so the new `LogConfig` not being
+/// applied is operator-visible.
 ///
 /// Equivalent to calling
 /// [`crate::telemetry::init_telemetry`] with
@@ -62,7 +65,9 @@ pub fn init_subscriber(config: LogConfig) {
 
 /// Internal helper used by `init_telemetry` to install the (non-OTel) part
 /// of the subscriber. Returns whether install actually succeeded — a
-/// duplicate install (e.g. inside tests) is silently ignored.
+/// duplicate install (e.g. inside tests) leaves the existing subscriber
+/// in place and emits a `tracing::warn!` through it so the operator can
+/// see that this `LogConfig` was not applied.
 pub(crate) fn install_base_subscriber(config: &LogConfig) -> bool {
     let env_filter = build_env_filter(&config.level);
     let result = match config.format {
@@ -89,10 +94,12 @@ pub(crate) fn install_base_subscriber(config: &LogConfig) -> bool {
     if !installed {
         // A global subscriber is already installed (common in tests, or an
         // embedder that initialises logging more than once). The existing
-        // one wins and this `LogConfig` was NOT applied. Surface it at
-        // debug through the subscriber that is already in place, rather
-        // than only returning a bool the callers tend to ignore.
-        tracing::debug!(
+        // one wins and this `LogConfig` was NOT applied. `try_init` only
+        // fails when a subscriber is already in place, so that subscriber
+        // is guaranteed to receive this `warn!` — `warn!` rather than
+        // `debug!` so an info-level production filter still surfaces it,
+        // since the bool return value tends to be ignored by callers.
+        tracing::warn!(
             "tracing subscriber already installed; keeping the existing one (this LogConfig was not applied)"
         );
     }
@@ -106,7 +113,8 @@ mod tests {
     #[test]
     fn init_is_idempotent() {
         // Calling twice must not panic. (tracing-subscriber returns
-        // Err on duplicate global default; we swallow it.)
+        // Err on duplicate global default; the second attempt logs a
+        // warn through the existing subscriber and reports false.)
         init_subscriber(LogConfig::default());
         init_subscriber(LogConfig::default());
     }
