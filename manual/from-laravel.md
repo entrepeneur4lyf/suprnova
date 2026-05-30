@@ -382,11 +382,10 @@ your app boots.
 // bootstrap.rs
 use std::sync::Arc;
 
-pub async fn bootstrap() -> Result<(), suprnova::FrameworkError> {
+pub async fn register() {
     suprnova::App::bind::<dyn MyService>(Arc::new(MyServiceImpl::new()));
     suprnova::Event::listen::<OrderShipped, _>(Arc::new(SendShipmentNotification)).await;
     crate::observers::register();
-    Ok(())
 }
 ```
 
