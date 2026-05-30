@@ -81,7 +81,7 @@ pub use cache::{Cache, CacheConfig, CacheStore, InMemoryCache, LockGuard, RedisC
 pub use config::{AppConfig, Config, Environment, ServerConfig, env, env_optional, env_required};
 pub use container::{App, Container};
 pub use context::{Context, ContextStore};
-pub use crypto::{Crypt, EncryptionKey};
+pub use crypto::{Crypt, CryptPurpose, EncryptionKey};
 pub use csrf::{CsrfMiddleware, OriginPolicy, csrf_field, csrf_meta_tag, csrf_token};
 pub use data::{
     Field, IncludeError, IncludeMiddleware, IsRelationLoaded, RequestIncludeSet,

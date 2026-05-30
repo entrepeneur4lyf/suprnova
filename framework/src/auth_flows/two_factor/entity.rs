@@ -15,7 +15,8 @@ pub struct Model {
     /// Opaque per-user identifier (e.g. `torii::UserId.to_string()`).
     #[sea_orm(primary_key, auto_increment = false)]
     pub user_id: String,
-    /// `Crypt::encrypt_string`-encoded base32 TOTP secret.
+    /// `Crypt::encrypt_string`-encoded base32 TOTP secret bound to
+    /// [`crate::crypto::CryptPurpose::TwoFactorSecret`].
     #[sea_orm(column_type = "Text")]
     pub secret: String,
     /// Set once the user proves possession of the authenticator
@@ -26,7 +27,9 @@ pub struct Model {
     /// `Ok(false)`.
     pub confirmed_at: Option<chrono::DateTime<chrono::Utc>>,
     /// `Crypt::encrypt_string` of newline-joined plaintext recovery
-    /// codes. `None` once every code has been consumed.
+    /// codes bound to
+    /// [`crate::crypto::CryptPurpose::TwoFactorRecovery`]. `None` once
+    /// every code has been consumed.
     #[sea_orm(column_type = "Text", nullable)]
     pub recovery_codes: Option<String>,
     /// Last TOTP timestep (`unix_seconds / step`) successfully accepted

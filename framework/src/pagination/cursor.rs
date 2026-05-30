@@ -248,8 +248,10 @@ impl<T> CursorPaginator<T> {
         })?;
         // `Crypt::encrypt_string` returns Err when Crypt isn't
         // initialized — propagate verbatim. No plaintext base64
-        // fallback (that branch was the codex-flagged fail-open path).
-        Crypt::encrypt_string(&json)
+        // fallback. Bound to `CryptPurpose::Cursor` so cursor
+        // ciphertext cannot be replayed into any other surface
+        // (cookie, 2FA secret, cast, etc.).
+        Crypt::encrypt_string(crate::crypto::CryptPurpose::Cursor, &json)
     }
 
     /// Decode the wire cursor into a typed `sea_orm::Value` plus the
@@ -284,13 +286,14 @@ impl<T> CursorPaginator<T> {
     /// genuine uninitialized-`Crypt` (would itself be a boot bug) still
     /// propagates as 500.
     pub fn decode_value(wire: &str) -> Result<(sea_orm::Value, CursorDirection), FrameworkError> {
-        let json = Crypt::decrypt_string(wire).map_err(|e| {
-            if Crypt::is_initialized() {
-                FrameworkError::bad_request("Invalid pagination cursor")
-            } else {
-                e
-            }
-        })?;
+        let json =
+            Crypt::decrypt_string(crate::crypto::CryptPurpose::Cursor, wire).map_err(|e| {
+                if Crypt::is_initialized() {
+                    FrameworkError::bad_request("Invalid pagination cursor")
+                } else {
+                    e
+                }
+            })?;
         let payload: CursorPayload = serde_json::from_str(&json).map_err(|e| {
             FrameworkError::internal(format!("Cursor payload JSON decode failed: {e}"))
         })?;
@@ -917,7 +920,13 @@ mod tests {
         // post-decrypt step rejects the body.
         let _g = CURSOR_LOCK.lock().unwrap();
         ensure_key();
-        let wire = Crypt::encrypt_string("not valid json").unwrap();
+        // Mint under the Cursor purpose so the AEAD step authenticates
+        // (the wire is "ours") and the post-decrypt JSON parse is what
+        // surfaces — otherwise the AEAD step would fail first and we'd
+        // get a 400 from the bad-cursor downgrade instead of the 500
+        // we're asserting.
+        let wire =
+            Crypt::encrypt_string(crate::crypto::CryptPurpose::Cursor, "not valid json").unwrap();
         let err = CursorPaginator::<i32>::decode_value(&wire).unwrap_err();
         assert_eq!(
             err.status_code(),
@@ -1002,7 +1011,9 @@ mod tests {
         let _g = CURSOR_LOCK.lock().unwrap();
         ensure_key();
         let bad = r#"{"t":"NotAVariant","v":42,"d":"next"}"#;
-        let wire = Crypt::encrypt_string(bad).unwrap();
+        // Mint under Cursor purpose so the AEAD step authenticates and
+        // the post-decrypt variant-tag dispatch is what rejects.
+        let wire = Crypt::encrypt_string(crate::crypto::CryptPurpose::Cursor, bad).unwrap();
         assert!(CursorPaginator::<i32>::decode_value(&wire).is_err());
     }
 
@@ -1011,7 +1022,9 @@ mod tests {
         let _g = CURSOR_LOCK.lock().unwrap();
         ensure_key();
         let bad = r#"{"t":"BigInt","v":1,"d":"sideways"}"#;
-        let wire = Crypt::encrypt_string(bad).unwrap();
+        // Same as above: bind under the cursor purpose so the AEAD
+        // path passes and the direction-parse step is what rejects.
+        let wire = Crypt::encrypt_string(crate::crypto::CryptPurpose::Cursor, bad).unwrap();
         assert!(CursorPaginator::<i32>::decode_value(&wire).is_err());
     }
 

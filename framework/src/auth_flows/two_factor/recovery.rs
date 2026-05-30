@@ -45,7 +45,8 @@ pub async fn consume(user_id: &str, code: &str) -> Result<bool, FrameworkError> 
     let Some(encrypted) = row.recovery_codes.clone() else {
         return Ok(false);
     };
-    let plaintext = Crypt::decrypt_string(&encrypted)?;
+    let plaintext =
+        Crypt::decrypt_string(crate::crypto::CryptPurpose::TwoFactorRecovery, &encrypted)?;
     let mut codes: Vec<String> = plaintext.lines().map(String::from).collect();
     let Some(idx) = codes.iter().position(|c| c == code) else {
         return Ok(false);
@@ -54,7 +55,10 @@ pub async fn consume(user_id: &str, code: &str) -> Result<bool, FrameworkError> 
     let new_recovery = if codes.is_empty() {
         None
     } else {
-        Some(Crypt::encrypt_string(&codes.join("\n"))?)
+        Some(Crypt::encrypt_string(
+            crate::crypto::CryptPurpose::TwoFactorRecovery,
+            &codes.join("\n"),
+        )?)
     };
     let mut active: entity::ActiveModel = row.into();
     active.recovery_codes = Set(new_recovery);

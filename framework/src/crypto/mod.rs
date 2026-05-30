@@ -67,6 +67,74 @@ use std::sync::OnceLock;
 use crate::FrameworkError;
 use crate::config::Environment;
 
+/// Cryptographic purpose tag bound into AES-GCM associated data (AAD)
+/// to give every surface its own decrypt domain.
+///
+/// The framework reuses one `APP_KEY` to encrypt cookies, pagination
+/// cursors, 2FA secrets, recovery codes, and column-level cast values.
+/// Without domain separation, a ciphertext produced for one surface
+/// could be replayed into another that happens to accept the same
+/// plaintext shape — the crypto layer would not catch the mismatch.
+///
+/// Each variant maps to a stable label (e.g. `b"suprnova:cookie:v1"`)
+/// that is passed as AAD to AES-256-GCM. GCM mixes the AAD into the
+/// authentication tag without including it in the wire bytes, so:
+///
+/// - Encrypting with `Cookie` and decrypting with `Cursor` fails the
+///   tag check — replay across surfaces is rejected at the crypto
+///   layer, before any post-decrypt parsing.
+/// - The on-wire format is unchanged: still
+///   `base64(nonce || ciphertext || tag)`. AAD is an authentication
+///   *input*, not part of the ciphertext.
+///
+/// Adding a new surface (e.g. a future "queue payload encryption") is
+/// adding a new variant + label here, not changing the wire format.
+///
+/// The `:v1` suffix is reserved for a future label rotation: bumping
+/// to `:v2` invalidates old ciphertext for that surface only, leaving
+/// the rest of the key/wire format alone.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CryptPurpose {
+    /// Encrypted HTTP cookies built via [`crate::http::Cookie::encrypted`]
+    /// and read via [`crate::http::Cookie::read_encrypted`]. Includes
+    /// the session cookie, the remember-me cookie, and the
+    /// maintenance-mode bypass cookie.
+    Cookie,
+    /// Pagination cursors produced by
+    /// [`crate::pagination::CursorPaginator::encode_value`] and consumed
+    /// by [`crate::pagination::CursorPaginator::decode_value`]. Cursors
+    /// travel on the wire (typically `?cursor=…`).
+    Cursor,
+    /// The encrypted base32 TOTP secret stored on
+    /// `two_factor_authentications.secret`.
+    TwoFactorSecret,
+    /// The newline-joined plaintext recovery codes stored on
+    /// `two_factor_authentications.recovery_codes`. Distinct from
+    /// [`Self::TwoFactorSecret`] so ciphertext from one column cannot
+    /// be replayed into the other within the same row.
+    TwoFactorRecovery,
+    /// Column values produced by the `AsEncrypted*` casts in
+    /// [`crate::eloquent::casts`]. One label covers all four cast
+    /// variants — within-cast replay across columns requires a DB
+    /// write, at which point the attacker already has access to the
+    /// stored ciphertext.
+    Cast,
+}
+
+impl CryptPurpose {
+    /// The stable byte label bound as AAD when encrypting / decrypting
+    /// under this purpose.
+    pub(crate) fn aad(self) -> &'static [u8] {
+        match self {
+            CryptPurpose::Cookie => b"suprnova:cookie:v1",
+            CryptPurpose::Cursor => b"suprnova:cursor:v1",
+            CryptPurpose::TwoFactorSecret => b"suprnova:2fa:secret:v1",
+            CryptPurpose::TwoFactorRecovery => b"suprnova:2fa:recovery:v1",
+            CryptPurpose::Cast => b"suprnova:cast:v1",
+        }
+    }
+}
+
 /// Internal process-wide key ring. Public via the [`Crypt`] facade.
 ///
 /// `current` is used for every encrypt; decrypt tries `current` first,
@@ -109,11 +177,20 @@ pub enum DecryptOrigin {
 /// # Wire format
 ///
 /// `encrypt_string` and `encrypt` return URL-safe base64 (no padding)
-/// over `nonce || ciphertext_with_tag`. Empty AAD. Each call gets a
-/// fresh random nonce. **The wire format is unchanged across the
-/// keyring refactor** — existing encrypted columns decrypt identically
-/// because no key identifier is stored alongside the ciphertext; the
-/// ring trial-decrypts until one succeeds.
+/// over `nonce || ciphertext_with_tag`. Each call gets a fresh random
+/// nonce. **The wire format does not carry the purpose / AAD label** —
+/// callers supply the same [`CryptPurpose`] on encrypt and decrypt by
+/// independent agreement; the GCM authentication tag detects a
+/// mismatch.
+///
+/// # Purpose-bound AAD
+///
+/// Every encrypt / decrypt method takes a [`CryptPurpose`] that is
+/// bound into the AES-GCM authentication tag as associated data. This
+/// gives each surface (cookie, cursor, 2FA secret, etc.) its own
+/// decrypt domain: ciphertext produced under one purpose fails to
+/// decrypt under another, blocking cross-surface ciphertext replay
+/// even when both surfaces accept the same plaintext shape.
 pub struct Crypt;
 
 impl Crypt {
@@ -150,38 +227,60 @@ impl Crypt {
         })
     }
 
-    /// Encrypt a UTF-8 string. Returns base64-url-no-pad over
-    /// `nonce || ciphertext_with_tag`. Always uses the current key.
-    pub fn encrypt_string(plaintext: &str) -> Result<String, FrameworkError> {
+    /// Encrypt a UTF-8 string under `purpose`. Returns base64-url-no-pad
+    /// over `nonce || ciphertext_with_tag`. Always uses the current
+    /// key.
+    ///
+    /// The `purpose` is bound as AEAD associated data — see
+    /// [`CryptPurpose`]. The returned wire is rejected by any decrypt
+    /// call that supplies a different purpose.
+    pub fn encrypt_string(
+        purpose: CryptPurpose,
+        plaintext: &str,
+    ) -> Result<String, FrameworkError> {
         let ring = Self::ring()?;
-        let wire = aead::encrypt(&ring.current, plaintext.as_bytes())?;
+        let wire = aead::encrypt(&ring.current, purpose.aad(), plaintext.as_bytes())?;
         Ok(URL_SAFE_NO_PAD.encode(wire))
     }
 
     /// Decrypt a base64-url-no-pad payload previously produced by
     /// [`Self::encrypt_string`]. Tries the current key first, then each
     /// previous key. On a previous-key hit, emits a `tracing::warn!`.
-    pub fn decrypt_string(wire: &str) -> Result<String, FrameworkError> {
-        let (plain, origin) = Self::decrypt_string_inner(wire)?;
+    ///
+    /// The `purpose` must match the value supplied at encrypt time, or
+    /// the GCM authentication tag check fails — see [`CryptPurpose`].
+    pub fn decrypt_string(purpose: CryptPurpose, wire: &str) -> Result<String, FrameworkError> {
+        let (plain, origin) = Self::decrypt_string_inner(purpose, wire)?;
         Self::log_rotation_warning(origin);
         Ok(plain)
     }
 
-    /// Encrypt any `Serialize` value by JSON-encoding then encrypting.
-    /// Always uses the current key.
-    pub fn encrypt<T: Serialize>(value: &T) -> Result<String, FrameworkError> {
+    /// Encrypt any `Serialize` value by JSON-encoding then encrypting
+    /// under `purpose`. Always uses the current key.
+    ///
+    /// The `purpose` is bound as AEAD associated data — see
+    /// [`CryptPurpose`].
+    pub fn encrypt<T: Serialize>(
+        purpose: CryptPurpose,
+        value: &T,
+    ) -> Result<String, FrameworkError> {
         let ring = Self::ring()?;
         let json = serde_json::to_vec(value)
             .map_err(|e| FrameworkError::internal(format!("Crypt JSON encode failed: {e}")))?;
-        let wire = aead::encrypt(&ring.current, &json)?;
+        let wire = aead::encrypt(&ring.current, purpose.aad(), &json)?;
         Ok(URL_SAFE_NO_PAD.encode(wire))
     }
 
     /// Decrypt and JSON-decode a payload previously produced by
     /// [`Self::encrypt`]. Tries the current key first, then each
     /// previous key. On a previous-key hit, emits a `tracing::warn!`.
-    pub fn decrypt<T: DeserializeOwned>(wire: &str) -> Result<T, FrameworkError> {
-        let (value, origin) = Self::decrypt_inner::<T>(wire)?;
+    ///
+    /// The `purpose` must match the value supplied at encrypt time.
+    pub fn decrypt<T: DeserializeOwned>(
+        purpose: CryptPurpose,
+        wire: &str,
+    ) -> Result<T, FrameworkError> {
+        let (value, origin) = Self::decrypt_inner::<T>(purpose, wire)?;
         Self::log_rotation_warning(origin);
         Ok(value)
     }
@@ -245,38 +344,44 @@ impl Crypt {
         CRYPT_RING.get().map(|r| r.current.as_bytes().to_vec())
     }
 
-    /// Test-and-internal hook: decrypt a string AND report which key
-    /// in the ring succeeded. Exposed at `pub(crate)` so tests in the
-    /// same crate (and the macro-generated `From<inner::Model>` could,
-    /// in principle, surface origin to operators per-column without
-    /// going through `tracing`) can pin rotation behaviour without
-    /// wrestling with `tracing::Subscriber` capture.
+    /// Test-and-internal hook: decrypt a string under `purpose` AND
+    /// report which key in the ring succeeded. Exposed at `pub(crate)`
+    /// so tests in the same crate (and the macro-generated
+    /// `From<inner::Model>` could, in principle, surface origin to
+    /// operators per-column without going through `tracing`) can pin
+    /// rotation behaviour without wrestling with `tracing::Subscriber`
+    /// capture.
     ///
     /// Public surface: [`Crypt::decrypt_string`].
     #[doc(hidden)]
-    pub fn decrypt_string_inner(wire: &str) -> Result<(String, DecryptOrigin), FrameworkError> {
+    pub fn decrypt_string_inner(
+        purpose: CryptPurpose,
+        wire: &str,
+    ) -> Result<(String, DecryptOrigin), FrameworkError> {
         let ring = Self::ring()?;
         let bytes = URL_SAFE_NO_PAD
             .decode(wire.trim())
             .map_err(|e| FrameworkError::internal(format!("Crypt base64 decode failed: {e}")))?;
-        let (plain_bytes, origin) = decrypt_with_ring(ring, &bytes)?;
+        let (plain_bytes, origin) = decrypt_with_ring(ring, purpose.aad(), &bytes)?;
         let plain = String::from_utf8(plain_bytes).map_err(|e| {
             FrameworkError::internal(format!("Crypt decrypted bytes not UTF-8: {e}"))
         })?;
         Ok((plain, origin))
     }
 
-    /// Test-and-internal hook: decrypt a JSON-encoded value AND report
-    /// which key in the ring succeeded. See [`Self::decrypt_string_inner`].
+    /// Test-and-internal hook: decrypt a JSON-encoded value under
+    /// `purpose` AND report which key in the ring succeeded. See
+    /// [`Self::decrypt_string_inner`].
     #[doc(hidden)]
     pub fn decrypt_inner<T: DeserializeOwned>(
+        purpose: CryptPurpose,
         wire: &str,
     ) -> Result<(T, DecryptOrigin), FrameworkError> {
         let ring = Self::ring()?;
         let bytes = URL_SAFE_NO_PAD
             .decode(wire.trim())
             .map_err(|e| FrameworkError::internal(format!("Crypt base64 decode failed: {e}")))?;
-        let (plain_bytes, origin) = decrypt_with_ring(ring, &bytes)?;
+        let (plain_bytes, origin) = decrypt_with_ring(ring, purpose.aad(), &bytes)?;
         let value: T = serde_json::from_slice(&plain_bytes)
             .map_err(|e| FrameworkError::internal(format!("Crypt JSON decode failed: {e}")))?;
         Ok((value, origin))
@@ -299,21 +404,22 @@ impl Crypt {
     }
 }
 
-/// Trial-decrypt `wire` against every key in `ring`. Current first,
-/// then each previous in order. Returns `(plain_bytes, origin)` on the
-/// first success; if every key fails returns the error from the
-/// *current* key (the most likely useful diagnostic — a previous-key
-/// failure would always be "wrong key" since previous keys typically
-/// can't decrypt new data).
+/// Trial-decrypt `wire` against every key in `ring` with `aad` bound
+/// into the GCM tag check. Current first, then each previous in order.
+/// Returns `(plain_bytes, origin)` on the first success; if every key
+/// fails returns the error from the *current* key (the most likely
+/// useful diagnostic — a previous-key failure would always be "wrong
+/// key" since previous keys typically can't decrypt new data).
 fn decrypt_with_ring(
     ring: &KeyRing,
+    aad: &[u8],
     wire: &[u8],
 ) -> Result<(Vec<u8>, DecryptOrigin), FrameworkError> {
-    match aead::decrypt(&ring.current, wire) {
+    match aead::decrypt(&ring.current, aad, wire) {
         Ok(plain) => Ok((plain, DecryptOrigin::Current)),
         Err(current_err) => {
             for (index, prev) in ring.previous.iter().enumerate() {
-                if let Ok(plain) = aead::decrypt(prev, wire) {
+                if let Ok(plain) = aead::decrypt(prev, aad, wire) {
                     return Ok((plain, DecryptOrigin::Previous(index)));
                 }
             }
@@ -561,22 +667,31 @@ pub fn _test_install_keyring(current: EncryptionKey, previous: Vec<EncryptionKey
     CRYPT_RING.set(KeyRing { current, previous }).is_ok()
 }
 
-/// Test-only helper: encrypt `plaintext` under an *arbitrary* key
-/// (bypassing the installed ring). Used to mint ciphertext under a key
-/// that isn't the current `APP_KEY` so rotation tests can simulate
-/// "this column was written when the old key was current."
+/// Test-only helper: encrypt `plaintext` under an *arbitrary* key and
+/// `purpose` (bypassing the installed ring). Used to mint ciphertext
+/// under a key that isn't the current `APP_KEY` so rotation tests can
+/// simulate "this column was written when the old key was current."
+///
+/// `purpose` must match the AAD the eventual decrypt path will supply
+/// — e.g. to simulate a row written by an `AsEncrypted` cast, pass
+/// [`CryptPurpose::Cast`]; the cast's `from_storage` decrypt will then
+/// authenticate the wire under the same AAD.
 ///
 /// Calls `aead::encrypt` directly and applies the same base64 wire
 /// format as [`Crypt::encrypt_string`]. The returned string is byte-
 /// for-byte indistinguishable from a normal `Crypt::encrypt_string`
-/// output produced under `key`.
+/// output produced under `key` for the same `purpose`.
 ///
 /// **Test-only — do not call from production code.** Compiled out when
 /// the `testing` feature is disabled.
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
-pub fn _test_encrypt_with(key: &EncryptionKey, plaintext: &str) -> Result<String, FrameworkError> {
-    let wire = aead::encrypt(key, plaintext.as_bytes())?;
+pub fn _test_encrypt_with(
+    key: &EncryptionKey,
+    purpose: CryptPurpose,
+    plaintext: &str,
+) -> Result<String, FrameworkError> {
+    let wire = aead::encrypt(key, purpose.aad(), plaintext.as_bytes())?;
     Ok(URL_SAFE_NO_PAD.encode(wire))
 }
 
@@ -780,6 +895,11 @@ mod boot_tests {
 
     // ---- Trial-decrypt loop coverage -----------------------------------
 
+    /// AAD used by the trial-decrypt loop tests. Any stable label
+    /// works; the rotation walk is independent of the AAD value as long
+    /// as encrypt and decrypt agree.
+    const TEST_AAD: &[u8] = b"suprnova:test-ring:v1";
+
     #[test]
     fn decrypt_with_ring_uses_current_first() {
         let current = EncryptionKey::generate();
@@ -788,8 +908,8 @@ mod boot_tests {
             current: current.clone(),
             previous: vec![prev],
         };
-        let wire = aead::encrypt(&current, b"hello").unwrap();
-        let (plain, origin) = decrypt_with_ring(&ring, &wire).unwrap();
+        let wire = aead::encrypt(&current, TEST_AAD, b"hello").unwrap();
+        let (plain, origin) = decrypt_with_ring(&ring, TEST_AAD, &wire).unwrap();
         assert_eq!(plain, b"hello");
         assert_eq!(origin, DecryptOrigin::Current);
     }
@@ -799,12 +919,12 @@ mod boot_tests {
         let current = EncryptionKey::generate();
         let prev = EncryptionKey::generate();
         // Encrypt under the OLD key, then verify the new ring decrypts.
-        let wire = aead::encrypt(&prev, b"legacy-payload").unwrap();
+        let wire = aead::encrypt(&prev, TEST_AAD, b"legacy-payload").unwrap();
         let ring = KeyRing {
             current,
             previous: vec![prev],
         };
-        let (plain, origin) = decrypt_with_ring(&ring, &wire).unwrap();
+        let (plain, origin) = decrypt_with_ring(&ring, TEST_AAD, &wire).unwrap();
         assert_eq!(plain, b"legacy-payload");
         assert_eq!(origin, DecryptOrigin::Previous(0));
     }
@@ -819,12 +939,12 @@ mod boot_tests {
         let middle = EncryptionKey::generate();
         let middle_2 = EncryptionKey::generate();
         let oldest = EncryptionKey::generate();
-        let wire = aead::encrypt(&oldest, b"ancient-payload").unwrap();
+        let wire = aead::encrypt(&oldest, TEST_AAD, b"ancient-payload").unwrap();
         let ring = KeyRing {
             current,
             previous: vec![oldest, middle, middle_2],
         };
-        let (plain, origin) = decrypt_with_ring(&ring, &wire).unwrap();
+        let (plain, origin) = decrypt_with_ring(&ring, TEST_AAD, &wire).unwrap();
         assert_eq!(plain, b"ancient-payload");
         assert_eq!(origin, DecryptOrigin::Previous(0));
     }
@@ -834,15 +954,36 @@ mod boot_tests {
         let current = EncryptionKey::generate();
         let prev = EncryptionKey::generate();
         let unrelated = EncryptionKey::generate();
-        let wire = aead::encrypt(&unrelated, b"unreachable").unwrap();
+        let wire = aead::encrypt(&unrelated, TEST_AAD, b"unreachable").unwrap();
         let ring = KeyRing {
             current,
             previous: vec![prev],
         };
-        let err = decrypt_with_ring(&ring, &wire).unwrap_err();
+        let err = decrypt_with_ring(&ring, TEST_AAD, &wire).unwrap_err();
         // The surfaced error is whatever `aead::decrypt` returned
         // for the current key (most useful diagnostic for the
         // operator — a previous-key fail is expected for new data).
         assert!(format!("{err}").contains("AEAD decrypt failed"));
+    }
+
+    #[test]
+    fn decrypt_with_ring_rejects_mismatched_aad() {
+        // Domain separation through the ring: a wire encrypted with
+        // AAD_A must NOT decrypt under AAD_B even when the key matches.
+        // This is the property that blocks cross-surface ciphertext
+        // replay through the whole facade, not just the raw `aead`
+        // module.
+        let current = EncryptionKey::generate();
+        let ring = KeyRing {
+            current: current.clone(),
+            previous: vec![],
+        };
+        let aad_a = b"suprnova:purpose-a:v1";
+        let aad_b = b"suprnova:purpose-b:v1";
+        let wire = aead::encrypt(&current, aad_a, b"crosswire").unwrap();
+        assert!(decrypt_with_ring(&ring, aad_b, &wire).is_err());
+        // Sanity: same AAD still decrypts via the ring.
+        let (plain, _origin) = decrypt_with_ring(&ring, aad_a, &wire).unwrap();
+        assert_eq!(plain, b"crosswire");
     }
 }

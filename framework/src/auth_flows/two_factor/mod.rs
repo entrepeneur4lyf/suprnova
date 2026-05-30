@@ -207,8 +207,12 @@ impl TwoFactor {
         );
 
         let recovery_codes = recovery::generate(RECOVERY_CODE_COUNT);
-        let encrypted_secret = Crypt::encrypt_string(&secret_b32)?;
-        let encrypted_recovery = Crypt::encrypt_string(&recovery_codes.join("\n"))?;
+        let encrypted_secret =
+            Crypt::encrypt_string(crate::crypto::CryptPurpose::TwoFactorSecret, &secret_b32)?;
+        let encrypted_recovery = Crypt::encrypt_string(
+            crate::crypto::CryptPurpose::TwoFactorRecovery,
+            &recovery_codes.join("\n"),
+        )?;
 
         upsert_row(
             user.user_id(),
@@ -323,7 +327,8 @@ impl TwoFactor {
             return Ok(false);
         }
 
-        let secret_b32 = Crypt::decrypt_string(&row.secret)?;
+        let secret_b32 =
+            Crypt::decrypt_string(crate::crypto::CryptPurpose::TwoFactorSecret, &row.secret)?;
         if !check_code(&secret_b32, code)? {
             record_2fa_failure(user.email()).await;
             return Ok(false);
@@ -429,7 +434,8 @@ impl TwoFactor {
             return Ok(false);
         }
 
-        let secret_b32 = Crypt::decrypt_string(&row.secret)?;
+        let secret_b32 =
+            Crypt::decrypt_string(crate::crypto::CryptPurpose::TwoFactorSecret, &row.secret)?;
         if !check_code(&secret_b32, code)? {
             return Ok(false);
         }
@@ -910,7 +916,10 @@ impl TwoFactor {
         reset_2fa_failures(user.email()).await;
 
         let new_codes = recovery::generate(RECOVERY_CODE_COUNT);
-        let encrypted = Crypt::encrypt_string(&new_codes.join("\n"))?;
+        let encrypted = Crypt::encrypt_string(
+            crate::crypto::CryptPurpose::TwoFactorRecovery,
+            &new_codes.join("\n"),
+        )?;
 
         let db = DB::connection()?;
         let conn = db.inner();
@@ -1038,7 +1047,10 @@ async fn load_secret(user_id: &str) -> Result<Option<String>, FrameworkError> {
     else {
         return Ok(None);
     };
-    Ok(Some(Crypt::decrypt_string(&row.secret)?))
+    Ok(Some(Crypt::decrypt_string(
+        crate::crypto::CryptPurpose::TwoFactorSecret,
+        &row.secret,
+    )?))
 }
 
 /// Current server-side TOTP timestep. Used by [`TwoFactor::verify`]

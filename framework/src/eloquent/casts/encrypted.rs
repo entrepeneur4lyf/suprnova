@@ -29,6 +29,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use super::{Cast, DynCast, IntoDynCast};
 use crate::Crypt;
+use crate::crypto::CryptPurpose;
 use crate::error::FrameworkError;
 
 // ---- AsEncrypted ---------------------------------------------------------
@@ -44,11 +45,13 @@ impl Cast for AsEncrypted {
     type Storage = String;
 
     fn to_storage(v: &String) -> Result<String, FrameworkError> {
-        Crypt::encrypt_string(v).map_err(|e| FrameworkError::internal(format!("AsEncrypted: {e}")))
+        Crypt::encrypt_string(CryptPurpose::Cast, v)
+            .map_err(|e| FrameworkError::internal(format!("AsEncrypted: {e}")))
     }
 
     fn from_storage(s: &String) -> Result<String, FrameworkError> {
-        Crypt::decrypt_string(s).map_err(|e| FrameworkError::internal(format!("AsEncrypted: {e}")))
+        Crypt::decrypt_string(CryptPurpose::Cast, s)
+            .map_err(|e| FrameworkError::internal(format!("AsEncrypted: {e}")))
     }
 }
 
@@ -114,12 +117,12 @@ where
         let json = serde_json::to_string(v).map_err(|e| {
             FrameworkError::validation("AsEncryptedArray", format!("serialize: {e}"))
         })?;
-        Crypt::encrypt_string(&json)
+        Crypt::encrypt_string(CryptPurpose::Cast, &json)
             .map_err(|e| FrameworkError::internal(format!("AsEncryptedArray encrypt: {e}")))
     }
 
     fn from_storage(s: &String) -> Result<Vec<T>, FrameworkError> {
-        let plain = Crypt::decrypt_string(s)
+        let plain = Crypt::decrypt_string(CryptPurpose::Cast, s)
             .map_err(|e| FrameworkError::internal(format!("AsEncryptedArray decrypt: {e}")))?;
         serde_json::from_str(&plain).map_err(|e| {
             FrameworkError::validation("AsEncryptedArray", format!("deserialize: {e}"))
@@ -188,12 +191,12 @@ where
         let json = serde_json::to_string(v).map_err(|e| {
             FrameworkError::validation("AsEncryptedObject", format!("serialize: {e}"))
         })?;
-        Crypt::encrypt_string(&json)
+        Crypt::encrypt_string(CryptPurpose::Cast, &json)
             .map_err(|e| FrameworkError::internal(format!("AsEncryptedObject encrypt: {e}")))
     }
 
     fn from_storage(s: &String) -> Result<T, FrameworkError> {
-        let plain = Crypt::decrypt_string(s)
+        let plain = Crypt::decrypt_string(CryptPurpose::Cast, s)
             .map_err(|e| FrameworkError::internal(format!("AsEncryptedObject decrypt: {e}")))?;
         serde_json::from_str(&plain).map_err(|e| {
             FrameworkError::validation("AsEncryptedObject", format!("deserialize: {e}"))

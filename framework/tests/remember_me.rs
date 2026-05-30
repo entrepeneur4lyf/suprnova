@@ -733,7 +733,9 @@ fn middleware_hydrates_session_from_remember_cookie() {
         let plaintext = suprnova::auth::remember::issue(user_id, ttl_minutes)
             .await
             .expect("issue token");
-        let encrypted = suprnova::Crypt::encrypt_string(&plaintext).expect("encrypt cookie");
+        let encrypted =
+            suprnova::Crypt::encrypt_string(suprnova::CryptPurpose::Cookie, &plaintext)
+                .expect("encrypt cookie");
         assert_eq!(
             count_tokens_for(user_id).await,
             1,
@@ -872,8 +874,9 @@ fn middleware_hydrates_session_from_remember_cookie() {
 
         // The rotated cookie's plaintext must verify against the live
         // row (the post-rotation row).
-        let rotated_plaintext = suprnova::Crypt::decrypt_string(new_ciphertext)
-            .expect("rotated cookie must decrypt");
+        let rotated_plaintext =
+            suprnova::Crypt::decrypt_string(suprnova::CryptPurpose::Cookie, new_ciphertext)
+                .expect("rotated cookie must decrypt");
         let third =
             suprnova::auth::remember::verify_and_rotate(&rotated_plaintext, ttl_minutes)
                 .await
@@ -906,7 +909,9 @@ fn middleware_clears_forged_remember_cookie() {
         // ciphertext is valid, but the plaintext does not match any
         // hashed row. The middleware must reject AND clear.
         let forged_plaintext = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF";
-        let encrypted = suprnova::Crypt::encrypt_string(forged_plaintext).expect("encrypt forged");
+        let encrypted =
+            suprnova::Crypt::encrypt_string(suprnova::CryptPurpose::Cookie, forged_plaintext)
+                .expect("encrypt forged");
 
         let mut http_bytes = Vec::new();
         http_bytes.extend_from_slice(b"GET / HTTP/1.1\r\n");

@@ -74,8 +74,10 @@ fn local_env_without_app_key_boots_and_installs_transient_key() {
         Crypt::is_initialized(),
         "Crypt must be installed after boot"
     );
-    let wire = Crypt::encrypt_string("local-dev-payload").expect("encrypt works");
-    let plain = Crypt::decrypt_string(&wire).expect("decrypt works");
+    let wire = Crypt::encrypt_string(suprnova::CryptPurpose::Cookie, "local-dev-payload")
+        .expect("encrypt works");
+    let plain =
+        Crypt::decrypt_string(suprnova::CryptPurpose::Cookie, &wire).expect("decrypt works");
     assert_eq!(plain, "local-dev-payload");
 }
 
@@ -129,7 +131,8 @@ fn boot_with_explicit_app_key_installs_that_key() {
     let _server = Server::from_config(Router::new()).expect("boot with APP_KEY");
     assert!(Crypt::is_initialized());
 
-    let wire = Crypt::encrypt_string("payload-with-explicit-key").expect("encrypt");
-    let plain = Crypt::decrypt_string(&wire).expect("decrypt");
+    let wire = Crypt::encrypt_string(suprnova::CryptPurpose::Cookie, "payload-with-explicit-key")
+        .expect("encrypt");
+    let plain = Crypt::decrypt_string(suprnova::CryptPurpose::Cookie, &wire).expect("decrypt");
     assert_eq!(plain, "payload-with-explicit-key");
 }
