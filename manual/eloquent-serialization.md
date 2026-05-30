@@ -80,7 +80,7 @@ pub async fn show(req: Request) -> Response {
     let id: i64 = req.param("id")?.parse()
         .map_err(|_| suprnova::FrameworkError::param_parse("id", "i64"))?;
     let user = User::find_or_fail(id).await?;
-    Ok(json_response!(user.to_array()))
+    json_response!(user.to_array())
 }
 ```
 
@@ -269,14 +269,14 @@ use suprnova::{json_response, Model};
 pub async fn admin_show(user: User) -> suprnova::Response {
     // strip a few extra fields for an admin endpoint that needs most
     // of the row but not these:
-    Ok(json_response!(
+    json_response!(
         user.to_array_except(&["password_hash", "remember_token", "internal_notes"])
     ))
 }
 
 pub async fn directory_show(user: User) -> suprnova::Response {
     // public directory — only the columns we want to publish:
-    Ok(json_response!(
+    json_response!(
         user.to_array_only(&["id", "name", "avatar_url"])
     ))
 }
@@ -327,7 +327,7 @@ pub async fn show(req: Request) -> Response {
         user.to_array_except(&["email", "phone", "stripe_customer_id"])
     };
 
-    Ok(json_response!(body))
+    json_response!(body)
 }
 ```
 
@@ -354,25 +354,25 @@ That means **all of these leak `password`**:
 let raw = serde_json::to_value(&user).unwrap();
 
 // json_response! with a struct field — same:
-Ok(json_response!({ "user": user }))
+json_response!({ "user": user }))
 
 // Nested inside another serializable container — same:
 #[derive(Serialize)]
 struct EnvelopeWithUser { ok: bool, user: User }
 let env = EnvelopeWithUser { ok: true, user };
-Ok(json_response!(env))
+json_response!(env))
 
 // Returning a Vec<User> through serde — same:
-Ok(json_response!(users))   // where users: Vec<User>
+json_response!(users))   // where users: Vec<User>
 ```
 
 Only these go through the filter pipeline:
 
 ```rust
-Ok(json_response!(user.to_array()))
-Ok(json_response!(users_collection.to_array()))  // Collection<User>
-Ok(json_response!(user.to_array_except(&["secret"])))
-Ok(json_response!(user.to_array_only(&["id", "name"])))
+json_response!(user.to_array()))
+json_response!(users_collection.to_array()))  // Collection<User>
+json_response!(user.to_array_except(&["secret"])))
+json_response!(user.to_array_only(&["id", "name"])))
 ```
 
 ### Why this happens
@@ -420,7 +420,7 @@ use suprnova::{json_response, Model};
 
 pub async fn list() -> suprnova::Response {
     let users = User::all().await?;
-    Ok(json_response!(users.to_array()))
+    json_response!(users.to_array())
 }
 ```
 

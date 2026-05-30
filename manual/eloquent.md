@@ -2399,7 +2399,7 @@ pub struct User { /* ... */ }
 | `AsArrayObject::class` | `AsArrayObject<T>` | `IndexMap<String, T>` |
 | `hashed` | `AsHashed` | `String` (`Hash::make` on write; never decrypts) |
 
-21 casts total. Most map one-to-one with Laravel; the
+22 casts total. Most map one-to-one with Laravel; the
 `AsOptionalDateTime` (used by `soft_deletes`) is auto-injected by
 the macro when the soft-delete column is `Option<DateTime<Utc>>`.
 
@@ -3835,7 +3835,7 @@ other tasks continue to honour their own scope (or its absence).
   `Collection<T>` surface, the generic-vs-model split, and
   `LazyCollection<M>` streaming
 - [Eloquent Casts, Accessors & Mutators](eloquent-mutators.md) — the
-  21 built-in casts plus the `casts!` runtime override
+  22 built-in casts plus the `casts!` runtime override
 - [Eloquent Serialization](eloquent-serialization.md) — `to_array`,
   `to_json`, hidden / visible / appends, filtered terminals
 - [Eloquent Factories](eloquent-factories.md) — randomized model

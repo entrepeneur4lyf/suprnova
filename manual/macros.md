@@ -743,8 +743,11 @@ See [Factories](eloquent-factories.md).
 ### `#[suprnova_test]`
 
 Wraps an `async fn` test with an in-memory SQLite database (running
-`crate::migrations::Migrator` by default) and a fresh thread-local
-container, so parallel tests stay hermetic:
+`crate::migrations::Migrator` by default), invokes `App::init()` and
+`App::boot_services()`, and runs the body under `#[tokio::test]`.
+Parallel tests stay hermetic through the container's per-thread
+layer — bind test-specific services through `TestContainer::fake`
+(not `App::bind`) so each thread sees its own fakes:
 
 ```rust
 use suprnova::suprnova_test;

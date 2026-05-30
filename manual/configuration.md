@@ -46,8 +46,12 @@ SESSION_SECURE=false         # set true in production (HTTPS only)
 SESSION_PATH=/
 SESSION_SAME_SITE=Lax
 
-# Mail
-MAIL_DRIVER=smtp             # smtp, ses, mailgun, postmark, sendgrid, resend, log, memory
+# Mail — defaults to `log` driver (writes outgoing mail to the
+# tracing log, good for dev). Set MAIL_DRIVER to one of
+# smtp / ses / mailgun / postmark / sendgrid / resend / log / memory
+# for production.
+MAIL_DRIVER=log
+# SMTP credentials (only read when MAIL_DRIVER=smtp):
 MAIL_SMTP_HOST=127.0.0.1
 MAIL_SMTP_PORT=587
 MAIL_SMTP_USER=

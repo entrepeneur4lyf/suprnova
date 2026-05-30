@@ -201,9 +201,11 @@ something better than a framework abstraction:
   the trait, register it in `bootstrap.rs`, done.
 - **Raw SQL when you want it.** `DB::select(...)`, `DB::table(...).get()`
   for dynamic rows, or drop fully to SeaORM. The ORM gets out of the way.
-- **Your own tower middleware?** You can run it via a thin shim — but
-  most middleware needs in Suprnova are covered by the built-in
-  middleware system. See [Middleware](middleware.md).
+- **Your own tower middleware?** Suprnova doesn't ship a Tower
+  adapter — middleware here is `impl Middleware`, not `tower::Service`.
+  If you need to bring a Tower-only crate, you'd adapt it by hand.
+  In practice, the built-in middleware system covers almost everything
+  you'd reach for. See [Middleware](middleware.md).
 
 ## What you give up
 

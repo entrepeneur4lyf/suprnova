@@ -276,7 +276,10 @@ fn cors_registry() -> MiddlewareRegistry {
 #[tokio::test]
 async fn cors_preflight_returns_204_with_headers() {
     let router = Router::new();
-    let addr = spawn_with_registry(router, cors_registry(), 1).await;
+    // The 3-arg form of `spawn_server` lets you wire a non-empty
+// MiddlewareRegistry — copy the helper from
+// framework/tests/cors_middleware.rs (it's ~30 lines).
+let addr = spawn_server(router, cors_registry(), 1).await;
 
     let (status, headers, _) = options(
         addr,
