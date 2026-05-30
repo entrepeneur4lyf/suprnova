@@ -92,6 +92,18 @@ pub const DEFAULT_COST: u32 = 12;
 /// Default bcrypt cost factor (Laravel-side alias for [`DEFAULT_COST`]).
 pub const DEFAULT_ROUNDS: u32 = DEFAULT_COST;
 
+/// Minimum bcrypt cost accepted by [`hash_with_cost`]. Matches the bcrypt
+/// crate's `MIN_COST` and the `HASH_ROUNDS` env-side floor.
+pub const MIN_BCRYPT_COST: u32 = 4;
+
+/// Maximum bcrypt cost accepted by [`hash_with_cost`]. Matches the bcrypt
+/// crate's `MAX_COST` and the `HASH_ROUNDS` env-side ceiling. Each
+/// increment doubles CPU time — at cost 31 a single hash takes hours on
+/// commodity hardware, which is why route code that flows policy/config
+/// values into [`hash_with_cost`] gets bounds-checked here rather than
+/// relying on the upstream crate's range check.
+pub const MAX_BCRYPT_COST: u32 = 31;
+
 /// Maximum usable password length when the active driver is bcrypt.
 ///
 /// Bcrypt requires a trailing null byte inside its 72-byte block, so the
@@ -171,7 +183,18 @@ pub fn hash_with(driver: &dyn Hasher, password: &str) -> Result<String, Framewor
 ///
 /// **Synchronous** — see [`hash_with_cost_async`] for the async-safe
 /// variant.
+///
+/// Rejects `cost` outside [`MIN_BCRYPT_COST`]`..=`[`MAX_BCRYPT_COST`]
+/// with [`FrameworkError::param`]. Mirrors the env-side `HASH_ROUNDS`
+/// validation so route code that flows policy/config values into this
+/// entry point can't accidentally request a cost so high it pins a
+/// worker thread for hours.
 pub fn hash_with_cost(password: &str, cost: u32) -> Result<String, FrameworkError> {
+    if !(MIN_BCRYPT_COST..=MAX_BCRYPT_COST).contains(&cost) {
+        return Err(FrameworkError::param(format!(
+            "bcrypt cost={cost} out of range {MIN_BCRYPT_COST}..={MAX_BCRYPT_COST}"
+        )));
+    }
     let bcrypt = BcryptHasher::new(BcryptOptions { rounds: cost });
     bcrypt.hash(password)
 }
@@ -402,5 +425,55 @@ mod tests {
         assert!(needs_rehash_with(&driver, &low_cost_hash));
         let default_cost_hash = hash_with(&driver, "test").expect("hash");
         assert!(!needs_rehash_with(&driver, &default_cost_hash));
+    }
+
+    #[test]
+    fn hash_with_cost_rejects_below_min() {
+        let err = hash_with_cost("test", MIN_BCRYPT_COST - 1).expect_err("below-min must reject");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("cost="),
+            "msg should cite the offending cost: {msg}"
+        );
+        assert!(
+            msg.contains("4..=31"),
+            "msg should cite the valid range: {msg}"
+        );
+    }
+
+    #[test]
+    fn hash_with_cost_rejects_above_max() {
+        let err = hash_with_cost("test", MAX_BCRYPT_COST + 1).expect_err("above-max must reject");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("cost="),
+            "msg should cite the offending cost: {msg}"
+        );
+        assert!(
+            msg.contains("4..=31"),
+            "msg should cite the valid range: {msg}"
+        );
+    }
+
+    #[test]
+    fn hash_with_cost_rejects_zero_and_far_above() {
+        // Sanity: 0 and absurdly-high values both rejected.
+        assert!(hash_with_cost("test", 0).is_err());
+        assert!(hash_with_cost("test", u32::MAX).is_err());
+    }
+
+    #[test]
+    fn hash_with_cost_accepts_endpoints() {
+        // MIN endpoint must work — it's the fastest valid bcrypt cost.
+        // (MAX endpoint isn't exercised because cost 31 takes hours.)
+        assert!(hash_with_cost("test", MIN_BCRYPT_COST).is_ok());
+    }
+
+    #[tokio::test]
+    async fn hash_with_cost_async_propagates_range_error() {
+        let err = hash_with_cost_async("test", MAX_BCRYPT_COST + 1)
+            .await
+            .expect_err("above-max must reject");
+        assert!(format!("{err}").contains("4..=31"));
     }
 }
