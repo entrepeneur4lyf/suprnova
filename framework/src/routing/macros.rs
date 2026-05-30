@@ -48,28 +48,56 @@ use std::sync::Arc;
 /// - `/:id` (Express/Rails style)
 /// - `/{id}` (matchit native style)
 ///
+/// # Segment-start matching
+///
+/// A `:` is only treated as a parameter opener when it sits at the start
+/// of a path segment — either at the start of the pattern or immediately
+/// after a `/`. A colon embedded *inside* a segment is preserved verbatim
+/// so literal colons in path text (e.g. `/files/note:draft`) survive
+/// untouched. This mirrors the Express / Rails convention where parameters
+/// occupy whole segments and prevents the converter from over-capturing
+/// the moment a path contains a literal `:`.
+///
 /// # Examples
 ///
 /// - `/users/:id` → `/users/{id}`
 /// - `/posts/:post_id/comments/:id` → `/posts/{post_id}/comments/{id}`
 /// - `/users/{id}` → `/users/{id}` (already correct syntax, unchanged)
+/// - `/files/note:draft` → `/files/note:draft` (mid-segment colon kept literal)
 pub(crate) fn convert_route_params(path: &str) -> String {
     let mut result = String::with_capacity(path.len() + 4); // Extra space for braces
-    let mut chars = path.chars().peekable();
+    let bytes = path.as_bytes();
+    let mut i = 0;
 
-    while let Some(ch) = chars.next() {
-        if ch == ':' {
-            // Start of parameter - collect until '/' or end
+    while i < bytes.len() {
+        let b = bytes[i];
+        // Treat `:` as a parameter opener only at the start of a path
+        // segment — first byte of the pattern, or the byte immediately
+        // after a `/`. Mid-segment colons are literal text.
+        let at_segment_start = i == 0 || bytes[i - 1] == b'/';
+        if b == b':' && at_segment_start {
             result.push('{');
-            while let Some(&next) = chars.peek() {
-                if next == '/' {
-                    break;
-                }
-                result.push(chars.next().unwrap());
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'/' {
+                // Safe to push raw bytes: input is &str, segment chars
+                // between the leading `:` and the next `/` are valid UTF-8
+                // and we copy them verbatim.
+                result.push(bytes[i] as char);
+                i += 1;
             }
             result.push('}');
         } else {
-            result.push(ch);
+            // Single-byte ASCII or the leading byte of a multi-byte UTF-8
+            // sequence — either way, copy through to the next iteration.
+            // Using char_indices would be safer for non-ASCII, but route
+            // patterns are conventionally ASCII; fall back to slicing by
+            // char boundary so any non-ASCII byte is still preserved.
+            let ch_start = i;
+            i += 1;
+            while i < bytes.len() && (bytes[i] & 0xC0) == 0x80 {
+                i += 1;
+            }
+            result.push_str(&path[ch_start..i]);
         }
     }
     result
@@ -1171,6 +1199,22 @@ mod tests {
         assert_eq!(
             convert_route_params("/api/v1/:version"),
             "/api/v1/{version}"
+        );
+
+        // Mid-segment colons are literal: only segment-leading `:` opens
+        // a parameter. A literal colon inside a segment must survive
+        // the conversion unchanged (`/foo:bar` stays `/foo:bar`,
+        // `/files/note:draft` stays `/files/note:draft`).
+        assert_eq!(convert_route_params("/foo:bar"), "/foo:bar");
+        assert_eq!(
+            convert_route_params("/files/note:draft"),
+            "/files/note:draft"
+        );
+        // Mixed: segment-leading `:` still opens a param even when a
+        // later segment carries a literal colon.
+        assert_eq!(
+            convert_route_params("/api/:version/files/note:draft"),
+            "/api/{version}/files/note:draft"
         );
     }
 
