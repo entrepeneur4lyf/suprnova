@@ -1,205 +1,316 @@
 # Deployment Overview
 
-suprnova applications compile to a single, self-contained binary that includes everything needed to run your application: web server, migrations, and scheduler.
+A Suprnova app compiles to a single self-contained binary that owns
+the web server, the migration runner, the scheduler, and the queue
+worker. Deploying is "copy the binary, set four environment variables,
+run it." This chapter covers what those four variables are, what the
+binary's subcommands do in production, and how the built-in health
+endpoint integrates with a platform's liveness probe. Platform-specific
+walkthroughs follow in [Railway](deployment-railway.md),
+[Digital Ocean](deployment-digital-ocean.md), and
+[Hetzner](deployment-hetzner.md).
 
-## Single Binary Architecture
+## The single binary
 
-Your suprnova application builds to one binary with multiple commands:
+Your app builds to one binary with a clap subcommand surface:
 
 ```bash
-./app                    # Run web server with auto-migrate (default)
-./app serve              # Run web server with auto-migrate
-./app serve --no-migrate # Run web server without migrations
-./app migrate            # Run pending migrations
-./app migrate:status     # Show migration status
-./app migrate:rollback   # Rollback last migration
-./app migrate:fresh      # Drop all tables and re-run migrations
-./app schedule:work      # Run scheduler daemon
-./app schedule:run       # Run due tasks once
-./app schedule:list      # List registered tasks
+./app                       # serve (default) — auto-migrate, then HTTP
+./app serve                 # explicit serve, with auto-migrate
+./app serve --no-migrate    # serve without running migrations
+./app web:run               # alias for serve
+
+./app migrate               # apply pending migrations and exit
+./app migrate:status        # show migration status
+./app migrate:rollback [N]  # roll back the last N migrations (default 1)
+./app migrate:fresh         # drop all tables, then re-migrate
+
+./app schedule:work         # scheduler daemon — wakes every minute
+./app schedule:run          # run due tasks once and exit
+./app schedule:list         # print every registered task
+./app queue:work            # queue worker daemon
+./app workflow:work         # workflow worker daemon
+
+./app down [--secret …] [--retry …] [--except …] [--message …]
+./app up                    # leave maintenance mode
 ```
 
-This architecture simplifies deployment:
-- One Docker image for all services
-- Same binary for web server and scheduler
-- Migrations run automatically on startup
+One binary means one Docker image, one CI artifact, one deployment to
+verify. The same image runs the web service, the scheduler, the queue
+worker, and the workflow worker — you start a different subcommand
+for each.
 
-## Building for Production
+## Four production environment variables
 
-### Generate Dockerfile
+Suprnova fails closed on boot if the production environment is
+misconfigured. The minimum set to deploy:
+
+| Variable | What it does | Failure mode |
+|---|---|---|
+| `APP_ENV` | Selects the environment (`production`, `staging`, etc.). | Defaults to `local` if unset — your app runs in dev mode in prod. |
+| `APP_KEY` | 32-byte AES-256 base64 key for `Crypt`, sessions, cookies, and pagination cursors. | Boot returns a typed error and exits non-zero when `APP_ENV` is not local/dev/test and `APP_KEY` is missing or malformed. |
+| `APP_URL` | Canonical absolute URL of your app (`https://app.example.com`). | Defaults to `http://localhost:8080`; signed URLs, redirects, mail links, and absolute Inertia URLs all use this. |
+| `DATABASE_URL` | Connection URL for your relational database. | Boot refuses to start when `APP_ENV` is `production` or `staging` and `DATABASE_URL` is unset — the dev SQLite fallback is rejected explicitly. |
+
+Generate `APP_KEY` once with the CLI:
+
+```bash
+suprnova key:generate           # writes APP_KEY=… into ./.env
+suprnova key:generate --show    # prints the key for $(…)
+```
+
+For key rotation, see [Encryption](encryption.md) —
+`APP_KEY_PREVIOUS` (or the Laravel-compatible `APP_PREVIOUS_KEYS`)
+takes a comma-separated list of older keys for decrypt-only fallback.
+
+Beyond the four required vars, common production knobs:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `SERVER_HOST` | `127.0.0.1` | Use `0.0.0.0` in containers. |
+| `SERVER_PORT` | `8080` | Match your platform's expected port. |
+| `APP_DEBUG` | env-derived | `false` in production/staging/custom envs. Set explicitly if you want loud errors in staging. |
+| `SERVER_MAX_BODY_SIZE` | per-handler default | Process-wide request body cap. |
+| `DB_MAX_CONNECTIONS` | `10` | Pool size. |
+| `REDIS_URL` | unset | Required if you've configured the Redis cache/queue/session drivers. |
+
+The full table lives in [Environment Variables](env-vars.md).
+
+## Recommended database: MariaDB
+
+Suprnova supports SQLite, PostgreSQL, MySQL, and MariaDB as first-class
+relational backends. The recommendation is environment-specific:
+
+- **Development.** SQLite. The scaffolder writes
+  `DATABASE_URL=sqlite://./database.db` so `suprnova serve` works
+  with zero database setup.
+- **Production.** MariaDB. It collapses what would otherwise be three
+  separate services (relational + vector + KV cache) onto one engine,
+  with system-versioned tables for audit if you need them.
+
+```bash
+# .env.production
+DATABASE_URL=mysql://app_user:secret@db.internal:3306/app_production
+```
+
+Use the `mysql://` scheme — SeaORM's MySQL driver handles MariaDB
+natively, and Suprnova's `MariaDbVectorDriver` (`VECTOR(N)` + HNSW)
+hooks in directly for vector workloads.
+
+The other relational backends are first-class too:
+
+```bash
+# PostgreSQL
+DATABASE_URL=postgres://app_user:secret@db.internal:5432/app_production
+
+# MySQL
+DATABASE_URL=mysql://app_user:secret@db.internal:3306/app_production
+
+# SQLite (for tiny single-instance deploys)
+DATABASE_URL=sqlite:///var/lib/myapp/data.db
+```
+
+### Why Suprnova diverges
+
+Laravel's defaults nudge new projects toward PostgreSQL because PHP +
+PostgreSQL is the well-trodden path. Suprnova picks the database that
+gives the cleanest single-engine production posture for a Rust app.
+MariaDB's `VECTOR(N)` (11.7+), Dynamic Columns, and system-versioned
+tables mean a small-to-mid product can ship search, KV, and audit
+without bolting on Redis, OpenSearch, or pgvector. PostgreSQL stays
+fully supported — the framework's test matrix runs against all three
+relational backends — but our deployment docs lead with the engine
+that minimises moving parts. See
+[Vector Storage](vector.md) and [Database](database.md) for the
+backend-specific surfaces.
+
+## Building a production image
+
+The scaffolder ships a generator for a multi-stage Dockerfile:
 
 ```bash
 suprnova docker:init
 ```
 
-This creates a multi-stage Dockerfile optimized for production:
+This writes a `Dockerfile` with three stages:
 
-1. **Frontend build** - Compiles React/TypeScript assets
-2. **Backend build** - Compiles Rust with release optimizations
-3. **Runtime** - Minimal Debian image with only runtime dependencies
+1. **Frontend build** — `node:20-alpine`, runs `npm ci && npm run build`
+   against your `frontend/` Inertia app (Svelte 5, React 19, or Vue 3.5
+   per your scaffold choice).
+2. **Backend build** — `rust:slim-bookworm`, compiles your crate in
+   release mode with dependency caching.
+3. **Runtime** — `debian:bookworm-slim`, copies the compiled binary
+   and Vite output, runs as a non-root `appuser`, exposes port 8080,
+   and runs `CMD ["./app"]` (the auto-migrating server).
 
-### Build the Image
+Build and run locally to verify before pushing:
 
 ```bash
 docker build -t myapp .
-```
 
-### Test Locally
+# With an env file
+docker run --rm -p 8080:8080 --env-file .env.production myapp
 
-```bash
-# Run with environment file
-docker run -p 8080:8080 --env-file .env.production myapp
-
-# Or pass environment variables directly
-docker run -p 8080:8080 \
-  -e DATABASE_URL=postgres://user:pass@host:5432/db \
+# Or with explicit vars (the four required ones)
+docker run --rm -p 8080:8080 \
   -e APP_ENV=production \
+  -e APP_KEY=$APP_KEY \
+  -e APP_URL=https://app.example.com \
+  -e DATABASE_URL=mysql://user:pass@host:3306/app \
   myapp
 ```
 
-## Environment Variables
+Never commit `.env.production` (or any file containing `APP_KEY` or
+`DATABASE_URL`) to your repo. Use your platform's secrets store and
+read the values at deploy time.
 
-Configure your application with these environment variables:
+## Migrations on boot
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DATABASE_URL` | PostgreSQL connection string | Required |
-| `APP_ENV` | Environment (development/production) | development |
-| `SERVER_HOST` | Host to bind to | 0.0.0.0 |
-| `SERVER_PORT` | Port to listen on | 8080 |
-| `REDIS_URL` | Redis connection string (if using cache) | Optional |
+The default `./app` (and explicit `./app serve`) command applies any
+pending migrations before binding the socket. The two practical
+implications:
 
-### Example .env.production
+- **Safe with multiple instances.** SeaORM's migration runner takes a
+  database-level advisory lock; the slowest pod waits, the others
+  proceed once it's done. You do not need a separate "migrate-then-deploy"
+  step for routine release rolls.
+- **Failed migration = failed deploy.** If a migration errors, the
+  process exits non-zero before the server binds. The platform's
+  health probe (see below) reports the pod unhealthy, and the rollout
+  halts. Fix forward by shipping a corrective migration in the next
+  release.
 
-```env
-DATABASE_URL=postgres://user:password@host:5432/myapp_production
-APP_ENV=production
-SERVER_HOST=0.0.0.0
-SERVER_PORT=8080
-REDIS_URL=redis://redis-host:6379
-```
-
-> **Warning:**
->
-> Never commit `.env.production` to version control. Add it to your `.gitignore`.
-
-
-## Migrations
-
-By default, the web server runs migrations automatically on startup. This ensures your database schema is always up to date.
-
-### Behavior
-
-- **Default (`./app`)**: Runs migrations silently, then starts server
-- **Explicit (`./app serve`)**: Same as default
-- **Skip migrations (`./app serve --no-migrate`)**: Start server without migrations
-- **Migrations only (`./app migrate`)**: Run migrations and exit
-
-### In Production
-
-For most deployments, the default auto-migrate behavior is ideal:
+For CI pipelines that want to gate the deploy on a successful migration
+before any pod accepts traffic, run migrations in a one-shot:
 
 ```bash
-# The container will:
-# 1. Connect to the database
-# 2. Run any pending migrations
-# 3. Start the web server
-docker run myapp
-```
-
-If you need to run migrations separately (e.g., in a CI/CD pipeline):
-
-```bash
-# Run migrations only
-docker run myapp ./app migrate
-
-# Then start the server without migrations
+docker run --rm myapp ./app migrate
+# … then roll the actual deploy
 docker run myapp ./app serve --no-migrate
 ```
 
-## Running the Scheduler
+`--no-migrate` skips the auto-migrate phase but still boots the server
+normally.
 
-If your application has scheduled tasks, run the scheduler as a separate process:
+## Workers as separate services
+
+The scheduler, queue, and workflow systems each have their own daemon
+subcommand. In production, run them as separate processes against the
+same image, sharing the same environment:
 
 ```bash
-# Run the scheduler daemon
-docker run myapp ./app schedule:work
+docker run myapp ./app schedule:work    # one instance — see below
+docker run myapp ./app queue:work       # scale to N instances
+docker run myapp ./app workflow:work    # scale to N instances
 ```
 
-The scheduler will:
-- Check for due tasks every minute
-- Run tasks in the background
-- Log task execution and errors
+Two rules to internalise:
 
-### Deployment Pattern
+- **Run exactly one `schedule:work` process.** Multiple scheduler
+  instances would dispatch every cron tick more than once. Most
+  platforms model this as a "worker" service with `replicas: 1`.
+- **Queue and workflow workers scale horizontally.** Both pull work
+  from a shared store and use visibility timeouts or row-level locks
+  to coordinate; adding pods adds throughput. `./app queue:work
+  --max-jobs N` makes the worker exit after N jobs so a supervisor can
+  rotate the process — useful for release-on-restart deploys.
 
-Most platforms support running multiple services from the same Docker image:
+See [Queues](queues.md), [Scheduling](scheduling.md), and
+[Workflows](workflows.md) for the per-subsystem detail.
 
-1. **Web service**: `./app` (default command)
-2. **Scheduler service**: `./app schedule:work`
+## Health check
 
-Both services use the same image and environment variables.
-
-## Health Checks
-
-suprnova includes a built-isuprnova/_suprnova/health` endpoint that returns JSON status information. Thsuprnova/_suprnova` prefix ensures it never conflicts with your application routes.
+Suprnova exposes a built-in liveness endpoint at `/_suprnova/health`.
+The `_suprnova/` prefix is reserved so your own routes can never
+collide with it.
 
 ```bash
 curl http://localhost:8080/_suprnova/health
+# {"status":"ok","timestamp":"2026-05-30T12:34:56+00:00"}
 ```
 
-Response:
-
-```json
-{
-  "status": "ok",
-  "timestamp": "2024-12-28T10:30:00Z"
-}
-```
-
-### Database Health Check
-
-Add `?db=true` to verify database connectivity:
+Add `?db=true` to also probe the database:
 
 ```bash
 curl http://localhost:8080/_suprnova/health?db=true
+# Healthy:
+#   200 {"status":"ok","timestamp":"…","database":"connected"}
+# Degraded:
+#   503 {"status":"degraded","timestamp":"…","database":"error","database_error":"…"}
 ```
 
-Response:
+The status flips to HTTP 503 when any sub-check fails, so a Kubernetes
+`livenessProbe` / `readinessProbe`, a Railway healthcheck, or a
+Digital Ocean health check can wire up directly:
 
-```json
-{
-  "status": "ok",
-  "timestamp": "2024-12-28T10:30:00Z",
-  "database": "connected"
-}
+```yaml
+livenessProbe:
+  httpGet:
+    path: /_suprnova/health
+    port: 8080
+readinessProbe:
+  httpGet:
+    path: /_suprnova/health?db=true
+    port: 8080
 ```
 
-### Platform Configuration
+The endpoint short-circuits before the middleware chain so it stays
+responsive even if a middleware deadlocks or the request id middleware
+is rejecting traffic.
 
-Configure your platform's health check to:
+## Maintenance mode
 
-- **Path**: `/_suprnova/health`
-- **Port**: 8080 (or `SERVER_PORT`)
-- **Protocol**: HTTP
+To roll a destructive migration or quiesce traffic for an incident:
+
+```bash
+./app down --secret abc123 \
+           --retry 60 \
+           --message "Deploying — back in a few minutes" \
+           --except /webhooks/stripe
+
+./app up
+```
+
+`down` writes a maintenance marker the middleware reads on every
+request. Requests get a 503 (configurable via `--status`) with the
+provided message, except for paths in `--except` and any request that
+includes the secret. `up` removes the marker.
 
 ## Scaling
 
-### Horizontal Scaling (Web)
+### Web
 
-Scale your web servers horizontally by running multiple instances behind a load balancer. Each instance:
-- Runs auto-migrations on startup (safe with multiple instances)
-- Serves HTTP requests independently
-- Shares the same database
+Horizontal scaling is the default story: every pod runs `./app`,
+shares `DATABASE_URL`, and connects to the same Redis (if you've
+configured Redis-backed cache/queue/session). Auto-migration is safe
+because of the advisory lock above. Sticky sessions are not required
+— session state lives in your session driver (database or Redis),
+not in process memory.
 
-### Scheduler
+### Workers
 
-Run only **one** scheduler instance to avoid duplicate task execution. Most platforms support marking a service as a "worker" that only runs one instance.
+- **Scheduler.** Exactly one instance, always.
+- **Queue.** Scale horizontally. If you've split work across multiple
+  named queues, run a worker per queue (or pass driver-specific queue
+  filters — see [Queues](queues.md)).
+- **Workflow.** Scale horizontally; row-level claim/heartbeat
+  coordinates the workers.
 
-## Next Steps
+## Per-platform walkthroughs
 
-Choose your deployment platform:
+The recipe above ports to every modern PaaS or VPS. The next three
+chapters walk you through the specifics:
 
-- [Deploy to Railway](deployment-railway.md) - Simple PaaS with automatic builds
-- [Deploy to Digital Ocean](deployment-digital-ocean.md) - App Platform with managed infrastructure
-- [Deploy to Hetzner VPS](deployment-hetzner.md) - Full control with systemd and Caddy
+| Platform | Style | Walkthrough |
+|---|---|---|
+| Railway | PaaS with auto-deploy from git | [Deploy to Railway](deployment-railway.md) |
+| Digital Ocean | App Platform (PaaS) or Droplets (VPS) | [Deploy to Digital Ocean](deployment-digital-ocean.md) |
+| Hetzner | VPS with systemd + Caddy | [Deploy to Hetzner](deployment-hetzner.md) |
+
+## Next
+
+- [Environment Variables](env-vars.md) — every env var the framework reads
+- [Encryption](encryption.md) — `APP_KEY`, key rotation, what's encrypted
+- [Configuration](configuration.md) — typed config sections built on top of env
+- [Database](database.md) — driver selection, pool tuning, multi-connection split
+- [Queues](queues.md) — worker scaling and queue drivers
