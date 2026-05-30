@@ -130,12 +130,12 @@ For test files where the same action has many cases, the Jest-shaped
 output:
 
 ```rust
-use suprnova::{describe, test, expect, testing::TestDatabase};
+use suprnova::{App, describe, test, expect, testing::TestDatabase};
 use crate::migrations::Migrator;
 
 describe!("ListTodosAction", {
     test!("returns empty list when no todos exist", async fn(db: TestDatabase) {
-        let todos = ListTodosAction::new().execute().await.unwrap();
+        let todos = App::resolve::<ListTodosAction>().unwrap().execute().await.unwrap();
         expect!(todos).to_be_empty();
     });
 
@@ -143,7 +143,7 @@ describe!("ListTodosAction", {
         Todo::create(attrs! { title: "Buy bread" }).await.unwrap();
         Todo::create(attrs! { title: "Walk dog" }).await.unwrap();
 
-        let todos = ListTodosAction::new().execute().await.unwrap();
+        let todos = App::resolve::<ListTodosAction>().unwrap().execute().await.unwrap();
         expect!(todos).to_have_length(2);
     });
 
@@ -326,10 +326,10 @@ sibling test forgot to wait for its own guard to drop first.
 
 ## Encryption key test helpers
 
-Tests that exercise encrypted casts (`#[cast(Encrypted<…>)]`), signed
-payloads, or the keyring's previous-key fallback need an `APP_KEY`
-installed in-process. The framework ships two test-only helpers under
-the `testing` feature:
+Tests that exercise encrypted casts (`casts = { secret = AsEncrypted }`
+on a `#[model(...)]`), signed payloads, or the keyring's previous-key
+fallback need an `APP_KEY` installed in-process. The framework ships
+two test-only helpers under the `testing` feature:
 
 ```rust
 use suprnova::testing::install_test_encryption_key;
