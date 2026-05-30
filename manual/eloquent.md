@@ -38,9 +38,10 @@ doesn't cover (see the [SeaORM escape hatches](#dropping-to-seaorm)).
 - [Replication](#replication)
 - [Debugging — dump and dd](#debugging--dump-and-dd)
 - [Testing models](#testing-models)
-- [DB facade — model-less queries](#db-facade--model-less-queries)
 - [Dropping to SeaORM](#dropping-to-seaorm)
 - [Migrating from `database::Model`](#migrating-from-databasemodel)
+- [DB facade — model-less queries](#db-facade--model-less-queries)
+- [Laravel-13 parity — relation-existence + cheap shortcuts](#laravel-13-parity--relation-existence--cheap-shortcuts)
 
 ## Quick start
 
@@ -111,7 +112,7 @@ configuration.
 | `timestamps` | flag / bool | `true` when both `created_at` and `updated_at` exist | Disable auto-managed timestamps |
 | `created_at` | string | `"created_at"` | Override the column name |
 | `updated_at` | string | `"updated_at"` | Override the column name |
-| `touches` | list of relation names | `[]` | Bump parent `updated_at` when this model saves (activates in Phase 10B) |
+| `touches` | list of relation names | `[]` | Parsed and stored as model metadata (`TOUCHES` const). The post-save hook that calls `.touch()` on the listed parents is not yet wired — for now, call `parent.touch().await?` explicitly from your observer or handler. |
 | `mutators` | list of strings | `[]` | Field names whose JSON-fill path routes through a `set_<field>(value)` mutator method |
 
 ### Full example
@@ -160,9 +161,9 @@ Function-level macros work alongside the struct attribute:
 - `#[mutator]` on a `fn set_name(&mut self, value: serde_json::Value)`
   makes it an Eloquent mutator. The model's JSON-fill path routes
   through it when `name` is listed in `mutators = [...]`.
-- `#[scope]` (Phase 10C) on a `fn(query: Builder<Self>) -> Builder<Self>`
+- `#[scope]` on a `fn(query: Builder<Self>) -> Builder<Self>`
   registers a local scope.
-- `#[global_scope]` (Phase 10C) registers a global scope.
+- `#[global_scope]` registers a global scope.
 - `#[prunable]` on `impl Prunable for T { ... }` registers the
   pruner via inventory so `model:prune` finds it.
 
@@ -1060,7 +1061,7 @@ the connection routing, not the SQL.
 
 ## Scopes
 
-Phase 10C ships two flavours of scope, mirroring Laravel:
+Suprnova ships two flavours of scope, mirroring Laravel:
 
 - **Local scopes** — extension methods on the builder, declared per
   model with `#[suprnova::scopes(Model)]`. Each free function in the
@@ -1185,7 +1186,11 @@ the `relations = { ... }` block on `#[suprnova::model]`, and the
 macro emits — per declared relation — a method on the struct, a
 loaded-accessor (`<name>_loaded()`), a count-accessor
 (`<name>_count()`), and the dispatcher arm the eager loader calls
-into. The relation kinds shipped today:
+into. This section covers the per-kind shape and option table; the
+deep dive on join-key resolution, the morph registry, pivot rows,
+and the polymorphic enum lowering lives in
+[Eloquent Relationships](eloquent-relationships.md). The relation
+kinds shipped today:
 
 | Kind                | One/many | Across families | Backed by |
 |---------------------|----------|-----------------|-----------|
@@ -2187,6 +2192,10 @@ type of `Builder::get` (where `T` is the model), of `Model::all`, of
 `pluck` / `chunk_map`, and of every other terminal that yields more
 than one row. It dereferences to `&[T]` so existing Vec call sites
 keep working without changes; the Laravel surface is composed on top.
+This section is the everyday surface; the full method index, the
+generic-vs-model split, the `LazyCollection<M>` streaming wrapper,
+and the borrow-vs-consume rules are in
+[Eloquent Collections](eloquent-collections.md).
 
 ### Generic surface
 
@@ -2329,7 +2338,10 @@ aren't affected by another task's `unguarded` scope.
 Casts run at the boundary between storage (column value) and runtime
 (model field). Each cast type implements the `Cast` trait. Built-in
 casts cover Laravel's full set; users register custom casts via the
-trait.
+trait. This section is the quick-reference index; the full per-cast
+contract — primitive, temporal, structured, enum, encrypted, hashed,
+plus the `casts!` runtime override macro — lives in
+[Eloquent Casts, Accessors & Mutators](eloquent-mutators.md).
 
 ### Explicit-only
 
@@ -2658,10 +2670,12 @@ pub struct Comment {
 }
 ```
 
-In Phase 10A the `touches = [...]` list is parsed and stored on the
-model as a `TOUCHES` const. The post-save hook that actually fires
-`self.post().touch().await?` lands in Phase 10B alongside the
-relation API — the metadata is already in place.
+The `touches = [...]` list is parsed and stored on the model as a
+`TOUCHES` const. The post-save hook that would automatically call
+`self.post().touch().await?` after a comment save is not yet wired —
+for now, call the parent's `.touch()` explicitly from an observer
+or your handler. The metadata is in place so that switching over
+later is a behaviour change, not an API change.
 
 ### Format
 
@@ -3359,11 +3373,10 @@ never blocks you from reaching the underlying ORM.
 
 ## Migrating from `database::Model`
 
-Pre-Phase-10A code may carry `impl suprnova::database::Model for
-Entity {}` on a hand-rolled SeaORM entity. The trait was renamed to
-`EntityExt` during Phase 10A T1 to make room for the new
-`Model` trait (which sits on the user-facing struct, not the
-SeaORM entity).
+Older code may carry `impl suprnova::database::Model for Entity {}`
+on a hand-rolled SeaORM entity. The trait was renamed to `EntityExt`
+to make room for the new `Model` trait — which sits on the
+user-facing struct, not on the SeaORM entity.
 
 The recommended migration path is to switch the type to
 `#[suprnova::model]`, which gives you the full Eloquent surface
@@ -3814,3 +3827,18 @@ without_touching(async {
 
 The scope is `tokio::task_local`-backed, so concurrent requests on
 other tasks continue to honour their own scope (or its absence).
+
+## Next
+
+- [Eloquent Relationships](eloquent-relationships.md) — deep dive on
+  every relation kind, the morph registry, and the polymorphic enum
+  lowering
+- [Eloquent Collections](eloquent-collections.md) — full
+  `Collection<T>` surface, the generic-vs-model split, and
+  `LazyCollection<M>` streaming
+- [Eloquent Casts, Accessors & Mutators](eloquent-mutators.md) — the
+  21 built-in casts plus the `casts!` runtime override
+- [Eloquent Serialization](eloquent-serialization.md) — `to_array`,
+  `to_json`, hidden / visible / appends, filtered terminals
+- [Eloquent Factories](eloquent-factories.md) — randomized model
+  instances for tests and seeders
