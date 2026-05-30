@@ -6,6 +6,7 @@ use crate::middleware::{Middleware, Next};
 use crate::session::get_csrf_token;
 use async_trait::async_trait;
 use std::time::Duration;
+use subtle::ConstantTimeEq;
 
 /// Maximum bytes we will buffer from a form-urlencoded request body to
 /// look for the `_token` field. A `_token` field is a 40-char hex
@@ -66,6 +67,81 @@ enum OriginCheck {
     Fail,
 }
 
+/// One entry in the CSRF exemption list — a pre-compiled glob plus an
+/// optional method scope. See [`CsrfMiddleware::except`] /
+/// [`CsrfMiddleware::except_method`].
+#[derive(Clone, Debug)]
+struct ExceptRule {
+    /// Original pattern as written by the caller; preserved for tests
+    /// and diagnostics.
+    pattern: String,
+    /// Compiled glob (regex). `None` means the pattern was an exact
+    /// match with no `*`, so we can fast-path string comparison.
+    regex: Option<regex::Regex>,
+    /// Upper-case HTTP method this rule scopes to. `None` matches any
+    /// method.
+    method: Option<String>,
+}
+
+impl ExceptRule {
+    /// Compile a caller-supplied pattern into an [`ExceptRule`].
+    /// `method = None` matches any method; otherwise the verb is
+    /// stored upper-cased for case-insensitive comparison.
+    fn compile(pattern: String, method: Option<String>) -> Self {
+        let normalized = normalize_pattern(&pattern);
+        let regex = if normalized.contains('*') {
+            // Translate Laravel-style `*` globs into a regex. We
+            // `regex::escape` the literal pieces first, then put back
+            // `.*` for each `*` — matching Laravel's `Str::is`
+            // semantics (`*` ⇒ zero-or-more of any character).
+            let mut rebuilt = String::with_capacity(normalized.len() + 8);
+            rebuilt.push('^');
+            for (i, piece) in normalized.split('*').enumerate() {
+                if i > 0 {
+                    rebuilt.push_str(".*");
+                }
+                rebuilt.push_str(&regex::escape(piece));
+            }
+            rebuilt.push('$');
+            // Compilation is infallible for these inputs (we built it
+            // from escaped literals + `.*`), so unwrap is acceptable.
+            Some(regex::Regex::new(&rebuilt).expect("globbed CSRF except pattern is valid regex"))
+        } else {
+            None
+        };
+        Self {
+            pattern: normalized,
+            regex,
+            method: method.map(|m| m.to_uppercase()),
+        }
+    }
+
+    /// Does this rule match the given request path + method?
+    fn matches(&self, path: &str, method: &str) -> bool {
+        if let Some(ref m) = self.method
+            && !m.eq_ignore_ascii_case(method)
+        {
+            return false;
+        }
+        let candidate = normalize_pattern(path);
+        match &self.regex {
+            Some(re) => re.is_match(&candidate),
+            None => self.pattern == candidate,
+        }
+    }
+}
+
+/// Laravel-style normalization for CSRF except matching: strip the
+/// leading slash so `/webhooks/*` and `webhooks/*` compare the same.
+/// The root path `/` is preserved literally so users can still
+/// blanket-exempt it.
+fn normalize_pattern(pattern: &str) -> String {
+    if pattern == "/" {
+        return "/".to_string();
+    }
+    pattern.trim_matches('/').to_string()
+}
+
 /// CSRF protection middleware
 ///
 /// Validates CSRF tokens on state-changing requests (POST, PUT, PATCH, DELETE).
@@ -108,8 +184,15 @@ enum OriginCheck {
 pub struct CsrfMiddleware {
     /// HTTP methods that require CSRF validation
     protected_methods: Vec<&'static str>,
-    /// Paths to exclude from CSRF validation (e.g., webhooks)
-    except: Vec<String>,
+    /// Paths to exclude from CSRF validation (e.g., webhooks).
+    ///
+    /// Each entry is a Laravel-style glob pattern (see [`Self::is_excluded`]):
+    /// `*` matches any run of characters, otherwise the pattern must
+    /// match the request path exactly. Stored as a tuple of `(method,
+    /// glob)` — `method = None` is the default, "any method" — so the
+    /// same surface can also express `POST /webhooks/*` etc. for routes
+    /// that only need to bypass CSRF on specific verbs.
+    except: Vec<ExceptRule>,
     /// How to treat `Sec-Fetch-Site`. Default: [`OriginPolicy::Disabled`].
     origin_policy: OriginPolicy,
     /// Whether to attach the `XSRF-TOKEN` cookie to outgoing responses.
@@ -151,9 +234,27 @@ impl CsrfMiddleware {
         }
     }
 
-    /// Add paths to exclude from CSRF validation
+    /// Add paths to exclude from CSRF validation.
     ///
     /// Useful for webhooks or API endpoints that use other authentication.
+    ///
+    /// # Pattern syntax
+    ///
+    /// Each entry is a Laravel-style glob (matching `Str::is`):
+    ///
+    /// - exact paths: `"/login"` matches only `/login`
+    /// - prefix wildcards: `"/webhooks/*"` matches `/webhooks/stripe`,
+    ///   `/webhooks/github/events`, …
+    /// - mid-pattern wildcards: `"/api/*/internal"` matches
+    ///   `/api/v1/internal` and `/api/v2/internal`
+    /// - leading wildcards: `"*/healthz"` matches any path ending in
+    ///   `/healthz`
+    ///
+    /// Patterns are normalized — a leading slash is optional, so
+    /// `"webhooks/*"` and `"/webhooks/*"` behave identically.
+    ///
+    /// This applies to **all** HTTP methods on a matching path. Use
+    /// [`Self::except_method`] to scope an exemption to one verb.
     ///
     /// # Example
     ///
@@ -162,7 +263,34 @@ impl CsrfMiddleware {
     ///     .except(vec!["/webhooks/*", "/api/external/*"]);
     /// ```
     pub fn except(mut self, paths: Vec<impl Into<String>>) -> Self {
-        self.except = paths.into_iter().map(|p| p.into()).collect();
+        self.except.extend(
+            paths
+                .into_iter()
+                .map(|p| ExceptRule::compile(p.into(), None)),
+        );
+        self
+    }
+
+    /// Add a method-scoped exemption — bypass CSRF only when the
+    /// request method matches.
+    ///
+    /// Useful when a webhook prefix legitimately receives both
+    /// `POST` callbacks (which can't carry a token) and authenticated
+    /// `DELETE` administrative requests (which can and should). The
+    /// method comparison is case-insensitive.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let csrf = CsrfMiddleware::new()
+    ///     // Stripe POST callbacks are exempt…
+    ///     .except_method("POST", "/webhooks/stripe/*")
+    ///     // …but DELETEs against the same prefix still require a token.
+    ///     ;
+    /// ```
+    pub fn except_method(mut self, method: impl Into<String>, pattern: impl Into<String>) -> Self {
+        self.except
+            .push(ExceptRule::compile(pattern.into(), Some(method.into())));
         self
     }
 
@@ -288,19 +416,19 @@ impl CsrfMiddleware {
         self
     }
 
-    /// Check if a path should be excluded from CSRF validation
-    fn is_excluded(&self, path: &str) -> bool {
-        for pattern in &self.except {
-            if pattern.ends_with('*') {
-                let prefix = &pattern[..pattern.len() - 1];
-                if path.starts_with(prefix) {
-                    return true;
-                }
-            } else if pattern == path {
-                return true;
-            }
-        }
-        false
+    /// Check if a path should be excluded from CSRF validation.
+    ///
+    /// Mirrors Laravel's `inExceptArray` semantics:
+    /// - exact matches return true
+    /// - patterns containing `*` are treated as globs (`*` ⇒
+    ///   zero-or-more of any character), matched against the full path
+    /// - leading/trailing slashes are normalized so `"/x"` and `"x"`
+    ///   are interchangeable on both sides
+    /// - rules added via [`Self::except_method`] additionally require
+    ///   the request's HTTP method to match (case-insensitively); rules
+    ///   added via [`Self::except`] match any method.
+    fn is_excluded(&self, path: &str, method: &str) -> bool {
+        self.except.iter().any(|rule| rule.matches(path, method))
     }
 
     /// Consult `Sec-Fetch-Site` against the configured policy.
@@ -394,7 +522,7 @@ impl Middleware for CsrfMiddleware {
         // still get the XSRF cookie so a webhook handler that later
         // renders an HTML page (uncommon, but possible) still hands
         // out a usable token.
-        let is_excluded = self.is_excluded(request.path());
+        let is_excluded = self.is_excluded(request.path(), method);
 
         // Fast path: no validation needed. Run the inner stack, then
         // attach the cookie on the way out.
@@ -513,19 +641,19 @@ fn reject_origin_mismatch() -> Response {
     .status(403))
 }
 
-/// Constant-time string comparison to prevent timing attacks
+/// Constant-time string comparison to prevent timing attacks.
 ///
-/// This ensures an attacker can't determine how much of the token is correct
-/// based on response time.
+/// Backed by [`subtle::ConstantTimeEq`] — a reviewed constant-time
+/// equality primitive — rather than a hand-rolled XOR loop. CSRF tokens
+/// in Suprnova are fixed-length hex strings, so the unequal-length
+/// short-circuit is a structural reject (a length mismatch can only
+/// come from a malformed / wrong-class token) and not a timing oracle
+/// for a same-length attacker.
 fn constant_time_compare(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
     }
-
-    a.bytes()
-        .zip(b.bytes())
-        .fold(0, |acc, (x, y)| acc | (x ^ y))
-        == 0
+    a.as_bytes().ct_eq(b.as_bytes()).into()
 }
 
 #[cfg(test)]
@@ -544,11 +672,50 @@ mod tests {
     fn test_is_excluded() {
         let csrf = CsrfMiddleware::new().except(vec!["/webhooks/*", "/api/public"]);
 
-        assert!(csrf.is_excluded("/webhooks/stripe"));
-        assert!(csrf.is_excluded("/webhooks/github/events"));
-        assert!(csrf.is_excluded("/api/public"));
-        assert!(!csrf.is_excluded("/api/private"));
-        assert!(!csrf.is_excluded("/login"));
+        // Method is irrelevant for plain `.except(...)` rules.
+        assert!(csrf.is_excluded("/webhooks/stripe", "POST"));
+        assert!(csrf.is_excluded("/webhooks/github/events", "PUT"));
+        assert!(csrf.is_excluded("/api/public", "DELETE"));
+        assert!(!csrf.is_excluded("/api/private", "POST"));
+        assert!(!csrf.is_excluded("/login", "POST"));
+    }
+
+    #[test]
+    fn test_is_excluded_supports_mid_pattern_glob() {
+        // Laravel's `Str::is` semantics: `*` can appear anywhere in
+        // the pattern, not just trailing. The framework's previous
+        // implementation only honored a trailing `*` as a prefix
+        // check; this regression pins the broader behavior.
+        let csrf = CsrfMiddleware::new().except(vec!["/api/*/internal", "*/healthz"]);
+        assert!(csrf.is_excluded("/api/v1/internal", "POST"));
+        assert!(csrf.is_excluded("/api/v2/internal", "POST"));
+        assert!(!csrf.is_excluded("/api/v1/external", "POST"));
+        assert!(csrf.is_excluded("/services/healthz", "POST"));
+        assert!(!csrf.is_excluded("/healthz/details", "POST"));
+        // `*/healthz` requires a literal `/healthz` somewhere in the
+        // candidate — bare `/healthz` (no prefix segment) does NOT
+        // match. This matches Laravel's `Str::is` behavior.
+        assert!(!csrf.is_excluded("/healthz", "POST"));
+    }
+
+    #[test]
+    fn test_is_excluded_normalizes_leading_slashes() {
+        // `/webhooks/*` and `webhooks/*` must behave identically — the
+        // user shouldn't have to remember which form Laravel prefers.
+        let csrf = CsrfMiddleware::new().except(vec!["webhooks/*"]);
+        assert!(csrf.is_excluded("/webhooks/stripe", "POST"));
+        assert!(csrf.is_excluded("webhooks/stripe", "POST"));
+    }
+
+    #[test]
+    fn test_except_method_scopes_to_one_verb() {
+        // A method-scoped exemption only fires for that verb;
+        // everything else still goes through CSRF validation.
+        let csrf = CsrfMiddleware::new().except_method("POST", "/webhooks/stripe/*");
+        assert!(csrf.is_excluded("/webhooks/stripe/charge", "POST"));
+        assert!(csrf.is_excluded("/webhooks/stripe/charge", "post"));
+        assert!(!csrf.is_excluded("/webhooks/stripe/charge", "DELETE"));
+        assert!(!csrf.is_excluded("/webhooks/stripe/charge", "PUT"));
     }
 
     #[test]

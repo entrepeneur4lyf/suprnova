@@ -112,8 +112,32 @@ use suprnova::CsrfMiddleware;
 
 // In your bootstrap or route configuration
 let csrf = CsrfMiddleware::new()
-    .except("/webhooks/stripe")
-    .except("/webhooks/github");
+    .except(vec!["/webhooks/stripe", "/webhooks/github"]);
+```
+
+Each pattern is a Laravel-style glob (`*` matches any run of
+characters):
+
+- exact paths: `"/login"` matches only `/login`
+- trailing wildcards: `"/webhooks/*"` matches `/webhooks/stripe`,
+  `/webhooks/github/events`, …
+- mid-pattern wildcards: `"/api/*/internal"` matches `/api/v1/internal`
+  and `/api/v2/internal`
+- leading wildcards: `"*/healthz"` matches any path ending in `/healthz`
+
+Patterns are normalized — a leading slash is optional, so
+`"webhooks/*"` and `"/webhooks/*"` behave identically.
+
+If you need an exemption to fire on **one** HTTP verb only, use
+`except_method`:
+
+```rust
+use suprnova::CsrfMiddleware;
+
+// Stripe POST callbacks are exempt; DELETEs against the same prefix
+// still require a token.
+let csrf = CsrfMiddleware::new()
+    .except_method("POST", "/webhooks/stripe/*");
 ```
 
 ## CSRF Helper Functions
