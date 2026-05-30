@@ -312,14 +312,14 @@ The idiomatic pattern when visibility depends on the viewer is a
 match at the call site, branching into the right per-call filter:
 
 ```rust
-use suprnova::{json_response, Model, Request, Response};
+use suprnova::{Auth, json_response, Model, Request, Response};
 
 pub async fn show(req: Request) -> Response {
     let id: i64 = req.param("id")?.parse()
         .map_err(|_| suprnova::FrameworkError::param_parse("id", "i64"))?;
     let user = User::find_or_fail(id).await?;
-    let viewer = req.user();
-    let viewing_self = viewer.as_ref().map(|v| v.id) == Some(user.id);
+    let viewer = Auth::user_as::<User>().await?;
+    let viewing_self = viewer.as_deref().map(|v| v.id) == Some(user.id);
 
     let body = if viewing_self {
         user.to_array()
