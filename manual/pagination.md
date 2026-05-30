@@ -7,7 +7,7 @@ JSON Inertia and JSON:API consumers already understand — you fetch a
 page and return it; nothing else is required.
 
 ```rust
-use suprnova::User;
+use crate::models::User;
 
 let page = User::query()
     .filter("active", true)
@@ -64,7 +64,8 @@ covered in the [URL generation](#url-generation-and-paths) section.
 ## `paginate` — length-aware
 
 ```rust
-use suprnova::{LengthAwarePaginator, User};
+use suprnova::LengthAwarePaginator;
+use crate::models::User;
 
 pub async fn index(_req: suprnova::Request) -> suprnova::Response {
     let page: LengthAwarePaginator<User> = User::query()
@@ -163,7 +164,8 @@ shape; for the total use the `total` field directly.
 ## `simple_paginate` — one query, no count
 
 ```rust
-use suprnova::{Paginator, User};
+use suprnova::Paginator;
+use crate::models::User;
 
 let page: Paginator<User> = User::query()
     .order_by_desc("id")
@@ -209,7 +211,8 @@ The same predicate set as the length-aware paginator is implemented:
 ## `cursor_paginate` — opaque keyset
 
 ```rust
-use suprnova::{CursorPaginator, User};
+use suprnova::CursorPaginator;
+use crate::models::User;
 
 let page: CursorPaginator<User> = User::query()
     .cursor_paginate(20)
