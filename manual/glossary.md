@@ -80,9 +80,9 @@ or a custom `Vec<Duration>`. See [Queues — Backoff schedules](queues.md#backof
 ### Batch (queue)
 
 A group of jobs dispatched together and tracked as a unit —
-`Batch::dispatch(jobs)` returns a `PendingBatch` with progress
-metadata. Useful when you want to fan out work and run a callback when
-the whole batch completes. See [Queues — Queued batches](queues.md#queued-batches).
+`PendingBatch::new().add(job).add(other).dispatch()` returns the
+persisted batch id. Useful when you want to fan out work and run a
+callback when the whole batch completes. See [Queues — Queued batches](queues.md#queued-batches).
 
 ### `BelongsTo`
 
@@ -276,9 +276,9 @@ magic-call. See [Service Container](container.md).
 
 ### Factory (Eloquent)
 
-The `#[derive(Factory)]` macro and `Factory<M>` trait that produce
-realistic test rows with `fake`-driven defaults — `User::factory(5)
-.create().await`. The Rust counterpart of Laravel's model factories.
+The `#[derive(Factory)]` macro and `Factory` trait that produce
+realistic test rows with `fake`-driven defaults — `UserFactory::times(5)
+.create_many().await?`. The Rust counterpart of Laravel's model factories.
 See [Macros — Factories](macros.md#factories).
 
 ### Fail-closed
@@ -435,9 +435,9 @@ props. Drives the `suprnova generate-types` command. See
 ### Job
 
 A serialisable struct implementing the `Job` trait — has a
-`handle(self)` method, dispatched through `Queue::dispatch(job)` or
-`job.dispatch()`. Persisted into the queue driver's storage and run
-by a worker. See [Queues](queues.md).
+`handle(self)` method, enqueued through `Queue::push(job)` (or
+`Queue::push_later(job, when)` for a delayed dispatch). Persisted into
+the queue driver's storage and run by a worker. See [Queues](queues.md).
 
 ### Job middleware
 
