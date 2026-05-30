@@ -138,14 +138,25 @@ impl Default for RequestIdMiddleware {
 /// pathologically long ids.
 const MAX_REQUEST_ID_LEN: usize = 128;
 
-/// Returns true if `s` is a safe id: ASCII printable, no control
-/// characters, no whitespace, within the length cap. Most production
-/// id formats (UUID, ULID, KSUID, hex trace ids) satisfy this.
+/// Returns true if `s` is a safe id: non-empty, within the length cap,
+/// and composed only of ASCII alphanumerics plus the small set of
+/// separators used by every common id scheme — `-` (UUID/ULID/KSUID),
+/// `.` and `_` (free-form correlation ids), `:` (W3C `traceparent`
+/// segment delimiter, Jaeger/Zipkin trace ids).
+///
+/// Anything outside that charset — quotes, brackets, slashes, equals,
+/// SQL or shell metacharacters — is rejected and replaced with a fresh
+/// UUID. The earlier "anything printable, non-space" rule kept control
+/// characters and length abuse out, but still let punctuation-heavy
+/// values through that wouldn't match downstream log/trace id schemas
+/// and that operators would have to defend against when grepping or
+/// piping logs.
 fn is_safe_request_id(s: &str) -> bool {
     if s.is_empty() || s.len() > MAX_REQUEST_ID_LEN {
         return false;
     }
-    s.bytes().all(|b| b.is_ascii_graphic() && b != b' ')
+    s.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b':')
 }
 
 /// Resolve the request id for an inbound request: reuse a safe
@@ -341,6 +352,58 @@ mod tests {
             Some("spawn-propagation-id-555"),
             "the spawned task must inherit the caller's request id"
         );
+    }
+
+    #[test]
+    fn is_safe_request_id_accepts_common_id_schemes() {
+        // UUID v4
+        assert!(is_safe_request_id("550e8400-e29b-41d4-a716-446655440000"));
+        // ULID
+        assert!(is_safe_request_id("01HNV3K7Y8XQZ9F4A2B3C5D6E7"));
+        // KSUID
+        assert!(is_safe_request_id("2N7yT5sCxQk6mZc9wRb3FvLpKQa"));
+        // Hex trace id (no separator)
+        assert!(is_safe_request_id("4bf92f3577b34da6a3ce929d0e0e4736"));
+        // W3C traceparent value (dash-separated, version-trace-span-flags)
+        assert!(is_safe_request_id(
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        ));
+        // Colon-separated id (Jaeger native)
+        assert!(is_safe_request_id("abc123:def456:ghi789:01"));
+        // Underscore/dot/mixed-case free-form id
+        assert!(is_safe_request_id("req_2026.05.30_inbound-42"));
+    }
+
+    #[test]
+    fn is_safe_request_id_rejects_punctuation_and_metacharacters() {
+        // Quotes / SQL-injection shape
+        assert!(!is_safe_request_id("'; DROP TABLE users--"));
+        // Angle brackets / HTML-injection shape
+        assert!(!is_safe_request_id("<script>alert(1)</script>"));
+        // Whitespace
+        assert!(!is_safe_request_id("has space"));
+        // Tab and newline (control chars were already rejected; re-assert)
+        assert!(!is_safe_request_id("tab\there"));
+        assert!(!is_safe_request_id("line\nbreak"));
+        // Slash / equals / ampersand (URL or env separators)
+        assert!(!is_safe_request_id("a/b"));
+        assert!(!is_safe_request_id("k=v"));
+        assert!(!is_safe_request_id("a&b"));
+        // Plus, percent, hash, at — printable but not in any id scheme
+        assert!(!is_safe_request_id("a+b"));
+        assert!(!is_safe_request_id("a%20b"));
+        assert!(!is_safe_request_id("a#b"));
+        assert!(!is_safe_request_id("a@b"));
+        // Bracketed / parenthesised
+        assert!(!is_safe_request_id("[abc]"));
+        assert!(!is_safe_request_id("(abc)"));
+        assert!(!is_safe_request_id("{abc}"));
+        // Empty
+        assert!(!is_safe_request_id(""));
+        // Length cap (129 of 'a')
+        assert!(!is_safe_request_id(&"a".repeat(MAX_REQUEST_ID_LEN + 1)));
+        // Non-ASCII
+        assert!(!is_safe_request_id("café-id"));
     }
 
     #[tokio::test]
