@@ -40,7 +40,7 @@ Confirm it worked:
 suprnova --version
 ```
 
-You should see `suprnova-cli 0.x.x`.
+You should see `suprnova 0.x.x`.
 
 If `suprnova` isn't found, your `~/.cargo/bin` isn't on `PATH`. Add this
 to your shell config:
@@ -59,23 +59,23 @@ default:
 suprnova new my-app
 ```
 
-The wizard asks four questions:
+The wizard asks for, in order:
 
-1. **Project name** — defaults to the directory argument (`my-app`)
+1. **Project name** — skipped when you pass it as the argument (`my-app`)
 2. **Description** — used in `Cargo.toml`
-3. **Frontend framework** — one of `svelte` (default), `react`, `vue`
-4. **Author** — used in `Cargo.toml`
+3. **Author** — used in `Cargo.toml`; defaults to your git `user.name`
+4. **Frontend framework** — one of `svelte` (default), `react`, `vue`
 
-If you want to skip the prompts (CI, scripted setup), pass the flags
-directly:
+If you want to skip the prompts (CI, scripted setup), pass
+`--no-interaction` and pick a frontend explicitly:
 
 ```bash
-suprnova new my-app \
-  --description "My app" \
-  --frontend svelte \
-  --author "Your Name" \
-  --no-interaction
+suprnova new my-app --frontend svelte --no-interaction
 ```
+
+`--no-interaction` accepts the defaults for description ("A web
+application built with Suprnova") and author (empty). To set those,
+edit the generated `Cargo.toml` after scaffolding.
 
 The three frontend choices each ship their own runes-on/Svelte-5,
 React-19, or Vue-3.5 starter. All three use Inertia v3 + Vite 6 +
@@ -118,7 +118,7 @@ account and `/login` to log in.
 
 ```
 my-app/
-├── Cargo.toml          # workspace + dependencies
+├── Cargo.toml          # crate manifest, two [[bin]] targets
 ├── .env                # local config (DB URL, app key, ports)
 ├── .env.example        # template for ops/CI
 ├── .gitignore
