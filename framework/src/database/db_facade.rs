@@ -395,6 +395,12 @@ impl DbTableBuilder {
     /// **Empty WHERE updates every row in the table.** That's a
     /// supported but rarely-correct operation — callers should add at
     /// least one `filter` unless they really mean "all rows."
+    ///
+    /// Dual-API: this is the Laravel-faithful name; the
+    /// `Builder<M>`-style alias is [`Self::update_all`]. Both call into
+    /// the same implementation. Prefer the `_all` name when the
+    /// table-wide intent is the point of the call site — it makes the
+    /// missing `filter` visible to reviewers.
     pub async fn update(self, attrs: Attrs) -> Result<u64, FrameworkError> {
         if attrs.is_empty() {
             return Err(FrameworkError::database(format!(
@@ -426,12 +432,29 @@ impl DbTableBuilder {
         Ok(result.rows_affected())
     }
 
+    /// Alias for [`Self::update`] that matches the [`Builder<M>`]
+    /// typed-Eloquent surface, where the bulk mutator is named
+    /// [`update_all`](crate::eloquent::Builder::update_all) to make the
+    /// table-wide intent explicit at the call site. Same semantics: an
+    /// empty WHERE updates every row.
+    ///
+    /// [`Builder<M>`]: crate::eloquent::Builder
+    #[doc(alias = "update")]
+    pub async fn update_all(self, attrs: Attrs) -> Result<u64, FrameworkError> {
+        self.update(attrs).await
+    }
+
     /// Delete every row matched by the WHERE clauses. Returns the
     /// number of rows affected.
     ///
     /// **Empty WHERE truncates the table.** `DB::table("x").delete()`
     /// removes every row by design — add a `filter` if you don't mean
     /// that.
+    ///
+    /// Dual-API: this is the Laravel-faithful name; the
+    /// `Builder<M>`-style alias is [`Self::delete_all`]. Both call into
+    /// the same implementation. Prefer the `_all` name when the
+    /// table-wide intent is the point of the call site.
     pub async fn delete(self) -> Result<u64, FrameworkError> {
         // Audit HIGH `database` #2 — identifier + operator validation.
         self.validate_inputs()?;
@@ -450,6 +473,18 @@ impl DbTableBuilder {
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(result.rows_affected())
+    }
+
+    /// Alias for [`Self::delete`] that matches the [`Builder<M>`]
+    /// typed-Eloquent surface, where the bulk mutator is named
+    /// [`delete_all`](crate::eloquent::Builder::delete_all) to make the
+    /// table-wide intent explicit at the call site. Same semantics: an
+    /// empty WHERE removes every row.
+    ///
+    /// [`Builder<M>`]: crate::eloquent::Builder
+    #[doc(alias = "delete")]
+    pub async fn delete_all(self) -> Result<u64, FrameworkError> {
+        self.delete().await
     }
 
     // ---- SQL rendering ---------------------------------------------------

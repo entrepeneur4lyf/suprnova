@@ -207,3 +207,59 @@ async fn operator_allowlist_accepts_canonical_comparisons() {
         );
     }
 }
+
+// ---- update_all / delete_all aliases -----------------------------------
+//
+// `Builder<M>` ships bulk mutators as `update_all` / `delete_all` so the
+// table-wide intent reads loud at the call site. The model-less
+// `DbTableBuilder` historically only offered the Laravel-faithful
+// `update` / `delete`. Both names now resolve to the same path — these
+// tests pin the alias parity end-to-end.
+
+#[tokio::test]
+async fn update_all_alias_matches_update() {
+    let _db = fresh_db_with_table().await;
+    let mut attrs = Attrs::new();
+    attrs.insert("event", serde_json::json!("seed"));
+    DB::table("audit_log").insert(attrs).await.unwrap();
+
+    let mut attrs = Attrs::new();
+    attrs.insert("event", serde_json::json!("renamed"));
+    let affected = DB::table("audit_log")
+        .filter("event", "seed")
+        .update_all(attrs)
+        .await
+        .unwrap();
+    assert_eq!(
+        affected, 1,
+        "update_all must mutate the same row update does"
+    );
+
+    let after = DB::table("audit_log")
+        .filter("event", "renamed")
+        .count()
+        .await
+        .unwrap();
+    assert_eq!(after, 1);
+}
+
+#[tokio::test]
+async fn delete_all_alias_matches_delete() {
+    let _db = fresh_db_with_table().await;
+    let mut attrs = Attrs::new();
+    attrs.insert("event", serde_json::json!("doomed"));
+    DB::table("audit_log").insert(attrs).await.unwrap();
+
+    let affected = DB::table("audit_log")
+        .filter("event", "doomed")
+        .delete_all()
+        .await
+        .unwrap();
+    assert_eq!(
+        affected, 1,
+        "delete_all must remove the same row delete does"
+    );
+
+    let after = DB::table("audit_log").count().await.unwrap();
+    assert_eq!(after, 0);
+}

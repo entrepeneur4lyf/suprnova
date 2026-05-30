@@ -64,6 +64,7 @@ use crate::FrameworkError;
 use crate::database::config::DatabaseConfig;
 use crate::database::connection::DbConnection;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{OnceLock, RwLock};
 
 /// Process-global registry of named database connections.
@@ -90,6 +91,14 @@ pub const READ_REPLICA_CONNECTION_NAME: &str = "__read_replica__";
 /// for test isolation. Cloning a [`DbConnection`] is an `Arc::clone`
 /// (sync, cheap), so the read path never blocks an async task.
 static REGISTRY: OnceLock<RwLock<HashMap<String, DbConnection>>> = OnceLock::new();
+
+/// Flipped to `true` the first time [`ConnectionRegistry::has`] observes
+/// a poisoned registry lock. The next read still falls back to the
+/// primary pool (the safe behaviour documented on `has`), and the
+/// warn-once gate keeps the hot routing path from spamming the log on
+/// every subsequent request — poison is sticky on `RwLock`, so without
+/// this gate every read would re-fire the warning.
+static REGISTRY_POISON_WARNED: AtomicBool = AtomicBool::new(false);
 
 fn reg() -> &'static RwLock<HashMap<String, DbConnection>> {
     REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
@@ -146,10 +155,31 @@ impl ConnectionRegistry {
     /// [`FrameworkError::internal`] on the same condition so the
     /// application learns about the poison through the next read or
     /// write that actually needs the named connection.
+    ///
+    /// Emits a single `tracing::warn!` the first time poison is
+    /// observed so operators see the condition in logs even when no
+    /// subsequent [`Self::get`] is exercised. Repeat observations are
+    /// silenced — `RwLock` poison is sticky and the hot routing path
+    /// must not flood the log.
     pub async fn has(name: &str) -> bool {
         match reg().read() {
             Ok(r) => r.contains_key(name),
-            Err(_) => false,
+            Err(_) => {
+                // Race-safe: `swap` returns the previous value. The
+                // first caller that flips `false → true` emits;
+                // everyone else short-circuits.
+                if !REGISTRY_POISON_WARNED.swap(true, Ordering::SeqCst) {
+                    tracing::warn!(
+                        target: "suprnova::database",
+                        "ConnectionRegistry RwLock is poisoned — a panicked writer left the \
+                         registry in a guarded state. `has(\"{name}\")` is degrading to false; \
+                         the executor will fall back to the primary pool for this and every \
+                         subsequent routed read. The next ConnectionRegistry::get(...) call \
+                         will surface an internal-error response.",
+                    );
+                }
+                false
+            }
         }
     }
 
