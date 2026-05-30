@@ -1,61 +1,16 @@
 # Middleware
 
-suprnova provides a powerful middleware system for intercepting and processing HTTP requests before they reach your route handlers. Middleware can inspect, modify, or short-circuit requests, and also post-process responses.
+Middleware wraps a request handler. It runs before the handler sees the
+request and again after the handler returns a response, so it's the
+place to put cross-cutting work — auth, logging, CORS, throttling,
+timing, transforming the request or response. Suprnova's surface is the
+same one Laravel users already know: a `handle(request, next)` method
+that decides whether to forward the request, short-circuit it, or
+mutate the response on the way back out.
 
-## Generating Middleware
+## The trait
 
-The fastest way to create a new middleware is using the suprnova CLI:
-
-```bash
-suprnova make:middleware Auth
-```
-
-This command will:
-1. Create `src/middleware/auth.rs` with a middleware stub
-2. Update `src/middleware/mod.rs` to export the new middleware
-
-```bash Examples
-# Creates AuthMiddleware in src/middleware/auth.rs
-suprnova make:middleware Auth
-
-# Creates RateLimitMiddleware in src/middleware/rate_limit.rs
-suprnova make:middleware RateLimit
-
-# You can also include "Middleware" suffix (same result)
-suprnova make:middleware CorsMiddleware
-```
-
-```rust Generated File
-//! Auth middleware
-
-use suprnova::{async_trait, Middleware, Next, Request, Response};
-
-/// Auth middleware
-pub struct AuthMiddleware;
-
-#[async_trait]
-impl Middleware for AuthMiddleware {
-    async fn handle(&self, request: Request, next: Next) -> Response {
-        // TODO: Implement middleware logic
-        next(request).await
-    }
-}
-```
-
-## Overview
-
-Middleware sits between the incoming request and your route handlers, allowing you to:
-
-- Authenticate and authorize requests
-- Log requests and responses
-- Add CORS headers
-- Rate limit requests
-- Transform request/response data
-- And much more
-
-## Creating Middleware
-
-To create middleware, define a struct and implement the `Middleware` trait:
+A middleware is a struct that implements `Middleware`:
 
 ```rust
 use suprnova::{async_trait, HttpResponse, Middleware, Next, Request, Response};
@@ -65,165 +20,242 @@ pub struct LoggingMiddleware;
 #[async_trait]
 impl Middleware for LoggingMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
-        // Pre-processing: runs before the route handler
+        // Pre-processing: runs before the handler.
         println!("--> {} {}", request.method(), request.path());
 
-        // Call the next middleware or route handler
+        // Forward to the next middleware (or the handler if this is
+        // the last layer).
         let response = next(request).await;
 
-        // Post-processing: runs after the route handler
-        println!("<-- Request complete");
+        // Post-processing: runs after the handler returns.
+        println!("<-- complete");
 
         response
     }
 }
 ```
 
-### The `handle` Method
+`handle` has three things to do, and you only have to do one of them
+on any given request:
 
-The `handle` method receives:
-- `request`: The incoming HTTP request
-- `next`: A function to call the next middleware in the chain (or the route handler)
+- **Forward.** Call `next(request).await` to pass control to the next
+  layer. The returned `Response` is what every layer above will see.
+- **Short-circuit.** Return `Err(HttpResponse::...)` without calling
+  `next`. The framework collapses both arms of `Response`
+  (`Result<HttpResponse, HttpResponse>`) into a single response — an
+  `Err` is a response, not a crash. See [Error Model](error-model.md).
+- **Mutate.** Modify the request before forwarding, or modify the
+  response after.
 
-You can:
-- **Continue the chain**: Call `next(request).await` to pass control to the next middleware
-- **Short-circuit**: Return a response early without calling `next()`
-- **Modify the request**: Transform the request before calling `next()`
-- **Modify the response**: Transform the response after calling `next()`
+`Next` is `Arc<dyn Fn(Request) -> MiddlewareFuture + Send + Sync>` —
+treat it like an async function from `Request` to `Response`.
 
-### Short-Circuiting Requests
+## Generating a stub
 
-Return early to block a request from reaching the route handler:
+The CLI scaffolds a working middleware file:
 
-```rust
-use suprnova::{async_trait, HttpResponse, Middleware, Next, Request, Response};
-
-pub struct AuthMiddleware;
-
-#[async_trait]
-impl Middleware for AuthMiddleware {
-    async fn handle(&self, request: Request, next: Next) -> Response {
-        // Check for Authorization header
-        if request.header("Authorization").is_none() {
-            // Short-circuit: return 401 without calling the route handler
-            return Err(HttpResponse::text("Unauthorized").status(401));
-        }
-
-        // Continue to the route handler
-        next(request).await
-    }
-}
+```bash
+suprnova make:middleware Auth         # → src/middleware/auth.rs (AuthMiddleware)
+suprnova make:middleware RateLimit    # → src/middleware/rate_limit.rs
+suprnova make:middleware CorsMiddleware  # "Middleware" suffix is fine, same result
 ```
 
-## Registering Middleware
+The generated file isn't a TODO stub — it's a real middleware that
+times the wrapped request and logs the inbound/outbound events with
+the per-request id installed by `RequestIdMiddleware`. Replace the
+body with whatever you actually need.
 
-suprnova supports three levels of middleware:
+## Registering middleware
 
-### 1. Global Middleware
+Three places to install it, depending on scope:
 
-Global middleware runs on **every request**. Register it in `bootstrap.rs` using the `global_middleware!` macro:
+### Global
+
+Runs on every request, in registration order. Use the
+`global_middleware!` macro inside `bootstrap()`:
 
 ```rust
 // src/bootstrap.rs
-use suprnova::{global_middleware, DB};
+use suprnova::{global_middleware, FrameworkError};
 use crate::middleware;
 
-pub async fn register() {
-    // Initialize database
-    DB::init().await.expect("Failed to connect to database");
-
-    // Global middleware runs on every request (in registration order)
+pub async fn bootstrap() -> Result<(), FrameworkError> {
     global_middleware!(middleware::LoggingMiddleware);
     global_middleware!(middleware::CorsMiddleware);
+    Ok(())
 }
 ```
 
-### 2. Route Middleware
+`global_middleware!(M)` expands to `register_global_middleware(M)`.
+Registration is **idempotent per concrete type** — registering the same
+struct twice keeps the first registration and emits a debug log. That
+makes re-running boot (tests, hot-reload, multiple `Server` instances
+in a process) safe. To install several copies of the same behaviour
+with different config, wrap each in a distinct newtype.
 
-Apply middleware to individual routes using the `.middleware()` method:
+### Per route
+
+Chain `.middleware(M)` on a route definition from the `routes!` macro:
 
 ```rust
 // src/routes.rs
-use suprnova::{routes, get, post};
-use crate::controllers;
-use crate::middleware::AuthMiddleware;
+use suprnova::{routes, get};
+use crate::{controllers, middleware::AuthMiddleware};
 
 routes! {
     get!("/", controllers::home::index).name("home"),
     get!("/public", controllers::home::public),
 
-    // Protected route - requires AuthMiddleware
-    get!("/protected", controllers::dashboard::index).middleware(AuthMiddleware),
-    get!("/admin", controllers::admin::index).middleware(AuthMiddleware),
+    get!("/protected", controllers::dashboard::index)
+        .middleware(AuthMiddleware),
+    get!("/admin", controllers::admin::index)
+        .middleware(AuthMiddleware),
 }
 ```
 
-### 3. Route Group Middleware
+### Per group
 
-Apply middleware to a group of routes that share a common prefix:
+Apply middleware to every route in a `group(...)` block:
 
 ```rust
 use suprnova::Router;
-use crate::middleware::{AuthMiddleware, ApiMiddleware};
+use crate::middleware::{ApiMiddleware, AuthMiddleware};
+use crate::controllers::{user, admin};
 
 Router::new()
-    // Public routes (no middleware)
+    // Public routes — no middleware.
     .get("/", home_handler)
     .get("/login", login_handler)
 
-    // API routes with shared middleware
+    // Every route under /api carries ApiMiddleware.
     .group("/api", |r| {
-        r.get("/users", list_users)
-         .post("/users", create_user)
-         .get("/users/{id}", show_user)
+        r.get("/users", user::index)
+         .post("/users", user::store)
+         .get("/users/{id}", user::show)
     })
     .middleware(ApiMiddleware)
 
-    // Admin routes with auth middleware
+    // Admin routes share auth.
     .group("/admin", |r| {
-        r.get("/dashboard", admin_dashboard)
-         .get("/settings", admin_settings)
+        r.get("/dashboard", admin::dashboard)
+         .get("/settings", admin::settings)
     })
-    .middleware(AuthMiddleware)
+    .middleware(AuthMiddleware);
 ```
 
-## Middleware Execution Order
+## Execution order
 
-Middleware executes in the following order:
-
-1. **Global middleware** (in registration order)
-2. **Route group middleware**
-3. **Route-level middleware**
-4. **Route handler**
-
-For responses, the order is reversed (post-processing happens in reverse order).
+At runtime the chain runs outside-in:
 
 ```
-Request -> Global MW -> Group MW -> Route MW -> Handler
-                                                  |
-Response <- Global MW <- Group MW <- Route MW <- Handler
+Request  →  RequestId  →  globals  →  group MW  →  route MW  →  handler
+                                                                  │
+Response ←  RequestId  ←  globals  ←  group MW  ←  route MW  ←  handler
 ```
 
-## Request Timeouts
+The first middleware added runs first. On the way back out, the order
+reverses — `MiddlewareChain::execute` nests each layer's post-processing
+inside the previous one.
 
-`TimeoutMiddleware` is a built-in middleware that bounds how long a handler may take to **produce a response**. A slow handler or a hung database query can otherwise hold a connection open indefinitely; the timeout returns `503 Service Unavailable` once the deadline is exceeded.
+If a middleware short-circuits with `Err(response)`, the chain unwinds
+immediately: every layer ABOVE the short-circuit still sees the response
+on the way back out, but layers BELOW (closer to the handler) do not run.
 
-### Installing the timeout
+### Group middleware is flattened, not stacked
 
-Install it globally for a process-wide ceiling (the default is 30 seconds), or per-route to tighten a specific endpoint.
+This one matters and is worth calling out. **Route-group middleware is
+not a separate runtime layer.** When `GroupBuilder::try_finalize` runs,
+it copies the group's middleware into each grouped route's
+`(method, pattern)` middleware list. By execution time, group middleware
+is indistinguishable from middleware attached directly to the route.
+
+Two consequences:
+
+- Runtime ordering is still correct (group middleware runs before route
+  middleware because it's registered first), but **introspection cannot
+  tell group from route middleware apart**.
+- Middleware keyed by the matched pattern (`"/posts/{id}"`), not the
+  raw path (`/posts/42`), so group middleware on parameterised routes
+  fires reliably.
+
+See `framework/src/routing/group.rs` for the flattening pass and
+`framework/src/middleware/chain.rs` for the execution loop.
+
+## Short-circuiting
+
+Return early to block a request before it reaches the handler:
 
 ```rust
-// src/bootstrap.rs — a 30s ceiling on every HTTP route
-use suprnova::{global_middleware, TimeoutMiddleware};
+use suprnova::{async_trait, HttpResponse, Middleware, Next, Request, Response};
 
-pub async fn register() {
-    global_middleware!(TimeoutMiddleware::default()); // 30 seconds
-    // ... other global middleware
+pub struct RequireApiKey;
+
+#[async_trait]
+impl Middleware for RequireApiKey {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        if request.header("X-Api-Key").is_none() {
+            return Err(HttpResponse::text("Unauthorized").status(401));
+        }
+        next(request).await
+    }
 }
 ```
 
+The chain collapses `Result<HttpResponse, HttpResponse>` to a single
+response, so `Err(...)` is just a response with a different role. The
+layers above this middleware still observe it on the way out and can
+post-process it.
+
+## Panic safety
+
+`MiddlewareChain::execute` does NOT catch panics — a panic in any
+middleware or in the handler unwinds straight out, like any other async
+function. The request-path safety net lives one level up at the server
+boundary in `execute_chain_safely`, which wraps the chain in
+`catch_unwind` and converts a panic into a sanitised 500 with the
+request id, dispatching `ErrorOccurred` for any observability listener.
+See [Request Lifecycle](lifecycle.md) for the full panic-recovery flow.
+
+This split is deliberate: standardised panic handling happens exactly
+once, where the request lifecycle owns it, rather than being duplicated
+inside the layer-agnostic primitive. A consumer driving a chain outside
+that boundary is responsible for its own `catch_unwind`.
+
+## Built-in middleware
+
+A non-exhaustive map. Each ships ready to install — most need a config
+struct, none need scaffolding.
+
+| Middleware | Purpose |
+|---|---|
+| `RequestIdMiddleware` | Always-outermost layer; assigns a UUID per request and tags it through logs + `X-Request-Id` |
+| `TimeoutMiddleware` | Bounds time-to-response; returns 503 when exceeded (see below) |
+| `CorsMiddleware` | Handles CORS preflight + decorates cross-origin responses (see below) |
+| `CsrfMiddleware` | Cookie-double-submit CSRF protection with configurable `OriginPolicy` |
+| `RateLimitMiddleware` / `ThrottleRequestsMiddleware` | Token-bucket and sliding-window throttling; see [Rate Limiting](rate-limiting.md) |
+| `SessionMiddleware` | Loads/persists the session over cookies; powers `req.session()` |
+| `AuthMiddleware` / `GuestMiddleware` / `BearerTokenMiddleware` | Guard membership checks; see [Authentication](authentication.md) |
+| `LoginThrottleMiddleware` / `EnsureEmailVerifiedMiddleware` / `TwoFactorChallengeMiddleware` | Auth-flow gates; see [Auth Flows](auth-flows.md) |
+| `MaintenanceMiddleware` | Returns 503 when the cache or filesystem maintenance flag is set |
+| `InertiaVersionMiddleware` / `EncryptHistoryMiddleware` | Inertia asset-version negotiation + history encryption |
+| `IncludeMiddleware` | Per-field include sets for `#[derive(Data)]` partial reloads |
+
+### Request timeouts
+
+`TimeoutMiddleware` bounds how long a handler may take to *produce* a
+response. A slow handler or a hung database query can otherwise hold
+a connection open indefinitely; the timeout returns
+`503 Service Unavailable` once the deadline is exceeded.
+
 ```rust
-// Tighten a single endpoint to 5 seconds
+// src/bootstrap.rs — 30-second ceiling on every HTTP route.
+use suprnova::{global_middleware, TimeoutMiddleware};
+
+global_middleware!(TimeoutMiddleware::default()); // DEFAULT_TIMEOUT = 30s
+```
+
+```rust
+// Tighten a single endpoint to 5 seconds.
 use suprnova::{Router, TimeoutMiddleware};
 
 Router::new()
@@ -231,204 +263,91 @@ Router::new()
     .middleware(TimeoutMiddleware::seconds(5));
 ```
 
-`TimeoutMiddleware::new(duration)` accepts any `Duration`; `TimeoutMiddleware::seconds(n)` is shorthand for whole seconds.
+`TimeoutMiddleware::new(Duration)` accepts any duration;
+`TimeoutMiddleware::seconds(n)` is shorthand for whole seconds.
 
-### Global is a ceiling; per-route tightens
+Global middleware runs **outside** route middleware, so a global timeout
+is an outer ceiling and a per-route timeout can only make a specific
+route *stricter* — the shorter deadline fires first. To let one route
+run longer than the global default, raise the global value or scope the
+global middleware to a route group that excludes that endpoint.
 
-Global middleware runs **outside** route middleware, so a global timeout is an outer ceiling and a per-route timeout can only make a route *stricter* — the shorter deadline fires first. To let one route run *longer* than the global default, either raise the global value or scope the global middleware to a route group that excludes that endpoint.
+Streaming responses (`HttpResponse::sse(...)`,
+`HttpResponse::stream_bytes(...)`) are naturally exempt: the handler
+returns immediately with a lazy body that hyper drains after the
+middleware chain completes. WebSocket upgrades are also skipped
+explicitly. See [Timeouts](timeout.md) for cancel-safety semantics.
 
-### Streaming responses and WebSockets are exempt
+### CORS
 
-The deadline bounds *time-to-response* — the moment your handler returns its `HttpResponse` — not how long the body streams afterwards:
+`CorsMiddleware` adds the `Access-Control-*` headers a browser needs to
+let a cross-origin page read your responses, and answers the preflight
+`OPTIONS` request browsers send before non-simple cross-origin calls.
+Same-origin apps (the default Inertia setup) don't need it — it matters
+only when a browser on a *different* origin calls your API.
 
-- **SSE and streaming responses** (`HttpResponse::sse(...)`, `HttpResponse::stream_bytes(...)`) are naturally exempt. The handler returns immediately with a lazy body that the server drains afterwards, so a long-lived event stream is never cut off by the timeout.
-- **WebSocket upgrades** (requests carrying `Upgrade: websocket`) are skipped explicitly and never armed.
-
-### Cancel safety
-
-When the deadline elapses the in-flight handler is **cancelled** — its future is dropped at the current `.await` point. Anything held across that point is released by its `Drop` impl, so open transactions roll back and locks release. Work you moved off the request with `tokio::spawn` is detached and will **not** be cancelled, so keep handlers cancel-safe.
-
-## Cross-Origin Resource Sharing (CORS)
-
-`CorsMiddleware` is a built-in middleware that adds the `Access-Control-*` headers a browser needs to let a cross-origin page read your responses, and answers the preflight `OPTIONS` request browsers send before non-simple cross-origin calls. Same-origin apps (the default Inertia setup) don't need it — it matters once a browser on a *different* origin calls your API (public API, separate SPA host, mobile webview).
-
-### Installing CORS
-
-CORS must be installed **globally** so preflight requests reach it (see below). There is intentionally no permissive default — choose an origin policy explicitly:
+CORS must be installed **globally** so preflights reach it (a preflight
+never matches a route, so a per-route CORS middleware would never see
+one). There is intentionally no permissive default — pick an origin
+policy explicitly:
 
 ```rust
 // src/bootstrap.rs
 use suprnova::{global_middleware, CorsConfig, CorsMiddleware};
 
-pub async fn register() {
-    global_middleware!(CorsMiddleware::new(
-        CorsConfig::allow_origins(["https://app.example", "https://admin.example"])
-            .allow_credentials(true)
-            .max_age(std::time::Duration::from_secs(600)),
-    ));
-}
+global_middleware!(CorsMiddleware::new(
+    CorsConfig::allow_origins(["https://app.example", "https://admin.example"])
+        .allow_credentials(true)
+        .max_age(std::time::Duration::from_secs(600)),
+));
 ```
 
-`CorsConfig::any_origin()` opts into `Access-Control-Allow-Origin: *` explicitly. Builder methods: `.methods([...])`, `.allow_headers([...])` / `.allow_any_headers()`, `.expose_headers([...])`, `.allow_credentials(bool)`, `.max_age(Duration)`.
+`CorsConfig::any_origin()` opts into `Access-Control-Allow-Origin: *`
+explicitly. Builder methods: `.methods([...])`, `.allow_headers([...])`
+/ `.allow_any_headers()`, `.expose_headers([...])`, `.paths([...])`
+(scope CORS to URL patterns), `.allow_origin_patterns([regex...])`,
+`.skip_when(|req| bool)`, `.allow_credentials(bool)`,
+`.max_age(Duration)`. Laravel-named aliases ship alongside (e.g.
+`.supports_credentials`, `.allowed_methods`) so a Laravel config maps
+directly.
 
-### Why CORS must be global
+`Access-Control-Allow-Origin: *` is invalid together with credentials —
+the browser rejects it. When `.allow_credentials(true)` is set, the
+middleware always echoes the specific request `Origin` instead of `*`,
+so the invalid combination can never be emitted. Non-wildcard responses
+also get `Vary: Origin` so shared caches stay correct. See
+[CORS](cors.md).
 
-A preflight is an `OPTIONS` request carrying `Access-Control-Request-Method`, and the router has no `OPTIONS` routes — so a preflight never matches a route. suprnova still runs the global middleware chain for unmatched requests (terminating in a 404), so a globally-installed `CorsMiddleware` intercepts the preflight and answers it with `204` before the 404 is produced. A *per-route* CORS middleware would never see preflights.
+## Pipeline — Laravel's `Illuminate\Pipeline\Pipeline`
 
-### Credentials and `*`
-
-`Access-Control-Allow-Origin: *` is invalid together with credentials — the browser rejects it. When `.allow_credentials(true)` is set, the middleware always echoes the specific request `Origin` (and reflects requested headers) instead of `*`, so the invalid combination can't be emitted. Non-wildcard responses also get `Vary: Origin` so shared caches stay correct.
-
-## Practical Examples
-
-### CORS Middleware
-
-> **Note:** This is a hand-rolled illustration. For production, prefer the built-in `suprnova::CorsMiddleware` (see *Cross-Origin Resource Sharing (CORS)* above) — it handles preflight `OPTIONS`, credentials, and `Vary` correctly.
+`Pipeline` is the Suprnova analogue of Laravel's pipeline class — a
+fluent builder over `MiddlewareChain` that mirrors the `send / through /
+pipe / then / then_return / finally_with` shape Laravel users already
+know. Useful when you want to assemble a middleware chain outside the
+request lifecycle (a job, a CLI command, a one-off integration test):
 
 ```rust
-use suprnova::{async_trait, Middleware, Next, Request, Response, HttpResponse};
-
-pub struct CorsMiddleware;
-
-#[async_trait]
-impl Middleware for CorsMiddleware {
-    async fn handle(&self, request: Request, next: Next) -> Response {
-        let response = next(request).await;
-
-        // Add CORS headers to the response
-        match response {
-            Ok(mut res) => {
-                res = res
-                    .header("Access-Control-Allow-Origin", "*")
-                    .header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE")
-                    .header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-                Ok(res)
-            }
-            Err(mut res) => {
-                res = res
-                    .header("Access-Control-Allow-Origin", "*");
-                Err(res)
-            }
-        }
-    }
-}
-```
-
-### Rate Limiting Middleware
-
-```rust
-use suprnova::{async_trait, Middleware, Next, Request, Response, HttpResponse};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-
-pub struct RateLimitMiddleware {
-    requests: Arc<AtomicUsize>,
-    max_requests: usize,
-}
-
-impl RateLimitMiddleware {
-    pub fn new(max_requests: usize) -> Self {
-        Self {
-            requests: Arc::new(AtomicUsize::new(0)),
-            max_requests,
-        }
-    }
-}
-
-#[async_trait]
-impl Middleware for RateLimitMiddleware {
-    async fn handle(&self, request: Request, next: Next) -> Response {
-        let count = self.requests.fetch_add(1, Ordering::SeqCst);
-
-        if count >= self.max_requests {
-            return Err(HttpResponse::text("Too Many Requests").status(429));
-        }
-
-        next(request).await
-    }
-}
-```
-
-### Request Timing Middleware
-
-```rust
-use suprnova::{async_trait, Middleware, Next, Request, Response};
-use std::time::Instant;
-
-pub struct TimingMiddleware;
-
-#[async_trait]
-impl Middleware for TimingMiddleware {
-    async fn handle(&self, request: Request, next: Next) -> Response {
-        let start = Instant::now();
-        let path = request.path().to_string();
-
-        let response = next(request).await;
-
-        let duration = start.elapsed();
-        println!("{} completed in {:?}", path, duration);
-
-        response
-    }
-}
-```
-
-## File Organization
-
-The recommended file structure for middleware:
-
-```
-src/
-├── middleware/
-│   ├── mod.rs          # Re-export all middleware
-│   ├── auth.rs         # Authentication middleware
-│   ├── logging.rs      # Logging middleware
-│   └── cors.rs         # CORS middleware
-├── bootstrap.rs        # Register global middleware
-├── routes.rs           # Apply route-level middleware
-└── main.rs
-```
-
-**src/middleware/mod.rs:**
-```rust
-mod auth;
-mod logging;
-mod cors;
-
-pub use auth::AuthMiddleware;
-pub use logging::LoggingMiddleware;
-pub use cors::CorsMiddleware;
-```
-
-## Pipeline (Laravel `Illuminate\Pipeline\Pipeline`)
-
-`Pipeline` is the Suprnova analogue of Laravel's pipeline class. It's a fluent
-builder that wraps `MiddlewareChain`, mirroring the `send / through / pipe /
-then / then_return / finally_with` shape Laravel users already know.
-
-```rust
-use suprnova::{Pipeline, HttpResponse};
+use suprnova::{Pipeline, Request};
 
 let response = Pipeline::new()
     .send(request)
     .through([AuthMiddleware, LoggingMiddleware])
-    .pipe(CorsMiddleware)
+    .pipe(CorsMiddleware::new(cors_config))
     .finally_with(|| tracing::info!("pipeline complete"))
     .then(|req| async move { handler(req).await })
     .await;
 ```
 
-Dual-API aliases live on the Rust side: `with_request` for `send`,
-`with_middleware` for `through`, `push` for `pipe`, `on_finally` for
-`finally_with`, and `execute` for `then`. Use whichever reads more naturally
-in your codebase — the Laravel names ship as first-class so a Laravel
-developer can write the same code they already know.
+Rust-side aliases ship alongside the Laravel names: `with_request` for
+`send`, `with_middleware` for `through`, `push` for `pipe`, `on_finally`
+for `finally_with`, `execute` for `then`. Use whichever reads better in
+your codebase.
 
-| Pipeline method | Laravel | Rust-side alias | Purpose |
+| Pipeline method | Laravel | Rust alias | Purpose |
 |---|---|---|---|
 | `send(request)` | `send($passable)` | `with_request(request)` | Set the request being threaded through |
 | `through(iter)` | `through($pipes)` | `with_middleware(iter)` | Replace the pipe list |
-| `through_boxed(iter)` | — | — | Replace the pipe list using pre-boxed middleware |
+| `through_boxed(iter)` | — | — | Replace the pipe list with pre-boxed middleware |
 | `pipe(M)` | `pipe($pipes)` | `push(M)` | Append a single middleware |
 | `pipe_boxed(M)` | — | — | Append a pre-boxed middleware |
 | `then(destination)` | `then($destination)` | `execute(destination)` | Run the chain with the destination handler |
@@ -436,13 +355,15 @@ developer can write the same code they already know.
 | `then_return()` | `thenReturn()` | — | Run the chain, return a 204 No Content |
 | `finally_with(F)` | `finally($callback)` | `on_finally(F)` | Run after the destination resolves |
 
-## Terminable middleware (post-response hooks)
+## Terminable middleware — post-response hooks
 
-Terminable middleware runs *after* the response has been sent to the client.
-Use it for slow IO that doesn't need to block the response — session
-persistence, audit logging, metrics flushes. Suprnova ships this as a
-dedicated `Terminable` trait so the request-path and termination-path are
-clearly typed and a middleware can opt into one, the other, or both.
+Terminable middleware runs *after* the response has been sent to the
+client. Use it for slow IO that doesn't need to block the response:
+session persistence, audit logging, metrics flushes.
+
+Suprnova ships this as a dedicated `Terminable` trait separate from
+`Middleware`, so the request-path and termination-path stay clearly
+typed. A type can implement one, the other, or both:
 
 ```rust
 use suprnova::{Terminable, TerminationSnapshot, register_terminable, async_trait};
@@ -465,17 +386,20 @@ impl Terminable for AuditLogTerminator {
 register_terminable(AuditLogTerminator);
 ```
 
-Termination is dispatched on the background runtime by the server after every
-response — including 4xx and 5xx — so hooks never block the wire. Registration
-is idempotent per concrete type, matching the global middleware contract.
-`registered_terminables()`, `terminable_count()`, and `has_terminable::<T>()`
-provide introspection for tests and boot-time diagnostics.
+The server iterates registered terminables in registration order after
+every response (4xx and 5xx included) and awaits each one. Errors are
+logged via `tracing::error!` and swallowed — the response has already
+left the building, so there's nobody left to surface them to.
 
-## Named middleware aliases and groups
+Registration is idempotent per concrete type. `registered_terminables()`,
+`terminable_count()`, and `has_terminable::<T>()` provide introspection
+for tests and boot-time diagnostics.
+
+## Named aliases and groups
 
 For consumers that prefer string-keyed middleware (Laravel's
-`middlewareAliases` / `middlewareGroups`), Suprnova ships a process-global
-alias and group registry:
+`middlewareAliases` / `middlewareGroups`), Suprnova ships a
+process-global alias + group registry:
 
 ```rust
 use suprnova::middleware::{
@@ -483,15 +407,14 @@ use suprnova::middleware::{
     resolve_middleware_group,
 };
 
-// Aliases are factory closures — invoked fresh per resolution so each
+// Aliases are factory closures — invoked fresh per resolution, so each
 // route registration produces an independent middleware instance.
-register_middleware_alias("auth", || AuthMiddleware);
-register_middleware_alias("throttle", || ThrottleMiddleware::default());
-register_middleware_alias("cors", || CorsMiddleware::default());
+register_middleware_alias("auth", || AuthMiddleware::new());
+register_middleware_alias("throttle", || ThrottleRequestsMiddleware::default());
 
-// Groups bundle aliases (and other groups — nesting is supported).
+// Groups bundle aliases. Nested groups are supported.
 register_middleware_group("api", ["auth".into(), "throttle".into()]);
-register_middleware_group("web", ["cors".into(), "auth".into()]);
+register_middleware_group("web", ["session".into(), "auth".into()]);
 
 // Resolve into a Vec<BoxedMiddleware> at boot or per-route.
 let api_mws = resolve_middleware_group("api")?;
@@ -500,25 +423,27 @@ let api_mws = resolve_middleware_group("api")?;
 `resolve_middleware_group` returns `Err(MiddlewareResolveError)` on:
 
 - `UnknownGroup(name)` — the named group was never registered;
-- `UnknownAlias { group, missing }` — the group entry isn't a known alias;
-- `UnknownNestedGroup { group, missing }` — a nested group reference fails to resolve;
+- `UnknownAlias { group, missing }` — a group entry isn't a known alias;
+- `UnknownNestedGroup { group, missing }` — a nested group reference
+  fails to resolve;
 - `CycleDetected { group }` — the group definition is recursive.
 
-Registration of an alias or group is **last-wins** for the same name, mirroring
-Laravel's reassignable kernel array.
+Registration of an alias or group is **last-wins** for the same name,
+mirroring Laravel's reassignable kernel array.
 
 ## Middleware priority
 
 `prepend_middleware_priority::<M>()` / `append_middleware_priority::<M>()`
-register a `TypeId` in the process-global priority list. The list is the
-Suprnova analogue of Laravel's `Kernel::$middlewarePriority`: middleware whose
-type appears earlier in the list sorts to the front of the chain regardless
-of registration order.
+register a `TypeId` in the process-global priority list — the Suprnova
+analogue of Laravel's `Kernel::$middlewarePriority`. Middleware whose
+type appears earlier in the list sorts to the front of the chain
+regardless of registration order:
 
 ```rust
-use suprnova::{append_middleware_priority, prepend_middleware_priority};
+use suprnova::{append_middleware_priority};
 
-// SessionMiddleware always runs before AuthMiddleware.
+// SessionMiddleware always runs before AuthMiddleware regardless of
+// the order they were registered.
 append_middleware_priority::<SessionMiddleware>();
 append_middleware_priority::<AuthMiddleware>();
 ```
@@ -526,7 +451,7 @@ append_middleware_priority::<AuthMiddleware>();
 `middleware_priority()` returns a snapshot of the current `Vec<TypeId>`
 for diagnostics or for an embedder that wants to drive its own sorter.
 
-## Global middleware introspection
+## Registry introspection
 
 Beyond `register_global_middleware`, the registry exposes:
 
@@ -535,26 +460,76 @@ Beyond `register_global_middleware`, the registry exposes:
 | `prepend_global_middleware(M)` | `prependMiddleware` | Insert at the front of the chain |
 | `has_global_middleware::<M>()` | `hasMiddleware` | Whether type `M` is registered |
 | `global_middleware_count()` | — | Number of globals currently registered |
+| `MiddlewareRegistry::from_global()` | — | Snapshot the global registry into a per-server registry |
 | `MiddlewareRegistry::prepend(M)` | — | Builder-style prepend on a registry instance |
 | `MiddlewareRegistry::append_boxed(M)` | — | Append a pre-boxed middleware |
 | `MiddlewareRegistry::prepend_boxed(M)` | — | Prepend a pre-boxed middleware |
 | `MiddlewareRegistry::len()` / `is_empty()` | — | Builder introspection |
 
-## Summary
+`MiddlewareRegistry::from_global()` snapshots the global registry at
+call time. Register every global middleware BEFORE constructing the
+server — a `global_middleware!` call made AFTER the server is built
+does not retroactively apply, so a running server's middleware stack
+cannot shift underneath it.
 
-| Feature | Usage |
-|---------|-------|
-| Create middleware | Implement `Middleware` trait |
-| Global middleware | `global_middleware!(MyMiddleware)` in `bootstrap.rs` |
-| Prepend global | `prepend_global_middleware(MyMiddleware)` |
-| Route middleware | `.middleware(MyMiddleware)` on route definition |
-| Group middleware | `.middleware(MyMiddleware)` on route group |
-| Pipeline builder | `Pipeline::new().send(req).through([...]).then(dst).await` |
-| Named aliases | `register_middleware_alias("auth", \|\| AuthMw)` |
-| Named groups | `register_middleware_group("api", ["auth", "throttle"])` |
-| Priority ordering | `append_middleware_priority::<MyMw>()` |
-| Terminable hooks | `register_terminable(MyTerminator)` — runs post-response |
-| Short-circuit | Return `Err(HttpResponse::...)` without calling `next()` |
-| Continue chain | Call `next(request).await` |
-| Request timeout | `global_middleware!(TimeoutMiddleware::default())` (global ceiling) or `.middleware(TimeoutMiddleware::seconds(n))` (per route) |
-| CORS | `global_middleware!(CorsMiddleware::new(CorsConfig::allow_origins([...])))` — must be global so preflight is handled |
+## File layout
+
+A typical layout once you have a few middlewares:
+
+```
+src/
+├── middleware/
+│   ├── mod.rs          # mod + pub use
+│   ├── auth.rs         # AuthMiddleware
+│   ├── logging.rs      # LoggingMiddleware
+│   └── audit.rs        # AuditLogTerminator
+├── bootstrap.rs        # global_middleware! + register_terminable
+├── routes.rs           # .middleware(M) per-route
+└── main.rs
+```
+
+`make:middleware` keeps `src/middleware/mod.rs` in sync — it appends
+the new `mod foo;` declaration and the matching `pub use foo::FooMiddleware;`
+re-export when the file is generated.
+
+## Why Suprnova diverges
+
+Laravel registers middleware classes in `app/Http/Kernel.php` and
+resolves them through the container, which performs reflection on
+constructor type-hints to inject dependencies. PHP's request-per-process
+model means the kernel is rebuilt every request, so the cost of
+reflective resolution is paid once per request and disappears between
+requests.
+
+Suprnova's process model is one binary serving many concurrent requests
+across many threads. Building a fresh chain per request would force a
+synchronisation point on the global middleware list and re-allocate
+`Arc<dyn Middleware>` for every layer on every request. Instead:
+
+- Global middleware is registered into a `OnceLock<RwLock<Vec<...>>>`
+  at boot, keyed by `TypeId` for idempotent registration.
+- `MiddlewareRegistry::from_global()` snapshots the global list once at
+  server construction; the per-request chain reuses that snapshot.
+- The chain itself is composed by nesting `Arc<dyn Fn>` closures, so
+  per-request work is one `Arc::clone` per layer rather than a fresh
+  allocation.
+
+The user-facing surface — `handle(request, next)`, the `global_middleware!`
+macro, named aliases, priority lists, terminable hooks — is the same
+one a Laravel developer reaches for. The machinery underneath swaps
+PHP's per-request rebuild for a Rust-shaped snapshot-at-boot model so
+the framework can serve concurrent requests without contending on the
+registry.
+
+## Next
+
+- [Request Lifecycle](lifecycle.md) — where the chain runs and how
+  panics are caught at the server boundary
+- [Error Model](error-model.md) — what `Result<HttpResponse, HttpResponse>`
+  actually means and how short-circuits collapse
+- [Timeouts](timeout.md) — `TimeoutMiddleware` cancel-safety in detail
+- [CORS](cors.md) — preflight handling, origin patterns, path scoping
+- [Rate Limiting](rate-limiting.md) — `RateLimitMiddleware` /
+  `ThrottleRequestsMiddleware` and `BackendErrorPolicy`
+- [Routing](routing.md) — what `routes!`, `Router`, and `group(...)`
+  expand into
