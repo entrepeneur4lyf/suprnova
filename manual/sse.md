@@ -219,23 +219,25 @@ automatically and sends the most recent `id:` it saw as the
 `.with_id(...)` and read the header on the resume request:
 
 ```rust
-use suprnova::{HttpResponse, Request, Response, sse::{self, SseEvent}};
-use tokio_stream::wrappers::BroadcastStream;
 use futures::StreamExt;
+use suprnova::{HttpResponse, Request, Response, sse::{self, SseEvent}};
 
 pub async fn stream_from_resume(req: Request) -> Response {
-    let resume_from: Option<u64> = sse::last_event_id(&req)
-        .and_then(|s| s.parse().ok());
+    let resume_from: u64 = sse::last_event_id(&req)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
 
-    let mut next_id: u64 = resume_from.unwrap_or(0) + 1;
-
-    // Build the producer stream from `next_id` onward ...
-    let stream = futures::stream::iter(events_since(next_id))
-        .map(move |payload| {
-            let id = next_id;
-            next_id += 1;
+    // Build the producer stream from `resume_from + 1` onward. The closure
+    // owns its own running counter so the mutation stays inside the stream.
+    let stream = futures::stream::iter(events_since(resume_from))
+        .scan(resume_from + 1, |next_id, payload| {
+            let id = *next_id;
+            *next_id += 1;
+            futures::future::ready(Some((id, payload)))
+        })
+        .map(|(id, payload)| {
             SseEvent::json("activity", &payload)
-                .unwrap()
+                .expect("payload is a Serialize value")
                 .with_id(id.to_string())
         });
 
@@ -272,8 +274,8 @@ framework never has to invent a default shape.
 
 ## Broadcasting one stream to many subscribers
 
-Fan-out to many SSE subscribers is already covered by the broadcasting
-subsystem ([Phase 7B](broadcasting.md)): subscribe to a
+Fan-out to many SSE subscribers is already covered by the
+[broadcasting subsystem](broadcasting.md): subscribe to a
 `BroadcastHub` channel and adapt the `broadcast::Receiver` into the
 `SseEvent` stream with `tokio_stream::wrappers::BroadcastStream` +
 `.map(...)`. Each connection gets its own receiver; the hub handles
@@ -341,14 +343,53 @@ emitted verbatim — no coercion. For production streams a 5–15 second
 retry strikes a balance between fast recovery and not hammering the
 server during a regional outage.
 
-## Summary
+### Why Suprnova diverges
 
-| Feature | API |
-|---------|-----|
-| Build a frame | `SseEvent::data("...")`, `SseEvent::json("event", &payload)`, `SseEvent::error("msg")` |
-| Tag a frame | `.with_event(...)`, `.with_id(...)`, `.with_retry(Duration)` |
-| Fail-fast on bad input | `.try_with_event(...)`, `.try_with_id(...)` |
-| Build a keep-alive | `SseEvent::keep_alive()`, `SseEvent::comment("...")` |
-| Resume on reconnect | `sse::last_event_id(&req)` |
-| Open the stream | `HttpResponse::sse(stream)` |
-| Fan out to many subscribers | `BroadcastStream::new(hub.subscribe(...)).map(...)` |
+Laravel ships SSE as a one-off helper on `Response`: `Response::eventStream(fn () => ...)`
+takes a generator-yielding closure and frames each yielded value as a
+`data:` line. It does not model `event:` / `id:` / `retry:` as first-class
+fields, has no built-in keep-alive primitive, and does not sanitize values
+that would inject extra fields on the wire.
+
+Suprnova treats SSE as a real subsystem rather than a one-off helper:
+
+- `SseEvent` is a typed value with fallible (`try_with_*`) and infallible
+  (`with_*`) builders, distinct `Frame` and `Comment` kinds, and a
+  documented sanitization contract on every single-line field.
+- `HttpResponse::sse(stream)` plugs into the same `stream_bytes` body
+  pipeline used by any other long-lived response, so SSE shares one
+  cancellation, headers, and panic-isolation path with the rest of the
+  framework.
+- Producers compose any `Stream<Item = SseEvent>` — `tokio::sync::mpsc`,
+  `tokio::sync::broadcast`, `futures::stream::iter`, or the
+  [BroadcastHub](broadcasting.md) fan-out adapter. None of these require
+  a framework escape hatch.
+- A `Last-Event-ID` reader (`sse::last_event_id`) and the WHATWG NUL-drop
+  rule are in the box, so resume-after-drop is one parse call away rather
+  than a custom header utility per app.
+
+## Reference
+
+| Symbol | Purpose |
+|--------|---------|
+| `suprnova::sse::SseEvent` | One emittable piece of an SSE stream. Two kinds — `Frame` (event with optional `event` / `id` / `retry` + `data`) and `Comment` (keep-alive). |
+| `SseEvent::data(text)` | Build a frame with only `data:` lines. |
+| `SseEvent::json(event, &payload)` | Build a frame whose payload is `serde_json`-serialized `payload`; sets `event:` to `event`. Returns `Result<Self, serde_json::Error>`. |
+| `SseEvent::error(message)` | Build a frame with `event: error` and the supplied message as `data`. |
+| `SseEvent::comment(text)` | Build a comment-only event (`: <text>\n\n`). Browser-invisible; keeps proxies awake. |
+| `SseEvent::keep_alive()` | Shorthand for the empty comment `:\n\n`. Minimum-bytes heartbeat. |
+| `.with_event(name)` / `.with_id(id)` / `.with_retry(Duration)` | Infallible builders on a `Frame`; silent no-op on a `Comment`. Strip CR / LF / NUL at `to_wire()` time with a structured WARN. |
+| `.try_with_event(name)` / `.try_with_id(id)` | Fallible siblings — return `Err(FrameworkError::validation(...))` on CR / LF / NUL. Use when the value flows from user input and you want a 4xx instead of a silent strip. |
+| `.event()` / `.id()` / `.retry()` / `.payload()` / `.is_comment()` / `.comment_text()` | Accessors. `payload()` is named to avoid colliding with the `data` constructor. |
+| `SseEvent::to_wire()` | Serialize to `Bytes` in the SSE wire format. Public so tests and adapters can encode without crossing the response builder. |
+| `suprnova::sse::last_event_id(&Request) -> Option<String>` | Read the `Last-Event-ID` header. Returns `None` when absent OR when the value contains a NUL byte (WHATWG drops invalid ids). |
+| `suprnova::sse::last_event_id_from_value(Option<&str>)` | Pure helper exposing the same validation contract — unit-testable without building a `Request`. |
+| `HttpResponse::sse(stream)` | Build a streaming response from any `Stream<Item = SseEvent> + Send + Sync + 'static`. Sets `Content-Type`, `Cache-Control`, `Connection`, `X-Accel-Buffering`. |
+
+## Next
+
+- [WebSockets](websockets.md) — the other long-lived connection, when you need bidirectional or binary frames.
+- [Broadcasting](broadcasting.md) — `BroadcastHub` fan-out shared with WebSocket subscribers.
+- [Notifications](notifications.md) — channel drivers for non-streaming push delivery (mail, database, broadcast).
+- [Web Push](web-push.md) — server-pushed notifications that reach the client when no `EventSource` is open.
+- [Responses](responses.md) — the rest of the `HttpResponse` builder surface.
