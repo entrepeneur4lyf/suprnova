@@ -56,6 +56,20 @@ apply a `RetryLayer` (3 attempts) by default since transient throttling /
 5xx errors are routine on object stores. Use the `_with` variants when you
 need full control.
 
+The full set of opendal layers wired in by Suprnova is `RetryLayer`,
+`TimeoutLayer`, `LoggingLayer`, `TracingLayer` (bridges to OTel via
+`tracing-opentelemetry` when the framework's `otel` feature is on), and
+`PrometheusClientLayer` (exports histograms and counters into a
+`prometheus_client::registry::Registry` you own). Layer order matters —
+the outermost layer wraps everything inside it — and the idiomatic stack
+is `RetryLayer → TimeoutLayer → LoggingLayer` so a timed-out attempt
+still logs and a retry covers transport failures.
+
+Re-registering the same name replaces the previous operator and emits a
+`warn!` log — disks are meant to be registered once at boot, and an
+accidental duplicate could swap a production disk for a memory one. The
+replacement still happens; the warning just makes the swap audible.
+
 ### Path-traversal guard
 
 Local filesystem disks have a `PathGuardLayer` applied before any user-supplied
@@ -63,6 +77,11 @@ layers. A request like `disk.write("../escaped.txt", ..)` is rejected before
 it reaches the OS — no `..` component or absolute prefix can escape the disk
 root. Object stores and the in-memory backend do not get the guard (a key
 like `../foo` is just an ordinary key character on those backends).
+
+The guard rejects `..`/absolute *components*. It does not chase symlinks:
+a symlink planted inside the root that points outside it is an
+operating-system concern — mount the disk root on a dedicated filesystem,
+use `nosymfollow`, or chroot — not a `..`-traversal one.
 
 ## The Laravel-shape disk surface
 
@@ -221,7 +240,7 @@ async fn stores_and_asserts() {
 }
 ```
 
-The four assertion helpers — `assert_exists`, `assert_contents`,
+The five assertion helpers — `assert_exists`, `assert_contents`,
 `assert_missing`, `assert_count`, `assert_directory_empty` — are exposed via
 the [`DiskAssertExt`] trait, gated on `#[cfg(any(test, feature = "testing"))]`
 so production code cannot reach for them.
@@ -258,6 +277,30 @@ so production code cannot reach for them.
 | `Storage::disk()->assertExists()`     | `disk.assert_exists(path).await`                         |
 | `FilesystemManager::forgetDisk($n)`   | `Storage::forget(name)`                                  |
 | `FilesystemManager::purge()`          | `Storage::purge()`                                       |
+
+## Configuration
+
+Storage configuration lives entirely in Rust code, not in `.env`. Disks
+are registered by name in `bootstrap()` via `Storage::register_*` and
+addressed by name at the call site (`Storage::disk("public")`). There is
+no `FILESYSTEM_DISK` env var the framework reads and no implicit default
+disk — each driver is a peer. Apps decide which disk name a given upload
+or download targets, and pass any URLs / keys / credentials the chosen
+driver needs as their own env vars.
+
+See [Configuration](configuration.md) for the wider rule on where the
+framework reads from the environment versus where it expects code-side
+registration.
+
+## Next
+
+- [Configuration](configuration.md) — what the framework reads from
+  `.env` (and why storage isn't on that list)
+- [Requests](requests.md) — file uploads land on a disk via
+  `UploadedFile::store_as`
+- [Responses](responses.md) — streaming bytes back out of a disk
+- [Cache](cache.md) — the other named-driver registry, same shape
+- [Testing](testing.md) — the wider fake-everything testing surface
 
 [`DiskExt`]: https://docs.rs/suprnova/latest/suprnova/trait.DiskExt.html
 [`DiskAssertExt`]: https://docs.rs/suprnova/latest/suprnova/filesystem/testing/trait.DiskAssertExt.html
