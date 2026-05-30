@@ -233,10 +233,10 @@ gaps as of the shipped framework.
 | Cashier (Stripe) | `suprnova-payments-stripe` adapter crate behind generic `Payment` / `Subscription` / `CustomerStore` / `WebhookHandler` traits | diverged | Generic surface, concrete adapter. [Payments](payments.md), [Stripe Adapter](payments-stripe.md) |
 | Cashier (Paddle) | `suprnova-payments-paddle` adapter | diverged | Merchant-of-Record flow + no direct `Payment` impl (Paddle owns the gateway). [Paddle Adapter](payments-paddle.md) |
 | Custom provider | Implement `PaymentProvider` + `SessionPayload` + `WebhookHandler` | shipped | [Provider Guide](payments-provider-guide.md) |
-| Inertia checkout components | Ship in the scaffold | shipped | [Payments Frontend](payments-frontend.md) |
-| Subscription lifecycles | `Subscription::create / update / cancel / resume / swap` (where the provider supports them) | shipped | `NotSupported` returned where the provider doesn't (e.g. Paddle subscription updates) |
-| Webhook idempotency | `webhook_events` mirror table with `UNIQUE(provider, external_id)` | shipped | Stripe-style replay protection |
-| Mirror tables | `customers`, `payment_methods`, `payments`, `subscriptions`, `invoices`, `webhook_events` | shipped | `provider_metadata` JSONB column on each for adapter-specific fields |
+| Inertia checkout components | Documented dispatch loops for Svelte / React / Vue against `SessionPayload.flow` | shipped | [Payments Frontend](payments-frontend.md). Starter-kit-tier pre-wired billing pages land with the Spark-tier kit ([Starter Kits](starter-kits.md)) |
+| Subscription lifecycles | `Subscription::subscribe / update / cancel / get` (where the provider supports them) | shipped | `NotSupported` returned where the provider doesn't (e.g. Paddle `subscribe` and price-set replacement) |
+| Webhook idempotency | `payments_webhook_events` mirror table with `UNIQUE(provider, provider_event_id)` | shipped | Stripe-style replay protection |
+| Mirror tables | `payments_customers`, `payments_payment_methods`, `payments_subscriptions`, `payments_subscription_items`, `payments_transactions`, `payments_webhook_events` | shipped | `provider_metadata` JSONB column on each for adapter-specific fields |
 
 ## Frontend (Laravel has Blade + starter kits; we have Inertia)
 
