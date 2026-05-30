@@ -79,6 +79,7 @@ fn build_channel() -> Arc<WebPushChannel> {
     // Strict endpoint policy would reject those. Tests opt into AllowAny.
     let client = Arc::new(
         WebPushClient::new(signer, "mailto:admin@suprnova.dev")
+            .expect("test mailto: subject is a valid VAPID URI")
             .with_endpoint_policy(EndpointPolicy::AllowAny),
     );
     Arc::new(WebPushChannel::new(client, 60))
@@ -177,6 +178,7 @@ async fn webpush_channel_returns_error_for_malformed_subscription_json() {
                 VapidSigner::new(VapidKey::generate()),
                 "mailto:admin@suprnova.dev",
             )
+            .expect("valid mailto: subject")
             .with_endpoint_policy(EndpointPolicy::AllowAny),
         ),
         60,

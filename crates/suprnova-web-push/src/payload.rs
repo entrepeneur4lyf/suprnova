@@ -23,6 +23,17 @@ impl ContentEncoding {
 /// encryption overhead so the final payload fits the 4096-byte push-service cap.
 pub const MAX_PLAINTEXT_BYTES: usize = 3992;
 
+/// Required length of the receiver's P-256 uncompressed public key
+/// (`p256dh`) after base64url decoding, per RFC 8291 §3.1: a 65-byte
+/// uncompressed SEC1 point (`0x04 || X || Y`, each coordinate 32 bytes).
+/// Matches `ECE_WEBPUSH_PUBLIC_KEY_LENGTH` in the upstream `ece` crate.
+pub const P256DH_KEY_LEN: usize = 65;
+
+/// Required length of the receiver's auth secret after base64url
+/// decoding, per RFC 8291 §3.2: a 16-byte uniformly-random value. Matches
+/// `ECE_WEBPUSH_AUTH_SECRET_LENGTH` in the upstream `ece` crate.
+pub const AUTH_SECRET_LEN: usize = 16;
+
 /// One encrypted push payload, ready to send.
 #[derive(Debug, Clone)]
 pub struct Payload {
@@ -57,9 +68,33 @@ impl Payload {
         let p256dh = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(p256dh_b64url)
             .map_err(|e| WebPushError::Encryption(format!("p256dh base64: {e}")))?;
+        if p256dh.len() != P256DH_KEY_LEN {
+            return Err(WebPushError::Encryption(format!(
+                "p256dh must decode to {P256DH_KEY_LEN} bytes (got {})",
+                p256dh.len()
+            )));
+        }
+        // RFC 8291 §3.1: an uncompressed SEC1 P-256 point starts with the
+        // 0x04 tag. The browser `getKey('p256dh')` export is always
+        // uncompressed; a compressed (0x02/0x03) or otherwise-tagged blob
+        // means the stored subscription is corrupt or fabricated. ece
+        // would surface this as a generic crypto error; surfacing it here
+        // with the tag in hex makes the failure actionable.
+        if p256dh[0] != 0x04 {
+            return Err(WebPushError::Encryption(format!(
+                "p256dh must be an uncompressed SEC1 point (tag 0x04, got 0x{:02x})",
+                p256dh[0]
+            )));
+        }
         let auth = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(auth_b64url)
             .map_err(|e| WebPushError::Encryption(format!("auth base64: {e}")))?;
+        if auth.len() != AUTH_SECRET_LEN {
+            return Err(WebPushError::Encryption(format!(
+                "auth secret must decode to {AUTH_SECRET_LEN} bytes (got {})",
+                auth.len()
+            )));
+        }
 
         let body = match encoding {
             ContentEncoding::Aes128Gcm => ece::encrypt(&p256dh, &auth, plaintext)

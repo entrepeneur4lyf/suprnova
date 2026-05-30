@@ -19,6 +19,15 @@ use url::Url;
 /// build their own [`Client`] and pass it to [`WebPushClient::with_client`].
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Cap on the rejection-body bytes buffered from a push-service error
+/// response. Real push services return small, human-readable rejection
+/// messages (`"too many requests"`, `"invalid registration token"`); a
+/// hostile or buggy endpoint streaming gigabytes of body must not be able
+/// to drive the sender's memory growth. Bodies are streamed and read
+/// stops once the cap is reached — the underlying connection is dropped
+/// without consuming the remainder.
+pub(crate) const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SubscriptionInfo {
     pub endpoint: String,
@@ -76,7 +85,10 @@ impl WebPushClient {
     /// slow or hostile push service cannot tie up the caller indefinitely.
     /// Callers needing a different transport policy build their own
     /// [`Client`] and use [`Self::with_client`] instead.
-    pub fn new(signer: VapidSigner, subject: impl Into<String>) -> Self {
+    ///
+    /// Returns an error if `subject` is not a VAPID-conformant contact
+    /// URI — see [`Self::with_client`] for the validation rules.
+    pub fn new(signer: VapidSigner, subject: impl Into<String>) -> Result<Self, WebPushError> {
         let http = Client::builder()
             .timeout(DEFAULT_REQUEST_TIMEOUT)
             .build()
@@ -89,13 +101,27 @@ impl WebPushClient {
     /// Use this when the default transport (a 30 s timeout) is the wrong
     /// policy — for example, when wiring through a corporate proxy, pinning
     /// TLS, or applying a different timeout.
-    pub fn with_client(http: Client, signer: VapidSigner, subject: impl Into<String>) -> Self {
-        Self {
+    ///
+    /// `subject` must be a VAPID contact URI per RFC 8292 §2.1: either a
+    /// `mailto:` URI with a non-empty recipient, or an `https://` URL.
+    /// Any other value is rejected at construction so a misconfigured
+    /// signer fails fast at startup rather than producing a JWT every push
+    /// service silently refuses. Validation is intentionally scheme-shape
+    /// only — full RFC 5322 email parsing is out of scope and not what
+    /// RFC 8292 requires.
+    pub fn with_client(
+        http: Client,
+        signer: VapidSigner,
+        subject: impl Into<String>,
+    ) -> Result<Self, WebPushError> {
+        let subject = subject.into();
+        validate_vapid_subject(&subject)?;
+        Ok(Self {
             http,
             signer,
-            subject: subject.into(),
+            subject,
             endpoint_policy: EndpointPolicy::default(),
-        }
+        })
     }
 
     /// Override the subscription-endpoint validation policy.
@@ -168,11 +194,116 @@ impl WebPushClient {
             201 | 202 | 204 => Ok(PushResponse { status }),
             404 | 410 => Err(WebPushError::SubscriptionGone),
             _ => {
-                let body = resp.text().await.unwrap_or_default();
-                Err(WebPushError::PushServiceRejected { status, body })
+                let retry_after =
+                    parse_retry_after_secs(resp.headers().get(reqwest::header::RETRY_AFTER));
+                let body = read_capped_body(resp, MAX_ERROR_BODY_BYTES).await;
+                Err(WebPushError::PushServiceRejected {
+                    status,
+                    retry_after,
+                    body,
+                })
             }
         }
     }
+}
+
+/// Stream and accumulate up to `cap` bytes of an HTTP response body, then
+/// drop the response so the remainder of the body is not buffered. The
+/// returned string is UTF-8-lossy — push services may include arbitrary
+/// bytes, but the snippet is intended for diagnostic surfacing only.
+async fn read_capped_body(mut resp: reqwest::Response, cap: usize) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    while buf.len() < cap {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                let remaining = cap - buf.len();
+                let take = remaining.min(chunk.len());
+                buf.extend_from_slice(&chunk[..take]);
+                if buf.len() >= cap {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    // Drop resp explicitly — closing the connection (or returning it to
+    // the pool) prevents the hostile peer from holding the socket open by
+    // dribbling more bytes once we've stopped reading.
+    drop(resp);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Parse an RFC 7231 `Retry-After` header into a [`Duration`].
+///
+/// Only the delta-seconds form is parsed; the HTTP-date form (`Wed, 21
+/// Oct 2026 07:28:00 GMT`) returns `None`. The vast majority of push
+/// services emit delta-seconds, and recognising the date form would
+/// require pulling a wider HTTP-date parser without unblocking any
+/// real-world retry path. Callers needing date-form support can re-read
+/// the original header from a transport hook on their own [`Client`].
+fn parse_retry_after_secs(header: Option<&reqwest::header::HeaderValue>) -> Option<Duration> {
+    let val = header?.to_str().ok()?;
+    let secs: u64 = val.trim().parse().ok()?;
+    // Cap the retry hint at 24 hours so a hostile server can't park a
+    // worker on a multi-year sleep. Callers can re-fetch the raw header
+    // if they have a use case for longer waits.
+    const MAX_RETRY_AFTER_SECS: u64 = 24 * 3600;
+    Some(Duration::from_secs(secs.min(MAX_RETRY_AFTER_SECS)))
+}
+
+/// Validate a VAPID subject claim per RFC 8292 §2.1.
+///
+/// The subject MUST be a contact URI — either a `mailto:` URI with a
+/// non-empty addressee, or an `https://` URL. Anything else is rejected
+/// at client construction so a misconfigured signer cannot ship invalid
+/// JWTs that push services silently refuse.
+///
+/// Validation is intentionally shallow:
+/// - `mailto:` — accept any non-empty addressee (no RFC 5322 parse;
+///   push services accept the same form browsers do).
+/// - `https://` — require [`Url::parse`] to succeed and the result to
+///   have a host.
+fn validate_vapid_subject(subject: &str) -> Result<(), WebPushError> {
+    let trimmed = subject.trim();
+    if trimmed.is_empty() {
+        return Err(WebPushError::Vapid(
+            "VAPID subject must be a mailto: or https: contact URI (got empty string)".into(),
+        ));
+    }
+    if let Some(rest) = trimmed.strip_prefix("mailto:") {
+        if rest.is_empty() {
+            return Err(WebPushError::Vapid(
+                "VAPID mailto: subject must have a non-empty addressee".into(),
+            ));
+        }
+        return Ok(());
+    }
+    if trimmed.starts_with("https://") {
+        let url = Url::parse(trimmed).map_err(|e| {
+            WebPushError::Vapid(format!("VAPID https subject is not a valid URL: {e}"))
+        })?;
+        // Reject empty / missing host. `url::Url::host()` returns `None`
+        // for hostless schemes; `host_str` can also return `Some("")` for
+        // `https:///path`. Both shapes are invalid VAPID subjects.
+        match url.host_str() {
+            None => {
+                return Err(WebPushError::Vapid(
+                    "VAPID https subject must have a host component".into(),
+                ));
+            }
+            Some("") => {
+                return Err(WebPushError::Vapid(
+                    "VAPID https subject must have a non-empty host component".into(),
+                ));
+            }
+            Some(_) => {}
+        }
+        return Ok(());
+    }
+    Err(WebPushError::Vapid(format!(
+        "VAPID subject must be a mailto: or https: contact URI per RFC 8292 §2.1 (got '{trimmed}')"
+    )))
 }
 
 fn parse_endpoint(endpoint: &str) -> Result<Url, WebPushError> {
@@ -352,5 +483,109 @@ mod tests {
             msg.contains("https") || msg.contains("host"),
             "URL with no host must be rejected: {msg}"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // VAPID subject validation — RFC 8292 §2.1 requires `mailto:` or
+    // `https:` URI for the `sub` claim. Misconfigured subjects fail at
+    // client construction so a startup misconfig blows up early instead of
+    // producing JWTs every push service silently refuses.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn vapid_subject_accepts_mailto_and_https_urls() {
+        for s in [
+            "mailto:admin@example.org",
+            "mailto:a@b.c",
+            "  mailto:ops@example.com  ",
+            "https://example.org/contact",
+            "https://app.example.org",
+        ] {
+            validate_vapid_subject(s).unwrap_or_else(|e| panic!("must accept '{s}': {e}"));
+        }
+    }
+
+    #[test]
+    fn vapid_subject_rejects_empty_or_non_uri() {
+        for bad in [
+            "",
+            "   ",
+            "admin@example.org",
+            "tel:+15555550100",
+            "http://example.org/",
+            "ftp://example.org/",
+        ] {
+            let err = validate_vapid_subject(bad).unwrap_err();
+            assert!(
+                matches!(err, WebPushError::Vapid(_)),
+                "expected Vapid error for '{bad}', got: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn vapid_subject_rejects_mailto_with_empty_addressee() {
+        let err = validate_vapid_subject("mailto:").unwrap_err();
+        assert!(
+            matches!(err, WebPushError::Vapid(_)),
+            "mailto: with no addressee must be rejected, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn vapid_subject_rejects_malformed_https() {
+        // `https://` with no authority is a parser error per RFC 3986 §3.2.
+        // The `url` crate surfaces this as "empty host". Either way, it
+        // cannot ever be a valid VAPID subject.
+        let err = validate_vapid_subject("https://").unwrap_err();
+        assert!(
+            matches!(err, WebPushError::Vapid(_)),
+            "https with no authority must be rejected, got: {err:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Retry-After parsing — only delta-seconds. HTTP-date form is
+    // intentionally returned as None (documented behaviour).
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn retry_after_parses_delta_seconds() {
+        let h = reqwest::header::HeaderValue::from_static("30");
+        assert_eq!(
+            parse_retry_after_secs(Some(&h)),
+            Some(Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn retry_after_trims_whitespace() {
+        let h = reqwest::header::HeaderValue::from_static("  120 ");
+        assert_eq!(
+            parse_retry_after_secs(Some(&h)),
+            Some(Duration::from_secs(120))
+        );
+    }
+
+    #[test]
+    fn retry_after_caps_at_24h() {
+        // 30 days in seconds — must be clamped to 24h.
+        let h = reqwest::header::HeaderValue::from_static("2592000");
+        assert_eq!(
+            parse_retry_after_secs(Some(&h)),
+            Some(Duration::from_secs(24 * 3600))
+        );
+    }
+
+    #[test]
+    fn retry_after_returns_none_for_http_date() {
+        // HTTP-date form is intentionally not parsed.
+        let h = reqwest::header::HeaderValue::from_static("Wed, 21 Oct 2026 07:28:00 GMT");
+        assert_eq!(parse_retry_after_secs(Some(&h)), None);
+    }
+
+    #[test]
+    fn retry_after_returns_none_when_absent() {
+        assert_eq!(parse_retry_after_secs(None), None);
     }
 }

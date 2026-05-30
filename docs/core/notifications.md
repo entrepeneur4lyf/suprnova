@@ -181,7 +181,7 @@ use suprnova::WebPushChannel;
 let client = WebPushClient::new(
     VapidKey::from_pem(/* ... */)?,
     "mailto:ops@example.com",
-);
+)?;
 let push_channel = WebPushChannel::new(Arc::new(client), 86_400 /* TTL seconds */);
 ```
 
