@@ -32,15 +32,41 @@ pub enum Environment {
 }
 
 impl Environment {
-    /// Detect environment from APP_ENV or default to Local
+    /// Detect environment from `APP_ENV` or default to `Local`.
+    ///
+    /// Matching is case-insensitive and accepts a small set of common
+    /// aliases so an operator's `APP_ENV=Production`, `APP_ENV=PROD`,
+    /// or `APP_ENV=prod` is recognized as `Production` instead of
+    /// silently falling through to `Custom(...)` (which makes
+    /// `is_production()` return `false` and bypasses production-only
+    /// behavior gated on it). Laravel does an exact case-sensitive
+    /// match on `APP_ENV`; we diverge to fail-safe on the common
+    /// casing/alias mistakes Rust deployments hit in the wild.
+    ///
+    /// Recognized aliases:
+    /// - `prod` → [`Self::Production`]
+    /// - `dev` → [`Self::Development`]
+    /// - `stage`, `stg` → [`Self::Staging`]
+    /// - `test` → [`Self::Testing`]
+    ///
+    /// Values that don't match a known variant or alias are stored in
+    /// [`Self::Custom`] with their original casing preserved — that
+    /// string flows back through [`Self::env_file_suffix`] to pick the
+    /// `.env.<suffix>` file, and lowercasing it here would silently
+    /// change which file loads for a real custom environment
+    /// (e.g. `APP_ENV=QA` must continue to load `.env.QA`).
     pub fn detect() -> Self {
-        match std::env::var("APP_ENV").ok().as_deref() {
-            Some("production") => Self::Production,
-            Some("staging") => Self::Staging,
-            Some("development") => Self::Development,
-            Some("testing") => Self::Testing,
-            Some("local") | None => Self::Local,
-            Some(other) => Self::Custom(other.to_string()),
+        let raw = match std::env::var("APP_ENV").ok() {
+            None => return Self::Local,
+            Some(s) => s,
+        };
+        match raw.to_lowercase().as_str() {
+            "production" | "prod" => Self::Production,
+            "staging" | "stage" | "stg" => Self::Staging,
+            "development" | "dev" => Self::Development,
+            "testing" | "test" => Self::Testing,
+            "local" => Self::Local,
+            _ => Self::Custom(raw),
         }
     }
 
@@ -350,5 +376,144 @@ pub(crate) fn env_strict<T: std::str::FromStr>(key: &str) -> Result<Option<T>, F
             }),
         },
         Err(_) => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Save the current `APP_ENV` value, set it to `value`, run `f`, then
+    /// restore the prior state. Tests calling this must be `#[serial]`
+    /// because `APP_ENV` is process-global.
+    fn with_app_env(value: Option<&str>, f: impl FnOnce()) {
+        let prior = std::env::var("APP_ENV").ok();
+        // SAFETY: mutates a process-global env var. Callers serialize via
+        // `serial_test` so this never races a sibling test.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var("APP_ENV", v),
+                None => std::env::remove_var("APP_ENV"),
+            }
+        }
+        f();
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("APP_ENV", v),
+                None => std::env::remove_var("APP_ENV"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(app_config_env)]
+    fn detect_recognizes_canonical_lowercase_variants() {
+        with_app_env(Some("production"), || {
+            assert_eq!(Environment::detect(), Environment::Production);
+        });
+        with_app_env(Some("staging"), || {
+            assert_eq!(Environment::detect(), Environment::Staging);
+        });
+        with_app_env(Some("development"), || {
+            assert_eq!(Environment::detect(), Environment::Development);
+        });
+        with_app_env(Some("testing"), || {
+            assert_eq!(Environment::detect(), Environment::Testing);
+        });
+        with_app_env(Some("local"), || {
+            assert_eq!(Environment::detect(), Environment::Local);
+        });
+        with_app_env(None, || {
+            assert_eq!(Environment::detect(), Environment::Local);
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(app_config_env)]
+    fn detect_is_case_insensitive_for_named_variants() {
+        // The audit-cited case: APP_ENV=Production must NOT silently
+        // become Custom("Production"), where is_production() returns
+        // false and production-gated behavior gets skipped.
+        for value in [
+            "Production",
+            "PRODUCTION",
+            "ProDUCTion",
+            "Staging",
+            "STAGING",
+            "Development",
+            "DEVELOPMENT",
+            "Testing",
+            "TESTING",
+            "Local",
+            "LOCAL",
+        ] {
+            with_app_env(Some(value), || {
+                let env = Environment::detect();
+                assert!(
+                    !matches!(env, Environment::Custom(_)),
+                    "APP_ENV={value:?} fell through to Custom — case-insensitive match broken"
+                );
+            });
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(app_config_env)]
+    fn detect_accepts_common_aliases() {
+        // The finding explicitly cites `prod`. Apply the same restraint
+        // to the peer aliases — small documented set, no creative
+        // expansion.
+        with_app_env(Some("prod"), || {
+            assert_eq!(Environment::detect(), Environment::Production);
+            assert!(Environment::detect().is_production());
+        });
+        with_app_env(Some("PROD"), || {
+            assert_eq!(Environment::detect(), Environment::Production);
+        });
+        with_app_env(Some("dev"), || {
+            assert_eq!(Environment::detect(), Environment::Development);
+        });
+        with_app_env(Some("stage"), || {
+            assert_eq!(Environment::detect(), Environment::Staging);
+        });
+        with_app_env(Some("stg"), || {
+            assert_eq!(Environment::detect(), Environment::Staging);
+        });
+        with_app_env(Some("test"), || {
+            assert_eq!(Environment::detect(), Environment::Testing);
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(app_config_env)]
+    fn detect_preserves_original_casing_for_custom_envs() {
+        // Lowercasing the stored Custom value would silently change
+        // which `.env.<suffix>` file loads — `APP_ENV=QA` must keep
+        // loading `.env.QA`, not `.env.qa`.
+        with_app_env(Some("QA"), || {
+            let env = Environment::detect();
+            assert_eq!(env, Environment::Custom("QA".to_string()));
+            assert_eq!(env.env_file_suffix(), Some("QA"));
+        });
+        with_app_env(Some("Preview-Branch-42"), || {
+            let env = Environment::detect();
+            assert_eq!(env, Environment::Custom("Preview-Branch-42".to_string()));
+            assert_eq!(env.env_file_suffix(), Some("Preview-Branch-42"));
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(app_config_env)]
+    fn is_production_recovers_for_capitalized_and_aliased_values() {
+        // The audit's headline failure: Config-facing is_production()
+        // must return true for the common casing/alias mistakes.
+        for value in ["Production", "PRODUCTION", "prod", "PROD"] {
+            with_app_env(Some(value), || {
+                assert!(
+                    Environment::detect().is_production(),
+                    "APP_ENV={value:?} should still resolve to Production"
+                );
+            });
+        }
     }
 }
