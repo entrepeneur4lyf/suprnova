@@ -250,18 +250,18 @@ that returns a paginator doesn't need to plumb the page number
 through manually:
 
 ```rust
-use suprnova::Request;
+use suprnova::{json_response, Request, Response};
 use crate::models::Post;
 
 pub async fn index(_req: Request) -> Response {
     // Reads ?page=N from the request's URL via Context::query_param
     // — no req.query() boilerplate, no parameter threading.
     let posts = Post::query()
-        .order_by("created_at", "desc")
+        .order_by_desc("created_at")
         .paginate(15)
         .await?;
 
-    Ok(json_response!(posts))
+    json_response!(posts)
 }
 ```
 
