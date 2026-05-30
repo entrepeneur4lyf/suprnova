@@ -12,7 +12,7 @@ Suprnova validates request input on two complementary tracks:
    that touch the database, or rules you want to store and pass around.
 
 The two tracks accumulate into the same
-[`ValidationErrors`](errors.md) bag and render the same
+[`ValidationErrors`](error-model.md) bag and render the same
 Laravel/Inertia `{ "message", "errors": { field: [...] } }` shape (HTTP
 422).
 
@@ -43,6 +43,40 @@ Email.passes("user@example.com")?; // Ok(())
 > the strings. Use `HttpUrl` (not `Url`) for callback/webhook/avatar inputs:
 > `Url` parses any scheme `url::Url` accepts (`file:`, `javascript:`, custom
 > URIs), while `HttpUrl` requires `http`/`https`.
+
+### Writing your own rule
+
+A custom rule is a unit (or data-carrying) struct with one impl. The
+trait gives you `check()` for free — it pushes any failure message onto
+a `ValidationErrors` bag under the named field — so the rule plugs
+into `validate!` and the `after_validation` hooks unchanged:
+
+```rust
+use suprnova::Rule;
+
+pub struct StartsWith(pub &'static str);
+
+impl Rule for StartsWith {
+    fn passes(&self, value: &str) -> Result<(), String> {
+        if value.starts_with(self.0) {
+            Ok(())
+        } else {
+            Err(format!("must start with {}", self.0))
+        }
+    }
+}
+
+// Now usable everywhere:
+StartsWith("acct_").passes("acct_1234")?;
+// or, in a validate! row:
+//   stripe_id => Required, StartsWith("acct_");
+```
+
+For cross-field logic, implement [`ContextualRule`] instead — the
+`passes` method gets a `&FormContext` (a `HashMap<String, String>` of
+sibling field values) alongside the value under test. For
+database-backed checks, implement [`AsyncRule`] and use it from
+`after_validation_async`.
 
 ## The `validate!` macro
 
@@ -267,3 +301,16 @@ hit the database or an async policy belongs in one of these places, not in
 | Async / DB-backed rule | `after_validation_async` + `AsyncRule::check_async` |
 | Uniqueness | `Unique::new(t, c)` + `UNIQUE` constraint + `from_unique_violation` |
 | Async authorization | middleware / `Gate::*_async` / `after_validation_async` |
+
+## Next
+
+- [Requests](requests.md) — the `#[request]` / `#[derive(FormRequest)]`
+  surface, the everyday derived-validation path
+- [Data Objects](data.md) — `#[derive(Data, Validate)]` for one struct
+  that's both an inbound request and an outbound DTO
+- [Error Model](error-model.md) — how `ValidationErrors` becomes the
+  422 JSON body, alongside every other error path
+- [Authorization](authorization.md) — `Gate`, `Policy`, and where
+  authorization belongs relative to validation
+- [Middleware](middleware.md) — the right place for "is this request
+  even allowed through" checks that need `.await`
