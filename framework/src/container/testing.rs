@@ -57,8 +57,21 @@
 use super::{Container, TASK_CONTAINER, TEST_CONTAINER};
 use std::any::Any;
 use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::task::JoinHandle;
+
+/// Live `TestContainerGuard` count.
+///
+/// Each `TestContainer::fake()` bumps it on creation; each guard drop
+/// decrements. The process-global named-`ConnectionRegistry` is only
+/// wiped when the count transitions back to zero, so a guard dropping
+/// in one parallel test cannot erase a connection name still being used
+/// by another concurrent test. Required because `ConnectionRegistry`
+/// itself is `OnceLock<RwLock<HashMap>>` — purely process-global, no
+/// per-test scoping — while the thread-local `TEST_CONTAINER` it sits
+/// next to is per-test.
+static FAKE_GUARDS: AtomicUsize = AtomicUsize::new(0);
 
 /// Test utilities for the container
 ///
@@ -84,6 +97,7 @@ impl TestContainer {
         TEST_CONTAINER.with(|c| {
             *c.borrow_mut() = Some(Container::new());
         });
+        FAKE_GUARDS.fetch_add(1, Ordering::SeqCst);
         TestContainerGuard
     }
 
@@ -292,18 +306,22 @@ impl Drop for TestContainerGuard {
         TEST_CONTAINER.with(|c| {
             *c.borrow_mut() = None;
         });
-        // Phase 10C T12 — the named-connection registry is process-
-        // global (OnceLock<RwLock<HashMap>>), so it survives the
-        // thread-local container reset. Wipe it on guard drop so the
-        // next test in the same process starts with no `__read_replica__`
-        // or other named connection registered.
+        // The thread-local container reset above isolates this test's
+        // service bindings. The named-connection registry is a
+        // separate, process-global `OnceLock<RwLock<HashMap>>` and so
+        // survives that reset; we only wipe it when the *last* live
+        // `TestContainerGuard` drops.
         //
-        // Why ConnectionRegistry is safe to clear here but the eloquent
-        // listener / scope registries are NOT (see AF4):
-        // `ConnectionRegistry` is keyed by string name; each test
-        // chooses a unique name and reaches for it explicitly via
-        // `DB::named`. Stale entries don't bleed semantics into
-        // unrelated parallel tests.
+        // Why the refcount matters: `ConnectionRegistry` is keyed by
+        // string name. The reserved name `__read_replica__` is the
+        // canonical one tests use to exercise read-write split routing,
+        // so two parallel tests that both register `__read_replica__`
+        // would step on each other if any one of their guard drops
+        // wiped the shared registry. Tests that touch the named
+        // registry still gate themselves with `#[serial_test::serial]`,
+        // but the refcount makes the guard safe to use from any test
+        // (including ones that have no connections registered) without
+        // accidentally clearing another test's entries.
         //
         // The eloquent `EventDispatcher`, `clear_cancellable_listeners`,
         // and `ScopeRegistry` are keyed by `TypeId::<M>()` — the
@@ -311,8 +329,77 @@ impl Drop for TestContainerGuard {
         // struct so the registrations don't collide. Wiping those
         // registries from `Drop` would break parallel test execution
         // (test A's drop clearing test B's still-needed listeners),
-        // so AF4 ships sync `clear()` on each as opt-in (documented in
-        // the framework tests' README) and does NOT call them here.
-        crate::database::ConnectionRegistry::clear();
+        // so each ships a sync `clear()` as opt-in (documented in
+        // the framework tests' README) and we do NOT call them here.
+        if FAKE_GUARDS.fetch_sub(1, Ordering::SeqCst) == 1 {
+            crate::database::ConnectionRegistry::clear();
+        }
+    }
+}
+
+#[cfg(test)]
+mod refcount_tests {
+    //! Regression: a guard dropping in one parallel test must not wipe
+    //! a `ConnectionRegistry` entry another concurrent test still
+    //! depends on. The refcount in `FAKE_GUARDS` makes the clear
+    //! conditional on being the *last* live guard.
+    //!
+    //! These tests are `#[serial]` because they mutate the registry's
+    //! global state and assert on guard-count transitions; the harness
+    //! must not have other tests holding `TestContainer::fake` guards
+    //! at the same time. Other test modules in this crate already
+    //! follow the same `#[serial]` discipline for registry mutation.
+    use super::*;
+    use crate::database::ConnectionRegistry;
+    use crate::database::testing::TestDatabase;
+    use serial_test::serial;
+
+    #[tokio::test]
+    #[serial]
+    async fn guard_drop_with_others_alive_preserves_named_connections() {
+        // Start from a known-empty registry so we're asserting on the
+        // refcount behaviour rather than residual entries.
+        ConnectionRegistry::clear();
+
+        // Two concurrent fakes: simulate two parallel test bodies.
+        let outer = TestContainer::fake();
+        let count_after_outer = FAKE_GUARDS.load(Ordering::SeqCst);
+        assert!(
+            count_after_outer >= 1,
+            "fake() must bump the live-guard counter"
+        );
+
+        // Outer test registers a named connection it still needs.
+        let db = TestDatabase::sqlite_memory().await.unwrap();
+        ConnectionRegistry::register_existing("refcount_outer_test", db.db().clone())
+            .await
+            .unwrap();
+        assert!(ConnectionRegistry::has("refcount_outer_test").await);
+
+        // Inner test starts and immediately ends. Before the fix this
+        // would wipe `refcount_outer_test` because the inner guard's
+        // drop called `ConnectionRegistry::clear()` unconditionally.
+        {
+            let _inner = TestContainer::fake();
+        }
+
+        assert!(
+            ConnectionRegistry::has("refcount_outer_test").await,
+            "an inner guard drop must NOT clear named connections still owned by outer guards",
+        );
+
+        // Outer drop is the last guard — registry gets cleared as part
+        // of teardown.
+        drop(outer);
+
+        // `db` itself still holds a `TestContainerGuard` via
+        // `TestDatabase`, so even after dropping `outer` the count is
+        // not yet zero. Drop the test database to release it.
+        drop(db);
+
+        assert!(
+            !ConnectionRegistry::has("refcount_outer_test").await,
+            "the last guard drop must clear named connections for next-test isolation",
+        );
     }
 }

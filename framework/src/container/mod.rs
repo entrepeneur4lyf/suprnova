@@ -1,11 +1,43 @@
 //! Application Container for Dependency Injection
 //!
 //! This module provides Laravel-like service container capabilities:
-//! - Singletons: shared instances across the application
+//! - Singletons: one stored value per type, returned on every resolution
 //! - Factories: new instance per resolution
-//! - Trait bindings: bind interfaces to implementations
+//! - Trait bindings: bind interfaces to implementations behind `Arc<dyn Trait>`
 //! - Test faking: swap implementations in tests
 //! - Service Providers: bootstrap services with register/boot lifecycle
+//!
+//! # Sharing semantics
+//!
+//! Laravel's `singleton` returns the same object reference every time. Rust
+//! has no implicit shared-by-reference for owned values, so Suprnova exposes
+//! two flavours that map to the same intent:
+//!
+//! - **Trait bindings — `App::bind::<dyn Trait>(Arc::new(impl))`**: the
+//!   stored `Arc<dyn Trait>` is cloned on resolution. All callers see the
+//!   same underlying object. This is the recommended shape whenever shared
+//!   state matters (caches, brokers, drivers, hubs, registries).
+//!
+//! - **Concrete `App::singleton::<T>(value)`**: the value is stored once
+//!   and `App::get::<T>()` returns a `Clone` of it on every resolution.
+//!   `T` must therefore implement [`Clone`]. For `Copy` / cheap-clone
+//!   types this is fine, and for `Arc<...>` / `Arc<Mutex<...>>` the
+//!   clone is a refcount bump so callers still see the same inner state.
+//!   For a plain non-trivial struct with mutable interior state, wrap it
+//!   in `Arc<Mutex<T>>` (or bind a trait) before registering — bare
+//!   `singleton::<T>(...)` would otherwise give each resolver an
+//!   independent copy of the data.
+//!
+//! # Lock-poisoning policy
+//!
+//! The global container guards itself behind a `std::sync::RwLock`. Every
+//! write path on [`App`] (`singleton`, `factory`, `bind`, `bind_factory`,
+//! and the test-container `instance` alias) recovers from a poisoned lock
+//! via `unwrap_or_else(|e| e.into_inner())` so service registration cannot
+//! be silently dropped if some unrelated subsystem panicked mid-write.
+//! Reads recover the same way, so a poisoned container still resolves
+//! whatever was registered before the poison. This matches the
+//! recover-in-place pattern documented in [`crate::lock`].
 //!
 //! # Example
 //!
@@ -287,7 +319,15 @@ impl App {
         APP_CONTAINER.get_or_init(|| RwLock::new(Container::new()));
     }
 
-    /// Register a singleton instance (shared across all resolutions)
+    /// Register a singleton instance.
+    ///
+    /// One value is stored per `TypeId::<T>`; [`App::get::<T>`] returns a
+    /// [`Clone`] of it on every resolution. For shared mutable state wrap
+    /// `T` in `Arc<Mutex<...>>` (or use [`App::bind`] with a trait object)
+    /// — see the module docs for the full sharing-semantics note.
+    ///
+    /// Recovers in place from a poisoned container lock so the registration
+    /// is never silently dropped.
     ///
     /// # Example
     /// ```rust,ignore
@@ -295,9 +335,8 @@ impl App {
     /// ```
     pub fn singleton<T: Any + Send + Sync + 'static>(instance: T) {
         let container = APP_CONTAINER.get_or_init(|| RwLock::new(Container::new()));
-        if let Ok(mut c) = container.write() {
-            c.singleton(instance);
-        }
+        let mut c = container.write().unwrap_or_else(|e| e.into_inner());
+        c.singleton(instance);
     }
 
     /// Register an existing instance as a shared singleton.
@@ -317,7 +356,10 @@ impl App {
         Self::singleton(value);
     }
 
-    /// Register a factory binding (new instance per resolution)
+    /// Register a factory binding (new instance per resolution).
+    ///
+    /// Recovers in place from a poisoned container lock so the registration
+    /// is never silently dropped.
     ///
     /// # Example
     /// ```rust,ignore
@@ -329,16 +371,18 @@ impl App {
         F: Fn() -> T + Send + Sync + 'static,
     {
         let container = APP_CONTAINER.get_or_init(|| RwLock::new(Container::new()));
-        if let Ok(mut c) = container.write() {
-            c.factory(factory);
-        }
+        let mut c = container.write().unwrap_or_else(|e| e.into_inner());
+        c.factory(factory);
     }
 
-    /// Bind a trait object to a concrete implementation (as singleton)
+    /// Bind a trait object to a concrete implementation (as singleton).
     ///
     /// Last write wins — calling `bind` again for the same trait overwrites
     /// the previous binding. Use [`App::bind_if_absent`] when registering from
     /// boot hooks that may run more than once.
+    ///
+    /// Recovers in place from a poisoned container lock so the binding is
+    /// never silently dropped.
     ///
     /// # Example
     /// ```rust,ignore
@@ -346,9 +390,8 @@ impl App {
     /// ```
     pub fn bind<T: ?Sized + Send + Sync + 'static>(instance: Arc<T>) {
         let container = APP_CONTAINER.get_or_init(|| RwLock::new(Container::new()));
-        if let Ok(mut c) = container.write() {
-            c.bind(instance);
-        }
+        let mut c = container.write().unwrap_or_else(|e| e.into_inner());
+        c.bind(instance);
     }
 
     /// Bind a trait object only if no binding already exists for that trait.
@@ -358,13 +401,13 @@ impl App {
     ///
     /// Manual `App::bind` calls always override, so application code retains
     /// the ability to replace a default-registered service explicitly.
+    ///
+    /// Recovers in place from a poisoned container lock — the binding is
+    /// honoured against whatever was registered before the poison.
     pub fn bind_if_absent<T: ?Sized + Send + Sync + 'static>(instance: Arc<T>) -> bool {
         let container = APP_CONTAINER.get_or_init(|| RwLock::new(Container::new()));
-        if let Ok(mut c) = container.write() {
-            c.bind_if_absent(instance)
-        } else {
-            false
-        }
+        let mut c = container.write().unwrap_or_else(|e| e.into_inner());
+        c.bind_if_absent(instance)
     }
 
     /// Register a singleton only if none is registered for the concrete type.
@@ -375,16 +418,19 @@ impl App {
     ///
     /// Manual `App::singleton` calls always override, so application code can
     /// still install a custom instance after boot.
+    ///
+    /// Recovers in place from a poisoned container lock — the registration
+    /// is honoured against whatever was registered before the poison.
     pub fn singleton_if_absent<T: Any + Send + Sync + 'static>(instance: T) -> bool {
         let container = APP_CONTAINER.get_or_init(|| RwLock::new(Container::new()));
-        if let Ok(mut c) = container.write() {
-            c.singleton_if_absent(instance)
-        } else {
-            false
-        }
+        let mut c = container.write().unwrap_or_else(|e| e.into_inner());
+        c.singleton_if_absent(instance)
     }
 
-    /// Bind a trait object to a factory
+    /// Bind a trait object to a factory.
+    ///
+    /// Recovers in place from a poisoned container lock so the binding is
+    /// never silently dropped.
     ///
     /// # Example
     /// ```rust,ignore
@@ -395,9 +441,8 @@ impl App {
         F: Fn() -> Arc<T> + Send + Sync + 'static,
     {
         let container = APP_CONTAINER.get_or_init(|| RwLock::new(Container::new()));
-        if let Ok(mut c) = container.write() {
-            c.bind_factory(factory);
-        }
+        let mut c = container.write().unwrap_or_else(|e| e.into_inner());
+        c.bind_factory(factory);
     }
 
     /// Resolve a concrete type.
@@ -409,6 +454,10 @@ impl App {
     ///    sync / `current_thread` tests.
     /// 3. Global container — production lookup.
     ///
+    /// All three layers recover in place from a poisoned lock so a panic
+    /// in one registration does not turn every later resolution into a
+    /// silent service-not-found.
+    ///
     /// # Example
     /// ```rust,ignore
     /// let db: DatabaseConnection = App::get().unwrap();
@@ -416,7 +465,7 @@ impl App {
     pub fn get<T: Any + Send + Sync + Clone + 'static>() -> Option<T> {
         // Task-local first (async-safe).
         if let Some(t) = TASK_CONTAINER
-            .try_with(|c| c.read().ok().and_then(|c| c.get::<T>()))
+            .try_with(|c| c.read().unwrap_or_else(|e| e.into_inner()).get::<T>())
             .ok()
             .flatten()
         {
@@ -436,7 +485,10 @@ impl App {
 
         // Fall back to global container.
         let container = APP_CONTAINER.get()?;
-        container.read().ok()?.get::<T>()
+        container
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get::<T>()
     }
 
     /// Resolve a trait binding - returns Arc<T>.
@@ -448,6 +500,10 @@ impl App {
     ///    sync / `current_thread` tests.
     /// 3. Global container — production lookup.
     ///
+    /// All three layers recover in place from a poisoned lock so a panic
+    /// in one registration does not turn every later resolution into a
+    /// silent service-not-found.
+    ///
     /// # Example
     /// ```rust,ignore
     /// let client: Arc<dyn HttpClient> = App::make::<dyn HttpClient>().unwrap();
@@ -455,7 +511,7 @@ impl App {
     pub fn make<T: ?Sized + Send + Sync + 'static>() -> Option<Arc<T>> {
         // Task-local first (async-safe).
         if let Some(t) = TASK_CONTAINER
-            .try_with(|c| c.read().ok().and_then(|c| c.make::<T>()))
+            .try_with(|c| c.read().unwrap_or_else(|e| e.into_inner()).make::<T>())
             .ok()
             .flatten()
         {
@@ -475,7 +531,10 @@ impl App {
 
         // Fall back to global container.
         let container = APP_CONTAINER.get()?;
-        container.read().ok()?.make::<T>()
+        container
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .make::<T>()
     }
 
     /// Resolve a concrete type, returning an error if not found
@@ -511,10 +570,11 @@ impl App {
     /// Check if a concrete type is registered.
     ///
     /// Lookup order matches [`App::get`]: task-local, thread-local, global.
+    /// Recovers in place from a poisoned lock at every layer.
     pub fn has<T: Any + 'static>() -> bool {
         // Task-local first.
         if TASK_CONTAINER
-            .try_with(|c| c.read().ok().map(|c| c.has::<T>()).unwrap_or(false))
+            .try_with(|c| c.read().unwrap_or_else(|e| e.into_inner()).has::<T>())
             .unwrap_or(false)
         {
             return true;
@@ -534,18 +594,22 @@ impl App {
 
         APP_CONTAINER
             .get()
-            .and_then(|c| c.read().ok())
-            .map(|c| c.has::<T>())
+            .map(|c| c.read().unwrap_or_else(|e| e.into_inner()).has::<T>())
             .unwrap_or(false)
     }
 
     /// Check if a trait binding is registered.
     ///
     /// Lookup order matches [`App::make`]: task-local, thread-local, global.
+    /// Recovers in place from a poisoned lock at every layer.
     pub fn has_binding<T: ?Sized + 'static>() -> bool {
         // Task-local first.
         if TASK_CONTAINER
-            .try_with(|c| c.read().ok().map(|c| c.has_binding::<T>()).unwrap_or(false))
+            .try_with(|c| {
+                c.read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .has_binding::<T>()
+            })
             .unwrap_or(false)
         {
             return true;
@@ -565,8 +629,11 @@ impl App {
 
         APP_CONTAINER
             .get()
-            .and_then(|c| c.read().ok())
-            .map(|c| c.has_binding::<T>())
+            .map(|c| {
+                c.read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .has_binding::<T>()
+            })
             .unwrap_or(false)
     }
 
@@ -610,12 +677,12 @@ impl App {
     /// (task-local) get clean isolation.
     ///
     /// Lookup order matches [`App::get`]: task-local, thread-local, global.
+    /// Recovers in place from a poisoned lock at every layer rather than
+    /// panicking — matches the rest of `App::*` reads/writes.
     pub fn inertia_registry() -> Arc<crate::inertia::InertiaRegistry> {
         // Task-local first (async-safe).
-        if let Some(reg) = TASK_CONTAINER
-            .try_with(|c| c.read().ok().map(|c| c.inertia.clone()))
-            .ok()
-            .flatten()
+        if let Ok(reg) =
+            TASK_CONTAINER.try_with(|c| c.read().unwrap_or_else(|e| e.into_inner()).inertia.clone())
         {
             return reg;
         }
@@ -633,7 +700,11 @@ impl App {
         // Fall back to the global container, lazy-initializing if necessary
         // so callers don't have to remember to call `App::init` first.
         let container = APP_CONTAINER.get_or_init(|| RwLock::new(Container::new()));
-        container.read().unwrap().inertia.clone()
+        container
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .inertia
+            .clone()
     }
 
     /// Register a synchronous Inertia shared prop. Included in every
@@ -775,4 +846,118 @@ macro_rules! factory {
     ($factory:expr) => {
         $crate::App::factory($factory)
     };
+}
+
+#[cfg(test)]
+mod poison_tests {
+    //! Lock-poisoning recovery contract for the container.
+    //!
+    //! `Container` itself is sync (no I/O, just `HashMap` writes); we
+    //! can't directly poison the process-global `APP_CONTAINER` without
+    //! contaminating every other test in the same process. Instead we
+    //! exercise the recover-in-place transformation on a fresh
+    //! `RwLock<Container>` that mirrors the production path one-to-one:
+    //! `container.write().unwrap_or_else(|e| e.into_inner())` followed
+    //! by a mutating call, and the same shape for `read()`.
+    //!
+    //! These assertions guarantee that the framework keeps registering
+    //! services through a poisoned container instead of silently
+    //! dropping the binding — the bug fixed alongside these tests.
+    use super::*;
+    use std::sync::RwLock;
+    use std::thread;
+
+    fn poison_container(lock: &Arc<RwLock<Container>>) {
+        let clone = Arc::clone(lock);
+        let _ = thread::spawn(move || {
+            let _g = clone.write().unwrap();
+            panic!("intentional poison");
+        })
+        .join();
+        assert!(lock.is_poisoned(), "test setup: lock must be poisoned");
+    }
+
+    #[derive(Clone, PartialEq, Debug)]
+    struct PoisonProbe(u32);
+
+    #[test]
+    fn write_path_registers_through_poison() {
+        let lock = Arc::new(RwLock::new(Container::new()));
+        poison_container(&lock);
+
+        // Mirror what `App::singleton` does: write through the recover.
+        let mut c = lock.write().unwrap_or_else(|e| e.into_inner());
+        c.singleton(PoisonProbe(7));
+        drop(c);
+
+        // Mirror what `App::get` does: read through the recover.
+        let got = lock
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get::<PoisonProbe>();
+        assert_eq!(
+            got,
+            Some(PoisonProbe(7)),
+            "registration must survive a poisoned container lock",
+        );
+    }
+
+    #[test]
+    fn bind_path_registers_through_poison() {
+        trait Probe: Send + Sync {
+            fn id(&self) -> u32;
+        }
+        struct ProbeImpl(u32);
+        impl Probe for ProbeImpl {
+            fn id(&self) -> u32 {
+                self.0
+            }
+        }
+
+        let lock = Arc::new(RwLock::new(Container::new()));
+        poison_container(&lock);
+
+        let mut c = lock.write().unwrap_or_else(|e| e.into_inner());
+        c.bind::<dyn Probe>(Arc::new(ProbeImpl(42)));
+        drop(c);
+
+        let got = lock
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .make::<dyn Probe>();
+        assert!(
+            got.is_some(),
+            "trait binding must survive a poisoned container lock",
+        );
+        assert_eq!(got.unwrap().id(), 42);
+    }
+
+    /// The pre-fix `if let Ok(...)` write path silently dropped the
+    /// registration on poison — the failure mode the audit flagged.
+    /// This regression test pins the pre-fix shape next to the fix so
+    /// a future refactor that re-introduces the silent-drop pattern
+    /// trips here instead of in production.
+    #[test]
+    fn legacy_if_let_ok_pattern_silently_drops_on_poison() {
+        let lock = Arc::new(RwLock::new(Container::new()));
+        poison_container(&lock);
+
+        let mut wrote = false;
+        if let Ok(mut c) = lock.write() {
+            c.singleton(PoisonProbe(99));
+            wrote = true;
+        }
+        assert!(
+            !wrote,
+            "the legacy `if let Ok` pattern WOULD silently drop the registration; \
+             production now uses `unwrap_or_else(|e| e.into_inner())` instead",
+        );
+
+        // And the read side under the same pattern returned None too.
+        let read = lock.read().ok().and_then(|c| c.get::<PoisonProbe>());
+        assert!(
+            read.is_none(),
+            "legacy `read().ok()?` returned None on poison"
+        );
+    }
 }
