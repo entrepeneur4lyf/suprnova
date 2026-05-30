@@ -1,6 +1,6 @@
 # Mail
 
-Suprnova's mail subsystem mirrors Laravel's `Mail::to(...)->send(...)` ergonomics on a Rust-native, Tokio-async runtime. One `Mail` facade, seven first-class transports (log, in-memory, SMTP, plus the five major HTTP providers), Tera-rendered templates with `self` as the context, queue + delayed delivery via the Phase 5A envelope, and a `Mail::fake()` test guard cut from the same cloth as `Bus::fake()` and `Cache::fake()`.
+Suprnova's mail subsystem mirrors Laravel's `Mail::to(...)->send(...)` API on Tokio. One `Mail` facade, eight transports (log and in-memory for dev/tests, SMTP, and five HTTP providers — Postmark, SES, SendGrid, Mailgun, Resend), Tera-rendered templates with the Mailable's serialized fields as the context, queue + delayed delivery on the durable at-least-once envelope, and a `Mail::fake()` test guard cut from the same cloth as `Bus::fake()` and `Cache::fake()`.
 
 ## Quick Start
 
@@ -164,11 +164,11 @@ Attachments ride through the `Mailable::attachments` method. All five HTTP provi
 
 ## Queueing
 
-`Mail::queue(...)` builds a `SendMailJob` and pushes it onto the Phase 5A queue. The worker rebuilds the mailable from the registered factory and dispatches through the bound transport:
+`Mail::queue(...)` builds a `SendMailJob` and pushes it onto the framework queue. The worker rebuilds the mailable from the registered factory and dispatches through the bound transport:
 
 ```rust
 // One-time: register every Mailable type the worker will see.
-suprnova::mail::register_mailable_factory::<Welcome>();
+suprnova::mail::register_mailable_factory::<Welcome>()?;
 
 // At send time:
 Mail::to("alice@example.org").queue(Welcome { name: "Alice".into() }).await?;
@@ -190,8 +190,10 @@ Every send routes through `suprnova::mail::dispatch_with_telemetry`, which opens
 - `to_count`, `cc_count`, `bcc_count` — recipient counts
 - `has_html`, `has_text` — body shape
 - `attachment_count` — number of attachments
+- `tag_count`, `metadata_count` — provider-hint counts
+- `priority` — `1..=5`, or `0` when unset
 
-On completion the span emits `mail sent` (info) or `mail send failed` (warn) with `duration_ms`. The same wrapper covers `Mail::send`, the `SendMailJob` queue worker, and the notification `MailChannel`, so the span schema is identical regardless of how the message was produced. (Per-domain attributes layered by Phase 8's admin observability work; these baseline fields stay constant.)
+On completion the span emits `mail sent` (info) or `mail send failed` (warn) with `duration_ms`. The same wrapper covers `Mail::send`, the `SendMailJob` queue worker, and the notification `MailChannel`, so the span schema is identical regardless of how the message was produced.
 
 ## Testing with `Mail::fake()`
 
@@ -239,10 +241,16 @@ impl MailTransport for StdoutTransport {
 
 // At boot:
 use std::sync::Arc;
-suprnova::mail::Mail::set_transport(Arc::new(StdoutTransport));
+suprnova::mail::Mail::set_transport(Arc::new(StdoutTransport))?;
 ```
 
 Transports run on Tokio's runtime — async IO, connection pooling, and concurrent send are first-class. There is no per-request fork penalty.
+
+### Why Suprnova diverges
+
+Laravel's Mailable layer is built on Symfony Mailer, which runs synchronously inside the request lifecycle. Suprnova's `MailTransport` is `async fn send(&self, msg: &OutgoingMessage)` end-to-end: the HTTP providers use `reqwest`, the SMTP path uses an async lettre adapter, and `dispatch_with_telemetry` wraps every send in a Tokio `tracing` span. Long-haul providers don't block the handler thread, connection pools survive across requests, and concurrent sends in one handler are trivial — `tokio::try_join!(Mail::to(a).send(m), Mail::to(b).send(n))` does what you'd expect.
+
+The other divergence is event cancellation. Laravel models a `MessageSending` listener that can return `false` and suppress the send (`events->until()`). Suprnova's dispatcher does not expose a short-circuit return channel — `MessageSending` is observation-only. To gate a send, refuse at the Mailable layer (override `render_html` / `render_text` to return an error) or wrap the `MailBuilder::send` call with your own guard. The trade is real: we lose one Laravel hook to keep the dispatcher's contract simple.
 
 ## Best Practices
 
@@ -252,10 +260,11 @@ Transports run on Tokio's runtime — async IO, connection pooling, and concurre
 
 ```rust
 // bootstrap.rs
-pub fn register() {
-    suprnova::mail::register_mailable_factory::<WelcomeEmail>();
-    suprnova::mail::register_mailable_factory::<PasswordReset>();
-    suprnova::mail::register_mailable_factory::<InvoiceShipped>();
+pub fn register() -> Result<(), suprnova::FrameworkError> {
+    suprnova::mail::register_mailable_factory::<WelcomeEmail>()?;
+    suprnova::mail::register_mailable_factory::<PasswordReset>()?;
+    suprnova::mail::register_mailable_factory::<InvoiceShipped>()?;
+    Ok(())
 }
 ```
 
@@ -289,7 +298,7 @@ The per-message override on `MailBuilder` (`.from(("Operations", "ops@example.co
 
 ### Use the queue for at-least-once delivery, not the direct path
 
-`MailBuilder::send` is at-most-once: if the transport fails halfway through dispatching to two providers, you cannot retry without risking double-send. `MailBuilder::queue` rides the Phase 5A FROZEN envelope, which supports idempotency keys and worker-level retry. For any mail you must not lose AND must not double-send, queue with a stable idempotency key tied to the originating event.
+`MailBuilder::send` is at-most-once: if the transport fails halfway through dispatching to two providers, you cannot retry without risking double-send. `MailBuilder::queue` rides the durable queue envelope, which supports idempotency keys and worker-level retry. For any mail you must not lose AND must not double-send, queue with a stable idempotency key tied to the originating event.
 
 ## One-off Messages: `Mail::raw` and `Mail::html`
 
@@ -471,13 +480,14 @@ Every successful dispatch fires two framework events:
 - `MessageSent` — immediately AFTER a successful transport call. Listeners observe the same shape; failed sends do not emit this event.
 
 ```rust
+use std::sync::Arc;
 use suprnova::events::EventFacade;
 use suprnova::mail::MessageSent;
 
-EventFacade::listen::<MessageSent, _>(Arc::new(MyAuditListener)).await?;
+EventFacade::listen::<MessageSent, _>(Arc::new(MyAuditListener)).await;
 ```
 
-Unlike Laravel, the dispatcher does **not** model a cancellation channel — listeners cannot suppress a send by returning `false`. The intent for these events is observability (audit logging, sampled tracing, metrics). To gate sends, refuse at the Mailable layer (override `render_html`/`render_text` to return an error) or wrap the `MailBuilder::send` call with an explicit guard.
+Both events are observation-only — the dispatcher does not model a Laravel-style cancellation channel. See [Why Suprnova diverges](#why-suprnova-diverges) above for the gating workaround.
 
 ## Multi-recipient Convenience: `Mail::cc` and `Mail::bcc`
 
@@ -496,6 +506,14 @@ The same fluent surface applies regardless of which entry point you start with.
 ### Test against `Mail::fake()`, not against the bound transport
 
 `Mail::fake()` installs a process-local capture transport for the duration of the RAII guard and restores whatever was bound before. Tests using it do not need to clear globals on every entry/exit — drop semantics handle that. Combine `#[serial_test::serial]` with `Mail::fake()` for tests that mutate the transport global; concurrent tests would clobber each other otherwise.
+
+## Next
+
+- [Notifications](notifications.md) — `Notify::send` fans out across mail, database, and webpush channels; `#[derive(NotificationMailable)]` is the macro-driven shortcut over the `Mailable` trait
+- [Queues](queues.md) — the durable envelope `Mail::queue` and `Mail::later` ride on
+- [Events](events.md) — listening for `MessageSending` / `MessageSent` plus the wider dispatcher model
+- [Testing](testing.md) — `Mail::fake()` alongside the other `*::fake()` guards
+- [Configuration](configuration.md) — typed config registration for service credentials
 
 ## Reference
 
