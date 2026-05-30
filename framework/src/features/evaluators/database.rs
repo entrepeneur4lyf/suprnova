@@ -162,7 +162,7 @@ impl DatabaseEvaluator {
             next.insert((row.name, row.scope_key), row.enabled);
         }
 
-        let mut store = lock::write(&self.flags)?;
+        let mut store = lock::write(&self.flags, "feature-flag snapshot")?;
         *store = next;
         Ok(())
     }
@@ -231,7 +231,7 @@ impl DatabaseEvaluator {
         // separate reload() remains available for picking up edits
         // made out-of-band.
         {
-            let mut store = lock::write(&self.flags)?;
+            let mut store = lock::write(&self.flags, "feature-flag snapshot")?;
             store.insert((name.to_string(), scope_key.to_string()), enabled);
         }
 
@@ -282,7 +282,7 @@ impl Evaluator for DatabaseEvaluator {
         // caller's composite evaluator falls through to the next
         // backend / disabled default; an error log surfaces the poison
         // for ops. Safer than panicking every flag check.
-        let store = match lock::read(&self.flags) {
+        let store = match lock::read(&self.flags, "feature-flag snapshot") {
             Ok(s) => s,
             Err(_) => {
                 tracing::error!(

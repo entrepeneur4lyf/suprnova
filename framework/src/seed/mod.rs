@@ -121,7 +121,7 @@ pub trait Seeder: Send + Sync {
 /// position, so test stubs slot in cleanly).
 pub fn register<S: Seeder + 'static>() {
     let f: SeederFn = || Box::pin(S::run());
-    match lock::write(&REGISTRY) {
+    match lock::write(&REGISTRY, "seeder registry") {
         Ok(mut g) => {
             g.get_or_insert_with(IndexMap::new)
                 .insert(S::name().to_string(), f);
@@ -141,7 +141,7 @@ pub fn register<S: Seeder + 'static>() {
 /// drive this directly after registering seeders.
 pub async fn run_all() -> Result<(), FrameworkError> {
     let entries: Vec<(String, SeederFn)> = {
-        let g = lock::read(&REGISTRY)?;
+        let g = lock::read(&REGISTRY, "seeder registry")?;
         g.as_ref()
             .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
             .unwrap_or_default()
@@ -169,7 +169,7 @@ pub async fn run_all() -> Result<(), FrameworkError> {
 /// `db:seed --class=UserSeeder` does the same.
 pub async fn run_one(name: &str) -> Result<(), FrameworkError> {
     let entry = {
-        let g = lock::read(&REGISTRY)?;
+        let g = lock::read(&REGISTRY, "seeder registry")?;
         g.as_ref().and_then(|m| m.get(name).copied())
     };
     match entry {
@@ -190,7 +190,7 @@ pub async fn run_one(name: &str) -> Result<(), FrameworkError> {
 /// matches the "treat poison as empty" pattern used by the
 /// registration path.
 pub fn count() -> usize {
-    match lock::read(&REGISTRY) {
+    match lock::read(&REGISTRY, "seeder registry") {
         Ok(g) => g.as_ref().map(|m| m.len()).unwrap_or(0),
         Err(_) => {
             tracing::error!("Seeder registry lock poisoned; reporting count=0.");
@@ -205,7 +205,7 @@ pub fn count() -> usize {
 /// asserting that bootstrap registered the expected fixtures.
 /// Returns `false` on registry-lock poison (matches `count()`).
 pub fn is_registered(name: &str) -> bool {
-    match lock::read(&REGISTRY) {
+    match lock::read(&REGISTRY, "seeder registry") {
         Ok(g) => g.as_ref().is_some_and(|m| m.contains_key(name)),
         Err(_) => {
             tracing::error!("Seeder registry lock poisoned; reporting is_registered=false.");
@@ -299,7 +299,7 @@ pub(crate) fn events_muted() -> bool {
 /// `ConnectionRegistry::clear` already use).
 #[doc(hidden)]
 pub fn clear() {
-    if let Ok(mut g) = lock::write(&REGISTRY) {
+    if let Ok(mut g) = lock::write(&REGISTRY, "seeder registry") {
         *g = None;
     }
 }

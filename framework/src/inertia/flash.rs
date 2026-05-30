@@ -85,7 +85,7 @@ pub(crate) fn encrypt_history_flag() -> Option<bool> {
 /// `tracing::error!` is emitted — the request is already failing,
 /// so silent loss matches the documented "no active scope" no-op.
 pub fn push(key: impl Into<String>, value: Value) {
-    let _ = FLASH_BAG.try_with(|bag| match lock::lock(bag) {
+    let _ = FLASH_BAG.try_with(|bag| match lock::lock(bag, "inertia flash bag") {
         Ok(mut guard) => {
             guard.insert(key.into(), value);
         }
@@ -109,7 +109,7 @@ pub fn push(key: impl Into<String>, value: Value) {
 /// Same per-request-scoped reasoning as [`push`].
 pub fn drain() -> serde_json::Map<String, Value> {
     FLASH_BAG
-        .try_with(|bag| match lock::lock(bag) {
+        .try_with(|bag| match lock::lock(bag, "inertia flash bag") {
             Ok(mut guard) => {
                 let entries = std::mem::take(&mut *guard);
                 entries.into_iter().collect()

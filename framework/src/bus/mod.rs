@@ -112,7 +112,7 @@ impl Bus {
                 Ok(boxed)
             })
         });
-        match lock::write(&REGISTRY) {
+        match lock::write(&REGISTRY, "bus handler registry") {
             Ok(mut g) => {
                 let map = g.get_or_insert_with(HashMap::new);
                 if map.insert(TypeId::of::<C>(), dispatcher).is_some() {
@@ -148,7 +148,7 @@ impl Bus {
             return Ok(Dispatched::Captured);
         }
         let dispatcher = {
-            let g = lock::read(&REGISTRY)?;
+            let g = lock::read(&REGISTRY, "bus handler registry")?;
             let map = g
                 .as_ref()
                 .ok_or_else(|| FrameworkError::internal("Bus: no handlers registered"))?;

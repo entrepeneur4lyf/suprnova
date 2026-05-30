@@ -245,7 +245,7 @@ pub(crate) fn intercept(req: &RequestBuilder) -> Result<ClientResponse, crate::F
 fn with_state<R>(f: impl FnOnce(&mut FakeState) -> R) -> R {
     FAKE_STATE
         .try_with(|state| {
-            let mut guard = lock::lock(state).expect("FakeState mutex poisoned");
+            let mut guard = lock::lock(state, "http fake state").expect("FakeState mutex poisoned");
             f(&mut guard)
         })
         .unwrap_or_else(|_| {

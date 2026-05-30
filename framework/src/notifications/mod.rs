@@ -324,16 +324,18 @@ static FACTORIES: RwLock<Option<HashMap<String, NotificationFactory>>> = RwLock:
 /// poisoned (a prior writer panicked) rather than panicking — the crate-wide
 /// write-poison policy lives in [`crate::lock`].
 pub fn set_dispatcher(d: Arc<NotificationDispatcher>) -> Result<(), FrameworkError> {
-    *lock::write(&DISPATCHER)? = Some(d);
+    *lock::write(&DISPATCHER, "notifications dispatcher")? = Some(d);
     Ok(())
 }
 
 pub(crate) fn dispatcher_for_queue() -> Result<Arc<NotificationDispatcher>, FrameworkError> {
-    lock::read(&DISPATCHER)?.clone().ok_or_else(|| {
-        FrameworkError::internal(
-            "no NotificationDispatcher registered; call notifications::set_dispatcher(...)",
-        )
-    })
+    lock::read(&DISPATCHER, "notifications dispatcher")?
+        .clone()
+        .ok_or_else(|| {
+            FrameworkError::internal(
+                "no NotificationDispatcher registered; call notifications::set_dispatcher(...)",
+            )
+        })
 }
 
 /// Register a notification type for queue dispatch. Call once at boot for
@@ -356,14 +358,14 @@ pub fn register_notification_factory<N: Notification>() -> Result<(), FrameworkE
         })?;
         Ok(Box::new(n))
     };
-    let mut g = lock::write(&FACTORIES)?;
+    let mut g = lock::write(&FACTORIES, "notification factory registry")?;
     g.get_or_insert_with(HashMap::new)
         .insert(N::notification_name().to_string(), factory);
     Ok(())
 }
 
 pub(crate) fn factory_for(name: &str) -> Result<NotificationFactory, FrameworkError> {
-    let g = lock::read(&FACTORIES)?;
+    let g = lock::read(&FACTORIES, "notification factory registry")?;
     let map = g
         .as_ref()
         .ok_or_else(|| FrameworkError::internal(format!("unknown notification: {name}")))?;

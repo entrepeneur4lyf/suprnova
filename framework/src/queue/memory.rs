@@ -74,7 +74,7 @@ fn drain_expired(
     }
     // cx / waker are dropped here — no await has occurred.
     if !expired_tokens.is_empty() {
-        let mut g = lock::lock(inner)?;
+        let mut g = lock::lock(inner, "memory queue state")?;
         for token in expired_tokens {
             if let Some(env) = g.reserved.remove(&token) {
                 g.visible.push_front(env);
@@ -100,7 +100,7 @@ fn drain_delayed(
     }
     // cx / waker are dropped here — no await has occurred.
     if !ready.is_empty() {
-        let mut g = lock::lock(inner)?;
+        let mut g = lock::lock(inner, "memory queue state")?;
         for env in ready {
             g.visible.push_back(env);
         }
@@ -160,7 +160,7 @@ impl QueueDriver for MemoryQueueDriver {
     async fn push(&self, env: Envelope) -> Result<(), FrameworkError> {
         let now = Utc::now();
         if env.available_at <= now {
-            let mut g = lock::lock(&self.inner)?;
+            let mut g = lock::lock(&self.inner, "memory queue state")?;
             g.visible.push_back(env);
         } else {
             // Compute delay on the Tokio virtual clock so paused-clock tests work.
@@ -190,14 +190,14 @@ impl QueueDriver for MemoryQueueDriver {
         }
 
         let env_opt = {
-            let mut g = lock::lock(&self.inner)?;
+            let mut g = lock::lock(&self.inner, "memory queue state")?;
             g.visible.pop_front()
         };
 
         if let Some(env) = env_opt {
             let token = ReservationToken(Uuid::new_v4());
             {
-                let mut g = lock::lock(&self.inner)?;
+                let mut g = lock::lock(&self.inner, "memory queue state")?;
                 g.reserved.insert(token.clone(), env.clone());
             }
             self.visibility
@@ -214,7 +214,7 @@ impl QueueDriver for MemoryQueueDriver {
     }
 
     async fn ack(&self, token: &ReservationToken) -> Result<(), FrameworkError> {
-        let mut g = lock::lock(&self.inner)?;
+        let mut g = lock::lock(&self.inner, "memory queue state")?;
         g.reserved.remove(token);
         Ok(())
     }
@@ -225,13 +225,13 @@ impl QueueDriver for MemoryQueueDriver {
         requeue_delay: Duration,
     ) -> Result<(), FrameworkError> {
         let env = {
-            let mut g = lock::lock(&self.inner)?;
+            let mut g = lock::lock(&self.inner, "memory queue state")?;
             g.reserved.remove(token)
         };
         if let Some(mut env) = env {
             env.attempts += 1;
             if requeue_delay.is_zero() {
-                let mut g = lock::lock(&self.inner)?;
+                let mut g = lock::lock(&self.inner, "memory queue state")?;
                 g.visible.push_front(env);
             } else {
                 env.available_at = Utc::now()
@@ -248,7 +248,7 @@ impl QueueDriver for MemoryQueueDriver {
 
     async fn size(&self) -> Result<u64, FrameworkError> {
         let visible = {
-            let g = lock::lock(&self.inner)?;
+            let g = lock::lock(&self.inner, "memory queue state")?;
             (g.visible.len() + g.reserved.len()) as u64
         };
         let delayed = self.delayed.lock().await.len() as u64;
@@ -256,7 +256,7 @@ impl QueueDriver for MemoryQueueDriver {
     }
 
     async fn pending_size(&self) -> Result<u64, FrameworkError> {
-        let g = lock::lock(&self.inner)?;
+        let g = lock::lock(&self.inner, "memory queue state")?;
         Ok(g.visible.len() as u64)
     }
 
@@ -265,13 +265,13 @@ impl QueueDriver for MemoryQueueDriver {
     }
 
     async fn reserved_size(&self) -> Result<u64, FrameworkError> {
-        let g = lock::lock(&self.inner)?;
+        let g = lock::lock(&self.inner, "memory queue state")?;
         Ok(g.reserved.len() as u64)
     }
 
     async fn clear(&self) -> Result<u64, FrameworkError> {
         let dropped_visible_reserved = {
-            let mut g = lock::lock(&self.inner)?;
+            let mut g = lock::lock(&self.inner, "memory queue state")?;
             let n = (g.visible.len() + g.reserved.len()) as u64;
             g.visible.clear();
             g.reserved.clear();

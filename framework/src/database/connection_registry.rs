@@ -116,7 +116,7 @@ impl ConnectionRegistry {
     pub async fn register(name: &str, config: DatabaseConfig) -> Result<(), FrameworkError> {
         Self::ensure_name_writable(name)?;
         let conn = DbConnection::connect(&config).await?;
-        let mut r = crate::lock::write(reg())?;
+        let mut r = crate::lock::write(reg(), "connection registry")?;
         r.insert(name.to_string(), conn);
         Ok(())
     }
@@ -129,7 +129,7 @@ impl ConnectionRegistry {
     /// Same reserved-name policy as [`Self::register`].
     pub async fn register_existing(name: &str, conn: DbConnection) -> Result<(), FrameworkError> {
         Self::ensure_name_writable(name)?;
-        let mut r = crate::lock::write(reg())?;
+        let mut r = crate::lock::write(reg(), "connection registry")?;
         r.insert(name.to_string(), conn);
         Ok(())
     }
@@ -140,7 +140,7 @@ impl ConnectionRegistry {
     /// primary; that would mask the misconfiguration). Returns an
     /// `Internal` error if the registry lock is poisoned.
     pub async fn get(name: &str) -> Result<DbConnection, FrameworkError> {
-        let r = crate::lock::read(reg())?;
+        let r = crate::lock::read(reg(), "connection registry")?;
         r.get(name)
             .cloned()
             .ok_or_else(|| FrameworkError::database(format!("connection '{name}' not registered")))
@@ -315,12 +315,12 @@ mod tests {
         // poison as a `FrameworkError` instead of panicking. The
         // production `register`/`get` paths use these helpers — the
         // shape below is the exact transformation.
-        let write_err = crate::lock::write(&lock).err();
+        let write_err = crate::lock::write(&lock, "test connection registry").err();
         assert!(
             write_err.is_some(),
             "lock::write must return Err on poison, got Ok",
         );
-        let read_err = crate::lock::read(&lock).err();
+        let read_err = crate::lock::read(&lock, "test connection registry").err();
         assert!(
             read_err.is_some(),
             "lock::read must return Err on poison, got Ok",

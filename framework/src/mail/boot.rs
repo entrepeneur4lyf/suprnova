@@ -29,16 +29,18 @@ static MEMORY_CAPTURE: RwLock<Option<Arc<InMemoryMailTransport>>> = RwLock::new(
 pub fn captured_in_memory() -> Option<Arc<InMemoryMailTransport>> {
     // Read accessor: degrade to `None` on a poisoned lock rather than
     // panicking (crate-wide read-poison policy — see `crate::lock`).
-    lock::read(&MEMORY_CAPTURE).ok().and_then(|g| g.clone())
+    lock::read(&MEMORY_CAPTURE, "mail memory capture")
+        .ok()
+        .and_then(|g| g.clone())
 }
 
 fn set_memory_capture(t: Arc<InMemoryMailTransport>) -> Result<(), FrameworkError> {
-    *lock::write(&MEMORY_CAPTURE)? = Some(t);
+    *lock::write(&MEMORY_CAPTURE, "mail memory capture")? = Some(t);
     Ok(())
 }
 
 fn clear_memory_capture() -> Result<(), FrameworkError> {
-    *lock::write(&MEMORY_CAPTURE)? = None;
+    *lock::write(&MEMORY_CAPTURE, "mail memory capture")? = None;
     Ok(())
 }
 

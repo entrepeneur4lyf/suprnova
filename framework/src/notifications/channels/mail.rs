@@ -110,7 +110,7 @@ pub fn register_mail_renderer<N: NotificationMailable>() -> Result<(), Framework
         })?;
         n.to_mail()
     };
-    let mut g = lock::write(&MAIL_RENDERERS)?;
+    let mut g = lock::write(&MAIL_RENDERERS, "notification mail renderers")?;
     g.get_or_insert_with(HashMap::new)
         .insert(N::notification_name(), renderer);
     Ok(())
@@ -122,7 +122,7 @@ fn renderer_for(name: &str) -> Result<MailRendererFn, FrameworkError> {
             "no mail renderer for notification {name} — register via suprnova::register_mail_renderer::<N>()"
         ))
     };
-    let g = lock::read(&MAIL_RENDERERS)?;
+    let g = lock::read(&MAIL_RENDERERS, "notification mail renderers")?;
     // Treat "registry never initialized" identically to "this notification
     // not registered" — the operator-facing fix is the same.
     let map = g.as_ref().ok_or_else(missing)?;

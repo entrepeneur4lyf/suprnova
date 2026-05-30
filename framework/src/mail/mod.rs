@@ -103,11 +103,11 @@ pub struct Mail;
 
 impl Mail {
     pub fn set_transport(transport: Arc<dyn MailTransport>) -> Result<(), FrameworkError> {
-        *lock::write(&TRANSPORT)? = Some(transport);
+        *lock::write(&TRANSPORT, "mail transport")? = Some(transport);
         Ok(())
     }
     pub fn clear_transport() -> Result<(), FrameworkError> {
-        *lock::write(&TRANSPORT)? = None;
+        *lock::write(&TRANSPORT, "mail transport")? = None;
         Ok(())
     }
 
@@ -157,7 +157,7 @@ impl Mail {
     /// lacks an explicit `from`. Returns the previous value, if any.
     /// Mirrors Laravel's `Mailer::alwaysFrom`.
     pub fn always_from(addr: impl Into<Address>) -> Result<Option<Address>, FrameworkError> {
-        let mut g = lock::write(&ALWAYS)?;
+        let mut g = lock::write(&ALWAYS, "mail always-defaults")?;
         Ok(g.from.replace(addr.into()))
     }
 
@@ -165,7 +165,7 @@ impl Mail {
     /// message that has no explicit reply-to. Mirrors
     /// `Mailer::alwaysReplyTo`.
     pub fn always_reply_to(addr: impl Into<Address>) -> Result<Option<Address>, FrameworkError> {
-        let mut g = lock::write(&ALWAYS)?;
+        let mut g = lock::write(&ALWAYS, "mail always-defaults")?;
         Ok(g.reply_to.replace(addr.into()))
     }
 
@@ -173,14 +173,14 @@ impl Mail {
     /// Mirrors `Mailer::alwaysTo`. Primarily a local-dev "single inbox"
     /// debugging knob.
     pub fn always_to(addr: impl Into<Address>) -> Result<Option<Address>, FrameworkError> {
-        let mut g = lock::write(&ALWAYS)?;
+        let mut g = lock::write(&ALWAYS, "mail always-defaults")?;
         Ok(g.to.replace(addr.into()))
     }
 
     /// Set the global default `return_path` (Sender / bounce-to).
     /// Mirrors `Mailer::alwaysReturnPath`.
     pub fn always_return_path(addr: impl Into<Address>) -> Result<Option<Address>, FrameworkError> {
-        let mut g = lock::write(&ALWAYS)?;
+        let mut g = lock::write(&ALWAYS, "mail always-defaults")?;
         Ok(g.return_path.replace(addr.into()))
     }
 
@@ -188,7 +188,7 @@ impl Mail {
     /// keep the global state clean across the suite. Returns `Ok(())`
     /// even if no defaults were set.
     pub fn forget_always() -> Result<(), FrameworkError> {
-        *lock::write(&ALWAYS)? = AlwaysDefaults::default();
+        *lock::write(&ALWAYS, "mail always-defaults")? = AlwaysDefaults::default();
         Ok(())
     }
 
@@ -213,7 +213,7 @@ impl Mail {
         clear_queue_capture();
         MAIL_FAKE_DEPTH.fetch_add(1, Ordering::SeqCst);
         let transport = Arc::new(InMemoryMailTransport::new());
-        let previous = lock::write(&TRANSPORT)
+        let previous = lock::write(&TRANSPORT, "mail transport")
             .expect("mail transport lock poisoned")
             .replace(transport.clone() as Arc<dyn MailTransport>);
         MailFake {
@@ -223,7 +223,7 @@ impl Mail {
     }
 
     pub(crate) fn current_transport() -> Result<Arc<dyn MailTransport>, FrameworkError> {
-        lock::read(&TRANSPORT)?
+        lock::read(&TRANSPORT, "mail transport")?
             .clone()
             .ok_or_else(|| FrameworkError::internal(
                 "no mail transport configured; call Mail::set_transport(...) or run suprnova::mail::boot::bootstrap_from_env()"
@@ -235,7 +235,7 @@ impl Mail {
     /// (queued mail) can route through the same precedence rules
     /// `MailBuilder::send` uses.
     pub(crate) fn apply_always_defaults(mut msg: OutgoingMessage) -> OutgoingMessage {
-        let defaults = lock::read(&ALWAYS)
+        let defaults = lock::read(&ALWAYS, "mail always-defaults")
             .ok()
             .map(|g| g.clone())
             .unwrap_or_default();
@@ -842,7 +842,8 @@ impl Drop for MailFake {
         // panic during drop we accept that — losing transport state
         // during teardown is preferable to silently leaving the fake
         // bound (which would corrupt every subsequent test).
-        *lock::write(&TRANSPORT).expect("mail transport lock poisoned") = self.previous.take();
+        *lock::write(&TRANSPORT, "mail transport").expect("mail transport lock poisoned") =
+            self.previous.take();
         // Clear queued capture — siblings tests should not see this
         // suite's queued buffer.
         clear_queue_capture();

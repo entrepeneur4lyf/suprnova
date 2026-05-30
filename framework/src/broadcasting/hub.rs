@@ -155,7 +155,7 @@ impl InMemoryBroadcastHub {
         }
         // Slow path — create the channel under a write lock and sweep
         // any dead siblings while we hold it.
-        match lock::write(&self.channels) {
+        match lock::write(&self.channels, "broadcast hub channels") {
             Ok(mut map) => {
                 let tx = map
                     .entry(channel.to_string())

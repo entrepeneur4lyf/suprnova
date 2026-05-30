@@ -94,7 +94,7 @@ pub fn register<M: Mailable>() -> Result<(), FrameworkError> {
         })?;
         Ok(Box::new(m))
     };
-    let mut g = lock::write(&REGISTRY)?;
+    let mut g = lock::write(&REGISTRY, "mailable registry")?;
     g.get_or_insert_with(HashMap::new)
         .insert(M::mailable_name().to_string(), factory);
     Ok(())
@@ -107,7 +107,7 @@ pub fn build(
     name: &str,
     payload: serde_json::Value,
 ) -> Result<Box<dyn AnyMailable>, FrameworkError> {
-    let g = lock::read(&REGISTRY)?;
+    let g = lock::read(&REGISTRY, "mailable registry")?;
     let map = g
         .as_ref()
         .ok_or_else(|| FrameworkError::internal(format!("unknown mailable: {name}")))?;

@@ -341,7 +341,7 @@ impl QueueDriver for RedisQueueDriver {
         // Call the `Message` trait's `to_owned` explicitly (not `ToOwned`).
         let shared = sea_streamer::Message::to_owned(&msg);
         {
-            let mut g = lock::lock(&self.pending)?;
+            let mut g = lock::lock(&self.pending, "redis queue pending map")?;
             g.insert(token.0, (envelope.clone(), shared));
         }
 
@@ -357,7 +357,7 @@ impl QueueDriver for RedisQueueDriver {
     /// next flush re-delivers the message.
     async fn ack(&self, token: &ReservationToken) -> Result<(), FrameworkError> {
         let entry = {
-            let mut g = lock::lock(&self.pending)?;
+            let mut g = lock::lock(&self.pending, "redis queue pending map")?;
             g.remove(&token.0)
         };
 
@@ -400,7 +400,7 @@ impl QueueDriver for RedisQueueDriver {
         requeue_delay: Duration,
     ) -> Result<(), FrameworkError> {
         let entry = {
-            let mut g = lock::lock(&self.pending)?;
+            let mut g = lock::lock(&self.pending, "redis queue pending map")?;
             g.remove(&token.0)
         };
 

@@ -951,7 +951,8 @@ impl DB {
     where
         F: Fn(&crate::database::events::QueryExecuted) + Send + Sync + 'static,
     {
-        let mut reg = crate::lock::write(crate::database::events::listeners())?;
+        let mut reg =
+            crate::lock::write(crate::database::events::listeners(), "db event listeners")?;
         reg.listeners.push(std::sync::Arc::new(callback));
         Ok(())
     }
@@ -961,7 +962,8 @@ impl DB {
     /// [`EventFacade::forget`](crate::EventFacade) (the dispatcher's
     /// per-event forget surface).
     pub fn flush_listeners() -> Result<(), FrameworkError> {
-        let mut reg = crate::lock::write(crate::database::events::listeners())?;
+        let mut reg =
+            crate::lock::write(crate::database::events::listeners(), "db event listeners")?;
         reg.listeners.clear();
         Ok(())
     }

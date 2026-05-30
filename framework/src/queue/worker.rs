@@ -83,7 +83,7 @@ pub fn register_job<J: Job>() {
         })
     });
     let middleware: MiddlewareFactory = Arc::new(|| J::middleware());
-    let mut g = lock::write(&REGISTRY).expect("queue registry poisoned");
+    let mut g = lock::write(&REGISTRY, "queue job registry").expect("queue registry poisoned");
     let name = J::job_name();
     let map = g.get_or_insert_with(HashMap::new);
     if map
@@ -114,7 +114,7 @@ pub async fn dispatch_by_name(
     payload: serde_json::Value,
 ) -> Result<(), FrameworkError> {
     let dispatcher = {
-        let g = lock::read(&REGISTRY)?;
+        let g = lock::read(&REGISTRY, "queue job registry")?;
         let map = g
             .as_ref()
             .ok_or_else(|| FrameworkError::internal(format!("unknown job: {name}")))?;
@@ -128,7 +128,7 @@ pub async fn dispatch_by_name(
 /// Look up the middleware factory for a job name. Returns an empty list
 /// for unregistered jobs (the dispatcher itself will error in that case).
 fn middleware_for(name: &str) -> Vec<Arc<dyn JobMiddleware>> {
-    let g = match lock::read(&REGISTRY) {
+    let g = match lock::read(&REGISTRY, "queue job registry") {
         Ok(g) => g,
         Err(_) => return Vec::new(),
     };
@@ -175,7 +175,7 @@ pub async fn run_through_middleware(env: Envelope) -> Result<JobOutcome, Framewo
 /// Return all registered job names. Used by admin inspectors and
 /// `cargo run --bin app -- jobs:list` (Phase 6B).
 pub fn registered_job_names() -> Vec<String> {
-    lock::read(&REGISTRY)
+    lock::read(&REGISTRY, "queue job registry")
         .expect("queue registry poisoned")
         .as_ref()
         .map(|m| {

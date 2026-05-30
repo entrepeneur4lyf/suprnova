@@ -134,7 +134,7 @@ impl InertiaRegistry {
         // every subsequent `App::inertia_share*` call. Read side
         // (`snapshot_static`/`trait_provider`) already propagates via `?`,
         // so the asymmetry was visible.
-        match lock::write(&self.shares) {
+        match lock::write(&self.shares, "inertia share registry") {
             Ok(mut reg) => {
                 if let Some(existing) = reg.iter_mut().find(|e| e.key == key) {
                     existing.prop = prop;
@@ -157,7 +157,7 @@ impl InertiaRegistry {
     /// **Poison policy** (Domain 20 audit D20-A): on lock poison the
     /// registration is skipped and a `tracing::error!` is emitted.
     pub fn register_trait(&self, provider: Arc<dyn InertiaSharedData>) {
-        match lock::write(&self.provider) {
+        match lock::write(&self.provider, "inertia shared trait slot") {
             Ok(mut slot) => {
                 *slot = Some(provider);
             }
@@ -171,7 +171,7 @@ impl InertiaRegistry {
     /// `Prop` either holds a `Value` (cheap clone) or an `Arc`-backed
     /// resolver. Internal use by `InertiaResponse::resolve`.
     pub(crate) fn snapshot_static(&self) -> Result<Vec<(String, Prop)>, FrameworkError> {
-        let reg = lock::read(&self.shares)?;
+        let reg = lock::read(&self.shares, "inertia share registry")?;
         Ok(reg
             .iter()
             .map(|e| (e.key.clone(), e.prop.clone()))
@@ -182,7 +182,7 @@ impl InertiaRegistry {
     pub(crate) fn trait_provider(
         &self,
     ) -> Result<Option<Arc<dyn InertiaSharedData>>, FrameworkError> {
-        Ok(lock::read(&self.provider)?.clone())
+        Ok(lock::read(&self.provider, "inertia shared trait slot")?.clone())
     }
 }
 

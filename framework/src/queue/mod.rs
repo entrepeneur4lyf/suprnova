@@ -394,7 +394,8 @@ impl Queue {
     /// Replace the registered driver. Primarily for boot-time wiring;
     /// in tests prefer `testing::install_fake()`.
     pub fn set_driver(driver: Arc<dyn QueueDriver>) {
-        *lock::write(&DRIVER).unwrap_or_else(|e| panic!("{e}")) = Some(driver);
+        *lock::write(&DRIVER, "queue driver registry").unwrap_or_else(|e| panic!("{e}")) =
+            Some(driver);
     }
 
     /// Return the registered driver's `name()` for observability (admin,
@@ -424,8 +425,7 @@ impl Queue {
 }
 
 pub(crate) fn current_driver() -> Result<Arc<dyn QueueDriver>, FrameworkError> {
-    lock::read(&DRIVER)
-        .map_err(|_| FrameworkError::internal("queue driver registry lock poisoned"))?
+    lock::read(&DRIVER, "queue driver registry")?
         .clone()
         .ok_or_else(|| {
             FrameworkError::internal(
@@ -436,8 +436,7 @@ pub(crate) fn current_driver() -> Result<Arc<dyn QueueDriver>, FrameworkError> {
 
 /// Wire the in-memory queue driver as the default. Idempotent.
 pub async fn bootstrap_default() {
-    if lock::read(&DRIVER)
-        .map_err(|_| FrameworkError::internal("queue driver registry lock poisoned"))
+    if lock::read(&DRIVER, "queue driver registry")
         .map(|g| g.is_some())
         .unwrap_or(false)
     {

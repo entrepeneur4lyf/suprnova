@@ -74,7 +74,7 @@ impl PaymentProviderRegistry {
     /// the same "not registered" shape as a missing entry, which keeps a single
     /// panic from cascading through every subsequent payment call.
     pub fn get(name: &str) -> Option<Arc<dyn PaymentProvider>> {
-        match crate::lock::read(ensure_built()) {
+        match crate::lock::read(ensure_built(), "payments registry") {
             Ok(map) => map.get(name).cloned(),
             Err(_) => {
                 tracing::error!(
@@ -90,7 +90,7 @@ impl PaymentProviderRegistry {
     ///
     /// On lock poison returns an empty vec and logs at `error` level.
     pub fn names() -> Vec<&'static str> {
-        match crate::lock::read(ensure_built()) {
+        match crate::lock::read(ensure_built(), "payments registry") {
             Ok(map) => map.keys().copied().collect(),
             Err(_) => {
                 tracing::error!("Payments registry lock poisoned; returning empty names list.");
@@ -108,7 +108,7 @@ impl PaymentProviderRegistry {
     /// On lock poison the bind is skipped and a `tracing::error!` is emitted —
     /// next `get()` call will then miss, matching the read-path policy.
     pub fn bind(name: &'static str, provider: Arc<dyn PaymentProvider>) {
-        match crate::lock::write(ensure_built()) {
+        match crate::lock::write(ensure_built(), "payments registry") {
             Ok(mut map) => {
                 map.insert(name, provider);
             }

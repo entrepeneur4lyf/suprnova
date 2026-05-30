@@ -1018,7 +1018,7 @@ async fn handle_ws_upgrade(
         let terminator: Arc<BoxedHandler> = Arc::new(Box::new(move |req: Request| {
             let captured = captured_for_terminator.clone();
             Box::pin(async move {
-                match lock::lock(&captured) {
+                match lock::lock(&captured, "ws upgrade terminator capture") {
                     Ok(mut guard) => {
                         *guard = Some(req);
                         Ok(HttpResponse::text("").status(200))
@@ -1082,7 +1082,7 @@ async fn handle_ws_upgrade(
             return http_response.into_hyper();
         }
 
-        match lock::lock(&captured) {
+        match lock::lock(&captured, "ws upgrade terminator capture") {
             Ok(mut guard) => match guard.take() {
                 Some(req) => req,
                 None => {

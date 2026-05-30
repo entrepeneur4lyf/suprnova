@@ -224,7 +224,7 @@ impl OAuthAuth {
     /// error propagation. Production: an app whose lock is poisoned at
     /// boot has bigger problems than a missing OAuth config.
     pub fn configure(&self, config: OAuthProviderConfig) {
-        match lock::write(configs()) {
+        match lock::write(configs(), "oauth provider configs") {
             Ok(mut map) => {
                 map.insert(self.provider.clone(), config);
             }
@@ -656,7 +656,7 @@ impl OAuthAuth {
     // ── Private helpers ────────────────────────────────────────────────────────
 
     fn config(&self) -> Result<OAuthProviderConfig, FrameworkError> {
-        lock::read(configs())?
+        lock::read(configs(), "oauth provider configs")?
             .get(&self.provider)
             .cloned()
             .ok_or_else(|| FrameworkError::Domain {
