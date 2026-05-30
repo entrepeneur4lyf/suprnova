@@ -1,399 +1,446 @@
 # Query Builder
 
-suprnova uses SeaORM's powerful query builder for complex database operations. While the `Model` and `ModelMut` traits handle common operations, you'll use the query builder for filtering, sorting, pagination, and joins.
-
-## Basic Queries
-
-### Getting the Connection
-
-Always start by getting the database connection:
-
-```rust
-use suprnova::database::DB;
-
-let db = DB::connection();
-```
-
-### Find All
+When you want to query a table without modelling it as a typed
+`#[suprnova::model]` struct, reach for `DB::table(name)`. It returns a
+chainable builder shaped like the typed Eloquent `Builder<M>`, but
+materialises rows as `DynamicRow` — a `serde_json::Map` newtype with
+typed accessors. This is the chapter for audit logs, ad-hoc reports,
+dashboard aggregates, and any table you haven't bothered to model. For
+the typed equivalent, see [Eloquent](eloquent.md). For raw `DB::select`
+inside transactions or with `DB::listen` observation, see
+[Database](database.md).
 
 ```rust
-use sea_orm::EntityTrait;
-use crate::models::todos::Entity as Todos;
+use suprnova::DB;
 
-let todos = Todos::find()
-    .all(DB::connection())
-    .await?;
-```
-
-### Find by ID
-
-```rust
-let todo = Todos::find_by_id(1)
-    .one(DB::connection())
+let rows = DB::table("audit_log")
+    .select(["id", "event", "actor_id"])
+    .filter("actor_id", 42i64)
+    .filter_op("created_at", ">=", "2026-01-01")
+    .order_by_desc("id")
+    .limit(50)
+    .get()
     .await?;
 
-// Returns Option<Model>
-if let Some(todo) = todo {
-    println!("Found: {}", todo.title);
+for row in rows.iter() {
+    let id: i64 = row.get_int("id")?;
+    let event: String = row.get_string("event")?;
+    println!("{id}: {event}");
 }
 ```
 
-## Filtering with Conditions
+## When to use which surface
 
-Use the `filter()` method with `Condition` for complex queries:
+Three query surfaces overlap; pick the right one for the table.
+
+| Table is… | Use | Returns |
+|---|---|---|
+| Modeled with `#[suprnova::model]` | `Model::query()` → `Builder<M>` | typed `M` values |
+| Unmodeled but you want a chainable WHERE/ORDER/LIMIT shape | `DB::table(name)` → `DbTableBuilder` | `DynamicRow` |
+| Anything the builders can't express — CTEs, window functions, backend DDL | `DB::select` / `DB::statement` / `DB::affecting_statement` | `DynamicRow` / `bool` / `u64` |
+
+`DbTableBuilder` exists for the middle case. You get the WHERE / ORDER /
+LIMIT chain without committing to a `#[suprnova::model]` struct and
+without dropping all the way to raw SQL strings.
+
+## The chainable surface
+
+`DB::table(name)` returns a `DbTableBuilder`. Build it up, then call a
+terminal method to execute.
+
+### Filtering
 
 ```rust
-use sea_orm::{EntityTrait, QueryFilter, ColumnTrait};
-use crate::models::todos::{Entity as Todos, Column};
+// Equality.
+DB::table("users").filter("email", "alice@example.com").get().await?;
 
-// Simple equality
-let completed_todos = Todos::find()
-    .filter(Column::Completed.eq(true))
-    .all(DB::connection())
-    .await?;
+// Arbitrary operator. Allowlist: =, <>, <, <=, >, >=, LIKE, NOT LIKE,
+// ILIKE, NOT ILIKE, IS, IS NOT.
+DB::table("orders").filter_op("total", ">=", 100i64).get().await?;
+DB::table("posts").filter_op("title", "LIKE", "%rust%").get().await?;
 
-// Multiple conditions
-let recent_completed = Todos::find()
-    .filter(Column::Completed.eq(true))
-    .filter(Column::Title.contains("urgent"))
-    .all(DB::connection())
+// Multiple filters AND together.
+DB::table("audit_log")
+    .filter("actor_id", 42i64)
+    .filter_op("event", "<>", "noop")
+    .get()
     .await?;
 ```
 
-### Available Filter Methods
+`filter` and `filter_op` both accept any `Into<SeaValue>` for the
+right-hand side, which covers `i64`, `String`, `&str`, `bool`, `f64`,
+`Option<T>`, `chrono::*`, `uuid::Uuid`, and `serde_json::Value` — every
+column type the backend understands.
 
-| Method | SQL Equivalent | Example |
-|--------|----------------|---------|
-| `eq(value)` | `= value` | `Column::Status.eq("active")` |
-| `ne(value)` | `!= value` | `Column::Status.ne("deleted")` |
-| `gt(value)` | `> value` | `Column::Age.gt(18)` |
-| `gte(value)` | `>= value` | `Column::Age.gte(21)` |
-| `lt(value)` | `< value` | `Column::Price.lt(100)` |
-| `lte(value)` | `<= value` | `Column::Price.lte(50)` |
-| `between(a, b)` | `BETWEEN a AND b` | `Column::Age.between(18, 65)` |
-| `like(pattern)` | `LIKE pattern` | `Column::Name.like("%john%")` |
-| `starts_with(s)` | `LIKE 's%'` | `Column::Name.starts_with("J")` |
-| `ends_with(s)` | `LIKE '%s'` | `Column::Email.ends_with(".com")` |
-| `contains(s)` | `LIKE '%s%'` | `Column::Title.contains("rust")` |
-| `is_null()` | `IS NULL` | `Column::DeletedAt.is_null()` |
-| `is_not_null()` | `IS NOT NULL` | `Column::Email.is_not_null()` |
-| `is_in(vec)` | `IN (...)` | `Column::Status.is_in(vec!["a", "b"])` |
-| `is_not_in(vec)` | `NOT IN (...)` | `Column::Id.is_not_in(vec![1, 2])` |
-
-## Complex Conditions
-
-### OR Conditions
+### Selecting columns
 
 ```rust
-use sea_orm::{Condition, EntityTrait, QueryFilter, ColumnTrait};
+// Default is SELECT *.
+DB::table("users").get().await?;
 
-let todos = Todos::find()
-    .filter(
-        Condition::any()
-            .add(Column::Title.contains("urgent"))
-            .add(Column::Title.contains("important"))
-    )
-    .all(DB::connection())
+// Restrict columns when you only need some.
+DB::table("users").select(["id", "email"]).get().await?;
+```
+
+### Ordering and windowing
+
+```rust
+DB::table("posts")
+    .order_by_desc("created_at")
+    .order_by_asc("title")
+    .limit(20)
+    .offset(40)
+    .get()
     .await?;
 ```
 
-### AND + OR Combined
+`order_by_desc` and `order_by_asc` chain in insertion order; the
+generated SQL preserves it.
+
+### Terminals
 
 ```rust
-let todos = Todos::find()
-    .filter(
-        Condition::all()
-            .add(Column::Completed.eq(false))
-            .add(
-                Condition::any()
-                    .add(Column::Title.contains("urgent"))
-                    .add(Column::Priority.gt(5))
-            )
-    )
-    .all(DB::connection())
+// All matching rows.
+let rows: Collection<DynamicRow> = DB::table("audit_log")
+    .filter("actor_id", 42i64)
+    .get()
+    .await?;
+
+// First row or None.
+let first: Option<DynamicRow> = DB::table("audit_log")
+    .filter("event", "user.deleted")
+    .first()
+    .await?;
+
+// Just the count (clears any select/order/limit/offset before
+// rendering — count semantics don't care about those).
+let n: u64 = DB::table("audit_log")
+    .filter("actor_id", 42i64)
+    .count()
     .await?;
 ```
 
-## Sorting
+`get()` returns `Collection<DynamicRow>` — the same collection wrapper
+typed models use, with the same `.iter()`, `.len()`, `.into_vec()`
+surface. See [Eloquent Collections](eloquent-collections.md).
 
-### Order By
-
-```rust
-use sea_orm::{EntityTrait, QueryOrder};
-
-// Single column
-let todos = Todos::find()
-    .order_by_asc(Column::CreatedAt)
-    .all(DB::connection())
-    .await?;
-
-// Descending
-let recent_first = Todos::find()
-    .order_by_desc(Column::CreatedAt)
-    .all(DB::connection())
-    .await?;
-
-// Multiple columns
-let sorted = Todos::find()
-    .order_by_desc(Column::Priority)
-    .order_by_asc(Column::Title)
-    .all(DB::connection())
-    .await?;
-```
-
-## Pagination
-
-### Limit and Offset
+### Inserts, updates, deletes
 
 ```rust
-use sea_orm::{EntityTrait, QuerySelect};
+use suprnova::attrs;
 
-// Get first 10
-let page_1 = Todos::find()
-    .limit(10)
-    .all(DB::connection())
+// INSERT, returns the new row's auto-increment id.
+let id: i64 = DB::table("audit_log")
+    .insert(attrs! { event: "user.created", actor_id: 42 })
     .await?;
 
-// Get page 2 (items 11-20)
-let page_2 = Todos::find()
-    .limit(10)
-    .offset(10)
-    .all(DB::connection())
+// UPDATE, returns rows affected.
+let updated: u64 = DB::table("audit_log")
+    .filter("id", id)
+    .update(attrs! { event: "user.created.v2" })
+    .await?;
+
+// DELETE, returns rows affected.
+let deleted: u64 = DB::table("audit_log")
+    .filter("actor_id", 42i64)
+    .delete()
     .await?;
 ```
 
-### Paginator
+The `attrs!` macro builds the column-to-value map at the call site.
+Keys are SQL identifiers (validated) and values are bound as
+parameters.
 
-SeaORM provides a built-in paginator:
+#### `update_all` and `delete_all` aliases
 
-```rust
-use sea_orm::{EntityTrait, PaginatorTrait};
-
-let paginator = Todos::find()
-    .order_by_desc(Column::CreatedAt)
-    .paginate(DB::connection(), 10);  // 10 items per page
-
-// Get total pages
-let num_pages = paginator.num_pages().await?;
-
-// Get specific page (0-indexed)
-let page_0 = paginator.fetch_page(0).await?;
-let page_1 = paginator.fetch_page(1).await?;
-```
-
-## Selecting Specific Columns
-
-### Partial Select
+`update` and `delete` are the Laravel-faithful names. The
+`Builder<M>`-style aliases — `update_all` and `delete_all` — call the
+same implementation. Prefer the `_all` form when the table-wide intent
+is the point of the call site; it makes a missing `filter` visible to
+reviewers:
 
 ```rust
-use sea_orm::{EntityTrait, QuerySelect};
+// Same behaviour as DB::table("rate_limits").delete().await? but the
+// _all suffix tells reviewers "yes, I meant to truncate the table".
+DB::table("rate_limits").delete_all().await?;
 
-#[derive(FromQueryResult)]
-struct TodoTitle {
-    id: i32,
-    title: String,
-}
-
-let titles = Todos::find()
-    .select_only()
-    .column(Column::Id)
-    .column(Column::Title)
-    .into_model::<TodoTitle>()
-    .all(DB::connection())
+// Mass update with a WHERE — the _all suffix here matches the typed
+// Builder<M> convention for the same operation.
+DB::table("sessions")
+    .filter_op("expires_at", "<", chrono::Utc::now())
+    .update_all(attrs! { status: "expired" })
     .await?;
 ```
 
-## Aggregations
+#### Empty WHERE on update or delete operates on every row
 
-### Count
+`DB::table("x").delete().await?` removes every row in the table. That
+is supported by design — sometimes you really do want to truncate —
+but it's rarely correct. Always look at a `delete()` / `delete_all()`
+call and check whether there's a `filter` in front of it. The same is
+true of `update` / `update_all`.
 
-```rust
-use sea_orm::{EntityTrait, PaginatorTrait};
+#### Insert backend split
 
-let count = Todos::find()
-    .filter(Column::Completed.eq(true))
-    .count(DB::connection())
-    .await?;
-```
+`RETURNING id` is used on Postgres and SQLite. MySQL doesn't support
+`RETURNING`, so the builder runs the INSERT and reads the driver's
+per-connection `last_insert_id()` from the result. The model-less
+builder assumes a standard `id` auto-increment primary key. UUID,
+composite, renamed, or non-integer primary keys aren't supported on
+this surface — use the typed [Eloquent](eloquent.md) `Model` interface
+instead, which consults the model definition for primary-key shape.
 
-### Sum, Avg, Min, Max
+## `DynamicRow` — typed accessors over a JSON map
 
-```rust
-use sea_orm::{EntityTrait, QuerySelect, sea_query::Func};
-
-// Using raw expressions for aggregations
-let result = Todos::find()
-    .select_only()
-    .column_as(Column::Priority.sum(), "total_priority")
-    .into_tuple::<(Option<i32>,)>()
-    .one(DB::connection())
-    .await?;
-```
-
-## Joins
-
-### Loading Related Data
+Every row returned by `DB::table` or `DB::select` materialises as
+`DynamicRow`, a `serde_json::Map<String, Value>` newtype with typed
+accessors. Each getter returns `Result<T, FrameworkError>` with a
+clear error message on missing key or type mismatch.
 
 ```rust
-use sea_orm::EntityTrait;
-use crate::models::{posts, users};
-
-// Load post with its author
-let post_with_author = posts::Entity::find_by_id(1)
-    .find_also_related(users::Entity)
-    .one(DB::connection())
-    .await?;
-
-// Load all posts for a user
-let user_posts = users::Entity::find_by_id(1)
-    .find_with_related(posts::Entity)
-    .all(DB::connection())
-    .await?;
-```
-
-### Custom Joins
-
-```rust
-use sea_orm::{EntityTrait, QuerySelect, JoinType, RelationTrait};
-
-let results = posts::Entity::find()
-    .join(JoinType::InnerJoin, posts::Relation::User.def())
-    .filter(users::Column::Active.eq(true))
-    .all(DB::connection())
-    .await?;
-```
-
-## Raw Queries
-
-For complex queries that can't be expressed with the query builder:
-
-```rust
-use sea_orm::{FromQueryResult, DbBackend, Statement};
-
-#[derive(FromQueryResult)]
-struct CustomResult {
-    count: i64,
-    category: String,
-}
-
-let results: Vec<CustomResult> = CustomResult::find_by_statement(
-    Statement::from_sql_and_values(
-        DbBackend::Sqlite,
-        r#"SELECT COUNT(*) as count, category FROM todos GROUP BY category"#,
-        vec![],
-    )
-)
-.all(DB::connection())
-.await?;
-```
-
-## Transactions
-
-### Basic Transaction
-
-```rust
-use sea_orm::TransactionTrait;
-
-let result = DB::connection()
-    .transaction::<_, (), sea_orm::DbErr>(|txn| {
-        Box::pin(async move {
-            // All operations in this block use the transaction
-            let todo = ActiveModel {
-                title: Set("New task".to_string()),
-                ..Default::default()
-            };
-            Todos::insert(todo).exec(txn).await?;
-
-            // More operations...
-
-            Ok(())  // Commit
-            // Return Err(...) to rollback
-        })
-    })
-    .await;
-```
-
-## Query Examples
-
-### Search with Pagination
-
-```rust
-pub async fn search_todos(
-    query: &str,
-    page: u64,
-    per_page: u64,
-) -> Result<(Vec<Todo>, u64), DbErr> {
-    let paginator = Todos::find()
-        .filter(
-            Condition::any()
-                .add(Column::Title.contains(query))
-                .add(Column::Description.contains(query))
-        )
-        .order_by_desc(Column::CreatedAt)
-        .paginate(DB::connection(), per_page);
-
-    let total_pages = paginator.num_pages().await?;
-    let todos = paginator.fetch_page(page).await?;
-
-    Ok((todos, total_pages))
+for row in rows.iter() {
+    let id: i64                 = row.get_int("id")?;
+    let event: String           = row.get_string("event")?;
+    let active: bool            = row.get_bool("active")?;
+    let weight: f64             = row.get_float("weight")?;
+    let payload: serde_json::Value = row.get_value("payload")?;
 }
 ```
 
-### Soft Delete Pattern
+For nullable columns, use `get_optional_*`. These distinguish "column
+missing" (error — schema mismatch) from "column present, value SQL
+NULL" (`Ok(None)`):
 
 ```rust
-// Only get non-deleted records
-let active_todos = Todos::find()
-    .filter(Column::DeletedAt.is_null())
-    .all(DB::connection())
-    .await?;
-
-// Soft delete a record
-let mut todo: ActiveModel = existing_todo.into();
-todo.deleted_at = Set(Some(chrono::Utc::now().naive_utc()));
-Todos::update_one(todo).await?;
+let title: Option<String> = row.get_optional_string("title")?;
+let score: Option<i64>    = row.get_optional_int("score")?;
 ```
 
-### Conditional Query Building
+Today the optional family covers `String` and `i64`. For other
+nullable types, use `get_value` and match on `serde_json::Value::Null`
+yourself, or read the column through `get_as::<Option<T>>` (any
+`T: DeserializeOwned`).
+
+To deserialise a column into any struct or container type, use
+`get_as`. The full `serde_json` deserialisation surface is available:
 
 ```rust
-pub async fn list_todos(
-    completed: Option<bool>,
-    search: Option<String>,
-    sort_by: Option<String>,
-) -> Result<Vec<Todo>, DbErr> {
-    let mut query = Todos::find();
-
-    // Apply filters conditionally
-    if let Some(completed) = completed {
-        query = query.filter(Column::Completed.eq(completed));
-    }
-
-    if let Some(search) = search {
-        query = query.filter(Column::Title.contains(&search));
-    }
-
-    // Apply sorting
-    query = match sort_by.as_deref() {
-        Some("title") => query.order_by_asc(Column::Title),
-        Some("created") => query.order_by_desc(Column::CreatedAt),
-        _ => query.order_by_desc(Column::Id),
-    };
-
-    query.all(DB::connection()).await
+#[derive(serde::Deserialize)]
+struct UserPrefs {
+    theme: String,
+    notifications: bool,
 }
+
+let prefs: UserPrefs    = row.get_as("prefs")?;
+let tags: Vec<String>   = row.get_as("tags")?;
+let when: chrono::DateTime<chrono::Utc> = row.get_as("created_at")?;
 ```
 
-## Summary
+`DynamicRow` derefs to `Map<String, Value>`, so iteration and
+key-existence checks work directly:
 
-| Operation | Method | Example |
-|-----------|--------|---------|
-| Find all | `find().all()` | `Entity::find().all(db)` |
-| Find by ID | `find_by_id()` | `Entity::find_by_id(1).one(db)` |
-| Filter | `filter()` | `find().filter(Column::X.eq(y))` |
-| Sort | `order_by_*()` | `find().order_by_asc(Column::X)` |
-| Limit | `limit()` | `find().limit(10)` |
-| Offset | `offset()` | `find().offset(20)` |
-| Paginate | `paginate()` | `find().paginate(db, 10)` |
-| Count | `count()` | `find().count(db)` |
-| Join | `find_also_related()` | `find().find_also_related(Other)` |
+```rust
+for (key, value) in row.iter() {
+    println!("{key} = {value}");
+}
+
+if row.contains_key("deleted_at") { /* … */ }
+```
+
+## Identifier trust boundary
+
+Table names, column names, ORDER BY directions, and SQL operators are
+interpolated into the SQL string verbatim — they are NOT bound as
+parameters (SQL doesn't allow placeholder-bound identifiers). Treat
+every `impl Into<String>` argument as a trusted, compile-time literal.
+
+```rust
+// Safe — the column name is a constant; the value is bound.
+DB::table("users").filter("email", request.email()).get().await?;
+
+// UNSAFE — never splice user input into a column name.
+DB::table("users")
+    .filter(request.user_supplied_column(), value)
+    .get()
+    .await?;
+```
+
+The framework enforces a strict allowlist at the I/O boundary —
+identifiers must match `[A-Za-z_][A-Za-z0-9_]*` with one optional
+`schema.` prefix, and operators must come from a fixed list. Violations
+fail closed with a `FrameworkError::Database` before any SQL is
+rendered. That's a safety net, not a license: keep identifiers literal
+in your code.
+
+Values on the right-hand side of `filter` / `filter_op` are always
+bound as parameters and safe to splice through from request data.
+
+## Raw queries
+
+When the builder can't express what you need — recursive CTEs, window
+functions, backend-specific DDL, `INSERT … ON CONFLICT DO UPDATE` —
+drop to a raw string. Placeholders match the active backend (`$1, $2,
+…` for Postgres, `?` for MySQL and SQLite); the framework auto-detects
+from `DatabaseConfig::url`.
+
+```rust
+use suprnova::DB;
+use sea_orm::Value;
+
+// SELECT — every row as DynamicRow.
+let rows = DB::select(
+    "SELECT u.name, COUNT(p.id) AS post_count
+     FROM users u LEFT JOIN posts p ON p.user_id = u.id
+     GROUP BY u.id
+     HAVING COUNT(p.id) > ?",
+    vec![Value::from(5i64)],
+).await?;
+
+// SELECT — first row only, mirrors Laravel's DB::selectOne.
+let alice = DB::select_one(
+    "SELECT * FROM users WHERE email = ?",
+    vec![Value::from("alice@example.com")],
+).await?;
+
+// SELECT — first column of first row as a typed scalar.
+let total: i64 = DB::scalar(
+    "SELECT COUNT(*) FROM users WHERE active = ?",
+    vec![Value::from(true)],
+).await?;
+
+// INSERT — true when at least one row was affected.
+DB::insert(
+    "INSERT INTO users (name, active) VALUES (?, ?)",
+    vec![Value::from("bob"), Value::from(true)],
+).await?;
+
+// UPDATE / DELETE — return the rows-affected count.
+let updated: u64 = DB::update(
+    "UPDATE users SET active = ? WHERE id = ?",
+    vec![Value::from(false), Value::from(1i64)],
+).await?;
+
+let deleted: u64 = DB::delete(
+    "DELETE FROM users WHERE active = ?",
+    vec![Value::from(false)],
+).await?;
+
+// Any prepared statement with bindings.
+DB::statement(
+    "UPDATE users SET votes = votes + ? WHERE id = ?",
+    vec![Value::from(1i64), Value::from(42i64)],
+).await?;
+
+// DDL or other no-binding statements that reject placeholder binding.
+DB::unprepared("CREATE INDEX idx_users_name ON users(name)").await?;
+
+// Generic "rows affected" path — for upserts and operations that
+// don't fit the named helpers.
+let n: u64 = DB::affecting_statement(
+    "INSERT INTO counters (k, n) VALUES ($1, 1)
+     ON CONFLICT (k) DO UPDATE SET n = counters.n + 1",
+    vec![Value::from("page_views")],
+).await?;
+```
+
+### Aggregate-column gotcha
+
+Untyped aggregates like `SELECT COUNT(*) AS n FROM t` work through the
+builder's `.count()` helper but may come back silently dropped from
+raw `DB::select` rows on SQLite. The underlying row materialiser walks
+sqlx's per-column type info, and a bare aggregate carries none. If you
+need raw `DB::select` with aggregates on SQLite, either wrap the
+expression in `CAST(… AS BIGINT)` to give it a type tag, or use
+`DB::scalar::<i64>` which goes through `query_one` + `try_get` and
+doesn't depend on the per-column type detection.
+
+## Bridge to typed Eloquent
+
+When the table is worth a `#[suprnova::model]` struct, the chainable
+shape carries over. `Model::query()` returns `Builder<M>`, which
+ships the same `filter` / `filter_op` / `order_by_*` / `limit` /
+`offset` / `get` / `first` / `count` surface — plus a much wider WHERE
+vocabulary (`filter_in`, `filter_between`, `filter_null`, `filter_has`,
+`filter_raw`, …) and Laravel-shape aliases (`db_where`, `where_in`,
+`where_between`, `where_null`, `where_has`, `where_raw`, …).
+
+```rust
+use suprnova::Model;
+
+let admins = User::query()
+    .filter("role", "admin")
+    .filter_op("created_at", ">=", since)
+    .order_by_desc("created_at")
+    .limit(20)
+    .get()
+    .await?;     // Collection<User> — typed, not DynamicRow
+
+let alice = User::query().filter("email", &email).first().await?;
+let total = User::query().filter("active", true).count().await?;
+// Note: Builder<M>::count returns i64 (matches Laravel's Eloquent),
+// whereas DbTableBuilder::count returns u64. Both surfaces give you a
+// non-negative SQL COUNT — they only differ in their wire type.
+```
+
+The full `Builder<M>` surface — every WHERE shape, aggregates,
+relations, eager loading, scopes, paginators, chunk iteration — is in
+[Eloquent](eloquent.md). The chainable shape you learned above is the
+same shape; the differences are typing and reach.
+
+## Routing to a named connection
+
+`DB::table` and the raw helpers default to the primary connection. To
+target a read replica, shard, or warehouse pool, pin the call:
+
+```rust
+// Builder pinned to a named connection.
+let rows = DB::table("audit_log").on("warehouse").get().await?;
+
+// Equivalent shorthand.
+let rows = DB::table_on("warehouse", "audit_log").get().await?;
+
+// Raw escapes have _on variants too.
+let rows = DB::select_on("warehouse", "SELECT …", vec![]).await?;
+let n    = DB::affecting_statement_on(
+    "warehouse",
+    "UPDATE …",
+    vec![],
+).await?;
+```
+
+When `__read_replica__` is registered, every read-shape terminal
+auto-routes through it; writes (`insert` / `update` / `delete` /
+`update_all` / `delete_all`) always target the primary. Inside a
+`DB::transaction` closure the active transaction's connection wins
+absolutely — `on(name)` is silently ignored to preserve atomicity. See
+[Database — Named connections](database.md) for the full precedence
+chain.
+
+### Why Suprnova diverges
+
+Laravel's `DB::table(...)` is its model-less query builder; under the
+hood it returns a `stdClass` per row (a PHP object whose properties
+are the columns). Suprnova returns `DynamicRow` instead — a
+`serde_json::Map` newtype with typed accessors. The accessor shape
+catches missing-column and wrong-type errors at the boundary instead
+of panicking deep in user code with a property-access exception.
+
+The dual `update`/`update_all` and `delete`/`delete_all` names exist
+because the typed Eloquent `Builder<M>` surface uses the `_all` suffix
+to make table-wide intent explicit at the call site. Rather than pick
+a side, the model-less builder ships both — `update` and `delete`
+match Laravel's `DB::table($t)->update(...)` and `->delete()` letter
+for letter; `update_all` and `delete_all` match the convention `M`
+users will already have in their muscle memory.
+
+## Next
+
+- [Database](database.md) — `DB` facade, transactions with savepoints,
+  `DB::listen` observability, named connections
+- [Eloquent](eloquent.md) — typed `#[suprnova::model]` structs and the
+  full `Builder<M>` surface
+- [Pagination](pagination.md) — `paginate` / `simple_paginate` /
+  `cursor_paginate` on typed builders
+- [Eloquent Collections](eloquent-collections.md) — the `Collection<T>`
+  returned by `get()` on both surfaces
+- [Migrations](migrations.md) — defining the schema the builders query
