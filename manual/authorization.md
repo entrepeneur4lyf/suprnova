@@ -1,7 +1,7 @@
 # Authorization
 
-Authentication answers _"who are you?"_ — authorization answers _"are you
-allowed to do this?"_ suprnova ships a Laravel-shaped `Gate` facade plus the
+Authentication answers _"who are you?"_; authorization answers _"are you
+allowed to do this?"_ Suprnova ships a Laravel-shaped `Gate` facade plus the
 `#[policy]` macro for resource-oriented wiring, with sync and async variants
 of every check so the same surface works whether your policy body needs a DB
 hit or just a struct-field comparison.
@@ -40,7 +40,7 @@ alice.authorize("update", &foreign_post)?;
 ### Defining abilities
 
 ```rust
-// Sync closure — fastest path, no allocation.
+// Sync closure — invoked directly, no boxed future.
 Gate::define::<User, Post>("view", |user, post| post.is_public || user.id == post.author_id);
 
 // Async closure — the future must be owned (no borrows past closure return).
@@ -142,8 +142,10 @@ impl PostPolicy {
 
 Each method becomes one `inventory::submit!`. `Server::serve` drains the
 inventory via `init_policies()` at boot, so by the time the first request
-arrives every action is registered. `init_policies()` is also public and
-idempotent — call it manually in tests.
+arrives every action is registered (see [Bootstrap](bootstrap.md) for where
+this slots into the boot sequence). `init_policies()` lives at
+`suprnova::authorization::init_policies` and is idempotent — call it manually
+in tests that exercise policy registration without standing up a server.
 
 Policy methods are stateless associated functions taking `(user, resource)` —
 the same shape as Laravel's `update(User $user, Post $post)`, where `$this` is
@@ -216,7 +218,7 @@ it's your application's `User`.
 ### Gating route groups
 
 ```rust
-use suprnova::{group, get, AuthMiddleware};
+use suprnova::{group, get, Auth, AuthMiddleware, FrameworkError, Request, Response};
 
 // Middleware checks the auth user; the handler authorizes the action.
 group!("/posts")
@@ -226,8 +228,13 @@ group!("/posts")
     ]);
 
 async fn edit_form(req: Request) -> Response {
-    let user: User = Auth::user_as().await?.ok_or(FrameworkError::Unauthorized)?;
-    let post = Post::find(req.path_param("id")?).await?;
+    let user: User = Auth::user_as::<User>()
+        .await?
+        .ok_or(FrameworkError::Unauthorized)?;
+    let id: i64 = req.param("id")?.parse()
+        .map_err(|_| FrameworkError::param_parse("id", "i64"))?;
+    let post = Post::find(id).await?
+        .ok_or_else(|| FrameworkError::not_found("Post"))?;
     user.authorize("update", &post)?;
     // ... render edit form
 }
@@ -385,11 +392,30 @@ every `(action, U, R)`. Put resource-specific logic in the gate. Hooks are
 synchronous predicates and apply to the async evaluation path too; for async
 authorization logic, use `define_async` / `define_async_with`.
 
-## No `forUser`
+### Why Suprnova diverges
 
 Laravel's `Gate::forUser($user)->allows(...)` rebinds the gate's *implicit*
-current-user resolver. suprnova's gate takes the user **explicitly** on every
-call, so "check as a different user" is just `Gate::allows(action,
-&other_user, &resource)`. There is no implicit resolver to rebind — the
-explicit API is strictly more general, which makes `forUser` redundant rather
-than missing.
+current-user resolver so the next check evaluates as that user. Suprnova's
+gate takes the user **explicitly** on every call, so "check as a different
+user" is just `Gate::allows(action, &other_user, &resource)`. There is no
+implicit resolver to rebind — the explicit API is strictly more general,
+which makes `forUser` redundant rather than missing.
+
+The same reasoning applies to Laravel's policy auto-discovery by class name.
+Suprnova ties policy methods to the type-erased `(action, U, R)` key at
+registration time, so a `Post` policy and a `Comment` policy with the same
+method name register two distinct gates without a naming convention or a
+discovery scan.
+
+## Next
+
+- [Authentication](authentication.md) — the user-side half: guards,
+  `Auth::user()`, `Auth::user_as::<T>()`
+- [Bootstrap](bootstrap.md) — where `init_policies()` runs in the boot
+  sequence, plus how to register before/after hooks
+- [Middleware](middleware.md) — pairing `AuthMiddleware` with route-level
+  authorization
+- [Error Model](error-model.md) — how a gate denial collapses into a 403, a
+  404, or a custom-status `FrameworkError::Domain`
+- [Events](events.md) — listening on policy outcomes via `Gate::after` for
+  audit logging
