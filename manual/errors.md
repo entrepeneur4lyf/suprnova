@@ -232,7 +232,8 @@ pub async fn show(req: Request) -> Response {
     let id: i64 = req.param("id")?.parse()
         .map_err(|_| FrameworkError::param_parse("id", "i64"))?;
 
-    let user = find_user(id).await.ok_or(UserNotFound)?;
+    let user = find_user(id).await
+        .ok_or_else(|| FrameworkError::from(UserNotFound))?;
 
     json_response!({ "user": user })
 }
