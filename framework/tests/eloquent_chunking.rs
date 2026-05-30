@@ -172,6 +172,31 @@ async fn chunk_by_id_short_last_batch_terminates() {
     assert_eq!(sizes, vec![5, 5, 2]);
 }
 
+#[tokio::test]
+async fn chunk_zero_n_errors() {
+    // `chunk(0)` would issue `LIMIT 0` forever — same hazard
+    // `paginate(0)` / `simple_paginate(0)` / `cursor_paginate(0)`
+    // reject up front with `FrameworkError::param`. Pin the parity.
+    let _db = fixture(5).await;
+    let err = T8Order::query()
+        .chunk(0, |_batch: Collection<T8Order>| async move { Ok(()) })
+        .await
+        .expect_err("chunk(0) must error");
+    assert_eq!(err.status_code(), 400);
+}
+
+#[tokio::test]
+async fn chunk_by_id_zero_n_errors() {
+    // Same explicit-parameter-error contract as `chunk(0)` — a zero
+    // batch size has no defensible meaning and must surface loudly.
+    let _db = fixture(5).await;
+    let err = T8Order::query()
+        .chunk_by_id(0, |_batch: Collection<T8Order>| async move { Ok(()) })
+        .await
+        .expect_err("chunk_by_id(0) must error");
+    assert_eq!(err.status_code(), 400);
+}
+
 // ---- chunk_map ---------------------------------------------------------
 
 #[tokio::test]

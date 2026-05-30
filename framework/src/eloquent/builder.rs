@@ -3482,6 +3482,12 @@ where
     /// [`Collection<M>`] composes Laravel-shape with `load(...)` /
     /// `load_missing(...)` from T5b).
     ///
+    /// ## Errors
+    ///
+    /// - `n == 0` → `FrameworkError::param("n")` (400). A zero batch
+    ///   size would issue `LIMIT 0` forever; reject up front rather
+    ///   than no-op silently.
+    ///
     /// ## Example
     ///
     /// ```ignore
@@ -3497,6 +3503,9 @@ where
         F: FnMut(Collection<M>) -> Fut + Send,
         Fut: std::future::Future<Output = Result<(), FrameworkError>> + Send,
     {
+        if n == 0 {
+            return Err(FrameworkError::param("n"));
+        }
         if !self.eager_specs.is_empty() {
             return Err(FrameworkError::internal(
                 "Builder::chunk does not support eager loading (`.with(...)`); apply `.with(...)` inside the per-chunk closure instead",
@@ -3541,6 +3550,12 @@ where
     /// Same restriction as [`Self::chunk`] — `.with(...)` is rejected
     /// up front. Re-apply inside the per-chunk closure as needed.
     ///
+    /// ## Errors
+    ///
+    /// - `n == 0` → `FrameworkError::param("n")` (400). A zero batch
+    ///   size would issue `LIMIT 0` forever; reject up front rather
+    ///   than no-op silently.
+    ///
     /// ## Example
     ///
     /// ```ignore
@@ -3557,6 +3572,9 @@ where
         F: FnMut(Collection<M>) -> Fut + Send,
         Fut: std::future::Future<Output = Result<(), FrameworkError>> + Send,
     {
+        if n == 0 {
+            return Err(FrameworkError::param("n"));
+        }
         if !self.eager_specs.is_empty() {
             return Err(FrameworkError::internal(
                 "Builder::chunk_by_id does not support eager loading (`.with(...)`); apply `.with(...)` inside the per-chunk closure instead",
