@@ -10,7 +10,7 @@ use crate::error::FrameworkError;
 use crate::lock;
 use command::{Command, Handler};
 use futures::future::BoxFuture;
-use std::any::TypeId;
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -55,8 +55,17 @@ impl<T> Dispatched<T> {
     }
 }
 
+/// Erased dispatcher: takes a boxed-`Any` command (we down-cast back to `C`
+/// inside the closure) and returns a boxed-`Any` output (the caller down-casts
+/// back to `C::Output`).
+///
+/// The bus is purely in-process: type-erasure goes through `Box<dyn Any>`
+/// rather than JSON. Both the command-in and the output-out down-casts are
+/// infallible by TypeId construction at the registration and dispatch sites
+/// below; we panic on mismatch because that can only happen if the registry
+/// has been corrupted.
 type ErasedDispatcher = Arc<
-    dyn Fn(serde_json::Value) -> BoxFuture<'static, Result<serde_json::Value, FrameworkError>>
+    dyn Fn(Box<dyn Any + Send>) -> BoxFuture<'static, Result<Box<dyn Any + Send>, FrameworkError>>
         + Send
         + Sync,
 >;
@@ -74,31 +83,33 @@ pub struct Bus;
 impl Bus {
     /// Register a handler for command type `C`. Overwrites any previous handler
     /// for the same type.
+    ///
+    /// The dispatcher path keeps commands and outputs as native Rust values —
+    /// no serde round-trip. Only the test-fake path serializes commands (so it
+    /// can store them by predicate-friendly value). That means a `C::Output`
+    /// only has to be `Send + 'static`; non-serde types like `Bytes`, opaque
+    /// handles, `Arc<Mutex<…>>`, etc. all work as outputs on the real path.
     pub fn register<C, H>(handler: H)
     where
         C: Command,
         H: Handler<C>,
-        C::Output: serde::Serialize + serde::de::DeserializeOwned,
     {
         let h = Arc::new(handler);
-        let dispatcher: ErasedDispatcher = Arc::new(move |payload: serde_json::Value| {
+        let dispatcher: ErasedDispatcher = Arc::new(move |any_cmd: Box<dyn Any + Send>| {
             let h = h.clone();
             Box::pin(async move {
-                let cmd: C = serde_json::from_value(payload).map_err(|e| {
-                    FrameworkError::internal(format!("Bus decode {}: {e}", C::command_name()))
-                })?;
+                let cmd: C = *any_cmd.downcast::<C>().unwrap_or_else(|_| {
+                    panic!(
+                        "Bus: internal type invariant — dispatcher for {} got a value of the \
+                         wrong concrete type. This is a framework bug.",
+                        C::command_name()
+                    )
+                });
                 let out = h.handle(cmd).await?;
-                let json = serde_json::to_value(&out).map_err(|e| {
-                    FrameworkError::internal(format!("Bus encode {}: {e}", C::command_name()))
-                })?;
-                Ok(json)
+                let boxed: Box<dyn Any + Send> = Box::new(out);
+                Ok(boxed)
             })
         });
-        // Domain 11 audit D11-B — was `lock::write(...).expect(...)`
-        // which defeated the helper's whole point (the read path at
-        // dispatch() correctly propagates via `?`). Now matches the
-        // helper's `Result` shape and logs + skips on poison so the
-        // bus boot doesn't crash on a recoverable internal error.
         match lock::write(&REGISTRY) {
             Ok(mut g) => {
                 g.get_or_insert_with(HashMap::new)
@@ -120,12 +131,9 @@ impl Bus {
     ///
     /// Under [`testing::install_fake`], the command is captured and
     /// `Ok(Dispatched::Captured)` is returned — the handler is **not** invoked.
-    /// Real failures (no handler registered, encode/decode errors, handler error)
-    /// still produce `Err(_)`.
-    pub async fn dispatch<C: Command>(cmd: C) -> Result<Dispatched<C::Output>, FrameworkError>
-    where
-        C::Output: serde::Serialize + serde::de::DeserializeOwned,
-    {
+    /// Real failures (no handler registered or handler error) still produce
+    /// `Err(_)`.
+    pub async fn dispatch<C: Command>(cmd: C) -> Result<Dispatched<C::Output>, FrameworkError> {
         if testing::is_active() {
             testing::record::<C>(&cmd)?;
             return Ok(Dispatched::Captured);
@@ -139,21 +147,21 @@ impl Bus {
                 FrameworkError::internal(format!("Bus: no handler for {}", C::command_name()))
             })?
         };
-        let payload = serde_json::to_value(&cmd)
-            .map_err(|e| FrameworkError::internal(format!("Bus encode: {e}")))?;
-        let result = dispatcher(payload).await?;
-        let out: C::Output = serde_json::from_value(result)
-            .map_err(|e| FrameworkError::internal(format!("Bus decode result: {e}")))?;
+        let result = dispatcher(Box::new(cmd)).await?;
+        let out: C::Output = *result.downcast::<C::Output>().unwrap_or_else(|_| {
+            panic!(
+                "Bus: internal type invariant — handler for {} returned a value of the wrong \
+                 concrete type. This is a framework bug.",
+                C::command_name()
+            )
+        });
         Ok(Dispatched::Executed(out))
     }
 
     /// Run commands sequentially, stopping on (and including) the first error.
     pub async fn chain<C: Command + Clone>(
         cmds: Vec<C>,
-    ) -> Vec<Result<Dispatched<C::Output>, FrameworkError>>
-    where
-        C::Output: serde::Serialize + serde::de::DeserializeOwned,
-    {
+    ) -> Vec<Result<Dispatched<C::Output>, FrameworkError>> {
         let mut out = Vec::with_capacity(cmds.len());
         for c in cmds {
             let r = Self::dispatch(c).await;
@@ -169,10 +177,7 @@ impl Bus {
     /// Run commands concurrently and collect results in input order.
     pub async fn batch<C: Command + Clone>(
         cmds: Vec<C>,
-    ) -> Vec<Result<Dispatched<C::Output>, FrameworkError>>
-    where
-        C::Output: serde::Serialize + serde::de::DeserializeOwned,
-    {
+    ) -> Vec<Result<Dispatched<C::Output>, FrameworkError>> {
         let futs = cmds.into_iter().map(|c| Self::dispatch(c));
         futures::future::join_all(futs).await
     }

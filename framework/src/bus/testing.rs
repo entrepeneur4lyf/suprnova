@@ -1,26 +1,47 @@
 //! `Bus::fake()` — installs a capture-only recorder.
+//!
+//! `install_fake()` acquires a process-wide serialization mutex for the
+//! lifetime of the returned `BusFakeGuard` so parallel tests calling
+//! `Bus::fake()` cannot clobber each other's recorded-command store. This
+//! matches [`crate::events::testing`] and [`crate::queue::testing`].
+//!
+//! Tests that interleave real-dispatch and fake-dispatch within the same
+//! binary (as `framework/tests/bus.rs` does) still need their own
+//! `#[serial_test::serial]` annotation: a real-dispatch test does not
+//! acquire `FAKE_SERIAL`, so it can race a parallel fake-dispatch test and
+//! see `is_active() == true`. `FAKE_SERIAL` removes the cross-fake hazard,
+//! not the real-vs-fake one.
 
 use crate::bus::command::Command;
 use crate::error::FrameworkError;
+use once_cell::sync::Lazy;
 use std::any::TypeId;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 #[derive(Default)]
 struct FakeStore {
     dispatched: HashMap<TypeId, Vec<serde_json::Value>>,
 }
 
+/// Process-wide serializer: only one test may hold the bus fake at a time.
+static FAKE_SERIAL: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static FAKE: Mutex<Option<FakeStore>> = Mutex::new(None);
 
+/// Poison-safe access to the fake store. A panicking test poisons the mutex;
+/// reading through the poison keeps the next test from inheriting the abort.
+fn lock_fake() -> MutexGuard<'static, Option<FakeStore>> {
+    FAKE.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 pub(crate) fn is_active() -> bool {
-    FAKE.lock().unwrap().is_some()
+    lock_fake().is_some()
 }
 
 pub(crate) fn record<C: Command>(cmd: &C) -> Result<(), FrameworkError> {
     let payload = serde_json::to_value(cmd)
         .map_err(|e| FrameworkError::internal(format!("bus encode: {e}")))?;
-    let mut g = FAKE.lock().unwrap();
+    let mut g = lock_fake();
     if let Some(s) = g.as_mut() {
         s.dispatched
             .entry(TypeId::of::<C>())
@@ -32,15 +53,20 @@ pub(crate) fn record<C: Command>(cmd: &C) -> Result<(), FrameworkError> {
 
 /// Install a fake Bus that captures dispatched commands instead of running handlers.
 ///
-/// Returns a guard that removes the fake when dropped. Use with `let _guard = install_fake();`
-/// inside a `#[serial]` test to avoid races with other tests.
+/// Returns a guard that removes the fake when dropped. The guard also holds
+/// a process-wide serialization lock so parallel `#[tokio::test]`s that call
+/// `Bus::fake()` cannot interleave with each other's captured-store.
 pub fn install_fake() -> BusFakeGuard {
-    *FAKE.lock().unwrap() = Some(FakeStore::default());
-    BusFakeGuard
+    let serial = FAKE_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    *lock_fake() = Some(FakeStore::default());
+    BusFakeGuard { _serial: serial }
 }
 
-/// RAII guard returned by [`install_fake`]. Resets the fake on drop.
-pub struct BusFakeGuard;
+/// RAII guard returned by [`install_fake`]. Resets the fake on drop and
+/// releases the process-wide fake serializer.
+pub struct BusFakeGuard {
+    _serial: MutexGuard<'static, ()>,
+}
 
 impl Drop for BusFakeGuard {
     fn drop(&mut self) {
@@ -48,15 +74,14 @@ impl Drop for BusFakeGuard {
         // the lock, this drop still needs to clear the fake so the next
         // test starts fresh. Reading through the poison avoids a
         // panic-in-destructor abort that would mask the original failure.
-        let mut g = FAKE.lock().unwrap_or_else(|p| p.into_inner());
-        *g = None;
+        *lock_fake() = None;
     }
 }
 
 /// Count dispatched commands of type `C` matching `pred`. Shared core for the
 /// assertion helpers below. Panics if the fake is not active.
 fn count_matching<C: Command>(pred: &impl Fn(&C) -> bool) -> usize {
-    let g = FAKE.lock().unwrap();
+    let g = lock_fake();
     let store = g.as_ref().expect("Bus::fake() must be active");
     store
         .dispatched
@@ -114,7 +139,7 @@ pub fn assert_dispatched_times<C: Command>(pred: impl Fn(&C) -> bool, expected: 
 /// Panics if the fake is not active or any command was dispatched.
 pub fn assert_nothing_dispatched() {
     let total: usize = {
-        let g = FAKE.lock().unwrap();
+        let g = lock_fake();
         let store = g.as_ref().expect("Bus::fake() must be active");
         store.dispatched.values().map(Vec::len).sum()
     };

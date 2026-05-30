@@ -139,3 +139,56 @@ async fn bus_fake_assert_nothing_dispatched_panics_when_any_dispatched() {
     let _ = Bus::dispatch(AddCommand { a: 1, b: 1 }).await.unwrap();
     assert_nothing_dispatched();
 }
+
+// --- non-serde Output ---
+//
+// Locks in the Bus's in-process contract: the registry no longer round-trips
+// `C::Output` through JSON, so an `Output` that is not `Serialize` /
+// `DeserializeOwned` (here: an `Arc<Mutex<…>>` holding state the handler
+// mutates) must be returned to the caller intact. The command itself is
+// still `Serialize + DeserializeOwned` because the fake path captures it.
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct OpaqueCommand {
+    bump: i64,
+}
+
+struct OpaqueHandle {
+    counter: std::sync::Arc<std::sync::Mutex<i64>>,
+}
+
+#[async_trait]
+impl Command for OpaqueCommand {
+    type Output = OpaqueHandle;
+    fn command_name() -> &'static str {
+        "OpaqueCommand"
+    }
+}
+
+struct OpaqueHandler;
+
+#[async_trait]
+impl Handler<OpaqueCommand> for OpaqueHandler {
+    async fn handle(&self, cmd: OpaqueCommand) -> Result<OpaqueHandle, FrameworkError> {
+        let counter = std::sync::Arc::new(std::sync::Mutex::new(cmd.bump));
+        Ok(OpaqueHandle { counter })
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn bus_dispatch_returns_non_serde_output_intact() {
+    Bus::register::<OpaqueCommand, _>(OpaqueHandler);
+    let r = Bus::dispatch(OpaqueCommand { bump: 42 }).await.unwrap();
+    let handle = r.unwrap_executed();
+    // The Arc<Mutex<i64>> survived dispatch as a live value, not a JSON
+    // round-trip. Confirm by mutating it.
+    {
+        let mut g = handle.counter.lock().unwrap();
+        *g += 1;
+        assert_eq!(*g, 43);
+    }
+    // And by checking strong_count proves we kept the same Arc, not a clone
+    // reconstructed from serialization.
+    assert_eq!(std::sync::Arc::strong_count(&handle.counter), 1);
+}
