@@ -5,6 +5,10 @@
 //! `user_id` into the current per-request session scope so that
 //! [`crate::Auth::check`] / [`crate::Auth::id`] work in downstream handlers.
 //!
+//! The `Bearer` scheme is matched case-insensitively per RFC 7235 §2.1, so
+//! `Bearer`, `bearer`, `BEARER`, etc. all work. Scheme and credentials may
+//! be separated by any number of SP/HTAB characters.
+//!
 //! # Behaviour
 //!
 //! - Header present **and** token valid **and** session exists → call
@@ -53,8 +57,13 @@ impl Middleware for BearerTokenMiddleware {
         // Extract the Bearer token from the Authorization header.
         // hyper's HeaderMap uses case-insensitive keys, so this handles
         // both "Authorization" and "authorization".
+        //
+        // Per RFC 7235 §2.1, the auth-scheme is case-insensitive — accept
+        // "Bearer", "bearer", "BEARER", "BeArEr", etc. Scheme and credentials
+        // are separated by one-or-more SP/HTAB; we trim leading whitespace
+        // on the credentials so any amount of whitespace works.
         if let Some(auth_header) = request.header("Authorization")
-            && let Some(token_str) = auth_header.strip_prefix("Bearer ")
+            && let Some(token_str) = strip_bearer_scheme(auth_header)
         {
             let token_str = token_str.trim();
             if !token_str.is_empty() {
@@ -71,5 +80,96 @@ impl Middleware for BearerTokenMiddleware {
         }
 
         next(request).await
+    }
+}
+
+/// Strip a case-insensitive `Bearer` scheme prefix from an `Authorization`
+/// header value, returning the raw credentials (with any leading whitespace
+/// still attached for the caller to trim).
+///
+/// Returns `None` if the header does not start with the `Bearer` scheme or
+/// is not followed by whitespace (i.e. `Bearertoken` without a separator is
+/// not a valid challenge per RFC 7235).
+fn strip_bearer_scheme(header: &str) -> Option<&str> {
+    const SCHEME: &str = "Bearer";
+
+    if header.len() < SCHEME.len() {
+        return None;
+    }
+
+    let (head, rest) = header.split_at(SCHEME.len());
+    if !head.eq_ignore_ascii_case(SCHEME) {
+        return None;
+    }
+
+    // RFC 7235: scheme and credentials must be separated by at least one
+    // SP/HTAB. An empty `rest` (header is exactly "Bearer") or a `rest`
+    // starting with a non-whitespace byte (e.g. "Bearertoken") is invalid.
+    let first = rest.as_bytes().first()?;
+    if !matches!(first, b' ' | b'\t') {
+        return None;
+    }
+
+    Some(rest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_bearer_scheme;
+
+    #[test]
+    fn strip_bearer_scheme_accepts_canonical_casing() {
+        assert_eq!(strip_bearer_scheme("Bearer abc"), Some(" abc"));
+    }
+
+    #[test]
+    fn strip_bearer_scheme_accepts_lowercase() {
+        assert_eq!(strip_bearer_scheme("bearer abc"), Some(" abc"));
+    }
+
+    #[test]
+    fn strip_bearer_scheme_accepts_uppercase() {
+        assert_eq!(strip_bearer_scheme("BEARER abc"), Some(" abc"));
+    }
+
+    #[test]
+    fn strip_bearer_scheme_accepts_mixed_casing() {
+        assert_eq!(strip_bearer_scheme("BeArEr abc"), Some(" abc"));
+    }
+
+    #[test]
+    fn strip_bearer_scheme_accepts_tab_separator() {
+        assert_eq!(strip_bearer_scheme("Bearer\tabc"), Some("\tabc"));
+    }
+
+    #[test]
+    fn strip_bearer_scheme_accepts_multiple_spaces() {
+        assert_eq!(strip_bearer_scheme("Bearer   abc"), Some("   abc"));
+    }
+
+    #[test]
+    fn strip_bearer_scheme_rejects_wrong_scheme() {
+        assert_eq!(strip_bearer_scheme("Basic abc"), None);
+    }
+
+    #[test]
+    fn strip_bearer_scheme_rejects_missing_separator() {
+        // "Bearertoken" has no SP/HTAB between scheme and credentials.
+        assert_eq!(strip_bearer_scheme("Bearertoken"), None);
+    }
+
+    #[test]
+    fn strip_bearer_scheme_rejects_scheme_only() {
+        assert_eq!(strip_bearer_scheme("Bearer"), None);
+    }
+
+    #[test]
+    fn strip_bearer_scheme_rejects_empty() {
+        assert_eq!(strip_bearer_scheme(""), None);
+    }
+
+    #[test]
+    fn strip_bearer_scheme_rejects_too_short() {
+        assert_eq!(strip_bearer_scheme("Be"), None);
     }
 }
