@@ -545,16 +545,18 @@ the model. The dual of an [Accessor](#accessor). See
 ### Notifiable
 
 The trait a user (or any object that can receive notifications)
-implements — `routes` returns the address per channel (mail address,
-push subscription, broadcast user id, etc.). See
+implements — `route_for(channel)` returns the address for the named
+channel (mail address, push subscription, broadcast user id, etc.) or
+`None` to skip. See
 [Notifications — The Notifiable Trait](notifications.md#the-notifiable-trait).
 
 ### Notification
 
-The trait a notification message implements — `via` returns the list
-of channels it should fan out to; each channel calls back into the
-notification with `to_<channel>(notifiable)` for the channel-specific
-payload. Dispatched through `Notify::send(user, notif).await`. See
+The trait a notification message implements — `channels()` returns the
+list of channel names it should fan out to; each channel calls back
+into the notification (via per-channel traits like `MailRendering` /
+`DatabaseChannel` payload methods) for the channel-specific payload.
+Dispatched through `Notify::send(&user, &notif).await`. See
 [Notifications](notifications.md).
 
 ## O
