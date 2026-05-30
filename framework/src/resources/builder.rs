@@ -182,10 +182,21 @@ pub fn render_resource_object<T: IntoJsonResource>(
     data.insert("id".into(), Value::String(id));
     data.insert("attributes".into(), attrs);
 
+    // JSON:API spec §6.3: sparse fieldsets apply to a resource object's
+    // fields, which includes BOTH attributes and relationships. When the
+    // request constrained `fields[<type>]`, drop any relationship whose
+    // name is not in the allowlist. Same per-type set governs both —
+    // the spec treats attributes and relationships as a single field
+    // namespace at the resource level.
     let rels = resource.resource_relationships();
     if !rels.is_empty() {
         let mut rels_map = Map::new();
         for (name, value) in rels {
+            if let Some(allowed) = attrs_filter_ref
+                && !allowed.contains(&name.as_str())
+            {
+                continue;
+            }
             let v = match value {
                 RelationshipValue::Single(rid) => serde_json::json!({ "data": rid.to_value() }),
                 RelationshipValue::Many(rids) => {
@@ -196,7 +207,11 @@ pub fn render_resource_object<T: IntoJsonResource>(
             };
             rels_map.insert(name, v);
         }
-        data.insert("relationships".into(), Value::Object(rels_map));
+        // Emit only when the post-filter map is non-empty — `relationships: {}`
+        // would violate the spec's non-empty-member expectation.
+        if !rels_map.is_empty() {
+            data.insert("relationships".into(), Value::Object(rels_map));
+        }
     }
 
     // Per-resource links — emit only when non-empty (spec §5.2.7).

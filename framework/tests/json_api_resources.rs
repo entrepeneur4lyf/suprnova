@@ -215,6 +215,61 @@ fn fieldset_repeated_keys_merge_across_encoding() {
     assert!(merged.contains(&"id"));
 }
 
+// Spec §6.3: sparse fieldsets apply to BOTH attributes and relationships.
+// When the request constrains `fields[<type>]`, relationship names not in
+// the allowlist must be dropped from the resource object's relationships
+// member alongside the attribute filter.
+#[tokio::test]
+async fn sparse_fieldsets_filter_relationships_per_spec() {
+    use suprnova::resources::{RequestFieldsetSet, scope_fieldset};
+
+    let post = make_post_with_author_and_tags();
+    // `title` is an attribute; no relationship name is in the allowlist,
+    // so the entire `relationships` member should be omitted.
+    let fieldset = RequestFieldsetSet::from_query("fields[posts]=title");
+    let envelope = scope_fieldset(fieldset, async move {
+        let resp = Resource::single(post).render().await.unwrap();
+        let body: Value = serde_json::from_slice(resp.body()).unwrap();
+        body
+    })
+    .await;
+
+    assert_eq!(envelope["data"]["attributes"]["title"], "Hi");
+    assert!(
+        envelope["data"].get("relationships").is_none(),
+        "fields[posts]=title with no relationship in the allowlist must \
+         omit the relationships member entirely (spec §6.3 — sparse \
+         fieldsets cover relationships, not just attributes)"
+    );
+}
+
+#[tokio::test]
+async fn sparse_fieldsets_keep_named_relationships_only() {
+    use suprnova::resources::{RequestFieldsetSet, scope_fieldset};
+
+    let post = make_post_with_author_and_tags();
+    // `author` is named — keep it. `tags` is not named — drop it.
+    let fieldset = RequestFieldsetSet::from_query("fields[posts]=title,author");
+    let envelope = scope_fieldset(fieldset, async move {
+        let resp = Resource::single(post).render().await.unwrap();
+        let body: Value = serde_json::from_slice(resp.body()).unwrap();
+        body
+    })
+    .await;
+
+    let rels = envelope["data"]["relationships"]
+        .as_object()
+        .expect("relationships present when at least one is allowed");
+    assert!(
+        rels.contains_key("author"),
+        "named relationship `author` must survive the fieldset filter"
+    );
+    assert!(
+        !rels.contains_key("tags"),
+        "unnamed relationship `tags` must be dropped from the response"
+    );
+}
+
 // ── Step 17/18: relationships + included + multi-level ────────────────────
 
 #[tokio::test]
@@ -315,6 +370,40 @@ async fn unknown_include_returns_400_errors_envelope() {
             .as_str()
             .unwrap()
             .contains("forbidden_field")
+    );
+}
+
+// Nested-include rejection must report the FULL rejected dotted path so
+// clients can pinpoint which segment is unsupported. Before the macro
+// prepended parent names on the way up, the error reported only the
+// deepest local key (`bogus`) which gave no hint that the failure came
+// from inside `author.bogus`.
+#[tokio::test]
+async fn nested_include_error_preserves_parent_path() {
+    use suprnova::{RequestIncludeSet, scope_include_set};
+
+    let post = make_post_with_author_and_tags();
+    // `author` is allowed on `posts`; `bogus` is NOT allowed on `authors`.
+    // The error path must read `author.bogus`, not just `bogus`.
+    let include_set = RequestIncludeSet::from_query("include=author.bogus");
+    let body = scope_include_set(include_set, async move {
+        let resp = Resource::single(post).render().await.unwrap();
+        assert_eq!(resp.status_code(), 400);
+        let v: Value = serde_json::from_slice(resp.body()).unwrap();
+        v
+    })
+    .await;
+
+    let errors = body["errors"].as_array().expect("errors envelope");
+    let detail = errors[0]["detail"].as_str().expect("detail string");
+    assert!(
+        detail.contains("author.bogus"),
+        "nested include rejection must include the full dotted path \
+         (got: {detail})"
+    );
+    assert!(
+        detail.contains("authors"),
+        "the deepest rejecting type should still surface (got: {detail})"
     );
 }
 

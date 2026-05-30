@@ -1536,13 +1536,24 @@ fn build_into_json_resource(
     let resource_type_lit = resource_type.clone();
 
     let included_entries = rel_fields.iter().map(|(ident, name)| {
+        // On recursive failure, prepend the current relationship name to
+        // the error path so the client sees the full rejected dotted path
+        // (e.g. `author.bogus` rather than just `bogus`). `on_type` stays
+        // at the deepest type — the one whose allowlist actually rejected.
         quote! {
             if let ::std::option::Option::Some(subtree) = include_tree.subtree(#name) {
                 ::suprnova::resources::PushIncluded::push_included(
                     &self.#ident,
                     subtree,
                     out,
-                )?;
+                ).map_err(|mut __suprnova_include_err| {
+                    __suprnova_include_err.path = ::std::format!(
+                        "{}.{}",
+                        #name,
+                        __suprnova_include_err.path,
+                    );
+                    __suprnova_include_err
+                })?;
             }
         }
     });
