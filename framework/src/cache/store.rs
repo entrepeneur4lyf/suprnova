@@ -101,9 +101,20 @@ pub trait CacheStore: Send + Sync {
         ttl: Option<Duration>,
     ) -> Result<(), FrameworkError>;
 
-    /// Remove every key associated with any of the given tags. Untagged
-    /// keys with the same name are unaffected unless they were
-    /// subsequently overwritten with a tagged write.
+    /// Remove every key whose **current** tag set contains any of the
+    /// given tags.
+    ///
+    /// Tag membership is per-entry: each tagged write installs that
+    /// write's tag set as the entry's source of truth, replacing any
+    /// prior tags. An untagged `put_raw` over a previously tagged key
+    /// clears those tags — a subsequent `flush_tags` of the old tag
+    /// will NOT delete the live untagged value. Likewise, overwriting
+    /// `tagged_put_raw(["a"], ...)` with `tagged_put_raw(["b"], ...)`
+    /// makes the entry only respond to `flush_tags(["b"])`.
+    ///
+    /// Stale forward-index references are pruned during the flush walk
+    /// and on `flush()` so they do not accumulate against keys that
+    /// have been overwritten or expired.
     async fn flush_tags(&self, tags: &[&str]) -> Result<(), FrameworkError>;
 
     /// Try to acquire a distributed lock for `key` with a TTL. On success,

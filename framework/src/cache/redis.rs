@@ -11,6 +11,30 @@ use super::config::CacheConfig;
 use super::store::CacheStore;
 use crate::error::FrameworkError;
 
+/// Convert a `Duration` into a Redis-millisecond TTL argument.
+///
+/// Redis sub-second TTLs are expressed via `PX` (set) and `PEXPIRE`
+/// (extend). Sub-second durations passed as `EX`/`EXPIRE` truncate to 0
+/// seconds, which Redis rejects for `SET ... EX 0` and, worse, treats as
+/// "delete the key" for `EXPIRE key 0`. Routing every Redis TTL through
+/// `PX`/`PEXPIRE` (Redis 2.6+, 2012) avoids both pitfalls.
+///
+/// `Duration::ZERO` is clamped to 1 ms so neither `PX 0` (rejected) nor
+/// `PEXPIRE 0` (key-delete) can sneak through. Caller-side `Duration`s
+/// outside u64 ms (≈ 584 million years) saturate to `u64::MAX`; Redis
+/// will reject that as an invalid expire on its own.
+#[inline]
+fn redis_ttl_ms(d: Duration) -> u64 {
+    let ms = d.as_millis();
+    if ms == 0 {
+        1
+    } else if ms > u64::MAX as u128 {
+        u64::MAX
+    } else {
+        ms as u64
+    }
+}
+
 /// Redis cache implementation
 ///
 /// Uses redis-rs with async/tokio runtime for high-performance caching.
@@ -64,6 +88,19 @@ impl RedisCache {
     fn prefixed_key(&self, key: &str) -> String {
         format!("{}{}", self.prefix, key)
     }
+
+    /// Aux SET that records the tag memberships for a value key.
+    ///
+    /// This lets `flush_tags` validate "is this key STILL tagged with `t`"
+    /// at the moment of deletion, so an untagged overwrite of a previously
+    /// tagged key is not silently deleted by a later `flush_tags(t)`.
+    ///
+    /// The aux set carries the same TTL as the value key, so an expired
+    /// value's tag entries age out together rather than accumulating
+    /// forever in the forward `tag:{t}` set.
+    fn key_tags_set(&self, prefixed_key: &str) -> String {
+        format!("{}__key_tags__:{}", self.prefix, prefixed_key)
+    }
 }
 
 #[async_trait]
@@ -87,22 +124,34 @@ impl CacheStore for RedisCache {
         ttl: Option<Duration>,
     ) -> Result<(), FrameworkError> {
         let mut conn = self.conn.clone();
-        let key = self.prefixed_key(key);
+        let pkey = self.prefixed_key(key);
+        let aux = self.key_tags_set(&pkey);
 
+        // Drop any prior tag aux set so a later tagged_put_raw does not
+        // resurrect stale tag memberships AND a later flush_tags cannot
+        // delete this untagged value (the aux set is the source of truth
+        // for "is this key still tagged with t?" at flush time). Pipelined
+        // with the SET so an untagged write is still one round trip.
+        let mut pipe = redis::pipe();
+        pipe.atomic();
+        pipe.cmd("DEL").arg(&aux).ignore();
         // `None` ttl means **no expiration** per the CacheStore contract.
         // The facade resolves any configured default before calling this
         // method — otherwise `Cache::forever` would not be forever on
         // Redis (HIGH audit finding #252).
         if let Some(duration) = ttl {
-            conn.set_ex::<_, _, ()>(&key, value, duration.as_secs())
-                .await
-                .map_err(|e| FrameworkError::internal(format!("Cache set error: {}", e)))?;
+            pipe.cmd("SET")
+                .arg(&pkey)
+                .arg(value)
+                .arg("PX")
+                .arg(redis_ttl_ms(duration))
+                .ignore();
         } else {
-            conn.set::<_, _, ()>(&key, value)
-                .await
-                .map_err(|e| FrameworkError::internal(format!("Cache set error: {}", e)))?;
+            pipe.cmd("SET").arg(&pkey).arg(value).ignore();
         }
-
+        pipe.query_async::<()>(&mut conn)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("Cache set error: {}", e)))?;
         Ok(())
     }
 
@@ -119,7 +168,7 @@ impl CacheStore for RedisCache {
         let mut conn = self.conn.clone();
         let pkey = self.prefixed_key(key);
 
-        // Atomic via SET NX [EX ttl] — Redis writes the value only when
+        // Atomic via SET NX [PX ttl] — Redis writes the value only when
         // the key does not exist. Returns the string "OK" on success and
         // nil (Option::None) on contention.
         let res: Option<String> = if let Some(d) = ttl {
@@ -127,8 +176,8 @@ impl CacheStore for RedisCache {
                 .arg(&pkey)
                 .arg(value)
                 .arg("NX")
-                .arg("EX")
-                .arg(d.as_secs())
+                .arg("PX")
+                .arg(redis_ttl_ms(d))
                 .query_async(&mut conn)
                 .await
                 .map_err(|e| FrameworkError::internal(format!("Cache add error: {e}")))?
@@ -141,6 +190,17 @@ impl CacheStore for RedisCache {
                 .await
                 .map_err(|e| FrameworkError::internal(format!("Cache add error: {e}")))?
         };
+
+        // If we wrote a fresh untagged value, drop any leftover tag aux
+        // set so a stale flush_tags cannot delete it.
+        if res.is_some() {
+            let aux = self.key_tags_set(&pkey);
+            redis::cmd("DEL")
+                .arg(&aux)
+                .query_async::<()>(&mut conn)
+                .await
+                .map_err(|e| FrameworkError::internal(format!("Cache aux drop: {e}")))?;
+        }
 
         Ok(res.is_some())
     }
@@ -159,32 +219,55 @@ impl CacheStore for RedisCache {
 
     async fn forget(&self, key: &str) -> Result<bool, FrameworkError> {
         let mut conn = self.conn.clone();
-        let key = self.prefixed_key(key);
+        let pkey = self.prefixed_key(key);
 
-        let deleted: i64 = conn
-            .del(&key)
+        // Drop the value AND its tag aux set. The forward `tag:{t}` set
+        // may still list this key; that's harmless — flush_tags validates
+        // membership via the aux set and skips a key whose aux set says
+        // "no longer tagged with t" (or no longer exists at all).
+        let aux = self.key_tags_set(&pkey);
+        let deleted: i64 = redis::cmd("DEL")
+            .arg(&pkey)
+            .arg(&aux)
+            .query_async(&mut conn)
             .await
             .map_err(|e| FrameworkError::internal(format!("Cache delete error: {}", e)))?;
 
+        // Return whether the value itself existed. The aux key tagging
+        // along is bookkeeping — its prior absence doesn't make `forget`
+        // a no-op from the caller's perspective.
         Ok(deleted > 0)
     }
 
     async fn flush(&self) -> Result<(), FrameworkError> {
         let mut conn = self.conn.clone();
 
-        // Use KEYS to find and delete all keys with our prefix
-        // Note: KEYS is O(N) and should be used carefully in production
+        // SCAN beats KEYS for production: incremental cursor iteration
+        // avoids blocking the Redis server on a single O(N) pass. We
+        // batch DEL per page so very large keyspaces don't build one
+        // giant argument list. The MATCH glob is anchored to our prefix
+        // so we never touch other applications' keys.
         let pattern = format!("{}*", self.prefix);
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg(&pattern)
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("Cache flush scan error: {}", e)))?;
-
-        if !keys.is_empty() {
-            conn.del::<_, ()>(keys).await.map_err(|e| {
-                FrameworkError::internal(format!("Cache flush delete error: {}", e))
-            })?;
+        let mut cursor: u64 = 0;
+        loop {
+            let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(500)
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| FrameworkError::internal(format!("Cache flush scan error: {}", e)))?;
+            if !batch.is_empty() {
+                conn.del::<_, ()>(batch).await.map_err(|e| {
+                    FrameworkError::internal(format!("Cache flush delete error: {}", e))
+                })?;
+            }
+            if next_cursor == 0 {
+                break;
+            }
+            cursor = next_cursor;
         }
 
         Ok(())
@@ -223,20 +306,48 @@ impl CacheStore for RedisCache {
     ) -> Result<(), FrameworkError> {
         let mut conn = self.conn.clone();
         let pkey = self.prefixed_key(key);
+        let aux = self.key_tags_set(&pkey);
 
         let mut pipe = redis::pipe();
         pipe.atomic();
+        // Rewrite the aux set from scratch — replaces (not unions with)
+        // any prior tag memberships. This is what protects a tagged
+        // overwrite from carrying old tags.
+        pipe.cmd("DEL").arg(&aux).ignore();
         // `None` ttl honoured literally — see put_raw for rationale.
         if let Some(d) = ttl {
+            let pxms = redis_ttl_ms(d);
             pipe.cmd("SET")
                 .arg(&pkey)
                 .arg(value)
-                .arg("EX")
-                .arg(d.as_secs())
+                .arg("PX")
+                .arg(pxms)
                 .ignore();
+            // Aux set rides the same TTL so the bookkeeping ages out with
+            // the value rather than accumulating forever.
+            if !tags.is_empty() {
+                let mut sadd = redis::cmd("SADD");
+                sadd.arg(&aux);
+                for t in tags {
+                    sadd.arg(*t);
+                }
+                pipe.add_command(sadd).ignore();
+                pipe.cmd("PEXPIRE").arg(&aux).arg(pxms).ignore();
+            }
         } else {
             pipe.cmd("SET").arg(&pkey).arg(value).ignore();
+            if !tags.is_empty() {
+                let mut sadd = redis::cmd("SADD");
+                sadd.arg(&aux);
+                for t in tags {
+                    sadd.arg(*t);
+                }
+                pipe.add_command(sadd).ignore();
+            }
         }
+        // Forward index: tag -> set of value keys. Used as the candidate
+        // list by flush_tags; the aux set is the source of truth for
+        // "is this key still tagged with t" at deletion time.
         for t in tags {
             let tag_key = format!("{}tag:{}", self.prefix, t);
             pipe.cmd("SADD").arg(&tag_key).arg(&pkey).ignore();
@@ -256,13 +367,35 @@ impl CacheStore for RedisCache {
                 .query_async(&mut conn)
                 .await
                 .map_err(|e| FrameworkError::internal(format!("Cache tag scan: {e}")))?;
-            if !members.is_empty() {
-                redis::cmd("DEL")
-                    .arg(members)
-                    .query_async::<()>(&mut conn)
+            for member in members {
+                let aux = self.key_tags_set(&member);
+                // SISMEMBER is the validation gate: if the key's aux set
+                // no longer contains this tag — because the key was
+                // overwritten untagged, or the aux set already expired
+                // alongside the value — we leave the value alone and
+                // just prune the forward index entry.
+                let still_tagged: bool = redis::cmd("SISMEMBER")
+                    .arg(&aux)
+                    .arg(*t)
+                    .query_async(&mut conn)
                     .await
-                    .map_err(|e| FrameworkError::internal(format!("Cache tag flush: {e}")))?;
+                    .map_err(|e| FrameworkError::internal(format!("Cache tag check: {e}")))?;
+                if still_tagged {
+                    // DEL the value AND its aux set. Other tags that
+                    // referenced the same key still get forward-index
+                    // pruning on their own flush via the SISMEMBER gate
+                    // (which will now miss because the aux set is gone).
+                    redis::cmd("DEL")
+                        .arg(&member)
+                        .arg(&aux)
+                        .query_async::<()>(&mut conn)
+                        .await
+                        .map_err(|e| FrameworkError::internal(format!("Cache tag flush: {e}")))?;
+                }
             }
+            // Forward index always cleared — its job here is done. Any
+            // residual references in OTHER tags' forward sets will be
+            // SISMEMBER-skipped on a future flush.
             redis::cmd("DEL")
                 .arg(&tag_key)
                 .query_async::<()>(&mut conn)
@@ -281,13 +414,15 @@ impl CacheStore for RedisCache {
         let pkey = format!("{}lock:{}", self.prefix, key);
         let token = uuid::Uuid::new_v4().to_string();
 
-        // SET key token NX EX ttl_secs — atomic: only sets if key does not exist
+        // SET key token NX PX ttl_ms — atomic: only sets if key does not
+        // exist. PX preserves sub-second precision (EX truncates and a
+        // sub-second TTL would round to 0, which Redis rejects).
         let res: Option<String> = redis::cmd("SET")
             .arg(&pkey)
             .arg(&token)
             .arg("NX")
-            .arg("EX")
-            .arg(ttl.as_secs())
+            .arg("PX")
+            .arg(redis_ttl_ms(ttl))
             .query_async(&mut conn)
             .await
             .map_err(|e| FrameworkError::internal(format!("Lock acquire: {e}")))?;
@@ -320,14 +455,17 @@ impl CacheStore for RedisCache {
     ) -> Result<bool, FrameworkError> {
         let mut conn = self.conn.clone();
         let pkey = format!("{}lock:{}", self.prefix, key);
-        // Atomically: if GET key == token then EXPIRE key ttl, else return 0
+        // Atomically: if GET key == token then PEXPIRE key ttl_ms, else
+        // return 0. PEXPIRE preserves sub-second precision — EXPIRE
+        // would truncate, and `EXPIRE key 0` deletes the key, which
+        // would silently release the lock on a sub-second refresh.
         let script = redis::Script::new(
-            "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('EXPIRE', KEYS[1], ARGV[2]) else return 0 end",
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('PEXPIRE', KEYS[1], ARGV[2]) else return 0 end",
         );
         let ok: i64 = script
             .key(&pkey)
             .arg(token)
-            .arg(ttl.as_secs() as i64)
+            .arg(redis_ttl_ms(ttl) as i64)
             .invoke_async(&mut conn)
             .await
             .map_err(|e| FrameworkError::internal(format!("Lock refresh: {e}")))?;
@@ -337,13 +475,58 @@ impl CacheStore for RedisCache {
     async fn touch(&self, key: &str, ttl: Duration) -> Result<bool, FrameworkError> {
         let mut conn = self.conn.clone();
         let pkey = self.prefixed_key(key);
-        // EXPIRE returns 1 if the TTL was set, 0 if the key does not exist
-        let ok: i64 = redis::cmd("EXPIRE")
+        // PEXPIRE returns 1 if the TTL was set, 0 if the key does not
+        // exist. PEXPIRE preserves sub-second precision; EXPIRE would
+        // truncate a sub-second ttl to 0 and delete the key.
+        let ok: i64 = redis::cmd("PEXPIRE")
             .arg(&pkey)
-            .arg(ttl.as_secs())
+            .arg(redis_ttl_ms(ttl))
             .query_async(&mut conn)
             .await
             .map_err(|e| FrameworkError::internal(format!("Cache touch: {e}")))?;
         Ok(ok == 1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redis_ttl_ms_preserves_millisecond_resolution() {
+        assert_eq!(redis_ttl_ms(Duration::from_millis(1)), 1);
+        assert_eq!(redis_ttl_ms(Duration::from_millis(50)), 50);
+        assert_eq!(redis_ttl_ms(Duration::from_millis(999)), 999);
+        assert_eq!(redis_ttl_ms(Duration::from_secs(1)), 1_000);
+        assert_eq!(redis_ttl_ms(Duration::from_secs(60)), 60_000);
+    }
+
+    #[test]
+    fn redis_ttl_ms_clamps_zero_to_one_ms() {
+        // Redis rejects PX 0 and PEXPIRE key 0 deletes the key — clamp
+        // to 1 ms so neither failure mode is reachable from this layer.
+        assert_eq!(redis_ttl_ms(Duration::ZERO), 1);
+    }
+
+    #[test]
+    fn redis_ttl_ms_handles_large_durations_safely() {
+        // 1 year in ms fits comfortably in u64; verify the path.
+        let one_year_ms = 365u64 * 24 * 60 * 60 * 1000;
+        assert_eq!(
+            redis_ttl_ms(Duration::from_secs(365 * 24 * 60 * 60)),
+            one_year_ms
+        );
+        // u64::MAX milliseconds is a hard ceiling — anything past it
+        // saturates rather than wrapping or panicking.
+        assert_eq!(redis_ttl_ms(Duration::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn redis_ttl_ms_subsecond_does_not_round_to_zero() {
+        // The bug we're fixing: `as_secs()` of any sub-second Duration is
+        // 0. Verify the replacement preserves precision instead.
+        let half_sec = Duration::from_millis(500);
+        assert_eq!(half_sec.as_secs(), 0, "control: as_secs truncates");
+        assert_eq!(redis_ttl_ms(half_sec), 500, "as_millis preserves");
     }
 }
