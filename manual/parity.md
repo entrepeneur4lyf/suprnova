@@ -190,7 +190,7 @@ gaps as of the shipped framework.
 | Collections | `Collection<M>` with `pluck`, `filter`, `map`, `each`, `chunk`, `groupBy`, `keyBy`, `sort_by`, `where_`, `first`, `last`, `count`, `is_empty`, `to_array` and Laravel friends; `Deref<Target = Vec<M>>` so all `Vec` idioms keep working | shipped | [Collections](eloquent-collections.md) |
 | API Resources | `#[derive(Resource)]` + `IntoJsonResource` + `JsonApiResponse` + fieldsets + includes | shipped | JSON:API shape + Laravel-style resource shape both available. [API Resources](eloquent-resources.md) |
 | Serialization | `#[model(hidden = [...], visible = [...], appends = [...])]` | shipped | Same control over which attributes serialise. [Serialization](eloquent-serialization.md) |
-| Factories | `#[derive(Factory)] struct UserFactory` + `User::factory().count(5).create().await?` | shipped | `Sequence` for cycling values. [Factories](eloquent-factories.md) |
+| Factories | `#[derive(Factory)] struct UserFactory` + `UserFactory::new().count(5).create().await?` (or `UserFactory::times(5).create_many().await?`) | shipped | `Sequence` for cycling values. [Factories](eloquent-factories.md) |
 | Lifecycle: chunking / lazy / cursor | `Builder::chunk(n, \|page\| async { ... })`, `lazy()`, `cursor()` | shipped | Memory-bounded iteration over large tables |
 | Pessimistic locking | `Builder::lock_for_update()`, `shared_lock()` | shipped | Inside a transaction |
 | `whereJsonContains` family | Available via SeaORM's column expressions (driver-aware) | shipped | The exact spelling differs per backend; helpers ship for the common cases |
