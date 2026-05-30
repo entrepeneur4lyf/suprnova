@@ -498,9 +498,12 @@ fn webhook_verify_rejects_bad_signature() {
 ```
 
 For local end-to-end testing without hitting Paddle at all, the framework
-ships `MockPaymentProvider` which mirrors Paddle's invariants
-(`as_payment()` is `None`, the same checkout-then-webhook flow). Bind
-the mock in tests instead of the real provider:
+ships `MockPaymentProvider`. Like Paddle, the mock's `as_payment()`
+returns `None` (no server-side capture), so code that branches on
+`as_payment().is_some()` follows the same path under the mock as it will
+under Paddle. The mock's `subscribe()` returns `Ok` (unlike Paddle), so
+tests that need to assert the `NotSupported` branch should use the real
+`PaddleProvider`. Bind the mock in tests instead of the real provider:
 
 ```rust
 use std::sync::Arc;
