@@ -153,7 +153,7 @@ impl Context {
                         tracing::trace!(
                             target: "suprnova::context",
                             op = "add",
-                            key = %key,
+                            key = ?key,
                             error = %err,
                             "Context mutation discarded: value failed to serialize",
                         );
@@ -188,7 +188,7 @@ impl Context {
                         tracing::trace!(
                             target: "suprnova::context",
                             op = "get",
-                            key = %key,
+                            key = ?key,
                             expected = std::any::type_name::<T>(),
                             error = %err,
                             "Context read returned None: value present but did not deserialize",
@@ -218,7 +218,7 @@ impl Context {
                         tracing::trace!(
                             target: "suprnova::context",
                             op = "push",
-                            key = %key,
+                            key = ?key,
                             error = %err,
                             "Context mutation discarded: value failed to serialize",
                         );
@@ -302,7 +302,7 @@ impl Context {
                         tracing::trace!(
                             target: "suprnova::context",
                             op = "hidden_add",
-                            key = %key,
+                            key = ?key,
                             error = %err,
                             "Context mutation discarded: value failed to serialize",
                         );
@@ -334,7 +334,7 @@ impl Context {
                         tracing::trace!(
                             target: "suprnova::context",
                             op = "hidden_get",
-                            key = %key,
+                            key = ?key,
                             expected = std::any::type_name::<T>(),
                             error = %err,
                             "Context read returned None: value present but did not deserialize",
