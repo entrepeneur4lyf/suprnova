@@ -1,12 +1,12 @@
 # Feature Flags
 
-Suprnova ships a feature-flag system that combines **compile-time declarations** with **runtime overrides** persisted to your database. A flag's behaviour is determined by, in order:
+Suprnova's feature-flag system combines compile-time `Feature` declarations with runtime overrides persisted to a `features` table. A flag's value at evaluation time is determined by, in order:
 
-1. A scoped row in the `features` table — e.g. `user:42` or `team:staff`.
+1. A scoped row in the `features` table — `user:42` or `team:staff`.
 2. The global row in the `features` table (scope `""`).
 3. The compile-time `default` baked into the `Feature` declaration.
 
-Toggles via the admin CRUD propagate to live evaluators **before the call returns** — kill-switch flags actually disable in real time, not "within the next TTL window."
+Toggles via the admin CRUD propagate to live evaluators before the mutation call returns. Kill-switch flags actually disable in real time, not "within the next TTL window."
 
 ## Quick start
 
@@ -51,14 +51,15 @@ pub async fn index(req: Request) -> Response {
 // flip the flag from an admin route or CLI:
 use suprnova::features::admin;
 
-admin::upsert("new-checkout-flow", "", true, None, Some(actor_user_id)).await?;
+let actor_id = Auth::id();  // Option<String> — None for system-initiated changes
+admin::upsert("new-checkout-flow", "", true, None, actor_id).await?;
 //                                  ^   ^                  ^
-//                                  |   |                  └ audit: who toggled it (Option<String>)
+//                                  |   |                  └ audit: who toggled it
 //                                  |   └ enabled
 //                                  └ scope_key: "" = global, "user:42" = scoped override
 ```
 
-The next `NEW_CHECKOUT_FLOW.is_enabled()` call observes `true` — including the cached evaluator entry, which was invalidated synchronously inside `admin::upsert`.
+The next `NEW_CHECKOUT_FLOW.is_enabled()` call observes `true` — including any cached evaluator entry, which was invalidated synchronously inside `admin::upsert`.
 
 ## The pieces
 
@@ -79,6 +80,16 @@ Centralising every declaration in `app/src/features.rs` gives you:
 - the obvious place to put a doc comment explaining what the flag controls
 
 Call `flag.is_enabled()` to read against the ambient context (set up by [`FeatureMiddleware`](#featuremiddleware)) or `flag.is_enabled_in(Some(&ctx))` to pass a specific [`Context`](https://docs.rs/featureflag/latest/featureflag/context/struct.Context.html).
+
+The `feature!` and `is_enabled!` macros are also re-exported from `suprnova::*` for call sites that don't want to import the constant:
+
+```rust
+use suprnova::is_enabled;
+
+if is_enabled!("new-checkout-flow", false) {
+    // ...
+}
+```
 
 ### `DatabaseEvaluator`
 
@@ -273,7 +284,7 @@ Listen for them via the framework's event dispatcher to feed an audit log, Slack
 EventFacade::listen::<FeatureUpdated, _>(Arc::new(FlagChangeAuditor)).await;
 ```
 
-**`is_enabled` does not fire a read-path event** in v1. Every request that checks a flag would multiply the event volume by the number of flags checked — fine for an audit-of-mutations story, prohibitive for read-path tracing. If your deployment needs sampled read-path audit, layer a custom evaluator that records into a bounded log channel (a Redis stream or a fanout queue, depending on scale).
+**`is_enabled` does not fire a read-path event.** Every request that checks a flag would multiply the event volume by the number of flags checked — fine for an audit-of-mutations story, prohibitive for read-path tracing. If your deployment needs sampled read-path audit, layer a custom evaluator that records into a bounded log channel (a Redis stream or a fanout queue, depending on scale).
 
 ## Missing-evaluator detection
 
@@ -359,7 +370,13 @@ async fn admin_upsert_propagates_to_cached_chain() {
 }
 ```
 
-See `framework/tests/features.rs` for the full set of composition tests shipped with Phase 13.
+See `framework/tests/features.rs` for the full set of composition tests.
+
+### Why Suprnova diverges
+
+Laravel Pennant resolves every flag against the database on demand (with optional driver-level memoization per request). The PHP request-per-process model makes a per-request DB hit cheap because the connection is dedicated and dies with the request.
+
+Suprnova's process model is the opposite — one long-running binary serving thousands of concurrent requests. A per-request DB hit on every flag check would multiply the connection pool's load by the flag-check count. The two-layer chain (`DatabaseEvaluator` snapshot + `CachedEvaluator` TTL) is the Rust-native answer: the hot path is fully synchronous against in-memory data, and the `FeatureSync` trait gives operator-initiated changes sub-second propagation without a polling reload. The shape is the same as Pennant — define a flag, check it in a handler, override it from an admin route. The plumbing is different because the runtime is different.
 
 ## Design notes
 
@@ -369,10 +386,14 @@ See `framework/tests/features.rs` for the full set of composition tests shipped 
 
 - **Why is `set_flag` `pub` on `DatabaseEvaluator`?** Test convenience. The production write path is `admin::upsert`; `set_flag` exists so tests can seed flags without setting up an `EventFacade` listener. Both paths call `features::sync::notify` so the propagation contract holds either way.
 
-- **Why no `FeatureRetrieved` event?** Volume. A handler checking ten flags per request fires ten events per request — for a 1k req/s service that's 36M events/hour, far above any audit pipeline's signal-to-noise ratio. Read-path sampling is a Phase 14 problem; mutation-path audit (`FeatureUpdated` / `FeatureDeleted`) is what v1 ships.
+- **Why no `FeatureRetrieved` event?** Volume. A handler checking ten flags per request fires ten events per request — for a 1k req/s service that's 36M events/hour, far above any audit pipeline's signal-to-noise ratio. Mutation-path audit (`FeatureUpdated` / `FeatureDeleted`) is what ships; read-path sampling, if needed, layers on top via a custom evaluator wrapper.
 
-## Related
+## Next
 
-- `suprnova::features::admin` — full API reference for the CRUD facade. Run `cargo doc --open -p suprnova` and navigate to `features::admin`.
-- [`docs/core/middleware.md`](middleware.md.md) — middleware ordering primer; `FeatureMiddleware` belongs after `SessionMiddleware`.
-- [featureflag crate docs](https://docs.rs/featureflag) — the upstream primitives layer (`Evaluator`, `Context`, `Feature`).
+- [Middleware](middleware.md) — `FeatureMiddleware` belongs after `SessionMiddleware`; this chapter covers ordering and the global stack
+- [Events](events.md) — listen to `FeatureUpdated` / `FeatureDeleted` to drive audit logs, Slack alerts, or downstream pipelines
+- [Service Container](container.md) — how the `dyn FeatureSync` binding is resolved, and why `TestContainer::bind` exists for parallel tests
+- [Testing](testing.md) — `TestDatabase::fresh::<M>()` and `TestContainer::fake` patterns this chapter relies on
+- [Authentication](authentication.md) — `Auth::id()` is the default user-id extractor and feeds `actor_id` for admin mutations
+
+External: the [featureflag crate docs](https://docs.rs/featureflag) cover the upstream `Evaluator`, `Context`, and `Feature` primitives. `suprnova::features::admin` is the full CRUD facade — `cargo doc --open -p suprnova` to browse.
