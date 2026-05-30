@@ -131,6 +131,13 @@ impl Storage {
     /// resolved relative to this root.
     ///
     /// Equivalent to [`Storage::register_fs_with`] with an identity closure.
+    ///
+    /// # Testing
+    ///
+    /// The disk registry is process-global. Tests that call any `register_*`
+    /// method directly race on this shared state when run in parallel — wrap
+    /// them in a [`Storage::fake`] guard, which serializes fake-using tests
+    /// process-wide and wipes the registry on drop.
     pub fn register_fs(
         name: impl Into<String>,
         root: impl AsRef<Path>,
@@ -205,6 +212,13 @@ impl Storage {
     /// any case where persistence is explicitly not required.
     ///
     /// Equivalent to [`Storage::register_memory_with`] with an identity closure.
+    ///
+    /// # Testing
+    ///
+    /// The disk registry is process-global. Tests that call any `register_*`
+    /// method directly race on this shared state when run in parallel — wrap
+    /// them in a [`Storage::fake`] guard, which serializes fake-using tests
+    /// process-wide and wipes the registry on drop.
     pub fn register_memory(name: impl Into<String>) {
         Self::register_memory_with(name, |op| op)
     }
@@ -245,6 +259,13 @@ impl Storage {
     /// (`with_max_times(3)`) so transient throttling / 5xx errors are retried.
     /// Use [`Storage::register_s3_with`] for full control of the layer stack
     /// (it applies no default layer).
+    ///
+    /// # Testing
+    ///
+    /// The disk registry is process-global. Tests that call any `register_*`
+    /// method directly race on this shared state when run in parallel — wrap
+    /// them in a [`Storage::fake`] guard, which serializes fake-using tests
+    /// process-wide and wipes the registry on drop.
     pub fn register_s3(name: impl Into<String>, config: S3Config) -> Result<(), FrameworkError> {
         Self::register_s3_with(name, config, default_cloud_resilience)
     }
@@ -320,6 +341,13 @@ impl Storage {
     /// (`with_max_times(3)`) so transient throttling / 5xx errors are retried.
     /// Use [`Storage::register_azblob_with`] for full control of the layer
     /// stack (it applies no default layer).
+    ///
+    /// # Testing
+    ///
+    /// The disk registry is process-global. Tests that call any `register_*`
+    /// method directly race on this shared state when run in parallel — wrap
+    /// them in a [`Storage::fake`] guard, which serializes fake-using tests
+    /// process-wide and wipes the registry on drop.
     pub fn register_azblob(
         name: impl Into<String>,
         config: AzBlobConfig,
@@ -376,6 +404,13 @@ impl Storage {
     /// (`with_max_times(3)`) so transient throttling / 5xx errors are retried.
     /// Use [`Storage::register_gcs_with`] for full control of the layer stack
     /// (it applies no default layer).
+    ///
+    /// # Testing
+    ///
+    /// The disk registry is process-global. Tests that call any `register_*`
+    /// method directly race on this shared state when run in parallel — wrap
+    /// them in a [`Storage::fake`] guard, which serializes fake-using tests
+    /// process-wide and wipes the registry on drop.
     pub fn register_gcs(name: impl Into<String>, config: GcsConfig) -> Result<(), FrameworkError> {
         Self::register_gcs_with(name, config, default_cloud_resilience)
     }
