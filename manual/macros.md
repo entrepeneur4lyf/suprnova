@@ -450,9 +450,9 @@ See [Inertia Responses](frontend-inertia-responses.md).
 
 ### `when_loaded!`
 
-Emits an `Inertia::Prop::lazy(…)` only when a named relation has been
-eager-loaded on the entity; otherwise emits `EagerNone` so the prop
-is skipped from the response entirely:
+Emits a `Prop::lazy(…)` only when a named relation has been
+eager-loaded on the entity; otherwise emits `Prop::EagerNone` so the
+prop is skipped from the response entirely:
 
 ```rust
 use suprnova::when_loaded;
@@ -655,7 +655,7 @@ impl CommentPolicy {
 }
 ```
 
-`Server::serve` calls `authorization::init_policies()` automatically.
+`Server::run` calls `authorization::init_policies()` automatically.
 See [Authorization](authorization.md).
 
 ## Notifications and mail
