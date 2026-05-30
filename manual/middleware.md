@@ -1,4 +1,8 @@
-# Middleware
+---
+title: 'Middleware'
+description: 'Intercept and process HTTP requests with suprnova middleware'
+icon: 'filter'
+---
 
 suprnova provides a powerful middleware system for intercepting and processing HTTP requests before they reach your route handlers. Middleware can inspect, modify, or short-circuit requests, and also post-process responses.
 
@@ -14,9 +18,7 @@ This command will:
 1. Create `src/middleware/auth.rs` with a middleware stub
 2. Update `src/middleware/mod.rs` to export the new middleware
 
-**Examples:**
-
-```bash
+```bash Examples
 # Creates AuthMiddleware in src/middleware/auth.rs
 suprnova make:middleware Auth
 
@@ -27,9 +29,7 @@ suprnova make:middleware RateLimit
 suprnova make:middleware CorsMiddleware
 ```
 
-**Generated file:**
-
-```rust
+```rust Generated File
 //! Auth middleware
 
 use suprnova::{async_trait, Middleware, Next, Request, Response};
@@ -153,12 +153,12 @@ use crate::controllers;
 use crate::middleware::AuthMiddleware;
 
 routes! {
-    get("/", controllers::home::index).name("home"),
-    get("/public", controllers::home::public),
+    get!("/", controllers::home::index).name("home"),
+    get!("/public", controllers::home::public),
 
     // Protected route - requires AuthMiddleware
-    get("/protected", controllers::dashboard::index).middleware(AuthMiddleware),
-    get("/admin", controllers::admin::index).middleware(AuthMiddleware),
+    get!("/protected", controllers::dashboard::index).middleware(AuthMiddleware),
+    get!("/admin", controllers::admin::index).middleware(AuthMiddleware),
 }
 ```
 
@@ -203,9 +203,9 @@ Middleware executes in the following order:
 For responses, the order is reversed (post-processing happens in reverse order).
 
 ```
-Request → Global MW → Group MW → Route MW → Handler
-                                              ↓
-Response ← Global MW ← Group MW ← Route MW ← Handler
+Request -> Global MW -> Group MW -> Route MW -> Handler
+                                                  |
+Response <- Global MW <- Group MW <- Route MW <- Handler
 ```
 
 ## Request Timeouts
@@ -382,17 +382,15 @@ impl Middleware for TimingMiddleware {
 The recommended file structure for middleware:
 
 ```
-cmd/
-└── main.rs
 src/
-├── lib.rs
 ├── middleware/
 │   ├── mod.rs          # Re-export all middleware
 │   ├── auth.rs         # Authentication middleware
 │   ├── logging.rs      # Logging middleware
 │   └── cors.rs         # CORS middleware
 ├── bootstrap.rs        # Register global middleware
-└── routes.rs           # Apply route-level middleware
+├── routes.rs           # Apply route-level middleware
+└── main.rs
 ```
 
 **src/middleware/mod.rs:**
@@ -406,14 +404,160 @@ pub use logging::LoggingMiddleware;
 pub use cors::CorsMiddleware;
 ```
 
+## Pipeline (Laravel `Illuminate\Pipeline\Pipeline`)
+
+`Pipeline` is the Suprnova analogue of Laravel's pipeline class. It's a fluent
+builder that wraps `MiddlewareChain`, mirroring the `send / through / pipe /
+then / then_return / finally_with` shape Laravel users already know.
+
+```rust
+use suprnova::{Pipeline, HttpResponse};
+
+let response = Pipeline::new()
+    .send(request)
+    .through([AuthMiddleware, LoggingMiddleware])
+    .pipe(CorsMiddleware)
+    .finally_with(|| tracing::info!("pipeline complete"))
+    .then(|req| async move { handler(req).await })
+    .await;
+```
+
+Dual-API aliases live on the Rust side: `with_request` for `send`,
+`with_middleware` for `through`, `push` for `pipe`, `on_finally` for
+`finally_with`, and `execute` for `then`. Use whichever reads more naturally
+in your codebase — the Laravel names ship as first-class so a Laravel
+developer can write the same code they already know.
+
+| Pipeline method | Laravel | Rust-side alias | Purpose |
+|---|---|---|---|
+| `send(request)` | `send($passable)` | `with_request(request)` | Set the request being threaded through |
+| `through(iter)` | `through($pipes)` | `with_middleware(iter)` | Replace the pipe list |
+| `through_boxed(iter)` | — | — | Replace the pipe list using pre-boxed middleware |
+| `pipe(M)` | `pipe($pipes)` | `push(M)` | Append a single middleware |
+| `pipe_boxed(M)` | — | — | Append a pre-boxed middleware |
+| `then(destination)` | `then($destination)` | `execute(destination)` | Run the chain with the destination handler |
+| `then_with(req, dst)` | — | — | Override the passable inline |
+| `then_return()` | `thenReturn()` | — | Run the chain, return a 204 No Content |
+| `finally_with(F)` | `finally($callback)` | `on_finally(F)` | Run after the destination resolves |
+
+## Terminable middleware (post-response hooks)
+
+Terminable middleware runs *after* the response has been sent to the client.
+Use it for slow IO that doesn't need to block the response — session
+persistence, audit logging, metrics flushes. Suprnova ships this as a
+dedicated `Terminable` trait so the request-path and termination-path are
+clearly typed and a middleware can opt into one, the other, or both.
+
+```rust
+use suprnova::{Terminable, TerminationSnapshot, register_terminable, async_trait};
+
+pub struct AuditLogTerminator;
+
+#[async_trait]
+impl Terminable for AuditLogTerminator {
+    async fn terminate(&self, snapshot: &TerminationSnapshot) {
+        tracing::info!(
+            method = %snapshot.method,
+            path = %snapshot.path,
+            status = snapshot.status,
+            "request handled",
+        );
+    }
+}
+
+// In bootstrap.rs
+register_terminable(AuditLogTerminator);
+```
+
+Termination is dispatched on the background runtime by the server after every
+response — including 4xx and 5xx — so hooks never block the wire. Registration
+is idempotent per concrete type, matching the global middleware contract.
+`registered_terminables()`, `terminable_count()`, and `has_terminable::<T>()`
+provide introspection for tests and boot-time diagnostics.
+
+## Named middleware aliases and groups
+
+For consumers that prefer string-keyed middleware (Laravel's
+`middlewareAliases` / `middlewareGroups`), Suprnova ships a process-global
+alias and group registry:
+
+```rust
+use suprnova::middleware::{
+    register_middleware_alias, register_middleware_group,
+    resolve_middleware_group,
+};
+
+// Aliases are factory closures — invoked fresh per resolution so each
+// route registration produces an independent middleware instance.
+register_middleware_alias("auth", || AuthMiddleware);
+register_middleware_alias("throttle", || ThrottleMiddleware::default());
+register_middleware_alias("cors", || CorsMiddleware::default());
+
+// Groups bundle aliases (and other groups — nesting is supported).
+register_middleware_group("api", ["auth".into(), "throttle".into()]);
+register_middleware_group("web", ["cors".into(), "auth".into()]);
+
+// Resolve into a Vec<BoxedMiddleware> at boot or per-route.
+let api_mws = resolve_middleware_group("api")?;
+```
+
+`resolve_middleware_group` returns `Err(MiddlewareResolveError)` on:
+
+- `UnknownGroup(name)` — the named group was never registered;
+- `UnknownAlias { group, missing }` — the group entry isn't a known alias;
+- `UnknownNestedGroup { group, missing }` — a nested group reference fails to resolve;
+- `CycleDetected { group }` — the group definition is recursive.
+
+Registration of an alias or group is **last-wins** for the same name, mirroring
+Laravel's reassignable kernel array.
+
+## Middleware priority
+
+`prepend_middleware_priority::<M>()` / `append_middleware_priority::<M>()`
+register a `TypeId` in the process-global priority list. The list is the
+Suprnova analogue of Laravel's `Kernel::$middlewarePriority`: middleware whose
+type appears earlier in the list sorts to the front of the chain regardless
+of registration order.
+
+```rust
+use suprnova::{append_middleware_priority, prepend_middleware_priority};
+
+// SessionMiddleware always runs before AuthMiddleware.
+append_middleware_priority::<SessionMiddleware>();
+append_middleware_priority::<AuthMiddleware>();
+```
+
+`middleware_priority()` returns a snapshot of the current `Vec<TypeId>`
+for diagnostics or for an embedder that wants to drive its own sorter.
+
+## Global middleware introspection
+
+Beyond `register_global_middleware`, the registry exposes:
+
+| Surface | Laravel | Purpose |
+|---|---|---|
+| `prepend_global_middleware(M)` | `prependMiddleware` | Insert at the front of the chain |
+| `has_global_middleware::<M>()` | `hasMiddleware` | Whether type `M` is registered |
+| `global_middleware_count()` | — | Number of globals currently registered |
+| `MiddlewareRegistry::prepend(M)` | — | Builder-style prepend on a registry instance |
+| `MiddlewareRegistry::append_boxed(M)` | — | Append a pre-boxed middleware |
+| `MiddlewareRegistry::prepend_boxed(M)` | — | Prepend a pre-boxed middleware |
+| `MiddlewareRegistry::len()` / `is_empty()` | — | Builder introspection |
+
 ## Summary
 
 | Feature | Usage |
 |---------|-------|
 | Create middleware | Implement `Middleware` trait |
 | Global middleware | `global_middleware!(MyMiddleware)` in `bootstrap.rs` |
+| Prepend global | `prepend_global_middleware(MyMiddleware)` |
 | Route middleware | `.middleware(MyMiddleware)` on route definition |
 | Group middleware | `.middleware(MyMiddleware)` on route group |
+| Pipeline builder | `Pipeline::new().send(req).through([...]).then(dst).await` |
+| Named aliases | `register_middleware_alias("auth", \|\| AuthMw)` |
+| Named groups | `register_middleware_group("api", ["auth", "throttle"])` |
+| Priority ordering | `append_middleware_priority::<MyMw>()` |
+| Terminable hooks | `register_terminable(MyTerminator)` — runs post-response |
 | Short-circuit | Return `Err(HttpResponse::...)` without calling `next()` |
 | Continue chain | Call `next(request).await` |
 | Request timeout | `global_middleware!(TimeoutMiddleware::default())` (global ceiling) or `.middleware(TimeoutMiddleware::seconds(n))` (per route) |
