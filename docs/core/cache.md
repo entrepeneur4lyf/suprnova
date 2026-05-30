@@ -120,6 +120,26 @@ let config = Cache::remember_forever("config:app", || async {
 
 This is perfect for expensive operations like database queries or API calls.
 
+`Cache::remember` is **not** stampede-safe. N concurrent misses for the
+same cold key will each run the closure and each write the result,
+matching Laravel's `Repository::remember` semantics. For popular
+rebuild paths under heavy load, wrap the call in `Cache::lock` so only
+one caller computes the value:
+
+```rust
+use suprnova::Cache;
+use std::time::Duration;
+
+if let Some(guard) = Cache::lock("rebuild:user:1", Duration::from_secs(10)).await? {
+    let user = Cache::remember("user:1", Some(Duration::from_secs(3600)), || async {
+        User::find(1).await
+    }).await?;
+    guard.release().await?;
+    // serve `user`
+}
+// Lost the race — read whatever the winner wrote, or fall back.
+```
+
 ## Atomic Counters
 
 Increment and decrement numeric values atomically:
@@ -199,6 +219,10 @@ let cached: Option<UserProfile> = Cache::get("profile:1").await?;
 | Selected via | `CACHE_DRIVER=redis` | `CACHE_DRIVER=memory` (default) |
 
 The framework selects the backend from the `CACHE_DRIVER` env var. There is no implicit fallback — production deployments that mean Redis must say so explicitly. The default is `memory` because most dev loops run in a single process and shouldn't be forced to stand up Redis to get a working cache.
+
+### In-memory expiration
+
+The in-memory backend evicts expired entries lazily on read: a `get`, `has`, or `add` that observes an expired entry removes it from the map as part of the call. Re-accessed keys therefore don't accumulate corpses. Workloads that write a high-cardinality set of short-lived keys and never read them back have no such trigger — call `InMemoryCache::purge_expired()` from a periodic task if that pattern applies. Redis handles its own expiration server-side.
 
 ## Best Practices
 

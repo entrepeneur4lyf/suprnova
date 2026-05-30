@@ -37,6 +37,17 @@ impl CacheEntry {
 /// Thread-safe cache that stores values in memory with optional TTL.
 /// Use this as a fallback when Redis is unavailable, or in tests.
 ///
+/// # Expiration semantics
+///
+/// Expired entries are evicted lazily: a read path that observes an
+/// expired entry (`get_raw` / `has` / `add_raw`'s existence check)
+/// removes it from the store as part of that call, so re-accessed keys
+/// do not accumulate. Keys that expire and are never touched again
+/// stay in the map until the entire cache is flushed or until a tagged
+/// flush walks them — call [`InMemoryCache::purge_expired`] from a
+/// periodic task if a workload writes many short-lived keys that are
+/// never re-read.
+///
 /// # Example
 ///
 /// ```rust,ignore
@@ -99,6 +110,80 @@ impl InMemoryCache {
     fn prefixed_key(&self, key: &str) -> String {
         format!("{}{}", self.prefix, key)
     }
+
+    /// Walk the value store and drop every entry whose TTL has elapsed.
+    ///
+    /// Read paths (`get_raw`, `has`, `add_raw`) already purge an
+    /// expired entry the first time they observe it, so the typical
+    /// hot-key workload does not accumulate corpses. Workloads that
+    /// write many short-lived keys and never read them back have no
+    /// such trigger — wire `purge_expired` into a periodic task in
+    /// that case. Returns the number of entries removed.
+    pub fn purge_expired(&self) -> Result<usize, FrameworkError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| FrameworkError::internal("Cache lock poisoned"))?;
+        let mut idx = self
+            .tag_index
+            .write()
+            .map_err(|_| FrameworkError::internal("Tag index poisoned"))?;
+
+        let dead: Vec<(String, Vec<String>)> = store
+            .iter()
+            .filter(|(_, e)| e.is_expired())
+            .map(|(k, e)| (k.clone(), e.tags.iter().cloned().collect()))
+            .collect();
+        let removed = dead.len();
+        for (k, tags) in dead {
+            store.remove(&k);
+            for t in &tags {
+                if let Some(set) = idx.get_mut(t) {
+                    set.remove(&k);
+                    if set.is_empty() {
+                        idx.remove(t);
+                    }
+                }
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Drop `key` from the store if (and only if) the entry is still
+    /// the same expired one observed under the read lock. A concurrent
+    /// writer may have replaced the entry between the read-lock drop
+    /// and the write-lock acquire — in that case we leave the new
+    /// value alone.
+    fn evict_if_still_expired(&self, key: &str) {
+        let mut store = match self.store.write() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let still_dead = store.get(key).map(|e| e.is_expired()).unwrap_or(false);
+        if !still_dead {
+            return;
+        }
+        let stale_tags: Vec<String> = store
+            .get(key)
+            .map(|e| e.tags.iter().cloned().collect())
+            .unwrap_or_default();
+        store.remove(key);
+        if stale_tags.is_empty() {
+            return;
+        }
+        let mut idx = match self.tag_index.write() {
+            Ok(i) => i,
+            Err(_) => return,
+        };
+        for t in &stale_tags {
+            if let Some(set) = idx.get_mut(t) {
+                set.remove(key);
+                if set.is_empty() {
+                    idx.remove(t);
+                }
+            }
+        }
+    }
 }
 
 impl Default for InMemoryCache {
@@ -116,15 +201,26 @@ impl CacheStore for InMemoryCache {
     async fn get_raw(&self, key: &str) -> Result<Option<String>, FrameworkError> {
         let key = self.prefixed_key(key);
 
-        let store = self
-            .store
-            .read()
-            .map_err(|_| FrameworkError::internal("Cache lock poisoned"))?;
+        // Hold the read lock for the common (hit / clean miss) path. If
+        // an expired entry is observed we drop the read lock, take a
+        // write lock, and evict — see `evict_if_still_expired` for the
+        // racey-concurrent-writer caveat.
+        let observed_expired = {
+            let store = self
+                .store
+                .read()
+                .map_err(|_| FrameworkError::internal("Cache lock poisoned"))?;
+            match store.get(&key) {
+                Some(entry) if !entry.is_expired() => return Ok(Some(entry.value.clone())),
+                Some(_) => true,
+                None => false,
+            }
+        };
 
-        match store.get(&key) {
-            Some(entry) if !entry.is_expired() => Ok(Some(entry.value.clone())),
-            _ => Ok(None),
+        if observed_expired {
+            self.evict_if_still_expired(&key);
         }
+        Ok(None)
     }
 
     async fn put_raw(
@@ -227,12 +323,25 @@ impl CacheStore for InMemoryCache {
     async fn has(&self, key: &str) -> Result<bool, FrameworkError> {
         let key = self.prefixed_key(key);
 
-        let store = self
-            .store
-            .read()
-            .map_err(|_| FrameworkError::internal("Cache lock poisoned"))?;
+        // Same lazy-purge pattern as `get_raw`: report `false` for an
+        // expired entry and drop it on the way out so the map doesn't
+        // accumulate corpses on every probe.
+        let (live, observed_expired) = {
+            let store = self
+                .store
+                .read()
+                .map_err(|_| FrameworkError::internal("Cache lock poisoned"))?;
+            match store.get(&key) {
+                Some(entry) if !entry.is_expired() => (true, false),
+                Some(_) => (false, true),
+                None => (false, false),
+            }
+        };
 
-        Ok(store.get(&key).map(|e| !e.is_expired()).unwrap_or(false))
+        if observed_expired {
+            self.evict_if_still_expired(&key);
+        }
+        Ok(live)
     }
 
     async fn forget(&self, key: &str) -> Result<bool, FrameworkError> {
@@ -493,5 +602,99 @@ impl CacheStore for InMemoryCache {
             }
             _ => Ok(false),
         }
+    }
+}
+
+#[cfg(test)]
+impl InMemoryCache {
+    /// Test-only: number of raw entries (live + dead) currently in the
+    /// value map. Used to assert that lazy purging actually shrinks the
+    /// map on observed-expired reads.
+    fn raw_len(&self) -> usize {
+        self.store.read().expect("Cache lock poisoned").len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cache::CacheStore;
+
+    #[tokio::test]
+    async fn get_raw_purges_expired_entry_on_read() {
+        let cache = InMemoryCache::with_prefix("t:");
+        cache
+            .put_raw("k", "v", Some(Duration::from_millis(5)))
+            .await
+            .unwrap();
+        assert_eq!(cache.raw_len(), 1);
+
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        assert!(cache.get_raw("k").await.unwrap().is_none());
+        assert_eq!(
+            cache.raw_len(),
+            0,
+            "expired entry observed by get_raw must be evicted"
+        );
+    }
+
+    #[tokio::test]
+    async fn has_purges_expired_entry_on_read() {
+        let cache = InMemoryCache::with_prefix("t:");
+        cache
+            .put_raw("k", "v", Some(Duration::from_millis(5)))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        assert!(!cache.has("k").await.unwrap());
+        assert_eq!(
+            cache.raw_len(),
+            0,
+            "expired entry observed by has must be evicted"
+        );
+    }
+
+    #[tokio::test]
+    async fn purge_expired_walks_whole_store() {
+        let cache = InMemoryCache::with_prefix("t:");
+        cache
+            .put_raw("a", "1", Some(Duration::from_millis(5)))
+            .await
+            .unwrap();
+        cache
+            .put_raw("b", "2", Some(Duration::from_millis(5)))
+            .await
+            .unwrap();
+        // No TTL — must survive the purge.
+        cache.put_raw("c", "3", None).await.unwrap();
+        assert_eq!(cache.raw_len(), 3);
+
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        let removed = cache.purge_expired().unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(cache.raw_len(), 1);
+        assert!(cache.has("c").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn lazy_purge_drops_tag_index_pointer() {
+        let cache = InMemoryCache::with_prefix("t:");
+        cache
+            .tagged_put_raw(&["users"], "u:1", "x", Some(Duration::from_millis(5)))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        assert!(cache.get_raw("u:1").await.unwrap().is_none());
+
+        // Re-tag a new key under the same tag, then flush — if the stale
+        // `u:1` pointer survived, flush_tags would do nothing harmful (the
+        // entry is already gone), but the tag map would never shrink.
+        let idx_size = cache.tag_index.read().unwrap().len();
+        assert_eq!(
+            idx_size, 0,
+            "tag index must not retain dangling pointer to evicted key"
+        );
     }
 }

@@ -294,7 +294,8 @@ impl Cache {
     /// Alias of [`Cache::remember_forever`]. Mirrors Laravel's
     /// `Cache::sear($key, $callback)`. Ships under the Laravel-side name
     /// for migration ergonomics; `remember_forever` is the Rust-side name
-    /// and is the more discoverable spelling.
+    /// and is the more discoverable spelling. Inherits the non-atomic /
+    /// stampede-prone semantics — see [`Cache::remember`].
     ///
     /// # Example
     ///
@@ -373,6 +374,32 @@ impl Cache {
     /// If the key exists, returns the cached value.
     /// If not, calls the closure to compute the value, stores it, and returns it.
     ///
+    /// # Concurrency — not stampede-safe
+    ///
+    /// `remember` is the get-or-compute composition Laravel ships and is
+    /// **non-atomic**: N concurrent misses for the same key will each run
+    /// `default()` and each write the result. That matches Laravel's
+    /// `Repository::remember` semantics (the upstream version is also a
+    /// non-atomic `get`-then-`put` pair) but it does not protect against
+    /// cache stampedes — a popular cold key under heavy load will hit
+    /// the backing store once per concurrent caller.
+    ///
+    /// For stampede-safe rebuilds wrap the call in [`Cache::lock`]:
+    ///
+    /// ```rust,ignore
+    /// use std::time::Duration;
+    /// use suprnova::Cache;
+    ///
+    /// if let Some(guard) = Cache::lock("rebuild:user:1", Duration::from_secs(10)).await? {
+    ///     let user = Cache::remember("user:1", Some(Duration::from_secs(3600)), || async {
+    ///         User::find(1).await
+    ///     }).await?;
+    ///     guard.release().await?;
+    ///     return Ok(user);
+    /// }
+    /// // Lost the race — read whatever the winner wrote (or fall back).
+    /// ```
+    ///
     /// # Example
     ///
     /// ```rust,ignore
@@ -406,7 +433,9 @@ impl Cache {
 
     /// Get an item or store a default value forever
     ///
-    /// Same as `remember` but with no expiration.
+    /// Same as `remember` but with no expiration. Inherits `remember`'s
+    /// non-atomic / stampede-prone semantics — see [`Cache::remember`]
+    /// for the lock-based mitigation.
     pub async fn remember_forever<T, F, Fut>(key: &str, default: F) -> Result<T, FrameworkError>
     where
         T: Serialize + DeserializeOwned,
