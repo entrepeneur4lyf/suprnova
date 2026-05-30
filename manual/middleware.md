@@ -1,8 +1,4 @@
----
-title: 'Middleware'
-description: 'Intercept and process HTTP requests with suprnova middleware'
-icon: 'filter'
----
+# Middleware
 
 suprnova provides a powerful middleware system for intercepting and processing HTTP requests before they reach your route handlers. Middleware can inspect, modify, or short-circuit requests, and also post-process responses.
 

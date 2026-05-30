@@ -1,8 +1,4 @@
----
-title: 'Error Handling'
-description: 'Handle errors elegantly with automatic HTTP response conversion'
-icon: 'circle-exclamation'
----
+# Error Handling
 
 suprnova provides a comprehensive error handling system that integrates seamlessly with Rust's `Result` type and the `?` operator. Errors are automatically converted to appropriate HTTP responses, making error handling clean and consistent throughout your application.
 

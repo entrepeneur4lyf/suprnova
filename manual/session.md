@@ -1,8 +1,4 @@
----
-title: Sessions
-description: Working with sessions in suprnova
-icon: cookie
----
+# Sessions
 
 suprnova provides database-backed session management similar to Laravel. Sessions are automatically initialized and managed through middleware.
 

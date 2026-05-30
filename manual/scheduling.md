@@ -1,8 +1,4 @@
----
-title: 'Task Scheduling'
-description: 'Schedule recurring tasks with suprnova Laravel-like scheduler'
-icon: 'clock'
----
+# Task Scheduling
 
 suprnova provides a powerful task scheduling system inspired by Laravel's scheduler. Schedule tasks to run at specific intervals - every minute, hourly, daily, weekly, or using custom cron expressions.
 
@@ -309,7 +305,7 @@ schedule.add(
 ```
 
 **How the lock works.** When the flag is set, suprnova tries to acquire a
-distributed mutex via the configured [`Cache`](/docs/core/cache) backend
+distributed mutex via the configured [`Cache`](cache.md) backend
 (`schedule:lock:<task-name>`). A successful acquire runs the task and releases
 the lock; a contended acquire is reported as a successful skip — `Ok(())`,
 with the task's skip counter ticked so observability surfaces can see it

@@ -1,8 +1,4 @@
----
-title: 'suprnova serve'
-description: 'Start the development servers'
-icon: 'play'
----
+# suprnova serve
 
 The `suprnova serve` command starts both the backend Rust server and the frontend Vite development server with hot-reload support.
 

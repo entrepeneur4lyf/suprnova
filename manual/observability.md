@@ -1,8 +1,4 @@
----
-title: 'Observability'
-description: 'Structured logging, distributed tracing, and metrics via OpenTelemetry.'
-icon: 'chart-line'
----
+# Observability
 
 Suprnova wires Rust's [`tracing`](https://docs.rs/tracing) ecosystem to
 [OpenTelemetry](https://opentelemetry.io/) through one module. Out of the box
@@ -66,11 +62,9 @@ get the logging layer alone — and the returned guard holds no providers, so
 dropping it without `shutdown()` is silent (no spurious "buffered telemetry
 may be lost" warning).
 
-<Note>
-A scaffolded app's `Server` already calls `init_telemetry` for you and flushes
-the guard on shutdown signal. You only wire it by hand when embedding Suprnova
-in your own runtime.
-</Note>
+> **Note:** A scaffolded app's `Server` already calls `init_telemetry` for you and flushes
+> the guard on shutdown signal. You only wire it by hand when embedding Suprnova
+> in your own runtime.
 
 ## Distributed tracing
 
@@ -87,7 +81,7 @@ in the *same* distributed trace, not a fresh root. A request with no
 `traceparent` (a direct browser hit) stays a clean root span.
 
 **Outbound trace propagation.** The framework HTTP client
-([`Http`](/docs/core/http-client)) injects the active trace context as a
+([`Http`](http-client.md)) injects the active trace context as a
 `traceparent` header on every outbound call, so the downstream service
 continues the same trace.
 
@@ -138,14 +132,12 @@ Suprnova — so configure them the normal way and they take effect:
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | exporter |
 | `OTEL_EXPORTER_OTLP_COMPRESSION` | exporter |
 
-<Warning>
-**Per-signal endpoint override is currently shadowed.** Suprnova sets the
-base endpoint explicitly for traces, metrics, and logs, which means
-per-signal overrides like `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` do not take
-effect — all three signals go to `OTEL_EXPORTER_OTLP_ENDPOINT`. If you need
-to fan signals to different collectors, run a local collector that routes
-them. This is a known limitation tracked for a future release.
-</Warning>
+> **Warning:** **Per-signal endpoint override is currently shadowed.** Suprnova sets the
+> base endpoint explicitly for traces, metrics, and logs, which means
+> per-signal overrides like `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` do not take
+> effect — all three signals go to `OTEL_EXPORTER_OTLP_ENDPOINT`. If you need
+> to fan signals to different collectors, run a local collector that routes
+> them. This is a known limitation tracked for a future release.
 
 ## Metrics
 
@@ -176,17 +168,15 @@ queue_depth.set_with(17.0, &[("queue", "emails")]);
 Without the `otel` feature every call above is a no-op with no allocation, so
 you can leave instrumentation in hot paths and pay nothing in default builds.
 
-<Note>
-Metric handles bind to whichever meter provider is active when the underlying
-instrument is first resolved. Create handles **after** `init_telemetry` has
-run (or lazily at first use) — a handle constructed before initialization
-resolves against the no-op provider and stays inert. The idiomatic pattern is
-a `once_cell`/`LazyLock` handle resolved on first emit, well after boot.
-
-Attribute values are string-typed (`&[(&'static str, &str)]`). Numeric and
-boolean attributes are a planned enhancement; for now format them as strings
-at the call site.
-</Note>
+> **Note:** Metric handles bind to whichever meter provider is active when the underlying
+> instrument is first resolved. Create handles **after** `init_telemetry` has
+> run (or lazily at first use) — a handle constructed before initialization
+> resolves against the no-op provider and stays inert. The idiomatic pattern is
+> a `once_cell`/`LazyLock` handle resolved on first emit, well after boot.
+>
+> Attribute values are string-typed (`&[(&'static str, &str)]`). Numeric and
+> boolean attributes are a planned enhancement; for now format them as strings
+> at the call site.
 
 ## The shutdown contract
 

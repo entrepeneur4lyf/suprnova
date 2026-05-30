@@ -1,8 +1,4 @@
----
-title: 'Build a Todo JSON API'
-description: 'Create a complete CRUD REST API for todos'
-icon: 'code'
----
+# Build a Todo JSON API
 
 In this tutorial, you'll build a complete JSON API for managing todos. You'll learn how to create routes, controllers, and interact with the database.
 
@@ -350,4 +346,4 @@ You've built a complete CRUD API with:
 - Add authentication middleware to protect routes
 - Implement pagination for the index endpoint
 - Add filtering and sorting capabilities
-- Create an Inertia frontend (see [Inertia Todo Tutorial](/tutorials/inertia-crud))
+- Create an Inertia frontend (see [Inertia Todo Tutorial](tutorial-inertia-crud.md))

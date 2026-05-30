@@ -1,8 +1,4 @@
----
-title: 'Query Builder'
-description: 'Build complex database queries with SeaORM'
-icon: 'magnifying-glass'
----
+# Query Builder
 
 suprnova uses SeaORM's powerful query builder for complex database operations. While the `Model` and `ModelMut` traits handle common operations, you'll use the query builder for filtering, sorting, pagination, and joins.
 

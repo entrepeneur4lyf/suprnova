@@ -1,8 +1,4 @@
----
-title: 'CLI Overview'
-description: 'A powerful command-line tool for scaffolding and managing suprnova applications'
-icon: 'terminal'
----
+# CLI Overview
 
 The suprnova CLI provides a comprehensive set of commands for creating projects, generating code, running development servers, and managing database migrations. Inspired by Laravel's Artisan CLI, it streamlines common development tasks.
 

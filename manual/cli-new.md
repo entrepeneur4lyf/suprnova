@@ -1,10 +1,6 @@
----
-title: 'suprnova new'
-description: 'Create a new suprnova project'
-icon: 'folder-plus'
----
+# suprnova new
 
-The `suprnova new` command creates asuprnovaw Suprnova project with all the necessary files and directory structure.
+The `suprnova new` command creates a new Suprnova project with all the necessary files and directory structure.
 
 ## Usage
 

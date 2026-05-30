@@ -1,8 +1,4 @@
----
-title: 'Frontend Overview'
-description: 'Building modern frontends with Inertia.js and React'
-icon: 'browser'
----
+# Frontend Overview
 
 suprnova integrates [Inertia.js](https://inertiajs.com/) to provide a seamless way to build modern single-page applications using React, without the complexity of building an API.
 
@@ -184,6 +180,6 @@ INERTIA_DEVELOPMENT=false suprnova serve --backend-only
 
 ## Next Steps
 
-- [Inertia Responses](/frontend/inertia-responses) - Learn about the `inertia_response!` macro
-- [Page Components](/frontend/pages) - Create React page components
-- [TypeScript Types](/frontend/typescript-types) - Generate types from Rust structs
+- [Inertia Responses](frontend-inertia-responses.md) - Learn about the `inertia_response!` macro
+- [Page Components](frontend-pages.md) - Create React page components
+- [TypeScript Types](frontend-typescript-types.md) - Generate types from Rust structs

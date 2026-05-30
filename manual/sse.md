@@ -1,8 +1,4 @@
----
-title: 'Server-Sent Events'
-description: 'Push events from the server to the browser over a single long-lived HTTP connection.'
-icon: 'tower-broadcast'
----
+# Server-Sent Events
 
 Server-Sent Events (SSE) is the minimum one-way push channel from server to
 browser: the browser opens `EventSource(url)`, the server keeps a
@@ -31,7 +27,7 @@ the client disconnects.
 | Per-tab connection cap | 6 (HTTP/1.1) / unlimited (HTTP/2) | Unlimited |
 
 Reach for SSE when you only need server-to-client push (activity feeds,
-notifications, log tails, AI streaming). Reach for [WebSockets](/docs/core/websockets)
+notifications, log tails, AI streaming). Reach for [WebSockets](websockets.md)
 when you need bidirectional traffic or binary frames.
 
 ## Quickstart
@@ -277,7 +273,7 @@ framework never has to invent a default shape.
 ## Broadcasting one stream to many subscribers
 
 Fan-out to many SSE subscribers is already covered by the broadcasting
-subsystem ([Phase 7B](/docs/core/broadcasting)): subscribe to a
+subsystem ([Phase 7B](broadcasting.md)): subscribe to a
 `BroadcastHub` channel and adapt the `broadcast::Receiver` into the
 `SseEvent` stream with `tokio_stream::wrappers::BroadcastStream` +
 `.map(...)`. Each connection gets its own receiver; the hub handles

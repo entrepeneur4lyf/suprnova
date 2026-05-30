@@ -374,5 +374,5 @@ See `framework/tests/features.rs` for the full set of composition tests shipped 
 ## Related
 
 - `suprnova::features::admin` — full API reference for the CRUD facade. Run `cargo doc --open -p suprnova` and navigate to `features::admin`.
-- [`docs/core/middleware.md`](./middleware.md) — middleware ordering primer; `FeatureMiddleware` belongs after `SessionMiddleware`.
+- [`docs/core/middleware.md`](middleware.md.md) — middleware ordering primer; `FeatureMiddleware` belongs after `SessionMiddleware`.
 - [featureflag crate docs](https://docs.rs/featureflag) — the upstream primitives layer (`Evaluator`, `Context`, `Feature`).

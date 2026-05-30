@@ -1,8 +1,4 @@
----
-title: 'Deploy to Hetzner VPS'
-description: 'Deploy your suprnova application to Hetzner Cloud or any VPS provider'
-icon: 'server'
----
+# Deploy to Hetzner VPS
 
 This guide covers deploying your suprnova application to a VPS (Virtual Private Server) using Hetzner Cloud. The same principles apply to other VPS providers like DigitalOcean Droplets, Linode, Vultr, or AWS EC2.
 

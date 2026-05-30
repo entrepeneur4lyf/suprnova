@@ -585,4 +585,4 @@ Use the correct variants when returning errors:
 - Add your crate to your app's `Cargo.toml` with `cargo add suprnova-payments-mollie --path ./crates/suprnova-payments-mollie`
 - Register at bootstrap as shown in step 7
 - Mount `webhook_routes(db.clone())` if you haven't already — it handles all registered providers automatically
-- See [`payments-frontend.md`](./payments-frontend.md) for how to render the `SessionPayload` your adapter returns
+- See [`payments-frontend.md`](payments-frontend.md.md) for how to render the `SessionPayload` your adapter returns

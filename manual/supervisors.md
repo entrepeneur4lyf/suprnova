@@ -1,12 +1,6 @@
----
-title: "Supervisors"
-description: "Long-lived daemon tasks that restart automatically on failure, registered at boot via inventory and managed by SupervisorRegistry"
-icon: "shield-check"
----
-
 # Supervisors
 
-A supervisor is a long-lived Tokio task that the framework starts at boot and restarts automatically when it exits. Supervisors are for "always-on" work: background heartbeats, metrics collectors, connection warmers, periodic sweepers, or any async loop that should never stop running. They are distinct from [queue workers](./queues.md), which consume discrete `Job` items from a queue. A supervisor has no job queue — it owns its own loop and decides when to sleep, wait, or act.
+A supervisor is a long-lived Tokio task that the framework starts at boot and restarts automatically when it exits. Supervisors are for "always-on" work: background heartbeats, metrics collectors, connection warmers, periodic sweepers, or any async loop that should never stop running. They are distinct from [queue workers](queues.md.md), which consume discrete `Job` items from a queue. A supervisor has no job queue — it owns its own loop and decides when to sleep, wait, or act.
 
 The `SupervisorRegistry` starts every registered supervisor as a detached Tokio task, watches each task's `JoinHandle`, and restarts it according to its `RestartPolicy` when it exits — whether by returning `Err`, returning `Ok`, or panicking. Restarts are separated by an exponential backoff that starts at 100ms and caps at 60 seconds, so a crashing supervisor does not spin-loop and flood logs.
 
@@ -78,7 +72,7 @@ fn restart_policy(&self) -> RestartPolicy { RestartPolicy::Never }     // one-sh
 
 **When to pick `Always` vs `OnError`.** An infinite loop supervisor (`loop { ... }`) should use `Always` — if the loop ever returns `Ok(())`, something unexpected happened and a restart is the correct response. A supervisor that does finite work and returns `Ok` on success (e.g., refreshing a cache once) should use `OnError` so that a clean finish does not trigger a restart.
 
-**`Never` for one-shot work.** Prefer [queue workers](./queues.md) or [scheduled tasks](./scheduling.md) for work that runs on a schedule. Use `RestartPolicy::Never` when the supervisor pattern is convenient for something that must run once at startup and never again.
+**`Never` for one-shot work.** Prefer [queue workers](queues.md.md) or [scheduled tasks](scheduling.md.md) for work that runs on a schedule. Use `RestartPolicy::Never` when the supervisor pattern is convenient for something that must run once at startup and never again.
 
 ## Panic Handling
 

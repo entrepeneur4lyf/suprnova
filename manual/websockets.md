@@ -1,9 +1,3 @@
----
-title: "WebSockets"
-description: "First-class WebSocket routes via the ws!() macro or Router::ws, with a typed send/recv API, path-param capture, and auth-at-connect via the Request the handler receives"
-icon: "bolt"
----
-
 # WebSockets
 
 Suprnova WebSocket routes sit alongside HTTP routes in the same router. You register a path and a handler; the framework detects the `Upgrade: websocket` request at that path, completes the RFC 6455 handshake, and calls your handler with a typed `WsSocket` and the original `Request`. There is no separate WebSocket server to run — WebSocket connections are upgraded from the same hyper listener that serves your HTTP traffic.
@@ -195,7 +189,7 @@ impl WebSocketHandler for RoomHandler {
 
 `req.param("id")` returns `Result<&str, ParamError>`. The `?` operator propagates a `FrameworkError::ParamError` if the segment is missing, which closes the connection with code 1011. In practice, if the route matched, the capture is always present — the error path is a safety net against typos in the param name.
 
-For the full `Request` API — headers, cookies, session, query string — see [the request docs](./requests.md).
+For the full `Request` API — headers, cookies, session, query string — see [the request docs](requests.md.md).
 
 ## Auth at Connect
 

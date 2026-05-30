@@ -1,8 +1,4 @@
----
-title: 'Actions'
-description: 'Encapsulate business logic with injectable action classes'
-icon: 'bolt'
----
+# Actions
 
 Actions in suprnova are injectable service classes that encapsulate your application's business logic. Inspired by Laravel's single-action classes, actions promote clean code organization by separating business logic from controllers. The `#[injectable]` macro provides automatic dependency injection and singleton registration.
 

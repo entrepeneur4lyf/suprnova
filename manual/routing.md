@@ -1,8 +1,4 @@
----
-title: 'Routing'
-description: 'Define and organize your application routes with suprnova'
-icon: 'route'
----
+# Routing
 
 suprnova provides a clean, Laravel-inspired routing system that lets you define routes declaratively using the `routes!` macro. Routes map URLs to handler functions (controllers), support dynamic parameters, named routes for URL generation, and per-route middleware.
 
@@ -297,7 +293,7 @@ get!("/admin", controllers::admin::index)
 
 > **Note:**
 >
-> For more details on creating middleware, see the [Middleware documentation](/core/middleware).
+> For more details on creating middleware, see the [Middleware documentation](middleware.md).
 
 
 ## Route Groups

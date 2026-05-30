@@ -1,8 +1,4 @@
----
-title: Authorization
-description: Gates and policies for authorizing actions in suprnova
-icon: shield-check
----
+# Authorization
 
 Authentication answers _"who are you?"_ — authorization answers _"are you
 allowed to do this?"_ suprnova ships a Laravel-shaped `Gate` facade plus the

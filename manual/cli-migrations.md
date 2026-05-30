@@ -1,8 +1,4 @@
----
-title: 'Database Migrations'
-description: 'Manage database schema with migrations'
-icon: 'database'
----
+# Database Migrations
 
 suprnova provides a complete set of commands for managing database migrations, inspired by Laravel's migration system.
 

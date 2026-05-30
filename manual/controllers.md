@@ -1,8 +1,4 @@
----
-title: 'Controllers'
-description: 'Handle HTTP requests and return responses with suprnova controllers'
-icon: 'gamepad'
----
+# Controllers
 
 suprnova controllers are async functions that handle HTTP requests and return responses. Following Laravel's conventions, controllers organize your application's request handling logic into dedicated modules, making your codebase clean and maintainable.
 
@@ -76,7 +72,7 @@ pub async fn handler_name(request: Request) -> Response
 
 > **Note:**
 >
-> For handling POST data with validation, see [Requests](/core/requests).
+> For handling POST data with validation, see [Requests](requests.md).
 
 
 ## Path Parameter Injection
@@ -358,7 +354,7 @@ pub async fn store(_req: Request) -> Response {
 
 > **Note:**
 >
-> For more response options, see the [Responses documentation](/core/responses).
+> For more response options, see the [Responses documentation](responses.md).
 
 
 ## RESTful Controllers
@@ -465,7 +461,7 @@ async fn find_user(id: &str) -> Result<User, AppError> {
 
 > **Note:**
 >
-> For more error handling options, see the [Responses documentation](/core/responses#error-handling).
+> For more error handling options, see the [Responses documentation](responses.md).
 
 
 ## Dependency Injection

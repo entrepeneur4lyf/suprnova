@@ -1,9 +1,3 @@
----
-title: "Console"
-description: "Per-project CLI for runtime commands: db:seed, user-defined #[command] async fns, and one-shot tasks. The Rust analogue of php artisan."
-icon: "terminal"
----
-
 # Console
 
 Each Suprnova project ships with a `console` binary — the runtime command dispatcher for everything that needs the app's compiled types: database seeders, custom one-shot tasks, queue management commands, anything you'd build with Laravel's `php artisan`. Commands are async fns annotated with `#[command]`; the framework collects them via `inventory` at link time, so adding a new command is a single file with no central registry to edit.

@@ -1,8 +1,4 @@
----
-title: CSRF Protection
-description: Cross-Site Request Forgery protection in suprnova
-icon: shield-check
----
+# CSRF Protection
 
 suprnova provides automatic CSRF (Cross-Site Request Forgery) protection for all state-changing requests. This prevents malicious websites from executing actions on behalf of authenticated users.
 

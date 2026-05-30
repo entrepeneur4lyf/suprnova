@@ -1,9 +1,3 @@
----
-title: "Hashing"
-description: "Password hashing with bcrypt, Argon2i, and Argon2id — Laravel-parity facade with env-driven driver selection"
-icon: "key"
----
-
 # Hashing
 
 Suprnova ships a Laravel-parity hashing facade backed by three first-class drivers: **bcrypt** (default — matches Laravel), **Argon2i** (memory-hard, side-channel-resistant), and **Argon2id** (OWASP 2024 recommendation). Driver selection is env-driven; the facade is algorithm-aware end-to-end (info, is_hashed, needs_rehash, verify).

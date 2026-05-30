@@ -1,9 +1,3 @@
----
-title: "Events"
-description: "Typed in-process pub/sub — dispatch events, listen with typed listeners, defer / push / fake / mute, parity-matched to Laravel's Event facade"
-icon: "radio"
----
-
 # Events
 
 Events are Suprnova's typed in-process pub/sub. A controller fires
@@ -185,7 +179,7 @@ its own Tokio task, bounded by a process semaphore, with bounded retry
 process; a crash drops in-flight listeners.
 
 `QueuedListener<E, J>` is a stock listener implementation that builds
-a [`Job`](./queue.md) from each event and pushes it on the durable
+a [`Job`](queue.md.md) from each event and pushes it on the durable
 queue. The event still fires synchronously and unbounded; the listener
 just enqueues — which is fast — so request latency stays low. The job
 itself survives the crash.
@@ -357,8 +351,8 @@ short note.
 
 ## See also
 
-- [`Queue`](./queue.md) — durable jobs, the crash-tolerant tier
-- [`Broadcasting`](./broadcasting.md) — bridge events to WebSocket
+- [`Queue`](queue.md.md) — durable jobs, the crash-tolerant tier
+- [`Broadcasting`](broadcasting.md.md) — bridge events to WebSocket
   channels (`EventFacade::broadcast::<E>(hub)`)
-- [Model lifecycle events](./eloquent.md) — per-model `Created`,
+- [Model lifecycle events](eloquent.md.md) — per-model `Created`,
   `Updating`, etc. with cancellable listeners via the `Observer` trait

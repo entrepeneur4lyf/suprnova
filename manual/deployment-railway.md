@@ -1,8 +1,4 @@
----
-title: 'Deploy to Railway'
-description: 'Deploy your suprnova application to Railway'
-icon: 'train'
----
+# Deploy to Railway
 
 [Railway](https://railway.app) is a modern platform that makes deploying Rust applications easy. This guide walks you through deploying your suprnova application.
 

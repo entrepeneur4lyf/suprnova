@@ -1,8 +1,4 @@
----
-title: 'Deploy to Digital Ocean'
-description: 'Deploy your suprnova application to Digital Ocean App Platform'
-icon: 'digital-ocean'
----
+# Deploy to Digital Ocean
 
 [Digital Ocean App Platform](https://www.digitalocean.com/products/app-platform) is a Platform-as-a-Service that supports Docker deployments. This guide walks you through deploying your suprnova application.
 

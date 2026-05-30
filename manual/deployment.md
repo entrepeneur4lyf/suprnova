@@ -1,8 +1,4 @@
----
-title: 'Deployment Overview'
-description: 'Deploy your suprnova application to production'
-icon: 'rocket'
----
+# Deployment Overview
 
 suprnova applications compile to a single, self-contained binary that includes everything needed to run your application: web server, migrations, and scheduler.
 
@@ -204,6 +200,6 @@ Run only **one** scheduler instance to avoid duplicate task execution. Most plat
 
 Choose your deployment platform:
 
-- [Deploy to Railway](/deployment/railway) - Simple PaaS with automatic builds
-- [Deploy to Digital Ocean](/deployment/digital-ocean) - App Platform with managed infrastructure
-- [Deploy to Hetzner VPS](/deployment/hetzner) - Full control with systemd and Caddy
+- [Deploy to Railway](deployment-railway.md) - Simple PaaS with automatic builds
+- [Deploy to Digital Ocean](deployment-digital-ocean.md) - App Platform with managed infrastructure
+- [Deploy to Hetzner VPS](deployment-hetzner.md) - Full control with systemd and Caddy

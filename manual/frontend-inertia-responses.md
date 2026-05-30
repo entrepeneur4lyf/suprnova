@@ -1,8 +1,4 @@
----
-title: 'Inertia Responses'
-description: 'Returning Inertia responses from your controllers'
-icon: 'reply'
----
+# Inertia Responses
 
 suprnova provides the `inertia_response!` macro for returning Inertia responses from your controllers. This macro handles both initial page loads (HTML) and subsequent XHR requests (JSON).
 

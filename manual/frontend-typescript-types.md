@@ -1,8 +1,4 @@
----
-title: 'TypeScript Types'
-description: 'Generate TypeScript types from your Rust props structs'
-icon: 'code'
----
+# TypeScript Types
 
 suprnova can automatically generate TypeScript interfaces from your Rust `InertiaProps` structs, ensuring type safety between your backend and frontend.
 
@@ -376,7 +372,7 @@ export default function Register() {
 
 > **Note:**
 >
-> For more information on requests and validation, see [Requests](/core/requests).
+> For more information on requests and validation, see [Requests](requests.md).
 
 
 ## Type-Safe Routes (Inertia v2+)

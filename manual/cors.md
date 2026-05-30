@@ -1,8 +1,4 @@
----
-title: CORS
-description: Cross-Origin Resource Sharing middleware in Suprnova
-icon: globe
----
+# CORS
 
 `CorsMiddleware` answers preflight `OPTIONS` requests and decorates ordinary
 cross-origin responses with `Access-Control-Allow-*` headers. It mirrors

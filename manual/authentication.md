@@ -1,8 +1,4 @@
----
-title: Authentication
-description: Session-based authentication in suprnova
-icon: lock
----
+# Authentication
 
 suprnova provides Laravel-style session-based authentication out of the box. When you create a new project wsuprnova `suprnova new`, it includes a complete authentication system with login, registration, and protected routes.
 
@@ -280,7 +276,7 @@ and `.for_guard(...)`.
 ## Auth Events
 
 The guards dispatch lifecycle events you can listen for (see [Events &
-Listeners](/core/events)):
+Listeners](events.md)):
 
 | Event | When |
 |-------|------|
@@ -471,11 +467,11 @@ export default function Login({ errors }: LoginProps) {
 
 ## Sessions
 
-Sessions are automatically managed by the framework. See the [Sessions](/core/sessions) documentation for details on how to work with session data directly.
+Sessions are automatically managed by the framework. See the [Sessions](session.md) documentation for details on how to work with session data directly.
 
 ## CSRF Protection
 
-All POST, PUT, PATCH, and DELETE requests are automatically protected against CSRF attacks. See the [CSRF Protection](/core/csrf) documentation for details.
+All POST, PUT, PATCH, and DELETE requests are automatically protected against CSRF attacks. See the [CSRF Protection](csrf.md) documentation for details.
 
 ## Security Features
 

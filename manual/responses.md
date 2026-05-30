@@ -1,8 +1,4 @@
----
-title: 'Responses'
-description: 'Create HTTP responses, handle errors, and perform redirects in suprnova'
-icon: 'reply'
----
+# Responses
 
 suprnova provides a flexible response system inspired by Laravel, allowing you to create JSON responses, text responses, redirects, and handle errors elegantly. The `Response` type enables using Rust's `?` operator for clean error propagation.
 

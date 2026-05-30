@@ -1,8 +1,4 @@
----
-title: 'Docker'
-description: 'Generate Docker files for development and production deployment'
-icon: 'docker'
----
+# Docker
 
 suprnova provides commands to generate Docker configuration files for both local development and production deployment.
 
@@ -241,7 +237,7 @@ For production deployment:
 
 > **Tip:**
 >
-> For detailed deployment guides, see [Deployment Overview](/deployment/overview), [Railway](/deployment/railway), or [Digital Ocean](/deployment/digital-ocean).
+> For detailed deployment guides, see [Deployment Overview](deployment.md), [Railway](deployment-railway.md), or [Digital Ocean](deployment-digital-ocean.md).
 
 
 ---

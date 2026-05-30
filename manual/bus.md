@@ -1,9 +1,3 @@
----
-title: "Bus"
-description: "The synchronous command bus — dispatch typed Commands to their registered Handlers, with chain and batch helpers and a record-only test fake"
-icon: "diamond-plus"
----
-
 # Bus
 
 The Bus is Suprnova's **synchronous** command dispatcher. You define a
@@ -11,7 +5,7 @@ typed `Command` (`{ input, Output type }`), register a `Handler` for it at
 boot, and then any code in the process can call `Bus::dispatch(cmd).await`
 and get back a `Dispatched<T>` carrying the handler's typed result.
 
-Bus pairs with [`Queue`](./queue.md) — the asynchronous sibling. They are
+Bus pairs with [`Queue`](queue.md.md) — the asynchronous sibling. They are
 two intentionally separate facades, not one routing dispatcher:
 
 | If you want…                                          | Use            |
@@ -225,7 +219,7 @@ when the count doesn't match. `assert_nothing_dispatched` panics with
 
 ## When to use `Queue` instead
 
-Reach for [`Queue`](./queue.md) when you want any of:
+Reach for [`Queue`](queue.md.md) when you want any of:
 
 - **Durability across restarts.** A queued job survives a process crash
   if the driver is `database` or `redis`.
@@ -254,8 +248,8 @@ durable work pushes through `Queue`.
 
 ## See also
 
-- [Queue](./queue.md) — async sibling, drivers, worker, retry policy
-- [Events](./events.md) — pub/sub dispatcher (one event → many listeners)
+- [Queue](queue.md.md) — async sibling, drivers, worker, retry policy
+- [Events](events.md.md) — pub/sub dispatcher (one event → many listeners)
 - `docs/parity/bus.md` — Laravel `Illuminate\Bus` ↔ Suprnova parity audit
   and open questions on net-new subsystems (heterogeneous Batch,
   heterogeneous Chain, DebounceLock, job middleware)

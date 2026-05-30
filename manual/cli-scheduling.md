@@ -1,8 +1,4 @@
----
-title: 'Scheduling Commands'
-description: 'CLI commands for running scheduled tasks'
-icon: 'calendar-clock'
----
+# Scheduling Commands
 
 suprnova provides CLI commands for running and managing scheduled tasks.
 

@@ -1,9 +1,3 @@
----
-title: "Cache"
-description: "Laravel-inspired cache facade with explicit memory or Redis backend selection"
-icon: "database"
----
-
 # Cache
 
 suprnova provides a Laravel-inspired Cache facade for storing and retrieving data with optional TTL (time-to-live) expiration. The backend — in-memory or Redis — is selected explicitly at boot via `CACHE_DRIVER`.

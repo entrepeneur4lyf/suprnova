@@ -1,8 +1,4 @@
----
-title: Testing
-description: Write tests for your suprnova application with database support
-icon: 'flask-vial'
----
+# Testing
 
 suprnova provides testing utilities that make it easy to write tests for your actions, services, and controllers with full database support using in-memory SQLsuprnova. Suprnova also offers Jest-like testing macros for better test organization and clearer failure output.
 

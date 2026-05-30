@@ -1,8 +1,4 @@
----
-title: 'Bootstrap'
-description: 'Configure services and middleware at application startup'
-icon: 'rocket'
----
+# Bootstrap
 
 The `bootstrap.rs` file is your application's central configuration point for registering services, global middleware, and performing runtime initialization. It's called during application startup, before the server begins handling requests.
 
@@ -89,7 +85,7 @@ pub async fn register() {
 
 > **Note:**
 >
-> Global middleware runs on every request in the order registered. For route-specific middleware, see the [Middleware documentation](/core/middleware).
+> Global middleware runs on every request in the order registered. For route-specific middleware, see the [Middleware documentation](middleware.md).
 
 
 ### Services with Runtime Configuration

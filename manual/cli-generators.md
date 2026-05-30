@@ -1,8 +1,4 @@
----
-title: 'Code Generators'
-description: 'Generate controllers, actions, middleware, errors, and more'
-icon: 'wand-magic-sparkles'
----
+# Code Generators
 
 suprnova provides generator commands to scaffold common application components with proper structure and boilerplate code.
 

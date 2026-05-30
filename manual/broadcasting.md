@@ -1,16 +1,10 @@
----
-title: "Broadcasting"
-description: "Publish events to WebSocket subscribers through named channels with public, private, and presence semantics, multi-process fanout, and a JSON envelope wire protocol"
-icon: "tower-broadcast"
----
-
 # Broadcasting
 
-Broadcasting is the server-to-client notification layer built on top of [the WebSocket primitive](./websockets.md). When you dispatch a `Broadcastable` event through `EventFacade`, it does two things simultaneously: it fires all in-process event listeners as usual, AND it pushes a JSON envelope to every WebSocket client subscribed to the channels the event declares. You do not manage individual connections — you manage channel subscriptions, and the hub fans out to subscribers.
+Broadcasting is the server-to-client notification layer built on top of [the WebSocket primitive](websockets.md.md). When you dispatch a `Broadcastable` event through `EventFacade`, it does two things simultaneously: it fires all in-process event listeners as usual, AND it pushes a JSON envelope to every WebSocket client subscribed to the channels the event declares. You do not manage individual connections — you manage channel subscriptions, and the hub fans out to subscribers.
 
 The `BroadcastHub` is the central bus. By default it is an in-process `InMemoryBroadcastHub`, which keeps everything in one process without external dependencies. A `broadcasting-fanout` Cargo feature swaps the hub for a `SeaStreamerBroadcastHub`, which routes events through a stream broker (Redis Streams) so that publishes from one process reach subscribers connected to other processes in a multi-replica deployment.
 
-Broadcasting sits on top of Phase 7A's WebSocket infrastructure. You register a `build_broadcasting_handler()` route the same way you register any WebSocket route; the framework upgrades the HTTP connection, and from that point on the JSON envelope protocol handles channel subscriptions and event delivery. Everything in [the WebSocket docs](./websockets.md) — heartbeat pings, `max_missed_pings`, path parameters, per-route middleware — applies to the broadcasting route as well.
+Broadcasting sits on top of Phase 7A's WebSocket infrastructure. You register a `build_broadcasting_handler()` route the same way you register any WebSocket route; the framework upgrades the HTTP connection, and from that point on the JSON envelope protocol handles channel subscriptions and event delivery. Everything in [the WebSocket docs](websockets.md.md) — heartbeat pings, `max_missed_pings`, path parameters, per-route middleware — applies to the broadcasting route as well.
 
 ## Quick Start
 
@@ -225,7 +219,7 @@ See [Presence channels](#presence-channels) for the full event semantics.
 
 ## The Broadcastable Trait
 
-`Broadcastable` extends [the event system](./events.md). Any event that implements `Broadcastable` is automatically pushed to the hub when dispatched — you call `EventFacade::dispatch` once, and both in-process listeners and WebSocket subscribers receive the event.
+`Broadcastable` extends [the event system](events.md.md). Any event that implements `Broadcastable` is automatically pushed to the hub when dispatched — you call `EventFacade::dispatch` once, and both in-process listeners and WebSocket subscribers receive the event.
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -497,7 +491,7 @@ Lowering `ping_interval` helps detect dead connections faster at the cost of hig
 
 ## Production Deployment
 
-The broadcasting WebSocket route is an upgraded HTTP connection on the same hyper listener as your HTTP routes. TLS termination happens upstream, exactly as described in [the WebSocket docs](./websockets.md#production-deployment). The nginx and Caddy configurations from that doc apply unchanged — extend them to cover the `/ws/broadcast` path.
+The broadcasting WebSocket route is an upgraded HTTP connection on the same hyper listener as your HTTP routes. TLS termination happens upstream, exactly as described in [the WebSocket docs](websockets.md.md). The nginx and Caddy configurations from that doc apply unchanged — extend them to cover the `/ws/broadcast` path.
 
 Active WebSocket handler tasks (including broadcasting connections) are tracked in `WS_TASKS` and are drained on graceful shutdown, so in-flight event deliveries complete before the process exits.
 
@@ -524,7 +518,7 @@ hub.assert_broadcast("orders.42", "OrderShipped");
 assert_eq!(hub.count(), 1);
 ```
 
-`broadcasts()` returns every recorded envelope for finer-grained assertions, and `assert_nothing_broadcast()` asserts none were sent. To assert that a `Broadcastable` *event* was dispatched at all (rather than what reached the wire), `Event::fake()` records the event itself — see [events](./events.md).
+`broadcasts()` returns every recorded envelope for finer-grained assertions, and `assert_nothing_broadcast()` asserts none were sent. To assert that a `Broadcastable` *event* was dispatched at all (rather than what reached the wire), `Event::fake()` records the event itself — see [events](events.md.md).
 
 ## Reference
 

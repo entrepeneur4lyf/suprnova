@@ -1,8 +1,4 @@
----
-title: 'Requests'
-description: 'Validate and parse incoming request data with the #[request] attribute'
-icon: 'file-check'
----
+# Requests
 
 suprnova provides a simple pattern for handling incoming request data with automatic validation. The `#[request]` attribute works with both JSON and form-urlencoded data, making it suitable for REST APIs and HTML forms alike.
 
@@ -447,7 +443,7 @@ export default function CreateTodo() {
 
 > **Note:**
 >
-> For more information on TypeScript type generation, see [TypeScript Types](/frontend/typescript-types).
+> For more information on TypeScript type generation, see [TypeScript Types](frontend-typescript-types.md).
 
 
 ## Request Accessors

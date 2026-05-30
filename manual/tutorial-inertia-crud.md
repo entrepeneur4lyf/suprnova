@@ -1,8 +1,4 @@
----
-title: 'Build a Todo App with Inertia'
-description: 'Create a full-stack CRUD app with React and Inertia.js'
-icon: 'layer-group'
----
+# Build a Todo App with Inertia
 
 In this tutorial, you'll build a complete todo application with a React frontend using Inertia.js. You'll learn how to connect your Rust backend to a modern React UI.
 

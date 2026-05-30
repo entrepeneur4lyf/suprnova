@@ -1,9 +1,3 @@
----
-title: "Notifications"
-description: "Send a single notification across mail, database, web push, and broadcast channels with one Notify::send call"
-icon: "bell"
----
-
 # Notifications
 
 Suprnova's notification subsystem mirrors Laravel's `Notification::send($user, $notification)` API: a single call fans out across every channel the notification declares. The recipient (`Notifiable`) addresses each channel — email for `mail`, database id for `database`, push subscription endpoint for `webpush`. Channels are registered with a `NotificationDispatcher`; the `Notify` facade is the call site for both in-process (`Notify::send`) and queued (`Notify::queue`) delivery.

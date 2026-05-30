@@ -1,14 +1,10 @@
----
-title: 'Validation'
-description: 'Composable rule objects, the validate! macro, async rules, and the Unique uniqueness contract.'
-icon: 'circle-check'
----
+# Validation
 
 Suprnova validates request input on two complementary tracks:
 
 1. **Derive validation** — `#[validate(...)]` attributes on a `FormRequest`
    struct, run automatically by `extract()`. This is the everyday path and
-   is covered in [Requests](/docs/core/requests). It handles per-field
+   is covered in [Requests](requests.md). It handles per-field
    rules (`email`, `length`, `range`, …) declaratively.
 2. **Rule objects + the `validate!` macro** — plain values implementing
    [`Rule`](#rule-objects) / `ContextualRule` / `AsyncRule`, composed
@@ -16,7 +12,7 @@ Suprnova validates request input on two complementary tracks:
    that touch the database, or rules you want to store and pass around.
 
 The two tracks accumulate into the same
-[`ValidationErrors`](/docs/core/error-handling) bag and render the same
+[`ValidationErrors`](errors.md) bag and render the same
 Laravel/Inertia `{ "message", "errors": { field: [...] } }` shape (HTTP
 422).
 
@@ -42,13 +38,11 @@ use suprnova::{Rule, rules::Email};
 Email.passes("user@example.com")?; // Ok(())
 ```
 
-<Note>
-`Numeric` accepts a **finite** number — `NaN`, `inf`, and magnitudes that
-overflow to infinity are rejected, even though Rust's parser would accept
-the strings. Use `HttpUrl` (not `Url`) for callback/webhook/avatar inputs:
-`Url` parses any scheme `url::Url` accepts (`file:`, `javascript:`, custom
-URIs), while `HttpUrl` requires `http`/`https`.
-</Note>
+> **Note:** `Numeric` accepts a **finite** number — `NaN`, `inf`, and magnitudes that
+> overflow to infinity are rejected, even though Rust's parser would accept
+> the strings. Use `HttpUrl` (not `Url`) for callback/webhook/avatar inputs:
+> `Url` parses any scheme `url::Url` accepts (`file:`, `javascript:`, custom
+> URIs), while `HttpUrl` requires `http`/`https`.
 
 ## The `validate!` macro
 
@@ -93,11 +87,9 @@ A contextual rule is followed by `=> with $ctx` (an
 `&HashMap<String, String>` of sibling values). The macro is **synchronous**
 — for async rules use the [hook](#async-rules-in-requests) below.
 
-<Warning>
-A common trap: writing `card_number ?: RequiredIf {...} => with ctx;`. On
-a `?:` row, `None` skips all rules, so `RequiredIf` can never fail an
-absent field. Use `?=>` for any rule that must fire on absence.
-</Warning>
+> **Warning:** A common trap: writing `card_number ?: RequiredIf {...} => with ctx;`. On
+> a `?:` row, `None` skips all rules, so `RequiredIf` can never fail an
+> absent field. Use `?=>` for any rule that must fire on absence.
 
 ## Cross-field hooks
 
@@ -129,11 +121,9 @@ impl FormRequest for UpdatePassword {
 }
 ```
 
-<Note>
-Override hooks need a hand-written `impl FormRequest` — the `#[request]`
-attribute and `#[derive(FormRequest)]` generate their own (empty) impl, so
-they're for the common no-override case only.
-</Note>
+> **Note:** Override hooks need a hand-written `impl FormRequest` — the `#[request]`
+> attribute and `#[derive(FormRequest)]` generate their own (empty) impl, so
+> they're for the common no-override case only.
 
 ### Async rules in requests
 
@@ -243,11 +233,11 @@ hit the database or an async policy belongs in one of these places, not in
 `authorize`:
 
 - **Middleware** — runs before `extract()`, is `async`, and short-circuits
-  by returning `Err(response)` (see [Middleware](/docs/core/middleware)).
+  by returning `Err(response)` (see [Middleware](middleware.md)).
   The right place for "is this user allowed to reach this route at all".
 - **The Gate** — call `Gate::allows_async` / `Gate::authorize_async` in the
   handler once you have the authenticated user and the resource (see
-  [Authorization](/docs/core/authorization)).
+  [Authorization](authorization.md)).
 - **`after_validation_async`** — for an authorization check that depends on
   the parsed request body, run it in the async hook alongside your other
   async rules.

@@ -1,9 +1,3 @@
----
-title: "Mail"
-description: "Send mail through SMTP or any of five HTTP providers with a unified facade, template-driven Mailables, queueing, and a first-class test fake"
-icon: "envelope"
----
-
 # Mail
 
 Suprnova's mail subsystem mirrors Laravel's `Mail::to(...)->send(...)` ergonomics on a Rust-native, Tokio-async runtime. One `Mail` facade, seven first-class transports (log, in-memory, SMTP, plus the five major HTTP providers), Tera-rendered templates with `self` as the context, queue + delayed delivery via the Phase 5A envelope, and a `Mail::fake()` test guard cut from the same cloth as `Bus::fake()` and `Cache::fake()`.

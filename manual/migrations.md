@@ -1,14 +1,10 @@
----
-title: 'Migrations'
-description: 'Manage database schema changes with migrations'
-icon: 'arrow-up'
----
+# Migrations
 
 Migrations allow you to evolve your database schema over time. suprnova uses SeaORM migrations with a Laravel-inspired workflow.
 
 > **Info:**
 >
-> For CLI commands (`suprnova migratsuprnova `suprnova migrate:rollback`, etc.), see the [CLI Migrations Reference](/cli/migrations).
+> For CLI commands (`suprnova migratsuprnova `suprnova migrate:rollback`, etc.), see the [CLI Migrations Reference](cli-migrations.md).
 
 
 ## Creating Migrations
@@ -430,4 +426,4 @@ suprnova migrate           # Apply again
 | `suprnova migrate:fresh` | Drop all tables and re-run |
 | `suprnova db:sync` | Sync schema to entities |
 
-See the [CLI Migrations Reference](/cli/migrations) for detailed command documentation.
+See the [CLI Migrations Reference](cli-migrations.md) for detailed command documentation.

@@ -1,8 +1,4 @@
----
-title: 'Page Components'
-description: 'Creating React page components for Inertia'
-icon: 'file-code'
----
+# Page Components
 
 Page components are React components that receive props from your suprnova controllers. They live in `frontend/src/pages/` and are automatically resolved by Inertia.
 

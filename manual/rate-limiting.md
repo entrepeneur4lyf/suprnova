@@ -1,9 +1,3 @@
----
-title: "Rate Limiting"
-description: "Sliding-window driver SPI + Laravel-shape Cache-backed RateLimiter facade with named limiters, attempt counters, and X-RateLimit-* headers"
-icon: "gauge"
----
-
 # Rate Limiting
 
 Suprnova ships two complementary rate-limit surfaces:
@@ -77,7 +71,7 @@ On rejection (over quota) it returns HTTP 429 with a `Retry-After` header. On ba
 
 ## Cache-backed Laravel-shape facade
 
-`RateLimiter` (the struct) mirrors `Illuminate\Cache\RateLimiter`. It's a fixed-window counter built on top of the Suprnova [`Cache`](./cache.md) facade. Use it for named limiters, `attempt()` workflows, or any time you want the `X-RateLimit-*` headers Laravel apps expect.
+`RateLimiter` (the struct) mirrors `Illuminate\Cache\RateLimiter`. It's a fixed-window counter built on top of the Suprnova [`Cache`](cache.md.md) facade. Use it for named limiters, `attempt()` workflows, or any time you want the `X-RateLimit-*` headers Laravel apps expect.
 
 ### Storage layout
 
@@ -275,14 +269,14 @@ let router = Router::new()
 
 ## Configuration
 
-The driver SPI is configured via environment variables; the Cache-backed facade is configured wherever your [`Cache`](./cache.md) store is configured (memory or Redis).
+The driver SPI is configured via environment variables; the Cache-backed facade is configured wherever your [`Cache`](cache.md.md) store is configured (memory or Redis).
 
 | Variable | Used by | Default |
 |----------|---------|---------|
 | `RATE_LIMIT_DRIVER` | Driver SPI bootstrap | `memory` |
 | `RATE_LIMIT_REDIS_URL` | Redis driver | `redis://127.0.0.1:6379` |
 | `RATE_LIMIT_PREFIX` | Redis key prefix | `suprnova:` |
-| `CACHE_DRIVER` / `REDIS_URL` / `CACHE_DEFAULT_TTL` / `REDIS_PREFIX` | Cache-backed `RateLimiter` facade (see [`Cache`](./cache.md)) | various |
+| `CACHE_DRIVER` / `REDIS_URL` / `CACHE_DEFAULT_TTL` / `REDIS_PREFIX` | Cache-backed `RateLimiter` facade (see [`Cache`](cache.md.md)) | various |
 
 ## Migration from Laravel
 

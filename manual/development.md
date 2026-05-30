@@ -1,8 +1,4 @@
----
-title: 'Development'
-description: 'Development workflow and tools for building suprnova applications'
-icon: 'code'
----
+# Development
 
 This guide covers the development workflow for building suprnova applications, including the dev server, hot reloading, and useful commands.
 
