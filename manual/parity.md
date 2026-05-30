@@ -44,7 +44,7 @@ gaps as of the shipped framework.
 | Agentic Development (AI) | No first-class AI SDK in framework | by design no | Use the crates you'd use anyway (`async-openai`, `anthropic-rs`, `tokenizers`, etc.) under `App::bind(Arc<dyn YourLlm>)` |
 | Directory Structure | `src/{actions,bootstrap,controllers,middleware,models,routes}` | shipped | Same intent, Rust-idiomatic layout. [Structure](structure.md) |
 | Frontend | Inertia v3 over Svelte 5 / React 19 / Vue 3.5 | shipped | [Frontend](frontend.md), [Pages](frontend-pages.md), [TS Types](frontend-typescript-types.md) |
-| Starter Kits | Plain `suprnova new --frontend <…>` ships auth, dashboard, payment-ready layout | not yet | Breeze/Jetstream/Spark-tier kits planned; today the default scaffold is closest to Breeze |
+| Starter Kits | Plain `suprnova new --frontend <…>` ships auth, dashboard, payment-ready layout | not yet | Breeze/Jetstream/Spark-tier kits planned; today the default scaffold is closest to Breeze. [Starter Kits](starter-kits.md) |
 | Deployment | Single binary; Docker / Railway / DO / Hetzner recipes | diverged | One artifact, not a PHP runtime + opcache + FPM. [Deployment](deployment.md) |
 
 ## The basics
@@ -74,7 +74,7 @@ gaps as of the shipped framework.
 | Session | `session()`, `session_mut()`, flash bag via `req.flash()` | shipped | DB-backed via `DatabaseSessionDriver`; cookie-backed by default. [Session](session.md) |
 | Validation | `#[derive(Validate)]` + 17 built-in rules + `Rule`/`AsyncRule` traits | shipped | Async rules (e.g. `Unique`) hit the DB. [Validation](validation.md) |
 | Error Handling | `FrameworkError`, `AppError`, `HttpError` trait, panic boundary in `execute_chain_safely` | shipped | [Error Handling](errors.md), [Error Model](error-model.md) |
-| Logging | `tracing` subscriber with structured fields, `LogFormat` (json / pretty / compact) | diverged | One log line is a JSON document; `request_id` always present. Listed but the dedicated chapter is **not yet** written |
+| Logging | `tracing` subscriber with structured fields, `LogFormat` (json / pretty / compact) | diverged | One log line is a JSON document; `request_id` always present. [Logging](logging.md) |
 | Abort helpers | `abort_if(cond, status, msg)`, `abort_unless(...)`, `abort_with(status, msg)` | shipped | Same shape as Laravel's `abort_if` family |
 
 ## Digging deeper
@@ -84,12 +84,12 @@ gaps as of the shipped framework.
 | Artisan Console | Per-app `console` binary built from `#[command]` + `#[derive(Command)]` | shipped | [Console](console.md). `cargo run --bin console <subcommand>` |
 | Tinker (REPL) | No REPL | by design no | Write a one-off `cargo run --bin xxx` script or a `#[suprnova_test]` |
 | Broadcasting | `BroadcastHub` + `Channel` / `PrivateChannel` / `PresenceChannel` + `Broadcastable` | shipped | sea-streamer fanout for multi-node. [Broadcasting](broadcasting.md) |
-| Cache | `Cache::get/put/forget/remember/rememberForever/increment/...` + `InMemoryCache`, `RedisCache`, `DatabaseCacheStore` | shipped | Atomic ops + tagged cache + cache locks (`LockGuard`). [Cache](cache.md) |
-| Collections | `eloquent::Collection<M>` with Laravel-shape methods | shipped | `Deref<Target = Vec<M>>` so existing Vec idioms still work. Listed but the dedicated chapter is **not yet** written |
+| Cache | `Cache::get/put/forget/remember/rememberForever/increment/...` + `InMemoryCache`, `RedisCache` | shipped | Atomic ops + tagged cache + cache locks (`LockGuard`). [Cache](cache.md) |
+| Collections | `eloquent::Collection<M>` with Laravel-shape methods | shipped | `Deref<Target = Vec<M>>` so existing Vec idioms still work. [Collections](eloquent-collections.md) |
 | Concurrency | Tokio everywhere — `tokio::spawn`, `tokio::join!`, `tokio::select!` | shipped | The whole framework is async. The Laravel `Concurrency::run([...])` facade doesn't ship; Tokio is the answer |
 | Context | `Context::put` / `Context::get` / `ContextStore` + auto-injection into queue / mail / events | shipped | [Context](context.md) |
 | Contracts | All public seams are traits | shipped | See the "Architecture / Contracts" row above |
-| Events | `Event::dispatch(e).await?`, `#[derive(Event)]`, `EventDispatcher`, queued listeners, subscribers | shipped | [Events](events.md) |
+| Events | `EventFacade::dispatch(e).await?`, `#[derive(Event)]`, `EventDispatcher`, queued listeners, subscribers | shipped | [Events](events.md) |
 | File Storage | `Storage::disk("local"\|"s3"\|"azblob"\|"gcs"\|"memory")` over OpenDAL | shipped | Same `put/get/delete/copy/move/exists/url` surface. Path-traversal protection built in. [Filesystem](filesystem.md) |
 | Helpers | Equivalents are in their home modules (no kitchen-sink `helpers.md`) | diverged | E.g. URL helpers live in [urls.md](urls.md), string helpers in `std`/`heck`, array helpers in `std::collections` — Rust does this with crates, not a global namespace |
 | HTTP Client | `Http::get/post/...` builder + `Http::fake(...)` for tests | shipped | Auto-records requests; `assert_sent` / `assert_not_sent`. [HTTP Client](http-client.md) |
@@ -98,7 +98,7 @@ gaps as of the shipped framework.
 | Notifications | `Notify::send(&user, notif).await?` + channels `mail/database/broadcast/webpush` | shipped | `Notifiable` trait + `Notification` per channel. [Notifications](notifications.md), [Web Push](web-push.md) |
 | Package Development | Workspace adapter crates (e.g. `suprnova-payments-stripe`) | shipped | Same shape as Laravel packages: depend on the framework, bind into the container, expose macros if needed |
 | Processes (running shell commands) | `tokio::process::Command` from the stdlib | by design no | No facade — Tokio's API is already the right shape |
-| Queues | `Queue::dispatch(job).await?` + drivers `sync/memory/database/redis/null`, batches, chains, `JobMiddleware`, `FailedJobStore` | shipped | [Queues](queues.md) |
+| Queues | `Queue::push(job).await?` + drivers `sync/memory/database/redis/null`, batches, chains, `JobMiddleware`, `FailedJobStore` | shipped | [Queues](queues.md) |
 | Rate Limiting | `RateLimiter::for_signature(...)`, `ThrottleRequestsMiddleware`, `RateLimitMiddleware` | shipped | Sliding window via `SlidingWindowConfig`. [Rate Limiting](rate-limiting.md) |
 | Search (Scout) | No first-party full-text search adapter | not yet | Vector search ships today via [Vector](vector.md); keyword-search Scout-equivalent is planned |
 | Strings (helpers) | `heck` crate (case conversions), `std::str`, `regex` | diverged | Same crates the rest of the Rust ecosystem uses; no `Str::camel($x)` global |
@@ -157,9 +157,9 @@ gaps as of the shipped framework.
 | Redis | Used by drivers (cache/queue/rate-limit) — no separate `Redis::*` facade | diverged | Reach for `redis` crate directly when you need ad-hoc commands; cache/queue/rate-limit cover 95% of typical use |
 | MongoDB | No first-party adapter yet | not yet | Use `mongodb` crate directly via `App::bind` |
 | Query Builder | `Builder<M>` with `db_where` / `or_where` / `where_in` / `where_between` / `where_null` / `where_has` / `with` / `with_count` / `order_by` / `group_by` / `having` / `paginate` / etc. | shipped | [Queries](queries.md) |
-| Pagination | `LengthAwarePaginator`, `Paginator` (simple), `CursorPaginator` | shipped | All three serialise to Laravel-shape JSON. Dedicated chapter is **not yet** written |
+| Pagination | `LengthAwarePaginator`, `Paginator` (simple), `CursorPaginator` | shipped | All three serialise to Laravel-shape JSON. [Pagination](pagination.md) |
 | Migrations | `#[derive(DeriveMigrationName)] struct M;` + `up`/`down` + `Migrator` | shipped | Run via `suprnova migrate`/`migrate:rollback`/`migrate:status`/`migrate:fresh`. [Migrations](migrations.md), [CLI Migrations](cli-migrations.md) |
-| Seeders | `Seeder` trait + `db:seed` subcommand | shipped | Per-model factories. Dedicated chapter is **not yet** written |
+| Seeders | `Seeder` trait + `db:seed` subcommand | shipped | Per-model factories. [Seeding](seeding.md) |
 
 ## Eloquent ORM
 
@@ -175,7 +175,7 @@ gaps as of the shipped framework.
 | Primary key types | i64 default; UUID / ULID via `#[model(unique_id = "uuid")]` or `unique_id = "ulid"` | shipped | Auto-generates id on insert |
 | Local scopes | `#[scopes(User)] impl User { fn active(b: &mut Builder<User>) { ... } }` | shipped | Method dispatch on `Builder<M>` |
 | Global scopes | `impl GlobalScope for ActiveOnly { ... }` + register | shipped | Stripped via `Builder::without_global_scope` |
-| Relationships (11 kinds) | `HasOne`, `HasMany`, `BelongsTo`, `BelongsToMany`, `HasOneThrough`, `HasManyThrough`, `MorphOne`, `MorphMany`, `MorphTo`, `MorphToMany`, `MorphedByMany` | shipped | Per-family morph enum. Dedicated chapter is **not yet** written |
+| Relationships (11 kinds) | `HasOne`, `HasMany`, `BelongsTo`, `BelongsToMany`, `HasOneThrough`, `HasManyThrough`, `MorphOne`, `MorphMany`, `MorphTo`, `MorphToMany`, `MorphedByMany` | shipped | Per-family morph enum. [Relationships](eloquent-relationships.md) |
 | Eager loading | `User::query().with(&["posts", "posts.comments"]).get()` | shipped | `EagerLoadDispatch` is sealed; only macro-generated relations can implement it |
 | Lazy loading prevention | `prevent_silently_discarding_attributes(true)` | shipped | Same shape as Laravel's `preventLazyLoading` |
 | Aggregates on relations | `with_count("posts")`, `with_sum("orders", "total")`, `with_avg`, `with_min`, `with_max` | shipped | Single subquery per aggregate |
@@ -185,12 +185,12 @@ gaps as of the shipped framework.
 | Touching parent timestamps | `#[model(touches = ["post"])]` | shipped | `without_touching \|\| { ... }` to skip |
 | Observers | `impl Observer<User>` + `#[suprnova::observer(User)]` | shipped | 16 lifecycle events |
 | 16 lifecycle events | `Created`, `Creating`, `Saving`, `Saved`, `Updating`, `Updated`, `Deleting`, `Deleted`, `Trashed`, `Restoring`, `Restored`, `Retrieved`, `Replicating`, `ForceDeleting`, `ForceDeleted`, `Pruning` | shipped | Per-model `events::*` submodule. `EventResult::cancel(_)` short-circuits with a 400 |
-| Mutators / Accessors | `#[accessor] fn full_name(&self) -> String { ... }` + `#[mutator] fn set_password(&mut self, v: String)` | shipped | [Eloquent](eloquent.md). Dedicated mutators chapter is **not yet** written |
-| Casts (21 built-in) | `casts! { AsString, AsInt, AsFloat, AsBool, AsJson, AsArray, AsArrayObject, AsObject, AsCollection, AsDate, AsDateTime, AsImmutableDate, AsImmutableDateTime, AsOptionalDateTime, AsTimestamp, AsDecimal, AsEnum<E>, AsEncrypted, AsEncryptedObject, AsEncryptedArray, AsEncryptedCollection, AsHashed }` | shipped | Implement `Cast` for custom |
-| Collections | `Collection<M>` with `pluck`, `filter`, `map`, `each`, `chunk`, `groupBy`, `keyBy`, `sort_by`, `where_`, `first`, `last`, `count`, `is_empty`, `to_array` and Laravel friends; `Deref<Target = Vec<M>>` so all `Vec` idioms keep working | shipped | Dedicated chapter is **not yet** written |
+| Mutators / Accessors | `#[accessor] fn full_name(&self) -> String { ... }` + `#[mutator] fn set_password(&mut self, v: String)` | shipped | [Mutators](eloquent-mutators.md) |
+| Casts (22 built-in) | `casts! { AsString, AsInt, AsFloat, AsBool, AsJson, AsArray, AsArrayObject, AsObject, AsCollection, AsDate, AsDateTime, AsImmutableDate, AsImmutableDateTime, AsOptionalDateTime, AsTimestamp, AsDecimal, AsEnum<E>, AsEncrypted, AsEncryptedObject, AsEncryptedArray, AsEncryptedCollection, AsHashed }` | shipped | Implement `Cast` for custom |
+| Collections | `Collection<M>` with `pluck`, `filter`, `map`, `each`, `chunk`, `groupBy`, `keyBy`, `sort_by`, `where_`, `first`, `last`, `count`, `is_empty`, `to_array` and Laravel friends; `Deref<Target = Vec<M>>` so all `Vec` idioms keep working | shipped | [Collections](eloquent-collections.md) |
 | API Resources | `#[derive(Resource)]` + `IntoJsonResource` + `JsonApiResponse` + fieldsets + includes | shipped | JSON:API shape + Laravel-style resource shape both available. [API Resources](eloquent-resources.md) |
-| Serialization | `#[model(hidden = [...], visible = [...], appends = [...])]` | shipped | Same control over which attributes serialise. Dedicated chapter is **not yet** written |
-| Factories | `#[derive(Factory)] struct UserFactory` + `User::factory().count(5).create().await?` | shipped | `Sequence` for cycling values. Dedicated chapter is **not yet** written |
+| Serialization | `#[model(hidden = [...], visible = [...], appends = [...])]` | shipped | Same control over which attributes serialise. [Serialization](eloquent-serialization.md) |
+| Factories | `#[derive(Factory)] struct UserFactory` + `User::factory().count(5).create().await?` | shipped | `Sequence` for cycling values. [Factories](eloquent-factories.md) |
 | Lifecycle: chunking / lazy / cursor | `Builder::chunk(n, \|page\| async { ... })`, `lazy()`, `cursor()` | shipped | Memory-bounded iteration over large tables |
 | Pessimistic locking | `Builder::lock_for_update()`, `shared_lock()` | shipped | Inside a transaction |
 | `whereJsonContains` family | Available via SeaORM's column expressions (driver-aware) | shipped | The exact spelling differs per backend; helpers ship for the common cases |
@@ -218,11 +218,11 @@ gaps as of the shipped framework.
 |---|---|---|---|
 | `php artisan test` | `cargo test` | shipped | [Testing](testing.md) |
 | Pest / PHPUnit style | `#[suprnova_test]` (async-aware) + `expect!()` Jest-like assertions + `describe!()` / `test!()` BDD macros | shipped | All three work interchangeably |
-| Feature tests (HTTP) | Drive `handle_request(router, registry, req)` in-process — no socket open | shipped | Dedicated chapter is **not yet** written |
+| Feature tests (HTTP) | Drive `handle_request(router, registry, req)` in-process — no socket open | shipped | [HTTP Tests](http-tests.md) |
 | Console tests | Run `dispatch_argv(["console", "..."])` and assert | shipped | Same shape as HTTP tests for the console binary |
 | Browser tests (Dusk) | n/a in framework — use Playwright / WebdriverIO / `gstack` agent browser | by design no | Cross-language tooling already exists; we don't reinvent it |
-| Database tests | `TestDatabase::fresh::<Migrator>()` + per-test rollback | shipped | Dedicated chapter is **not yet** written |
-| Mocking & fakes | Per-facade fakes: `MailFake`, `NotifyFakeGuard`, `EventFakeGuard`, `Queue::fake`, `Bus::fake`, `Http::fake`, `Storage::fake` | shipped | Recorded calls + assertion helpers. Dedicated chapter is **not yet** written |
+| Database tests | `TestDatabase::fresh::<Migrator>()` + per-test rollback | shipped | [Database Tests](database-testing.md) |
+| Mocking & fakes | Per-facade fakes: `MailFake`, `NotifyFakeGuard`, `EventFakeGuard`, `Queue::fake`, `Bus::fake`, `Http::fake`, `Storage::fake` | shipped | Recorded calls + assertion helpers. [Mocking](mocking.md) |
 | Time travel | `tokio::time::{pause, advance, resume}` from the stdlib runtime | shipped | Don't ship our own — Tokio's API already does it |
 | Container isolation | `TestContainer::fake(\|tc\| tc.bind(...))` — thread-local | diverged | Parallel-safe by construction. [Container](container.md) |
 
@@ -230,8 +230,8 @@ gaps as of the shipped framework.
 
 | Laravel | Suprnova | Status | Notes / link |
 |---|---|---|---|
-| Cashier (Stripe) | `suprnova-payments-stripe` adapter crate behind generic `Payment` / `Subscription` / `CustomerStore` / `WebhookHandler` traits | diverged | Generic surface, concrete adapter. [Payments](payments.md), Stripe-specific chapter **not yet** |
-| Cashier (Paddle) | `suprnova-payments-paddle` adapter | diverged | Merchant-of-Record flow + no direct `Payment` impl (Paddle owns the gateway). Paddle-specific chapter **not yet** |
+| Cashier (Stripe) | `suprnova-payments-stripe` adapter crate behind generic `Payment` / `Subscription` / `CustomerStore` / `WebhookHandler` traits | diverged | Generic surface, concrete adapter. [Payments](payments.md), [Stripe Adapter](payments-stripe.md) |
+| Cashier (Paddle) | `suprnova-payments-paddle` adapter | diverged | Merchant-of-Record flow + no direct `Payment` impl (Paddle owns the gateway). [Paddle Adapter](payments-paddle.md) |
 | Custom provider | Implement `PaymentProvider` + `SessionPayload` + `WebhookHandler` | shipped | [Provider Guide](payments-provider-guide.md) |
 | Inertia checkout components | Ship in the scaffold | shipped | [Payments Frontend](payments-frontend.md) |
 | Subscription lifecycles | `Subscription::create / update / cancel / resume / swap` (where the provider supports them) | shipped | `NotSupported` returned where the provider doesn't (e.g. Paddle subscription updates) |
@@ -377,15 +377,6 @@ shape of the gap in one place:
 | Telescope (debug dashboard) | Web UI for requests / queries / events / cache hits | Use OTel + tracing output ([Observability](observability.md)) |
 | Pulse (perf dashboard) | Web UI for slow queries / errors / hot routes | Same: OTel surface today, dashboard later |
 | Horizon (queue dashboard) | Web UI for queue depth / failed jobs / throughput | `cargo run --bin console queue:failed` and OTel metrics |
-| Logging (dedicated chapter) | Walks through tracing subscriber config, log levels, sinks | Listed in [`documentation.md`](documentation.md); the surface is shipped — the chapter isn't written yet |
-| Pagination (dedicated chapter) | Walkthrough of the three paginators + Inertia integration | The three paginators ship today; chapter is **not yet** |
-| Seeding (dedicated chapter) | Per-model factories + `Seeder` trait walkthrough | Surface ships; chapter is **not yet** |
-| Eloquent — Relationships / Collections / Mutators / Serialization / Factories | Dedicated chapters | All five surfaces ship today and are documented in [Eloquent](eloquent.md); standalone chapters are **not yet** |
-| HTTP Tests / Database Tests / Mocking | Dedicated chapters | Surfaces ship; chapters are **not yet** |
-| Payments — Stripe / Paddle (dedicated chapters) | Adapter-specific walkthroughs | Adapter crates ship today; chapters are **not yet**. [Provider Guide](payments-provider-guide.md) covers building one |
-| Release Notes / Contribution Guide | Listed but not yet written | v0.1.0 is gated on these landing |
-| Environment Variables (dedicated chapter) | The full table of `APP_KEY` / `DATABASE_URL` / `MAIL_DRIVER` / etc. | Listed in [`documentation.md`](documentation.md); chapter is **not yet** |
-| Glossary (dedicated chapter) | Alphabetical concept list | Listed; chapter is **not yet** |
 
 ## What we won't ship (and why)
 
