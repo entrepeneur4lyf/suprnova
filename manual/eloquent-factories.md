@@ -363,7 +363,7 @@ autocomplete. The composability — chaining `Self::admin()` from inside
 Each `next()` call returns 1, 2, 3, … atomically across threads:
 
 ```rust
-use suprnova::Sequence;
+use suprnova::{Fake, Sequence};
 
 static ORDER_IDS: Sequence = Sequence::new();
 
@@ -522,16 +522,24 @@ Reach for `make` whenever the test doesn't care that the row exists.
 Reach for `create` when you'll query the row back, when a foreign key
 needs a real id, or when you're populating fixtures for a sub-system
 that reads the DB. Note that `create_many` persists sequentially — if a
-later insert fails, the prior inserts are NOT rolled back. Wrap a
-transaction yourself if you need atomicity:
+later insert fails, the prior inserts are NOT rolled back. `create` /
+`create_many` use the framework's bound `DB::connection()` directly,
+so they do **not** participate in an ambient `DB::transaction(...)`
+scope. If you need atomicity across a batch of factory inserts, drop
+down to `make_many` + `persist_via_seaorm` against the transaction
+handle:
 
 ```rust
-use suprnova::DB;
+use suprnova::{DB, factory::persist_via_seaorm};
 
 DB::transaction(|tx| Box::pin(async move {
-    let users = UserFactory::times(50).create_many().await?;
-    let posts = PostFactory::times(200).create_many().await?;
-    Ok((users, posts))
+    for user in UserFactory::times(50).make_many() {
+        persist_via_seaorm(user, tx).await?;
+    }
+    for post in PostFactory::times(200).make_many() {
+        persist_via_seaorm(post, tx).await?;
+    }
+    Ok::<_, suprnova::FrameworkError>(())
 })).await?;
 ```
 
@@ -563,15 +571,16 @@ other persistence path — exactly what you want when the behaviour is
 "every time this row lands, do X":
 
 ```rust
-use suprnova::{Observer, observer};
+use suprnova::{FrameworkError, Observer, async_trait, observer};
 
 #[observer(User)]
 pub struct AuditUser;
 
+#[async_trait]
 impl Observer<User> for AuditUser {
-    fn created(user: &mut User) -> suprnova::events::EventResult {
+    async fn created(&self, user: &User) -> Result<(), FrameworkError> {
         tracing::info!(user_id = user.id, "user created");
-        suprnova::events::EventResult::Proceed
+        Ok(())
     }
 }
 ```
@@ -626,7 +635,8 @@ that inserts unconditionally produces duplicates on re-run. Use
 ## Putting it together: a complete test fixture
 
 ```rust
-use suprnova::{describe, test, expect};
+use suprnova::{App, describe, test, expect};
+use suprnova::events::{EventFacade, assert_dispatched_times};
 use suprnova::testing::TestDatabase;
 use crate::factories::{PostFactory, UserFactory};
 use crate::actions::publish_post::PublishPostAction;
@@ -657,13 +667,13 @@ describe!("PublishPostAction", {
     });
 
     test!("publishing emits exactly one event", async fn(db: TestDatabase) {
-        let fake = suprnova::events::EventFacade::fake();
+        let _guard = EventFacade::fake();
         let post = PostFactory::new().create().await.unwrap();
 
         App::resolve::<PublishPostAction>().unwrap()
             .execute(post.id).await.unwrap();
 
-        fake.assert_dispatched::<crate::events::PostPublished>(1);
+        assert_dispatched_times::<crate::events::PostPublished>(1);
     });
 });
 ```
