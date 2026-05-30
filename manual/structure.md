@@ -5,7 +5,7 @@ gives you this:
 
 ```
 my-app/
-├── Cargo.toml                      # workspace dependencies + crate metadata
+├── Cargo.toml                      # crate manifest + dependencies, two [[bin]] targets
 ├── .env                            # local config — DB URL, app key, ports
 ├── .env.example                    # template for ops/CI
 ├── .gitignore                      # excludes target/, .env, node_modules/, public/assets/
@@ -72,7 +72,7 @@ Vue adds `frontend/src/shims-vue.d.ts`.
 
 The API starter (`suprnova new my-api --api`) is slimmer: no
 `frontend/`, no auth controllers, and `cmd/main.rs` is replaced by
-`src/main.rs` (single-crate layout instead of workspace).
+`src/main.rs`.
 
 ## What each directory is for
 
@@ -83,16 +83,17 @@ calls the standard boot pipeline:
 
 ```rust
 use suprnova::Application;
+use my_app::{bootstrap, config, migrations, routes};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
     Application::new()
-        .config(my_app::config::register)
-        .bootstrap(my_app::bootstrap::bootstrap)
-        .routes(my_app::routes::register)
-        .migrations::<my_app::migrations::Migrator>()
+        .config(config::register_all)
+        .bootstrap(bootstrap::register)
+        .routes(routes::register)
+        .migrations::<migrations::Migrator>()
         .run()
-        .await
+        .await;
 }
 ```
 
@@ -133,87 +134,97 @@ file:
 
 ```rust
 use std::sync::Arc;
-use suprnova::{App, FrameworkError};
+use suprnova::App;
 
-pub async fn bootstrap() -> Result<(), FrameworkError> {
+pub async fn register() {
     // Bind a service into the container
-    App::bind(Arc::new(MyService::new()));
+    App::bind::<dyn MyService>(Arc::new(MyServiceImpl::new()));
 
     // Register an Eloquent observer
     crate::models::user::register_observer();
 
     // Listen for events
-    suprnova::Event::listen::<OrderShipped, _>(SendShipmentNotification);
-
-    Ok(())
+    suprnova::Event::listen::<OrderShipped, _>(Arc::new(SendShipmentNotification)).await;
 }
 ```
 
-`bootstrap()` runs once per process, after the config loader but
-before `serve` accepts the first request. Workers (`queue:work`,
+`register()` runs once per process, after the config loader but before
+`serve` accepts the first request. Workers (`queue:work`,
 `schedule:run`, `workflow:work`) reuse the same bootstrap so they see
 the same services. See [Application Bootstrap](bootstrap.md).
 
 ### `src/routes.rs`
 
-Your URL surface. One `routes!` macro tree:
+Your URL surface. The `routes!` macro at module top-level expands into
+a `pub fn register() -> Router` that `cmd/main.rs` hands to
+`Application::routes(...)`:
 
 ```rust
 use suprnova::{get, post, put, delete, routes};
-use crate::controllers;
+use crate::{controllers, middleware};
 
-pub fn register() -> suprnova::Router {
-    routes! {
-        get!("/", controllers::home::index).name("home"),
+routes! {
+    get!("/", controllers::home::index).name("home"),
 
-        // Auth (registered + protected)
-        get!("/login", controllers::auth::show_login).name("login.show"),
-        post!("/login", controllers::auth::login).name("login.attempt"),
-        post!("/logout", controllers::auth::logout).name("logout"),
-        get!("/register", controllers::auth::show_register).name("register.show"),
-        post!("/register", controllers::auth::register).name("register"),
+    // Auth (registered + protected)
+    get!("/login", controllers::auth::show_login).name("login.show"),
+    post!("/login", controllers::auth::login).name("login.attempt"),
+    post!("/logout", controllers::auth::logout).name("logout"),
+    get!("/register", controllers::auth::show_register).name("register.show"),
+    post!("/register", controllers::auth::register).name("register"),
 
-        // Dashboard requires authenticate middleware
-        get!("/dashboard", controllers::dashboard::index)
-            .middleware(crate::middleware::authenticate())
-            .name("dashboard"),
-    }
+    // Dashboard requires authenticate middleware
+    get!("/dashboard", controllers::dashboard::index)
+        .middleware(middleware::authenticate::auth())
+        .name("dashboard"),
 }
 ```
 
-The macro returns a `Router` you hand to `Application::routes(…)`. See
-[Routing](routing.md).
+See [Routing](routing.md).
 
 ### `src/bin/console.rs`
 
 Your per-project console binary. Runs as `cargo run --bin console
-<subcommand>`. The default scaffolds with stubs for `db:seed`,
-`model:prune`, etc.; your own `#[command]`-annotated handlers in
-`src/commands/` get picked up automatically via inventory:
+<subcommand>` and dispatches the framework's `db:seed` built-in plus
+every `#[command]`-annotated handler (or `#[derive(Command)]` typed
+struct) in `src/commands/` — both forms register through inventory at
+compile time:
 
 ```bash
-cargo run --bin console queue:work        # built-in
-cargo run --bin console schedule:run      # built-in
-cargo run --bin console workflow:work     # built-in
-cargo run --bin console db:seed           # built-in
-cargo run --bin console make:something    # your custom command
+cargo run --bin console db:seed           # framework built-in
+cargo run --bin console report:daily      # your custom command
 ```
+
+The long-running workers (`queue:work`, `schedule:run`,
+`schedule:work`, `workflow:work`) live on the main app binary
+because `Application::run()` dispatches them — call them as
+`cargo run -- queue:work` (or via `suprnova schedule:run` /
+`suprnova workflow:work` if you prefer the umbrella CLI).
 
 See [Console](console.md).
 
 ### `src/commands/`
 
-Where your `#[command]`-annotated console handlers live:
+Where your console handlers live. Two flavours: a typed struct with
+clap-derived args and `impl TypedCommand`, or a raw `#[command]` on an
+`async fn(Vec<String>) -> Result<(), FrameworkError>`. The scaffolder
+generates the typed form:
 
 ```rust
-use suprnova::{Command, command};
+use async_trait::async_trait;
+use clap::Parser;
+use suprnova::{Command, FrameworkError, TypedCommand};
 
-#[command(name = "report:daily")]
-pub struct DailyReport;
+#[derive(Parser, Command, Debug)]
+#[console(name = "report:daily", description = "Generate the daily report")]
+pub struct DailyReport {
+    #[arg(long, default_value_t = false)]
+    pub dry_run: bool,
+}
 
-#[async_trait::async_trait]
-impl Command for DailyReport {
-    async fn run(&self) -> Result<(), suprnova::FrameworkError> {
+#[async_trait]
+impl TypedCommand for DailyReport {
+    async fn run(self) -> Result<(), FrameworkError> {
         // …
         Ok(())
     }
@@ -221,29 +232,41 @@ impl Command for DailyReport {
 ```
 
 `suprnova make:command report-daily` scaffolds the file and adds it to
-`src/commands/mod.rs`. See [Console](console.md) for the typed-args
-variant.
+`src/commands/mod.rs`. See [Console](console.md).
 
 ### `src/config/`
 
 Typed configuration structs. The scaffold ships `database.rs` and
-`mail.rs`; add your own for any subsystem your app cares about:
+`mail.rs`; add your own for any subsystem your app cares about. Each
+config struct reads its values from the environment, and
+`config::register_all()` registers them with the framework:
+
+```rust
+use suprnova::{env, env_required};
+
+#[derive(Clone, Debug)]
+pub struct AnalyticsConfig {
+    pub api_key: String,
+    pub max_batch: u32,
+}
+
+impl AnalyticsConfig {
+    pub fn from_env() -> Self {
+        Self {
+            api_key: env_required::<String>("ANALYTICS_API_KEY"),
+            max_batch: env("ANALYTICS_MAX_BATCH", 100u32),
+        }
+    }
+}
+```
+
+Wire it in `config/mod.rs`:
 
 ```rust
 use suprnova::Config;
 
-#[derive(Clone, serde::Deserialize)]
-pub struct DatabaseConfig {
-    pub url: String,
-    pub max_connections: u32,
-}
-
-pub fn register() -> Result<(), suprnova::FrameworkError> {
-    Config::section("database", |env| DatabaseConfig {
-        url: env.required("DATABASE_URL")?,
-        max_connections: env.optional("DB_MAX_CONNECTIONS").unwrap_or(10),
-    })?;
-    Ok(())
+pub fn register_all() {
+    Config::register(AnalyticsConfig::from_env());
 }
 ```
 
@@ -273,8 +296,9 @@ migrate`, `migrate:rollback`, `migrate:status`, `migrate:fresh`,
 ### `src/models/`
 
 Your Eloquent models. One file per model, each a `#[suprnova::model]`
-struct. The scaffold ships `user.rs`; everything else you add via
-`suprnova make:model <Name>`. See [Eloquent](eloquent.md).
+struct. The scaffold ships `user.rs`; add new models by writing a new
+file by hand or running `suprnova db:sync --regenerate-models` after a
+schema migration. See [Eloquent](eloquent.md).
 
 ### `src/actions/`
 
@@ -308,7 +332,7 @@ additions:
 
 | Directory | When you add it |
 |---|---|
-| `src/jobs/` | First time you `Queue::dispatch(SomeJob)`. See [Queues](queues.md). |
+| `src/jobs/` | First time you `Queue::push(SomeJob)`. See [Queues](queues.md). |
 | `src/listeners/` | First time you `Event::listen`. See [Events](events.md). |
 | `src/observers/` | First time you implement `Observer<MyModel>`. See [Eloquent](eloquent.md#observers). |
 | `src/notifications/` | First time you implement a `Notification`. See [Notifications](notifications.md). |
@@ -316,7 +340,7 @@ additions:
 | `src/policies/` | First time you write a `#[policy]`. See [Authorization](authorization.md). |
 | `src/factories/` | First time you write a `Factory<Model>` for tests. See [Eloquent Factories](eloquent-factories.md). |
 | `src/seeders/` | First time you write a `Seeder` for `db:seed`. See [Seeding](seeding.md). |
-| `src/events/` | First time you `#[derive(Event)]` your own event type. See [Events](events.md). |
+| `src/events/` | First time you `impl Event` for your own event type. See [Events](events.md). |
 | `src/broadcasting/` | First time you define a private/presence `Channel`. See [Broadcasting](broadcasting.md). |
 | `src/ws/` | First time you write a `ws!()` handler. See [WebSockets](websockets.md). |
 | `src/supervisors/` | First time you implement a long-running `Supervisor`. See [Supervisors](supervisors.md). |
