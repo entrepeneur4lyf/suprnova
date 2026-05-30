@@ -1,4 +1,5 @@
-use crate::config::env::{Environment, env};
+use crate::config::env::{Environment, env, env_strict};
+use crate::error::FrameworkError;
 
 /// Application configuration
 #[derive(Debug, Clone)]
@@ -21,13 +22,30 @@ impl AppConfig {
     /// `APP_ENV` — `true` in local/development/testing, `false`
     /// otherwise (including production and any unrecognized
     /// environment). This keeps local zero-config DX while making
-    /// production fail-safe per codex review finding #12.
+    /// production fail-safe.
+    ///
+    /// This helper is lenient — a typo in `APP_DEBUG` falls back to
+    /// the environment-derived default (with a `tracing::warn!`).
+    /// It is used by `impl Default`, the builder fallback path, and
+    /// the lenient `Config::is_debug` fallback. The strict variant
+    /// is [`Self::try_from_env`]; `Config::init` calls that.
     pub fn from_env() -> Self {
         let environment = Environment::detect();
-        let debug = std::env::var("APP_DEBUG")
-            .ok()
-            .and_then(|s| s.parse::<bool>().ok())
-            .unwrap_or_else(|| default_debug_for_env(&environment));
+        let debug = match std::env::var("APP_DEBUG") {
+            Ok(raw) => match raw.parse::<bool>() {
+                Ok(v) => v,
+                Err(_) => {
+                    tracing::warn!(
+                        env_var = "APP_DEBUG",
+                        raw_value = %raw,
+                        "APP_DEBUG is set but failed to parse as bool; \
+                         falling back to environment-derived default"
+                    );
+                    default_debug_for_env(&environment)
+                }
+            },
+            Err(_) => default_debug_for_env(&environment),
+        };
 
         Self {
             name: env("APP_NAME", "Suprnova Application".to_string()),
@@ -35,6 +53,26 @@ impl AppConfig {
             debug,
             url: env("APP_URL", "http://localhost:8080".to_string()),
         }
+    }
+
+    /// Build config from environment variables, returning an error if
+    /// any typed knob is set to a value that fails to parse. Used by
+    /// `Config::init` so a typo in `APP_DEBUG` aborts boot instead
+    /// of silently reverting to the env-derived default.
+    pub fn try_from_env() -> Result<Self, FrameworkError> {
+        let environment = Environment::detect();
+        let debug =
+            env_strict::<bool>("APP_DEBUG")?.unwrap_or_else(|| default_debug_for_env(&environment));
+        let name =
+            env_strict::<String>("APP_NAME")?.unwrap_or_else(|| "Suprnova Application".to_string());
+        let url =
+            env_strict::<String>("APP_URL")?.unwrap_or_else(|| "http://localhost:8080".to_string());
+        Ok(Self {
+            name,
+            environment,
+            debug,
+            url,
+        })
     }
 
     /// Create a builder for customizing config
@@ -125,6 +163,35 @@ impl AppConfigBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial(app_config_env)]
+    fn try_from_env_rejects_unparseable_debug() {
+        // `APP_DEBUG=not-a-bool` must fail boot via `try_from_env`,
+        // not silently fall back to the environment-derived default
+        // the way the lenient `from_env` path does. This is the
+        // boot-time fail-loud guarantee `Config::init` relies on.
+        let prior = std::env::var("APP_DEBUG").ok();
+        // SAFETY: this test mutates a process-global env var. Other
+        // tests in this crate use the same single-threaded pattern;
+        // we restore the prior value at the end.
+        unsafe {
+            std::env::set_var("APP_DEBUG", "not-a-bool");
+        }
+        let err = AppConfig::try_from_env().expect_err("unparseable debug must error");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("APP_DEBUG"),
+            "error should name the env var: {:?}",
+            msg
+        );
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("APP_DEBUG", v),
+                None => std::env::remove_var("APP_DEBUG"),
+            }
+        }
+    }
 
     #[test]
     fn default_debug_is_true_in_local_dev_test() {

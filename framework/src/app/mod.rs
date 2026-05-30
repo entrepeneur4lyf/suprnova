@@ -463,8 +463,11 @@ where
     pub async fn run(self) {
         let cli = Cli::parse();
 
-        // Initialize framework configuration (loads .env files)
-        Config::init(Path::new("."));
+        // Initialize framework configuration (loads .env files). Boot
+        // fails loudly here — a malformed `.env` or an unparseable
+        // typed env var (`SERVER_PORT=abc`) aborts before the worker
+        // tasks spin up, so the operator sees the typo at startup.
+        Config::init(Path::new(".")).expect("framework configuration init failed");
 
         // Register all #[policy] gates collected via inventory::submit!.
         // Called here (before the subcommand match) so background workers,

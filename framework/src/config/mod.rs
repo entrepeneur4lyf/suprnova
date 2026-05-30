@@ -10,13 +10,15 @@
 //! ```rust,no_run
 //! use suprnova::{Config, ServerConfig};
 //!
-//! fn main() {
-//!     // Initialize config (loads .env files)
-//!     Config::init(std::path::Path::new("."));
+//! fn main() -> Result<(), suprnova::error::FrameworkError> {
+//!     // Initialize config (loads .env files). Boot fails loudly if a
+//!     // `.env` file is malformed or a typed env var fails to parse.
+//!     Config::init(std::path::Path::new("."))?;
 //!
 //!     // Get typed config
 //!     let server = Config::get::<ServerConfig>().unwrap();
 //!     println!("Server port: {}", server.port);
+//!     Ok(())
 //! }
 //! ```
 
@@ -25,6 +27,8 @@ pub mod providers;
 pub mod repository;
 pub mod typed;
 
+#[doc(hidden)]
+pub use env::__reset_loaded_keys_for_tests;
 pub use env::{Environment, env, env_optional, env_required, load_dotenv};
 pub use providers::{AppConfig, AppConfigBuilder, ServerConfig, ServerConfigBuilder};
 
@@ -51,22 +55,33 @@ impl Config {
     ///
     /// The detected environment (Local, Development, Production, etc.)
     ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::FrameworkError`] when a discovered
+    /// `.env` file cannot be read or parsed, or when a typed
+    /// framework knob (e.g. `SERVER_PORT`, `APP_DEBUG`) is set to a
+    /// value that fails to parse. Missing `.env` files are not an
+    /// error.
+    ///
     /// # Example
     ///
     /// ```rust,no_run
     /// use suprnova::Config;
     ///
-    /// let env = Config::init(std::path::Path::new("."));
+    /// let env = Config::init(std::path::Path::new("."))
+    ///     .expect("config init");
     /// println!("Running in {} environment", env);
     /// ```
-    pub fn init(project_root: &Path) -> Environment {
-        let env = env::load_dotenv(project_root);
+    pub fn init(project_root: &Path) -> Result<Environment, crate::error::FrameworkError> {
+        let env = env::load_dotenv(project_root)?;
 
-        // Register default configs
-        repository::register(AppConfig::from_env());
-        repository::register(ServerConfig::from_env());
+        // Register default configs, using the strict variants so a
+        // typo in `SERVER_PORT` or `APP_DEBUG` aborts boot loudly
+        // instead of silently falling back to the default.
+        repository::register(AppConfig::try_from_env()?);
+        repository::register(ServerConfig::try_from_env()?);
 
-        env
+        Ok(env)
     }
 
     /// Get a typed config struct from the repository
