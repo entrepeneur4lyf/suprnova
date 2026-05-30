@@ -27,7 +27,7 @@ pub struct User {
 
 // Then anywhere:
 let user = User::find(42).await?;
-let admins = User::query().db_where("role", "=", "admin").get().await?;
+let admins = User::query().db_where("role", "admin").get().await?;
 let alice = User::create(attrs!{ name: "Alice", email: "alice@x.com" }).await?;
 ```
 
@@ -55,7 +55,7 @@ Suprnova is what happens when you copy Laravel's conventions onto Tokio.
 You get:
 
 - **Same surface** — `routes!`, `Auth::user()`, `Cache::remember`,
-  `Mail::send`, `Queue::dispatch`, `Storage::disk("s3")`, `Notification::send`,
+  `Mail::send`, `Queue::push`, `Storage::disk("s3")`, `Notify::send`,
   `Schedule::call`, `Gate::allows`, the Eloquent query builder, soft deletes,
   factories, observers, broadcasting, all of it
 - **Different engine** — async-everywhere, long-lived connections as
@@ -108,7 +108,7 @@ A non-exhaustive map. The full list is in [`documentation.md`](documentation.md)
 | **Eloquent** | `#[suprnova::model]` macro, all 11 relation kinds, eager loading, soft deletes, prunable, scopes (local + global), 16 lifecycle events, observers, 21 built-in casts, accessors/mutators, three paginators, chunk/lazy/cursor iteration, collections, replication |
 | **Auth** | Stateful sessions, opaque user IDs, multiple guards, Eloquent + database providers, password hashing (bcrypt + argon2), policy macros, gates, email verification, password reset, brute-force throttling, TOTP 2FA, remember-me, OAuth via torii integration |
 | **Frontend** | Inertia v3 bridge, Svelte 5 / React 19 / Vue 3.5 starter templates, typed `#[derive(InertiaProps)]`, partial reloads, automatic TypeScript type generation |
-| **Background** | Queue with sync/redis/database/null drivers, batches, chains, job middleware, failed-job store, `#[command]`/`#[derive(Command)]` console binary, `#[derive(Task)]` scheduler, `#[workflow]` long-running stateful work, `Supervisor` trait with panic-catch auto-restart, command bus, event dispatcher |
+| **Background** | Queue with memory/sync/redis/database/null drivers, batches, chains, job middleware, failed-job store, `#[command]`/`#[derive(Command)]` console binary, `Task` trait scheduler, `#[workflow]` long-running stateful work, `Supervisor` trait with panic-catch auto-restart, command bus, event dispatcher |
 | **Realtime** | `ws!()` macro for typed WebSocket handlers, broadcasting channels (public, private, presence), sea-streamer fanout, server-sent events, web push (VAPID) |
 | **Cache & Storage** | Memory, Redis, Database cache drivers; atomic operations; tagged cache; cache locks; filesystem with fs/memory/s3/azblob/gcs drivers; path-traversal protection; vector storage with multiple backends |
 | **Mail & Notify** | `Mailable` trait, drivers for SMTP/SES/Mailgun/Postmark/SendGrid/Resend (plus in-memory & log for tests), `Notifiable` with mail/database/broadcast/webpush channels |
@@ -125,7 +125,7 @@ current HEAD:
 
 - Every Laravel 13.x surface across the 30 documented domains is shipped
 - Every issue raised by independent code review has been resolved
-- 3420+ tests pass across the workspace
+- The workspace test suite passes on every change
 - Every public API in `framework/src/lib.rs` is feature-stable for v0.1
 
 The framework is **pre-launch**: v0.1.0 is not yet tagged. APIs are
