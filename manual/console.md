@@ -1,6 +1,6 @@
 # Console
 
-Each Suprnova project ships with a `console` binary — the runtime command dispatcher for everything that needs the app's compiled types: database seeders, custom one-shot tasks, queue management commands, anything you'd build with Laravel's `php artisan`. Commands are async fns annotated with `#[command]`; the framework collects them via `inventory` at link time, so adding a new command is a single file with no central registry to edit.
+Each Suprnova project ships with a `console` binary — the runtime command dispatcher for everything that needs the app's compiled types: database seeders, pruners, one-shot maintenance tasks, anything you'd build with Laravel's `php artisan`. Commands are either typed structs that `#[derive(Command)]` (built on top of `clap::Parser`) or async fns annotated with `#[command]`; the framework collects them via `inventory` at link time, so adding a new command is a single file with no central registry to edit. This is the Suprnova analogue of `php artisan` — same script, same process, same address space, exits when the handler returns.
 
 ## Quick Start
 
@@ -42,7 +42,7 @@ cargo run --bin console -- greet --help
 # (clap-generated per-command help, including the typed flags)
 ```
 
-No central registry to edit. `#[derive(Command)]` submits a `CommandEntry { name, description, clap_builder, handler }` via inventory; the console binary calls `suprnova::console::dispatch_argv(env::args)`, which builds one clap parser tree from every registered entry and routes the parsed `ArgMatches` to the right handler.
+No central registry to edit. `#[derive(Command)]` submits a `CommandEntry { name, description, clap_builder, handler }` via inventory; the console binary calls `suprnova::console::dispatch_argv_with_init(argv, init)`, which builds one clap parser tree from every registered entry, runs the bootstrap `init` closure only when a real subcommand matches, and routes the parsed `ArgMatches` to the right handler.
 
 ### The simpler path: raw `Vec<String>`
 
@@ -76,34 +76,47 @@ use std::process::ExitCode;
 async fn main() -> ExitCode {
     let _ = dotenvy::dotenv();
 
-    my_app::config::register_all();
-    my_app::bootstrap::register().await;
+    // Surface this project's version via `--version` / `--help`.
+    // env! resolves to the user's app version, not the framework's.
+    suprnova::console::set_version(env!("CARGO_PKG_VERSION"));
 
     let argv: Vec<String> = std::env::args().collect();
-    match suprnova::console::dispatch_argv(argv).await {
+    let result = suprnova::console::dispatch_argv_with_init(argv, || async {
+        my_app::config::register_all();
+        my_app::bootstrap::register().await;
+    })
+    .await;
+
+    match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(_) => ExitCode::FAILURE,
     }
 }
 ```
 
 Tokio runs in `current_thread` flavor — there's no work to parallelize across cores in a one-shot command, and the multi-threaded runtime's worker pool would just be overhead.
 
-`config::register_all()` + `bootstrap::register()` run in the same order as the server's `Application::run`. That means seeders, queue jobs, mail factories, and event listeners are all wired before any handler reaches for them. If you want a command to skip an expensive bootstrap step, gate the step itself on an env var rather than threading a "lazy bootstrap" flag through the framework.
+Two things to notice:
+
+- **Bootstrap is lazy.** The closure passed to `dispatch_argv_with_init` only runs when clap matches a real registered subcommand. `console --help`, `console --version`, missing-subcommand, and parse-error paths all skip it — so `console --help` works on a fresh checkout that doesn't have `DATABASE_URL` set yet.
+- **`main` doesn't print errors.** `dispatch_argv_with_init` owns all user-facing stderr — it eprintlns the handler's error message (unless the error is silent, like a clap parse failure that clap already printed) and prints clap's own help / version / parse-error output. `main` is pure `Result → ExitCode` translation; adding a redundant `eprintln!` would double-print.
+
+If you want a particular command to skip an expensive bootstrap step entirely, gate the step itself on an env var rather than threading a "lazy bootstrap" flag through the framework.
 
 ## Built-in Commands
 
 The framework registers a small set of commands itself. Linking the framework into a project pulls them in automatically.
 
-| Command   | What it does                              |
-|-----------|-------------------------------------------|
-| `db:seed` | Run every registered `Seeder` in order.   |
-| `help`    | List available commands. Also `--help`, `-h`, or empty argv. |
+| Command       | What it does                              |
+|---------------|-------------------------------------------|
+| `db:seed`     | Run every registered `Seeder` in order. Accepts `--class=<Name>` (or a bare positional) to run a single named seeder, matching `php artisan db:seed --class=UserSeeder`. |
+| `model:prune` | Walk the `PrunerEntry` registry and force-delete every row each registered `Prunable` / `MassPrunable` scope returns. `--model=<Name>` restricts to one type; `--pretend` reports rowcount without modifying any rows. |
+| `--help` / `-h` | List available commands; per-subcommand `--help` is built by clap from the typed args. |
+| `--version`   | Print the version registered by `set_version` (typically your app's `CARGO_PKG_VERSION`). Omitted entirely if `set_version` was never called. |
 
-`db:seed` runs whatever you've registered in `bootstrap::register()` with `suprnova::seed::register::<MySeeder>()`. On an empty registry it logs a `tracing::warn!` and returns `Ok(())` — invoking `db:seed` before registering seeders is a benign user mistake, not a programmer error.
+`db:seed` runs whatever you've registered in `bootstrap::register()` with `suprnova::seed::register::<MySeeder>()`. On an empty registry it prints a warning and returns `Ok(())` — invoking `db:seed` before registering seeders is a benign user mistake, not a programmer error.
+
+> The worker daemons (`queue:work`, `schedule:run`, `schedule:work`, `schedule:list`, `workflow:work`) are **not** on the console binary. They live on the app/server binary's clap parser (the same binary that serves HTTP). The global `suprnova` CLI shells into `cargo run --quiet -- <name>` for those. See the [Asymmetry section](#asymmetry-with-suprnova-migrate) below.
 
 ## Defining Commands
 
@@ -166,13 +179,15 @@ Names in both shapes support Laravel-style namespacing: `mail:send`, `queue:work
 
 ## `suprnova make:command`
 
-The CLI generator drops a runnable stub:
+The CLI generator drops a runnable stub. The generated file uses the **typed shape** (`#[derive(Parser, Command)]` + `impl TypedCommand`) — that's the recommended default, and it gives you per-command `--help` for free:
 
 ```bash
 suprnova make:command cache:clear
-# → src/commands/cache_clear.rs (with #[command(name = "cache:clear")])
-# → src/commands/mod.rs gets `pub mod cache_clear;` appended
+# → src/commands/cache_clear.rs (pub struct CacheClear with #[console(name = "cache:clear")])
+# → src/commands/mod.rs gets `pub mod cache_clear;` appended (created if missing)
 ```
+
+The stub is runnable as-is — `cargo run --bin console -- cache:clear` will print `cache:clear: not yet implemented` and return `Ok(())` so you can wire it in and iterate. Fill in fields on the struct for typed args and replace the body of `TypedCommand::run`.
 
 Name normalization:
 
@@ -185,9 +200,9 @@ Name normalization:
 
 If the input contains `:`, the colon namespace is preserved verbatim. Otherwise the Rust fn name is snake_case and the command name is kebab-case.
 
-Make sure `pub mod commands;` is declared in `src/lib.rs` so the inventory submission is link-reachable from the console binary. The generator scaffolds this for new projects; if you removed it, the new file's `#[command]` block will compile but never end up in the registry.
+Make sure `pub mod commands;` is declared in `src/lib.rs` so the inventory submission is link-reachable from the console binary. The generator scaffolds this for new projects and emits a loud warning if it's missing; if you removed it, the new file's `inventory::submit!` block will compile but never end up in the registry.
 
-## Why a Per-Project Binary
+### Why Suprnova diverges
 
 The framework deliberately does **not** make a global `suprnova` CLI command for runtime tasks like `db:seed`. A global binary can't statically load your app's seeders, factories, or `#[command]` async fns without either:
 
@@ -202,19 +217,19 @@ So the user's project produces a `console` binary. Run it directly:
 cargo run --bin console -- mail:send
 ```
 
-This is the Rust analogue of Laravel's `php artisan` — same script, same process, same address space, exits when the handler returns.
+Laravel solves the same problem with `php artisan` — a per-project script that boots the framework and dispatches to user-defined commands. PHP can do this dynamically because the framework code lives next to the user's at runtime. Rust's compile-and-link model rules that out, so we ship the dispatcher as a library (`suprnova::console::*`) and let each project link its own one-line `console` binary.
 
 ### Asymmetry with `suprnova migrate`
 
-There are two distinct command-invocation paths in a Suprnova project, and the asymmetry is **structural** — don't try to unify them:
+There are three distinct command-invocation paths in a Suprnova project, and the asymmetry is **structural** — don't try to unify them:
 
-| Command surface                           | Invocation                              | Why                                      |
-|-------------------------------------------|-----------------------------------------|------------------------------------------|
-| `suprnova new`, `suprnova make:*`, `suprnova serve` | Global CLI binary (installed via `cargo install --git`) | File-only generators; don't need user code. |
-| `suprnova migrate`, `suprnova migrate:status`, etc. | Global CLI shells into `cargo run --bin app -- migrate` | Schema-level; the app binary's Clap parser handles it. |
-| `console db:seed`, `console <your-command>` | Per-project `console` binary           | Needs user types (seeders, commands); compiled into the user's crate. |
+| Command surface                                   | Invocation                                              | Why                                                 |
+|---------------------------------------------------|---------------------------------------------------------|-----------------------------------------------------|
+| `suprnova new`, `suprnova make:*`, `suprnova serve`, `suprnova key:generate`, … | Global CLI binary (installed via `cargo install --git`) | File-only generators and scaffolders; don't need user code. |
+| `suprnova migrate`, `suprnova migrate:status`, `suprnova schedule:run`, `suprnova schedule:work`, `suprnova schedule:list`, `suprnova workflow:work` | Global CLI shells into `cargo run --quiet -- <name>` against the app/server binary | Long-running daemons and schema work that the same `Application::run` clap parser owns. The server binary's `queue:work` lives here too — `cargo run --bin <app> -- queue:work`. |
+| `console db:seed`, `console model:prune`, `console <your-command>` | Per-project `console` binary (`src/bin/console.rs`) | One-shot commands that need user types (seeders, commands, prunable models) compiled into the user's crate. |
 
-The migrate path predates the Console architecture and continues to work as-is. New runtime commands belong in `#[command]` async fns dispatched by the project's `console` binary.
+The split is intentional. The server binary already needs a clap parser to choose between `serve`, `migrate`, `queue:work`, etc.; daemons that share its lifecycle live there. The console binary exists for everything else — short-lived, user-defined, type-rich. New runtime commands belong in `#[command]` / `#[derive(Command)]` dispatched by the project's `console` binary.
 
 ## Best Practices
 
@@ -225,10 +240,12 @@ A `#[command]` is the CLI-shaped wrapper; the business logic should live in an `
 ```rust
 #[command(name = "users:purge")]
 pub async fn users_purge(args: Vec<String>) -> Result<(), FrameworkError> {
-    let action: PurgeStaleUsers = App::get()?;
+    let action = App::resolve::<PurgeStaleUsers>()?;
     action.execute(parse(args)?).await
 }
 ```
+
+`App::resolve` returns `Result<T, FrameworkError::ServiceUnresolved(_)>` — the `?` flavor of `App::get` (which returns `Option`). See [Service Container](container.md) for the full surface.
 
 ### Use namespaces for related commands
 
@@ -247,10 +264,21 @@ Console handlers print to stdout for human-readable output. If a downstream tool
 | Symbol                                    | Purpose                                       |
 |-------------------------------------------|-----------------------------------------------|
 | `suprnova::Command` (derive)              | Register a `clap::Parser`-deriving struct as a typed console command. Pairs with `TypedCommand`. |
-| `suprnova::TypedCommand` (trait)          | Trait with `async fn run(self) -> Result<...>` — the body of a typed command. |
+| `suprnova::TypedCommand` (trait)          | Trait with `async fn run(self) -> Result<(), FrameworkError>` — the body of a typed command. |
 | `suprnova::command` (attribute)           | Register an async fn taking `Vec<String>` as a raw-args console command. |
-| `suprnova::console::dispatch_argv(argv)`  | Build the clap parser tree from every registered entry, parse argv, route to the handler. |
+| `suprnova::console::dispatch_argv(argv)`  | Build the clap parser tree from every registered entry, parse argv, route to the handler. No lazy init — convenient for tests and programmatic callers. |
+| `suprnova::console::dispatch_argv_with_init(argv, init)` | Same as `dispatch_argv` but runs the `init` closure between clap's argv parse and the matched handler. The init only fires when a real subcommand matches — `--help` / `--version` / parse-error paths skip it. This is what the scaffolded `console` binary uses. |
+| `suprnova::console::set_version(&'static str)` | Register the version string surfaced via `--version` and in `--help`. Call once at the start of `main`. First registration wins. |
 | `suprnova::console::find(name)`           | Look up a registered command by exact name.   |
 | `suprnova::console::list()`               | All registered commands, sorted by name.      |
 | `suprnova::CommandEntry`                  | Inventory record: `{ name, description, clap_builder, handler }`. Submitted by both macros. |
 | `suprnova::CommandHandler`                | The handler fn-pointer type: `fn(&clap::ArgMatches) -> Pin<Box<dyn Future<...>>>`. |
+| `FrameworkError::silent()` / `.is_silent()` | Construct / detect an error that the dispatcher will NOT print to stderr. Used internally to suppress double-prints when clap already wrote a parse error to the terminal. |
+
+## Next
+
+- [Application Bootstrap](bootstrap.md) — what runs inside the `dispatch_argv_with_init` closure
+- [Service Container](container.md) — `App::resolve` vs `App::get`, and how a handler reaches shared services
+- [Seeding](seeding.md) — what `db:seed` actually invokes
+- [Eloquent](eloquent.md) — `Prunable`, `MassPrunable`, and how `model:prune` walks the registry
+- [Scheduling](scheduling.md) — the asymmetry: scheduler daemons live on the app binary, not the console
