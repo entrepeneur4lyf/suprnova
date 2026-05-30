@@ -65,6 +65,13 @@ pub enum ServerFrame {
         event: String,
         data: Value,
     },
+    /// Subscriber lagged past the server's per-channel ring buffer and
+    /// `skipped` envelopes were dropped on this connection. The client's
+    /// local state on `channel` is now stale; it should refetch or
+    /// resync before processing further events. Sent immediately after
+    /// the lag is detected; the forwarder continues delivering subsequent
+    /// frames, but the gap is not recoverable from the server side.
+    Lagged { channel: String, skipped: u64 },
     /// Error response — surfaces parse failures, auth rejections,
     /// channel-not-found, etc. `channel` is `None` for envelope-level
     /// errors that aren't tied to a specific channel.

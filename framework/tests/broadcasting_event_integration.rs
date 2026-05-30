@@ -1,9 +1,13 @@
 //! Broadcastable + EventDispatcher integration.
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use suprnova::broadcasting::{BroadcastHub, Broadcastable, InMemoryBroadcastHub};
+use suprnova::FrameworkError;
+use suprnova::broadcasting::{
+    BroadcastEnvelope, BroadcastHub, Broadcastable, InMemoryBroadcastHub,
+};
 use suprnova::{Event, EventFacade};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -191,5 +195,56 @@ async fn broadcast_when_gates_the_push() {
     assert!(
         rx.try_recv().is_err(),
         "only the publish=true event should have been broadcast"
+    );
+}
+
+// ── publish failures propagate to the dispatcher caller ──────────────────────
+
+/// A hub that fails every `publish` — used to verify that fanout errors
+/// reach `EventFacade::dispatch` through `BroadcastListener`.
+struct FailingHub;
+
+#[async_trait]
+impl BroadcastHub for FailingHub {
+    fn subscribe(&self, _channel: &str) -> tokio::sync::broadcast::Receiver<BroadcastEnvelope> {
+        tokio::sync::broadcast::channel(1).0.subscribe()
+    }
+
+    async fn publish(&self, _envelope: BroadcastEnvelope) -> Result<(), FrameworkError> {
+        Err(FrameworkError::internal("broker disconnected"))
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PageViewed {
+    page_id: i64,
+}
+
+impl Event for PageViewed {
+    fn event_name() -> &'static str {
+        "PageViewed"
+    }
+}
+
+impl Broadcastable for PageViewed {
+    fn broadcast_on(&self) -> Vec<String> {
+        vec![format!("page.{}", self.page_id)]
+    }
+}
+
+#[tokio::test]
+async fn hub_publish_failure_surfaces_to_event_dispatch() {
+    let hub: Arc<dyn BroadcastHub> = Arc::new(FailingHub);
+    EventFacade::broadcast::<PageViewed>(Arc::clone(&hub)).await;
+
+    // The dispatch must Err: a hub failure used to be silently swallowed
+    // by BroadcastListener (returning Ok), letting cross-process
+    // broadcasts vanish from underneath EventFacade::dispatch callers.
+    let err = EventFacade::dispatch(PageViewed { page_id: 7 })
+        .await
+        .expect_err("publish failure must propagate through BroadcastListener");
+    assert!(
+        err.to_string().contains("broker disconnected"),
+        "expected broker error message in {err}"
     );
 }

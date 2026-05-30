@@ -8,6 +8,7 @@
 //! feature gate), like `Event::fake`.
 
 use super::hub::{BroadcastEnvelope, BroadcastHub, InMemoryBroadcastHub};
+use crate::FrameworkError;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Mutex;
@@ -85,11 +86,11 @@ impl BroadcastHub for RecordingBroadcastHub {
         self.inner.subscribe(channel)
     }
 
-    async fn publish(&self, envelope: BroadcastEnvelope) {
+    async fn publish(&self, envelope: BroadcastEnvelope) -> Result<(), FrameworkError> {
         if let Ok(mut v) = self.published.lock() {
             v.push(envelope.clone());
         }
-        self.inner.publish(envelope).await;
+        self.inner.publish(envelope).await
     }
 
     fn subscriber_count(&self, channel: &str) -> usize {
@@ -124,7 +125,8 @@ mod tests {
             "Msg",
             json!({ "t": "hi" }),
         ))
-        .await;
+        .await
+        .unwrap();
 
         hub.assert_broadcast("chat.1", "Msg");
         assert_eq!(hub.count(), 1);
@@ -136,7 +138,8 @@ mod tests {
         let hub = RecordingBroadcastHub::new();
         let mut rx = hub.subscribe("chat.1");
         hub.publish(BroadcastEnvelope::new("chat.1", "Msg", json!({})))
-            .await;
+            .await
+            .unwrap();
         let env = rx.recv().await.expect("delivered");
         assert_eq!(env.event, "Msg");
     }

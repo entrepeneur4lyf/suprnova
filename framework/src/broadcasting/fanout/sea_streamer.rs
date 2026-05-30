@@ -503,7 +503,15 @@ async fn consumer_pump_task(
                         // double delivery to local subscribers.
                     }
                     Ok(tagged) => {
-                        local.publish(tagged.envelope).await;
+                        // In-memory publish is infallible; logging is just
+                        // a belt-and-braces guard against a future trait
+                        // impl that needs to surface a failure here.
+                        if let Err(e) = local.publish(tagged.envelope).await {
+                            tracing::warn!(
+                                error = %e,
+                                "sea-streamer consumer: local hub publish failed; dropping"
+                            );
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -667,38 +675,35 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
         self.local.subscribe(channel)
     }
 
-    async fn publish(&self, envelope: BroadcastEnvelope) {
-        // Local fanout — immediate, no round-trip.
-        self.local.publish(envelope.clone()).await;
+    async fn publish(&self, envelope: BroadcastEnvelope) -> Result<(), FrameworkError> {
+        // Local fanout — immediate, no round-trip. Local subscribers
+        // see this envelope even if the cross-process fanout below
+        // fails: the local delivery and the wire delivery are
+        // independent and we don't want a broker hiccup to silently
+        // drop in-process listeners.
+        self.local.publish(envelope.clone()).await?;
 
-        // Cross-process fanout via sea-streamer.
+        // Cross-process fanout via sea-streamer. A failure here is a
+        // real loss — other processes' subscribers won't see the event.
+        // Surface it to the caller so a Broadcastable dispatch returns
+        // Err and the operator can react.
         let tagged = TaggedEnvelope {
             instance_id: self.instance_id,
             envelope,
         };
-        match serde_json::to_vec(&tagged) {
-            Ok(bytes) => {
-                // send() is non-blocking; the future carries the delivery receipt
-                // but we don't need it. Errors (e.g. producer shut down) are logged.
-                match self.producer.send(bytes.as_slice()) {
-                    Ok(_future) => {
-                        // Receipt future intentionally not awaited; fire-and-forget.
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            error = %e,
-                            "SeaStreamerBroadcastHub: producer send error"
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    "SeaStreamerBroadcastHub: failed to serialize envelope"
-                );
-            }
-        }
+        let bytes = serde_json::to_vec(&tagged).map_err(|e| {
+            FrameworkError::internal(format!(
+                "SeaStreamerBroadcastHub: failed to serialize envelope: {e}"
+            ))
+        })?;
+        // send() is non-blocking; the future carries the delivery receipt
+        // but we don't need it (fire-and-forget at the broker boundary).
+        // Producer-side failures (broker disconnected, channel closed) are
+        // returned to the caller.
+        self.producer.send(bytes.as_slice()).map_err(|e| {
+            FrameworkError::internal(format!("SeaStreamerBroadcastHub: producer send error: {e}"))
+        })?;
+        Ok(())
     }
 
     fn subscriber_count(&self, channel: &str) -> usize {

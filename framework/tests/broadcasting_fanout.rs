@@ -81,7 +81,8 @@ async fn local_fanout_delivers_to_subscriber() {
         "MessagePosted",
         json!({ "text": "hello" }),
     ))
-    .await;
+    .await
+    .unwrap();
 
     let received = tokio::time::timeout(Duration::from_secs(1), rx.recv())
         .await
@@ -102,7 +103,9 @@ async fn publish_with_no_subscriber_is_silent() {
         .expect("hub connect");
 
     // No subscriber — publish should not panic.
-    hub.publish(envelope("lonely", "Tick", json!({}))).await;
+    hub.publish(envelope("lonely", "Tick", json!({})))
+        .await
+        .unwrap();
 }
 
 /// `subscriber_count` reflects the live receivers.
@@ -139,7 +142,8 @@ async fn no_duplicate_delivery_via_loopback() {
     let mut rx = hub.subscribe("dedup.42");
 
     hub.publish(envelope("dedup.42", "Ping", json!({ "n": 1 })))
-        .await;
+        .await
+        .unwrap();
 
     // First delivery — from local fanout (immediate).
     let first = tokio::time::timeout(Duration::from_millis(200), rx.recv())
@@ -216,7 +220,8 @@ async fn cross_hub_delivery() {
     let mut rx = hub2.subscribe("chat.shared");
 
     hub1.publish(envelope("chat.shared", "Posted", json!({ "from": "hub1" })))
-        .await;
+        .await
+        .unwrap();
 
     // hub2's subscriber must receive the message (via the consumer pump's
     // deliver branch, NOT local fanout — hub2 didn't call publish locally).
@@ -243,9 +248,11 @@ async fn channel_isolation() {
     let mut rx_b = hub.subscribe("ch.b");
 
     hub.publish(envelope("ch.a", "EventA", json!({ "src": "a" })))
-        .await;
+        .await
+        .unwrap();
     hub.publish(envelope("ch.b", "EventB", json!({ "src": "b" })))
-        .await;
+        .await
+        .unwrap();
 
     let msg_a = tokio::time::timeout(Duration::from_millis(200), rx_a.recv())
         .await
@@ -481,7 +488,8 @@ async fn redis_backend_cross_hub_fanout() {
             "MessagePosted",
             json!({ "from": "hub_a" }),
         ))
-        .await;
+        .await
+        .unwrap();
 
     let envelope = tokio::time::timeout(Duration::from_secs(5), rx.recv())
         .await

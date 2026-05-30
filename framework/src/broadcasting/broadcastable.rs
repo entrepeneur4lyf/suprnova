@@ -25,6 +25,17 @@ use std::sync::Arc;
 /// Implementers must list the channel names the event broadcasts on.
 /// The channels can be parameterized by event fields (e.g.,
 /// `format!("user.{}.orders", self.user_id)`).
+///
+/// # Dispatch ordering with sibling listeners
+///
+/// The dispatcher used by [`crate::events::Event::dispatch`] is **fail-fast**:
+/// if a hub publish fails (e.g. broker disconnect on a multi-process backend),
+/// the [`BroadcastListener`] returns `Err` and sibling listeners that come
+/// after it in the registration order do **not** run. Register the
+/// [`BroadcastListener`] **after** in-process listeners whose side effects
+/// (DB writes, log emission) must run regardless of broadcast outcome, or
+/// switch to [`crate::events::Event::dispatch_best_effort`] when you need all
+/// listeners to run even if one returns `Err`.
 pub trait Broadcastable: Event + Serialize {
     /// Channel names this event broadcasts on when dispatched.
     /// Called once per dispatch; cheap allocation is fine.
@@ -116,7 +127,12 @@ impl<E: Broadcastable> Listener<E> for BroadcastListener<E> {
         for channel in channels {
             let mut envelope = BroadcastEnvelope::new(channel, event_name.clone(), data.clone());
             envelope.except = except.clone();
-            self.hub.publish(envelope).await;
+            // Propagate hub publish failures so EventFacade::dispatch
+            // returns Err on cross-process fanout loss instead of
+            // silently swallowing it. Local in-memory hubs return Ok
+            // unconditionally; multi-process backends surface broker
+            // failures here.
+            self.hub.publish(envelope).await?;
         }
         Ok(())
     }

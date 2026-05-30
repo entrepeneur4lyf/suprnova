@@ -70,7 +70,10 @@ impl Channel for BroadcastChannel {
             event = %envelope.event,
             "publishing broadcast notification to hub"
         );
-        hub.publish(envelope).await;
+        // Propagate hub publish failures: a cross-process fanout loss
+        // is real and the notification dispatcher should surface it,
+        // not swallow it.
+        hub.publish(envelope).await?;
         Ok(())
     }
 }

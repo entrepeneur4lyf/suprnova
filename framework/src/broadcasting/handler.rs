@@ -193,9 +193,25 @@ impl WebSocketHandler for BroadcastingWsHandler {
                                 // Client publishes are not socket-excluded — the
                                 // publisher receives its own event like any other
                                 // subscriber (see broadcasting docs).
-                                self.hub
+                                let chan_for_err = channel.clone();
+                                if let Err(e) = self
+                                    .hub
                                     .publish(BroadcastEnvelope::new(channel, event, data))
-                                    .await;
+                                    .await
+                                {
+                                    // Surface broker / fanout failures back to
+                                    // the originating client so it knows the
+                                    // publish didn't reach other processes.
+                                    let err = ServerFrame::Error {
+                                        channel: Some(chan_for_err),
+                                        reason: format!("publish failed: {e}"),
+                                    };
+                                    socket
+                                        .send_text(
+                                            serde_json::to_string(&err).unwrap_or_default(),
+                                        )
+                                        .await?;
+                                }
                             }
                         }
                         Err(e) => {
@@ -213,18 +229,28 @@ impl WebSocketHandler for BroadcastingWsHandler {
         }
 
         // Connection closed — publish presence.left for any remaining
-        // presence subscriptions, then abort all forwarder tasks.
+        // presence subscriptions, then abort all forwarder tasks. This
+        // is a cleanup loop; a hub publish failure on shutdown gets
+        // logged but doesn't tear down the surrounding handler.
         let mut map = forwarders.lock().await;
         for (channel, entry) in map.drain() {
             if let Some(ps) = entry.presence {
                 self.hub.untrack_member(&channel, &ps.member_id).await;
-                self.hub
+                if let Err(e) = self
+                    .hub
                     .publish(BroadcastEnvelope::new(
                         channel.clone(),
                         "presence.left",
                         ps.info,
                     ))
-                    .await;
+                    .await
+                {
+                    tracing::warn!(
+                        channel = %channel,
+                        error = %e,
+                        "broadcasting handler: presence.left publish failed during teardown"
+                    );
+                }
             }
             entry.handle.abort();
         }
@@ -292,6 +318,9 @@ async fn handle_subscribe(
     let mut rx = hub.subscribe(channel);
     let tx = outbound_tx.clone();
     let self_socket = socket_id.to_string();
+    // Capture the channel name so the forwarder can name the channel
+    // when it emits a Lagged frame after a `broadcast::RecvError::Lagged(_)`.
+    let forwarder_channel = channel.to_string();
     let forwarder = tokio::spawn(async move {
         loop {
             match rx.recv().await {
@@ -316,11 +345,23 @@ async fn handle_subscribe(
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    // Lag: the subscriber fell behind the ring buffer.
-                    // v1 skips missed frames and continues.  Phase 7B+
-                    // can surface a "lagged" event so the client can
-                    // refetch state.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    // The subscriber fell behind the per-channel ring
+                    // buffer; `skipped` envelopes were dropped on this
+                    // connection. Surface this so the client knows its
+                    // local state is stale and must refetch — silently
+                    // skipping events would let bugs hide as "we lost a
+                    // tick" rather than "the client's state diverged
+                    // from the server's".
+                    let frame = ServerFrame::Lagged {
+                        channel: forwarder_channel.clone(),
+                        skipped,
+                    };
+                    if let Ok(text) = serde_json::to_string(&frame)
+                        && tx.send(text).await.is_err()
+                    {
+                        return; // outbound closed mid-Lagged send
+                    }
                     continue;
                 }
             }
@@ -342,12 +383,24 @@ async fn handle_subscribe(
             // Existing subscription being replaced — clean up presence if needed.
             if let Some(ps) = old.presence {
                 hub.untrack_member(channel, &ps.member_id).await;
-                hub.publish(BroadcastEnvelope::new(
-                    channel.to_string(),
-                    "presence.left",
-                    ps.info,
-                ))
-                .await;
+                // Cleanup-path publish: log a hub failure but continue —
+                // the user just re-subscribed, we shouldn't fail the new
+                // sub because the prior presence.left couldn't be
+                // forwarded cross-process.
+                if let Err(e) = hub
+                    .publish(BroadcastEnvelope::new(
+                        channel.to_string(),
+                        "presence.left",
+                        ps.info,
+                    ))
+                    .await
+                {
+                    tracing::warn!(
+                        channel = %channel,
+                        error = %e,
+                        "broadcasting handler: presence.left publish failed during resubscribe cleanup"
+                    );
+                }
             }
             old.handle.abort();
         }
@@ -399,12 +452,26 @@ async fn handle_subscribe(
         // presence.joined — published via hub so all subscribers receive it
         // (including the new subscriber via their forwarder — that's the
         // standard Pusher self-join behaviour; clients filter by member_id).
-        hub.publish(BroadcastEnvelope::new(
-            channel.to_string(),
-            "presence.joined",
-            info,
-        ))
-        .await;
+        // A hub failure here is the subscriber being announced; surface
+        // via an Error frame on this socket. The local member entry
+        // already exists, so cross-process fanout is the only thing
+        // that could have dropped.
+        if let Err(e) = hub
+            .publish(BroadcastEnvelope::new(
+                channel.to_string(),
+                "presence.joined",
+                info,
+            ))
+            .await
+        {
+            let err = ServerFrame::Error {
+                channel: Some(channel.to_string()),
+                reason: format!("presence.joined publish failed: {e}"),
+            };
+            socket
+                .send_text(serde_json::to_string(&err).unwrap_or_default())
+                .await?;
+        }
     }
 
     Ok(())
@@ -424,12 +491,22 @@ async fn handle_unsubscribe(
     if let Some(e) = entry {
         if let Some(ps) = e.presence {
             hub.untrack_member(channel, &ps.member_id).await;
-            hub.publish(BroadcastEnvelope::new(
-                channel.to_string(),
-                "presence.left",
-                ps.info,
-            ))
-            .await;
+            // Cleanup-path publish: a hub failure here doesn't stop the
+            // client from getting their Unsubscribed ack below.
+            if let Err(err) = hub
+                .publish(BroadcastEnvelope::new(
+                    channel.to_string(),
+                    "presence.left",
+                    ps.info,
+                ))
+                .await
+            {
+                tracing::warn!(
+                    channel = %channel,
+                    error = %err,
+                    "broadcasting handler: presence.left publish failed during unsubscribe"
+                );
+            }
         }
         e.handle.abort();
     }

@@ -191,7 +191,8 @@ async fn subscribe_and_receive_event_round_trip() {
         "MessagePosted",
         json!({ "text": "hello" }),
     ))
-    .await;
+    .await
+    .unwrap();
 
     let frame = read_server_frame(&mut ws).await;
     assert_eq!(frame["action"], "event");
@@ -221,7 +222,8 @@ async fn parameterized_channel_threads_params_to_authorize() {
 
     // A publish to the concrete room name reaches this subscriber.
     hub.publish(BroadcastEnvelope::new("room.42", "Ping", json!({ "n": 1 })))
-        .await;
+        .await
+        .unwrap();
     let frame = read_server_frame(&mut ws).await;
     assert_eq!(frame["action"], "event");
     assert_eq!(frame["channel"], "room.42");
@@ -304,7 +306,8 @@ async fn unsubscribe_stops_event_delivery() {
         "MessagePosted",
         json!({ "text": "lost" }),
     ))
-    .await;
+    .await
+    .unwrap();
 
     // Wait a beat then confirm no event arrives.
     // 150ms is conservative — abort is near-instant.
@@ -730,4 +733,53 @@ async fn broadcast_to_others_excludes_the_originating_socket() {
         a_silent.is_err(),
         "originating socket A must be excluded by broadcast_to_others"
     );
+}
+
+#[tokio::test]
+async fn lagged_subscriber_receives_explicit_lagged_frame() {
+    // Subscribers that fall behind the per-channel ring buffer would
+    // previously have those frames silently dropped — clients couldn't
+    // tell their local state had diverged. The protocol now surfaces a
+    // `lagged` frame with the count so clients know to refetch.
+    let (port, hub) = spawn_broadcasting_server().await;
+    let url = format!("ws://127.0.0.1:{port}/ws/broadcast");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
+    expect_connected(&mut ws).await;
+
+    let sub =
+        serde_json::to_string(&json!({ "action": "subscribe", "channel": "chat.public" })).unwrap();
+    ws.send(Message::text(sub)).await.unwrap();
+    let ack = read_server_frame(&mut ws).await;
+    assert_eq!(ack["action"], "subscribed");
+
+    // Stop reading on the WS, then flood the broadcast channel until the
+    // server-side forwarder is forced to observe a Lagged. The per-channel
+    // ring is 256; publish > 256 + outbound buffer (64) to be safe.
+    for i in 0..1024 {
+        hub.publish(BroadcastEnvelope::new(
+            "chat.public",
+            "Flood",
+            json!({ "n": i }),
+        ))
+        .await
+        .unwrap();
+    }
+
+    // Read frames until we see a Lagged, asserting it before the timeout.
+    let lagged = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let frame = read_server_frame(&mut ws).await;
+            if frame["action"] == "lagged" {
+                return frame;
+            }
+        }
+    })
+    .await
+    .expect("lagged frame arrives within 2s");
+
+    assert_eq!(lagged["channel"], "chat.public");
+    let skipped = lagged["skipped"].as_u64().expect("skipped is a number");
+    assert!(skipped > 0, "lagged.skipped must be > 0 (got {skipped})");
 }

@@ -14,7 +14,8 @@ async fn publish_to_subscribed_channel_delivers_envelope() {
         "MessagePosted",
         json!({ "text": "hello" }),
     ))
-    .await;
+    .await
+    .unwrap();
 
     let received = rx.recv().await.expect("envelope arrives");
     assert_eq!(received.channel, "chat.42");
@@ -33,7 +34,8 @@ async fn publish_to_unsubscribed_channel_is_ignored_by_other_subscribers() {
         "MemberJoined",
         json!({ "user_id": 7 }),
     ))
-    .await;
+    .await
+    .unwrap();
 
     let presence_msg = presence_rx
         .recv()
@@ -62,7 +64,8 @@ async fn unsubscribe_via_drop_releases_slot() {
     // explicit poll). Yield + publish to push the count refresh.
     tokio::task::yield_now().await;
     hub.publish(BroadcastEnvelope::new("chat.42", "Tick", json!({})))
-        .await;
+        .await
+        .unwrap();
     tokio::task::yield_now().await;
 
     assert_eq!(hub.subscriber_count("chat.42"), 1);
