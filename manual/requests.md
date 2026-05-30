@@ -93,11 +93,14 @@ pub struct ExampleRequest {
     pub phone: String,
 }
 
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use regex::Regex;
 
-static PHONE_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\+?[0-9\s\-()]{7,20}$").unwrap());
+// validator 0.20 implements `AsRegex` for `std::sync::LazyLock<Regex>`
+// but not for `once_cell::sync::Lazy<Regex>` — use the std type so the
+// derive's `#[validate(regex(path = "..."))]` expansion typechecks.
+static PHONE_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\+?[0-9\s\-()]{7,20}$").unwrap());
 ```
 
 ### Numeric validations

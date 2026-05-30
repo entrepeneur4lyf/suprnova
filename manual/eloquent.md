@@ -2221,8 +2221,9 @@ nums.last();               // Some(&9)
 nums.len();                // 6
 nums.is_empty();           // false
 nums.contains(&4);         // true
-nums.first_where(|n| *n > 3); // Some(&4)
-nums.contains_where(|n| *n > 8); // true
+// Predicate closures receive `&&T` — note the double-deref `**n`:
+nums.first_where(|n| **n > 3);    // Some(&4)
+nums.contains_where(|n| **n > 8); // true
 // For a count, run the predicate inline: `nums.iter().filter(|n| **n > 2).count()` — 4
 ```
 
