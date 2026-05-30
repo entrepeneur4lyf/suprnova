@@ -920,6 +920,12 @@ impl From<Redirect> for Response {
         let url = redirect.build_url();
         flash_preserve_fragment_if_set(redirect.preserve_fragment);
         drain_flash(redirect.flash);
+        // Bridge the per-request task-local flash bag into the session
+        // so values pushed via `App::flash` survive the redirect. The
+        // receiving request's `SessionMiddleware` ages them into
+        // `_flash.old.*` and Inertia surfaces them under `page.flash`.
+        // No-op outside a session scope.
+        crate::inertia::flash::transfer_to_session();
         let mut response = HttpResponse::new()
             .status(redirect.status)
             .header("Location", url);
@@ -1128,6 +1134,12 @@ impl From<RedirectRouteBuilder> for Response {
         };
         flash_preserve_fragment_if_set(redirect.preserve_fragment);
         drain_flash(redirect.flash);
+        // Bridge the per-request task-local flash bag into the session
+        // so values pushed via `App::flash` survive the redirect. The
+        // receiving request's `SessionMiddleware` ages them into
+        // `_flash.old.*` and Inertia surfaces them under `page.flash`.
+        // No-op outside a session scope.
+        crate::inertia::flash::transfer_to_session();
         let mut response = HttpResponse::new()
             .status(redirect.status)
             .header("Location", url);

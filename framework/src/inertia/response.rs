@@ -730,9 +730,19 @@ impl InertiaResponse {
         )
         .await?;
 
-        // Combine response-builder flash + task-local flash bag (App::flash).
-        let mut flash = response_flash;
+        // Combine flash from three sources, in precedence order
+        // (later writes override earlier so same-request entries win
+        // over inherited cross-redirect entries):
+        //   1. Session `_flash.old.*` — bridged from the previous
+        //      request via `From<Redirect> for Response` then aged by
+        //      `SessionMiddleware`.
+        //   2. Task-local flash bag — same-request `App::flash`.
+        //   3. Builder flash — same-request `InertiaResponse::flash`.
+        let mut flash = flash::drain_session_flash_for_page();
         for (k, v) in flash::drain() {
+            flash.insert(k, v);
+        }
+        for (k, v) in response_flash {
             flash.insert(k, v);
         }
 
@@ -775,7 +785,7 @@ impl InertiaResponse {
         let Self {
             component,
             props,
-            flash,
+            flash: response_flash,
             config,
             title: _,
             encrypt_history,
@@ -788,11 +798,26 @@ impl InertiaResponse {
                 .await
                 .expect("test resolver should not fail");
         let resolved_encrypt_history = encrypt_history.unwrap_or(config.encrypt_history_default);
-        // Test helper doesn't run inside a session scope, so we never
-        // pick up a flashed flag here — only the explicit override.
+        // Test helper doesn't run inside a session scope by default,
+        // so we never pick up a flashed flag here — only the explicit
+        // override. Tests that DO drive a session scope via
+        // `session_scope_for_test` pick up `_flash.old.*` via the
+        // shared session-flash merge below.
         let resolved_preserve_fragment = preserve_fragment.unwrap_or(false);
         // The test helper does not exercise the shared-data registry.
         let shared_keys: Vec<String> = Vec::new();
+
+        // Mirror the same three-tier flash precedence as `resolve`:
+        // session-old < task-local < builder. Keeps the test helper
+        // honest about the production drain path.
+        let mut flash = flash::drain_session_flash_for_page();
+        for (k, v) in flash::drain() {
+            flash.insert(k, v);
+        }
+        for (k, v) in response_flash {
+            flash.insert(k, v);
+        }
+
         build_page_object(
             &component,
             materialized,

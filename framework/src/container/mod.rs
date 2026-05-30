@@ -775,9 +775,14 @@ impl App {
     /// silently a no-op if called outside an HTTP request (e.g. from
     /// a background worker).
     ///
-    /// Cross-redirect persistence (Laravel's classic flash semantics)
-    /// requires session-flash integration — see
-    /// [`flash`](crate::inertia::flash) module docs.
+    /// **Cross-redirect persistence**: when the handler returns a
+    /// [`Redirect`](crate::http::Redirect) and a session scope is
+    /// active, the flash bag is transferred into the session on
+    /// conversion to [`Response`](crate::http::Response) and surfaces
+    /// on the receiving request's Inertia response under `page.flash`.
+    /// Without a session scope the values still appear on the *current*
+    /// response but cannot survive the redirect. Same-request flashes
+    /// win over inherited session flashes on key collision.
     pub fn flash<V: serde::Serialize>(key: impl Into<String>, value: V) {
         let v = serde_json::to_value(&value).expect("App::flash value must serialize cleanly");
         crate::inertia::flash::push(key.into(), v);

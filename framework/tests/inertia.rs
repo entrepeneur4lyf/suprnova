@@ -2756,6 +2756,303 @@ mod version_mw {
     }
 }
 
+// ---- Cross-redirect flash persistence: App::flash + Redirect ----
+//
+// These exercise the full chain so that `App::flash` survives an
+// outgoing redirect: the redirect conversion transfers the task-local
+// bag into the session, the receiving request's session ages it into
+// `_flash.old.*`, and `InertiaResponse::resolve` merges it into the
+// page object's top-level `flash` field. Without the session bridge
+// the flash would only appear on the *current* response — the
+// finding's "silently no-ops outside the task-local request bag"
+// premise.
+
+#[tokio::test]
+async fn app_flash_survives_redirect_into_session() {
+    use suprnova::Redirect;
+    use suprnova::session::{new_session_slot_for_test, session_scope_for_test};
+
+    let slot = new_session_slot_for_test();
+    let bag = suprnova::inertia::flash_new_bag_for_test();
+    session_scope_for_test(slot.clone(), async {
+        suprnova::inertia::flash_scope_for_test(bag, async {
+            suprnova::App::flash("status", serde_json::json!("Saved!"));
+            // Convert a Redirect → Response. The conversion should
+            // bridge the task-local bag into the session as
+            // `_flash.new.*`.
+            let _: suprnova::Response = Redirect::to("/dashboard").into();
+        })
+        .await;
+    })
+    .await;
+
+    let s = slot.lock().unwrap();
+    let session = s.as_ref().expect("session present");
+    assert!(
+        session.has("_flash.new.status"),
+        "App::flash should be bridged into session as _flash.new.status"
+    );
+}
+
+#[tokio::test]
+async fn app_flash_redirect_destination_sees_flash_in_page() {
+    // Full round-trip: request A flashes via App::flash + Redirect,
+    // session middleware ages on request B, request B's
+    // InertiaResponse surfaces the value under page.flash.
+    use suprnova::Redirect;
+    use suprnova::session::{new_session_slot_for_test, session_scope_for_test};
+
+    let slot = new_session_slot_for_test();
+
+    // Request A: flash + redirect.
+    let bag = suprnova::inertia::flash_new_bag_for_test();
+    session_scope_for_test(slot.clone(), async {
+        suprnova::inertia::flash_scope_for_test(bag, async {
+            suprnova::App::flash("status", serde_json::json!("Saved!"));
+            let _: suprnova::Response = Redirect::to("/dashboard").into();
+        })
+        .await;
+    })
+    .await;
+
+    // Session middleware on the receiving request ages flash.
+    {
+        let mut g = slot.lock().unwrap();
+        let s = g.as_mut().unwrap();
+        s.age_flash_data();
+    }
+
+    // Request B: Inertia response surfaces the value under page.flash.
+    let req = MockReq::new("/dashboard").inertia();
+    let bag_b = suprnova::inertia::flash_new_bag_for_test();
+    let page: serde_json::Value = session_scope_for_test(slot.clone(), async move {
+        suprnova::inertia::flash_scope_for_test(bag_b, async move {
+            let resp = InertiaResponse::new("Dashboard")
+                .resolve(&req)
+                .await
+                .unwrap();
+            let body = body_to_string(resp.into_hyper().into_body());
+            serde_json::from_str(&body).unwrap()
+        })
+        .await
+    })
+    .await;
+
+    assert_eq!(page["flash"]["status"], serde_json::json!("Saved!"));
+}
+
+#[tokio::test]
+async fn app_flash_no_redirect_does_not_leak_to_next_request() {
+    // Non-redirect path: App::flash should appear on THIS response
+    // (existing semantics) and must NOT persist into the session,
+    // otherwise the next request sees a stale flash. This is the
+    // anti-test for the "write to both at flash time" foot-gun.
+    use suprnova::session::{new_session_slot_for_test, session_scope_for_test};
+
+    let slot = new_session_slot_for_test();
+
+    // Request A: flash + non-redirect Inertia response.
+    let req_a = MockReq::new("/").inertia();
+    let bag_a = suprnova::inertia::flash_new_bag_for_test();
+    let page_a: serde_json::Value = session_scope_for_test(slot.clone(), async {
+        suprnova::inertia::flash_scope_for_test(bag_a, async move {
+            suprnova::App::flash("toast", serde_json::json!("hi"));
+            let resp = InertiaResponse::new("Home").resolve(&req_a).await.unwrap();
+            let body = body_to_string(resp.into_hyper().into_body());
+            serde_json::from_str(&body).unwrap()
+        })
+        .await
+    })
+    .await;
+    assert_eq!(page_a["flash"]["toast"], serde_json::json!("hi"));
+
+    // Session middleware on the next request ages flash. Nothing
+    // should have been written so age is a no-op.
+    {
+        let mut g = slot.lock().unwrap();
+        let s = g.as_mut().unwrap();
+        s.age_flash_data();
+        assert!(
+            !s.has("_flash.old.toast"),
+            "App::flash without redirect must not bleed into session — \
+             otherwise it would appear on every subsequent unrelated request"
+        );
+    }
+
+    // Request B: fresh task-local bag, no flash should appear.
+    let req_b = MockReq::new("/").inertia();
+    let bag_b = suprnova::inertia::flash_new_bag_for_test();
+    let page_b: serde_json::Value = session_scope_for_test(slot.clone(), async move {
+        suprnova::inertia::flash_scope_for_test(bag_b, async move {
+            let resp = InertiaResponse::new("Home").resolve(&req_b).await.unwrap();
+            let body = body_to_string(resp.into_hyper().into_body());
+            serde_json::from_str(&body).unwrap()
+        })
+        .await
+    })
+    .await;
+    assert!(
+        !page_b.as_object().unwrap().contains_key("flash"),
+        "follow-up request must not see the non-redirected flash"
+    );
+}
+
+#[tokio::test]
+async fn redirect_with_flash_surfaces_in_destination_page() {
+    // `Redirect::with(...)` already wrote to the session in
+    // `drain_flash`. The complementary half — `InertiaResponse::resolve`
+    // reading session `_flash.old.*` — must now surface it.
+    use suprnova::Redirect;
+    use suprnova::session::{new_session_slot_for_test, session_scope_for_test};
+
+    let slot = new_session_slot_for_test();
+
+    session_scope_for_test(slot.clone(), async {
+        let _: suprnova::Response = Redirect::to("/dashboard")
+            .with("status", serde_json::json!("Updated."))
+            .into();
+    })
+    .await;
+
+    // Age — emulating the receiving request's SessionMiddleware.
+    {
+        let mut g = slot.lock().unwrap();
+        let s = g.as_mut().unwrap();
+        s.age_flash_data();
+    }
+
+    let req = MockReq::new("/dashboard").inertia();
+    let bag = suprnova::inertia::flash_new_bag_for_test();
+    let page: serde_json::Value = session_scope_for_test(slot.clone(), async move {
+        suprnova::inertia::flash_scope_for_test(bag, async move {
+            let resp = InertiaResponse::new("Dashboard")
+                .resolve(&req)
+                .await
+                .unwrap();
+            let body = body_to_string(resp.into_hyper().into_body());
+            serde_json::from_str(&body).unwrap()
+        })
+        .await
+    })
+    .await;
+
+    assert_eq!(page["flash"]["status"], serde_json::json!("Updated."));
+}
+
+#[tokio::test]
+async fn session_flash_filters_internal_keys() {
+    // `_old_input` (form repopulation) and `_inertia.*` (protocol
+    // flags) ride in the same session flash queue but must NOT leak
+    // into page.flash, which is user-facing.
+    use suprnova::session::{new_session_slot_for_test, session_scope_for_test};
+
+    let slot = new_session_slot_for_test();
+    {
+        let mut g = slot.lock().unwrap();
+        let s = g.as_mut().unwrap();
+        s.put("_flash.old.status", serde_json::json!("ok"));
+        s.put("_flash.old._old_input", serde_json::json!({"email": "x"}));
+        s.put("_flash.old._inertia.preserve_fragment", true);
+    }
+
+    let req = MockReq::new("/dashboard").inertia();
+    let bag = suprnova::inertia::flash_new_bag_for_test();
+    let page: serde_json::Value = session_scope_for_test(slot.clone(), async move {
+        suprnova::inertia::flash_scope_for_test(bag, async move {
+            let resp = InertiaResponse::new("Dashboard")
+                .resolve(&req)
+                .await
+                .unwrap();
+            let body = body_to_string(resp.into_hyper().into_body());
+            serde_json::from_str(&body).unwrap()
+        })
+        .await
+    })
+    .await;
+
+    let flash = page["flash"].as_object().expect("flash object");
+    assert_eq!(flash.get("status"), Some(&serde_json::json!("ok")));
+    assert!(
+        !flash.contains_key("_old_input"),
+        "internal _old_input key must not leak into page.flash"
+    );
+    assert!(
+        !flash.contains_key("_inertia.preserve_fragment"),
+        "internal _inertia.* keys must not leak into page.flash"
+    );
+}
+
+#[tokio::test]
+async fn same_request_flash_wins_over_session_flash_on_collision() {
+    // Precedence contract: a destination controller can override
+    // an inherited flash value by re-flashing the same key. Order is
+    // session-old < task-local < builder.
+    use suprnova::session::{new_session_slot_for_test, session_scope_for_test};
+
+    let slot = new_session_slot_for_test();
+    {
+        let mut g = slot.lock().unwrap();
+        let s = g.as_mut().unwrap();
+        s.put(
+            "_flash.old.status",
+            serde_json::json!("from previous request"),
+        );
+    }
+
+    let req = MockReq::new("/dashboard").inertia();
+    let bag = suprnova::inertia::flash_new_bag_for_test();
+    let page: serde_json::Value = session_scope_for_test(slot.clone(), async move {
+        suprnova::inertia::flash_scope_for_test(bag, async move {
+            // Same-key flash on the destination handler — should win.
+            let resp = InertiaResponse::new("Dashboard")
+                .flash("status", serde_json::json!("overridden"))
+                .resolve(&req)
+                .await
+                .unwrap();
+            let body = body_to_string(resp.into_hyper().into_body());
+            serde_json::from_str(&body).unwrap()
+        })
+        .await
+    })
+    .await;
+
+    assert_eq!(page["flash"]["status"], serde_json::json!("overridden"));
+}
+
+#[tokio::test]
+async fn app_flash_without_session_scope_stays_one_shot() {
+    // No session scope around the Redirect conversion → bridge is a
+    // no-op (documented). The flash appears on the same-request
+    // response only; subsequent requests see nothing. This is the
+    // documented degraded-mode behaviour for routes outside session
+    // middleware.
+    use suprnova::Redirect;
+
+    let bag = suprnova::inertia::flash_new_bag_for_test();
+    suprnova::inertia::flash_scope_for_test(bag, async {
+        suprnova::App::flash("status", serde_json::json!("ephemeral"));
+        let _: suprnova::Response = Redirect::to("/x").into();
+        // The bag was drained on the redirect conversion.
+    })
+    .await;
+
+    // A fresh request after the redirect — no session anywhere — must
+    // not see the value.
+    let req = MockReq::new("/x").inertia();
+    let bag2 = suprnova::inertia::flash_new_bag_for_test();
+    let page: serde_json::Value = suprnova::inertia::flash_scope_for_test(bag2, async move {
+        let resp = InertiaResponse::new("X").resolve(&req).await.unwrap();
+        let body = body_to_string(resp.into_hyper().into_body());
+        serde_json::from_str(&body).unwrap()
+    })
+    .await;
+    assert!(
+        !page.as_object().unwrap().contains_key("flash"),
+        "without a session scope, App::flash can't cross a redirect — \
+         destination must not see it"
+    );
+}
+
 // ---- helpers ----
 
 fn body_to_string(

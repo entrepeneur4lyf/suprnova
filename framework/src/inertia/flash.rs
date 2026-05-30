@@ -19,17 +19,33 @@
 //! worker thread. The thread-local InertiaContext bug we fixed in Tier 0
 //! is exactly the kind of problem this avoids.
 //!
-//! ## What's NOT included (yet)
+//! ## Cross-redirect persistence
 //!
 //! Laravel's flash semantics include **cross-redirect persistence**:
 //! controller A flashes a value and redirects to controller B; the
-//! flash data appears on B's response. That requires session
-//! integration — the framework serializes the flash bag to the session
-//! store on redirect responses and reads it back on the next request.
+//! flash data appears on B's response. Suprnova implements this by
+//! bridging the per-request flash bag into the session on every
+//! [`Redirect`](crate::http::Redirect) → [`Response`](crate::http::Response)
+//! conversion. The receiving request's
+//! [`SessionMiddleware`](crate::session::SessionMiddleware) ages the
+//! flashed values into `_flash.old.*`, and
+//! [`InertiaResponse::resolve`](crate::InertiaResponse::resolve)
+//! merges them into the page object's top-level `flash` field
+//! alongside same-request flashes from [`App::flash`](crate::App::flash)
+//! and [`InertiaResponse::flash`](crate::InertiaResponse::flash).
 //!
-//! Suprnova's session domain is its own parity track. For Tier 2 we
-//! ship the in-request flash bag and the protocol-level emission;
-//! the cross-redirect persistence wires up when session-flash lands.
+//! ### Precedence on key collision
+//!
+//! Same-request flash (task-local bag + builder) wins over session
+//! `_flash.old.*` so a destination handler can override an inherited
+//! value just by re-flashing the same key.
+//!
+//! ### Internal session keys are filtered
+//!
+//! Session flash is shared with the framework's own one-shot signals
+//! (`_old_input` for form repopulation, `_inertia.*` for protocol
+//! flags). Only user-visible keys are surfaced to `page.flash` — keys
+//! prefixed with `_` are filtered out.
 
 use crate::lock;
 use serde_json::Value;
@@ -112,4 +128,67 @@ pub fn drain() -> serde_json::Map<String, Value> {
 /// the flash scope.
 pub(crate) fn new_bag() -> Arc<Mutex<HashMap<String, Value>>> {
     Arc::new(Mutex::new(HashMap::new()))
+}
+
+/// Bridge the per-request flash bag into the active session as
+/// `_flash.new.*` so the values survive an outgoing redirect.
+///
+/// Called by `From<Redirect> for Response` immediately before the HTTP
+/// response is built. On the receiving request the
+/// [`SessionMiddleware`](crate::session::SessionMiddleware) ages the
+/// values into `_flash.old.*`, and
+/// [`drain_session_flash_for_page`] surfaces them under the page
+/// object's top-level `flash` field.
+///
+/// No-op when no session scope is active (e.g. the route is outside
+/// the session middleware) — the values remain in the task-local bag
+/// and still appear on the *current* response via [`drain`], but they
+/// cannot persist past the redirect because there is no session to
+/// persist them into.
+///
+/// **Move semantics**: the task-local bag is drained on transfer so a
+/// redirect handler that returns a non-redirect response after calling
+/// [`push`] still sees the values in [`drain`]. The double-drain risk
+/// only applies on the redirect path, where the drained values are
+/// transferred to the session and the current response is discarded by
+/// the client following the `Location` header.
+pub fn transfer_to_session() {
+    let entries = drain();
+    if entries.is_empty() {
+        return;
+    }
+    crate::session::session_mut(|s| {
+        for (k, v) in entries {
+            s.flash(&k, v);
+        }
+    });
+}
+
+/// Collect the receiving request's session `_flash.old.*` entries
+/// that should surface under the page object's top-level `flash`
+/// field.
+///
+/// Filters out internal session keys (anything `_`-prefixed) so the
+/// `_old_input` form-repopulation bag and the `_inertia.*` protocol
+/// flags don't leak to the client. The unprefixed `_old_input` itself
+/// is also filtered as belt-and-suspenders against a future move of
+/// the constant.
+///
+/// Returns an empty map outside a `SessionMiddleware` scope.
+pub fn drain_session_flash_for_page() -> serde_json::Map<String, Value> {
+    crate::session::session()
+        .map(|s| {
+            let mut out = serde_json::Map::new();
+            for (key, value) in &s.data {
+                let Some(name) = key.strip_prefix("_flash.old.") else {
+                    continue;
+                };
+                if name.starts_with('_') {
+                    continue;
+                }
+                out.insert(name.to_string(), value.clone());
+            }
+            out
+        })
+        .unwrap_or_default()
 }
