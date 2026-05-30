@@ -557,7 +557,7 @@ If yes, opt POST/PATCH into retries. If no, accept the 5xx.
   web push, all share the same test-fake philosophy
 - [Queues](queues.md) — jobs that make outbound HTTP calls, plus the
   `spawn_with_fake_inheritance` pattern for testing workers
-- [Testing](testing.md) — `#[suprnova::test]`, `TestContainer`, and the
+- [Testing](testing.md) — `#[suprnova_test]`, `TestContainer`, and the
   rest of the fakes surface
 - [Observability](observability.md) — OTel propagator setup that makes
   `traceparent` injection light up

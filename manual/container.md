@@ -233,7 +233,7 @@ not see a fake bound by a sibling test. `TestContainer::fake(|tc|
 hermetic:
 
 ```rust
-#[suprnova::test]
+#[suprnova_test]
 async fn one_test_binds_a_fake() {
     suprnova::container::testing::TestContainer::fake(|tc| {
         tc.bind::<dyn Mailer>(Arc::new(FakeMailer::new()));
@@ -269,7 +269,7 @@ let conn = pool.checkout().await?;
 ### Swap a default for a fake in tests
 
 ```rust
-#[suprnova::test]
+#[suprnova_test]
 async fn order_dispatches_email() {
     use std::sync::Arc;
     use suprnova::container::testing::TestContainer;
@@ -319,6 +319,6 @@ is different because the runtime is different.
 - [Application Bootstrap](bootstrap.md) — where the binding code goes
 - [Configuration](configuration.md) — typed config registration
   alongside services
-- [Testing](testing.md) — `TestContainer::fake` and `#[suprnova::test]`
+- [Testing](testing.md) — `TestContainer::fake` and `#[suprnova_test]`
 - [Lock Policy](lock-policy.md) — why poisoned-lock recovery matters
   in a container-backed application

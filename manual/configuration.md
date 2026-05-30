@@ -268,7 +268,7 @@ In tests, register config in the test setup rather than relying on
 `.env`:
 
 ```rust
-#[suprnova::test]
+#[suprnova_test]
 async fn test_with_custom_db() {
     suprnova::Config::register(DatabaseConfig {
         url: "sqlite::memory:".to_string(),
@@ -282,7 +282,7 @@ async fn test_with_custom_db() {
 }
 ```
 
-The `#[suprnova::test]` attribute also sets up isolated container
+The `#[suprnova_test]` attribute also sets up isolated container
 state so concurrent tests don't see each other's bindings — see
 [Testing](testing.md).
 

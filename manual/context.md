@@ -323,7 +323,7 @@ propagation a deliberate decision instead of a hidden default.
 
 ## Tests
 
-Inside `#[tokio::test]` or `#[suprnova::test]`, no `Context` scope is
+Inside `#[tokio::test]` or `#[suprnova_test]`, no `Context` scope is
 installed by default. Most context-touching code under test handles
 the "no scope" case gracefully (silent no-op + `None` reads), so
 plain unit tests don't need any setup.
