@@ -538,6 +538,35 @@ impl FrameworkError {
         }
     }
 
+    /// Bridge from any [`HttpError`]-implementing domain error into
+    /// `FrameworkError`. Use this at the call site to propagate a
+    /// custom error through `?` without writing a one-off
+    /// `From<MyError>` impl:
+    ///
+    /// ```rust,ignore
+    /// use suprnova::{FrameworkError, HttpError};
+    ///
+    /// pub async fn show(req: Request) -> Result<HttpResponse, FrameworkError> {
+    ///     let user = find_user(req.param("id")?)
+    ///         .map_err(FrameworkError::from_http_error)?;
+    ///     Ok(HttpResponse::json(user))
+    /// }
+    /// ```
+    ///
+    /// A blanket `impl<T: HttpError> From<T> for FrameworkError` would
+    /// conflict with the existing `From<AppError>` impl (AppError
+    /// itself implements `HttpError`), so the bridge is a constructor
+    /// rather than a `From` impl. The status code and message are
+    /// taken from [`HttpError::status_code`] and
+    /// [`HttpError::error_message`] and stored in a [`Self::Domain`]
+    /// variant — response rendering follows the normal Domain path.
+    pub fn from_http_error<E: HttpError>(err: E) -> Self {
+        Self::Domain {
+            message: err.error_message(),
+            status_code: err.status_code(),
+        }
+    }
+
     /// Create a generic bad-request (400) error.
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self::Domain {
@@ -645,8 +674,13 @@ impl FrameworkError {
         }
     }
 
-    /// Return the primary human-readable error message. Used by
-    /// `into_json_api_response` to populate the `detail` field.
+    /// Return the per-variant payload string (param name, model name,
+    /// inner message, etc.) — NOT the formatted Display.
+    ///
+    /// This accessor exists so callers can inspect the variant's
+    /// payload field uniformly without matching every variant. For a
+    /// user-facing message use [`std::fmt::Display`] (`to_string()`) /
+    /// the `Error::source` chain instead.
     pub fn message(&self) -> &str {
         match self {
             Self::ServiceNotFound { type_name } => type_name,
@@ -687,13 +721,72 @@ impl FrameworkError {
     ///     .map_err(FrameworkError::from)
     ///     .map_err(|e| e.context("creating new user"))?;
     /// ```
+    ///
+    /// Variant preservation: structured response variants
+    /// (`Validation`, `ValidationError`, `PrecognitionFailure`,
+    /// `PrecognitionSuccess`, `Unauthorized`, `ModelNotFound`,
+    /// `ParamParse`, `UnsupportedMediaType`, `AlreadyReported`) keep
+    /// their variant so their response renderer still emits the
+    /// per-variant body (Laravel `errors` map, Precognition headers,
+    /// JSON:API `source.pointer`, etc.). The context prefix is folded
+    /// into the inner message only when that variant carries one.
+    /// Plain message-carrying variants (`Internal`, `Database`,
+    /// `Domain`, `ServiceNotFound`, `ParamError`) flatten to
+    /// `Domain { message: "<ctx>: <original>", status_code }` as
+    /// before.
     pub fn context(self, ctx: impl Into<String>) -> Self {
         let prefix = ctx.into();
-        let status = self.status_code();
-        let original = self.to_string();
-        Self::Domain {
-            message: format!("{}: {}", prefix, original),
-            status_code: status,
+        match self {
+            Self::Validation(errors) => {
+                let mut prefixed = ValidationErrors::new();
+                for (field, msgs) in errors.errors.into_iter() {
+                    for m in msgs {
+                        prefixed.add(field.clone(), format!("{}: {}", prefix, m));
+                    }
+                }
+                Self::Validation(prefixed)
+            }
+            Self::PrecognitionFailure(errors) => {
+                let mut prefixed = ValidationErrors::new();
+                for (field, msgs) in errors.errors.into_iter() {
+                    for m in msgs {
+                        prefixed.add(field.clone(), format!("{}: {}", prefix, m));
+                    }
+                }
+                Self::PrecognitionFailure(prefixed)
+            }
+            Self::ValidationError { field, message } => Self::ValidationError {
+                field,
+                message: format!("{}: {}", prefix, message),
+            },
+            Self::ModelNotFound { model_name } => Self::ModelNotFound {
+                model_name: format!("{}: {}", prefix, model_name),
+            },
+            Self::ParamParse {
+                param,
+                expected_type,
+            } => Self::ParamParse {
+                param: format!("{}: {}", prefix, param),
+                expected_type,
+            },
+            // Variants whose body is fully fixed by the variant itself
+            // (no caller-visible message field). Preserve the variant
+            // so the response renderer still chooses the right shape;
+            // the context prefix has nowhere to land without losing
+            // structure, so the variant is returned unchanged.
+            other @ (Self::Unauthorized
+            | Self::UnsupportedMediaType
+            | Self::PrecognitionSuccess
+            | Self::AlreadyReported) => other,
+            // Plain message-carrying variants flatten to Domain.
+            other => {
+                let status = other.status_code();
+                let original = other.to_string();
+                Self::Domain {
+                    message: format!("{}: {}", prefix, original),
+                    status_code: status,
+                }
+            }
         }
     }
 }
@@ -731,6 +824,144 @@ mod context_tests {
         assert!(msg.contains("loading service"));
         assert!(msg.contains("reading config"));
         assert!(msg.contains("io error"));
+    }
+
+    #[test]
+    fn context_preserves_validation_variant_and_errors_map() {
+        let mut errs = ValidationErrors::new();
+        errs.add("email", "invalid");
+        errs.add("password", "too short");
+        let wrapped = FrameworkError::Validation(errs).context("registration");
+        match wrapped {
+            FrameworkError::Validation(v) => {
+                let email = v.errors.get("email").expect("email entry preserved");
+                assert!(email.iter().any(|m| m.contains("registration")));
+                assert!(email.iter().any(|m| m.contains("invalid")));
+                let pwd = v.errors.get("password").expect("password entry preserved");
+                assert!(pwd.iter().any(|m| m.contains("registration")));
+            }
+            other => panic!("expected Validation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn context_preserves_precognition_failure_variant() {
+        let mut errs = ValidationErrors::new();
+        errs.add("name", "required");
+        let wrapped = FrameworkError::PrecognitionFailure(errs).context("precog step");
+        assert!(matches!(wrapped, FrameworkError::PrecognitionFailure(_)));
+        assert_eq!(wrapped.status_code(), 422);
+    }
+
+    #[test]
+    fn context_preserves_unauthorized_variant() {
+        let wrapped = FrameworkError::Unauthorized.context("auth gate");
+        assert!(matches!(wrapped, FrameworkError::Unauthorized));
+        assert_eq!(wrapped.status_code(), 403);
+    }
+
+    #[test]
+    fn context_preserves_model_not_found_variant_with_prefix() {
+        let wrapped = FrameworkError::model_not_found("User").context("loading dashboard");
+        match wrapped {
+            FrameworkError::ModelNotFound { model_name } => {
+                assert!(model_name.contains("loading dashboard"));
+                assert!(model_name.contains("User"));
+            }
+            other => panic!("expected ModelNotFound, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn context_preserves_param_parse_variant_with_prefix() {
+        let wrapped = FrameworkError::param_parse("id", "uuid").context("route");
+        match wrapped {
+            FrameworkError::ParamParse {
+                param,
+                expected_type,
+            } => {
+                assert!(param.contains("route"));
+                assert!(param.contains("id"));
+                assert_eq!(expected_type, "uuid");
+            }
+            other => panic!("expected ParamParse, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn context_preserves_validation_error_single_field() {
+        let wrapped = FrameworkError::validation("email", "required").context("signup");
+        match wrapped {
+            FrameworkError::ValidationError { field, message } => {
+                assert_eq!(field, "email");
+                assert!(message.contains("signup"));
+                assert!(message.contains("required"));
+            }
+            other => panic!("expected ValidationError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn context_preserves_precognition_success_and_already_reported() {
+        let p = FrameworkError::PrecognitionSuccess.context("ignored");
+        assert!(matches!(p, FrameworkError::PrecognitionSuccess));
+        let a = FrameworkError::silent().context("ignored");
+        assert!(matches!(a, FrameworkError::AlreadyReported));
+    }
+}
+
+#[cfg(test)]
+mod http_error_bridge_tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct DomainErr;
+
+    impl std::fmt::Display for DomainErr {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "domain failure")
+        }
+    }
+
+    impl std::error::Error for DomainErr {}
+
+    impl HttpError for DomainErr {
+        fn status_code(&self) -> u16 {
+            418
+        }
+
+        fn error_message(&self) -> String {
+            "I'm a teapot".to_string()
+        }
+    }
+
+    #[test]
+    fn from_http_error_carries_status_and_message() {
+        let err = FrameworkError::from_http_error(DomainErr);
+        assert_eq!(err.status_code(), 418);
+        match err {
+            FrameworkError::Domain {
+                message,
+                status_code,
+            } => {
+                assert_eq!(message, "I'm a teapot");
+                assert_eq!(status_code, 418);
+            }
+            other => panic!("expected Domain, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn from_http_error_threads_through_question_mark() {
+        fn inner() -> Result<(), DomainErr> {
+            Err(DomainErr)
+        }
+        fn outer() -> Result<(), FrameworkError> {
+            inner().map_err(FrameworkError::from_http_error)?;
+            Ok(())
+        }
+        let err = outer().unwrap_err();
+        assert_eq!(err.status_code(), 418);
     }
 }
 

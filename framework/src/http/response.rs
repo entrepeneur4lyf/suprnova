@@ -282,19 +282,36 @@ impl HttpResponse {
     /// middleware would forward into a header (CORS allow-headers,
     /// `X-Forwarded-*`, custom debug headers).
     ///
-    /// The status code goes through `StatusCode::from_u16` with the
-    /// same drop-on-invalid policy; out-of-range values (>999 or any
-    /// non-status integer) downgrade to a 500 rather than panic.
+    /// The status code is constrained to the IANA HTTP status range
+    /// `100..=599`. Anything outside that range — `Hyper`'s own
+    /// `from_u16` is more permissive (it accepts the full `100..=999`
+    /// space, including the unassigned `6xx`-`9xx` block) — downgrades
+    /// to `500 Internal Server Error` with a `tracing::warn!` rather
+    /// than reaching the wire. This catches `AppError::status(700)` /
+    /// `FrameworkError::domain(_, 800)` typos before a client sees a
+    /// non-conformant status line.
     pub fn into_hyper(self) -> hyper::Response<BoxBody<Bytes, Infallible>> {
-        let status = match hyper::StatusCode::from_u16(self.status) {
-            Ok(s) => s,
-            Err(_) => {
-                tracing::warn!(
-                    status = self.status,
-                    "dropping invalid HTTP status code; falling back to 500"
-                );
-                hyper::StatusCode::INTERNAL_SERVER_ERROR
+        let status = if (100..=599).contains(&self.status) {
+            match hyper::StatusCode::from_u16(self.status) {
+                Ok(s) => s,
+                Err(_) => {
+                    // Hyper rejected a value inside our nominal range
+                    // (shouldn't happen — `from_u16` accepts all
+                    // 100..=999). Fall through to the 500 fallback.
+                    tracing::warn!(
+                        status = self.status,
+                        "dropping invalid HTTP status code; falling back to 500"
+                    );
+                    hyper::StatusCode::INTERNAL_SERVER_ERROR
+                }
             }
+        } else {
+            tracing::warn!(
+                status = self.status,
+                "dropping out-of-range HTTP status code (must be 100..=599); \
+                 falling back to 500"
+            );
+            hyper::StatusCode::INTERNAL_SERVER_ERROR
         };
         let mut builder = hyper::Response::builder().status(status);
 
@@ -1445,9 +1462,10 @@ mod header_validation_tests {
     }
 
     /// Out-of-range status codes downgrade to 500 rather than panic.
-    /// Hyper's `StatusCode::from_u16` rejects values outside the
-    /// 100-999 range; before the fix, the body builder's .unwrap()
-    /// would panic.
+    /// Before any fix, the body builder's `.unwrap()` would panic.
+    /// Today the wire boundary is constrained to `100..=599`: anything
+    /// outside that range — including the 6xx/7xx/8xx/9xx block hyper
+    /// would otherwise accept — downgrades to 500.
     #[test]
     fn invalid_status_code_falls_back_to_500() {
         // 0 and 9999 are both outside the HTTP status range.
@@ -1456,6 +1474,35 @@ mod header_validation_tests {
 
         let resp = HttpResponse::text("ok").status(0).into_hyper();
         assert_eq!(resp.status(), 500);
+    }
+
+    /// Non-standard 6xx-9xx status codes (which hyper's own
+    /// `StatusCode::from_u16` would happily accept) downgrade to 500
+    /// rather than reaching the wire. Catches `AppError::status(700)`
+    /// / `FrameworkError::domain(_, 800)` typos at the boundary.
+    #[test]
+    fn non_standard_6xx_to_9xx_status_falls_back_to_500() {
+        for code in [600, 700, 750, 800, 900, 999] {
+            let resp = HttpResponse::text("ok").status(code).into_hyper();
+            assert_eq!(
+                resp.status(),
+                500,
+                "expected status {code} to downgrade to 500"
+            );
+        }
+    }
+
+    /// Boundary check — valid codes flow through untouched.
+    #[test]
+    fn boundary_status_codes_in_range_flow_through() {
+        for code in [100, 200, 204, 301, 404, 422, 500, 599] {
+            let resp = HttpResponse::text("ok").status(code).into_hyper();
+            assert_eq!(
+                resp.status().as_u16(),
+                code,
+                "expected status {code} to pass through unchanged"
+            );
+        }
     }
 }
 
