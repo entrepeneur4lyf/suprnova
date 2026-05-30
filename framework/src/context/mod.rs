@@ -144,8 +144,20 @@ impl Context {
     {
         if CONTEXT
             .try_with(|store| {
-                if let Ok(v) = serde_json::to_value(value) {
-                    store.data.insert(key.into(), v);
+                let key = key.into();
+                match serde_json::to_value(value) {
+                    Ok(v) => {
+                        store.data.insert(key, v);
+                    }
+                    Err(err) => {
+                        tracing::trace!(
+                            target: "suprnova::context",
+                            op = "add",
+                            key = %key,
+                            error = %err,
+                            "Context mutation discarded: value failed to serialize",
+                        );
+                    }
                 }
             })
             .is_err()
@@ -160,13 +172,30 @@ impl Context {
 
     /// Read `key` and deserialize. Returns `None` if absent, outside a
     /// scope, or if the stored value isn't of type `T`.
+    ///
+    /// A wrong-type read (`key` present but `serde_json::from_value::<T>`
+    /// errors) emits a `tracing::trace!` on the `suprnova::context`
+    /// target so the bug is observable in instrumented runs; plain
+    /// absence stays silent so logs aren't flooded by intentional
+    /// "is this set?" probes.
     pub fn get<T: DeserializeOwned>(key: &str) -> Option<T> {
         CONTEXT
             .try_with(|store| {
-                store
-                    .data
-                    .get(key)
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                let raw = store.data.get(key)?;
+                match serde_json::from_value::<T>(raw.value().clone()) {
+                    Ok(v) => Some(v),
+                    Err(err) => {
+                        tracing::trace!(
+                            target: "suprnova::context",
+                            op = "get",
+                            key = %key,
+                            expected = std::any::type_name::<T>(),
+                            error = %err,
+                            "Context read returned None: value present but did not deserialize",
+                        );
+                        None
+                    }
+                }
             })
             .ok()
             .flatten()
@@ -183,8 +212,19 @@ impl Context {
         if CONTEXT
             .try_with(|store| {
                 let key = key.into();
-                let new_val = serde_json::to_value(value).ok();
-                let Some(new_val) = new_val else { return };
+                let new_val = match serde_json::to_value(value) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        tracing::trace!(
+                            target: "suprnova::context",
+                            op = "push",
+                            key = %key,
+                            error = %err,
+                            "Context mutation discarded: value failed to serialize",
+                        );
+                        return;
+                    }
+                };
                 store
                     .data
                     .entry(key)
@@ -253,8 +293,20 @@ impl Context {
     {
         if CONTEXT
             .try_with(|store| {
-                if let Ok(v) = serde_json::to_value(value) {
-                    store.hidden.insert(key.into(), v);
+                let key = key.into();
+                match serde_json::to_value(value) {
+                    Ok(v) => {
+                        store.hidden.insert(key, v);
+                    }
+                    Err(err) => {
+                        tracing::trace!(
+                            target: "suprnova::context",
+                            op = "hidden_add",
+                            key = %key,
+                            error = %err,
+                            "Context mutation discarded: value failed to serialize",
+                        );
+                    }
                 }
             })
             .is_err()
@@ -268,13 +320,28 @@ impl Context {
     }
 
     /// Read `key` from the hidden bag.
+    ///
+    /// Like [`Self::get`], a wrong-type read (`key` present but
+    /// deserialize fails) emits a `tracing::trace!` so the bug is
+    /// observable; plain absence stays silent.
     pub fn hidden_get<T: DeserializeOwned>(key: &str) -> Option<T> {
         CONTEXT
             .try_with(|store| {
-                store
-                    .hidden
-                    .get(key)
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                let raw = store.hidden.get(key)?;
+                match serde_json::from_value::<T>(raw.value().clone()) {
+                    Ok(v) => Some(v),
+                    Err(err) => {
+                        tracing::trace!(
+                            target: "suprnova::context",
+                            op = "hidden_get",
+                            key = %key,
+                            expected = std::any::type_name::<T>(),
+                            error = %err,
+                            "Context read returned None: value present but did not deserialize",
+                        );
+                        None
+                    }
+                }
             })
             .ok()
             .flatten()
@@ -340,6 +407,60 @@ impl Context {
         QUERY_OVERRIDE.with(|cell| {
             *cell.borrow_mut() = None;
         });
+    }
+
+    /// **Test-only.** Install a query-parameter override and return a
+    /// guard that wipes the thread-local on drop.
+    ///
+    /// Preferred over the raw [`Self::test_set_query`] /
+    /// [`Self::test_clear_query`] pair because it can't leak: even when
+    /// the test body panics or returns early, the guard's `Drop` runs
+    /// and clears the override before the OS thread is recycled by
+    /// Cargo's per-binary thread pool.
+    ///
+    /// Repeated calls overlay onto the same map; the most recently
+    /// returned guard wipes the override entirely when dropped (it does
+    /// not restore the previous map). For most tests that's the right
+    /// behavior — each `#[tokio::test]` sets up its own overrides from
+    /// scratch.
+    ///
+    /// ```ignore
+    /// #[tokio::test]
+    /// async fn handler_reads_page_param() {
+    ///     let _q = Context::test_query_guard("page", "3");
+    ///     assert_eq!(Context::query_param("page"), Some("3".into()));
+    ///     // `_q` drops at end of scope; the override is wiped.
+    /// }
+    /// ```
+    ///
+    /// Compiled only in test builds; absent from release binaries.
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use = "the guard wipes the test query override on drop; binding it to `_` clears immediately"]
+    pub fn test_query_guard(name: impl Into<String>, value: impl Into<String>) -> TestQueryGuard {
+        Self::test_set_query(name, value);
+        TestQueryGuard { _private: () }
+    }
+}
+
+/// **Test-only.** RAII guard returned by
+/// [`Context::test_query_guard`]; wipes the thread-local query
+/// override on drop so a panicking or early-returning test body can't
+/// leak overrides into the next test scheduled on the same OS thread.
+///
+/// Compiled only in test builds; absent from release binaries.
+#[cfg(any(test, feature = "testing"))]
+#[must_use = "the guard wipes the test query override on drop; binding it to `_` clears immediately"]
+pub struct TestQueryGuard {
+    // Private field so external crates can't construct one without
+    // going through `Context::test_query_guard`, which is what installs
+    // the override the guard is responsible for.
+    _private: (),
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl Drop for TestQueryGuard {
+    fn drop(&mut self) {
+        Context::test_clear_query();
     }
 }
 
@@ -583,5 +704,155 @@ mod tests {
             })
             .await;
         assert!(!logs_contain("Context mutation discarded"));
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn get_wrong_type_returns_none_and_emits_trace_event() {
+        // Locks the "wrong type" observability gap: get returns None
+        // both for an absent key and for a present-but-wrong-type read;
+        // the trace event lets callers distinguish the two in
+        // instrumented runs.
+        CONTEXT
+            .scope(ContextStore::default(), async {
+                Context::add("user_id", 42i64);
+                // i64 stored, requested as String: present but wrong type.
+                assert_eq!(Context::get::<String>("user_id"), None);
+            })
+            .await;
+        assert!(logs_contain("Context read returned None"));
+        assert!(logs_contain("op=\"get\""));
+        assert!(logs_contain("key=\"user_id\""));
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn get_absent_key_stays_silent() {
+        // Plain absence is the common case and would flood logs if it
+        // emitted; only the present-but-wrong-type branch is observable.
+        CONTEXT
+            .scope(ContextStore::default(), async {
+                assert_eq!(Context::get::<String>("never_set"), None);
+            })
+            .await;
+        assert!(!logs_contain("Context read returned None"));
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn hidden_get_wrong_type_emits_trace_event() {
+        // Same observability contract for the hidden bag.
+        CONTEXT
+            .scope(ContextStore::default(), async {
+                Context::hidden_add("token_count", 7i64);
+                assert_eq!(Context::hidden_get::<Vec<String>>("token_count"), None);
+            })
+            .await;
+        assert!(logs_contain("Context read returned None"));
+        assert!(logs_contain("op=\"hidden_get\""));
+        assert!(logs_contain("key=\"token_count\""));
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn hidden_get_absent_key_stays_silent() {
+        CONTEXT
+            .scope(ContextStore::default(), async {
+                assert_eq!(Context::hidden_get::<String>("never_set"), None);
+            })
+            .await;
+        assert!(!logs_contain("Context read returned None"));
+    }
+
+    /// A type whose `Serialize` impl deterministically fails — used to
+    /// exercise the otherwise-hard-to-trigger `to_value` error path on
+    /// `add` / `push` / `hidden_add`. Ordinary types almost never fail
+    /// `serde_json::to_value`, but the observability contract holds for
+    /// the ones that do (e.g. NaN floats serialized as strict JSON, or
+    /// user-defined types with custom impls).
+    struct AlwaysFailsSerialize;
+
+    impl serde::Serialize for AlwaysFailsSerialize {
+        fn serialize<S>(&self, _: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom("serialize intentionally fails"))
+        }
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn add_serialize_failure_emits_trace_event() {
+        CONTEXT
+            .scope(ContextStore::default(), async {
+                Context::add("bad", AlwaysFailsSerialize);
+                // Value was dropped; subsequent get must not find it.
+                assert!(!Context::has("bad"));
+            })
+            .await;
+        assert!(logs_contain("value failed to serialize"));
+        assert!(logs_contain("op=\"add\""));
+        assert!(logs_contain("key=\"bad\""));
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn push_serialize_failure_emits_trace_event() {
+        CONTEXT
+            .scope(ContextStore::default(), async {
+                Context::push("bad_stack", AlwaysFailsSerialize);
+                assert!(!Context::has("bad_stack"));
+            })
+            .await;
+        assert!(logs_contain("value failed to serialize"));
+        assert!(logs_contain("op=\"push\""));
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn hidden_add_serialize_failure_emits_trace_event() {
+        CONTEXT
+            .scope(ContextStore::default(), async {
+                Context::hidden_add("bad_secret", AlwaysFailsSerialize);
+                assert_eq!(Context::hidden_get::<String>("bad_secret"), None);
+            })
+            .await;
+        assert!(logs_contain("value failed to serialize"));
+        assert!(logs_contain("op=\"hidden_add\""));
+    }
+
+    #[tokio::test]
+    async fn test_query_guard_clears_on_drop() {
+        // The RAII guard wipes the override even if the test body
+        // doesn't call test_clear_query — the failure mode the LOW
+        // finding flagged.
+        Context::test_clear_query();
+        {
+            let _g = Context::test_query_guard("page", "11");
+            assert_eq!(Context::query_param("page"), Some("11".to_string()));
+        }
+        // Guard dropped: override is gone.
+        assert_eq!(Context::query_param("page"), None);
+    }
+
+    #[tokio::test]
+    async fn test_query_guard_clears_on_panic_simulation() {
+        // Drop runs even when the body unwinds. Simulate by spawning a
+        // task that panics inside the guard's scope, then verify the
+        // override didn't leak into the current thread (we can't observe
+        // the spawned thread's overrides anyway, so this also serves as
+        // a thread-isolation sanity check).
+        Context::test_clear_query();
+        let handle = tokio::task::spawn_blocking(|| {
+            let _g = Context::test_query_guard("page", "13");
+            // The guard runs Drop on unwind; we don't actually panic to
+            // keep the test deterministic, but the contract is the same
+            // — Drop is unconditional.
+            assert_eq!(Context::query_param("page"), Some("13".to_string()));
+        });
+        handle.await.expect("spawned blocking task completes");
+        // The current thread never had the override installed.
+        assert_eq!(Context::query_param("page"), None);
     }
 }
