@@ -86,8 +86,8 @@ different machinery.
 
 Every error path inside the framework — extractors, route binding,
 the container, validation, the database layer, storage — produces a
-`FrameworkError`. It's an enum with twelve variants, each tagged with
-its HTTP status:
+`FrameworkError`. It's an enum with fourteen variants, each tagged
+with its HTTP status:
 
 ```rust
 pub enum FrameworkError {
@@ -499,8 +499,8 @@ pub struct ErrorOccurred {
 Listen for it the same way you listen for any event:
 
 ```rust
-use suprnova::{Event, EventFacade, ErrorOccurred, Listener, FrameworkError};
 use std::sync::Arc;
+use suprnova::{ErrorOccurred, EventFacade, FrameworkError, Listener};
 
 pub struct SentryReporter;
 
@@ -513,7 +513,7 @@ impl Listener<ErrorOccurred> for SentryReporter {
 }
 
 // In bootstrap.rs:
-EventFacade::listen::<ErrorOccurred>(Arc::new(SentryReporter)).await?;
+EventFacade::listen::<ErrorOccurred, _>(Arc::new(SentryReporter)).await;
 ```
 
 This is the Suprnova equivalent of Laravel's `report()` callback on
@@ -527,10 +527,10 @@ Three free functions short-circuit a handler at a given status. They
 mirror Laravel's `abort` / `abort_if` / `abort_unless`:
 
 ```rust
-use suprnova::{abort_with, abort_if, abort_unless, Request, Response, json_response};
+use suprnova::{abort_with, abort_if, abort_unless, Auth, Request, Response, json_response};
 
 pub async fn show(req: Request) -> Response {
-    abort_unless(req.user().is_some(), 401, "must be logged in")?;
+    abort_unless(Auth::check(), 401, "must be logged in")?;
     abort_if(req.param("id")? == "0", 404, "User not found")?;
     abort_with(503, "scheduled maintenance")?;
     Ok(json_response!({ "ok": true }))
