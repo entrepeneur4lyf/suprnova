@@ -127,10 +127,38 @@ impl GateRegistry {
     // Insert a gate entry, degrading gracefully on lock poison rather than
     // panicking the boot path. Skipping a single registration is recoverable:
     // the gate's authorize calls return None → safe-deny.
+    //
+    // Last-writer-wins on duplicate `(action, U, R)` matches Laravel's
+    // `Gate::define` semantic (PHP overwrites the abilities map entry), so
+    // re-registering an ability replaces the previous closure. That's the
+    // right default — tests, hot reload, and intentional overrides all rely
+    // on it. But silent replacement in a process-global registry makes
+    // accidental duplicates (two policies, two bootstrap closures, an
+    // inventory + an explicit call) impossible to audit. Emit a
+    // `tracing::warn!` whenever a registration overwrites an existing entry
+    // so the conflict is visible in logs without breaking the semantic.
     fn insert_gate<U: 'static, R: 'static>(&self, action: &str, entry: GateEntry, kind: &str) {
         let key = (action.to_string(), TypeId::of::<U>(), TypeId::of::<R>());
         match self.gates.write() {
             Ok(mut gates) => {
+                let previous_kind = gates.get(&key).map(|e| match e {
+                    GateEntry::Sync(_) => "sync",
+                    GateEntry::Async(_) => "async",
+                });
+                if let Some(previous_kind) = previous_kind {
+                    tracing::warn!(
+                        action = %action,
+                        previous_kind = %previous_kind,
+                        new_kind = %kind,
+                        user_type = std::any::type_name::<U>(),
+                        resource_type = std::any::type_name::<R>(),
+                        "Gate registration is overwriting an existing gate for \
+                         (action, user, resource); the previous closure will no \
+                         longer be invoked. This matches Laravel's last-writer-wins \
+                         semantic but is reported so duplicate registrations from \
+                         policies, inventory, or bootstrap code are auditable."
+                    );
+                }
                 gates.insert(key, entry);
             }
             Err(_) => {
@@ -399,4 +427,68 @@ impl GateRegistry {
 pub(crate) fn global() -> &'static GateRegistry {
     static R: std::sync::OnceLock<GateRegistry> = std::sync::OnceLock::new();
     R.get_or_init(GateRegistry::new)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct U;
+    struct R;
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn re_registering_overwrites_with_last_writer_and_warns() {
+        // Each test owns a fresh registry — the production global is shared
+        // across the process, and we don't want bleed-over from other tests
+        // that may also register a gate named "duplicate-probe".
+        let registry = GateRegistry::new();
+
+        registry.register::<U, R>("duplicate-probe", |_u, _r| true);
+        registry.register::<U, R>("duplicate-probe", |_u, _r| false);
+
+        let decision = registry
+            .invoke::<U, R>("duplicate-probe", &U, &R)
+            .expect("gate is registered");
+        assert!(
+            !decision.allowed(),
+            "last-writer-wins: the second registration must replace the first"
+        );
+
+        assert!(
+            logs_contain("overwriting an existing gate"),
+            "duplicate registration must emit a warn so it is auditable"
+        );
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn first_registration_does_not_warn() {
+        let registry = GateRegistry::new();
+
+        registry.register::<U, R>("fresh-probe", |_u, _r| true);
+
+        assert!(
+            !logs_contain("overwriting an existing gate"),
+            "a first-time registration must not warn"
+        );
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn sync_overwriting_async_warns_with_kind_transition() {
+        let registry = GateRegistry::new();
+
+        registry.register_async::<U, R, _, _>("kind-flip", |_u, _r| async { true });
+        registry.register::<U, R>("kind-flip", |_u, _r| false);
+
+        assert!(
+            logs_contain("overwriting an existing gate"),
+            "a sync registration replacing an async one must still warn"
+        );
+        assert!(
+            logs_contain("previous_kind") && logs_contain("async"),
+            "the warn must record the previous gate kind for diagnostics"
+        );
+    }
 }
