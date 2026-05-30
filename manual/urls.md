@@ -286,15 +286,20 @@ function for both relative-from-now and explicit-absolute deadlines.
 On the inbound side, you verify the signature against the live request:
 
 ```rust
-use suprnova::{url, Request, Response, HttpResponse};
+use suprnova::{url, FrameworkError, Request, Response, HttpResponse};
 
-async fn reset(req: Request) -> Response {
+pub async fn reset(req: Request) -> Response {
+    reset_inner(req).await.map_err(HttpResponse::from)
+}
+
+async fn reset_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
     if !url::has_valid_signature(&req)? {
-        return HttpResponse::text("Invalid or expired link").status(403);
+        return Err(FrameworkError::forbidden("Invalid or expired link"));
     }
     // Signature is good and not expired — proceed.
     let user_id = req.param("user").unwrap();
     // ...
+    Ok(HttpResponse::text("ok"))
 }
 ```
 
@@ -303,9 +308,14 @@ URL is not expired. For the three-way distinction between *invalid*,
 *expired*, and *valid*, use `signature_verdict`:
 
 ```rust
-use suprnova::{url, routing::SignatureVerdict};
+use suprnova::{url, FrameworkError, HttpResponse, Request, Response};
+use suprnova::routing::SignatureVerdict;
 
-async fn reset(req: Request) -> Response {
+pub async fn reset(req: Request) -> Response {
+    reset_inner(req).await.map_err(HttpResponse::from)
+}
+
+async fn reset_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
     match url::signature_verdict(&req)? {
         SignatureVerdict::Valid => {
             // Proceed.
@@ -313,15 +323,18 @@ async fn reset(req: Request) -> Response {
         SignatureVerdict::Expired => {
             // Bounce the user to a page that explains the link expired
             // and offers to send a fresh one.
-            return Redirect::to("/password/reset-expired").into();
+            return Ok(HttpResponse::new()
+                .status(302)
+                .header("Location", "/password/reset-expired"));
         }
         SignatureVerdict::Invalid => {
             // Render a generic 403 — don't leak whether the signature
             // was malformed, missing, or just wrong.
-            return HttpResponse::text("Invalid link").status(403);
+            return Err(FrameworkError::forbidden("Invalid link"));
         }
     }
     // ...
+    Ok(HttpResponse::text("ok"))
 }
 ```
 
