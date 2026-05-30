@@ -130,16 +130,6 @@ pub async fn start_named(name: &str, input: &str) -> Result<WorkflowHandle, Fram
     store::insert_workflow(name, input, config.max_attempts).await
 }
 
-/// Normalize a workflow name to module_path::fn_name form
-pub fn normalize_workflow_name(name: &str) -> String {
-    let trimmed = name.replace(' ', "");
-    if trimmed.contains("::") {
-        trimmed
-    } else {
-        format!("{}::{}", module_path!(), trimmed)
-    }
-}
-
 /// Workflow worker daemon
 pub struct WorkflowWorker {
     config: Arc<WorkflowConfig>,
