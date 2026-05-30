@@ -70,10 +70,14 @@ Application::new()
 - `serve` — start the HTTP server
 - `web:run` — alias for serve
 - `migrate` / `migrate:rollback` / `migrate:status` / `migrate:fresh`
-- `db:sync` / `db:seed`
 - `schedule:run` / `schedule:work` / `schedule:list`
 - `workflow:work`
 - `queue:work`
+- `down` / `up` — toggle maintenance mode
+
+`db:sync` and `db:seed` live on the framework-wide `suprnova` CLI
+binary (`suprnova-cli`) and the per-app `cmd/console` binary
+respectively — not on the `Application::run()` switch.
 
 For `serve`, it then:
 
@@ -124,10 +128,15 @@ drive without opening a socket.** It's re-exported as
 ```rust
 pub async fn handle_request(
     router: Arc<Router>,
-    registry: Arc<MiddlewareRegistry>,
-    req: Request,
-) -> HttpResponse;
+    middleware_registry: Arc<MiddlewareRegistry>,
+    req: hyper::Request<hyper::body::Incoming>,
+) -> hyper::Response<ServerBody>;
 ```
+
+A peer-aware variant, `handle_request_with_peer`, takes the same
+arguments plus an `Option<std::net::IpAddr>` — the production accept
+loop uses it; in-process callers use `handle_request` and the request's
+proxy headers (or `None`) determine `Request::ip()`.
 
 Inside, it:
 
@@ -262,9 +271,10 @@ A short list of invariants the lifecycle establishes:
 - **5xx bodies are always sanitised.** Detail goes to the log, not the
   wire.
 - **Poisoned locks never abort the process.** Two sanctioned patterns:
-  per-request paths map poison to `FrameworkError::lock_poisoned` (and
-  the request gets a 503); hot-path registries that must stay up
-  recover in place with `.unwrap_or_else(|e| e.into_inner())`. See
+  per-request paths route poison into a `FrameworkError::Internal`
+  carrying a `"<context> lock poisoned"` message (and the request
+  gets a 500); hot-path registries that must stay up recover in place
+  with `.unwrap_or_else(|e| e.into_inner())`. See
   [Lock Policy](lock-policy.md).
 - **Driver backend failures are an explicit fail-open or fail-closed
   choice.** Rate-limit, cache, session each pick a policy at the call
