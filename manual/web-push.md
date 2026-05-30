@@ -283,7 +283,7 @@ notification:
 
 ```rust
 suprnova::notifications::register_notification_factory::<OrderShipped>()?;
-suprnova::queue::register_job::<suprnova::SendNotificationJob>();
+suprnova::queue::worker::register_job::<suprnova::SendNotificationJob>();
 ```
 
 Behind the scenes, queued dispatch builds a `SendNotificationJob`
@@ -339,25 +339,25 @@ pub async fn subscribe(req: Request) -> Response {
 
     let (_parts, bytes) = match req.body_bytes().await {
         Ok(b) => b,
-        Err(e) => return json_response!({ "error": e.to_string() }, 400),
+        Err(e) => return json_response!({ "error": e.to_string() }).map(|r| r.status(400)),
     };
     let raw = match std::str::from_utf8(&bytes) {
         Ok(s) => s.to_string(),
-        Err(_) => return json_response!({ "error": "body not utf-8" }, 400),
+        Err(_) => return json_response!({ "error": "body not utf-8" }).map(|r| r.status(400)),
     };
 
     // Parse to validate the shape — endpoint, keys.p256dh, keys.auth.
     // If parsing fails, the browser handed us something malformed.
     let sub: SubscriptionInfo = match serde_json::from_str(&raw) {
         Ok(s) => s,
-        Err(e) => return json_response!({ "error": e.to_string() }, 400),
+        Err(e) => return json_response!({ "error": e.to_string() }).map(|r| r.status(400)),
     };
 
     // Persist `raw` verbatim — that's the exact string WebPushChannel
     // will hand to serde_json::from_str on dispatch.
     User::query()
-        .db_where("id", "=", user_id)
-        .update(attrs! { push_subscription_json: raw })
+        .db_where_op("id", "=", user_id)
+        .update_all(attrs! { push_subscription_json: raw })
         .await
         .unwrap();
 
