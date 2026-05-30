@@ -544,9 +544,9 @@ complete surface.
 ## Mutators — routed writes through your transform
 
 A mutator is the write-side counterpart. When the field's name appears
-in `#[model(mutators = [...])]`, every fill / create / update path
-routes the value through `self.set_<field>(value)?` instead of
-assigning the field directly.
+in `#[model(mutators = [...])]`, every mass-assignment path (`create` /
+`update`) routes the value through `self.set_<field>(value)?` instead
+of assigning the field directly.
 
 ```rust
 use serde_json::Value;
@@ -586,8 +586,8 @@ impl User {
 `set_password` receives a `serde_json::Value`. The body owns the
 deserialise + transform — the field type on the struct can stay
 `String`, and your validation runs before the column is touched.
-A returned error propagates through `create()` / `update()` /
-`fill()` as a `bad_request`.
+A returned error propagates through `create()` / `update()` as a
+`bad_request`.
 
 Direct field assignment bypasses the mutator:
 
@@ -598,13 +598,13 @@ user.save().await?;                 // saves "raw"
 
 This matches Laravel's `$user->password = ...` vs `$user->fill(...)`
 behaviour. When you want the mutator to be the only path, route
-all writes through `attrs!` + `fill` / `create` / `update`.
+all writes through `attrs!` + `create` / `update`.
 
 ### Combining mutators with casts
 
 A mutator and a cast can coexist on the same field; the mutator runs
-on the write path (when fill / create / update is called), the cast
-runs on the read path (when the column is materialised from a SELECT).
+on the write path (when `create` / `update` is called), the cast runs
+on the read path (when the column is materialised from a SELECT).
 A common pattern is to use `AsHashed` for the read-side idempotence
 guarantee and the mutator for write-side validation — the mutator
 hashes, `AsHashed` sees an already-hashed value and passes through.
@@ -699,7 +699,7 @@ in-memory copy via `replicate()`:
 
 ```rust
 let original = Post::find_or_fail(1).await?;
-let copy = original.replicate().await?;  // unsaved
+let mut copy = original.replicate().await?;  // unsaved
 copy.title = format!("{} (copy)", original.title);
 copy.save().await?;  // now persisted with a new PK
 ```
