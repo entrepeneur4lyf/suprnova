@@ -246,11 +246,12 @@ routes! {
 ## Authorization and cross-field hooks
 
 The `FormRequest` trait exposes three lifecycle hooks: `authorize`,
-`after_validation`, and `after_validation_async`. The `#[request]`
-attribute emits the `impl FormRequest` block for you, so overriding any
-of them means dropping to the derive form (`FormRequestDerive`) and
-writing the impl yourself — you cannot add a second `impl FormRequest`
-alongside one the attribute already wrote.
+`after_validation`, and `after_validation_async`. Both the `#[request]`
+attribute and the `#[derive(FormRequestDerive)]` form emit a default
+`impl FormRequest` for you. To override any hook, add the
+`#[form_request(custom_hooks)]` opt-out to suppress the default impl,
+then write your own. (This mirrors the `#[multipart(custom_hooks)]`
+pattern.)
 
 ```rust
 use suprnova::{FormRequest, FormRequestDerive, Request};
@@ -258,6 +259,7 @@ use serde::Deserialize;
 use validator::Validate;
 
 #[derive(Deserialize, Validate, FormRequestDerive)]
+#[form_request(custom_hooks)]
 pub struct DeleteUserRequest {
     pub user_id: i64,
 }
@@ -266,6 +268,25 @@ impl FormRequest for DeleteUserRequest {
     fn authorize(req: &Request) -> bool {
         // Return false to short-circuit with 403 Forbidden before the
         // body is read.
+        req.header("X-Admin-Token").is_some()
+    }
+}
+```
+
+The opt-out also works under the `#[request]` attribute form — useful
+when you want the attribute's auto-derives but need to override hooks:
+
+```rust
+use suprnova::{FormRequest, Request, request};
+
+#[request]
+#[form_request(custom_hooks)]
+pub struct DeleteUserRequestAttr {
+    pub user_id: i64,
+}
+
+impl FormRequest for DeleteUserRequestAttr {
+    fn authorize(req: &Request) -> bool {
         req.header("X-Admin-Token").is_some()
     }
 }
@@ -293,6 +314,7 @@ use serde::Deserialize;
 use validator::Validate;
 
 #[derive(Deserialize, Validate, FormRequestDerive)]
+#[form_request(custom_hooks)]
 pub struct UpdatePasswordRequest {
     #[validate(length(min = 8))]
     pub new_password: String,
