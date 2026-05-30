@@ -266,6 +266,18 @@ impl Http {
 /// installed, so nested guards compose correctly: dropping an inner guard
 /// returns the flag to whatever the outer scope had set, not
 /// unconditionally to "allowed".
+///
+/// # Parallel-task caveat
+///
+/// The underlying flag is a process-global `AtomicBool`, so parallel
+/// tasks that each install their own guard race on the same cell — an
+/// inner guard from one task can briefly relax the guard for another
+/// task that expects it to stay on. Process-global by design: this
+/// catches the exact failure it was built for (work `tokio::spawn`-ed
+/// out of a [`Http::fake`] scope hitting the real network). For
+/// parallel test isolation, prefer per-task fake scopes via
+/// [`Http::fake`] + [`Http::spawn_with_fake_inheritance`] instead of
+/// relying on the guard alone.
 #[must_use = "FailOnRealCallsGuard releases the guard on drop — bind it to a name"]
 pub struct FailOnRealCallsGuard {
     previous: bool,
