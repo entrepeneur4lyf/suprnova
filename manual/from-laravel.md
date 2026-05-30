@@ -16,18 +16,18 @@ shape, and the few things Rust gives you for free that PHP can't.
 | `Route::get('/posts/{id}', [PostController::class, 'show'])` | `get!("/posts/{id}", controllers::post::show)` (in `routes!`) |
 | `class Post extends Model` | `#[suprnova::model] struct Post { … }` |
 | `Post::find($id)` | `Post::find(id).await?` |
-| `Post::where('status', 'published')->get()` | `Post::query().db_where("status", "=", "published").get().await?` |
-| `Auth::user()` | `Auth::user(&req).await?` |
-| `Cache::remember('key', 60, fn() => …)` | `Cache::remember("key", 60, \|\| async { … }).await?` |
-| `Queue::push(new SendEmail($user))` | `Queue::dispatch(SendEmail { user_id }).await?` |
+| `Post::where('status', 'published')->get()` | `Post::query().db_where("status", "published").get().await?` |
+| `Auth::user()` | `Auth::user().await?` |
+| `Cache::remember('key', 60, fn() => …)` | `Cache::remember("key", Some(Duration::from_secs(60)), \|\| async { … }).await?` |
+| `Queue::push(new SendEmail($user))` | `Queue::push(SendEmail { user_id }).await?` |
 | `Mail::to($u)->send(new Welcome($u))` | `Mail::to(&u.email).send(WelcomeMail { user: u }).await?` |
-| `Storage::disk('s3')->put($path, $bytes)` | `Storage::disk("s3").put(&path, bytes).await?` |
-| `Notification::send($u, new Invoice($i))` | `Notification::send(&u, InvoiceNotification { invoice }).await?` |
+| `Storage::disk('s3')->put($path, $bytes)` | `Storage::disk("s3")?.put(&path, bytes).await?` |
+| `Notification::send($u, new Invoice($i))` | `Notify::send(&u, &InvoiceNotification { invoice }).await?` |
 | `Gate::allows('update', $post)` | `Gate::allows::<PostPolicy, _>("update", &user, &post).await?` |
-| `request()->validate([...])` | `req.validate::<MyForm>().await?` (via `#[derive(Data, Validate)]`) |
+| `request()->validate([...])` | `#[handler]` extracts an `#[derive(Data, Validate)]` arg directly |
 | `event(new OrderShipped($order))` | `Event::dispatch(OrderShipped { order }).await?` |
 | `Bus::dispatch(new ProcessFoo($x))` | `Bus::dispatch(ProcessFoo { x }).await?` |
-| `php artisan schedule:list` | `cargo run --bin console schedule:list` |
+| `php artisan schedule:list` | `suprnova schedule:list` |
 | `php artisan tinker` | (no REPL — write a one-off `cargo run` script or test) |
 | `composer require league/csv` | `cargo add csv` |
 
@@ -161,14 +161,17 @@ signature:
 use suprnova::handler;
 
 #[handler]
-pub async fn show(post: Post) -> Response {
+pub async fn show(post: post::Model) -> Response {
     // Route model binding ran automatically; `post` is the loaded row.
     json_response!({ "post": post })
 }
 ```
 
-If the row doesn't exist, the binding returns a 404 before your code
-runs — same behaviour as Laravel's implicit binding.
+The `post::Model` type comes from the model's generated module — that's
+the signal `#[handler]` uses to pick route model binding over the
+default form-request extraction. If the row doesn't exist, the binding
+returns a 404 before your code runs — same behaviour as Laravel's
+implicit binding.
 
 Action structs (single-method "invokable" controllers, Laravel-style) are
 supported too: see [Actions](actions.md).
@@ -181,7 +184,7 @@ names — both work, pick whichever reads cleanly at the call site.
 ```rust
 // Laravel surface
 let active = User::query()
-    .db_where("status", "=", "active")
+    .db_where("status", "active")
     .order_by_desc("created_at")
     .limit(20)
     .get()
@@ -189,7 +192,7 @@ let active = User::query()
 
 // Rust surface (identical result)
 let active = User::query()
-    .filter("status", "=", "active")
+    .filter("status", "active")
     .order_by_desc("created_at")
     .take(20)
     .get()
@@ -198,26 +201,26 @@ let active = User::query()
 
 `db_where` is the Laravel-side name (the bare `where` collides with the
 Rust keyword). `filter` is the Rust-idiomatic alias. Both exist; both
-do the same thing. See the [Eloquent reference](eloquent.md) — it's the
-longest chapter for a reason, the surface is wide.
+do the same thing. For non-equality operators, reach for `db_where_op`
+(or its `filter_op` alias): `.db_where_op("status", "!=", "archived")`.
+See the [Eloquent reference](eloquent.md) — it's the longest chapter
+for a reason, the surface is wide.
 
 ### Auth
 
 ```rust
-use suprnova::auth::Auth;
+use suprnova::{Auth, Credentials};
 
 // In a handler:
-let user = Auth::user(&req).await?;   // Authenticatable
-let id = user.get_auth_identifier();
+let user = Auth::user().await?;   // Option<Arc<dyn Authenticatable>>
+let id = user.as_ref().map(|u| u.get_auth_identifier());
 
 // Logging in (e.g. inside your login controller):
-Auth::attempt(&req, "alice@x.com", "secret").await?;
-
-// Switching context (impersonation, tests):
-Auth::user_as(&req, &other).await?;
+let creds = Credentials::password("alice@x.com", "secret");
+Auth::attempt(&creds, false).await?;
 
 // Logging out:
-Auth::logout(&req).await?;
+Auth::logout().await?;
 ```
 
 Guards, providers, sessions, remember-me, email verification, password
@@ -231,12 +234,13 @@ You write SeaORM migrators. The shape will look familiar even if the
 syntax is new:
 
 ```rust
-use suprnova::sea_orm_migration::prelude::*;
+use sea_orm_migration::prelude::*;
 
-pub struct M20260101_000001_CreatePostsTable;
+#[derive(DeriveMigrationName)]
+pub struct Migration;
 
 #[async_trait::async_trait]
-impl MigrationTrait for M20260101_000001_CreatePostsTable {
+impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager.create_table(
             Table::create()
@@ -264,53 +268,61 @@ See [Migrations](migrations.md).
 ### Queues and scheduling
 
 ```rust
-use suprnova::queue::Queue;
+use suprnova::{FrameworkError, Job, Queue, async_trait};
+use serde::{Deserialize, Serialize};
 
-// Define a job:
-#[derive(suprnova::Job, serde::Serialize, serde::Deserialize)]
+// Define a job — the data lives on the struct, the contract lives on
+// `impl Job`.
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SendWelcomeEmail {
     pub user_id: i64,
 }
 
-#[async_trait::async_trait]
-impl suprnova::queue::Handle for SendWelcomeEmail {
-    async fn handle(self) -> Result<(), suprnova::FrameworkError> {
+#[async_trait]
+impl Job for SendWelcomeEmail {
+    fn job_name() -> &'static str {
+        "SendWelcomeEmail"
+    }
+
+    async fn handle(self) -> Result<(), FrameworkError> {
         let user = User::find_or_fail(self.user_id).await?;
         Mail::to(&user.email).send(WelcomeMail { user }).await?;
         Ok(())
     }
 }
 
-// Dispatch it:
-Queue::dispatch(SendWelcomeEmail { user_id: user.id }).await?;
+// Push it onto the queue:
+Queue::push(SendWelcomeEmail { user_id: user.id }).await?;
 
-// Or with options:
-Queue::dispatch(SendWelcomeEmail { user_id })
-    .on_queue("low")
-    .delay(std::time::Duration::from_secs(60))
-    .await?;
+// Or with a delay:
+Queue::later(
+    std::time::Duration::from_secs(60),
+    SendWelcomeEmail { user_id },
+).await?;
 ```
 
 Workers run with `cargo run --bin console queue:work`. Drivers include
-sync (in-process, for tests), database, and redis. Batches, chains,
-unique jobs, retries, backoff, middleware, failed-job store — all there.
-See [Queues](queues.md).
+memory and sync (in-process, for tests), database, redis, and null.
+Batches, chains, unique jobs, retries, backoff, middleware, failed-job
+store — all there. See [Queues](queues.md).
 
-Scheduling uses the `#[derive(Task)]` derive and a per-project
-scheduler binary:
+Scheduling uses the `Task` trait and the per-project scheduler binary:
 
 ```rust
-#[derive(suprnova::Task)]
-#[task(cron = "0 3 * * *")]   // every day at 3am
+use suprnova::{Task, TaskResult, async_trait};
+
 pub struct DailyDigest;
 
-#[async_trait::async_trait]
-impl suprnova::schedule::Run for DailyDigest {
-    async fn run(&self) -> Result<(), suprnova::FrameworkError> {
+#[async_trait]
+impl Task for DailyDigest {
+    async fn handle(&self) -> TaskResult {
         // …
         Ok(())
     }
 }
+
+// Register inside bootstrap (e.g. via Schedule::call / .task / .add):
+//   schedule.add(schedule.task(DailyDigest).daily().at("03:00").name("daily-digest"));
 ```
 
 See [Task Scheduling](scheduling.md).
@@ -329,7 +341,7 @@ There's no Blade. Instead, the frontend is a real SPA via Inertia.js,
 and you pass typed props from Rust:
 
 ```rust
-use suprnova::{handler, inertia_response, InertiaProps};
+use suprnova::{inertia_response, InertiaProps, Request, Response};
 
 #[derive(InertiaProps, serde::Serialize)]
 pub struct ShowProps {
@@ -337,10 +349,11 @@ pub struct ShowProps {
     pub comments: Vec<Comment>,
 }
 
-#[handler]
-pub async fn show(post: Post) -> Response {
+pub async fn show(req: Request) -> Response {
+    let id: i64 = req.param("id").unwrap_or("0").parse().unwrap_or(0);
+    let post = Post::find_or_fail(id).await?;
     let comments = post.comments().get().await?;
-    inertia_response!("Posts/Show", ShowProps { post, comments })
+    inertia_response!(&req, "Posts/Show", ShowProps { post, comments })
 }
 ```
 
@@ -367,9 +380,11 @@ your app boots.
 
 ```rust
 // bootstrap.rs
+use std::sync::Arc;
+
 pub async fn bootstrap() -> Result<(), suprnova::FrameworkError> {
-    suprnova::App::bind(Arc::new(MyService::new()));
-    suprnova::Event::listen::<OrderShipped, _>(SendShipmentNotification);
+    suprnova::App::bind::<dyn MyService>(Arc::new(MyServiceImpl::new()));
+    suprnova::Event::listen::<OrderShipped, _>(Arc::new(SendShipmentNotification)).await;
     crate::observers::register();
     Ok(())
 }
@@ -396,7 +411,7 @@ Laravel facades like `DB::` are class-aliases configured in `config/app.php`.
 Suprnova facades are real modules at the crate root:
 
 ```rust
-use suprnova::{Auth, Cache, DB, Event, Gate, Mail, Notification, Queue, Schedule, Storage};
+use suprnova::{Auth, Cache, DB, Event, Gate, Mail, Notify, Queue, Schedule, Storage};
 ```
 
 Same surface, no global aliasing needed.
