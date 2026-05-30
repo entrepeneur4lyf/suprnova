@@ -1,250 +1,250 @@
 # Docker
 
-suprnova provides commands to generate Docker configuration files for both local development and production deployment.
+Suprnova ships two CLI commands that generate Docker artifacts you can
+adopt verbatim or modify. `docker:init` writes a multi-stage `Dockerfile`
++ `.dockerignore` for production. `docker:compose` writes a
+`docker-compose.yml` for local development services (database, cache, and
+optionally Mailpit + MinIO). Both commands write into the current project
+root; neither tries to drive your container runtime.
 
 ## docker:init
 
-Generate a production-ready, multi-stage Dockerfile optimized for Rust applications.
+Generate a production Dockerfile alongside a matching `.dockerignore`.
 
 ```bash
 suprnova docker:init
 ```
 
-### What It Creates
+The command refuses to overwrite an existing `Dockerfile`; remove the
+existing file first if you want to regenerate.
+
+### What gets written
 
 | File | Purpose |
 |------|---------|
-| `Dockerfile` | Multi-stage build for production |
-| `.dockerignore` | Excludes unnecessary files from build context |
+| `Dockerfile` | Three-stage build: frontend assets, Rust release binary, runtime image |
+| `.dockerignore` | Excludes `target/`, `node_modules/`, `.env*`, the existing build artifacts, and the Docker files themselves |
 
-### Dockerfile Features
+### Dockerfile shape
 
-The generated Dockerfile uses a multi-stage build for optimal image size:
+The generated Dockerfile uses three stages so the runtime image carries
+only the compiled binary plus its required shared libraries:
 
-1. **Stage 1: Frontend Build** - Builds the frontend assets using Node.js
-2. **Stage 2: Backend Build** - Compiles the Rust application with release optimizations
-3. **Stage 3: Runtime** - Minimal Debian-based image with only runtime dependencies
+1. **`frontend-builder`** — `node:20-alpine`. Installs npm deps and runs
+   `npm run build`, producing `frontend/dist`.
+2. **`backend-builder`** — `rust:1.75-slim-bookworm`. Caches `Cargo.toml`
+   + `Cargo.lock` as a dependency layer, then copies your `cmd/`, `src/`,
+   and the built `frontend/dist` (as `public/assets`) and runs
+   `cargo build --release`.
+3. **`runtime`** — `debian:bookworm-slim` with `ca-certificates` and
+   `libssl3`. Runs as a non-root `appuser`. Copies the binary in as
+   `./app` and the `public/` directory beside it. Exposes port 8080.
 
-```dockerfile
-# Stage 1: Build Frontend
-FROM node:20-alpine AS frontend-builder
-# ... builds frontend assets
-
-# Stage 2: Build Rust Backend
-FROM rust:1.75-slim-bookworm AS backend-builder
-# ... compiles Rust with cargo build --release
-
-# Stage 3: Runtime Image
-FROM debian:bookworm-slim AS runtime
-# ... minimal runtime with ca-certificates and libssl
-```
-
-### Building and Running
-
-After generating the Dockerfile:
+The final image's default `CMD` is `["./app"]`, which runs the unified
+binary's `serve` subcommand (web server with auto-migrations on
+startup). To run a different subcommand, override the command at
+`docker run` time:
 
 ```bash
-# Build the image
-docker build -t my-app .
-
-# Run the container
+# Web server (default)
 docker run -p 8080:8080 --env-file .env.production my-app
+
+# Run migrations only and exit
+docker run --env-file .env.production my-app ./app migrate
+
+# Run the scheduler daemon
+docker run --env-file .env.production my-app ./app schedule:work
+
+# Run the queue worker
+docker run --env-file .env.production my-app ./app queue:work
 ```
 
-> **Tip:**
->
-> Create a `.env.production` file with your production environment variables. Never commit this file to version control.
+Pass production config through `--env-file .env.production` or
+individual `-e` flags. `.env.production` should never be committed —
+it's already covered by the `.dockerignore`.
 
+### Bumping the Rust toolchain
 
----
+The Dockerfile pins `rust:1.75-slim-bookworm` for the build stage so a
+freshly-generated image is reproducible. Suprnova itself uses the 2024
+edition and needs **Rust 1.85+**, so update the `FROM` line before the
+first build:
+
+```dockerfile
+FROM rust:1.85-slim-bookworm AS backend-builder
+```
+
+Pin to whatever toolchain version matches what `rust-toolchain.toml` (if
+you have one) or your local `rustc --version` reports.
+
+### Why Suprnova diverges
+
+Laravel deployments typically run **multiple processes per container or
+host**: php-fpm for web, a queue worker, a scheduler, sometimes a
+Horizon dashboard, sometimes an Octane runner. Each one is its own
+service definition.
+
+Suprnova compiles to **one statically-linked binary** that knows every
+subcommand the framework ships — `serve`, `migrate`, `queue:work`,
+`schedule:work`, `workflow:work`, `ssr:start`. The same Docker image
+runs every role; the only thing that changes is the command. That makes
+"web + worker + scheduler" three services in your orchestrator that all
+point at the same image tag — one build to roll the entire app forward.
 
 ## docker:compose
 
-Generate a `docker-compose.yml` file for local development with common services.
+Generate a `docker-compose.yml` that brings up local development
+services.
 
 ```bash
 suprnova docker:compose [OPTIONS]
 ```
 
+Like `docker:init`, this refuses to overwrite an existing
+`docker-compose.yml`. It also appends `docker-compose.override.yml` to
+your `.gitignore` (if a `.gitignore` is present) so you can keep
+per-developer overrides locally without committing them.
+
 ### Options
 
 | Option | Description |
 |--------|-------------|
-| `--with-mailpit` | Include Mailpit email testing service |
-| `--with-minio` | Include MinIO S3-compatible storage service |
+| `--with-mailpit` | Include the Mailpit email-testing service |
+| `--with-minio` | Include MinIO (S3-compatible object storage) |
 
-### Default Services
+If you pass neither flag, the command prompts interactively for both.
+Passing either flag skips the prompt and uses the flag values you gave.
 
-PostgreSQL and Redis are always included:
+### What you always get
 
-| Service | Port | Description |
-|---------|------|-------------|
-| PostgreSQL | 5432 | Primary database |
-| Redis | 6379 | Caching and session storage |
+PostgreSQL and Redis are written into every generated compose file:
 
-### Optional Services
+| Service | Default port | Image |
+|---------|-------------:|-------|
+| PostgreSQL | 5432 | `postgres:16-alpine` |
+| Redis | 6379 | `redis:7-alpine` |
 
-When prompted (or using flags), you can add:
+Both services have health checks, persistent named volumes, and live on
+a project-scoped network (`<project>_network`). The Postgres user,
+password, and database default to `suprnova` / `suprnova_secret` /
+`suprnova_db`.
 
-| Service | Ports | Description |
-|---------|-------|-------------|
-| Mailpit | 1025 (SMTP), 8025 (UI) | Local email testing |
-| MinIO | 9000 (API), 9001 (Console) | S3-compatible object storage |
+### Optional services
 
-### Examples
+When you opt in:
 
-```bash
-# Interactive mode - prompts for optional services
-suprnova docker:compose
+| Service | Default ports | Image |
+|---------|--------------:|-------|
+| Mailpit | 1025 (SMTP), 8025 (UI) | `axllent/mailpit:latest` |
+| MinIO | 9000 (S3 API), 9001 (Console) | `minio/minio:latest` |
 
-# Include all optional services
-suprnova docker:compose --with-mailpit --with-minio
+Mailpit defaults to accepting any SMTP auth so you don't have to
+configure credentials during development; the web UI at
+`http://localhost:8025` shows every email your app sends. MinIO's
+default credentials are `minioadmin` / `minioadmin`.
 
-# Include only email testing
-suprnova docker:compose --with-mailpit
-```
-
-### Generated Configuration
-
-The generated `docker-compose.yml` includes:
-
-- **Environment variable defaults** - Uses `${VAR:-default}` syntax for easy customization
-- **Health checks** - All services include health checks for reliability
-- **Persistent volumes** - Data is preserved between container restarts
-- **Custom network** - Services communicate on an isolated network
-
-### Using the Services
-
-Start all services:
+### Running the stack
 
 ```bash
+# Bring everything up in the background
 docker compose up -d
-```
 
-Stop all services:
-
-```bash
-docker compose down
-```
-
-View logs:
-
-```bash
+# Tail logs
 docker compose logs -f
+
+# Stop and remove the containers (volumes persist)
+docker compose down
+
+# Remove volumes too (wipes the local database)
+docker compose down -v
 ```
 
-### Environment Configuration
+### Wiring `.env` to compose
 
-Update your `.env` file to use the Docker services:
+The compose file uses `${VAR:-default}` syntax everywhere, so you can
+override anything by setting it in `.env` or your shell. A typical
+`.env` for the default stack:
 
 ```env
-# PostgreSQL
 DATABASE_URL=postgres://suprnova:suprnova_secret@localhost:5432/suprnova_db
-
-# Redis (if using caching)
 REDIS_URL=redis://localhost:6379
 
 # Mailpit (if enabled)
+MAIL_DRIVER=smtp
 MAIL_HOST=localhost
 MAIL_PORT=1025
 
 # MinIO (if enabled)
+FILESYSTEM_DISK=s3
 S3_ENDPOINT=http://localhost:9000
 S3_ACCESS_KEY=minioadmin
 S3_SECRET_KEY=minioadmin
+S3_BUCKET=local
+S3_REGION=us-east-1
 ```
 
-### Customizing Ports
-
-Override default ports using environment variables:
+To override a port (e.g. because 5432 is already in use), set the
+matching env var before bringing the stack up:
 
 ```bash
-# In your shell or .env file
 DB_PORT=5433 docker compose up -d
-
-# Or set them in .env
-DB_PORT=5433
-REDIS_PORT=6380
-MAILPIT_SMTP_PORT=2025
-MAILPIT_UI_PORT=8026
-MINIO_API_PORT=9002
-MINIO_CONSOLE_PORT=9003
 ```
 
-### Service URLs
+The full set of overridable ports:
 
-After starting, access services at:
+| Variable | Service | Default |
+|----------|---------|--------:|
+| `DB_PORT` | PostgreSQL | 5432 |
+| `REDIS_PORT` | Redis | 6379 |
+| `MAILPIT_SMTP_PORT` | Mailpit SMTP | 1025 |
+| `MAILPIT_UI_PORT` | Mailpit UI | 8025 |
+| `MINIO_API_PORT` | MinIO S3 | 9000 |
+| `MINIO_CONSOLE_PORT` | MinIO Console | 9001 |
 
-| Service | URL |
-|---------|-----|
-| PostgreSQL | `localhost:5432` |
-| Redis | `localhost:6379` |
-| Mailpit UI | `http://localhost:8025` |
-| MinIO Console | `http://localhost:9001` |
+### Customising the compose file
 
-> **Note:**
->
-> Mailpit captures all outgoing emails from your application. Access the web UI to view sent emails during development.
+`docker-compose.yml` is yours to edit after generation — Suprnova
+doesn't regenerate or read it later. Common patches:
 
+- Swap `postgres:16-alpine` for `mysql:8` or `mariadb:11` if you prefer
+  one of those drivers; both are first-class in Suprnova
+- Add a `volumes:` entry that mounts your `migrations/` directory if you
+  want to run migrations inside a one-shot container
+- Add additional services (Qdrant, Elasticsearch, Nats) the same way
 
----
+## Production deployment
 
-## Unified Binary Commands
+For a real deployment, run `docker:init` and treat the generated
+`Dockerfile` as your build input. Most orchestrators (Railway, Fly,
+Digital Ocean App Platform, Kubernetes) just need three things:
 
-Your suprnova application builds to a single binary with multiple commands:
+1. The image tag built from this `Dockerfile`
+2. An env file with `DATABASE_URL`, `APP_KEY`, and any driver-specific
+   keys
+3. A health check pointing at `GET /_suprnova/health`
 
-```bash
-./app                    # Run web server with auto-migrate (default)
-./app serve              # Run web server with auto-migrate
-./app serve --no-migrate # Run web server without migrations
-./app migrate            # Run pending migrations
-./app schedule:work      # Run scheduler daemon
-```
+The single-binary shape means every role uses the same image; you
+declare a "web" service running `./app` and a "scheduler" or "worker"
+service running `./app schedule:work` (or `./app queue:work`). Both
+read the same env, so they stay in lockstep on every deploy.
 
-When running in Docker:
-
-```bash
-# Default - runs web server with auto-migrations
-docker run myapp
-
-# Run scheduler
-docker run myapp ./app schedule:work
-
-# Run migrations only
-docker run myapp ./app migrate
-```
-
----
-
-## Production Deployment
-
-For production deployment:
-
-1. **Generate Dockerfile**
-   ```bash
-   suprnova docker:init
-   ```
-
-2. **Build the image**
-   ```bash
-   docker build -t my-app .
-   ```
-
-3. **Run**
-   ```bash
-   docker run -d -p 8080:8080 --env-file .env.production my-app
-   ```
-
-> **Tip:**
->
-> For detailed deployment guides, see [Deployment Overview](deployment.md), [Railway](deployment-railway.md), or [Digital Ocean](deployment-digital-ocean.md).
-
-
----
+See [Deployment](deployment.md) for the platform-agnostic checklist,
+and the platform guides for fully-worked examples:
+[Railway](deployment-railway.md),
+[Digital Ocean](deployment-digital-ocean.md),
+[Hetzner VPS](deployment-hetzner.md).
 
 ## Summary
 
-| Command | Creates | Purpose |
-|---------|---------|---------|
-| `docker:init` | `Dockerfile`, `.dockerignore` | Production deployment |
-| `docker:compose` | `docker-compose.yml` | Local development services |
+| Command | Writes | When to use |
+|---------|--------|-------------|
+| `suprnova docker:init` | `Dockerfile`, `.dockerignore` | Building production images |
+| `suprnova docker:compose` | `docker-compose.yml` | Bringing up local Postgres/Redis/Mailpit/MinIO |
+
+## Next
+
+- [Deployment](deployment.md) — the platform-agnostic deployment checklist
+- [Railway](deployment-railway.md) — managed PaaS with build-from-git
+- [Digital Ocean](deployment-digital-ocean.md) — App Platform deploys
+- [Hetzner VPS](deployment-hetzner.md) — bare-metal with systemd + Caddy
+- [Environment Variables](env-vars.md) — every key the framework reads
