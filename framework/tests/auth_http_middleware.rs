@@ -44,9 +44,6 @@ static SETUP: Lazy<()> = Lazy::new(|| {
 struct TestUser;
 
 impl Authenticatable for TestUser {
-    fn auth_identifier(&self) -> i64 {
-        7
-    }
     fn get_auth_identifier(&self) -> String {
         "7".to_string()
     }
@@ -98,6 +95,29 @@ impl Middleware for LoginAsUser {
     async fn handle(&self, request: Request, next: Next) -> Response {
         Auth::set_user(the_user());
         next(request).await
+    }
+}
+
+/// Test-only stand-in for `SessionMiddleware`: installs the session and
+/// pending-cookies task-locals so anything inside `next` can call
+/// `Auth::login_id` / `Auth::login_remember` without persisting to a real
+/// session store. Used by the `BasicAuthMiddleware::new()` (stateful)
+/// integration tests: that flow calls `Auth::login_id`, which now returns
+/// `Err` when called outside a session scope. The fake scope makes the
+/// session writes succeed; the test only cares about the HTTP status the
+/// middleware returns, not what landed in the store.
+struct FakeSessionScope;
+
+#[async_trait::async_trait]
+impl Middleware for FakeSessionScope {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        let session = suprnova::session::new_session_slot_for_test();
+        let pending = suprnova::session::new_pending_cookies_slot_for_test();
+        suprnova::session::session_scope_for_test(
+            session,
+            suprnova::session::pending_cookies_scope_for_test(pending, next(request)),
+        )
+        .await
     }
 }
 
@@ -279,7 +299,14 @@ async fn basic_wrong_password_challenges_401() {
 #[tokio::test]
 async fn basic_stateful_valid_credentials_reach_handler() {
     Lazy::force(&SETUP);
-    let registry = MiddlewareRegistry::new().append(BasicAuthMiddleware::new());
+    // BasicAuthMiddleware::new() is the stateful variant — on a credential
+    // match it persists the user into the session via `Auth::login_id`.
+    // That now requires a SessionMiddleware-equivalent task-local scope
+    // upstream; FakeSessionScope provides the slot without binding a real
+    // store driver to keep the test hermetic.
+    let registry = MiddlewareRegistry::new()
+        .append(FakeSessionScope)
+        .append(BasicAuthMiddleware::new());
     let addr = spawn_server(router(), registry, 1).await;
 
     let (status, _headers, body) = request(

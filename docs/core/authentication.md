@@ -66,10 +66,12 @@ Auth::logout().await?;
 
 If you have already verified a user's identity yourself and only need to
 establish the session, use the synchronous primitive `Auth::login_id(id)` — it
-writes the session id without a provider, an `AuthManager`, or events:
+writes the session id without a provider, an `AuthManager`, or events.
+Returns `Err` when called outside a request scope (no `SessionMiddleware`
+installed) so a silently-dropped login can never look like success:
 
 ```rust
-Auth::login_id(user.id.to_string());
+Auth::login_id(user.id.to_string())?;
 ```
 
 ## Getting the Current User
@@ -119,14 +121,10 @@ use suprnova::Authenticatable;
 use std::any::Any;
 
 impl Authenticatable for Model {
-    fn auth_identifier(&self) -> i64 {
-        self.id
-    }
-
-    /// The identifier as a string — this is the canonical value stored in the
-    /// session and used as the guard key (Laravel's `getAuthIdentifier`).
-    /// The default stringifies `auth_identifier`; override it for UUID or
-    /// other non-integer keys.
+    /// The identifier as a string — the canonical value stored in the session
+    /// and used as the guard key (Laravel's `getAuthIdentifier`). Numeric
+    /// primary keys stringify trivially; UUIDs / ULIDs / opaque
+    /// external-provider ids flow through unchanged.
     fn get_auth_identifier(&self) -> String {
         self.id.to_string()
     }
@@ -142,6 +140,11 @@ impl Authenticatable for Model {
     }
 }
 ```
+
+The optional `auth_identifier() -> i64` method is a convenience for apps whose
+id is a signed integer primary key — Suprnova itself never calls it. The
+default parses `get_auth_identifier`, falling back to `0` for non-numeric ids.
+Override it for free when your model already holds an `i64`.
 
 `get_auth_identifier` (a `String`) is the surface the guard and session use;
 `auth_identifier` (an `i64`) is a Suprnova convenience that defaults the string
@@ -336,7 +339,10 @@ pub async fn login(req: Request) -> Response {
     }
 
     // Establish the session for this id (sync primitive — no provider needed).
-    Auth::login_id(user.id.to_string());
+    // The `?` propagates an `Err` if the request is missing its
+    // `SessionMiddleware` scope, so a silently-dropped login never reaches
+    // the redirect.
+    Auth::login_id(user.id.to_string())?;
 
     redirect!("/dashboard")
 }

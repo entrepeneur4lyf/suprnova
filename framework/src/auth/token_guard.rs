@@ -113,9 +113,6 @@ mod tests {
     }
 
     impl Authenticatable for TestUser {
-        fn auth_identifier(&self) -> i64 {
-            self.id.parse().unwrap_or(0)
-        }
         fn get_auth_identifier(&self) -> String {
             self.id.clone()
         }

@@ -59,9 +59,6 @@ static SETUP: Lazy<()> = Lazy::new(|| {
 struct UserById(String);
 
 impl Authenticatable for UserById {
-    fn auth_identifier(&self) -> i64 {
-        0
-    }
     fn get_auth_identifier(&self) -> String {
         self.0.clone()
     }

@@ -50,16 +50,12 @@ impl GenericUser {
 }
 
 impl Authenticatable for GenericUser {
-    /// The integer form of the id.
-    ///
-    /// `GenericUser` ids are strings (the row's identifier column), so this
-    /// parses and falls back to `0` for non-numeric ids (UUIDs, opaque torii
-    /// ids). Prefer [`get_auth_identifier`](Authenticatable::get_auth_identifier),
-    /// which returns the original string, as the canonical id surface.
-    fn auth_identifier(&self) -> i64 {
-        self.id.parse().unwrap_or(0)
-    }
-
+    /// Returns the original string id — `GenericUser`'s identifier
+    /// column is stored as a string, so the canonical
+    /// [`Authenticatable::get_auth_identifier`] surface is a clone of
+    /// the stored value. The optional integer form falls back to the
+    /// trait default, which parses this string (returning `0` for
+    /// non-numeric ids like UUIDs and opaque torii ids).
     fn get_auth_identifier(&self) -> String {
         self.id.clone()
     }

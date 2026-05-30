@@ -21,9 +21,6 @@ pub struct TestUser {
 }
 
 impl Authenticatable for TestUser {
-    fn auth_identifier(&self) -> i64 {
-        self.id
-    }
     fn get_auth_identifier(&self) -> String {
         self.id.to_string()
     }

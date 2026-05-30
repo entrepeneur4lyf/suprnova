@@ -44,15 +44,42 @@ tokio::task_local! {
 /// slot after the handler returns and attaches every cookie to the
 /// response.
 ///
-/// If called outside a request scope (no `PENDING_COOKIES` task-local
-/// installed — e.g. unit tests without the middleware) the cookie is
-/// silently dropped. Production code always runs through
-/// `SessionMiddleware::handle`, which installs the slot.
+/// Returns `true` when the cookie was queued and `false` when the
+/// `PENDING_COOKIES` task-local was not installed (e.g. a unit test
+/// running without the session middleware). Callers that have
+/// already done side-effecting work — issuing a DB row, rotating a
+/// token — must check the result and either roll back or fail loud:
+/// dropping the cookie silently leaves the client without the durable
+/// half of the credential.
+#[must_use = "callers that already committed side effects (DB rows, token rotations) must check whether the cookie was actually queued"]
 #[allow(dead_code)]
-pub(crate) fn push_pending_cookie(cookie: Cookie) {
-    let _ = PENDING_COOKIES.try_with(|slot| {
-        slot.lock().unwrap().push(cookie);
-    });
+pub(crate) fn push_pending_cookie(cookie: Cookie) -> bool {
+    PENDING_COOKIES
+        .try_with(|slot| {
+            slot.lock().unwrap().push(cookie);
+        })
+        .is_ok()
+}
+
+/// Whether the per-request pending-cookies slot is installed.
+///
+/// Lets callers pre-check **before** doing irreversible work (DB inserts,
+/// token rotation) that the cookie they're about to queue will actually
+/// reach the response. Pairs with [`push_pending_cookie`] for the
+/// "atomic credential issue" path: bail before the side effect if the
+/// scope is absent rather than after, so a dropped cookie can never
+/// leave an orphan DB row behind.
+pub(crate) fn pending_cookies_scope_installed() -> bool {
+    PENDING_COOKIES.try_with(|_| ()).is_ok()
+}
+
+/// Whether the per-request session slot is installed.
+///
+/// Pre-check for sync session-mutating primitives (`Auth::login_id`)
+/// that need to refuse a silent no-op when called outside a request
+/// scope. Mirrors [`pending_cookies_scope_installed`].
+pub(crate) fn session_scope_installed() -> bool {
+    SESSION_CONTEXT.try_with(|_| ()).is_ok()
 }
 
 /// Get the current session (read-only)

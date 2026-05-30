@@ -34,8 +34,9 @@ use crate::events::EventFacade;
 /// Auth::attempt(&Credentials::password(email, password), remember).await?;
 ///
 /// // Or establish the session directly from a known id (sync primitive:
-/// // no provider, no AuthManager, no events).
-/// Auth::login_id(user_id.to_string());
+/// // no provider, no AuthManager, no events). Returns Err when called
+/// // outside a request scope.
+/// Auth::login_id(user_id.to_string())?;
 ///
 /// // Log out — clears the session + request user, revokes remember-me,
 /// // and fires Logout.
@@ -71,11 +72,28 @@ impl Auth {
     /// remember-me, provider resolution — use [`login`](Self::login),
     /// [`attempt`](Self::attempt), or [`login_using_id`](Self::login_using_id).
     ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::internal`] when called outside a request
+    /// scope (no [`SessionMiddleware`](crate::SessionMiddleware) installed,
+    /// or a unit test that forgot to wrap the call in
+    /// [`crate::session::session_scope_for_test`]). The previous infallible
+    /// signature silently dropped the write — a "successful login" that
+    /// never landed — which the caller had no way to detect.
+    ///
     /// # Security
     ///
     /// Regenerates the session ID to prevent session fixation, and rotates the
     /// CSRF token.
-    pub fn login_id(user_id: impl Into<String>) {
+    pub fn login_id(user_id: impl Into<String>) -> Result<(), crate::error::FrameworkError> {
+        if !crate::session::middleware::session_scope_installed() {
+            return Err(crate::error::FrameworkError::internal(
+                "Auth::login_id called outside a request scope: no SessionMiddleware is \
+                 active (or the test forgot session_scope_for_test). The session write \
+                 would have been dropped silently.",
+            ));
+        }
+
         // Regenerate session ID to prevent session fixation
         regenerate_session_id();
 
@@ -86,6 +104,8 @@ impl Auth {
         session_mut(|session| {
             session.csrf_token = generate_csrf_token();
         });
+
+        Ok(())
     }
 
     /// Log in a user AND issue a remember-me token.
@@ -115,8 +135,10 @@ impl Auth {
         ttl_minutes: i64,
     ) -> Result<(), crate::error::FrameworkError> {
         let user_id = user_id.into();
-        // Regular session login (regen session id + CSRF, set user).
-        Self::login_id(user_id.clone());
+        // Regular session login (regen session id + CSRF, set user). This
+        // also verifies the session scope is installed — failing loud here
+        // before the DB row gets written by `issue_remember_cookie`.
+        Self::login_id(user_id.clone())?;
         // Issue the row + queue the cookie.
         Self::issue_remember_cookie(&user_id, ttl_minutes).await
     }
@@ -142,6 +164,21 @@ impl Auth {
         user_id: &str,
         ttl_minutes: i64,
     ) -> Result<(), crate::error::FrameworkError> {
+        // Pre-flight: refuse to insert the DB row when no pending-cookies
+        // scope is installed. Otherwise `push_pending_cookie` below would
+        // silently drop the cookie and the row would be orphaned — the
+        // client receives no durable login state but the database holds
+        // a live token. Single task = task-local cannot vanish mid-fn,
+        // so no TOCTOU between this check and the push.
+        if !crate::session::middleware::pending_cookies_scope_installed() {
+            return Err(crate::error::FrameworkError::internal(
+                "Auth::issue_remember_cookie called outside a request scope: no \
+                 SessionMiddleware is active (or the test forgot \
+                 pending_cookies_scope_for_test). Refusing to insert a remember-me \
+                 row that would orphan when the cookie cannot reach the response.",
+            ));
+        }
+
         // Issue the row. Returns the plaintext destined for the cookie.
         let plaintext = super::remember::issue(user_id, ttl_minutes).await?;
 
@@ -154,7 +191,14 @@ impl Auth {
             std::time::Duration::from_secs((ttl_minutes.max(0) as u64).saturating_mul(60));
         let cookie =
             crate::session::middleware::create_remember_cookie(&config, &plaintext, max_age)?;
-        crate::session::middleware::push_pending_cookie(cookie);
+        let queued = crate::session::middleware::push_pending_cookie(cookie);
+        // The pre-flight above guarantees `queued == true`; the assert is
+        // a belt-and-suspenders against future refactors removing the
+        // pre-flight without removing the row write.
+        debug_assert!(
+            queued,
+            "pending-cookies scope was installed at pre-flight but lost by push time"
+        );
 
         Ok(())
     }
@@ -240,7 +284,12 @@ impl Auth {
     fn queue_remember_clear_cookie() {
         let config = crate::session::SessionConfig::from_env();
         let clear = crate::session::middleware::create_forget_remember_cookie(&config);
-        crate::session::middleware::push_pending_cookie(clear);
+        // A clear cookie is a defensive add — when there is no scope to push
+        // into (no SessionMiddleware) there is no orphan state to worry about,
+        // and the browser simply keeps whatever stale cookie it held. Dropping
+        // the result here is intentional, unlike the issue path which gates a
+        // DB row write on the push succeeding.
+        let _ = crate::session::middleware::push_pending_cookie(clear);
     }
 
     /// Tear down all authentication state for the current request: revoke the
@@ -729,9 +778,6 @@ mod tests {
     #[derive(Clone)]
     struct TestUser;
     impl Authenticatable for TestUser {
-        fn auth_identifier(&self) -> i64 {
-            7
-        }
         fn get_auth_identifier(&self) -> String {
             "7".to_string()
         }
@@ -869,5 +915,71 @@ mod tests {
             );
         })
         .await;
+    }
+
+    // `login_id` writes into the session via the per-request task-local. Inside
+    // a session scope it must succeed AND the write must be visible via
+    // `Auth::id()`. The audit's "silent no-op" was that the write disappeared
+    // when the scope was absent — that case is the next test.
+    #[tokio::test]
+    async fn login_id_succeeds_inside_session_scope() {
+        let slot = crate::session::new_session_slot_for_test();
+        crate::session::session_scope_for_test(slot, async {
+            Auth::login_id("alice-42").expect("login_id should succeed inside a session scope");
+            // The id surfaces immediately via the session-backed read path.
+            assert_eq!(Auth::id(), Some("alice-42".to_string()));
+        })
+        .await;
+    }
+
+    // Outside a session scope `login_id` previously dropped the write and still
+    // returned `()`. It must now return a loud `Err` so the caller cannot
+    // mistake a no-op for a successful login.
+    #[tokio::test]
+    async fn login_id_errors_outside_session_scope() {
+        let err = Auth::login_id("alice-42")
+            .expect_err("login_id outside a session scope must error, not silently no-op");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("login_id") && msg.contains("session"),
+            "error must point at the cause; got: {msg}"
+        );
+    }
+
+    // `issue_remember_cookie` writes a DB row AND queues a cookie. With no
+    // pending-cookies scope installed, the cookie would be dropped — the
+    // audit's orphan-token bug. It must pre-flight and refuse before the
+    // row write, so this test only needs a session scope to exercise the
+    // pending-cookies absence (we never reach the DB).
+    #[tokio::test]
+    async fn issue_remember_cookie_errors_without_pending_cookies_scope() {
+        let slot = crate::session::new_session_slot_for_test();
+        crate::session::session_scope_for_test(slot, async {
+            let err = Auth::issue_remember_cookie("alice-42", 60)
+                .await
+                .expect_err("issue_remember_cookie without pending-cookies scope must error");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("issue_remember_cookie") && msg.contains("scope"),
+                "error must point at the cause; got: {msg}"
+            );
+        })
+        .await;
+    }
+
+    // `login_remember` is the public entry. It calls `login_id` first, so
+    // the no-session-scope case errors out before the row write — the same
+    // fail-loud guarantee. The pending-cookies path is exercised in
+    // `tests/remember_me.rs` against a live DB.
+    #[tokio::test]
+    async fn login_remember_errors_outside_session_scope() {
+        let err = Auth::login_remember("alice-42", 60)
+            .await
+            .expect_err("login_remember outside a session scope must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("login_id") && msg.contains("session"),
+            "error must point at the underlying login_id cause; got: {msg}"
+        );
     }
 }

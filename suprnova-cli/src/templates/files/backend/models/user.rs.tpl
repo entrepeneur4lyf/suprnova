@@ -81,8 +81,8 @@ impl User {
 }
 
 impl Authenticatable for User {
-    fn auth_identifier(&self) -> i64 {
-        self.id
+    fn get_auth_identifier(&self) -> String {
+        self.id.to_string()
     }
 
     fn auth_identifier_name(&self) -> &'static str {

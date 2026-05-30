@@ -204,7 +204,7 @@ impl StatefulGuard for SessionGuard {
         if remember {
             Auth::login_remember(user_id.clone(), self.remember_ttl_minutes).await?;
         } else {
-            Auth::login_id(user_id.clone());
+            Auth::login_id(user_id.clone())?;
         }
 
         // Cache the resolved user for the rest of the request.
@@ -293,9 +293,6 @@ mod tests {
     }
 
     impl Authenticatable for TestUser {
-        fn auth_identifier(&self) -> i64 {
-            self.id.parse().unwrap_or(0)
-        }
         fn get_auth_identifier(&self) -> String {
             self.id.clone()
         }
