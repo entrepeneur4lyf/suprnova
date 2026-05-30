@@ -286,7 +286,7 @@ For bulk seeding where that fanout is unwanted, wrap the loop in
 ```rust
 seed::without_events(async {
     for i in 0..50 {
-        User::create(User { id: 0, name: format!("user{i}"), ..Default::default() }).await?;
+        User::create(attrs! { name: format!("user{i}"), email: format!("user{i}@example.com") }).await?;
     }
     Ok::<_, FrameworkError>(())
 }).await?;
