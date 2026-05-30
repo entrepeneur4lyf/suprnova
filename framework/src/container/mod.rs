@@ -112,6 +112,34 @@ enum Binding {
     Factory(Arc<dyn Fn() -> Arc<dyn Any + Send + Sync> + Send + Sync>),
 }
 
+impl Binding {
+    /// Resolve this binding to a concrete `T: Clone` value. Lock-free: the
+    /// caller is expected to have already cloned the binding out of the
+    /// container's `RwLock` (see [`Container::binding`]) so factory
+    /// closures do not run while a read or write guard is held.
+    fn resolve_concrete<T: Any + Send + Sync + Clone + 'static>(&self) -> Option<T> {
+        match self {
+            Binding::Singleton(arc) => arc.downcast_ref::<T>().cloned(),
+            Binding::Factory(factory) => {
+                let arc = factory();
+                arc.downcast_ref::<T>().cloned()
+            }
+        }
+    }
+
+    /// Resolve this binding to an `Arc<T>` trait object. Lock-free; see
+    /// [`Binding::resolve_concrete`] for the lock-handling contract.
+    fn resolve_make<T: ?Sized + Send + Sync + 'static>(&self) -> Option<Arc<T>> {
+        match self {
+            Binding::Singleton(arc) => arc.downcast_ref::<Arc<T>>().cloned(),
+            Binding::Factory(factory) => {
+                let arc = factory();
+                arc.downcast_ref::<Arc<T>>().cloned()
+            }
+        }
+    }
+}
+
 /// The main service container
 ///
 /// Stores type-erased bindings keyed by TypeId. Supports both concrete types
@@ -237,6 +265,15 @@ impl Container {
         self.bindings.insert(type_id, Binding::Factory(wrapped));
     }
 
+    /// Clone the binding for `type_id` out of the map. Returned `Binding`
+    /// is cheap to clone (both variants are `Arc`s) and can be resolved
+    /// after any surrounding lock has been released — used by `App::get`
+    /// and `App::make` to avoid running factory closures while a read
+    /// guard on the container is still alive.
+    fn binding(&self, type_id: TypeId) -> Option<Binding> {
+        self.bindings.get(&type_id).cloned()
+    }
+
     /// Resolve a concrete type (requires Clone)
     ///
     /// # Example
@@ -244,13 +281,7 @@ impl Container {
     /// let db: DatabaseConnection = container.get().unwrap();
     /// ```
     pub fn get<T: Any + Send + Sync + Clone + 'static>(&self) -> Option<T> {
-        match self.bindings.get(&TypeId::of::<T>())? {
-            Binding::Singleton(arc) => arc.downcast_ref::<T>().cloned(),
-            Binding::Factory(factory) => {
-                let arc = factory();
-                arc.downcast_ref::<T>().cloned()
-            }
-        }
+        self.binding(TypeId::of::<T>())?.resolve_concrete::<T>()
     }
 
     /// Resolve a trait binding - returns Arc<T>
@@ -260,17 +291,7 @@ impl Container {
     /// let client: Arc<dyn HttpClient> = container.make::<dyn HttpClient>().unwrap();
     /// ```
     pub fn make<T: ?Sized + Send + Sync + 'static>(&self) -> Option<Arc<T>> {
-        let type_id = TypeId::of::<Arc<T>>();
-        match self.bindings.get(&type_id)? {
-            Binding::Singleton(arc) => {
-                // The stored value is Arc<Arc<T>>, so we downcast and clone the inner Arc
-                arc.downcast_ref::<Arc<T>>().cloned()
-            }
-            Binding::Factory(factory) => {
-                let arc = factory();
-                arc.downcast_ref::<Arc<T>>().cloned()
-            }
-        }
+        self.binding(TypeId::of::<Arc<T>>())?.resolve_make::<T>()
     }
 
     /// Check if a concrete type is registered
@@ -458,37 +479,50 @@ impl App {
     /// in one registration does not turn every later resolution into a
     /// silent service-not-found.
     ///
+    /// Factory closures run AFTER the container lock is released. The
+    /// binding is cloned out from under the read guard and only then
+    /// invoked, so a factory may safely call back into `App::*` or run
+    /// arbitrarily expensive work without blocking concurrent writers
+    /// or deadlocking against a re-entrant write.
+    ///
     /// # Example
     /// ```rust,ignore
     /// let db: DatabaseConnection = App::get().unwrap();
     /// ```
     pub fn get<T: Any + Send + Sync + Clone + 'static>() -> Option<T> {
-        // Task-local first (async-safe).
-        if let Some(t) = TASK_CONTAINER
-            .try_with(|c| c.read().unwrap_or_else(|e| e.into_inner()).get::<T>())
+        let type_id = TypeId::of::<T>();
+
+        // Task-local first (async-safe). Clone the binding out from under
+        // the read guard so any factory closure runs lock-free — otherwise
+        // a factory that re-enters `App::*` (or any writer) would deadlock,
+        // and an expensive factory would needlessly block container mutation.
+        if let Some(binding) = TASK_CONTAINER
+            .try_with(|c| c.read().unwrap_or_else(|e| e.into_inner()).binding(type_id))
             .ok()
             .flatten()
         {
-            return Some(t);
+            return binding.resolve_concrete::<T>();
         }
 
-        // Thread-local second (sync / current_thread compat).
-        let test_result = TEST_CONTAINER.with(|c| {
+        // Thread-local second (sync / current_thread compat). RefCell so
+        // there's no cross-thread guard, but we extract the binding before
+        // invoking it to keep the resolution shape uniform across layers.
+        let test_binding = TEST_CONTAINER.with(|c| {
             c.borrow()
                 .as_ref()
-                .and_then(|container| container.get::<T>())
+                .and_then(|container| container.binding(type_id))
         });
-
-        if test_result.is_some() {
-            return test_result;
+        if let Some(binding) = test_binding {
+            return binding.resolve_concrete::<T>();
         }
 
-        // Fall back to global container.
+        // Fall back to global container. Same extract-then-drop-lock shape.
         let container = APP_CONTAINER.get()?;
-        container
+        let binding = container
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .get::<T>()
+            .binding(type_id)?;
+        binding.resolve_concrete::<T>()
     }
 
     /// Resolve a trait binding - returns Arc<T>.
@@ -504,37 +538,45 @@ impl App {
     /// in one registration does not turn every later resolution into a
     /// silent service-not-found.
     ///
+    /// Factory closures run AFTER the container lock is released — see
+    /// [`App::get`] for the full contract; the same guarantee holds for
+    /// trait factories registered via [`App::bind_factory`].
+    ///
     /// # Example
     /// ```rust,ignore
     /// let client: Arc<dyn HttpClient> = App::make::<dyn HttpClient>().unwrap();
     /// ```
     pub fn make<T: ?Sized + Send + Sync + 'static>() -> Option<Arc<T>> {
-        // Task-local first (async-safe).
-        if let Some(t) = TASK_CONTAINER
-            .try_with(|c| c.read().unwrap_or_else(|e| e.into_inner()).make::<T>())
+        let type_id = TypeId::of::<Arc<T>>();
+
+        // Task-local first (async-safe). Same extract-then-drop-lock shape
+        // as `App::get` so factory closures that re-enter `App::*` cannot
+        // deadlock against a held read guard.
+        if let Some(binding) = TASK_CONTAINER
+            .try_with(|c| c.read().unwrap_or_else(|e| e.into_inner()).binding(type_id))
             .ok()
             .flatten()
         {
-            return Some(t);
+            return binding.resolve_make::<T>();
         }
 
         // Thread-local second (sync / current_thread compat).
-        let test_result = TEST_CONTAINER.with(|c| {
+        let test_binding = TEST_CONTAINER.with(|c| {
             c.borrow()
                 .as_ref()
-                .and_then(|container| container.make::<T>())
+                .and_then(|container| container.binding(type_id))
         });
-
-        if test_result.is_some() {
-            return test_result;
+        if let Some(binding) = test_binding {
+            return binding.resolve_make::<T>();
         }
 
         // Fall back to global container.
         let container = APP_CONTAINER.get()?;
-        container
+        let binding = container
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .make::<T>()
+            .binding(type_id)?;
+        binding.resolve_make::<T>()
     }
 
     /// Resolve a concrete type, returning an error if not found
@@ -963,6 +1005,150 @@ mod poison_tests {
         assert!(
             read.is_none(),
             "legacy `read().ok()?` returned None on poison"
+        );
+    }
+}
+
+#[cfg(test)]
+mod lock_release_tests {
+    //! Factory closures must run AFTER the container read lock has been
+    //! released. `App::get`/`App::make` clone the binding out from under
+    //! the guard via `Container::binding(type_id)` and only then invoke
+    //! the factory — otherwise a factory that re-enters `App::*` (or any
+    //! writer that needs the lock) would deadlock, and an expensive
+    //! factory would needlessly block container mutation.
+    //!
+    //! The tests below mirror the production extract-drop-resolve path
+    //! on a fresh `Arc<RwLock<Container>>` so they don't touch the
+    //! process-global `APP_CONTAINER`. `try_write` is used in the probe
+    //! so a regression returns `WouldBlock` immediately instead of
+    //! hanging the test runner.
+    use super::*;
+    use std::sync::RwLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct Probe(u32);
+
+    #[test]
+    fn factory_runs_without_read_guard_held() {
+        let lock = Arc::new(RwLock::new(Container::new()));
+
+        // Probe lock the factory will try to write-lock. If the
+        // production path still held a read guard on `lock` during the
+        // factory invocation, registering the factory with a closure
+        // that probes `lock` itself would be the natural test — but
+        // that mixes "binding storage" with "deadlock surface". Use a
+        // dedicated probe lock instead so the assertion is unambiguous:
+        // the factory must observe that the container lock is free.
+        let probe_container = Arc::clone(&lock);
+        let saw_lock_free = Arc::new(AtomicBool::new(false));
+        let saw_lock_free_in = Arc::clone(&saw_lock_free);
+
+        {
+            let mut c = lock.write().unwrap();
+            c.factory(move || {
+                // While this closure runs we must NOT be holding a read
+                // guard on the container — assert by trying to acquire
+                // a write guard. `try_write` is non-blocking, so a
+                // regression to the old "factory inside read guard"
+                // shape returns `WouldBlock` instead of hanging.
+                let free = probe_container.try_write().is_ok();
+                saw_lock_free_in.store(free, Ordering::SeqCst);
+                Probe(123)
+            });
+        }
+
+        // Mirror the production extract-drop-resolve path one-to-one.
+        let type_id = TypeId::of::<Probe>();
+        let binding = lock
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .binding(type_id)
+            .expect("factory binding must be registered");
+        // Lock guard drops at end of previous statement (temporary
+        // expression). The binding clone is what we hand to the factory.
+        let resolved = binding.resolve_concrete::<Probe>();
+
+        assert_eq!(resolved, Some(Probe(123)));
+        assert!(
+            saw_lock_free.load(Ordering::SeqCst),
+            "factory closure must run AFTER the container read guard is released",
+        );
+    }
+
+    /// Pin the bad shape: holding the read guard for the entire
+    /// resolution (the pre-fix structure) would prevent a concurrent
+    /// writer from making progress while the factory is running.
+    #[test]
+    fn legacy_factory_inside_read_guard_blocks_writers() {
+        let lock = Arc::new(RwLock::new(Container::new()));
+        let probe_container = Arc::clone(&lock);
+        let saw_lock_free = Arc::new(AtomicBool::new(false));
+        let saw_lock_free_in = Arc::clone(&saw_lock_free);
+
+        {
+            let mut c = lock.write().unwrap();
+            c.factory(move || {
+                let free = probe_container.try_write().is_ok();
+                saw_lock_free_in.store(free, Ordering::SeqCst);
+                Probe(7)
+            });
+        }
+
+        // Pre-fix shape: invoke the factory WHILE the read guard is
+        // still alive (the guard is a temporary that lives to the end
+        // of the chained call).
+        let _resolved = lock
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get::<Probe>();
+
+        assert!(
+            !saw_lock_free.load(Ordering::SeqCst),
+            "legacy chained `read()...get()` keeps the guard alive while the factory runs — \
+             production now extracts the binding first and drops the guard",
+        );
+    }
+
+    #[test]
+    fn make_factory_runs_without_read_guard_held() {
+        trait Greeter: Send + Sync {
+            fn hello(&self) -> &'static str;
+        }
+        struct Hi;
+        impl Greeter for Hi {
+            fn hello(&self) -> &'static str {
+                "hi"
+            }
+        }
+
+        let lock = Arc::new(RwLock::new(Container::new()));
+        let probe_container = Arc::clone(&lock);
+        let saw_lock_free = Arc::new(AtomicBool::new(false));
+        let saw_lock_free_in = Arc::clone(&saw_lock_free);
+
+        {
+            let mut c = lock.write().unwrap();
+            c.bind_factory::<dyn Greeter, _>(move || {
+                let free = probe_container.try_write().is_ok();
+                saw_lock_free_in.store(free, Ordering::SeqCst);
+                Arc::new(Hi) as Arc<dyn Greeter>
+            });
+        }
+
+        let type_id = TypeId::of::<Arc<dyn Greeter>>();
+        let binding = lock
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .binding(type_id)
+            .expect("trait factory binding must be registered");
+        let resolved = binding.resolve_make::<dyn Greeter>();
+
+        assert_eq!(resolved.map(|g| g.hello()), Some("hi"));
+        assert!(
+            saw_lock_free.load(Ordering::SeqCst),
+            "trait factory closure must run AFTER the container read guard is released",
         );
     }
 }
