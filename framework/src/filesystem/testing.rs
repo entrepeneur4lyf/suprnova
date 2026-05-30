@@ -25,7 +25,7 @@ use opendal::Operator;
 use std::future::Future;
 use std::sync::{Mutex, MutexGuard};
 
-static FAKE_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) static FAKE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Guard returned by [`Storage::fake`](super::Storage::fake).
 ///

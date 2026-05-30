@@ -42,11 +42,18 @@ impl FrameworkError {
         // for the debug-only meta.debug_message field below; for 4xx
         // it also becomes the user-facing `detail` value so JSON:API
         // clients see the same richer message the regular JSON error
-        // renderer emits.
+        // renderer emits — except for `ValidationError`, where the
+        // envelope already carries the field name in `source.pointer`,
+        // so the bare message stays in `detail` rather than the
+        // doubled "Validation error for 'email': email is invalid".
         let full_message = self.to_string();
         let detail = if status >= 500 {
             // Generic detail — never the raw err message.
             title.to_string()
+        } else if matches!(self, FrameworkError::ValidationError { .. }) {
+            // Field name is exposed under source.pointer; detail
+            // carries only the message to avoid redundancy.
+            self.message().to_string()
         } else {
             full_message.clone()
         };

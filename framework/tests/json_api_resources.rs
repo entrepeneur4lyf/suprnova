@@ -404,7 +404,12 @@ async fn validation_error_becomes_jsonapi_errors_envelope() {
 async fn not_found_becomes_jsonapi_404_errors_envelope() {
     use suprnova::FrameworkError;
 
-    let err = FrameworkError::not_found("User not found");
+    // `not_found` takes the model name; the Display impl appends
+    // " not found" to match Laravel's `User not found` shape. JSON:API
+    // detail now uses the full Display string instead of the raw
+    // payload, so callers see the rendered message rather than the
+    // bare model name.
+    let err = FrameworkError::not_found("User");
     let response = err.into_json_api_response();
     let body: Value = serde_json::from_slice(response.body()).unwrap();
     assert_eq!(body["errors"][0]["status"], "404");

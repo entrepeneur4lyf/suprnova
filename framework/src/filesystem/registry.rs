@@ -111,11 +111,15 @@ pub(crate) fn names() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::filesystem::testing::FAKE_LOCK;
     use opendal::services;
 
-    // These tests share the process-global `REGISTRY`. They use unique names
-    // and never call `reset()`, so parallel execution cannot wipe an entry
-    // between the two `register` calls below (which would mask the warn).
+    // These tests share the process-global `REGISTRY` with every
+    // `Storage::fake()` test in the suite. The fake guard resets the
+    // registry on drop, so without coordination it can wipe a name
+    // between this test's two `register()` calls and mask the expected
+    // warn. Holding `FAKE_LOCK` for the duration of these tests serializes
+    // them against every fake user, eliminating the race window.
     fn memory_op() -> Operator {
         Operator::new(services::Memory::default())
             .expect("opendal memory service is infallible")
@@ -125,6 +129,9 @@ mod tests {
     #[tracing_test::traced_test]
     #[test]
     fn re_registering_an_existing_name_warns() {
+        let _lock = FAKE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         register("registry_dup_warn_probe", memory_op());
         register("registry_dup_warn_probe", memory_op());
         assert!(
@@ -136,6 +143,9 @@ mod tests {
     #[tracing_test::traced_test]
     #[test]
     fn first_registration_of_a_name_does_not_warn() {
+        let _lock = FAKE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         register("registry_fresh_no_warn_probe", memory_op());
         assert!(
             !logs_contain("re-registered"),
