@@ -1178,6 +1178,30 @@ impl From<crate::error::FrameworkError> for HttpResponse {
                     .header("Precognition", "true")
                     .header("Vary", "Precognition");
             }
+            crate::error::FrameworkError::AlreadyReported => {
+                // AlreadyReported is a CLI sentinel produced by
+                // `FrameworkError::silent()` for the console dispatcher.
+                // It has no HTTP meaning — its message is empty and its
+                // status would otherwise fall through as 500 with a
+                // blank "framework error" log line. If it ever reaches
+                // an HTTP path it indicates a controller/extractor
+                // accidentally constructed the CLI sentinel. Render a
+                // clean generic 500 and log a loud warning identifying
+                // the leak so the underlying bug is observable instead
+                // of silent.
+                let request_id =
+                    crate::logging::current_request_id().map(|id| id.as_str().to_string());
+                tracing::error!(
+                    request_id = ?request_id,
+                    "CLI sentinel `FrameworkError::AlreadyReported` reached HTTP response \
+                     conversion; this indicates a request handler returned `silent()`. \
+                     Returning a generic 500. Use a real error variant in request paths."
+                );
+                return HttpResponse::json(serde_json::json!({
+                    "message": "Internal Server Error",
+                }))
+                .status(500);
+            }
             _ => {}
         }
 
@@ -1375,6 +1399,78 @@ mod error_to_response_tests {
         let resp: HttpResponse = err.into();
         assert_eq!(resp.status_code(), 500);
         // Same note as above re: body field access.
+    }
+
+    /// The `AlreadyReported` variant is a CLI sentinel produced by
+    /// `FrameworkError::silent()` and consumed by the console
+    /// dispatcher. It has no HTTP meaning. If it ever leaks into the
+    /// HTTP `From` impl (controller bug), the conversion must:
+    ///
+    ///   * render a clean generic 500 (never the variant's empty
+    ///     `Display`, which would produce a 500 with an empty
+    ///     `message` field), and
+    ///   * NOT silently fall through the default 500 path that would
+    ///     emit a near-empty "framework error" log line.
+    ///
+    /// Verify the response shape here; the loud `tracing::error!`
+    /// that identifies the leak is exercised in
+    /// `already_reported_leak_emits_loud_warning` below.
+    #[test]
+    fn already_reported_leak_renders_clean_generic_500() {
+        let err = FrameworkError::silent();
+        let resp: HttpResponse = err.into();
+        assert_eq!(resp.status_code(), 500);
+        let body = std::str::from_utf8(resp.body()).expect("utf-8 body");
+        let parsed: serde_json::Value = serde_json::from_str(body).expect("json body");
+        assert_eq!(parsed["message"], "Internal Server Error");
+    }
+
+    /// The leak-detection branch logs at `error!` level with a message
+    /// that names the offending variant, so the bug surfaces in
+    /// production logs instead of disappearing behind a blank 500.
+    #[test]
+    fn already_reported_leak_emits_loud_warning() {
+        use tracing::subscriber::with_default;
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone, Default)]
+        struct Buf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, bs: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bs);
+                Ok(bs.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Buf {
+                self.clone()
+            }
+        }
+
+        let buf = Buf::default();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_max_level(tracing::Level::ERROR)
+            .with_ansi(false)
+            .finish();
+
+        with_default(sub, || {
+            let _: HttpResponse = FrameworkError::silent().into();
+        });
+
+        let logged = String::from_utf8(buf.0.lock().unwrap().clone()).expect("utf-8 log");
+        assert!(
+            logged.contains("AlreadyReported"),
+            "expected loud warning naming the leaked variant, got: {logged}"
+        );
+        assert!(
+            logged.contains("HTTP response conversion"),
+            "expected warning to describe the leak site, got: {logged}"
+        );
     }
 }
 
