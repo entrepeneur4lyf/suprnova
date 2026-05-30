@@ -57,7 +57,10 @@ Add `#[derive(Validate)]` separately so `#[validate(...)]` attributes stay visib
 | Attribute | Effect |
 |---|---|
 | `#[data(auto_lazy)]` | Every `Prop`-typed field is implicitly `#[data(lazy)]` |
-| `#[data(custom_authorize)]` | Skip generating `FormRequest` so you can write your own `authorize` |
+| `#[data(authorize = "path::to::fn")]` | Route the generated `FormRequest::authorize` to a free function with signature `fn(req: &Request) -> bool`. The body parser, validator, Precognition support, and route-param injection still come from the derive |
+| `#[data(allow_unknown_fields)]` | Accept payload keys that don't match any struct field. The default is **strict**: an unrecognised key fails the deserialize with `serde::de::Error::unknown_field(..)` and surfaces as a 422 through `FormRequest`. Opt into permissive only for response DTOs that read forward-compatible third-party payloads |
+
+The earlier `#[data(custom_authorize)]` flag — which suppressed the whole `FormRequest` impl and forced you to reimplement body parsing, validation, and Precognition by hand — is gone. The macro emits a migration error if you try to use it. Use `#[data(authorize = "fn")]` instead.
 
 ## `Field<T>` — Absent / Null / Value
 
@@ -179,7 +182,7 @@ where
 
 The TypeScript extractor emits `export interface Paginated<T>` so frontend code can reuse the generic across instantiations.
 
-The `?include=` allowlist is keyed on the bare struct name (`Paginated`), not on instantiations. `Paginated<UserDto>` and `Paginated<ArticleDto>` share the same allowlist — `allow_include` names a field, and field names don't depend on type parameters.
+The `?include=` allowlist is keyed on the fully-qualified type path (`concat!(module_path!(), "::", stringify!(Paginated))`), not on type-parameter instantiations. `Paginated<UserDto>` and `Paginated<ArticleDto>` declared in the same module share one allowlist — `allow_include` names a field, and field names don't depend on type parameters. Two different DTOs named `Paginated` in different modules each get their own allowlist; their keys don't collide.
 
 Note: `FormRequest` is suppressed for generic structs because its trait bounds (`DeserializeOwned + Validate + Send`) can't be verified without knowing concrete type params. Provide your own impl if you need to extract a generic Data struct from a request.
 
@@ -201,17 +204,21 @@ pub struct UpdateUser {
 
 For `PATCH /users/{id}` with body `{"name": "Ada"}`, the route-captured `id` is merged into the validated payload. **The path always wins over a body-supplied value** (prevents IDOR via body-tampering).
 
-Bare `#[data(from_route_param)]` defaults to the field name. The macro picks a type-aware parser at compile time:
+Bare `#[data(from_route_param)]` defaults to the field name. The macro classifies the field's last path segment at compile time and dispatches to a matching parser. Only the exact names listed below are recognised; everything else (including `i8`/`i16`/`isize`, `Uuid`, `DateTime`, custom newtypes) falls through to `pass_string` and lets the field's own `Deserialize` do the work.
 
 | Field type | Parser |
 |---|---|
-| `i8..i64`, `isize` | `parse_i64` |
-| `u8..u64`, `usize` | `parse_u64` |
-| `i128`, `u128` | `parse_i128` (string-passthrough; field's own `Deserialize` handles it) |
-| `f32`, `f64` | `parse_f64` |
-| `bool` | `parse_bool` (accepts `"true"` / `"false"`) |
-| `String`, `Uuid`, `DateTime`, custom newtypes | `pass_string` (the field's own `Deserialize` does the work) |
-| `Option<T>` of any of the above | Same parser as `T`; missing route param leaves the field absent |
+| `i64` | `parse_i64` |
+| `u64` | `parse_u64` |
+| `i32` | `parse_i32` |
+| `u32` | `parse_u32` |
+| `i128` | `parse_i128` (validates then passes raw string through; field's `Deserialize` parses) |
+| `u128` | `parse_u128` (same string-passthrough pattern) |
+| `f64` | `parse_f64` (rejects non-finite values) |
+| `f32` | `parse_f32` (rejects non-finite values) |
+| `bool` | `parse_bool` (accepts only `"true"` / `"false"`) |
+| Anything else | `pass_string` — raw string handed to the field's own `Deserialize` |
+| `Option<T>` or `Field<T>` of any of the above | Same parser as `T`; missing route param leaves the field absent |
 
 ## Lazy props
 
@@ -302,3 +309,11 @@ suprnova make:inertia UserDto --data
 ```
 
 Emits a `#[derive(Data, Validate)]` skeleton instead of the legacy `#[derive(InertiaProps)]` template.
+
+## Next
+
+- [Validation](validation.md) — `#[derive(Validate)]`, async validators, and how `FormRequest` calls into them
+- [Requests](requests.md) — the request extractor surface that `FormRequest` plugs into
+- [Inertia Responses](frontend-inertia-responses.md) — the `Inertia::data` path and how lazy props become partial-reload-eligible
+- [Eloquent Resources](eloquent-resources.md) — `#[derive(Resource)]` for JSON:API outputs (sibling of `Data` for serialization-only payloads)
+- [Error Model](error-model.md) — how `unknown_field` rejection becomes a 422 and how `FormRequest` failures travel back as `ValidationErrors`
