@@ -28,7 +28,7 @@ use std::sync::Arc;
 #[allow(unused_imports)]
 use suprnova::{
     bind, global_middleware, singleton, App, Auth, AuthConfig, AuthManager, CsrfMiddleware,
-    EloquentUserProvider, SessionConfig, SessionMiddleware, DB,
+    EloquentUserProvider, IncludeMiddleware, SessionConfig, SessionMiddleware, DB,
 };
 
 use crate::middleware;
@@ -51,6 +51,13 @@ pub async fn register() {
 
     // CSRF protection (validates tokens on POST/PUT/PATCH/DELETE)
     global_middleware!(CsrfMiddleware::new());
+
+    // Parse `?include=`/`?exclude=`/`?only=`/`?except=` and `?fields[...]=`
+    // into the per-request task-local so `#[derive(Data)]` responses,
+    // `Resource::single`, and `Prop::Lazy` resolution honour the client's
+    // requested shape out of the box. Without this, Data DTOs silently
+    // ignore include/fieldset query parameters.
+    global_middleware!(IncludeMiddleware);
 
     // Authentication: register the AuthManager (the config/auth.php analogue)
     // and a user provider so `Auth::attempt` and `Auth::user_as::<User>()`

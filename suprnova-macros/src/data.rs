@@ -852,7 +852,12 @@ fn build_prop_entry(
         // __try_into_inertia_props — propagate the serialize failure as a
         // FrameworkError via `?` instead of panicking. Same diagnostic
         // shape (Struct::field + source error) as the infallible path's panic.
-        quote! {
+        //
+        // Field<T>: skip the entry entirely when Absent so Inertia props mirror
+        // the documented `skip_serializing_if = "Field::is_absent"` behaviour
+        // (no key in the prop list rather than a `null` value).
+        let skip_if_absent = is_field_type(&f.ty);
+        let push_block = quote! {
             out.push((
                 #name.to_string(),
                 ::suprnova::inertia::PropEntry::Eager(
@@ -868,15 +873,27 @@ fn build_prop_entry(
                         )))?,
                 ),
             ));
+        };
+        if skip_if_absent {
+            quote! {
+                if !::suprnova::data::Field::is_absent(&self.#ident) {
+                    #push_block
+                }
+            }
+        } else {
+            push_block
         }
     } else {
-        // Domain 5 audit M-D5-9 - emitted panic names the struct + field so
-        // operators can pinpoint which `serde_json::to_value` failed in
-        // production logs. Matches the diagnostic shape M-D5-1 introduced on
-        // the cast-failure path. RETAINED as the infallible escape hatch
-        // (`Inertia::data`); `__try_into_inertia_props` / `Inertia::try_data`
-        // is the fallible sibling for callers off the HTTP request lifecycle.
-        quote! {
+        // Infallible escape hatch (`Inertia::data`); `__try_into_inertia_props`
+        // / `Inertia::try_data` is the fallible sibling for callers off the
+        // HTTP request lifecycle. The panic message names the struct + field
+        // so operators can pinpoint which `serde_json::to_value` failed in
+        // production logs.
+        //
+        // Field<T>: skip the entry entirely when Absent so Inertia props mirror
+        // the documented `skip_serializing_if = "Field::is_absent"` behaviour.
+        let skip_if_absent = is_field_type(&f.ty);
+        let push_block = quote! {
             out.push((
                 #name.to_string(),
                 ::suprnova::inertia::PropEntry::Eager(
@@ -892,6 +909,15 @@ fn build_prop_entry(
                         )),
                 ),
             ));
+        };
+        if skip_if_absent {
+            quote! {
+                if !::suprnova::data::Field::is_absent(&self.#ident) {
+                    #push_block
+                }
+            }
+        } else {
+            push_block
         }
     }
 }
@@ -1142,6 +1168,20 @@ fn is_option_or_field(ty: &syn::Type) -> bool {
     false
 }
 
+/// Returns `true` when the field type's last path segment is `Field`.
+/// Distinguishes `Field<T>` (tri-state `Absent`/`Null`/`Value`) from the
+/// plain `Option<T>` so we can wire the documented `Field::Absent` →
+/// "omit the key entirely" behaviour from `framework/src/data/field.rs`
+/// into the derive's custom Serialize.
+fn is_field_type(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(p) = ty {
+        if let Some(seg) = p.path.segments.last() {
+            return seg.ident == "Field";
+        }
+    }
+    false
+}
+
 fn build_serialize(
     struct_name: &Ident,
     impl_generics: &syn::ImplGenerics,
@@ -1149,6 +1189,12 @@ fn build_serialize(
     where_clause: Option<&syn::WhereClause>,
     parsed: &[(&Field, FieldOptions)],
 ) -> TokenStream2 {
+    // Build the output field list, tagging each entry as either always-emit
+    // or `Field`-typed-conditional-emit. `Field<T>` honors its documented
+    // contract: `Field::Absent` omits the key from the serialized output,
+    // matching the `skip_serializing_if = "Field::is_absent"` guidance in
+    // `framework/src/data/field.rs`. `Field::Null` and `Field::Value(_)`
+    // still serialize (as `null` and the inner value, respectively).
     let output_fields: Vec<TokenStream2> = parsed
         .iter()
         // input_only and lazy fields are excluded from serde Serialize:
@@ -1159,8 +1205,18 @@ fn build_serialize(
         .map(|(f, _)| {
             let ident = f.ident.as_ref().unwrap();
             let name = ident.to_string();
-            quote! {
-                ::serde::ser::SerializeStruct::serialize_field(&mut state, #name, &self.#ident)?;
+            if is_field_type(&f.ty) {
+                quote! {
+                    if !::suprnova::data::Field::is_absent(&self.#ident) {
+                        ::serde::ser::SerializeStruct::serialize_field(&mut state, #name, &self.#ident)?;
+                    } else {
+                        ::serde::ser::SerializeStruct::skip_field(&mut state, #name)?;
+                    }
+                }
+            } else {
+                quote! {
+                    ::serde::ser::SerializeStruct::serialize_field(&mut state, #name, &self.#ident)?;
+                }
             }
         })
         .collect();
@@ -1406,7 +1462,9 @@ fn build_into_json_resource(
     let id_field = syn::Ident::new(&opts.id_field, proc_macro2::Span::call_site());
 
     // Attribute fields: non-input_only, not the id field, not allow_include, not lazy.
-    let attr_fields: Vec<(&Ident, String)> = parsed
+    // Carry whether the field is `Field<T>` so the attribute writer can honour
+    // the `Field::Absent` → omit-key contract per `framework/src/data/field.rs`.
+    let attr_fields: Vec<(&Ident, String, bool)> = parsed
         .iter()
         .filter(|(f, fo)| {
             let ident = f.ident.as_ref().unwrap();
@@ -1415,7 +1473,8 @@ fn build_into_json_resource(
         .map(|(f, _)| {
             let ident = f.ident.as_ref().unwrap();
             let name = ident.to_string();
-            (ident, name)
+            let is_field = is_field_type(&f.ty);
+            (ident, name, is_field)
         })
         .collect();
 
@@ -1431,13 +1490,13 @@ fn build_into_json_resource(
         .collect();
 
     let struct_name_str = struct_name.to_string();
-    let attrs_entries = attr_fields.iter().map(|(ident, name)| {
-        // Domain 5 audit M-D5-9 — same diagnostic upgrade as
-        // `__into_inertia_props` above. The "attribute serialization
-        // should succeed" expect message was a black box in
-        // production logs; the new panic surfaces the offending
-        // struct + field + the underlying serde error.
-        quote! {
+    let attrs_entries = attr_fields.iter().map(|(ident, name, is_field)| {
+        // Panic message names the struct + field so operators can pinpoint
+        // which `serde_json::to_value` failed in production logs.
+        //
+        // Field<T>: omit the attribute when Absent so the resource matches
+        // the documented `Field::Absent` → "key absent" contract.
+        let insert_block = quote! {
             if fieldset_includes(#name) {
                 map.insert(
                     #name.to_string(),
@@ -1452,6 +1511,15 @@ fn build_into_json_resource(
                         )),
                 );
             }
+        };
+        if *is_field {
+            quote! {
+                if !::suprnova::data::Field::is_absent(&self.#ident) {
+                    #insert_block
+                }
+            }
+        } else {
+            insert_block
         }
     });
 

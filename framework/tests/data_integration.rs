@@ -216,12 +216,14 @@ fn outbound_path_strips_input_only_and_includes_output_only() {
         "published_html (output_only) should be present in serialized output"
     );
 
-    // Field::Absent serializes as null (serialize_none()) — the macro's custom
-    // Serialize impl does not honor skip_serializing_if on field attrs, so the
-    // key IS present with a null value.
+    // Field::Absent is omitted entirely from the serialized output, matching
+    // the `#[serde(default, skip_serializing_if = "Field::is_absent")]`
+    // contract documented in `framework/src/data/field.rs`. The macro's
+    // custom Serialize routes Field-typed fields through `SerializeStruct::
+    // skip_field` when `is_absent()` returns true.
     assert!(
-        j["summary"].is_null(),
-        "summary (Field::Absent) should serialize as null, got: {:?}",
+        j.get("summary").is_none(),
+        "summary (Field::Absent) should be omitted from serialized output, got: {:?}",
         j.get("summary")
     );
 }
