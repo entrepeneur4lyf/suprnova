@@ -156,7 +156,7 @@ implementations. See [Cache — Configuration](cache.md#configuration).
 ### Cast (Eloquent)
 
 A bidirectional transformation declared with `casts!` on an Eloquent
-model — DB column type ↔ Rust type. 21 built-ins ship
+model — DB column type ↔ Rust type. 22 built-ins ship
 (`AsBool`, `AsDateTime`, `AsJson`, `AsEncrypted`, `AsArray`, etc.); a
 user-implemented `Cast` trait covers anything else. See
 [Eloquent — Casts](eloquent.md#casts).
@@ -646,7 +646,7 @@ database, null), worker, batches, chains. See [Queues](queues.md).
 A type implementing `QueueDriver` (push, pop, release, etc.) —
 ships `MemoryQueueDriver`, `SyncQueueDriver` (run inline),
 `RedisQueueDriver`, `DatabaseQueueDriver`, `NullQueueDriver`. Picked
-at boot via `QUEUE_CONNECTION`. See
+at boot via `QUEUE_DRIVER`. See
 [Queues — Drivers](queues.md#drivers).
 
 ### Queue worker
@@ -832,7 +832,7 @@ inventory at compile time. See [Console](console.md).
 
 ### `UserId`
 
-The opaque string identifier returned by `Auth::user_id()` — a
+The opaque string identifier returned by `Auth::id()` — a
 torii-issued user id, not the database primary key. Sessions store
 the `UserId`; user-provider lookups translate it to the concrete user
 struct. The intentional indirection lets you swap user backends
