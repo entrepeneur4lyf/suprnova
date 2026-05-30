@@ -485,7 +485,7 @@ the job calls sees the same tenant id it would inside a request.
 This is also where `hidden_add` earns its keep — the job can fetch
 and stash an API key once at scope entry, and every downstream HTTP
 call inside the job reads it via `Context::hidden_get` without
-re-fetching. See [Queue](queue.md) for the `Job` trait shape.
+re-fetching. See [Queues](queues.md) for the `Job` trait shape.
 
 ### Audit trail across a request
 

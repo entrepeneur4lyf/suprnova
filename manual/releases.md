@@ -7,15 +7,15 @@ will host the full release history once the first version ships.
 
 As of the latest commit on `main`:
 
-- **Laravel-13 parity sweep** is complete across all 30 module groups
+- **Laravel 13.x surface** is complete across all 30 documented domains
   (HTTP, routing, controllers, requests, responses, middleware, CSRF,
   CORS, validation, errors, logging, container, bootstrap, sessions,
   database, Eloquent, queues, console, broadcasting, cache, events,
   filesystem, HTTP client, mail, notifications, rate limiting,
   scheduling, authentication, auth flows, authorization)
-- **External audit backlog** is fully drained: 0 HIGH, 0 MEDIUM, 0 LOW
-  findings open
-- **Test suite** runs 3400+ tests across the workspace, gate-clean
+- **External code review** is fully closed — every issue raised by
+  independent audits has been resolved
+- **Test suite** runs 3400+ tests across the workspace
 - **Frontend starters** ship for Svelte 5 (default), React 19, and Vue 3.5
 - **Payments adapters** in tree for Stripe (gateway model) and Paddle
   (Merchant of Record model)

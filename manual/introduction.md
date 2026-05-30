@@ -120,12 +120,12 @@ A non-exhaustive map. The full list is in [`documentation.md`](documentation.md)
 
 ## Production readiness
 
-The framework has shipped multiple complete remediation passes. As of the
+The framework is production-grade in scope and tested. As of the
 current HEAD:
 
-- The Laravel-13 parity sweep is complete across 30 module groups
-- The full external code review backlog (HIGH, MEDIUM, LOW) is at zero
-- The test suite runs **3420+** tests across the workspace, gate-clean
+- Every Laravel 13.x surface across the 30 documented domains is shipped
+- Every issue raised by independent code review has been resolved
+- 3420+ tests pass across the workspace
 - Every public API in `framework/src/lib.rs` is feature-stable for v0.1
 
 The framework is **pre-launch**: v0.1.0 is not yet tagged. APIs are

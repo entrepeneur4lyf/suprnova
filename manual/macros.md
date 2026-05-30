@@ -382,8 +382,10 @@ See [Mutators & Casts](eloquent-mutators.md).
 
 ### `route_binding!`
 
-Implements `RouteBinding` for a model so it resolves automatically
-from a route parameter:
+Implements `RouteBinding` for a hand-rolled SeaORM entity so it
+resolves automatically from a route parameter. Models defined with
+`#[suprnova::model]` register automatically and don't need this; reach
+for `route_binding!` when you wrote the entity by hand:
 
 ```rust
 use suprnova::route_binding;

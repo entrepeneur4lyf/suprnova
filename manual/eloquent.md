@@ -3531,19 +3531,17 @@ context: either use a `CAST(... AS BIGINT)` wrapper or read the
 column with a typed `DB::table(...).count()` / `.max(...)` helper
 that uses `query_one` + `try_get` under the hood.
 
-## Laravel-13 parity — relation-existence + cheap shortcuts
+## Relation-existence + cheap shortcuts
 
-This section documents the Laravel-13 parity sweep that landed across
-the builder + Model trait. Every method here mirrors a named Laravel
-surface; the dual-API naming follows Suprnova's standing convention
-(Laravel-shape name first, idiomatic Rust alias second).
+Suprnova mirrors Laravel's relation-existence query family. Every
+method here pairs the Laravel-shape name with an idiomatic Rust alias
+(Suprnova's standing dual-API convention).
 
 ### Relation-existence filters (`has` / `where_has` / `where_belongs_to`)
 
-The biggest gap closed by the sweep is the correlated `EXISTS (...)`
-family. These methods constrain the parent query by the existence (or
-absence, or count) of related rows, without joining the relation into
-the outer SELECT.
+The correlated `EXISTS (...)` family constrains the parent query by
+the existence (or absence, or count) of related rows, without joining
+the relation into the outer SELECT.
 
 ```rust
 use suprnova::Model;

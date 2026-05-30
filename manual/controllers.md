@@ -120,8 +120,10 @@ pub async fn show(user: user::Model) -> Response {
 The route placeholder name (`{user}`) and the argument name (`user`)
 must match. The framework parses the param string as the model's
 primary-key type, calls `Entity::find_by_pk`, and returns 404 if the
-row is missing. No need for `route_binding!` — that legacy macro is
-deprecated; any `#[suprnova::model]` struct binds automatically.
+row is missing. Any `#[suprnova::model]` struct binds automatically;
+the `route_binding!` macro stays available for hand-rolled SeaORM
+entities that don't use `#[suprnova::model]` — see
+[Macros](macros.md#route_binding).
 
 ### Form requests
 

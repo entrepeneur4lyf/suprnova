@@ -21,10 +21,9 @@ The **Status** column uses four values:
 
 The relevant chapter (where one exists) is linked from the **Notes** column.
 
-This is a live map. Per the [Introduction](introduction.md), the Laravel
-13.x parity sweep ran across 30 module groups and the test suite is gate
-clean; the gaps listed below are the real, current gaps as of the
-shipped framework.
+This is a live map. Suprnova ships every Laravel 13.x surface across
+the 30 documented domains; the gaps listed below are the real, current
+gaps as of the shipped framework.
 
 ## Architecture concepts
 

@@ -472,15 +472,13 @@ let posts_with_rust_tag: Collection<Post> = rust_tag.posts().get().await?;
 
 Every struct annotated `#[suprnova::model(morph_type = "...")]` emits
 one [`MorphTypeEntry`][morph] via `inventory::submit!` at compile
-time. The registry powers four things:
+time. The registry powers three things:
 
 1. **Per-family enum dispatch** — `MorphTo.get()` reads the child row's
    `<name>_type` string and looks it up to find the right enum variant.
 2. **`MorphedByMany` target filtering** — `target_morph_type = "post"`
    resolves through the registry to ensure the type string is real.
-3. **Admin tooling** — Phase-8 admin walks the registry to render the
-   polymorphic relation graph.
-4. **Sanity checks** — `find_morph_type("post")` returns `None` if no
+3. **Sanity checks** — `find_morph_type("post")` returns `None` if no
    model has registered with that string, distinguishing
    "deliberately unregistered" from "typo".
 
