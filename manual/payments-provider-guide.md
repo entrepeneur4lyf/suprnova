@@ -4,6 +4,12 @@ This guide walks through building a third-party adapter crate — `suprnova-paym
 
 The same structure applies to any provider: Square, Braintree, Adyen, or anything else with an HTTP API.
 
+### Why Suprnova diverges
+
+Laravel ships Cashier as a first-party Stripe integration. It is excellent for the Stripe path, but it codifies one provider's vocabulary into the framework — adding a second provider means either forking Cashier or building a parallel surface beside it.
+
+Suprnova keeps every provider on the same five-trait contract: `Checkout`, `Subscription`, `CustomerStore`, `WebhookHandler`, and the optional `Payment` for server-capture providers. Domain code only ever holds `Arc<dyn PaymentProvider>` from the registry. Swapping Stripe for Paddle (or for the Mollie adapter you're about to write) is a bootstrap change, not a code change. The reference adapters at `crates/suprnova-payments-stripe/` and `crates/suprnova-payments-paddle/` prove the trait contract holds for two very different commercial models — direct-capture gateway and Merchant of Record — and your adapter slots into the same shape.
+
 ## 1. Create the Workspace Member Crate
 
 From the repo root:
@@ -18,12 +24,14 @@ Add it to your root `Cargo.toml`:
 [workspace]
 members = [
     "framework",
+    "app",
     "suprnova-cli",
     "suprnova-macros",
-    "app",
     "crates/suprnova-payments-mollie",  # add this line
 ]
 ```
+
+(The reference adapters — `crates/suprnova-payments-stripe` and `crates/suprnova-payments-paddle` — live in this same `crates/` directory and are good templates to read alongside this guide.)
 
 **`crates/suprnova-payments-mollie/Cargo.toml`:**
 
@@ -123,16 +131,18 @@ impl PaymentProvider for MollieProvider {
         "mollie"
     }
 
-    // If Mollie supports server-capture, override as_payment():
+    // Only override `as_payment()` if you also implement `Payment` (server-capture).
+    // The default impl on `PaymentProvider` returns `None` — omit this override
+    // entirely if Mollie is checkout-only / MoR-style.
     fn as_payment(&self) -> Option<&dyn Payment> {
-        Some(self)  // remove this line if not implementing Payment
+        Some(self)
     }
 }
 ```
 
-`PaymentProvider` is the umbrella trait. It requires `Checkout + Subscription + CustomerStore + WebhookHandler`. You implement each in a dedicated module.
+`PaymentProvider` is the umbrella trait — the supertrait clause is `Checkout + Subscription + CustomerStore + WebhookHandler`, so the compiler will refuse to bind your provider until all four are implemented. The fifth trait, `Payment`, is **optional** — only providers that expose server-side capture implement it, and `as_payment()` reports the result to the framework. The default `as_payment()` returns `None`, so omit the override entirely if your provider doesn't do server-capture.
 
-## 4. Implement the Four Universal Traits
+## 4. Implement the Four Required Traits
 
 ### `checkout.rs`
 
@@ -354,7 +364,9 @@ impl WebhookHandler for MollieProvider {
             .headers
             .get("X-Mollie-Signature")
             .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| PaymentError::WebhookSignatureMissing)?;
+            .ok_or_else(|| PaymentError::WebhookSignature(
+                "missing X-Mollie-Signature header".into()
+            ))?;
 
         // Compute expected HMAC-SHA256 over the raw body.
         let mut mac = HmacSha256::new_from_slice(self.webhook_secret.as_bytes())
@@ -363,20 +375,20 @@ impl WebhookHandler for MollieProvider {
 
         // Decode the hex-encoded received signature.
         let received = hex::decode(signature)
-            .map_err(|_| PaymentError::WebhookSignatureInvalid)?;
+            .map_err(|_| PaymentError::WebhookSignature("non-hex signature".into()))?;
 
         // Constant-time comparison.
         mac.verify_slice(&received)
-            .map_err(|_| PaymentError::WebhookSignatureInvalid)
+            .map_err(|_| PaymentError::WebhookSignature("signature mismatch".into()))
     }
 
     fn parse_event(&self, body: &[u8]) -> PaymentResult<WebhookEvent> {
         // Mollie sends JSON — parse it.
         let raw: serde_json::Value = serde_json::from_slice(body)
-            .map_err(|e| PaymentError::WebhookParseError(format!("JSON parse: {e}")))?;
+            .map_err(|e| PaymentError::Validation(format!("invalid mollie webhook body: {e}")))?;
 
         let event_id = raw["id"].as_str()
-            .ok_or_else(|| PaymentError::WebhookParseError("missing event id".into()))?
+            .ok_or_else(|| PaymentError::Validation("missing event id".into()))?
             .to_string();
 
         // Mollie uses resource types rather than event type strings in some webhook shapes.
@@ -400,8 +412,9 @@ impl WebhookHandler for MollieProvider {
 
 Key points:
 
-- `WebhookSignatureMissing` and `WebhookSignatureInvalid` are the correct `PaymentError` variants for missing and bad signatures.
-- The framework's `webhook_routes` handler calls `verify` before `parse_event` and returns 401 on verification failure, 400 on parse failure.
+- `PaymentError::WebhookSignature(String)` is the single variant for any signature failure — missing header, malformed encoding, mismatch. The framework's webhook route treats every `WebhookSignature(_)` as a 401.
+- Use `PaymentError::Validation(String)` for unparseable bodies. The webhook route returns 400 on any parse failure.
+- The framework's `webhook_routes` handler calls `verify` before `parse_event`, then hydrates inside a DB transaction. Hydration failures return 503 so the provider retries.
 - Never log the raw secret or the received signature.
 
 ### Mirror-table hydration: `extract_payload_ids` + `extract_payment_snapshot` + `extract_customer_snapshot`
@@ -569,20 +582,33 @@ Gate live integration tests with `#[ignore]` so `cargo test` passes in CI withou
 
 ## 9. `PaymentError` Variants Reference
 
-Use the correct variants when returning errors:
+The full enum lives in `framework/src/payments/error.rs`. Pick the variant that matches what actually went wrong:
 
 | Variant | When to use |
 |---|---|
-| `PaymentError::Internal(String)` | Unexpected SDK error, network failure, or unimplemented method |
-| `PaymentError::NotFound(String)` | Customer, subscription, or transaction ID doesn't exist |
-| `PaymentError::NotSupported(String)` | The method isn't applicable for this provider (e.g. Paddle's `subscribe`) |
-| `PaymentError::WebhookSignatureMissing` | Required signature header absent |
-| `PaymentError::WebhookSignatureInvalid` | Signature present but does not verify |
-| `PaymentError::WebhookParseError(String)` | Body is not parseable as the expected format |
+| `Provider(String)` | The provider's API returned an error you don't need to translate further |
+| `Validation(String)` | Request fields are invalid, or a webhook body won't parse |
+| `NotSupported(String)` | The method isn't applicable for this provider (e.g. Paddle's `subscribe`) |
+| `Declined { reason, decline_code }` | Card declined — pass `decline_code` through when the provider supplies one |
+| `Authentication(String)` | Provider rejected your API key or credentials |
+| `NotFound(String)` | Customer, subscription, or transaction ID doesn't exist |
+| `WebhookSignature(String)` | Any signature failure — missing header, malformed encoding, or mismatch |
+| `InvalidPhoneNumber(String)` | E.164 validation failed in mobile-money flows |
+| `InvalidCountryCode(String)` | ISO-3166-1 alpha-2 validation failed |
+| `Internal(String)` | Unexpected SDK error, network failure, HMAC init failure, or any other framework-side problem |
 
-## What's Next
+The webhook route maps these to status codes: `WebhookSignature(_)` → 401, `Validation(_)` from `parse_event` → 400, anything else from hydration → 503 (so the provider retries).
 
-- Add your crate to your app's `Cargo.toml` with `cargo add suprnova-payments-mollie --path ./crates/suprnova-payments-mollie`
-- Register at bootstrap as shown in step 7
-- Mount `webhook_routes(db.clone())` if you haven't already — it handles all registered providers automatically
-- See [`payments-frontend.md`](payments-frontend.md) for how to render the `SessionPayload` your adapter returns
+Once your adapter compiles and the discriminator test passes:
+
+- Add your crate to your app's `Cargo.toml` with `cargo add suprnova-payments-mollie --path ./crates/suprnova-payments-mollie`.
+- Register at bootstrap as shown in step 7.
+- Mount `webhook_routes(db.clone())` once at app boot — the same handler dispatches to every registered provider by name, so a single mount serves Stripe, Paddle, and your new adapter.
+
+## Next
+
+- [Payments](payments.md) — the provider-neutral surface and Quick Start
+- [Payments — Stripe Adapter](payments-stripe.md) — full template for a gateway adapter
+- [Payments — Paddle Adapter](payments-paddle.md) — full template for a Merchant-of-Record adapter
+- [Payments Frontend](payments-frontend.md) — how to render the `SessionPayload` your adapter returns
+- [Error Model](error-model.md) — how `PaymentError` lands as an `HttpResponse`
