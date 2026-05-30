@@ -1,17 +1,14 @@
 # CORS
 
-`CorsMiddleware` answers preflight `OPTIONS` requests and decorates ordinary
-cross-origin responses with `Access-Control-Allow-*` headers. It mirrors
-Laravel's `HandleCors` middleware and `config/cors.php` config, but as a
-typed builder on `CorsConfig`.
-
-## When you need it
-
-Same-origin apps (Inertia served from the same host as the backend, the
-Suprnova default) don't need CORS at all. CORS only matters once a browser
-on a *different* origin calls your API: public APIs, an SPA hosted under a
-different domain, a mobile webview, or a separately-hosted documentation
-site that hits your backend.
+`CorsMiddleware` answers preflight `OPTIONS` requests and decorates
+ordinary cross-origin responses with `Access-Control-Allow-*` headers.
+You install it once in `bootstrap()` when a browser on a different
+origin calls your API — public APIs, an SPA hosted on a different
+domain, a mobile webview, or a separately-hosted docs site. Same-origin
+apps (Inertia served from the same host as the backend, the Suprnova
+default) don't need CORS at all. The middleware mirrors Laravel's
+`HandleCors` and `config/cors.php`, but as a typed builder on
+`CorsConfig`.
 
 ## Install it globally
 
@@ -222,4 +219,40 @@ from reading it.
 
 The middleware is registered globally rather than the Laravel-style
 "automatically installed for `paths`" — Suprnova's middleware chain is
-explicit, see [middleware](middleware.md) for the design.
+explicit, see [Middleware](middleware.md) for the design.
+
+### Why Suprnova diverges
+
+Laravel's `HandleCors` is auto-attached to the kernel and reads its
+policy from `config/cors.php`. The shape works for PHP because the
+config array is the one place a request-per-process framework can
+share configuration without re-evaluating it per request. Suprnova
+exposes the same options as a typed `CorsConfig` builder you register
+explicitly with `global_middleware!`, which keeps the middleware
+chain visible in `bootstrap()` and lets the compiler enforce the
+allowlist-vs-wildcard choice (no `Default` for `CorsConfig`, so you
+can't accidentally ship `Access-Control-Allow-Origin: *` because you
+forgot to fill in a config value).
+
+The other divergence is that preflights reach the middleware even on
+unrouted paths. Laravel routes `OPTIONS` through its router so the
+preflight matches an `OPTIONS` route (auto-registered for each REST
+route). Suprnova's router has no `OPTIONS` routes; instead the server
+runs the global middleware chain on unmatched requests before
+returning 404, so a globally-installed `CorsMiddleware` short-circuits
+the preflight with `204` before the not-found path is taken. That's
+why CORS *must* be installed globally — a per-route registration
+would never see the preflight.
+
+## Next
+
+- [Middleware](middleware.md) — the trait, the chain, global vs
+  per-route registration, terminable hooks
+- [CSRF](csrf.md) — the other global middleware most apps install
+  alongside CORS
+- [Routing](routing.md) — how routes are matched (and why preflights
+  don't match), plus the no-fallback path the global chain runs on
+- [Request Lifecycle](lifecycle.md) — where CORS sits in the chain
+  relative to session, CSRF, and the handler
+- [Configuration](configuration.md) — typed config patterns for
+  middleware that need environment-driven settings
