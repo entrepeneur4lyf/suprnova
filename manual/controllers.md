@@ -1,31 +1,42 @@
 # Controllers
 
-suprnova controllers are async functions that handle HTTP requests and return responses. Following Laravel's conventions, controllers organize your application's request handling logic into dedicated modules, making your codebase clean and maintainable.
+A Suprnova controller is just an async function. It takes whatever it
+needs from the request — typed path parameters, a loaded model, a
+validated form — and returns a `Response`. There is no controller base
+class. There is no service-locator wiring file. The function is the
+unit, and the `#[handler]` attribute glues it to the routing macros.
 
-## Generating Controllers
+```rust
+use suprnova::{handler, json_response, Response};
+use crate::models::user;
 
-The fastest way to create a new controller is using the suprnova CLI:
+// GET /users/{user}
+#[handler]
+pub async fn show(user: user::Model) -> Response {
+    json_response!({
+        "id": user.id,
+        "name": user.name,
+        "email": user.email,
+    })
+}
+```
+
+That handler's signature does three things at once: declares the route
+parameter (`user`), pulls the row out of the database, and 404s if the
+row isn't there. None of it is written by hand. `#[handler]` reads the
+argument types and generates the extraction.
+
+## Generating a controller
 
 ```bash
 suprnova make:controller User
 ```
 
-This command will:
-1. Create `src/controllers/user.rs` with a controller stub
-2. Update `src/controllers/mod.rs` to export the new controller
+This writes `src/controllers/user.rs` with a single `invoke` stub and
+adds `pub mod user;` to `src/controllers/mod.rs`. The stub is the
+minimum-viable handler:
 
-```bash Examples
-# Creates user.rs in src/controllers/
-suprnova make:controller User
-
-# Creates product.rs in src/controllers/
-suprnova make:controller Product
-
-# Controller name is converted to snake_case for the file
-suprnova make:controller OrderItem  # Creates order_item.rs
-```
-
-```rust Generated File
+```rust
 //! User controller
 
 use suprnova::{handler, json_response, Request, Response};
@@ -38,131 +49,58 @@ pub async fn invoke(_req: Request) -> Response {
 }
 ```
 
-## Controller Structure
+Add as many functions to the file as you want — Suprnova doesn't track
+controller "classes", just functions. Many apps split by resource
+(`controllers::user::{index, show, store, update, destroy}`), but
+nothing in the framework enforces it.
 
-Controllers are async functions decorated with `#[handler]` that take a `Request` and return a `Response`:
+The name is converted to `snake_case` for the filename: `OrderItem`
+becomes `order_item.rs`.
 
-```rust
-use suprnova::{handler, Request, Response, json_response};
+## The `#[handler]` attribute
 
-#[handler]
-pub async fn index(_req: Request) -> Response {
-    json_response!({
-        "message": "Hello from controller"
-    })
-}
-```
+The macro classifies each parameter's type and generates the matching
+extractor. Four categories:
 
-### The Handler Attribute
+| Parameter type | Extracted via | Failure mode |
+|---|---|---|
+| `Request` | passes the request through unchanged | — |
+| `i32`, `i64`, `u32`, `u64`, `usize`, `String` | `FromParam` — parses the route param of the same name | 400 on parse failure, 400 on missing |
+| `T: AutoRouteBinding` (any Eloquent `Model`) | parses the param as the model's primary key, loads the row | 400 on parse failure, 404 if not found |
+| Anything else (`T: FromRequest`) | calls `T::from_request(req)` — typically a `#[derive(FormRequest)]` validator | whatever `from_request` returns; 422 for validation errors |
 
-All controller methods use the `#[handler]` attribute. This enables:
-- Automatic extraction and validation of request data
-- Clean integration with FormRequests for POST data validation
-- Future DX improvements like dependency injection
+The macro runs the extractions in declaration order, so the body of
+your function sees fully-typed values. If any extraction fails, the
+error short-circuits via `?` and the handler body never runs.
 
-```rust
-#[handler]
-pub async fn handler_name(request: Request) -> Response
-```
-
-- **`#[handler]`**: Required attribute that enables automatic parameter extraction
-- **`async fn`**: Controllers are asynchronous, allowing non-blocking I/O operations
-- **`Request`**: Contains all information about the incoming HTTP request
-- **`Response`**: An alias for `Result<HttpResponse, HttpResponse>`, enabling the `?` operator
-
-> **Note:**
->
-> For handling POST data with validation, see [Requests](requests.md).
-
-
-## Path Parameter Injection
-
-The `#[handler]` macro supports automatic extraction of path parameters directly as function arguments. This eliminates the need to manually call `req.param()`.
-
-### Primitive Path Parameters
-
-Declare path parameters as function arguments with primitive types:
+### Path parameters
 
 ```rust
-use suprnova::{handler, json_response, Response};
-
 // Route: get!("/users/{id}", controllers::user::show)
 #[handler]
-pub async fn show(id: i32) -> Response {
-    json_response!({
-        "user_id": id
-    })
+pub async fn show(id: i64) -> Response {
+    json_response!({ "user_id": id })
 }
 
-// Route: get!("/posts/{slug}", controllers::post::show)
+// Route: get!("/posts/{post_id}/comments/{comment_id}", show_comment)
 #[handler]
-pub async fn show_by_slug(slug: String) -> Response {
-    json_response!({
-        "slug": slug
-    })
-}
-```
-
-### Multiple Path Parameters
-
-Extract multiple parameters in a single handler:
-
-```rust
-// Route: get!("/posts/{post_id}/comments/{comment_id}", handler)
-#[handler]
-pub async fn show_comment(post_id: i32, comment_id: i32) -> Response {
+pub async fn show_comment(post_id: i64, comment_id: i64) -> Response {
     json_response!({
         "post_id": post_id,
-        "comment_id": comment_id
+        "comment_id": comment_id,
     })
 }
 ```
 
-### Supported Types
+The argument name must match the route placeholder: `{id}` requires
+`id: …`. The argument type is parsed via `FromParam`. Bad input
+(`/users/abc` against `id: i64`) returns 400 with a message naming
+the parameter and target type.
 
-| Type | Description |
-|------|-------------|
-| `i32`, `i64` | Signed integers |
-| `u32`, `u64`, `usize` | Unsigned integers |
-| `String` | String values |
+### Route model binding
 
-> **Note:**
->
-> The parameter name in your function must match the route parameter name (e.g., `{id}` requires `id: i32`).
-
-
-## Route Model Binding
-
-Route model binding automatically resolves database models from route parameters. If the model is not found, suprnova automatically returns a 404 response.
-
-### Setting Up Route Binding
-
-First, enable route binding for your model using the `route_binding!` macro:
-
-```rust
-// src/models/user.rs
-use sea_orm::entity::prelude::*;
-use suprnova::{route_binding, Model, ModelMut};
-
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-#[sea_orm(table_name = "users")]
-pub struct Model {
-    #[sea_orm(primary_key)]
-    pub id: i32,
-    pub name: String,
-    pub email: String,
-}
-
-impl suprnova::Model for Entity {}
-impl suprnova::ModelMut for Entity {}
-
-// Enable route model binding - "user" matches {user} in routes
-route_binding!(Entity, Model, "user");
-```
-
-### Using Route Model Binding in Handlers
-
-Now you can directly accept the model as a handler parameter:
+`Eloquent` models implement `AutoRouteBinding` automatically. Declare
+the model as an argument and the framework loads it:
 
 ```rust
 use suprnova::{handler, json_response, Response};
@@ -171,407 +109,164 @@ use crate::models::user;
 // Route: get!("/users/{user}", controllers::user::show)
 #[handler]
 pub async fn show(user: user::Model) -> Response {
-    // user is automatically fetched from the database
-    // Returns 404 if not found
     json_response!({
         "id": user.id,
         "name": user.name,
-        "email": user.email
+        "email": user.email,
     })
 }
 ```
 
-### Combining Models with Form Requests
+The route placeholder name (`{user}`) and the argument name (`user`)
+must match. The framework parses the param string as the model's
+primary-key type, calls `Entity::find_by_pk`, and returns 404 if the
+row is missing. No need for `route_binding!` — that legacy macro is
+deprecated; any `#[suprnova::model]` struct binds automatically.
 
-Mix route model binding with form requests for update operations:
+### Form requests
+
+Anything that implements `FromRequest` plugs in the same way. The
+common case is a `#[derive(FormRequest)]` struct that validates the
+request body and surfaces a 422 with field-keyed errors on failure:
 
 ```rust
-use suprnova::{handler, json_response, Response};
+use suprnova::{attrs, handler, json_response, Response};
 use crate::models::user;
 use crate::requests::UpdateUserRequest;
 
 // Route: put!("/users/{user}", controllers::user::update)
 #[handler]
 pub async fn update(user: user::Model, form: UpdateUserRequest) -> Response {
-    // user: auto-fetched from database (404 if not found)
-    // form: auto-validated from request body
-
-    json_response!({
-        "updated_user_id": user.id,
-        "new_name": form.name
-    })
+    let id = user.id;
+    user.update(attrs! { name: form.name, email: form.email }).await?;
+    json_response!({ "updated": id })
 }
 ```
 
-### Error Responses
+See [Form Requests](requests.md) for the validator derive and the
+full validation pipeline.
 
-| Error | Status Code | Description |
-|-------|-------------|-------------|
-| Model not found | 404 | The requested resource doesn't exist |
-| Invalid parameter | 400 | Parameter couldn't be parsed (e.g., "abc" as i32) |
-| Missing parameter | 400 | Required route parameter is missing |
+### When you want the raw `Request`
 
-### Flexibility
-
-You have full control over how you access route parameters:
+If you'd rather extract things by hand — or you need a header, a
+cookie, a query string — take `Request` directly:
 
 ```rust
-// Option 1: Request passthrough (manual extraction)
+use suprnova::{handler, json_response, Request, Response};
+
 #[handler]
 pub async fn show(req: Request) -> Response {
-    let id = req.param("id")?;
-    // Manual database query...
-}
+    let id = req.param("id")?;             // route param, 400 on miss
+    let ua = req.header("User-Agent");      // Option<&str>
+    let page: u32 = req.query_param("page") // Option<String>
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
 
-// Option 2: Primitive path params (no model binding)
+    json_response!({ "id": id, "ua": ua, "page": page })
+}
+```
+
+You can mix and match: `pub async fn nested(category_id: i64, product: product::Model, req: Request)` is a valid signature. The macro extracts each argument by its own rule.
+
+## The `Response` contract
+
+`Response` is an alias for `Result<HttpResponse, HttpResponse>`. Both
+arms carry the same payload type, which is why `?` works everywhere.
+The middleware chain collapses the result with one line at the
+boundary:
+
+```rust
+result.unwrap_or_else(|e| e)
+```
+
+This is the same contract every `?` propagation point relies on.
+Errors get converted via `From<FrameworkError> for HttpResponse`
+before they reach the chain — see [Error Model](error-model.md) for
+the full picture.
+
+The body of a handler reads top-to-bottom and uses `?` to bail:
+
+```rust
+use suprnova::{handler, json_response, Response};
+use crate::models::user;
+
 #[handler]
-pub async fn show(id: i32) -> Response {
-    // Just the ID, no automatic model fetch
+pub async fn show(id: i64) -> Response {
+    let user = user::Model::find_or_fail(id).await?;
+    let invoices = user.invoices().get().await?;
+    json_response!({ "user": user, "invoices": invoices })
 }
+```
 
-// Option 3: Route model binding (auto-fetch with 404)
+If `find_or_fail` returns `Err`, the function exits with a 404. If
+`invoices().get()` errors, you get a 500. No `match` statements, no
+exception handlers.
+
+## Creating responses
+
+Three macros and a builder cover the common cases:
+
+```rust
+use suprnova::{handler, json_response, text_response, HttpResponse, Response, ResponseExt};
+
 #[handler]
-pub async fn show(user: user::Model) -> Response {
-    // Model automatically fetched from database
-}
-
-// Option 4: Mix primitives and models
-#[handler]
-pub async fn nested(category_id: i32, product: product::Model) -> Response {
-    // category_id: just extracted as i32
-    // product: auto-fetched from database
-}
-```
-
-## The Request Object
-
-The `Request` struct provides Laravel-like access to request data:
-
-### Getting Route Parameters
-
-Access dynamic URL segments defined in your routes:
-
-```rust
-use suprnova::{Request, Response, json_response};
-
-// Route: get!("/users/{id}", controllers::user::show)
-pub async fn show(req: Request) -> Response {
-    // Using ? operator - returns 400 error if param missing
-    let id = req.param("id")?;
-
-    json_response!({
-        "user_id": id
-    })
-}
-```
-
-For routes with multiple parameters:
-
-```rust
-// Route: get!("/posts/{post_id}/comments/{comment_id}", handler)
-pub async fn show_comment(req: Request) -> Response {
-    let post_id = req.param("post_id")?;
-    let comment_id = req.param("comment_id")?;
-
-    json_response!({
-        "post_id": post_id,
-        "comment_id": comment_id
-    })
-}
-```
-
-### Getting Headers
-
-Access HTTP headers from the request:
-
-```rust
-pub async fn index(req: Request) -> Response {
-    // Get a specific header (returns Option<&str>)
-    let auth = req.header("Authorization");
-    let content_type = req.header("Content-Type");
-
-    if let Some(token) = auth {
-        // Process authenticated request
-    }
-
-    json_response!({"status": "ok"})
-}
-```
-
-### Request Methods
-
-| Method | Return Type | Description |
-|--------|-------------|-------------|
-| `method()` | `&Method` | HTTP method (GET, POST, etc.) |
-| `path()` | `&str` | Request path (e.g., `/users/123`) |
-| `param(name)` | `Result<&str, ParamError>` | Get a route parameter |
-| `params()` | `&HashMap<String, String>` | Get all route parameters |
-| `header(name)` | `Option<&str>` | Get a header value |
-| `is_inertia()` | `bool` | Check if Inertia.js request |
-| `inertia_version()` | `Option<&str>` | Get Inertia version |
-
-## Creating Responses
-
-Controllers return responses using helper methods and macros:
-
-### JSON Responses
-
-```rust
-use suprnova::{json_response, Request, Response};
-
-pub async fn index(_req: Request) -> Response {
+pub async fn json_handler() -> Response {
     json_response!({
         "users": [
             {"id": 1, "name": "John"},
-            {"id": 2, "name": "Jane"}
+            {"id": 2, "name": "Jane"},
         ]
     })
 }
-```
 
-### Text Responses
-
-```rust
-use suprnova::{text_response, Request, Response};
-
-pub async fn health(_req: Request) -> Response {
+#[handler]
+pub async fn health() -> Response {
     text_response!("OK")
 }
+
+#[handler]
+pub async fn store() -> Response {
+    // Built-in chainable status / headers via ResponseExt.
+    json_response!({ "id": 1, "created": true }).status(201)
+}
+
+#[handler]
+pub async fn page() -> Response {
+    Ok(HttpResponse::html("<h1>Hello</h1>"))
+}
 ```
 
-### Setting Status Codes
+`json_response!`, `text_response!`, and `HttpResponse::*` all produce
+the same `Response` type. The `ResponseExt` trait adds `.status(...)`,
+`.header(...)`, `.cookie(...)`, and `.with_headers(...)` so you can
+chain configuration onto a macro result.
+
+For everything else — file downloads, streaming bodies, Inertia
+responses, redirects — see [Responses](responses.md).
+
+## Redirects
+
+`redirect!("route.name")` validates the route exists at compile time
+and returns a builder you can chain configuration onto:
 
 ```rust
-use suprnova::{json_response, Request, Response, ResponseExt};
+use suprnova::{handler, redirect, Response};
 
-pub async fn store(_req: Request) -> Response {
-    // Create user...
-
-    json_response!({"id": 1, "created": true})
-        .status(201)
-}
-```
-
-> **Note:**
->
-> For more response options, see the [Responses documentation](responses.md).
-
-
-## RESTful Controllers
-
-suprnova encourages organizing controllers following REST conventions:
-
-```rust
-// src/controllers/user.rs
-use suprnova::{json_response, redirect, Request, Response, ResponseExt};
-
-/// GET /users - List all users
-pub async fn index(_req: Request) -> Response {
-    json_response!({
-        "users": [
-            {"id": 1, "name": "John"},
-            {"id": 2, "name": "Jane"}
-        ]
-    })
-}
-
-/// GET /users/{id} - Show a specific user
-pub async fn show(req: Request) -> Response {
-    let id = req.param("id")?;
-
-    json_response!({
-        "id": id,
-        "name": format!("User {}", id)
-    })
-}
-
-/// POST /users - Create a new user
-pub async fn store(_req: Request) -> Response {
-    // Create user logic...
-
-    json_response!({"id": 1, "created": true})
-        .status(201)
-}
-
-/// PUT /users/{id} - Update a user
-pub async fn update(req: Request) -> Response {
-    let id = req.param("id")?;
-
-    // Update user logic...
-
-    json_response!({
-        "id": id,
-        "updated": true
-    })
-}
-
-/// DELETE /users/{id} - Delete a user
-pub async fn destroy(req: Request) -> Response {
-    let _id = req.param("id")?;
-
-    // Delete user logic...
-
-    redirect!("users.index").into()
-}
-```
-
-Register these in your routes:
-
-```rust
-// src/routes.rs
-use suprnova::{get, post, put, delete, routes};
-use crate::controllers;
-
-routes! {
-    get!("/users", controllers::user::index).name("users.index"),
-    get!("/users/{id}", controllers::user::show).name("users.show"),
-    post!("/users", controllers::user::store).name("users.store"),
-    put!("/users/{id}", controllers::user::update).name("users.update"),
-    delete!("/users/{id}", controllers::user::destroy).name("users.destroy"),
-}
-```
-
-## Error Handling in Controllers
-
-Use the `?` operator for clean error propagation:
-
-```rust
-use suprnova::{AppError, Request, Response, json_response};
-
-pub async fn show(req: Request) -> Response {
-    // Returns 400 if param is missing
-    let id = req.param("id")?;
-
-    // Simulate database lookup
-    let user = find_user(id).await?;
-
-    json_response!({
-        "user": user
-    })
-}
-
-async fn find_user(id: &str) -> Result<User, AppError> {
-    // Database query...
-    if id == "999" {
-        return Err(AppError::not_found("User not found"));
-    }
-    Ok(User { id: id.to_string(), name: "John".to_string() })
-}
-```
-
-> **Note:**
->
-> For more error handling options, see the [Responses documentation](responses.md).
-
-
-## Dependency Injection
-
-Use `App::resolve()` to inject dependencies from the container:
-
-```rust
-use suprnova::{App, Request, Response, json_response};
-use crate::actions::UserService;
-
-pub async fn index(_req: Request) -> Response {
-    // Resolve a service from the container
-    let user_service = App::resolve::<UserService>();
-
-    let users = user_service.list_all();
-
-    json_response!({
-        "users": users
-    })
-}
-```
-
-## File Organization
-
-The standard file structure for controllers:
-
-```
-src/
-├── controllers/
-│   ├── mod.rs          # Re-export all controllers
-│   ├── home.rs         # Home controller
-│   ├── user.rs         # User controller
-│   ├── product.rs      # Product controller
-│   └── api/            # Nested API controllers
-│       ├── mod.rs
-│       └── user.rs     # API user controller
-├── routes.rs           # Route definitions
-└── main.rs
-```
-
-**src/controllers/mod.rs:**
-```rust
-pub mod home;
-pub mod user;
-pub mod product;
-pub mod api;
-```
-
-**src/controllers/user.rs:**
-```rust
-use suprnova::{json_response, Request, Response};
-
-pub async fn index(_req: Request) -> Response {
-    json_response!({"controller": "user"})
-}
-
-pub async fn show(req: Request) -> Response {
-    let id = req.param("id")?;
-    json_response!({"id": id})
-}
-```
-
-## Practical Examples
-
-### API Controller with Validation
-
-```rust
-use suprnova::{AppError, Request, Response, json_response, ResponseExt};
-
-pub async fn store(req: Request) -> Response {
-    // Get required header
-    let content_type = req.header("Content-Type")
-        .ok_or_else(|| AppError::bad_request("Content-Type header required"))?;
-
-    if !content_type.contains("application/json") {
-        return Err(AppError::bad_request("Content-Type must be application/json").into());
-    }
-
-    // Process the request...
-
-    json_response!({"created": true})
-        .status(201)
-}
-```
-
-### Controller with Redirects
-
-```rust
-use suprnova::{redirect, route, Request, Response};
-
-pub async fn store(_req: Request) -> Response {
-    // Create resource...
-
-    // Redirect to named route
+#[handler]
+pub async fn store() -> Response {
+    // Create the user…
     redirect!("users.index").into()
 }
 
-pub async fn update(req: Request) -> Response {
-    let id = req.param("id")?;
-
-    // Update resource...
-
-    // Redirect with route parameter
+#[handler]
+pub async fn update(id: i64) -> Response {
     redirect!("users.show")
-        .with("id", id)
+        .with("id", id.to_string())
         .into()
 }
 
-pub async fn search(_req: Request) -> Response {
-    // Redirect with query parameters
+#[handler]
+pub async fn search() -> Response {
     redirect!("users.index")
         .query("page", "1")
         .query("sort", "name")
@@ -579,24 +274,189 @@ pub async fn search(_req: Request) -> Response {
 }
 ```
 
-## Summary
+`.with(key, value)` fills a route placeholder; `.query(key, value)`
+appends a query string parameter; `.flash(key, value)` writes to the
+session flash bag for the next request. `.into()` converts the
+builder to a `Response`.
 
-| Feature | Usage |
-|---------|-------|
-| Generate controller | `suprnova make:controller Name` |
-| Handler attribute | `#[handler]` on all controller methods |
-| Handler signature | `pub async fn name(req: Request) -> Response` |
-| Path param handler | `pub async fn name(id: i32) -> Response` |
-| Route model binding | `pub async fn name(user: user::Model) -> Response` |
-| FormRequest handler | `pub async fn name(form: FormRequest) -> Response` |
-| Mixed params | `pub async fn name(user: user::Model, form: UpdateRequest) -> Response` |
-| Enable route binding | `route_binding!(Entity, Model, "param_name")` |
-| Get route param | `req.param("id")?` |
-| Get all params | `req.params()` |
-| Get header | `req.header("Authorization")` |
-| Get HTTP method | `req.method()` |
-| Get path | `req.path()` |
-| JSON response | `json_response!({...})` |
-| Text response | `text_response!("...")` |
-| Set status | `.status(201)` |
-| Redirect | `redirect!("route.name").into()` |
+If the named route doesn't exist, the macro fails the compile with
+a list of available route names — typos surface before staging.
+
+## Container-injected services
+
+Resolve services from the container with `App::resolve` (concrete
+types) or `App::resolve_make` (trait objects). Both return
+`Result<_, FrameworkError>` so they compose with `?`:
+
+```rust
+use suprnova::{handler, json_response, App, Response};
+use crate::services::UserService;
+
+#[handler]
+pub async fn index() -> Response {
+    let user_service = App::resolve::<UserService>()?;
+    let users = user_service.list_all().await?;
+    json_response!({ "users": users })
+}
+```
+
+If you're binding actions with `#[injectable]`, this is how a
+controller calls them. See [Actions](actions.md) for the action
+shape, and [Service Container](container.md) for the full container
+surface — binding, factories, the task-local / thread-local /
+global lookup cascade.
+
+## A worked RESTful controller
+
+```rust
+// src/controllers/user.rs
+use suprnova::{attrs, handler, json_response, redirect, Response, ResponseExt};
+use crate::models::user;
+use crate::requests::{StoreUserRequest, UpdateUserRequest};
+
+// GET /users
+#[handler]
+pub async fn index() -> Response {
+    let users = user::Model::all().await?;
+    json_response!({ "users": users })
+}
+
+// GET /users/{user}
+#[handler]
+pub async fn show(user: user::Model) -> Response {
+    json_response!({ "user": user })
+}
+
+// POST /users
+#[handler]
+pub async fn store(form: StoreUserRequest) -> Response {
+    let user = user::Model::create(attrs! {
+        name: form.name,
+        email: form.email,
+    }).await?;
+    json_response!({ "user": user }).status(201)
+}
+
+// PUT /users/{user}
+#[handler]
+pub async fn update(user: user::Model, form: UpdateUserRequest) -> Response {
+    let id = user.id;
+    user.update(attrs! {
+        name: form.name,
+        email: form.email,
+    }).await?;
+    json_response!({ "updated": id })
+}
+
+// DELETE /users/{user}
+#[handler]
+pub async fn destroy(user: user::Model) -> Response {
+    user.delete().await?;
+    redirect!("users.index").into()
+}
+```
+
+Register them with the `routes!` macro:
+
+```rust
+// src/routes.rs
+use suprnova::{delete, get, post, put, routes};
+use crate::controllers;
+
+routes! {
+    get!("/users",           controllers::user::index   ).name("users.index"),
+    get!("/users/{user}",    controllers::user::show    ).name("users.show"),
+    post!("/users",          controllers::user::store   ).name("users.store"),
+    put!("/users/{user}",    controllers::user::update  ).name("users.update"),
+    delete!("/users/{user}", controllers::user::destroy ).name("users.destroy"),
+}
+```
+
+The route placeholder `{user}` matches the argument name `user: user::Model`, which is how the framework knows which path segment loads the model.
+
+## The `Request` API
+
+The methods you'll reach for most often when taking `Request` directly:
+
+| Method | Returns | Notes |
+|---|---|---|
+| `method()` | `&hyper::Method` | HTTP method |
+| `path()` | `&str` | URL path |
+| `param(name)` | `Result<&str, ParamError>` | route param; `?` to bail |
+| `params()` | `&HashMap<String, String>` | all route params |
+| `query()` | `Option<&str>` | raw query string |
+| `query_param(key)` | `Option<String>` | single query string value |
+| `query_params()` | `HashMap<String, String>` | all query params |
+| `query_into::<T>()` | `Result<T, FrameworkError>` | typed deserialize |
+| `header(name)` | `Option<&str>` | single header |
+| `headers()` | `&hyper::HeaderMap` | full header map |
+| `has_header(name)` | `bool` | presence check |
+| `bearer_token()` | `Option<String>` | parsed `Authorization: Bearer …` |
+| `cookie(name)` | `Option<String>` | single cookie value |
+| `cookies()` | `HashMap<String, String>` | all cookies |
+| `ip()` | `Option<String>` | peer IP, X-Forwarded-For-aware |
+| `secure()` | `bool` | HTTPS detection (incl. proxies) |
+| `is_method(m)` | `bool` | case-insensitive |
+| `is_inertia()` | `bool` | Inertia XHR header |
+| `ajax()` | `bool` | `X-Requested-With: XMLHttpRequest` |
+| `expects_json()` / `wants_json()` | `bool` | Accept-header inspection |
+| `route_name()` | `Option<String>` | matched route's `.name(...)` |
+| `json::<T>()` | `Result<T, FrameworkError>` | parse body as JSON (consumes) |
+| `form::<T>()` | `Result<T, FrameworkError>` | parse as form-urlencoded |
+| `input::<T>()` | `Result<T, FrameworkError>` | content-type-dispatched parse |
+
+This is a Laravel-shaped surface — every method here mirrors a method
+on Laravel's `Request` class.
+
+## File layout
+
+Convention:
+
+```
+src/
+├── controllers/
+│   ├── mod.rs          # pub mod home; pub mod user; ...
+│   ├── home.rs
+│   ├── user.rs
+│   └── api/
+│       ├── mod.rs
+│       └── user.rs
+├── routes.rs           # routes! { ... }
+└── main.rs
+```
+
+Nothing in the framework enforces this layout — controllers can live
+anywhere reachable from `routes.rs`. The convention exists because
+it's what scaffolding emits and because routes/controllers are the
+natural pair.
+
+## Why Suprnova diverges
+
+Laravel controllers are classes that extend `Illuminate\Routing\Controller`.
+Methods are called on instances the container resolves per-request,
+which is where constructor-injection happens. The pattern is fine on
+PHP — `new`-on-every-request is cheap when the entire process tears
+down after the response.
+
+In Rust, that pattern would mean either (a) allocating a controller
+struct per request, which costs an `Arc` clone you don't need, or (b)
+re-implementing dependency injection through a base class hierarchy
+that doesn't pay for itself.
+
+Suprnova picks the simpler model: a controller is a free async
+function, and "dependencies" are either container resolutions
+(`App::resolve::<Service>()?`) or extraction-typed arguments
+(`form: UpdateUserRequest`). Constructor injection happens at the
+`#[injectable]` boundary in [Actions](actions.md), where it belongs.
+The handler stays a pure function from request to response, which
+makes it trivial to test in isolation: build a `Request`, call the
+function, assert on the result.
+
+## Next
+
+- [Routing](routing.md) — what `routes!`, `get!`, `post!`, and `.name()` expand into
+- [Form Requests](requests.md) — typed validation via `#[derive(FormRequest)]`
+- [Responses](responses.md) — JSON, HTML, files, streams, Inertia pages, redirects
+- [Service Container](container.md) — what `App::resolve` actually does
+- [Actions](actions.md) — where business logic lives outside the controller
+- [Error Model](error-model.md) — how `?` turns `FrameworkError` into a response
