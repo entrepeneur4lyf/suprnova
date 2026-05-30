@@ -1,6 +1,6 @@
 # Hashing
 
-Suprnova ships a Laravel-parity hashing facade backed by three first-class drivers: **bcrypt** (default — matches Laravel), **Argon2i** (memory-hard, side-channel-resistant), and **Argon2id** (OWASP 2024 recommendation). Driver selection is env-driven; the facade is algorithm-aware end-to-end (info, is_hashed, needs_rehash, verify).
+The `suprnova::hashing` module is the framework's password hashing surface, with three first-class drivers — **bcrypt** (default, matches Laravel), **Argon2i** (memory-hard, side-channel-resistant), and **Argon2id** (OWASP 2024 recommendation). Use it when storing user passwords, hashing remember-me verifier tokens, or anywhere a one-way function is the right primitive. Driver selection is env-driven, and the facade is algorithm-aware end-to-end (`info`, `is_hashed`, `needs_rehash`, `verify`) so a stored bcrypt hash still verifies after you flip `HASH_DRIVER=argon2id`.
 
 ## Overview
 
@@ -92,6 +92,31 @@ assert!(verify_with(&driver, &long, &h)?);
 
 Same shape as Argon2id; `Argon2iHasher::new(opts)`. Use Argon2id for new projects — Argon2i is supported for parity but Argon2id is the modern recommendation.
 
+## Bcrypt with an explicit cost (`hash_with_cost`)
+
+`hash_with_cost(password, cost)` and `hash_with_cost_async(password, cost)` mint a bcrypt hash at a caller-supplied cost factor regardless of `HASH_DRIVER`. Use these when policy or per-tenant config flows a cost into the call site rather than into the process env — for example, a high-security account class that uses cost 14 while the rest of the app runs at the default 12.
+
+```rust
+use suprnova::hashing::{hash_with_cost, hash_with_cost_async};
+
+// Sync — tests, CLI tools.
+let h = hash_with_cost("my_password", 14)?;
+
+// Async — inside Tokio request handlers.
+let h = hash_with_cost_async("my_password", 14).await?;
+```
+
+Both entry points reject `cost` outside `MIN_BCRYPT_COST..=MAX_BCRYPT_COST` (`4..=31`) with `FrameworkError::param`, mirroring the env-side `HASH_ROUNDS` validation:
+
+```rust
+use suprnova::hashing::{hash_with_cost, MIN_BCRYPT_COST, MAX_BCRYPT_COST};
+
+assert!(hash_with_cost("pw", MIN_BCRYPT_COST - 1).is_err()); // < 4
+assert!(hash_with_cost("pw", MAX_BCRYPT_COST + 1).is_err()); // > 31
+```
+
+The bounds check matters because each cost increment doubles CPU time. At cost 31 a single bcrypt hash takes hours on commodity hardware — bounds-checking inside the framework keeps a policy/config typo from accidentally pinning a worker thread for the rest of the day. The async variant goes through `spawn_blocking` so even a legitimately high cost doesn't freeze the request loop.
+
 ## Algorithm-aware needs_rehash
 
 `needs_rehash` returns `true` when the stored hash should be re-hashed under the active driver. It covers three cases:
@@ -175,10 +200,16 @@ The idempotence check uses `hashing::is_hashed`, so flipping `HASH_DRIVER` mid-p
 
 ## Use with `Auth::attempt`
 
-`Auth::attempt(&credentials)` calls `UserProvider::validate_credentials`, which in turn calls `hashing::verify_async` against the user's stored hash. This dispatches through the active driver, so the verify works regardless of which algorithm minted the stored hash — perfect for live migration: flip `HASH_DRIVER=argon2id`, all existing bcrypt hashes still verify, and `needs_rehash` returns `true` so you can rotate them on each successful login.
+`Auth::attempt(&credentials)` calls `UserProvider::validate_credentials`, which in turn calls `hashing::verify_async` against the user's stored hash. Verify dispatches on the *stored* hash's algorithm, not the configured driver — so after you flip `HASH_DRIVER=argon2id`, every existing bcrypt hash still verifies, and `needs_rehash` returns `true` so the standard rotate-on-login pattern carries the user base across to the new algorithm one login at a time.
 
-## See also
+## Overriding the driver in tests
 
-- [Authentication](authentication) — `Auth::attempt`, the user-provider trait, and how hashing integrates with login.
-- [Auth flows](auth-flows) — password reset rotates the stored hash through `verify_and_rotate`, which uses the active driver.
-- [Eloquent](eloquent) — `#[cast(AsHashed)]` reference.
+`set_default_driver(Box<dyn Hasher>)` installs a driver programmatically for tests and embedded CLI tools that build the driver without going through `HASH_DRIVER`. It is one-shot — the first call wins, and a second call returns `FrameworkError::internal` rather than swapping the driver mid-process. Use it at suite startup, before any code path resolves the default.
+
+## Next
+
+- [Authentication](authentication.md) — `Auth::attempt`, the user-provider trait, and how hashing integrates with login
+- [Auth flows](auth-flows.md) — `PasswordReset::complete` rotates the stored password hash through the active driver; remember-me tokens are hashed before storage via `hash_async`
+- [Eloquent](eloquent.md) — `#[cast(AsHashed)]` reference and the broader cast surface
+- [Encryption](encryption.md) — two-way authenticated encryption for at-rest data; the complement to one-way hashing
+- [Error Model](error-model.md) — what `FrameworkError::param` looks like when a hashing config value is rejected
