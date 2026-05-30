@@ -205,6 +205,49 @@ pub trait PrivateChannel: Channel {}
 /// Channel with presence semantics — emits `presence.joined` /
 /// `presence.left` events when subscribers attach or detach. T6
 /// wires the actual emission in `BroadcastingWsHandler`.
+///
+/// # Two-part contract — easy to half-implement
+///
+/// Implementing `PresenceChannel` is **not enough** on its own. The
+/// `BroadcastingWsHandler` detects presence by calling
+/// [`Channel::presence_info`] — whose default returns `None`. A channel
+/// that implements `PresenceChannel` but forgets to override
+/// `presence_info` is wired as a non-presence channel: subscribes work,
+/// but `presence.joined` / `presence.left` / `presence.here` never fire
+/// and `member_info` is never called. The compiler cannot catch this on
+/// stable Rust, so both halves must be supplied by hand:
+///
+/// ```rust,ignore
+/// use async_trait::async_trait;
+/// use suprnova::broadcasting::{Channel, ChannelParams, PresenceChannel};
+/// use suprnova::http::Request;
+/// use suprnova::FrameworkError;
+/// use serde_json::{Value, json};
+///
+/// pub struct Lobby;
+///
+/// #[async_trait]
+/// impl Channel for Lobby {
+///     fn name(&self) -> &'static str { "presence.lobby" }
+///
+///     // Required for presence semantics to fire — without this override
+///     // `PresenceChannel` is wired but inert.
+///     fn presence_info(&self) -> Option<&dyn PresenceChannel> {
+///         Some(self)
+///     }
+/// }
+///
+/// #[async_trait]
+/// impl PresenceChannel for Lobby {
+///     async fn member_info(
+///         &self,
+///         _req: &Request,
+///         _params: &ChannelParams,
+///     ) -> Result<Value, FrameworkError> {
+///         Ok(json!({ "user_id": 42 }))
+///     }
+/// }
+/// ```
 #[async_trait]
 pub trait PresenceChannel: Channel {
     /// Member info to broadcast on join/leave events. Typically

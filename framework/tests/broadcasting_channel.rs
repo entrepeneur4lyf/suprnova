@@ -53,6 +53,9 @@ impl Channel for PresenceLobby {
     fn name(&self) -> &'static str {
         "presence.lobby"
     }
+    fn presence_info(&self) -> Option<&dyn PresenceChannel> {
+        Some(self)
+    }
 }
 
 #[async_trait]

@@ -360,8 +360,14 @@ impl SeaStreamerBroadcastHub {
         // Derive heartbeat and prune intervals from the TTL:
         //   heartbeat = ttl / 6   (refresh well within the TTL window)
         //   prune     = ttl / 2   (scan twice per TTL window)
-        let heartbeat_interval = presence_ttl / 6;
-        let prune_interval = presence_ttl / 2;
+        //
+        // Both are clamped to a non-zero floor so a pathologically small TTL
+        // (e.g. sub-second values from a misconfigured caller) cannot produce
+        // a `Duration::ZERO` interval, which would make the heartbeat / prune
+        // loops sleep zero and busy-spin a worker thread.
+        const MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+        let heartbeat_interval = (presence_ttl / 6).max(MIN_INTERVAL);
+        let prune_interval = (presence_ttl / 2).max(MIN_INTERVAL);
 
         let instance_id = Uuid::new_v4();
         let local = Arc::new(InMemoryBroadcastHub::new());
