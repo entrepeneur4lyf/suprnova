@@ -30,10 +30,10 @@ You now have:
 - A SeaORM-backed Eloquent layer with relations, eager loading, soft deletes
 - Inertia.js bridging Rust → Svelte 5 with typed `#[derive(InertiaProps)]`
 - Auth (sessions, password hashing, email verification, 2FA, OAuth via torii)
-- A queue with redis/database/sync drivers
-- A `#[derive(Task)]` cron scheduler
+- A queue with memory/sync/redis/database/null drivers
+- A cron scheduler driven by the `Task` trait
 - A console binary per project for `cargo run --bin console <cmd>`
-- Cache, storage (fs/s3/azblob/gcs), mail (SMTP + 6 providers), web push
+- Cache, storage (fs/s3/azblob/gcs), mail (SMTP + 5 providers: SES, Mailgun, Postmark, SendGrid, Resend), web push
 - Broadcasting over a pluggable hub (sea-streamer by default)
 - Validation, CSRF, CORS, rate limiting, idempotency, request timeouts, structured errors
 
@@ -75,15 +75,15 @@ layer. Suprnova ships that layer:
 | Capability | Hand-roll on Axum | In Suprnova |
 |---|---|---|
 | Routing macros that scale to hundreds of routes | Builder API, can get noisy | `routes!` macro with grouping, prefixes, middleware, naming |
-| Route model binding (path id → loaded model) | Custom extractor per type | `#[handler]` resolves `Post` from `{id}` automatically |
+| Route model binding (path id → loaded model) | Custom extractor per type | `#[handler]` resolves `post::Model` from `{id}` automatically |
 | Eloquent-style chainable query builder | Use SeaORM directly | `Post::query().db_where(...).order_by(...).get().await?` |
 | Soft deletes, observers, lifecycle events | Build per-model | `#[model(soft_deletes)] + impl Observer<Post>` |
 | Migrations + entity generation | Wire sea-orm-cli + scripts | `suprnova db:sync` runs migrations and regenerates entities |
-| Auth (sessions, providers, guards) | Stitch tower-sessions + own logic | `Auth::attempt`, `Auth::user`, `#[middleware(auth)]` |
+| Auth (sessions, providers, guards) | Stitch tower-sessions + own logic | `Auth::attempt`, `Auth::user`, `.middleware(AuthMiddleware)` per route |
 | Email verification, password reset, 2FA, brute-force | Hand-build all four | All built in, configurable, idempotent |
-| Background queue | Pick a driver, write workers | `Queue::dispatch` + `suprnova queue:work` |
-| Cron scheduling | Write a tokio task with `tokio_cron_scheduler` | `#[derive(Task)] #[task(cron = "0 3 * * *")]` |
-| Inertia bridge | Build extractors + a JS adapter | `inertia_response!("Page", props)` |
+| Background queue | Pick a driver, write workers | `Queue::push` + `cargo run --bin console queue:work` |
+| Cron scheduling | Write a tokio task with `tokio_cron_scheduler` | `impl Task` + `Schedule::task(...).daily().at("03:00")` |
+| Inertia bridge | Build extractors + a JS adapter | `inertia_response!(&req, "Page", props)` |
 | Typed frontend props (Rust → TS) | Write a generator | `#[derive(InertiaProps)]` + `suprnova generate-types` |
 | Broadcasting (public / private / presence channels) | Wire a streaming backend + auth | `BroadcastHub` + `Channel`/`PrivateChannel`/`PresenceChannel` traits |
 | Mail with multiple providers | Pick one, write your own abstraction | `Mail::driver("ses")` etc., uniform `Mailable` API |
@@ -110,26 +110,29 @@ You'll recognise the shapes:
 ```rust
 // A handler returns `Result<HttpResponse, HttpResponse>` (aliased Response).
 pub async fn show(req: Request) -> Response {
-    let id: i64 = req.param("id").unwrap_or("0").parse()?;
+    let id: i64 = req.param("id").unwrap_or("0").parse().unwrap_or(0);
     let post = Post::find_or_fail(id).await?;
     Ok(HttpResponse::json(serde_json::json!({ "post": post })))
 }
 
 // Middleware is a trait, not a closure:
-#[async_trait::async_trait]
+#[async_trait]
 impl Middleware for RequireAdmin {
-    async fn handle(&self, req: Request, next: Next<'_>) -> Response {
-        let user = Auth::user(&req).await?;
+    async fn handle(&self, req: Request, next: Next) -> Response {
+        let user = Auth::user_as::<User>().await?
+            .ok_or_else(|| HttpResponse::text("Unauthorized").status(401))?;
         if !user.is_admin {
-            return Err(HttpResponse::status(StatusCode::FORBIDDEN));
+            return Err(HttpResponse::text("Forbidden").status(403));
         }
-        next.run(req).await
+        next(req).await
     }
 }
 
-// Background work is async functions returning Result:
-#[async_trait::async_trait]
-impl Handle for SendWelcomeEmail {
+// Background work is the `Job` trait — `handle(self)` runs the job:
+#[async_trait]
+impl Job for SendWelcomeEmail {
+    fn job_name() -> &'static str { "SendWelcomeEmail" }
+
     async fn handle(self) -> Result<(), FrameworkError> {
         let user = User::find_or_fail(self.user_id).await?;
         Mail::to(&user.email).send(WelcomeMail { user }).await?;
@@ -150,12 +153,11 @@ than via traits, which lets it inject app services as well as request
 data. Route model binding (`Post` from `{id}`) is built in.
 
 If you've used `sqlx` directly: Suprnova's ORM sits over SeaORM, which
-sits over sqlx. You can drop to raw SQL via `DB::raw(...)` or the
-`DbTableBuilder` for dynamic queries; you can drop straight to SeaORM
-for things the Eloquent surface doesn't cover (e.g. raw `Statement`
-queries with custom result mapping). The chapter on
-[Dropping to SeaORM](eloquent.md#dropping-to-seaorm) covers the
-escape hatches.
+sits over sqlx. You can drop to raw SQL via `DB::select(...)` /
+`DB::select_one(...)` or use `DB::table("name")` for chainable dynamic
+queries; you can drop straight to SeaORM for things the Eloquent
+surface doesn't cover (e.g. raw `Statement` queries with custom result
+mapping). The [Eloquent chapter](eloquent.md) covers the escape hatches.
 
 ## What's the productivity delta?
 
@@ -166,13 +168,13 @@ chapter:
   [Authentication](authentication.md) + [Auth Flows](auth-flows.md). Set
   the migration, configure the guard, you're done.
 - **"I wrote my own queue worker with retry/backoff."** →
-  [Queues](queues.md). `Queue::dispatch` + `suprnova queue:work`.
+  [Queues](queues.md). `Queue::push` + `cargo run --bin console queue:work`.
 - **"I wired WebSockets with hyper-tungstenite once."** →
   [WebSockets](websockets.md). The `ws!()` macro types the handler;
   the upgrade, ping/pong heartbeat, close-frame handshake, and
   back-pressure are taken care of.
 - **"I built an Inertia adapter from scratch."** →
-  [Inertia](frontend.md). `inertia_response!("Page", props)`, with
+  [Inertia](frontend.md). `inertia_response!(&req, "Page", props)`, with
   `InertiaProps` generating the TS types.
 - **"I built a per-tenant rate limiter."** →
   [Rate Limiting](rate-limiting.md). Configurable key, configurable
@@ -197,8 +199,8 @@ something better than a framework abstraction:
 - **Custom drivers.** Cache, queue, mail, broadcasting, vector, payments
   — every "driver registry" subsystem accepts custom drivers. Implement
   the trait, register it in `bootstrap.rs`, done.
-- **Raw SQL when you want it.** `DB::raw(...)`, `DB::table(...).get_raw()`,
-  or drop fully to SeaORM. The ORM gets out of the way.
+- **Raw SQL when you want it.** `DB::select(...)`, `DB::table(...).get()`
+  for dynamic rows, or drop fully to SeaORM. The ORM gets out of the way.
 - **Your own tower middleware?** You can run it via a thin shim — but
   most middleware needs in Suprnova are covered by the built-in
   middleware system. See [Middleware](middleware.md).
