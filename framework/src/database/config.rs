@@ -160,6 +160,40 @@ impl DatabaseConfig {
         }
         Ok(())
     }
+
+    /// Refuse pool settings that would silently misbehave at runtime:
+    ///
+    /// - `max_connections == 0` — the pool will never hand out a
+    ///   connection; every query times out.
+    /// - `min_connections > max_connections` — sqlx accepts this but it
+    ///   means the pool can never warm itself up.
+    /// - `connect_timeout == 0` — the first call would error
+    ///   immediately on any latency.
+    ///
+    /// Called from [`DbConnection::connect`](crate::database::DbConnection)
+    /// so both [`DB::init`](crate::DB::init) and
+    /// [`DB::init_with`](crate::DB::init_with) fail-fast on a bad config
+    /// instead of producing a sick pool. `min_connections == 0` is left
+    /// alone — that's a legitimate "lazy / idle-empty pool" mode.
+    pub fn validate_pool(&self) -> Result<(), FrameworkError> {
+        if self.max_connections == 0 {
+            return Err(FrameworkError::param(
+                "DB_MAX_CONNECTIONS must be > 0; a zero-sized pool never hands out connections",
+            ));
+        }
+        if self.min_connections > self.max_connections {
+            return Err(FrameworkError::param(format!(
+                "DB_MIN_CONNECTIONS ({}) must be <= DB_MAX_CONNECTIONS ({})",
+                self.min_connections, self.max_connections,
+            )));
+        }
+        if self.connect_timeout == 0 {
+            return Err(FrameworkError::param(
+                "DB_CONNECT_TIMEOUT must be > 0; a zero-second timeout fails immediately on any latency",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for DatabaseConfig {

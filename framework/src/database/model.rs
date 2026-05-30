@@ -5,6 +5,17 @@
 //! [`EntityExtMut`] (write). These are blanket-friendly add-ons on
 //! `EntityTrait`; the new full Eloquent `Model` trait shipped in Phase 10A
 //! is the modern surface and reserves the bare `Model` name.
+//!
+//! All terminal methods route through
+//! [`ExecutorChoice`](crate::database::transaction::ExecutorChoice), so
+//! they observe the same precedence chain as
+//! [`Builder<M>`](crate::eloquent::Builder): the ambient
+//! [`CURRENT_TX`](crate::database::transaction::CURRENT_TX) installed by
+//! [`DB::transaction`](crate::DB::transaction), then per-call routing,
+//! then `__read_replica__` for reads, then the primary pool. Crucially,
+//! writes inside a `DB::transaction` closure are now part of the
+//! transaction — previously they silently bypassed it and survived
+//! rollbacks.
 
 use async_trait::async_trait;
 use sea_orm::{
@@ -12,8 +23,38 @@ use sea_orm::{
     PaginatorTrait, PrimaryKeyTrait, TryIntoModel,
 };
 
-use crate::database::DB;
+use crate::database::transaction::ExecutorChoice;
 use crate::error::FrameworkError;
+
+/// Run a closure with a reference to the connection or transaction
+/// that [`ExecutorChoice`] resolved to. Used by every read terminal on
+/// the [`EntityExt`] trait so the legacy surface honours the same
+/// routing layer as `Builder<M>`: tx override, ambient `CURRENT_TX`,
+/// per-builder `on(name)`, model default, read replica, primary pool.
+async fn with_read_executor<F, Fut, T>(f: F) -> Result<T, FrameworkError>
+where
+    F: FnOnce(ExecutorChoice) -> Fut + Send,
+    Fut: std::future::Future<Output = Result<T, sea_orm::DbErr>> + Send,
+{
+    let exec = ExecutorChoice::resolve_read(None, None, None).await?;
+    f(exec)
+        .await
+        .map_err(|e| FrameworkError::database(e.to_string()))
+}
+
+/// Mirror of [`with_read_executor`] for write terminals. Skips the
+/// read-replica step in [`ExecutorChoice::resolve_write`] so a stray
+/// write inside `EntityExtMut` never silently lands on the replica.
+async fn with_write_executor<F, Fut, T>(f: F) -> Result<T, FrameworkError>
+where
+    F: FnOnce(ExecutorChoice) -> Fut + Send,
+    Fut: std::future::Future<Output = Result<T, sea_orm::DbErr>> + Send,
+{
+    let exec = ExecutorChoice::resolve_write(None, None, None).await?;
+    f(exec)
+        .await
+        .map_err(|e| FrameworkError::database(e.to_string()))
+}
 
 /// Trait providing Laravel-like read operations on SeaORM entities
 ///
@@ -59,11 +100,13 @@ where
     /// let users = user::Entity::all().await?;
     /// ```
     async fn all() -> Result<Vec<Self::Model>, FrameworkError> {
-        let db = DB::connection()?;
-        Self::find()
-            .all(db.inner())
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))
+        with_read_executor(|exec| async move {
+            match exec {
+                ExecutorChoice::Tx(t) => Self::find().all(t.as_ref()).await,
+                ExecutorChoice::Pool(c) => Self::find().all(c.inner()).await,
+            }
+        })
+        .await
     }
 
     /// Find a record by primary key (generic version)
@@ -76,11 +119,14 @@ where
     where
         K: Into<<Self::PrimaryKey as PrimaryKeyTrait>::ValueType> + Send,
     {
-        let db = DB::connection()?;
-        Self::find_by_id(id)
-            .one(db.inner())
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))
+        let query = Self::find_by_id(id);
+        with_read_executor(|exec| async move {
+            match exec {
+                ExecutorChoice::Tx(t) => query.one(t.as_ref()).await,
+                ExecutorChoice::Pool(c) => query.one(c.inner()).await,
+            }
+        })
+        .await
     }
 
     /// Find a record by primary key or return an error
@@ -109,11 +155,13 @@ where
     /// let count = user::Entity::count_all().await?;
     /// ```
     async fn count_all() -> Result<u64, FrameworkError> {
-        let db = DB::connection()?;
-        Self::find()
-            .count(db.inner())
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))
+        with_read_executor(|exec| async move {
+            match exec {
+                ExecutorChoice::Tx(t) => Self::find().count(t.as_ref()).await,
+                ExecutorChoice::Pool(c) => Self::find().count(c.inner()).await,
+            }
+        })
+        .await
     }
 
     /// Check if any records exist
@@ -135,11 +183,13 @@ where
     /// let first_user = user::Entity::first().await?;
     /// ```
     async fn first() -> Result<Option<Self::Model>, FrameworkError> {
-        let db = DB::connection()?;
-        Self::find()
-            .one(db.inner())
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))
+        with_read_executor(|exec| async move {
+            match exec {
+                ExecutorChoice::Tx(t) => Self::find().one(t.as_ref()).await,
+                ExecutorChoice::Pool(c) => Self::find().one(c.inner()).await,
+            }
+        })
+        .await
     }
 }
 
@@ -186,11 +236,13 @@ where
     /// let user = user::Entity::insert_one(new_user).await?;
     /// ```
     async fn insert_one(model: Self::ActiveModel) -> Result<Self::Model, FrameworkError> {
-        let db = DB::connection()?;
-        model
-            .insert(db.inner())
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))
+        with_write_executor(|exec| async move {
+            match exec {
+                ExecutorChoice::Tx(t) => model.insert(t.as_ref()).await,
+                ExecutorChoice::Pool(c) => model.insert(c.inner()).await,
+            }
+        })
+        .await
     }
 
     /// Update an existing record
@@ -202,11 +254,13 @@ where
     /// let updated = user::Entity::update_one(user).await?;
     /// ```
     async fn update_one(model: Self::ActiveModel) -> Result<Self::Model, FrameworkError> {
-        let db = DB::connection()?;
-        model
-            .update(db.inner())
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))
+        with_write_executor(|exec| async move {
+            match exec {
+                ExecutorChoice::Tx(t) => model.update(t.as_ref()).await,
+                ExecutorChoice::Pool(c) => model.update(c.inner()).await,
+            }
+        })
+        .await
     }
 
     /// Delete a record by primary key
@@ -219,11 +273,13 @@ where
     where
         K: Into<<Self::PrimaryKey as PrimaryKeyTrait>::ValueType> + Send,
     {
-        let db = DB::connection()?;
-        let result = Self::delete_by_id(id)
-            .exec(db.inner())
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let stmt = Self::delete_by_id(id);
+        let exec = ExecutorChoice::resolve_write(None, None, None).await?;
+        let result = match exec {
+            ExecutorChoice::Tx(t) => stmt.exec(t.as_ref()).await,
+            ExecutorChoice::Pool(c) => stmt.exec(c.inner()).await,
+        }
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(result.rows_affected)
     }
 
@@ -241,11 +297,12 @@ where
     where
         Self::ActiveModel: TryIntoModel<Self::Model>,
     {
-        let db = DB::connection()?;
-        let saved = model
-            .save(db.inner())
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let exec = ExecutorChoice::resolve_write(None, None, None).await?;
+        let saved = match exec {
+            ExecutorChoice::Tx(t) => model.save(t.as_ref()).await,
+            ExecutorChoice::Pool(c) => model.save(c.inner()).await,
+        }
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
         saved
             .try_into_model()
             .map_err(|e| FrameworkError::database(e.to_string()))

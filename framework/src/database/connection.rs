@@ -32,6 +32,11 @@ impl DbConnection {
     /// For SQLite databases, this will automatically create the database file
     /// if it doesn't exist.
     pub async fn connect(config: &DatabaseConfig) -> Result<Self, FrameworkError> {
+        // Validate pool config before SeaORM silently accepts a
+        // misconfigured `ConnectOptions` (e.g. a zero-sized pool that
+        // immediately starves callers).
+        config.validate_pool()?;
+
         // For SQLite, ensure the database file can be created
         let url = if config.url.starts_with("sqlite://") {
             // Extract the file path from the URL
@@ -40,16 +45,21 @@ impl DbConnection {
 
             // Don't apply to in-memory databases
             if path != ":memory:" && !path.starts_with(":memory:") {
-                // Create parent directories if needed
+                // Create parent directories if needed. `?mode=rwc` makes
+                // SQLite create the database FILE, but it will not make
+                // PARENT DIRECTORIES — propagate any failure here with
+                // path context so misconfigured paths and permission
+                // problems surface as a clear filesystem diagnostic
+                // instead of a downstream "unable to open database file."
                 if let Some(parent) = std::path::Path::new(path).parent()
                     && !parent.as_os_str().is_empty()
                 {
-                    std::fs::create_dir_all(parent).ok();
-                }
-
-                // Touch the file to create it if it doesn't exist
-                if !std::path::Path::new(path).exists() {
-                    std::fs::File::create(path).ok();
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        FrameworkError::database(format!(
+                            "failed to create SQLite parent directory `{}`: {e}",
+                            parent.display(),
+                        ))
+                    })?;
                 }
             }
 

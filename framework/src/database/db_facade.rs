@@ -259,11 +259,27 @@ impl DbTableBuilder {
         Ok(count.max(0) as u64)
     }
 
-    /// Insert one row.
+    /// Insert one row and return the newly-assigned **auto-increment
+    /// integer primary key** named `id`.
     ///
-    /// Returns the inserted row's primary key (assumes `id`). Backend
-    /// split: Postgres + SQLite use `RETURNING id`; MySQL runs the
-    /// INSERT then issues `SELECT LAST_INSERT_ID()`.
+    /// This mirrors Laravel's `DB::table(...)->insertGetId(...)`. The
+    /// model-less builder assumes the standard `id BIGINT PRIMARY KEY
+    /// AUTO_INCREMENT` / `SERIAL` / `INTEGER PRIMARY KEY AUTOINCREMENT`
+    /// convention because there is no entity definition to consult. If
+    /// the target table:
+    ///
+    /// - has no column named `id`, or
+    /// - uses a UUID, composite, renamed, or non-integer primary key,
+    ///
+    /// the call returns a [`FrameworkError::Database`] instead of
+    /// silently producing a wrong id. Use the typed Eloquent
+    /// [`Model`](crate::eloquent::Model) surface for tables that don't
+    /// match the convention — it consults the model definition for
+    /// primary-key shape and type.
+    ///
+    /// Backend split: Postgres + SQLite use `RETURNING id`; MySQL runs
+    /// the INSERT then surfaces the driver's per-connection
+    /// `last_insert_id()` from the `ExecResult`.
     pub async fn insert(self, attrs: Attrs) -> Result<i64, FrameworkError> {
         // Audit HIGH `database` #2 — validate identifiers and operators
         // captured in the builder state, plus the attrs keys which are
@@ -324,11 +340,22 @@ impl DbTableBuilder {
                 let row = exec
                     .query_one(stmt)
                     .await
-                    .map_err(|e| FrameworkError::database(e.to_string()))?;
-                let id = row
-                    .and_then(|r| r.try_get::<i64>("", "id").ok())
-                    .unwrap_or(0);
-                Ok(id)
+                    .map_err(|e| FrameworkError::database(e.to_string()))?
+                    .ok_or_else(|| {
+                        FrameworkError::database(format!(
+                            "DB::table(\"{}\")::insert: backend returned no row from `RETURNING id`",
+                            self.table,
+                        ))
+                    })?;
+                row.try_get::<i64>("", "id").map_err(|e| {
+                    FrameworkError::database(format!(
+                        "DB::table(\"{}\")::insert: cannot read auto-increment `id` as i64 ({e}). \
+                         The model-less builder assumes an `id BIGINT` (or compatible) \
+                         primary key — for UUID, composite, renamed, or non-integer \
+                         primary keys use the typed Eloquent Model surface instead.",
+                        self.table,
+                    ))
+                })
             }
             DbBackend::MySql => {
                 // MySQL doesn't support `RETURNING`. Use the driver's
@@ -342,7 +369,22 @@ impl DbTableBuilder {
                     .run(stmt)
                     .await
                     .map_err(|e| FrameworkError::database(e.to_string()))?;
-                Ok(result.last_insert_id() as i64)
+                let raw = result.last_insert_id();
+                if raw == 0 {
+                    // MySQL returns 0 for tables without an
+                    // AUTO_INCREMENT column (e.g. UUID PK or composite
+                    // PK). Surfacing `0` would silently lie — fail
+                    // loudly with the same actionable guidance as the
+                    // Postgres / SQLite branch.
+                    return Err(FrameworkError::database(format!(
+                        "DB::table(\"{}\")::insert: MySQL returned last_insert_id() = 0; \
+                         the model-less builder assumes an AUTO_INCREMENT integer `id` \
+                         primary key. For UUID, composite, renamed, or non-integer \
+                         primary keys use the typed Eloquent Model surface instead.",
+                        self.table,
+                    )));
+                }
+                Ok(raw as i64)
             }
         }
     }
