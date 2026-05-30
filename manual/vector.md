@@ -1,10 +1,10 @@
 # Vector
 
-Suprnova's vector layer treats every vector backend as a first-class driver behind one trait. v1 ships **Memory** (in-process), **Qdrant** (gRPC), **Pinecone** (gRPC), and **MariaDB** (native `VECTOR(N)` + HNSW, 11.7+). Weaviate, Milvus, LanceDB, pgvector and LibSQL queue up behind real consumer demand.
-
-Laravel ships vectors only via Postgres `pgvector`. Suprnova diverges: pick the right database for the job. Same trait, swap drivers without rewriting consumer code.
-
-> **Production recommendation.** Suprnova's default development database is SQLite (zero setup, single file). For production, we recommend **MariaDB 11.7+**: one engine handles relational tables, vectors, JSON / NoSQL workloads, and system-versioned temporal tables — fewer moving parts than `Postgres + Redis + Qdrant` separately. The MariaDB driver below is what powers that recommendation.
+Suprnova ships a Laravel-shape `Vector` facade backed by one of four
+drivers — in-process Memory, Qdrant, Pinecone, or MariaDB native
+`VECTOR(N)` — picked explicitly at boot via `Vector::register`. The
+facade is a thin layer over a `VectorDriver` trait, so custom backends
+plug in the same way the built-ins do.
 
 ## Quickstart
 
@@ -45,6 +45,24 @@ pub trait VectorDriver: Send + Sync + 'static {
 `VectorItem` carries an arbitrary `String` id, an `embedding: Vec<f32>`, and freeform `metadata: serde_json::Value` (must be a JSON object or `null`). `VectorMatch` returns the original id, the backend's similarity score, and the same metadata shape.
 
 The trait is intentionally small. When you need filter expressions on search, sparse vectors, scroll/list, snapshots, or quantization knobs, drop down to the driver's underlying SDK via its public `client()` trapdoor.
+
+### Why Suprnova diverges
+
+Laravel ships vectors only through Postgres `pgvector`. That's the
+PHP-shape answer: pick one storage backend, hide it behind a single
+driver, and call it done. Suprnova treats the choice as a configuration
+concern. The same trait covers an in-process `HashMap` for tests,
+a dedicated vector DB (Qdrant, Pinecone) when the embedding count
+justifies the operational cost, and a relational backend (MariaDB
+11.7+) when you'd rather keep vectors next to the rows that produced
+them. Weaviate, Milvus, LanceDB, pgvector, and LibSQL queue up behind
+real consumer demand — none are blocked by the trait shape.
+
+When the rest of your app fits on one engine, MariaDB 11.7+ keeps
+vectors alongside relational tables, JSON documents, and
+system-versioned temporal data — fewer moving parts than running
+Postgres + Redis + Qdrant separately. See [Deployment](deployment.md)
+for the recommendation in context.
 
 ## Drivers
 
@@ -270,3 +288,15 @@ To add a fifth backend (Weaviate, Milvus, LanceDB, pgvector, LibSQL, ...):
 3. Mirror the Qdrant/Pinecone test split: pure-function tests always run, integration tests `#[ignore]`-gated behind env vars for credentials.
 
 The trait is intentionally small so the bar to ship a new driver stays low. If a backend needs surface that doesn't fit (filter expressions, sparse vectors, hybrid search), expose it via the driver's `client()` trapdoor — don't bloat the trait.
+
+## Next
+
+- [Deployment](deployment.md) — the MariaDB-as-default-production
+  recommendation in context
+- [Database](database.md) — multi-driver SeaORM setup, including
+  MariaDB as a relational backend alongside vectors
+- [Environment Variables](env-vars.md) — `QDRANT_URL`,
+  `PINECONE_API_KEY`, `MARIADB_URL` and other driver env contracts
+- [Cache](cache.md) — sibling facade with the same driver-trait shape
+- [Laravel Parity Map](parity.md) — where vector search sits relative
+  to Scout
