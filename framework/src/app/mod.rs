@@ -623,19 +623,35 @@ where
             std::process::exit(1);
         });
 
-        // For SQLite, ensure the database file can be created
+        // For SQLite, ensure the database file can be created. Surface
+        // filesystem errors (permission denied, no such path, read-only fs)
+        // with an actionable message rather than letting them re-surface
+        // later as a generic "failed to connect" panic.
         let database_url = if database_url.starts_with("sqlite://") {
             let path = database_url.trim_start_matches("sqlite://");
             let path = path.trim_start_matches("./");
 
             if let Some(parent) = Path::new(path).parent()
                 && !parent.as_os_str().is_empty()
+                && let Err(e) = std::fs::create_dir_all(parent)
             {
-                std::fs::create_dir_all(parent).ok();
+                eprintln!(
+                    "suprnova: failed to create SQLite parent directory \
+                     {parent}: {e}. Check that the path is writable and the \
+                     enclosing filesystem is not read-only.",
+                    parent = parent.display(),
+                );
+                std::process::exit(1);
             }
 
-            if !Path::new(path).exists() {
-                std::fs::File::create(path).ok();
+            if !Path::new(path).exists()
+                && let Err(e) = std::fs::File::create(path)
+            {
+                eprintln!(
+                    "suprnova: failed to create SQLite database file {path}: \
+                     {e}. Check filesystem permissions on the target path.",
+                );
+                std::process::exit(1);
             }
 
             format!("sqlite:{}?mode=rwc", path)
