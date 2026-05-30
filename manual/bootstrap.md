@@ -1,63 +1,68 @@
-# Bootstrap
+# Application Bootstrap
 
-The `bootstrap.rs` file is your application's central configuration point for registering services, global middleware, and performing runtime initialization. It's called during application startup, before the server begins handling requests.
+`bootstrap.rs` is the one place where your application wires itself up
+at startup. Container bindings, event listeners, observers, supervisors,
+global middleware — anything that should exist before the first request
+hits the server (or the first job pops off the queue) is registered
+inside a single async `bootstrap` function. There is no
+service-provider scaffold to assemble; one function, run once, is the
+whole API.
 
-## Overview
+## The shape
 
-Every suprnova application has a `src/bootstrap.rs` file that contains a `register()` function:
+A scaffolded app's entry point builds an [`Application`](lifecycle.md)
+fluently and runs it. The `bootstrap` step is one method on the
+builder:
+
+```rust
+// cmd/main.rs
+use app::{bootstrap, config, migrations, routes};
+use suprnova::Application;
+
+#[tokio::main]
+async fn main() {
+    Application::new()
+        .config(config::register_all)
+        .bootstrap(bootstrap::register)
+        .routes(routes::register)
+        .migrations::<migrations::Migrator>()
+        .run()
+        .await;
+}
+```
+
+The framework calls your `bootstrap_fn` once during the boot sequence,
+after `Config::init` and after the runtime drivers (Cache, Queue,
+RateLimit, Mail) are up but before the router is built. The same call
+runs for background workers (`queue:work`, `workflow:work`,
+`schedule:work`) so an observer or listener registered here fires
+identically for an insert from a queue job and an insert from an HTTP
+handler. [Lifecycle](lifecycle.md) walks the full sequence.
+
+The function's signature is fixed by `Application::bootstrap`:
 
 ```rust
 // src/bootstrap.rs
-use suprnova::{bind, global_middleware, singleton, App, DB};
-use crate::middleware;
-
 pub async fn register() {
-    // Initialize database connection
-    DB::init().await.expect("Failed to connect to database");
-
-    // Global middleware (runs on every request)
-    global_middleware!(middleware::LoggingMiddleware);
-
-    // Register services that need runtime configuration
-    // bind!(dyn CacheStore, RedisCache::new(&redis_url));
+    // bindings, observers, listeners, supervisors, global middleware
 }
 ```
 
-## When Bootstrap Runs
+It returns `()`. Fallible setup uses `.expect("…")` with a message that
+explains the remediation — boot is the right time to fail loudly. The
+example app's call is `DB::init().await.expect("Failed to connect to
+database");` so a missing `DATABASE_URL` aborts the process at boot
+with the actual error printed, instead of surfacing as a confusing
+"connection refused" on the first request.
 
-The bootstrap file is called in `main.rs` during the application startup sequence:
+## What goes in bootstrap
 
-```rust
-// src/main.rs
-#[tokio::main]
-async fn main() {
-    // 1. Initialize framework configuration (loads .env files)
-    Config::init(std::path::Path::new("."));
+A real `bootstrap` function does a small number of distinct things.
+Each subsection below is one of them. The example app's
+`app/src/bootstrap.rs` exercises all of them and is the working
+reference.
 
-    // 2. Register application configs
-    config::register_all();
-
-    // 3. Register services and global middleware
-    bootstrap::register().await;
-
-    // 4. Register routes
-    let router = routes::register();
-
-    // 5. Start server
-    Server::from_config(router)
-        .run()
-        .await
-        .expect("Failed to start server");
-}
-```
-
-This sequence ensures that environment variables and configuration are available before services are initialized.
-
-## What to Register in Bootstrap
-
-### Database Initialization
-
-Initialize the database connection to make it available throughout your application:
+### Database connection
 
 ```rust
 use suprnova::DB;
@@ -67,84 +72,258 @@ pub async fn register() {
 }
 ```
 
-### Global Middleware
+`DB::init` reads `DatabaseConfig` (registered by your `config_fn`) and
+opens the pool. The connection is stored in the [container](container.md)
+as a singleton — `DB::connection()` / `DB::get()` resolves it
+anywhere. `DB::init_with(config)` is the test-and-tooling escape
+hatch when you want to point at something other than the env-derived
+URL.
 
-Register middleware that should run on every request:
+### Global middleware
 
 ```rust
-use suprnova::global_middleware;
+use suprnova::{global_middleware, SessionMiddleware, SessionConfig, TimeoutMiddleware};
 use crate::middleware;
 
 pub async fn register() {
-    // Middleware runs in registration order
     global_middleware!(middleware::LoggingMiddleware);
-    global_middleware!(middleware::CorsMiddleware);
-    global_middleware!(middleware::SecurityHeadersMiddleware);
+    global_middleware!(TimeoutMiddleware::default());
+    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
 }
 ```
 
-> **Note:**
->
-> Global middleware runs on every request in the order registered. For route-specific middleware, see the [Middleware documentation](middleware.md).
+`global_middleware!` registers a layer that runs on every request,
+including unrouted ones (404s, OPTIONS preflight). The order you
+register in is the order the chain runs — outside-in. The framework
+slots its own `RequestIdMiddleware` outermost; everything you add sits
+inside it. [Middleware](middleware.md) explains the full chain shape,
+including the per-route layer.
 
+### Container bindings
 
-### Services with Runtime Configuration
-
-Register services that need environment variables, config files, or other runtime values:
-
-```rust
-use suprnova::{singleton, bind};
-
-pub async fn register() {
-    // Services configured from environment
-    let redis_url = std::env::var("REDIS_URL").unwrap_or_default();
-    bind!(dyn CacheStore, RedisCache::new(&redis_url));
-
-    // Services with complex initialization
-    let smtp_config = SmtpConfig::from_env();
-    singleton!(EmailService::new(smtp_config));
-
-    // External API clients
-    let api_key = std::env::var("STRIPE_API_KEY").expect("STRIPE_API_KEY required");
-    singleton!(StripeClient::new(&api_key));
-}
-```
-
-### Trait Bindings
-
-Bind interfaces to concrete implementations for dependency injection:
+The container takes whatever you put in it; the macros are sugar over
+the [`App`](container.md) facade.
 
 ```rust
-use suprnova::bind;
 use std::sync::Arc;
+use suprnova::{App, bind, singleton, factory};
+use crate::providers::DatabaseUserProvider;
 
 pub async fn register() {
-    // Bind trait to implementation
-    bind!(dyn PaymentGateway, StripeGateway::new());
-    bind!(dyn EmailSender, SmtpEmailSender::new());
-    bind!(dyn CacheStore, RedisCache::new());
+    // Trait → singleton (wraps in Arc):
+    bind!(dyn UserProvider, DatabaseUserProvider);
+
+    // Concrete singleton:
+    singleton!(MyConfig { max_uploads_per_user: 100 });
+
+    // Factory (constructed per resolve):
+    factory!(|| RequestLogger::new());
+
+    // Or call the facade directly for finer control:
+    let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
+    App::bind::<dyn BroadcastHub>(hub);
 }
 ```
 
-## Bootstrap vs `#[injectable]`
+Trait-object bindings are the most common shape — bind an interface,
+let handlers and tests substitute the implementation. The
+[Container](container.md) chapter has the full binding API including
+`bind_factory!`, the `_if_absent` variants, and the three-layer
+lookup model.
 
-suprnova provides two ways to register services:
+### Event listeners and observers
 
-| Feature | `#[injectable]` Macro | Bootstrap Registration |
-|---------|----------------------|------------------------|
-| **When to use** | Simple services with no runtime config | Services needing env vars, config, or complex setup |
-| **Registration** | Automatic at compile-time | Manual in `bootstrap.rs` |
-| **Dependencies** | Via `#[inject]` attribute | Passed to constructor |
-| **Flexibility** | Limited to defaults | Full control over initialization |
-
-### Use `#[injectable]` for:
+The dispatcher is alive as soon as bootstrap runs — listeners
+registered here see every subsequent dispatch.
 
 ```rust
-// Simple services without runtime configuration
+use std::sync::Arc;
+use suprnova::EventFacade;
+use crate::events::UserRegistered;
+use crate::listeners::SendWelcomeEmailListener;
+
+pub async fn register() {
+    EventFacade::listen::<UserRegistered, _>(
+        Arc::new(SendWelcomeEmailListener),
+    ).await;
+}
+```
+
+Eloquent observers (`#[suprnova::observer(M)]`) collect themselves via
+`inventory::submit!` at compile time. One call drains the inventory
+into the dispatcher:
+
+```rust
+suprnova::eloquent::observers::bootstrap_observers()
+    .await
+    .expect("observer install failed");
+```
+
+The call is idempotent — re-running bootstrap (a worker that boots a
+second time) does not double-register the listener adapters.
+[Events](events.md) covers dispatch and listener authoring;
+[Eloquent](eloquent.md) covers observers.
+
+### Supervisors
+
+Long-running background tasks declared via the `Supervisor` trait and
+`inventory::submit!` start through one call:
+
+```rust
+use suprnova::SupervisorRegistry;
+
+pub async fn register() {
+    SupervisorRegistry::start_all().await;
+}
+```
+
+Each supervisor runs in its own restart-loop task with a panic
+boundary; a panicked supervisor is logged and restarted, not allowed
+to take the process down. See [Supervisors](supervisors.md) for the
+trait and the restart policy.
+
+### Worker job registration
+
+Queue jobs and mailables that workers need to dispatch by name register
+themselves at boot:
+
+```rust
+use suprnova::queue::worker::register_job;
+
+pub async fn register() {
+    register_job::<crate::jobs::welcome_log::WelcomeLog>();
+
+    suprnova::mail::register_mailable_factory::<crate::mail::welcome::WelcomeEmail>()
+        .expect("register at boot");
+    register_job::<suprnova::mail::send_job::SendMailJob>();
+}
+```
+
+Without this, the worker has no way to map a queued envelope back to
+the type that handles it.
+
+## The post-boot hook: `booted()`
+
+Bootstrap *registers*; `booted()` *resolves*. The builder takes a
+second callback that fires after the server has finished its own
+service boot but before it begins accepting connections. Use it when
+you need to read something the framework itself bound during boot:
+
+```rust
+Application::new()
+    .config(config::register_all)
+    .bootstrap(bootstrap::register)
+    .routes(routes::register)
+    .booted(|| {
+        let cfg: MyConfig = suprnova::App::get().unwrap();
+        tracing::info!(?cfg, "services booted");
+    })
+    .run()
+    .await;
+```
+
+`booted` is synchronous and runs after `Server::from_config` — drivers
+are up, encryption keys are loaded, your bindings exist. Most apps do
+not need this hook; reach for it when a one-shot post-boot side effect
+needs to see a fully-constructed container.
+
+## A complete `bootstrap.rs`
+
+A trimmed but representative shape, drawn from the example app:
+
+```rust
+//! Application bootstrap — register services, listeners, and
+//! global middleware.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use suprnova::broadcasting::{BroadcastHub, ChannelRegistry, InMemoryBroadcastHub};
+use suprnova::features::{FeatureMiddleware, bootstrap_database_cached};
+use suprnova::queue::worker::register_job;
+use suprnova::{
+    App, DB, EventFacade, FrameworkError, Inertia, InertiaConfig,
+    SessionConfig, SessionMiddleware, Storage, SupervisorRegistry,
+    UserProvider, bind, global_middleware,
+};
+
+use crate::broadcasting::ChatChannel;
+use crate::events::UserRegistered;
+use crate::listeners::SendWelcomeEmailListener;
+use crate::middleware;
+use crate::providers::DatabaseUserProvider;
+
+pub async fn register() {
+    // ── Database
+    DB::init().await.expect("Failed to connect to database");
+
+    // ── Global middleware (outside-in in registration order)
+    global_middleware!(middleware::LoggingMiddleware);
+    global_middleware!(suprnova::TimeoutMiddleware::default());
+    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
+
+    // ── Auth provider
+    bind!(dyn UserProvider, DatabaseUserProvider);
+
+    // ── Inertia protocol layer
+    Inertia::install(&InertiaConfig::new().version("1.0"));
+
+    // ── Broadcasting hub + channel registry
+    let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
+    App::bind::<dyn BroadcastHub>(Arc::clone(&hub));
+
+    let mut registry = ChannelRegistry::new();
+    registry.register(ChatChannel);
+    App::singleton(Arc::new(registry));
+
+    // ── Event listeners + bridges
+    EventFacade::listen::<UserRegistered, _>(
+        Arc::new(SendWelcomeEmailListener),
+    ).await;
+    EventFacade::broadcast::<UserRegistered>(Arc::clone(&hub)).await;
+
+    // ── Storage disks (env-gated S3 in production)
+    Storage::register_fs("public", "./storage/public")
+        .expect("register public disk");
+
+    // ── Worker job registration
+    register_job::<crate::jobs::welcome_log::WelcomeLog>();
+    suprnova::mail::register_mailable_factory::<crate::mail::welcome::WelcomeEmail>()
+        .expect("register at boot");
+    register_job::<suprnova::mail::send_job::SendMailJob>();
+
+    // ── Observers + supervisors
+    suprnova::eloquent::observers::bootstrap_observers()
+        .await
+        .expect("observer install failed");
+    SupervisorRegistry::start_all().await;
+
+    // ── Feature flags
+    bootstrap_database_cached(Duration::from_secs(60))
+        .await
+        .expect("feature-flag chain wired");
+    global_middleware!(FeatureMiddleware::new());
+}
+```
+
+Notice the rhythm: each block does one thing, calls one or two APIs,
+and either succeeds or fails with a clear message. Nothing here is
+clever; the function is long because the app has a lot of moving
+parts, not because the bootstrap pattern is complicated.
+
+## When to bootstrap vs `#[injectable]`
+
+`#[injectable]` is a macro that auto-registers a singleton in the
+container's `inventory` at compile time. It is the right choice for
+services that need nothing more than their `#[inject]` dependencies to
+construct:
+
+```rust
+use suprnova::injectable;
+
 #[injectable]
 pub struct UserService;
 
-// Services with injected dependencies
 #[injectable]
 pub struct OrderService {
     #[inject]
@@ -152,84 +331,89 @@ pub struct OrderService {
 }
 ```
 
-### Use Bootstrap for:
+These resolve themselves; bootstrap does not need to touch them.
 
-```rust
-pub async fn register() {
-    // Database connections
-    DB::init().await.expect("Database connection failed");
+Bootstrap is the right place when construction needs anything else —
+an environment variable, a constructed config struct, a `dyn Trait`
+binding, a runtime decision, an async setup call, or registration of
+something that is not itself a service (a listener, an observer, a
+queue job mapping, a global middleware layer).
 
-    // Services configured from environment
-    let api_key = std::env::var("API_KEY")?;
-    singleton!(ExternalApiClient::new(&api_key));
+| Use `#[injectable]` for | Use `bootstrap` for |
+|---|---|
+| Concrete singletons with no runtime config | Anything `dyn Trait` |
+| Services constructed from other injectables | Anything async at boot |
+| Default DI graph | Environment-driven values |
+| | Event listeners, observers, supervisors |
+| | Global middleware |
+| | Worker job + mailable registration |
 
-    // Conditional service registration
-    if cfg!(debug_assertions) {
-        singleton!(MockPaymentGateway::new());
-    } else {
-        singleton!(RealPaymentGateway::new());
-    }
-}
-```
+You can mix freely. `#[injectable]` services are visible in the
+container by the time `bootstrap` runs, so a binding in bootstrap can
+read them.
 
-## Complete Bootstrap Example
+## Where bootstrap sits in the boot order
 
-Here's a comprehensive example showing common patterns:
+The full sequence (excerpted from [Lifecycle](lifecycle.md)):
 
-```rust
-//! Application Bootstrap
-//!
-//! Register global middleware and services that need runtime configuration.
+1. `Config::init(".")` — load `.env`, detect environment
+2. `init_policies()` — drain the `#[policy]` inventory
+3. Your `config_fn` runs (typed config registration)
+4. Migrations run (auto-migrate on `serve`)
+5. **Your `bootstrap_fn` runs** ← `bootstrap::register`
+6. Routes assembled from your `routes_fn`
+7. `Server::from_config` boots drivers + container
+8. Your `booted_fn`s fire
+9. Server begins accepting connections
 
-use suprnova::{bind, global_middleware, singleton, App, DB};
-use crate::middleware;
-use std::sync::Arc;
+Background workers (`queue:work`, `workflow:work`, `schedule:work`)
+share steps 1–5 and 7 so a listener or observer you register reaches
+worker code paths exactly as it reaches HTTP handlers.
 
-pub async fn register() {
-    // ═══════════════════════════════════════════════════════
-    // Database
-    // ═══════════════════════════════════════════════════════
-    DB::init().await.expect("Failed to connect to database");
+### Why Suprnova diverges
 
-    // ═══════════════════════════════════════════════════════
-    // Global Middleware (runs on every request, in order)
-    // ═══════════════════════════════════════════════════════
-    global_middleware!(middleware::LoggingMiddleware);
-    global_middleware!(middleware::CorsMiddleware);
+Laravel splits boot across multiple service providers: each provider
+implements `register()` and `boot()`, they're collected in
+`config/app.php`, and Laravel walks them in two passes (all `register`,
+then all `boot`) so a service can depend on another provider's
+bindings without ordering ceremony in user code. The provider class
+gives you a unit of organisation when an app accumulates dozens of
+distinct subsystems.
 
-    // ═══════════════════════════════════════════════════════
-    // Cache
-    // ═══════════════════════════════════════════════════════
-    let redis_url = std::env::var("REDIS_URL")
-        .unwrap_or_else(|_| "redis://localhost:6379".to_string());
-    bind!(dyn CacheStore, RedisCache::new(&redis_url));
+Suprnova collapses that to one function. The reasons:
 
-    // ═══════════════════════════════════════════════════════
-    // Email
-    // ═══════════════════════════════════════════════════════
-    let smtp_host = std::env::var("SMTP_HOST").unwrap_or_default();
-    let smtp_port = std::env::var("SMTP_PORT")
-        .unwrap_or_else(|_| "587".to_string())
-        .parse()
-        .unwrap_or(587);
-    singleton!(EmailService::new(&smtp_host, smtp_port));
+- **The two-pass `register`/`boot` split solves an ordering problem
+  Rust does not have.** `#[injectable]` and the container's
+  `bootstrap_singletons` already resolve dependency graphs without
+  user-visible ordering. Bindings register inline; the lookup machinery
+  handles the rest.
+- **One function is easier to read than ten.** A new contributor
+  opens `bootstrap.rs` and sees every binding, every listener, every
+  observer, every middleware layer in one place. Provider-style
+  fragmentation hides what the app actually does.
+- **Inventory-style auto-registration covers the rest.** Observers,
+  supervisors, scheduled tasks, policies, and queue handlers all
+  collect themselves at compile time via `inventory::submit!`.
+  Bootstrap drains the inventories with single calls
+  (`bootstrap_observers`, `SupervisorRegistry::start_all`) rather than
+  enumerating each.
 
-    // ═══════════════════════════════════════════════════════
-    // External Services
-    // ═══════════════════════════════════════════════════════
-    if let Ok(stripe_key) = std::env::var("STRIPE_SECRET_KEY") {
-        singleton!(StripeClient::new(&stripe_key));
-    }
-}
-```
+Where Laravel earns the provider split is library distribution: a
+crate that ships its own bindings would want a registration entry
+point that an app can opt into without editing its own bootstrap.
+Suprnova's analogue is a public `pub async fn register()` in the
+crate's root and a one-line call from the app's `bootstrap`. The
+ergonomic cost is one line; the readability gain is everything in
+one place.
 
-## Summary
+## Next
 
-| Task | Method |
-|------|--------|
-| Initialize database | `DB::init().await` |
-| Register global middleware | `global_middleware!(Middleware)` |
-| Register singleton | `singleton!(Service::new())` |
-| Register factory | `factory!(\|\| Service::new())` |
-| Bind trait to impl | `bind!(dyn Trait, Implementation::new())` |
-| File location | `src/bootstrap.rs` |
+- [Lifecycle](lifecycle.md) — full boot order and where `bootstrap_fn` fires
+- [Container](container.md) — `App::bind` / `App::singleton` /
+  `App::factory` and the three-layer lookup
+- [Configuration](configuration.md) — typed config registration that
+  runs before bootstrap
+- [Middleware](middleware.md) — chain composition for layers
+  registered with `global_middleware!`
+- [Events](events.md) — the dispatcher that listeners and observers
+  plug into
