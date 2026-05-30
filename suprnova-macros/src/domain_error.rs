@@ -178,11 +178,19 @@ pub fn domain_error_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
     let expanded = match &input.data {
         syn::Data::Struct(data_struct) => {
             let fields = &data_struct.fields;
+            // Unit and tuple structs need a trailing `;`; named-field
+            // structs are terminated by their `{ ... }`. Without this,
+            // `#[domain_error] pub struct Foo;` and tuple-struct forms
+            // expand to invalid syntax.
+            let semi = match fields {
+                syn::Fields::Named(_) => quote!(),
+                syn::Fields::Unit | syn::Fields::Unnamed(_) => quote!(;),
+            };
 
             quote! {
                 #(#user_attrs)*
                 #[derive(Debug, Clone)]
-                #vis struct #name #generics #fields
+                #vis struct #name #generics #fields #semi
 
                 impl #impl_generics ::std::fmt::Display for #name #ty_generics #where_clause {
                     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
