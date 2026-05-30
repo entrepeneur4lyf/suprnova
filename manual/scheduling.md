@@ -1,6 +1,6 @@
 # Task Scheduling
 
-suprnova provides a powerful task scheduling system inspired by Laravel's scheduler. Schedule tasks to run at specific intervals - every minute, hourly, daily, weekly, or using custom cron expressions.
+Scheduled tasks are async functions the framework runs on a cron expression — every minute, hourly, daily, weekly, or any custom 5-field cron. Tasks live inside your application binary; `schedule:run` evaluates due tasks once (call it from system cron) and `schedule:work` runs the same evaluator as a long-lived daemon.
 
 ## Generating Tasks
 
@@ -93,7 +93,8 @@ For complex tasks that need dependencies or reusable logic, implement the `Task`
 ```rust
 // src/tasks/cleanup_logs_task.rs
 use async_trait::async_trait;
-use suprnova::{Task, TaskResult, DB};
+use chrono::{Duration, Utc};
+use suprnova::{Task, TaskResult};
 use crate::models::Log;
 
 pub struct CleanupLogsTask;
@@ -107,13 +108,13 @@ impl CleanupLogsTask {
 #[async_trait]
 impl Task for CleanupLogsTask {
     async fn handle(&self) -> TaskResult {
-        // Access the database just like in controllers
-        let db = DB::connection();
-
-        // Delete logs older than 30 days
+        // Eloquent works exactly as it does inside a controller; tasks see
+        // the same container bindings (`DB::connection()`, `App::get::<T>()`)
+        // that a request handler does — see Application bootstrap below.
+        let cutoff = Utc::now() - Duration::days(30);
         Log::query()
-            .filter(Log::created_at.lt(thirty_days_ago()))
-            .delete()
+            .filter_op("created_at", "<", cutoff)
+            .delete_all()
             .await?;
 
         println!("Old logs cleaned up successfully");
@@ -230,16 +231,22 @@ suprnova provides a fluent API for defining when tasks should run:
 | Method | Description |
 |--------|-------------|
 | `.every_minute()` | Run every minute |
+| `.every_two_minutes()` | Run every 2 minutes |
 | `.every_five_minutes()` | Run every 5 minutes |
 | `.every_ten_minutes()` | Run every 10 minutes |
 | `.every_fifteen_minutes()` | Run every 15 minutes |
 | `.every_thirty_minutes()` | Run every 30 minutes |
 | `.hourly()` | Run every hour at minute 0 |
 | `.hourly_at(30)` | Run every hour at minute 30 |
+| `.every_two_hours()` / `.every_three_hours()` / `.every_four_hours()` / `.every_six_hours()` | Run on the hour every N hours |
 | `.daily()` | Run daily at midnight |
 | `.daily_at("03:00")` | Run daily at 3:00 AM |
+| `.twice_daily(1, 13)` | Run twice daily (e.g. 1:00 AM and 1:00 PM) |
 | `.weekly()` | Run weekly on Sunday at midnight |
 | `.monthly()` | Run monthly on the 1st at midnight |
+| `.monthly_on(15)` | Run monthly on a specific day |
+| `.quarterly()` | Run on the 1st of Jan/Apr/Jul/Oct at midnight |
+| `.yearly()` | Run on January 1st at midnight |
 
 ### Day-Specific Schedules
 
@@ -288,6 +295,24 @@ For full control, use cron syntax:
 .cron("30 4 * * 1-5")   // 4:30 AM on weekdays
 .cron("0 0 1,15 * *")   // 1st and 15th of each month
 ```
+
+`.cron(...)` **panics** if the expression is malformed (wrong field count,
+unparseable step/range/list). Use `.try_cron(expr)` when the expression is
+supplied at runtime (configuration, user input) and you'd rather propagate
+the parse error:
+
+```rust
+schedule.add(
+    schedule.task(MyTask::new())
+        .try_cron(env_expr)?   // returns Err(String) on a bad expression
+        .name("from-config")
+);
+```
+
+The same `panic` / `try_*` pair exists on every numeric-range builder method:
+`try_hourly_at`, `try_daily_at`, `try_twice_daily`, `try_monthly_on`. The
+infallible variants panic on out-of-range numerics (e.g. `daily_at("25:00")`
+or `monthly_on(40)`); the fallible siblings return `Err(String)`.
 
 ## Task Configuration
 
@@ -472,7 +497,8 @@ sudo systemctl start myapp-scheduler
 Scheduled tasks have full access to the application context, just like controllers:
 
 ```rust
-use suprnova::{App, Task, TaskResult, DB};
+use async_trait::async_trait;
+use suprnova::{App, Task, TaskResult};
 use crate::actions::SendEmailAction;
 use crate::models::User;
 
@@ -481,16 +507,17 @@ pub struct SendRemindersTask;
 #[async_trait]
 impl Task for SendRemindersTask {
     async fn handle(&self) -> TaskResult {
-        // Access database
+        // Eloquent: `.get()` returns a `Collection<User>` you can iterate.
         let users = User::query()
-            .filter(User::reminder_enabled.eq(true))
-            .all()
+            .filter("reminder_enabled", true)
+            .get()
             .await?;
 
-        // Use actions via dependency injection
-        let send_email: SendEmailAction = App::get().unwrap();
+        // Anything bound in `bootstrap.rs` is reachable here too.
+        let send_email = App::get::<SendEmailAction>()
+            .expect("SendEmailAction bound in bootstrap()");
 
-        for user in users {
+        for user in users.iter() {
             send_email.execute(&user.email, "Daily Reminder").await?;
         }
 
@@ -529,6 +556,60 @@ pub use send_reminders_task::SendRemindersTask;
 pub use backup_database_task::BackupDatabaseTask;
 ```
 
+## Wiring the scheduler into your application
+
+`make:task` wires `.schedule(<crate>::schedule::register)` into your
+`Application` builder automatically. If you build the chain by hand, the
+relevant call is on `Application`:
+
+```rust
+// cmd/main.rs (or src/main.rs for the api starter)
+Application::new()
+    .config(my_app::config::register)
+    .bootstrap(my_app::bootstrap::bootstrap)
+    .routes(my_app::routes::register)
+    .schedule(my_app::schedule::register)        // <- this line
+    .migrations::<my_app::migrations::Migrator>()
+    .run()
+    .await;
+```
+
+Without `.schedule(...)` the `schedule:*` subcommands all report that no
+tasks are registered. `schedule:work` and `schedule:run` also run the same
+runtime drivers and `bootstrap_fn` as the HTTP server, so observers,
+listeners, and container bindings registered at boot are visible to your
+task handlers exactly as they are to controllers (see
+[Application Bootstrap](bootstrap.md)).
+
+### Why Suprnova diverges
+
+Laravel's scheduler is itself a single Artisan command (`schedule:run`) that
+PHP-cron triggers every minute. The PHP runtime spins up, evaluates due
+tasks, runs them in-process or shells out, then tears the runtime down. PHP
+has no long-lived processes, so the daemon form (`schedule:work`) was
+backported by Lumen and ships in Laravel itself as a workaround for sites
+without crontab access.
+
+In Suprnova the daemon is first-class. `schedule:work` runs inside a Tokio
+runtime that's already long-lived, so:
+
+- **Background tasks (`run_in_background`) compose with the tick loop.**
+  Laravel spawns a child process per background task; we spawn into a
+  `JoinSet` and surface completions on the next tick or at shutdown.
+- **Graceful shutdown is a `tokio::select!` arm.** Ctrl-C / SIGTERM
+  drains in-flight background tasks before exit; in-process tasks finish
+  their current call.
+- **Same-minute dedup is in-process state.** A `last_run_minute` atomic
+  per task guarantees a single process can't double-fire a minute-aligned
+  task even if the loop ticks fast. PHP can't do this — every cron tick
+  is a fresh process — which is why Laravel uses filesystem locks as the
+  only line of defence.
+
+The `Cache::lock`-backed `without_overlapping` still exists for the
+multi-process case (system cron on multiple hosts, multiple `schedule:work`
+daemons behind a load balancer). It's the same mechanism, just at a layer
+the scheduler doesn't always need.
+
 ## Summary
 
 | Feature | Usage |
@@ -537,6 +618,7 @@ pub use backup_database_task::BackupDatabaseTask;
 | Trait-based | Implement `Task` trait, configure schedule during registration |
 | Closure-based | `schedule.call(\|\| async { ... })` |
 | Register tasks | `schedule.add(schedule.task(...).daily().name("..."))` |
+| Wire into app | `Application::new().schedule(schedule::register)` |
 | Run once | `suprnova schedule:run` |
 | Run daemon | `suprnova schedule:work` |
 | List tasks | `suprnova schedule:list` |
@@ -544,3 +626,12 @@ pub use backup_database_task::BackupDatabaseTask;
 | Custom overlap TTL | `.without_overlapping_for(Duration)` |
 | Background | `.run_in_background()` (panic-isolated via JoinSet) |
 | Same-minute dedup | Always on per-process; skipped runs return `Ok(())` |
+| Validated cron at runtime | `.try_cron(expr)` / `.try_daily_at(s)` / `.try_hourly_at(n)` |
+
+## Next
+
+- [Scheduling Commands](cli-scheduling.md) — `schedule:run` / `schedule:work` / `schedule:list` CLI reference
+- [Queues](queues.md) — for work that should be picked up by a worker rather than tick on a clock
+- [Console](console.md) — `#[command]` for one-shot operator tasks (not on a schedule)
+- [Cache](cache.md) — the backend that powers cross-process `without_overlapping`
+- [Application Bootstrap](bootstrap.md) — how `.schedule(...)` plugs into the builder, and what tasks can resolve from the container
