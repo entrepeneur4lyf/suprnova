@@ -6,7 +6,7 @@ license.workspace = true
 description = "Stripe reference adapter for Suprnova's generic Payments surface"
 
 [dependencies]
-suprnova = { path = "../../framework" }
+suprnova = { path = "../../framework", version = "0.1" }
 async-stripe = { version = "1.0.0-rc.5", default-features = false, features = ["rustls-tls-webpki-roots", "rustls-ring"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
