@@ -13,7 +13,7 @@
 //!   form. Returns a [`Transaction`] handle the caller commits or
 //!   rolls back explicitly. Useful when the transaction's lifetime
 //!   spans multiple control-flow branches that don't fit a closure.
-//!   Manual mode does NOT install [`CURRENT_TX`]; callers opt every
+//!   Manual mode does NOT install `CURRENT_TX`; callers opt every
 //!   operation into the transaction with `Builder::with_tx(&tx)` or
 //!   the `Model::*_with_tx` shims.
 //!
@@ -39,7 +39,7 @@
 //! it on a connection that's already holding a transaction starts a
 //! brand-new physical transaction that commits / rolls back
 //! independently of the outer scope. That's a silent data-integrity
-//! footgun, so [`DB::transaction`] checks [`CURRENT_TX`] up front
+//! footgun, so [`DB::transaction`] checks `CURRENT_TX` up front
 //! and returns a database error instead of producing the wrong
 //! semantics. Use [`Transaction::savepoint`] for nested behaviour.
 
@@ -85,7 +85,7 @@ pub struct Transaction {
 ///
 /// `TxHandle` is also the executor-dispatch carrier inside
 /// `Builder<M>::tx_override` — when set, it short-circuits the
-/// [`CURRENT_TX`] lookup so a builder cloned out of a tx scope can
+/// `CURRENT_TX` lookup so a builder cloned out of a tx scope can
 /// still target the original transaction.
 #[derive(Clone)]
 pub struct TxHandle {
@@ -138,7 +138,7 @@ pub enum ExecutorChoice {
 
 impl ExecutorChoice {
     /// Pick the executor for an operation that has no builder-level
-    /// override. Consults [`CURRENT_TX`] first, then falls back to
+    /// override. Consults `CURRENT_TX` first, then falls back to
     /// the global pool.
     ///
     /// Doc-hidden internal API. Public visibility is required because
@@ -560,7 +560,7 @@ impl Transaction {
     /// Return a clonable handle to this transaction. Pair with
     /// `Builder::with_tx(&tx)` (or the `Model::*_with_tx` variants)
     /// to scope a single operation through the transaction without
-    /// installing it as the ambient [`CURRENT_TX`].
+    /// installing it as the ambient `CURRENT_TX`.
     pub fn handle(&self) -> TxHandle {
         TxHandle {
             inner: self.inner.clone(),
@@ -659,7 +659,7 @@ impl DB {
     /// Run `f` inside a database transaction. The closure receives a
     /// `&Transaction` it can use to issue savepoints; operations on
     /// `Builder<M>` / `Model` inside the closure pick up the active
-    /// transaction automatically via the [`CURRENT_TX`] task-local.
+    /// transaction automatically via the `CURRENT_TX` task-local.
     ///
     /// - Closure returns `Ok` → commit. Result propagated.
     /// - Closure returns `Err` → rollback. Original error returned.
@@ -822,7 +822,7 @@ impl DB {
     /// if the handle is dropped the underlying SeaORM
     /// `DatabaseTransaction::drop` rolls back automatically.
     ///
-    /// Manual mode does NOT install [`CURRENT_TX`]. Scope individual
+    /// Manual mode does NOT install `CURRENT_TX`. Scope individual
     /// operations through the transaction with `Builder::with_tx(&tx)`
     /// or the `Model::*_with_tx(&tx, ...)` shims.
     ///

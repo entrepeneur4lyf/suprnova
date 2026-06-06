@@ -1,4 +1,4 @@
-//! Builder<M> — the chainable query type returned by `Model::query()`.
+//! `Builder<M>` — the chainable query type returned by `Model::query()`.
 //!
 //! ## Dual API
 //!
@@ -34,14 +34,14 @@
 //!
 //! ## Per-WhereTerm SQL renderer
 //!
-//! [`Builder::render_select_for`] emits per-backend SQL from the
-//! [`WhereTerm`] AST: Postgres `$N` placeholders + `EXTRACT(... FROM
+//! `Builder::render_select_for` emits per-backend SQL from the
+//! `WhereTerm` AST: Postgres `$N` placeholders + `EXTRACT(... FROM
 //! col)` date parts + `@>` JSON containment; MySQL + SQLite use `?`
 //! placeholders with backend-appropriate `DATE()` / `JSON_LENGTH()`
 //! forms.
 //!
 //! UNION arms thread the placeholder counter through
-//! [`Builder::render_select_into`] so Postgres `$N` numbering stays
+//! `Builder::render_select_into` so Postgres `$N` numbering stays
 //! monotonic across the combined statement — see
 //! `union_postgres_placeholders_are_monotonic` in
 //! `framework/tests/eloquent_builder.rs` for the regression test.
@@ -411,7 +411,7 @@ impl<M> Default for Builder<M> {
 }
 
 /// Manual `Clone` for `Builder<M>` — every field is `Clone` except
-/// [`EagerSpec::WithWhere`], whose `Box<dyn Any>` payload (the
+/// `EagerSpec::WithWhere`, whose `Box<dyn Any>` payload (the
 /// type-erased relation predicate) is not. Phase 10C T8's chunking
 /// and lazy iteration both need the builder to clone across query
 /// boundaries; rather than tighten `with_where`'s `FnOnce` bound to
@@ -689,13 +689,11 @@ impl<M> Builder<M> {
     /// connection instead of consulting the ambient transaction or
     /// the global pool. Phase 10C T11.
     ///
-    /// Precedence: explicit `with_tx` > ambient
-    /// [`CURRENT_TX`](crate::database::transaction::CURRENT_TX) >
-    /// [`DB::connection()`]. Use `with_tx` when you have a manual
-    /// [`Transaction`](crate::Transaction) (from
-    /// [`DB::begin_transaction`](crate::DB::begin_transaction)) and
-    /// want a specific query scoped to it without installing the
-    /// task-local.
+    /// Precedence: explicit `with_tx` > ambient `CURRENT_TX`
+    /// task-local > [`DB::connection()`]. Use `with_tx` when you have
+    /// a manual [`Transaction`](crate::Transaction) (from
+    /// [`DB::transaction`](crate::DB::transaction)) and want a
+    /// specific query scoped to it without installing the task-local.
     ///
     /// ## Example
     ///
@@ -1319,7 +1317,8 @@ impl<M> Builder<M> {
     }
 
     /// `ORDER BY RANDOM()` — useful for sampling. Each backend emits
-    /// its own randomisation function via [`render_orders`].
+    /// its own randomisation function via the internal `render_orders`
+    /// helper.
     pub fn in_random_order(mut self) -> Self {
         self.orders.push(OrderTerm::Random);
         self
@@ -3233,7 +3232,7 @@ where
     /// useful when a page has multiple paginators that each need their
     /// own query string.
     ///
-    /// Returns a [`LengthAwarePaginator<M>`] whose JSON shape matches
+    /// Returns a [`LengthAwarePaginator<M>`](crate::LengthAwarePaginator) whose JSON shape matches
     /// Laravel's `LengthAwarePaginator::toArray()` — ready to ship to
     /// Inertia / JSON consumers without reshaping.
     ///
@@ -3728,7 +3727,7 @@ where
     /// 1000 rows per fetch).
     ///
     /// The internal batch size keeps the round-trip count low; the
-    /// returned [`LazyCollection<M>`] surfaces one row at a time to
+    /// returned [`LazyCollection<M>`](crate::eloquent::LazyCollection) surfaces one row at a time to
     /// the consumer with backpressure via `.next().await`.
     ///
     /// Alias: [`Self::cursor`] (Laravel name).

@@ -8,7 +8,7 @@
 //! sits on the hot request path and cannot block on async I/O. SeaORM
 //! and our backing databases (Postgres / MySQL / SQLite via SQLx) are
 //! async-only. We bridge the two by holding an in-memory snapshot of
-//! the table, refreshed asynchronously via [`Self::reload`] and
+//! the table, refreshed asynchronously via [`DatabaseEvaluator::reload`] and
 //! [`Self::set_flag`]. Reads go through an `RwLock` over a
 //! `HashMap<(name, scope_key), enabled>` — lock-free under contention,
 //! zero allocation on the hot path beyond the lookup key.
@@ -92,7 +92,7 @@ impl DatabaseEvaluator {
     /// Pulls the connection out of the App container (set up by
     /// [`DB::init`](crate::database::DB::init)) and seeds the in-memory
     /// snapshot from the live `features` table. Subsequent edits go
-    /// through [`Self::set_flag`] or out-of-band SQL + [`Self::reload`].
+    /// through [`Self::set_flag`] or out-of-band SQL + [`DatabaseEvaluator::reload`].
     ///
     /// # Errors
     ///

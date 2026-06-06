@@ -21,21 +21,21 @@
 //!
 //! Mutators:
 //!
-//! - [`attach`](Self::attach) — INSERT a single pivot row.
-//! - [`attach_with`](Self::attach_with) — INSERT with extra pivot
+//! - [`attach`](BelongsToMany::attach) — INSERT a single pivot row.
+//! - [`attach_with`](BelongsToMany::attach_with) — INSERT with extra pivot
 //!   columns (and timestamps if `with_timestamps()` is set).
-//! - [`detach`](Self::detach) — DELETE a single pivot row.
-//! - [`sync`](Self::sync) — diff-and-apply against the current pivot
+//! - [`detach`](BelongsToMany::detach) — DELETE a single pivot row.
+//! - [`sync`](BelongsToMany::sync) — diff-and-apply against the current pivot
 //!   set; runs attach + detach inside a `DatabaseTransaction` so a
 //!   partial failure rolls back.
 //!
 //! Readers:
 //!
-//! - [`get`](Self::get) — two-query strategy: fetch related rows via
+//! - [`get`](BelongsToMany::get) — two-query strategy: fetch related rows via
 //!   `JOIN`, fetch pivot rows separately, zip via `(parent_id,
 //!   related_id)`, stamp `__pivot` on each clone.
-//! - [`first`](Self::first) — `.get().into_iter().next()`.
-//! - [`count`](Self::count) — `SELECT COUNT(*) FROM pivot WHERE
+//! - [`first`](BelongsToMany::first) — `.get().into_iter().next()`.
+//! - [`count`](BelongsToMany::count) — `SELECT COUNT(*) FROM pivot WHERE
 //!   pivot_foreign_key = ?`.
 //!
 //! Eager loading happens through the parent model's `__eager_load`

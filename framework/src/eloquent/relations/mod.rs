@@ -198,7 +198,7 @@ pub trait Relation {
 ///
 /// The `target_table` / `foreign_key` / `parent_key` /
 /// `pivot_*` / `morph_*` fields carry the runtime join metadata the
-/// existence-engine ([`Builder::has`], [`Builder::where_has`], etc.) and
+/// existence-engine ([`Builder::has`](crate::eloquent::Builder::has), [`Builder::where_has`](crate::eloquent::Builder::where_has), etc.) and
 /// the `where_belongs_to` / `where_morphed_to` family need to render
 /// correlated `EXISTS (...)` subqueries.
 ///
@@ -417,7 +417,7 @@ pub trait EagerLoadDispatch: __sealed::Sealed + Sized {
     /// resolver; T2 doesn't call this from `Builder::get`.
     ///
     /// `missing_only` switches per-relation arm behaviour: when
-    /// `false` (the default, used by [`Builder::with`]) the arm
+    /// `false` (the default, used by [`Builder::with`](crate::eloquent::Builder::with)) the arm
     /// unconditionally bulk-loads the next segment on the cached
     /// children. When `true` (used by
     /// [`Collection::load_missing`][crate::eloquent::Collection::load_missing])
@@ -435,7 +435,7 @@ pub trait EagerLoadDispatch: __sealed::Sealed + Sized {
     ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>>;
 
     /// Stamp the per-row `__pivot` field with a type-erased pivot row.
-    /// Used by [`BelongsToMany::get`](super::belongs_to_many::BelongsToMany::get)
+    /// Used by [`BelongsToMany::get`](crate::eloquent::relations::belongs_to_many::BelongsToMany::get)
     /// to attach pivot context to each related row at load time, when
     /// the related type is generic and can't reach `self.__pivot`
     /// directly through field access.

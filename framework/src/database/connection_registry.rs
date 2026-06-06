@@ -22,7 +22,7 @@
 //!   ([`Model::create`], [`Model::save`], [`Model::delete`]) ignore it
 //!   and target the primary. Per-query opt-outs:
 //!   [`Builder::on_write_connection`] (one query to primary) or
-//!   [`Builder::on(name)`] (one query to an arbitrary named connection).
+//!   [`Builder::on`] (one query to an arbitrary named connection).
 //!
 //! ## Test isolation
 //!
@@ -40,12 +40,12 @@
 //! panicked writer would take down the whole framework on the next
 //! request. The fixed shape:
 //!
-//! - [`Self::register`] / [`Self::register_existing`] / [`Self::get`]
-//!   route through [`crate::lock::write`] / [`crate::lock::read`] and
-//!   propagate a [`FrameworkError::internal`] on poison instead of
-//!   panicking. Application code surfaces the failure normally.
+//! - [`ConnectionRegistry::register`] / [`ConnectionRegistry::register_existing`] /
+//!   [`ConnectionRegistry::get`] route through the framework's poison-safe
+//!   lock helpers and propagate a [`FrameworkError::internal`](crate::FrameworkError)
+//!   on poison instead of panicking. Application code surfaces the failure normally.
 //!
-//! - [`Self::has`] is called inline as a `bool` by the executor
+//! - [`ConnectionRegistry::has`] is called inline as a `bool` by the executor
 //!   read-replica routing path; widening its signature to
 //!   `Result<bool, FrameworkError>` would force every caller to
 //!   `?`-bubble. Instead `has` degrades to `false` on poison — the

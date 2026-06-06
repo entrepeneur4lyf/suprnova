@@ -1,3 +1,16 @@
+// Rustdoc link hygiene — warn-level today; CI ratchets the count
+// downward (see release-prep §3.3 and the `doc` job in ci.yml).
+// Switch to `#![deny(...)]` once the count reaches zero so regressions
+// break the build instead of accumulating.
+#![warn(rustdoc::broken_intra_doc_links)]
+#![warn(rustdoc::private_intra_doc_links)]
+// `#![warn(missing_docs)]` is intentionally NOT declared here yet.
+// Tests + the inner modules emit ~1100 warnings that would cascade
+// through `cargo clippy --workspace --tests -- -D warnings`. Adding
+// per-module `#[allow(missing_docs)]` exemptions for test code is the
+// v0.1.x path (see release-prep §3.4); the public-surface baseline of
+// 34 items can then be closed cleanly before escalating to `#![deny]`.
+
 pub mod app;
 pub mod auth;
 pub mod auth_flows;

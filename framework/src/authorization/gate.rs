@@ -37,7 +37,7 @@ impl Gate {
 
     /// Define a synchronous gate whose closure returns a rich [`Response`]
     /// rather than a bare `bool` — so a denial can carry a message, code, and
-    /// HTTP status that [`inspect`](Self::inspect) and [`authorize`](Self::authorize)
+    /// HTTP status that [`inspect`](Self::inspect) and [`Self::authorize`](Self::authorize)
     /// surface.
     ///
     /// ```ignore
@@ -63,7 +63,7 @@ impl Gate {
     ///
     /// Routes through [`inspect`](Self::inspect), so `before`/`after` hooks
     /// apply. Calling `allows` on an async-registered gate returns `false`
-    /// (default deny). Use [`allows_async`](Self::allows_async) to invoke async
+    /// (default deny). Use [`Self::allows_async`](Self::allows_async) to invoke async
     /// gates correctly.
     pub fn allows<U: 'static, R: 'static>(action: &str, user: &U, resource: &R) -> bool {
         Self::inspect(action, user, resource).allowed()
@@ -101,9 +101,9 @@ impl Gate {
     ///
     /// # Sync compatibility
     ///
-    /// Async-registered gates return `false` from the sync [`allows`] /
-    /// [`denies`] / [`authorize`] methods (default deny). Always use
-    /// [`allows_async`] / [`denies_async`] / [`authorize_async`] for gates
+    /// Async-registered gates return `false` from the sync [`Self::allows`] /
+    /// [`Self::denies`] / [`Self::authorize`] methods (default deny). Always use
+    /// [`Self::allows_async`] / [`Self::denies_async`] / [`Self::authorize_async`] for gates
     /// registered with `define_async`.
     pub fn define_async<U, R, F, Fut>(action: &str, f: F)
     where
@@ -127,7 +127,7 @@ impl Gate {
         global().register_async_with::<U, R, F, Fut>(action, f);
     }
 
-    /// Async version of [`allows`]. Works for both sync- and async-registered gates.
+    /// Async version of [`Self::allows`]. Works for both sync- and async-registered gates.
     pub async fn allows_async<U: 'static, R: 'static>(
         action: &str,
         user: &U,
@@ -136,7 +136,7 @@ impl Gate {
         Self::inspect_async(action, user, resource).await.allowed()
     }
 
-    /// Async version of [`denies`].
+    /// Async version of [`Self::denies`].
     pub async fn denies_async<U: 'static, R: 'static>(
         action: &str,
         user: &U,
@@ -145,7 +145,7 @@ impl Gate {
         !Self::allows_async(action, user, resource).await
     }
 
-    /// Async version of [`authorize`].
+    /// Async version of [`Self::authorize`].
     pub async fn authorize_async<U: 'static, R: 'static>(
         action: &str,
         user: &U,
@@ -164,8 +164,8 @@ impl Gate {
     /// Laravel's `Gate::inspect`. An undefined ability (no gate, no hook
     /// decision) yields a default deny.
     ///
-    /// This is the evaluation core: [`allows`](Self::allows),
-    /// [`denies`](Self::denies), and [`authorize`](Self::authorize) all route
+    /// This is the evaluation core: [`Self::allows`](Self::allows),
+    /// [`Self::denies`](Self::denies), and [`Self::authorize`](Self::authorize) all route
     /// through it, so `before`/`after` hooks apply uniformly.
     pub fn inspect<U: 'static, R: 'static>(action: &str, user: &U, resource: &R) -> Response {
         global()
@@ -277,7 +277,7 @@ impl Gate {
     /// first allow — does not evaluate later actions.
     ///
     /// A missing gate among `actions` is treated as deny (matches
-    /// the single-action [`allows`] semantic).
+    /// the single-action [`Self::allows`] semantic).
     pub fn any<U: 'static, R: 'static>(actions: &[&str], user: &U, resource: &R) -> bool {
         actions.iter().any(|a| Self::allows(a, user, resource))
     }
@@ -303,9 +303,9 @@ impl Gate {
 
     // ── Multi-action dispatch (async) ─────────────────────────────────────────
 
-    /// Async sibling of [`any`]. Sequentially awaits each gate; works
+    /// Async sibling of [`Self::any`]. Sequentially awaits each gate; works
     /// for sync and async registrations alike (via
-    /// [`allows_async`]'s dispatch). Sequential rather than
+    /// [`Self::allows_async`]'s dispatch). Sequential rather than
     /// concurrent because most policy bodies are cheap and
     /// short-circuiting on the first allow saves the rest.
     pub async fn any_async<U: 'static, R: 'static>(
@@ -321,7 +321,7 @@ impl Gate {
         false
     }
 
-    /// Async sibling of [`none`].
+    /// Async sibling of [`Self::none`].
     pub async fn none_async<U: 'static, R: 'static>(
         actions: &[&str],
         user: &U,
@@ -330,7 +330,7 @@ impl Gate {
         !Self::any_async(actions, user, resource).await
     }
 
-    /// Async sibling of [`check`].
+    /// Async sibling of [`Self::check`].
     pub async fn check_async<U: 'static, R: 'static>(
         actions: &[&str],
         user: &U,

@@ -66,7 +66,7 @@
 //! # Shutdown
 //!
 //! [`SupervisorRegistry::start_all`] initializes a per-process
-//! [`SUPERVISOR_TASKS`] JoinSet and a shared [`SUPERVISOR_CANCEL`]
+//! `SUPERVISOR_TASKS` JoinSet and a shared `SUPERVISOR_CANCEL`
 //! CancellationToken. Every supervisor task is spawned into the JoinSet.
 //! On Ctrl-C / SIGTERM, `Server::run` cancels the token and drains the
 //! JoinSet with a 5-second grace window, then `abort_all` for any
@@ -189,8 +189,8 @@ impl SupervisorRegistry {
     /// compile time.
     ///
     /// Each supervisor runs in its own restart-loop task spawned into the
-    /// per-process [`SUPERVISOR_TASKS`] JoinSet. The shared
-    /// [`SUPERVISOR_CANCEL`] token is passed into every `run()` call so
+    /// per-process `SUPERVISOR_TASKS` JoinSet. The shared
+    /// `SUPERVISOR_CANCEL` token is passed into every `run()` call so
     /// supervisors can exit cleanly on shutdown.
     ///
     /// Call this once at application boot, e.g. inside `bootstrap::register`.
@@ -214,9 +214,9 @@ impl SupervisorRegistry {
 
     /// Cancel all running supervisors and drain their tasks.
     ///
-    /// 1. Fires [`SUPERVISOR_CANCEL`] so every supervisor that
+    /// 1. Fires `SUPERVISOR_CANCEL` so every supervisor that
     ///    `tokio::select!`s on `cancel.cancelled()` exits cleanly.
-    /// 2. Drains [`SUPERVISOR_TASKS`] up to `timeout`.
+    /// 2. Drains `SUPERVISOR_TASKS` up to `timeout`.
     /// 3. After the deadline, calls `abort_all` and drains the remaining
     ///    aborted handles so the runtime can shut down cleanly.
     ///

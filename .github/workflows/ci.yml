@@ -147,3 +147,46 @@ jobs:
 
       - name: cargo audit
         run: cargo audit
+
+  # Rustdoc link hygiene — ratcheting gate. Counts current
+  # `cargo doc` warnings against a hard-coded baseline; any regression
+  # (more warnings than the baseline) fails the build. Once the
+  # baseline reaches 0, escalate the inner-attributes in
+  # framework/src/lib.rs from `#![warn(...)]` to `#![deny(...)]` and
+  # delete this job — the build itself becomes the gate.
+  #
+  # When you fix warnings, ratchet RUSTDOC_BASELINE downward in the
+  # SAME commit so the new floor sticks. Tracked in release-prep §3.3.
+  doc:
+    name: rustdoc link hygiene
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOC_BASELINE: 108
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-doc
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libsqlite3-dev libpq-dev
+
+      - name: cargo doc -p suprnova --no-deps
+        run: |
+          cargo doc -p suprnova --no-deps 2> /tmp/rustdoc.log || true
+          count=$(grep -c "^warning:" /tmp/rustdoc.log || true)
+          count=${count:-0}
+          echo "rustdoc warnings: $count (baseline: $RUSTDOC_BASELINE)"
+          if [ "$count" -gt "$RUSTDOC_BASELINE" ]; then
+            echo "::error::rustdoc warnings regressed: $count > $RUSTDOC_BASELINE"
+            grep "^warning:" /tmp/rustdoc.log | head -20
+            exit 1
+          fi
+          if [ "$count" -lt "$RUSTDOC_BASELINE" ]; then
+            echo "::warning::rustdoc warnings dropped below baseline ($count < $RUSTDOC_BASELINE) — ratchet RUSTDOC_BASELINE down in .github/workflows/ci.yml"
+          fi
