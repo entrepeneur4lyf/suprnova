@@ -80,10 +80,10 @@ const SESSION_KEY_AUTH: &str = "passkey_auth";
 ///
 /// # Security
 ///
-/// Codex review finding #3: storing only the WebAuthn `PasskeyRegistration`
-/// state in session let a caller finish registration for a different email
-/// than they started with — the finisher could attach the credential to any
-/// account by passing a different email to `finish_registration`.
+/// Storing only the WebAuthn `PasskeyRegistration` state in session would
+/// let a caller finish registration for a different email than they started
+/// with — the finisher could attach the credential to any account by passing
+/// a different email to `finish_registration`.
 ///
 /// This struct binds the WebAuthn state to the begin-time **email + user_id**
 /// so `finish_registration` can reject calls that target a different account.
@@ -143,7 +143,7 @@ fn require_session_present(facade_call: &'static str) -> Result<(), FrameworkErr
 /// table and put just the ceremony selector in the session. The session
 /// is no longer the source of truth for the ceremony payload — the table
 /// is, with a UNIQUE selector + conditional DELETE for atomic single-use
-/// consumption. ChatGPT audit `torii_integration` HIGH #3.
+/// consumption.
 async fn store_registration_ceremony(
     ceremony: &PasskeyRegistrationCeremony,
 ) -> Result<(), FrameworkError> {
@@ -410,7 +410,7 @@ impl PasskeyAuth {
 
         // Bind the WebAuthn state to the begin-time email + user_id so
         // `finish_registration` can reject calls that target a different
-        // account. (Codex review finding #3.)
+        // account.
         store_registration_ceremony(&PasskeyRegistrationCeremony {
             state: pending_reg,
             email: email.to_string(),
@@ -451,11 +451,10 @@ impl PasskeyAuth {
         // (one-time use). Missing or expired ceremony → 400.
         let ceremony = take_registration_ceremony().await?;
 
-        // **Codex review finding #3**: reject if the caller-supplied email
-        // doesn't match the email the ceremony was begun for. Without this
-        // check, a session that started registration for alice@example.com
-        // could attach a credential to bob@example.com by calling
-        // `finish_registration("bob@example.com", ...)`.
+        // Reject if the caller-supplied email doesn't match the email the
+        // ceremony was begun for. Without this check, a session that started
+        // registration for alice@example.com could attach a credential to
+        // bob@example.com by calling `finish_registration("bob@example.com", ...)`.
         //
         // Comparison is case-insensitive on the ASCII range (RFC 5321 §2.4
         // says the local-part is technically case-sensitive, but production
@@ -472,8 +471,7 @@ impl PasskeyAuth {
         // WebAuthn finish failures are user/client protocol failures
         // (bad challenge response, malformed attestation, signature
         // mismatch). 401 is the right code — these must not generate
-        // 500 responses or internal-error telemetry. ChatGPT audit
-        // `torii_integration` HIGH #2.
+        // 500 responses or internal-error telemetry.
         let passkey = webauthn
             .finish_passkey_registration(&response, &ceremony.state)
             .map_err(|e| FrameworkError::Domain {
@@ -546,9 +544,9 @@ impl PasskeyAuth {
         require_session_present("passkey::begin_authentication")?;
 
         // Resolve user — **lookup-only**. Authentication is the wrong
-        // place to create accounts on miss (codex review finding #3): a
-        // probing attacker who guesses email addresses could otherwise
-        // silently provision accounts they don't own.
+        // place to create accounts on miss: a probing attacker who guesses
+        // email addresses could otherwise silently provision accounts they
+        // don't own.
         let user = find_user_by_email_lookup_only(email)
             .await?
             .ok_or_else(|| {
@@ -638,8 +636,8 @@ impl PasskeyAuth {
         // (one-time use). Missing or expired → 400.
         let ceremony = take_authentication_ceremony().await?;
 
-        // **Codex review finding #3**: reject if the caller-supplied email
-        // doesn't match the email the ceremony was begun for.
+        // Reject if the caller-supplied email doesn't match the email the
+        // ceremony was begun for.
         if !email.eq_ignore_ascii_case(&ceremony.email) {
             return Err(FrameworkError::Domain {
                 message: "passkey authentication email mismatch — session was started for a different account".to_string(),
@@ -681,8 +679,7 @@ impl PasskeyAuth {
         // WebAuthn finish failures are user/client protocol failures
         // (bad challenge response, malformed assertion, signature
         // mismatch). 401 is the right code — these must not generate
-        // 500 responses or internal-error telemetry. ChatGPT audit
-        // `torii_integration` HIGH #2.
+        // 500 responses or internal-error telemetry.
         let auth_result: PasskeyAuthenticationResult = webauthn
             .finish_passkey_authentication(&response, &ceremony.state)
             .map_err(|e| FrameworkError::Domain {

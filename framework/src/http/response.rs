@@ -1246,12 +1246,12 @@ impl From<crate::error::FrameworkError> for HttpResponse {
         // The `errors` key is only present for validation-style errors
         // (per-field detail). Everything else gets just `message`.
         //
-        // 5xx sanitisation (codex review finding #2): for status >= 500
-        // we replace the raw err.to_string() with a generic
-        // "Internal Server Error". The original detail still flows into
-        // logs + ErrorOccurred above. When APP_DEBUG=true (false by
-        // default outside local/dev/test) we additionally include a
-        // `debug_message` field for development visibility — frontends
+        // 5xx sanitisation: for status >= 500 we replace the raw
+        // err.to_string() with a generic "Internal Server Error". The
+        // original detail still flows into logs + ErrorOccurred above.
+        // When APP_DEBUG=true (false by default outside local/dev/test)
+        // we additionally include a `debug_message` field for development
+        // visibility — frontends
         // MUST NOT key on this field, which is why `message` stays
         // generic in both modes.
         let mut body = match &err {
@@ -1507,12 +1507,11 @@ mod stream_tests {
 
 #[cfg(test)]
 mod header_validation_tests {
-    //! Domain 3a audit fix DR1: invalid response headers must be
-    //! dropped + logged, not propagated to a builder.body().unwrap()
-    //! panic that would tear down the per-connection task. The
-    //! catch_unwind in `execute_chain_safely` (Domain 2) doesn't cover
-    //! `into_hyper` because that runs after the chain returns, so the
-    //! validation has to live here.
+    //! Invalid response headers must be dropped + logged, not
+    //! propagated to a builder.body().unwrap() panic that would tear
+    //! down the per-connection task. The `catch_unwind` in
+    //! `execute_chain_safely` doesn't cover `into_hyper` because that
+    //! runs after the chain returns, so the validation has to live here.
 
     use super::*;
 

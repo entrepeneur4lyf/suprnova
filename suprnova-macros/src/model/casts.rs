@@ -214,12 +214,12 @@ pub fn active_model_update_stmt(
 /// generated method returns `Result<Self, FrameworkError>`; non-cast
 /// fields are a trivial move out of `row`.
 ///
-/// #380 (Augment): the panicking [`from_storage_arm`] stays as the
-/// `From<inner::Model>` escape hatch. This arm gives the framework's
-/// own hydration hot paths (`find` / `all` / `Builder::get` / ...) a
-/// recoverable error so a corrupt row or a deprecated enum variant in
-/// old data does not panic a queue worker, the scheduler, or a CLI
-/// command — none of which sit behind the HTTP panic-recovery net.
+/// The panicking [`from_storage_arm`] stays as the `From<inner::Model>`
+/// escape hatch. This arm gives the framework's own hydration hot paths
+/// (`find` / `all` / `Builder::get` / ...) a recoverable error so a
+/// corrupt row or a deprecated enum variant in old data does not panic
+/// a queue worker, the scheduler, or a CLI command — none of which sit
+/// behind the HTTP panic-recovery net.
 pub fn try_from_storage_arm(ident: &syn::Ident, cast_ty: Option<&Type>) -> TokenStream {
     match cast_ty {
         Some(cast_ty) => {
@@ -243,7 +243,7 @@ pub fn try_from_storage_arm(ident: &syn::Ident, cast_ty: Option<&Type>) -> Token
 /// value off `self`, routes it through `Cast::to_storage`, and maps a
 /// failure to a field-named `FrameworkError` instead of panicking.
 /// Non-cast fields move out of `self`. See [`try_from_storage_arm`]
-/// for the #380 Augment rationale.
+/// for the rationale.
 pub fn try_to_storage_arm(ident: &syn::Ident, cast_ty: Option<&Type>) -> TokenStream {
     match cast_ty {
         Some(cast_ty) => {
@@ -336,10 +336,10 @@ mod tests {
         );
     }
 
-    // #380 (Augment): the fallible `try_*` arms must propagate via
-    // `map_err` + `?` (NOT panic) while keeping the field-name
-    // diagnostic, so a corrupt row surfaces a recoverable
-    // `FrameworkError` on the framework's non-HTTP hydration paths.
+    // The fallible `try_*` arms must propagate via `map_err` + `?`
+    // (NOT panic) while keeping the field-name diagnostic, so a
+    // corrupt row surfaces a recoverable `FrameworkError` on the
+    // framework's non-HTTP hydration paths.
 
     #[test]
     fn try_from_storage_arm_propagates_and_names_field() {

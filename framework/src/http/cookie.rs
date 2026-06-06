@@ -415,12 +415,11 @@ mod tests {
         assert!(header.contains("session="));
     }
 
-    /// Domain 3a audit fix DR2: a CRLF in a cookie name MUST be
-    /// percent-encoded so it cannot inject additional headers into the
-    /// Set-Cookie response. Before the fix, the raw `\r\n` passed
-    /// through `url_encode` and either landed in the response verbatim
-    /// (header injection) or panicked the per-connection task when
-    /// hyper rejected the value.
+    /// A CRLF in a cookie name MUST be percent-encoded so it cannot
+    /// inject additional headers into the Set-Cookie response. Before
+    /// this was enforced, a raw `\r\n` passed through `url_encode` and
+    /// either landed in the response verbatim (header injection) or
+    /// panicked the per-connection task when hyper rejected the value.
     #[test]
     fn cookie_name_with_crlf_is_percent_encoded() {
         let cookie = Cookie::new("evil\r\nX-Injected: yes", "v");
@@ -451,9 +450,8 @@ mod tests {
         );
     }
 
-    /// Domain 3a audit fix DR3: non-ASCII bytes in a cookie value get
-    /// percent-encoded so the resulting Set-Cookie header is pure ASCII
-    /// per RFC 6265.
+    /// Non-ASCII bytes in a cookie value get percent-encoded so the
+    /// resulting Set-Cookie header is pure ASCII per RFC 6265.
     #[test]
     fn cookie_value_with_non_ascii_is_percent_encoded() {
         let cookie = Cookie::new("lang", "café");
@@ -468,9 +466,9 @@ mod tests {
         );
     }
 
-    /// Domain 3a audit fix DR4: percent-encoded UTF-8 round-trips as
-    /// the original UTF-8 string. Before the fix, `%C3%A9` decoded to
-    /// two Latin-1 chars (`Ã©`) instead of `é`.
+    /// Percent-encoded UTF-8 round-trips as the original UTF-8 string.
+    /// A naive byte-wise decode would render `%C3%A9` as two Latin-1
+    /// chars (`Ã©`) instead of `é`.
     #[test]
     fn cookie_utf8_round_trip_preserves_multi_byte_chars() {
         let original = "café — naïve façade";

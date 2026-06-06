@@ -13,7 +13,7 @@
 //! `concat!(module_path!(), "::", stringify!(StructName))` — the same
 //! expression the derive macro emits at the `inventory::submit!` call
 //! site. This prevents collisions between two same-named DTOs in
-//! different modules (audit HIGH `data` #336, second half).
+//! different modules.
 //!
 //! Callers — both for `register` (writes) and `is_allowed` /
 //! `allowed_for` (reads) — MUST use the same key shape:

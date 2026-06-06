@@ -478,7 +478,7 @@ mod tests {
         assert_eq!(expr.expression(), "30 14 * * *");
     }
 
-    // ---- #380c: helpers now validate ranges (contract-bug fix) ----------
+    // ---- helpers validate ranges ----------------------------------------
     //
     // The cron parser accepts any `u32` without range-checking, so these
     // helpers' `# Panics` docs were unenforced and bad input silently became

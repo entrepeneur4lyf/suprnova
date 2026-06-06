@@ -2277,7 +2277,7 @@ mod tests {
         assert_eq!(params.get("slug"), Some(&"a/b".to_string()));
     }
 
-    // ---- PATCH / HEAD / OPTIONS verb coverage (audit #350) ------------
+    // ---- PATCH / HEAD / OPTIONS verb coverage -------------------------
 
     /// PATCH routes register through the fluent surface and match.
     #[test]
@@ -2409,7 +2409,7 @@ mod tests {
         assert!(router.match_route(&Method::OPTIONS, "/r/meta").is_some());
     }
 
-    // ---- any / methods fan-out coverage (#350c) -----------------------
+    // ---- any / methods fan-out coverage -------------------------------
 
     /// `Router::any` registers the handler against every common HTTP
     /// method (GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS).

@@ -723,7 +723,7 @@ mod tests {
         assert!(s.ends_with("\n\n"));
     }
 
-    // ---- #352b: retry / comment / error / try_with_* / last_event_id ---
+    // ---- retry / comment / error / try_with_* / last_event_id ---------
 
     /// `with_retry` emits a `retry:` line with the duration in
     /// integer milliseconds. Spec contract: non-negative integer ms

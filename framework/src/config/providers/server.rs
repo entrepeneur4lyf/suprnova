@@ -113,9 +113,9 @@ impl ServerConfigBuilder {
 
 #[cfg(test)]
 mod tests {
-    //! Domain 4 audit fix C1 regression: ServerConfig::from_env's default
-    //! for `max_body_size` must match the body-collector's compile-time
-    //! default so a missing env var doesn't silently change the cap.
+    //! `ServerConfig::from_env`'s default for `max_body_size` must
+    //! match the body-collector's compile-time default so a missing
+    //! env var doesn't silently change the cap.
     //!
     //! Note: we don't assert on env-var-driven values here because tests
     //! share a process env and `SERVER_MAX_BODY_SIZE` could leak in from

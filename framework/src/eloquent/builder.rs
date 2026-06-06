@@ -3038,7 +3038,7 @@ where
             // Fast path — convert each row via the macro-emitted
             // fallible `Model::try_from_storage`, so a cast that fails
             // to decode a stored value propagates as a `FrameworkError`
-            // instead of panicking (#380 Augment).
+            // instead of panicking.
             raw_rows
                 .into_iter()
                 .map(M::try_from_storage)

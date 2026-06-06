@@ -642,12 +642,12 @@ impl BootKeyRing {
 // ----------------------------------------------------------------------
 // Test-only key installation hooks.
 //
-// HIGH audit #334: these helpers used to be plain `pub fn` items guarded
-// only by `#[doc(hidden)]`, which is not a real boundary — `doc(hidden)`
-// hides them from rustdoc but does NOT remove them from the binary or
-// from `use suprnova::crypto::*` access. A consumer (or attacker) could
-// install a key before `Server::from_config`, bypassing the APP_KEY
-// validation that the server runs only when `Crypt` is uninitialized.
+// These helpers must be guarded behind `#[cfg(test)]` rather than only
+// `#[doc(hidden)]`. `doc(hidden)` hides them from rustdoc but does NOT
+// remove them from the binary or from `use suprnova::crypto::*` access.
+// A consumer (or attacker) could otherwise install a key before
+// `Server::from_config`, bypassing the APP_KEY validation that the
+// server runs only when `Crypt` is uninitialized.
 //
 // They are now gated behind `cfg(any(test, feature = "testing"))` —
 // when a downstream consumer disables `default-features`, these

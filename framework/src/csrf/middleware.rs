@@ -818,8 +818,8 @@ mod tests {
     }
 
     // ----------------------------------------------------------------
-    // Regression: HIGH audit finding `csrf` #335 — documented `_token`
-    // form-field validation was not implemented; only headers were read.
+    // Regression coverage: documented `_token` form-field validation was
+    // historically not implemented; only headers were read.
     //
     // These tests install a fake session in `SESSION_CONTEXT`, drive a
     // real `Request` through `CsrfMiddleware::handle`, and verify:

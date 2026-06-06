@@ -231,8 +231,8 @@ impl<T> CursorPaginator<T> {
     ///
     /// Returns `Err` if the SeaORM variant isn't a supported cursor
     /// boundary or if `Crypt` is not initialized (defensive — should
-    /// be impossible after `Server::from_config`). Codex review
-    /// finding #1: never emit an unsigned/forgeable cursor payload.
+    /// be impossible after `Server::from_config`). Cursors must be
+    /// signed; never emit an unsigned/forgeable cursor payload.
     pub fn encode_value(
         value: &sea_orm::Value,
         direction: CursorDirection,

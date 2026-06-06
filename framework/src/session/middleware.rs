@@ -52,7 +52,6 @@ tokio::task_local! {
 /// dropping the cookie silently leaves the client without the durable
 /// half of the credential.
 #[must_use = "callers that already committed side effects (DB rows, token rotations) must check whether the cookie was actually queued"]
-#[allow(dead_code)]
 pub(crate) fn push_pending_cookie(cookie: Cookie) -> bool {
     PENDING_COOKIES
         .try_with(|slot| {
@@ -119,35 +118,6 @@ where
 {
     SESSION_CONTEXT
         .try_with(|slot| slot.lock().unwrap().as_mut().map(f))
-        .ok()
-        .flatten()
-}
-
-/// Set the session context for the current request. Internal helper —
-/// not part of the public surface. Tests should use the
-/// `new_session_slot_for_test` / `session_scope_for_test` helpers
-/// in [`crate::session`] instead.
-#[allow(dead_code)]
-pub(crate) fn set_session(session: SessionData) {
-    let _ = SESSION_CONTEXT.try_with(|slot| {
-        *slot.lock().unwrap() = Some(session);
-    });
-}
-
-/// Clear the session context. Internal — see [`set_session`].
-#[allow(dead_code)]
-pub(crate) fn clear_session() {
-    let _ = SESSION_CONTEXT.try_with(|slot| {
-        *slot.lock().unwrap() = None;
-    });
-}
-
-/// Take the session out of the context. Internal — used by
-/// `SessionMiddleware` for the save step.
-#[allow(dead_code)]
-pub(crate) fn take_session() -> Option<SessionData> {
-    SESSION_CONTEXT
-        .try_with(|slot| slot.lock().unwrap().take())
         .ok()
         .flatten()
 }
@@ -250,7 +220,7 @@ impl SessionMiddleware {
     /// environments, and generates a transient dev key otherwise), so
     /// the error path is purely defensive. If it ever does fire, the
     /// middleware fails the request closed rather than emit a
-    /// plaintext session id — codex review finding #1.
+    /// plaintext session id.
     fn create_session_cookie(&self, session_id: &str) -> Result<Cookie, crate::FrameworkError> {
         let base = Cookie::encrypted(&self.config.cookie_name, session_id)?;
         let mut cookie = base
@@ -352,7 +322,7 @@ impl Middleware for SessionMiddleware {
         // transient key in dev). If we somehow got here without one
         // — e.g. an embedder built a service loop without going through
         // `Server::from_config` — bail out closed rather than emit or
-        // accept plaintext session ids. Codex review finding #1.
+        // accept plaintext session ids.
         if !crate::crypto::Crypt::is_initialized() {
             return Err(crate::http::HttpResponse::text(
                 "Internal Server Error: encryption key not installed",

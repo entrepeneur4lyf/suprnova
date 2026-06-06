@@ -1324,7 +1324,7 @@ mod tests {
         matches!(&group.items[0], GroupItem::Route(_));
     }
 
-    // ---- PATCH / HEAD / OPTIONS macro coverage (#350b) ----------------
+    // ---- PATCH / HEAD / OPTIONS macro coverage ------------------------
 
     /// `__patch_impl`, `__head_impl`, and `__options_impl` mint
     /// `RouteDefBuilder`s with the matching `HttpMethod` variant. The

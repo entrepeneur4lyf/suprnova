@@ -11,7 +11,7 @@ use crate::error::FrameworkError;
 /// back to memory on failure" behaviour was actively dangerous in
 /// production. Operators choosing Redis MUST set the driver explicitly
 /// so connection failures surface at boot instead of silently degrading
-/// to per-process in-memory state (HIGH audit finding #251).
+/// to per-process in-memory state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CacheDriver {
     /// Per-process in-memory cache. Default. No external dependencies.

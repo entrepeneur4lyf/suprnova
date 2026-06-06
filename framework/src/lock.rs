@@ -72,9 +72,9 @@ mod tests {
         assert!(rw.is_poisoned(), "test setup: RwLock must be poisoned");
     }
 
-    /// Propagate policy (the #371 registration writes — notifications and
-    /// mail registries `?` these helpers): a poisoned lock surfaces as a
-    /// `FrameworkError` rather than panicking the whole subsystem.
+    /// Propagate policy: a poisoned lock surfaces as a `FrameworkError`
+    /// rather than panicking the whole subsystem. Notifications and mail
+    /// registries `?` these helpers.
     #[test]
     fn helpers_return_err_on_poison_instead_of_panicking() {
         let rw = Arc::new(RwLock::new(0u32));

@@ -75,7 +75,7 @@ impl Server {
     ///
     /// - `APP_ENV` resolves to a non-development environment (anything
     ///   other than local/development/testing) AND `APP_KEY` is unset
-    ///   or empty. Production fails closed per codex review finding #1.
+    ///   or empty. Production fails closed.
     /// - `APP_KEY` is set but malformed (wrong length, not base64).
     /// - `APP_KEY_PREVIOUS` is set and any comma-separated entry is
     ///   malformed. A half-rotated secret must fail at boot rather
@@ -119,14 +119,14 @@ impl Server {
         // Validate `APP_KEY` (+ `APP_KEY_PREVIOUS`) on EVERY boot, not just
         // when `Crypt` is uninitialized.
         //
-        // Audit HIGH #334: the previous `if !Crypt::is_initialized()` gate
-        // meant that any earlier key install (test hooks, embedders that
-        // boot the server more than once, etc.) skipped the validation
-        // entirely on subsequent boots — a missing/malformed APP_KEY in
-        // production would slip through if any code path had pre-installed
-        // a transient or test key. We now resolve the boot ring on every
-        // call, so a production boot fails closed regardless of what may
-        // have been installed earlier in the process.
+        // The previous `if !Crypt::is_initialized()` gate meant that any
+        // earlier key install (test hooks, embedders that boot the server
+        // more than once, etc.) skipped the validation entirely on
+        // subsequent boots — a missing/malformed APP_KEY in production
+        // would slip through if any code path had pre-installed a transient
+        // or test key. We now resolve the boot ring on every call, so a
+        // production boot fails closed regardless of what may have been
+        // installed earlier in the process.
         //
         // `init_with_keyring` is itself idempotent (no-op + `warn!` on
         // second call) so installing again after validation is safe; what
@@ -196,14 +196,10 @@ impl Server {
 
         let config = Config::get::<ServerConfig>().unwrap_or_else(ServerConfig::from_env);
 
-        // Domain 4 audit fix C1: wire the configured body cap into the
-        // process-global atomic the request collector reads from. Before
-        // this, `SERVER_MAX_BODY_SIZE=...` in the environment was parsed
-        // into ServerConfig but silently ignored — the framework kept
-        // using the compile-time default for every request body cap
-        // decision. Per-FormRequest overrides still take precedence
-        // because `FormRequest::max_body_bytes` is checked at extract
-        // time, not at boot.
+        // Wire the configured body cap into the process-global atomic the
+        // request collector reads from. Per-FormRequest overrides still
+        // take precedence because `FormRequest::max_body_bytes` is checked
+        // at extract time, not at boot.
         crate::http::body::set_global_max_request_body_bytes(config.max_body_size);
 
         Ok(Self {
@@ -1473,11 +1469,11 @@ async fn check_database_health() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    //! Codex review finding #16: invalid `Server::host()` strings used to
-    //! panic at boot via `host.parse().unwrap()`. These tests pin the
-    //! current behaviour — a typed `FrameworkError` with a message that
-    //! names the offending value and the expected format — so a future
-    //! regression to `.unwrap()` fails loudly.
+    //! Invalid `Server::host()` strings used to panic at boot via
+    //! `host.parse().unwrap()`. These tests pin the current behaviour —
+    //! a typed `FrameworkError` with a message that names the offending
+    //! value and the expected format — so a future regression to
+    //! `.unwrap()` fails loudly.
     use super::*;
     use crate::routing::Router;
 

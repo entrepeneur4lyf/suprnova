@@ -85,7 +85,7 @@ impl AuthManager {
         let provider = self.provider(&config.provider)?;
         Ok(match config.driver {
             GuardDriver::Session => Arc::new(SessionGuard::named(name, provider)) as Arc<dyn Guard>,
-            GuardDriver::Token => Arc::new(TokenGuard::named(name, provider)) as Arc<dyn Guard>,
+            GuardDriver::Token => Arc::new(TokenGuard::new(provider)) as Arc<dyn Guard>,
         })
     }
 

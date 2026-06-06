@@ -633,7 +633,7 @@ mod tests {
         );
     }
 
-    // ---- #380c: fallible schedule helpers (range validation) ------------
+    // ---- fallible schedule helpers (range validation) ------------------
 
     #[test]
     fn try_hourly_at_validates_minute() {

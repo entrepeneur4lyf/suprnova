@@ -41,9 +41,9 @@ pub use torii::{LockoutStatus, Session, SessionToken, User, UserId};
 
 /// Serializes concurrent `init_torii` callers so that `TORII`, `PROVIDER`,
 /// and the passkey `WEBAUTHN` cannot land from different configs under a
-/// startup race (ChatGPT audit `torii_integration` HIGH #1). `init_torii`
-/// double-checks `TORII.get()` both before and after acquiring this lock,
-/// so the fast path stays lock-free once initialised.
+/// startup race. `init_torii` double-checks `TORII.get()` both before and
+/// after acquiring this lock, so the fast path stays lock-free once
+/// initialised.
 static INIT_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// The single global Torii instance, pinned to the SeaORM repository provider.
@@ -63,7 +63,7 @@ static PROVIDER: OnceLock<Arc<SeaORMRepositoryProvider>> = OnceLock::new();
 ///
 /// **Do not call this from authentication / login paths.** Login flows must
 /// use [`find_user_by_email_lookup_only`] so failed attempts cannot silently
-/// create accounts. (Codex review finding #3.)
+/// create accounts.
 pub(crate) async fn find_or_create_user_by_email(email: &str) -> Result<User, FrameworkError> {
     let provider = PROVIDER.get().ok_or_else(|| {
         FrameworkError::internal("Torii not initialised. Call init_torii() first.")
@@ -83,8 +83,7 @@ pub(crate) async fn find_or_create_user_by_email(email: &str) -> Result<User, Fr
 /// endpoints) that must respond identically whether or not the email is
 /// on file. **Never** use [`find_or_create_user_by_email`] in login or
 /// resend paths: it would silently create accounts from failed login
-/// attempts (account-enumeration / probing footgun, codex review
-/// finding #3).
+/// attempts (account-enumeration / probing footgun).
 pub async fn find_user_by_email_lookup_only(email: &str) -> Result<Option<User>, FrameworkError> {
     let provider = PROVIDER.get().ok_or_else(|| {
         FrameworkError::internal("Torii not initialised. Call init_torii() first.")
@@ -123,7 +122,7 @@ pub async fn find_user_by_id(user_id: &str) -> Result<Option<User>, FrameworkErr
 /// # Purpose
 ///
 /// Integration tests need to assert that authentication paths do **not**
-/// create user rows on failed login attempts (codex review finding #3).
+/// create user rows on failed login attempts.
 /// `password_hash_for_email_test_only` can't discriminate "no user" from
 /// "user with NULL password hash" — both return `Ok(None)`. This helper
 /// answers the existence question directly.
@@ -279,9 +278,8 @@ pub async fn init_torii(config: ToriiConfig) -> Result<(), FrameworkError> {
     }
 
     // Serialize concurrent initializers so they cannot split TORII /
-    // PROVIDER / WEBAUTHN across different configs (ChatGPT audit
-    // `torii_integration` HIGH #1). Two callers that both pass the
-    // TORII.get().is_some() check above would otherwise race
+    // PROVIDER / WEBAUTHN across different configs. Two callers that both
+    // pass the TORII.get().is_some() check above would otherwise race
     // independently and each set could land from a different caller.
     let _guard = INIT_GUARD.lock().await;
 
@@ -316,11 +314,10 @@ pub async fn init_torii(config: ToriiConfig) -> Result<(), FrameworkError> {
 }
 
 /// Map a [`torii::ToriiError`] to a [`FrameworkError`] with the
-/// appropriate HTTP status code (ChatGPT audit `torii_integration`
-/// HIGH #2). Auth failures are user/client protocol failures and
-/// must map to 401 — not 500 — so they do not generate spurious
-/// internal-error telemetry or 500 responses. Storage failures are
-/// genuine server faults and stay as 500 internal errors.
+/// appropriate HTTP status code. Auth failures are user/client protocol
+/// failures and must map to 401 — not 500 — so they do not generate
+/// spurious internal-error telemetry or 500 responses. Storage failures
+/// are genuine server faults and stay as 500 internal errors.
 pub(crate) fn map_torii_error(e: torii::ToriiError) -> FrameworkError {
     use torii::ToriiError;
     match e {

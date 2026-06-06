@@ -434,7 +434,7 @@ impl RouteBuilder {
 
 #[cfg(test)]
 mod tests {
-    //! Fluent GroupRouter parity for #350d.
+    //! Fluent GroupRouter parity tests.
 
     use super::*;
     use crate::http::text;

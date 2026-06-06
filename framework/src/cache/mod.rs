@@ -4,7 +4,7 @@
 //! The backend is selected explicitly via the `CACHE_DRIVER` env var
 //! (`memory` — default — or `redis`); a misconfigured or unreachable
 //! Redis fails boot rather than silently downgrading to a per-process
-//! in-memory cache (HIGH audit finding #251).
+//! in-memory cache.
 //!
 //! # Quick Start
 //!
@@ -89,8 +89,7 @@ impl Cache {
     /// - [`CacheDriver::Redis`] — connect to `REDIS_URL` and bind the
     ///   resulting `RedisCache`. **Fails closed** if the URL is
     ///   unreachable so a misconfigured production deployment never
-    ///   silently downgrades to a per-process cache (HIGH audit
-    ///   finding #251).
+    ///   silently downgrades to a per-process cache.
     ///
     /// Called automatically by `Server::run()` and `App` boot helpers.
     pub(crate) async fn bootstrap() -> Result<(), FrameworkError> {
@@ -162,8 +161,7 @@ impl Cache {
     /// If `ttl` is `None`, uses the default TTL from config (or no
     /// expiration if the default is 0). The default-TTL resolution
     /// happens at the facade layer — both in-memory and Redis backends
-    /// honour `None` literally at the store level (HIGH audit finding
-    /// #252 + parity finding for the in-memory divergence).
+    /// honour `None` literally at the store level.
     ///
     /// # Example
     ///
@@ -186,8 +184,7 @@ impl Cache {
     ///
     /// Bypasses the configured default TTL entirely — even if
     /// `CACHE_DEFAULT_TTL` is set, the value will never expire. This
-    /// path is symmetric across in-memory and Redis backends (HIGH
-    /// audit finding #252).
+    /// path is symmetric across in-memory and Redis backends.
     ///
     /// # Example
     ///

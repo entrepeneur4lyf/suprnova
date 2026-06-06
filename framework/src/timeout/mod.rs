@@ -30,8 +30,7 @@
 //! any request carrying `Upgrade: websocket`. Currently WS upgrades are
 //! dispatched by [`server::handle_ws_upgrade`](crate::server) which never
 //! runs global middleware, so this guard is **defense in depth** for the day
-//! global middleware is also applied to upgrades (production gates
-//! #347/#357). It is not itself a fix for those gates.
+//! global middleware is also applied to upgrades.
 //!
 //! # Cancel safety
 //!
@@ -129,7 +128,7 @@ impl Middleware for TimeoutMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
         // WebSocket upgrades stream for the lifetime of the connection, so a
         // request deadline must never bound them. See the module docs: this
-        // is defense in depth, not a fix for #347/#357.
+        // guard is defense in depth.
         if is_websocket_upgrade(request.headers()) {
             return next(request).await;
         }

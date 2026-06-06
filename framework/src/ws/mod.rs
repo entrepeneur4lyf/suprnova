@@ -152,7 +152,6 @@ impl Default for WsConfig {
 impl WsConfig {
     /// Convert to tungstenite's `WebSocketConfig` for passing to
     /// `hyper_tungstenite::upgrade`.
-    #[allow(dead_code)] // used by upgrade wiring in T5
     pub(crate) fn to_tungstenite_config(
         &self,
     ) -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {

@@ -230,12 +230,11 @@ impl crate::middleware::Middleware for RequestIdMiddleware {
         // `Context::query_param` and downstream paginate / cursor code
         // can read them without re-parsing the URI on every call.
         //
-        // Audit HIGH #333: prior to this snapshot the middleware used
-        // `ContextStore::default()`, so the in-scope `query` bag was
-        // always empty for real HTTP requests — `Context::query_param`
-        // always returned `None` and Eloquent pagination silently
-        // defaulted to page 1 / no-cursor regardless of `?page=` or
-        // `?cursor=` in the URL.
+        // Before this snapshot the middleware used `ContextStore::default()`,
+        // so the in-scope `query` bag was always empty for real HTTP
+        // requests — `Context::query_param` always returned `None` and
+        // Eloquent pagination silently defaulted to page 1 / no-cursor
+        // regardless of `?page=` or `?cursor=` in the URL.
         let query_map: std::collections::HashMap<String, String> = request
             .query()
             .map(|q| {

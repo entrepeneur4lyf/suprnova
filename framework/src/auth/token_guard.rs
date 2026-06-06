@@ -36,25 +36,16 @@ use crate::error::FrameworkError;
 /// dependency. Resolves the current user from the request-scoped id and
 /// the guard's [`UserProvider`].
 pub struct TokenGuard {
-    /// The guard's name (e.g. `"api"`).
-    #[allow(dead_code)]
-    name: String,
     /// The user provider this guard resolves and validates against.
     provider: Arc<dyn UserProvider>,
 }
 
 impl TokenGuard {
-    /// Create a token guard named `"api"` with the given provider.
+    /// Create a token guard with the given provider. Guards are named
+    /// at the dispatcher level (see [`crate::auth::AuthManager`]), so
+    /// the guard itself doesn't carry its own name.
     pub fn new(provider: Arc<dyn UserProvider>) -> Self {
-        Self::named("api", provider)
-    }
-
-    /// Create a token guard with an explicit name.
-    pub fn named(name: impl Into<String>, provider: Arc<dyn UserProvider>) -> Self {
-        Self {
-            name: name.into(),
-            provider,
-        }
+        Self { provider }
     }
 }
 

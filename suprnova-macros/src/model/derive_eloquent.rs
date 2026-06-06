@@ -254,11 +254,11 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         .zip(field_strs.iter())
         .map(|(ident, name)| casts::to_storage_arm(ident, input.cast_for_field(name)));
 
-    // #380 (Augment) — fallible analogues of the read/write arms
-    // above. These feed `Model::try_from_storage` / `try_into_storage`,
-    // the `?`-propagating hydration/dehydration the framework's own
-    // CRUD hot paths route through. The infallible `From` impls below
-    // keep using the panicking arms as the documented escape hatch.
+    // Fallible analogues of the read/write arms above. These feed
+    // `Model::try_from_storage` / `try_into_storage`, the `?`-propagating
+    // hydration/dehydration the framework's own CRUD hot paths route
+    // through. The infallible `From` impls below keep using the
+    // panicking arms as the documented escape hatch.
     let try_from_storage_arms = field_idents
         .iter()
         .zip(field_strs.iter())
@@ -834,8 +834,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
             #append_accessor_dispatch
 
-            // #380 (Augment) — fallible hydration / dehydration. The
-            // framework's CRUD paths call these so a cast that fails to
+            // Fallible hydration / dehydration. The framework's CRUD
+            // paths call these so a cast that fails to
             // decode a stored value (corrupt column, schema drift) or
             // encode a runtime value surfaces a recoverable
             // `FrameworkError` instead of a panic. That matters off the

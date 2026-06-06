@@ -216,17 +216,16 @@ fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::
                 } else if meta.path.is_ident("deny_unknown_fields") {
                     // `deny_unknown_fields` was the opt-in flag when
                     // permissive was the default. Strict is now the
-                    // default (codex review finding #10), so this flag
-                    // is a no-op kept only to keep older call sites
-                    // compiling. Prefer removing the attribute entirely.
+                    // default, so this flag is a no-op kept only to
+                    // keep older call sites compiling. Prefer removing
+                    // the attribute entirely.
                 } else if meta.path.is_ident("custom_authorize") {
                     // Hard-cut diagnostic: the old "skip the whole
-                    // FormRequest impl" flag is gone (codex review
-                    // finding #11). Migrate to `authorize = "fn"` so
-                    // body parsing, validation, and Precognition still
-                    // get generated for you.
+                    // FormRequest impl" flag is gone. Migrate to
+                    // `authorize = "fn"` so body parsing, validation,
+                    // and Precognition still get generated for you.
                     return Err(meta.error(
-                        "#[data(custom_authorize)] was removed (codex review finding #11) — use #[data(authorize = \"path::to::fn\")] instead; the derive keeps emitting the FormRequest impl and only routes authorize to your function",
+                        "#[data(custom_authorize)] was removed — use #[data(authorize = \"path::to::fn\")] instead; the derive keeps emitting the FormRequest impl and only routes authorize to your function",
                     ));
                 } else {
                     return Err(meta.error(
@@ -307,14 +306,14 @@ fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::
                     };
                     match key.as_str() {
                         "id_field" => {
-                            // Domain 5 audit M-D5-7 — `id_field = "..."`
-                            // is emitted as `syn::Ident::new(&opts.id_field,
-                            // Span::call_site())` at `data.rs:1112` so the
-                            // generated `IntoJsonResource` impl can reference
-                            // the matching struct field via `self.#id_field`.
-                            // A non-ident value (`id_field = "user-id"`,
-                            // `id_field = "user id"`) panics the macro
-                            // instead of producing a clean compile error.
+                            // `id_field = "..."` is emitted as
+                            // `syn::Ident::new(&opts.id_field, Span::call_site())`
+                            // so the generated `IntoJsonResource` impl can
+                            // reference the matching struct field via
+                            // `self.#id_field`. A non-ident value
+                            // (`id_field = "user-id"`, `id_field = "user id"`)
+                            // panics the macro instead of producing a clean
+                            // compile error.
                             if syn::parse_str::<syn::Ident>(&value).is_err() {
                                 return Err(syn::Error::new_spanned(
                                     &assign.right,
@@ -549,11 +548,11 @@ fn build_form_request(
     // injection into the parsed body map before deserialization, with path
     // params winning (IDOR protection).
     //
-    // Audit HIGH #336: prior to this, the route-param branch read
-    // `body_bytes()` without honoring `max_body_bytes`, never parsed
-    // form-urlencoded bodies, didn't handle Precognition, and skipped the
-    // `after_validation` cross-field hook. Adding a single route-param
-    // field silently changed the request semantics for the whole DTO.
+    // Historically the route-param branch read `body_bytes()` without
+    // honoring `max_body_bytes`, never parsed form-urlencoded bodies,
+    // didn't handle Precognition, and skipped the `after_validation`
+    // cross-field hook. Adding a single route-param field silently
+    // changed the request semantics for the whole DTO.
     quote! {
         #[::suprnova::__async_trait::async_trait]
         impl #impl_generics ::suprnova::http::FormRequest for #struct_name #ty_generics #where_clause {
@@ -797,8 +796,8 @@ fn add_de_lifetime(g: &syn::Generics) -> syn::Generics {
 /// serializes the field to a `serde_json::Value` up front:
 ///
 /// - `fallible = false` → panics on `Serialize` failure, naming
-///   `Struct::field` + the source error (Domain 5 M-D5-9). Backs the
-///   infallible `__into_inertia_props` escape hatch (`Inertia::data`).
+///   `Struct::field` + the source error. Backs the infallible
+///   `__into_inertia_props` escape hatch (`Inertia::data`).
 /// - `fallible = true`  → propagates the failure as `FrameworkError::internal`
 ///   via `?`, with the same diagnostic shape. Backs `__try_into_inertia_props`
 ///   (`Inertia::try_data`), so a bad `Serialize` impl becomes a recoverable
@@ -815,10 +814,10 @@ fn build_prop_entry(
     let name = ident.to_string();
 
     if let Some(flavor) = &opts.lazy {
-        // Audit HIGH #336: `owner` is the FULLY-QUALIFIED type name so
-        // include-allowlist lookups match the registry key (also fully
-        // qualified). Bare struct names would collide across modules
-        // and nondeterministically resolve the wrong allowlist.
+        // `owner` is the FULLY-QUALIFIED type name so include-allowlist
+        // lookups match the registry key (also fully qualified). Bare
+        // struct names would collide across modules and nondeterministically
+        // resolve the wrong allowlist.
         let entry_construction = match flavor {
             LazyFlavor::Plain | LazyFlavor::Inertia | LazyFlavor::WhenLoaded => quote! {
                 ::suprnova::inertia::PropEntry::LazyOwned {
@@ -1632,7 +1631,7 @@ fn build_allowlist_registration(
     // survives `cargo test` symbol stripping because the linker sees
     // these as live data, not unused init functions.
     //
-    // Audit HIGH #336: the registry key is the FULLY-QUALIFIED type name
+    // The registry key is the FULLY-QUALIFIED type name
     // (`my_crate::my_module::MyDto`) — not the bare struct name. This
     // prevents two DTOs with the same identifier in different modules
     // from overwriting each other's include allowlists nondeterministically.

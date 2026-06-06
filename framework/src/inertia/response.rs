@@ -460,8 +460,7 @@ impl InertiaResponse {
     // by the panic-recovery middleware and converted to a 500. Prefer the
     // `try_*` form when building responses off that path (queue workers, the
     // scheduler, CLI) where no such net exists, or whenever you want to
-    // handle a serialization failure explicitly. Closes the Codex MEDIUM
-    // "infallible public surfaces convert recoverable errors into panics".
+    // handle a serialization failure explicitly.
 
     /// Fallible sibling of [`with`](Self::with).
     pub fn try_with<V: Serialize>(
@@ -1035,9 +1034,20 @@ async fn resolve_props(
                         match resolver().await {
                             Ok(v) => Ok(TaskOutcome::Insert { key, value: v }),
                             Err(e) if rescue => {
-                                // TODO: log/dispatch to error tracker
-                                // (depends on the events parity work).
-                                let _ = e;
+                                tracing::warn!(
+                                    prop_key = %key,
+                                    error = %e,
+                                    "inertia deferred prop resolver failed; rescued per spec",
+                                );
+                                let _ = crate::events::EventFacade::dispatch(
+                                    crate::events::ErrorOccurred {
+                                        error_message: e.to_string(),
+                                        status_code: 500,
+                                        request_id: crate::logging::current_request_id()
+                                            .map(|id| id.as_str().to_string()),
+                                    },
+                                )
+                                .await;
                                 Ok(TaskOutcome::Rescued { key })
                             }
                             Err(e) => Err(e),

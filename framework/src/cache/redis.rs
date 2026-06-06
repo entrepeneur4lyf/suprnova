@@ -51,7 +51,7 @@ impl RedisCache {
             .map_err(|e| FrameworkError::internal(format!("Redis connection error: {}", e)))?;
 
         // Bound the initial-connect budget so an unreachable Redis fails
-        // CLOSED promptly (HIGH #251) instead of hanging. The redis-rs
+        // CLOSED promptly instead of hanging. The redis-rs
         // defaults are 6 reconnect retries with an UNCAPPED exponential
         // backoff (max_delay = None), so against a down/unreachable host the
         // connect future can take well over 10s to resolve with an error —
@@ -138,7 +138,7 @@ impl CacheStore for RedisCache {
         // `None` ttl means **no expiration** per the CacheStore contract.
         // The facade resolves any configured default before calling this
         // method — otherwise `Cache::forever` would not be forever on
-        // Redis (HIGH audit finding #252).
+        // Redis.
         if let Some(duration) = ttl {
             pipe.cmd("SET")
                 .arg(&pkey)

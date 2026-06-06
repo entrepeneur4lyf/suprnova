@@ -172,8 +172,7 @@ pub struct InertiaConfig {
     /// Default: 16 — generous for typical Inertia pages while bounding
     /// downstream fan-out on pages with many lazy resolvers. Without
     /// this cap a page with N lazy props issues N parallel database /
-    /// HTTP calls per request (Domain 20 audit D20-E / ChatGPT
-    /// MODULE_REVIEW_NOTES ## inertia MEDIUM #4).
+    /// HTTP calls per request.
     pub max_concurrent_resolvers: usize,
     /// Lazy-loaded Vite manifest cache.
     ///

@@ -197,8 +197,8 @@ impl Event for TransactionRolledBack {
 }
 
 /// Open-connection count crossed a configured threshold. Fired by
-/// monitoring tooling (the future `db:monitor` CLI command); not
-/// emitted by the framework itself.
+/// external monitoring tooling that observes the connection pool;
+/// not emitted by the framework itself.
 #[derive(Debug, Clone)]
 pub struct DatabaseBusy {
     /// Logical connection name being monitored.

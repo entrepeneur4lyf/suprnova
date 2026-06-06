@@ -300,13 +300,12 @@ impl OAuthAuth {
         let challenge = pkce_s256_challenge(&verifier);
 
         // Store the (state, verifier, provider) ceremony in the
-        // single-use `auth_ceremony_tokens` table. ChatGPT audit
-        // `torii_integration` HIGH #3: the previous design stored
-        // these in the session and relied on a non-atomic
-        // get-and-forget — two concurrent callbacks with the same
-        // session cookie could both consume the same ceremony.
-        // The ceremony-tokens table provides atomic single-use via a
-        // conditional DELETE keyed on the UNIQUE selector.
+        // single-use `auth_ceremony_tokens` table. Storing these in the
+        // session would rely on a non-atomic get-and-forget — two
+        // concurrent callbacks with the same session cookie could both
+        // consume the same ceremony. The ceremony-tokens table provides
+        // atomic single-use via a conditional DELETE keyed on the UNIQUE
+        // selector.
         //
         // TTL: 10 minutes — generous for slow networks while keeping
         // unused ceremonies pruned.
@@ -324,10 +323,9 @@ impl OAuthAuth {
         // Session binding: write the state under a provider-scoped
         // session key. `complete` requires THIS session to hold the
         // exact state before consuming the ceremony — preserves the
-        // codex finding #7 property that an attacker who steals a
-        // state value but not the session cookie cannot complete the
-        // flow. The atomic ceremony consume gives single-use on top
-        // of the session check.
+        // property that an attacker who steals a state value but not
+        // the session cookie cannot complete the flow. The atomic
+        // ceremony consume gives single-use on top of the session check.
         session_mut(|s| {
             s.put(&session_state_key, state.clone());
         });
@@ -394,10 +392,10 @@ impl OAuthAuth {
         let endpoints = self.endpoints_for(&config)?;
         let torii = instance()?;
 
-        // Session binding (codex finding #7): the session that called
-        // `begin` is the only session that can complete the flow. An
-        // attacker who steals a state value but not the session cookie
-        // sees an empty session here and is rejected.
+        // Session binding: the session that called `begin` is the only
+        // session that can complete the flow. An attacker who steals a
+        // state value but not the session cookie sees an empty session
+        // here and is rejected.
         let session_state_key = format!("oauth_state_{}", self.provider);
         let expected_state: Option<String> = session().and_then(|s| s.get(&session_state_key));
 
@@ -425,8 +423,7 @@ impl OAuthAuth {
         // concurrent callbacks with the same `state` both pass the
         // session check above, but only one wins the atomic DELETE
         // (rows_affected == 1) and gets the payload; the other gets
-        // `None` and rejects. ChatGPT audit `torii_integration` HIGH
-        // #3 — replay race impossible by construction.
+        // `None` and rejects — replay race impossible by construction.
         let payload: OAuthCeremonyPayload =
             super::ceremony::consume(state, super::ceremony::kind::OAUTH)
                 .await?
@@ -560,8 +557,7 @@ impl OAuthAuth {
         // Resolve a stable provider-side identifier. If the provider
         // sent neither `sub` nor `id`, we cannot safely attribute the
         // user — refuse the callback rather than collapse to a constant
-        // that would conflate distinct users (ChatGPT audit
-        // `torii_integration` HIGH #4). 502 because the upstream
+        // that would conflate distinct users. 502 because the upstream
         // produced an unusable payload.
         let provider_id = profile.id_str().ok_or_else(|| FrameworkError::Domain {
             message: format!(
@@ -572,9 +568,9 @@ impl OAuthAuth {
         })?;
 
         // Derive the user's email. Identity attribution keys on
-        // `provider_id` (see HIGH #4), so this is purely the email
-        // address recorded on the torii user row — but it must still
-        // be a real, verified email, never a username or opaque ID:
+        // `provider_id`, so this is purely the email address recorded
+        // on the torii user row — but it must still be a real,
+        // verified email, never a username or opaque ID:
         //
         // 1. If the userinfo response carries `email` and (for OIDC
         //    providers like Google) `email_verified == true`, use it
@@ -881,8 +877,7 @@ impl ProviderProfile {
     /// `id` (GitHub-style). Callers MUST reject such responses as
     /// they cannot be safely attributed — collapsing missing IDs to
     /// a constant like `"unknown"` would conflate multiple distinct
-    /// users under one identity (ChatGPT audit `torii_integration`
-    /// HIGH #4).
+    /// users under one identity.
     fn id_str(&self) -> Option<String> {
         if let Some(sub) = &self.sub {
             return Some(sub.clone());

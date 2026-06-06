@@ -1,7 +1,7 @@
 //! Single-use ceremony tokens for OAuth + Passkey auth flows.
 //!
 //! Hardens OAuth state and Passkey challenge consumption against
-//! concurrent replay (ChatGPT audit `torii_integration` HIGH #3).
+//! concurrent replay.
 //!
 //! The previous design stored ceremony state in the session and
 //! relied on session.get + session.forget being a single atomic
