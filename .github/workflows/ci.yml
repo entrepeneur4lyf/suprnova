@@ -55,9 +55,17 @@ jobs:
   # The vector-pinecone feature is exercised separately in test-features
   # because it pulls a dep chain with active RustSec advisories
   # (production gate #370).
+  #
+  # Matrix runs Ubuntu + macOS. Windows is deferred to v0.1.x per
+  # release-prep §2.2 (sqlx Postgres deps require non-trivial Windows
+  # setup; not blocking the initial release).
   test:
-    name: cargo test --workspace
-    runs-on: ubuntu-latest
+    name: cargo test --workspace (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -65,12 +73,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-test
+          shared-key: ci-test-${{ matrix.os }}
 
-      - name: Install system dependencies
+      - name: Install system dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libssl-dev libsqlite3-dev libpq-dev
+
+      - name: Install system dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install pkg-config libpq
+          brew link --force libpq
 
       - name: cargo test --workspace
         run: cargo test --workspace --no-fail-fast
@@ -107,9 +122,17 @@ jobs:
   # The scaffold_snapshot compile checks are `#[ignore]`d in the suite
   # (~40s each, they compile a whole generated project) so they don't slow
   # local `cargo test`; CI is where they run.
+  #
+  # Matrix runs Ubuntu + macOS. Catches "scaffolded project doesn't
+  # compile on macOS" issues (hardcoded path separators, OS-specific
+  # paths) before they ship to a user via `suprnova new`.
   scaffold:
-    name: scaffold compiles (generated projects)
-    runs-on: ubuntu-latest
+    name: scaffold compiles (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -117,12 +140,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-scaffold
+          shared-key: ci-scaffold-${{ matrix.os }}
 
-      - name: Install system dependencies
+      - name: Install system dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libssl-dev libsqlite3-dev libpq-dev
+
+      - name: Install system dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install pkg-config libpq
+          brew link --force libpq
 
       - name: scaffold_snapshot compile checks (default + api starters)
         run: cargo test -p suprnova-cli --test scaffold_snapshot -- --ignored
