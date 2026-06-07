@@ -77,36 +77,53 @@ impl RateLimiterDriver for RedisRateLimiter {
         config: &SlidingWindowConfig,
     ) -> Result<Option<Duration>, FrameworkError> {
         let zkey = format!("{}rl:{}", self.prefix, key);
-        let mut conn = self.conn.clone();
         let now_ms = chrono::Utc::now().timestamp_millis();
         let window_ms = config.window.as_millis() as i64;
-        // Evict old entries then fetch the oldest score.
-        redis::cmd("ZREMRANGEBYSCORE")
-            .arg(&zkey)
-            .arg("-inf")
-            .arg(now_ms - window_ms)
-            .query_async::<()>(&mut conn)
+
+        // Single Lua block so the evict / count / oldest-score reads
+        // observe the same snapshot. As three separate round-trips a
+        // concurrent `try_acquire` (which is itself atomic) could
+        // ZADD between our ZCARD and our ZRANGE — count says "at
+        // limit" then ZRANGE returns a *newer* member's score,
+        // shrinking the computed Retry-After well below the real
+        // remaining window. Returns -1 for "under limit, no header
+        // needed" and a non-negative ms count for "still throttled,
+        // header should be at least this long."
+        let script = Script::new(
+            r"
+            local zkey = KEYS[1]
+            local now = tonumber(ARGV[1])
+            local window = tonumber(ARGV[2])
+            local max = tonumber(ARGV[3])
+            redis.call('ZREMRANGEBYSCORE', zkey, '-inf', now - window)
+            local count = redis.call('ZCARD', zkey)
+            if count < max then
+                return -1
+            end
+            local oldest = redis.call('ZRANGE', zkey, 0, 0, 'WITHSCORES')
+            if #oldest < 2 then
+                return 0
+            end
+            local oldest_score = tonumber(oldest[2])
+            local elapsed = now - oldest_score
+            if elapsed < 0 then elapsed = 0 end
+            local remaining = window - elapsed
+            if remaining < 0 then remaining = 0 end
+            return remaining
+            ",
+        );
+        let mut conn = self.conn.clone();
+        let remaining_ms: i64 = script
+            .key(&zkey)
+            .arg(now_ms)
+            .arg(window_ms)
+            .arg(config.max_requests as i64)
+            .invoke_async(&mut conn)
             .await
-            .map_err(|e| FrameworkError::internal(format!("rl evict: {e}")))?;
-        let count: i64 = redis::cmd("ZCARD")
-            .arg(&zkey)
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("rl card: {e}")))?;
-        if count < config.max_requests as i64 {
+            .map_err(|e| FrameworkError::internal(format!("rl retry_after script: {e}")))?;
+        if remaining_ms < 0 {
             return Ok(None);
         }
-        let oldest: Vec<(String, f64)> = redis::cmd("ZRANGE")
-            .arg(&zkey)
-            .arg(0)
-            .arg(0)
-            .arg("WITHSCORES")
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("rl range: {e}")))?;
-        let oldest_score = oldest.first().map(|(_, s)| *s as i64).unwrap_or(now_ms);
-        let elapsed_ms = (now_ms - oldest_score).max(0);
-        let remaining_ms = (window_ms - elapsed_ms).max(0) as u64;
-        Ok(Some(Duration::from_millis(remaining_ms)))
+        Ok(Some(Duration::from_millis(remaining_ms as u64)))
     }
 }

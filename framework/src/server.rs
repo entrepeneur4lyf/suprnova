@@ -1366,19 +1366,28 @@ fn check_origin_policy(
                 .ok_or("missing Origin header")?;
             let origin_url = url::Url::parse(origin).map_err(|_| "malformed Origin")?;
             let origin_host = origin_url.host_str().ok_or("Origin has no host")?;
+            let origin_scheme = origin_url.scheme();
             let origin_port = origin_url.port();
             let host_header = headers
                 .get(hyper::header::HOST)
                 .and_then(|v| v.to_str().ok())
                 .ok_or("missing Host header")?;
             let (host_name, host_port_opt) = split_host_header(host_header);
-            // Origin's host comparison is case-insensitive (DNS is); port is
-            // compared exact-or-default. If `Origin` omitted port the URL
-            // crate returns `None` — match against the Host's port too.
+            // Host names are case-insensitive (DNS). Port comparison
+            // is exact-or-default: `url::Url::port()` returns `None`
+            // when the URL omitted port OR when it explicitly carried
+            // the scheme's default, but `Host:` headers commonly send
+            // either form (`example.com` or `example.com:443`) and
+            // browsers don't normalize one to the other. Normalize
+            // both sides to the same effective port keyed by the
+            // Origin's scheme so `https://example.com` matches
+            // `example.com:443` and vice versa.
             if !origin_host.eq_ignore_ascii_case(host_name) {
                 return Err("Origin host does not match Host header");
             }
-            if origin_port != host_port_opt {
+            if effective_port(origin_scheme, origin_port)
+                != effective_port(origin_scheme, host_port_opt)
+            {
                 return Err("Origin port does not match Host header");
             }
             Ok(())
@@ -1397,6 +1406,23 @@ fn check_origin_policy(
                 Err("Origin not in AllowList")
             }
         }
+    }
+}
+
+/// Resolve a port slot against its scheme's well-known default. Used by
+/// the SameOrigin port check so a peer that sent the explicit form
+/// (`example.com:443`) and a peer that sent the elided form
+/// (`example.com`) compare equal under the same scheme. Schemes whose
+/// default port we don't track (custom upstream, `file:`, etc.) fall
+/// through with `None`, which lands them in the exact-only comparison.
+fn effective_port(scheme: &str, port: Option<u16>) -> Option<u16> {
+    if port.is_some() {
+        return port;
+    }
+    match scheme {
+        "http" | "ws" => Some(80),
+        "https" | "wss" => Some(443),
+        _ => None,
     }
 }
 
@@ -1604,5 +1630,89 @@ mod tests {
             "Server::new must snapshot newly registered global middleware \
              (it pulls MiddlewareRegistry::from_global, like from_config)"
         );
+    }
+
+    fn ws_headers(origin: &str, host: &str) -> hyper::HeaderMap {
+        let mut h = hyper::HeaderMap::new();
+        h.insert(hyper::header::ORIGIN, origin.parse().unwrap());
+        h.insert(hyper::header::HOST, host.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn same_origin_normalizes_https_default_port_443() {
+        // The browser elides :443 on https Origin; the Host header
+        // may carry the explicit form (`example.com:443`) or the
+        // elided form. The exact-or-default rule must accept both
+        // shapes either way around — pre-fix the explicit/elided
+        // mix returned `Origin port does not match` despite being
+        // the SAME origin.
+        let policy = crate::ws::OriginPolicy::SameOrigin;
+
+        // Origin elides 443, Host carries 443 explicit.
+        let h = ws_headers("https://example.com", "example.com:443");
+        assert!(
+            check_origin_policy(&policy, &h).is_ok(),
+            "https://example.com must equal example.com:443"
+        );
+
+        // Origin carries 443 explicit, Host elides.
+        let h = ws_headers("https://example.com:443", "example.com");
+        assert!(
+            check_origin_policy(&policy, &h).is_ok(),
+            "https://example.com:443 must equal example.com"
+        );
+    }
+
+    #[test]
+    fn same_origin_normalizes_http_default_port_80() {
+        let policy = crate::ws::OriginPolicy::SameOrigin;
+
+        let h = ws_headers("http://example.com", "example.com:80");
+        assert!(check_origin_policy(&policy, &h).is_ok());
+
+        let h = ws_headers("http://example.com:80", "example.com");
+        assert!(check_origin_policy(&policy, &h).is_ok());
+    }
+
+    #[test]
+    fn same_origin_still_rejects_genuine_port_mismatch() {
+        // Default-port normalization must NOT let a legitimately
+        // different port slip through. https on default 443 vs
+        // explicit 8443 are different origins.
+        let policy = crate::ws::OriginPolicy::SameOrigin;
+        let h = ws_headers("https://example.com", "example.com:8443");
+        assert_eq!(
+            check_origin_policy(&policy, &h),
+            Err("Origin port does not match Host header"),
+        );
+    }
+
+    #[test]
+    fn effective_port_returns_explicit_when_present() {
+        assert_eq!(effective_port("https", Some(8443)), Some(8443));
+        assert_eq!(effective_port("http", Some(8080)), Some(8080));
+        // Even when the explicit port happens to be the default,
+        // we return it as-is — `url::Url::port()` already stripped
+        // the default to None for us; this branch only fires when
+        // the call site passed Some.
+        assert_eq!(effective_port("https", Some(443)), Some(443));
+    }
+
+    #[test]
+    fn effective_port_fills_well_known_defaults() {
+        assert_eq!(effective_port("http", None), Some(80));
+        assert_eq!(effective_port("ws", None), Some(80));
+        assert_eq!(effective_port("https", None), Some(443));
+        assert_eq!(effective_port("wss", None), Some(443));
+    }
+
+    #[test]
+    fn effective_port_leaves_unknown_scheme_alone() {
+        // Unknown / custom schemes don't get fabricated defaults —
+        // the port comparison falls through to the literal None==None
+        // arm which is the safe (no-spoofing) default.
+        assert_eq!(effective_port("ftp", None), None);
+        assert_eq!(effective_port("file", None), None);
     }
 }
