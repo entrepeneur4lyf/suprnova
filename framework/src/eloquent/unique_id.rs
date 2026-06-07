@@ -99,9 +99,10 @@ pub trait HasUniqueId {
 const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 /// Generate a 26-character lowercase ULID. We pull a 48-bit Unix-ms
-/// timestamp + 80 bits of randomness, encode the 128 bits in Crockford
-/// base32, then lowercase. Mirrors Laravel's `Str::ulid()` then
-/// `strtolower(...)` path in `HasUlids::newUniqueId`.
+/// timestamp + 80 bits of randomness, pack them into the canonical
+/// 16-byte ULID layout, then encode with [`encode_ulid_lowercase`].
+/// Mirrors Laravel's `Str::ulid()` then `strtolower(...)` path in
+/// `HasUlids::newUniqueId`.
 fn generate_ulid_lowercase() -> String {
     use rand::RngExt;
     let now_ms = std::time::SystemTime::now()
@@ -126,8 +127,23 @@ fn generate_ulid_lowercase() -> String {
     buf[5] = (ts48 & 0xff) as u8;
     buf[6..].copy_from_slice(&rand_bytes);
 
-    // 128 bits → 26 Crockford base32 chars. ULID encodes the first
-    // char from only the top 2 bits to keep the canonical length.
+    encode_ulid_lowercase(&buf)
+}
+
+/// Encode a packed 16-byte ULID payload (6-byte timestamp + 10-byte
+/// random) into the canonical 26-character Crockford base32 string,
+/// lowercased.
+///
+/// Pulled out of [`generate_ulid_lowercase`] so the bit-packing logic
+/// is deterministic and testable against known vectors — the
+/// timestamp + random source in `generate_ulid_lowercase` is not.
+///
+/// ULID encodes 128 bits into 26 base32 characters; the leading char
+/// carries only the top 2 bits of `buf[0]` (the remaining 3 bits would
+/// overflow a 130-bit space). Matches the canonical ULID spec and
+/// every mainstream implementation (`ulid-go`, `ulid.js`,
+/// Laravel `Str::ulid()`).
+fn encode_ulid_lowercase(buf: &[u8; 16]) -> String {
     let mut out = String::with_capacity(26);
     out.push(CROCKFORD[((buf[0] & 0xE0) >> 5) as usize] as char);
     out.push(CROCKFORD[(buf[0] & 0x1F) as usize] as char);
@@ -184,6 +200,137 @@ mod tests {
             assert_eq!(id.len(), 26);
             assert!(UniqueIdKind::Ulid.is_valid(&id), "invalid ulid: {id}");
         }
+    }
+
+    /// All-zero payload encodes to 26 `'0'` characters — the canonical
+    /// minimum ULID. Verifies the bit-packing handles the zero edge
+    /// case across every 5-bit slice without offset bugs.
+    #[test]
+    fn encode_zero_payload_matches_spec_minimum() {
+        let buf = [0u8; 16];
+        assert_eq!(encode_ulid_lowercase(&buf), "00000000000000000000000000");
+    }
+
+    /// All-ones payload encodes to `"7zzzzzzzzzzzzzzzzzzzzzzzzz"` — the
+    /// canonical maximum ULID per the spec. The leading char is `'7'`
+    /// (not `'Z'`) because the first character carries only the top 2
+    /// bits of `buf[0]`; the remaining 25 chars each span a full 5-bit
+    /// slice of all-ones, which is Crockford index 31 = `'Z'`.
+    #[test]
+    fn encode_max_payload_matches_spec_maximum() {
+        let buf = [0xffu8; 16];
+        assert_eq!(encode_ulid_lowercase(&buf), "7zzzzzzzzzzzzzzzzzzzzzzzzz");
+    }
+
+    /// A known asymmetric vector: timestamp = 1 ms, randomness = 0.
+    /// The smallest non-zero ts48 puts a `1` in `buf[5]` only.
+    /// Char 10 reads `buf[5] & 0x1F` = 1 → Crockford index 1 = `'1'`;
+    /// every other char reads zero bits and stays `'0'`. Catches any
+    /// off-by-one in the per-position bit masks.
+    #[test]
+    fn encode_minimum_nonzero_timestamp_isolated_in_position_10() {
+        let mut buf = [0u8; 16];
+        buf[5] = 0x01;
+        assert_eq!(encode_ulid_lowercase(&buf), "00000000010000000000000000");
+    }
+
+    /// Decode a Crockford base32 ULID string back to the underlying 16
+    /// bytes using an INDEPENDENT bit-shift algorithm (accumulator-based
+    /// rather than position-by-position), then verify the original
+    /// payload survives a round-trip. Catches any deviation between
+    /// `encode_ulid_lowercase` and a textbook base32 reader.
+    #[test]
+    fn random_payloads_round_trip_through_independent_decoder() {
+        // Vector A: timestamp + low-bit random, exercising every
+        // 5-bit slice at least partially.
+        let payloads: [[u8; 16]; 4] = [
+            [
+                0x01, 0x86, 0xe5, 0xf2, 0xd1, 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
+                0x11, 0x22,
+            ],
+            [
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                0xff, 0xff,
+            ],
+            [
+                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00,
+            ],
+            [
+                0xde, 0xad, 0xbe, 0xef, 0xfe, 0xed, 0xfa, 0xce, 0xca, 0xfe, 0xba, 0xbe, 0xc0, 0xff,
+                0xee, 0x42,
+            ],
+        ];
+        for buf in &payloads {
+            let encoded = encode_ulid_lowercase(buf);
+            assert_eq!(encoded.len(), 26, "ulid must be 26 chars: {encoded}");
+            let decoded = decode_crockford_ulid(&encoded)
+                .unwrap_or_else(|| panic!("decode failed for {encoded}"));
+            assert_eq!(
+                &decoded, buf,
+                "round-trip mismatch — input {buf:02x?}, encoded {encoded}, decoded {decoded:02x?}",
+            );
+        }
+    }
+
+    /// Independent reference decoder for round-trip verification.
+    /// Pulls 5 bits at a time off the front of an accumulator. The
+    /// leading character contributes 3 bits, every subsequent
+    /// character contributes 5 bits — 3 + 25*5 = 128 bits, the exact
+    /// ULID width.
+    ///
+    /// A well-formed ULID's leading char satisfies `index <= 7`
+    /// (3 bits). Higher values would imply a 129-bit payload; we
+    /// reject those as non-canonical input rather than truncate.
+    ///
+    /// Returns `None` on length, alphabet, or leading-char overflow.
+    fn decode_crockford_ulid(s: &str) -> Option<[u8; 16]> {
+        if s.len() != 26 {
+            return None;
+        }
+        let chars: Vec<u8> = s.bytes().collect();
+        let mut indices = [0u8; 26];
+        for (i, c) in chars.iter().enumerate() {
+            let up = c.to_ascii_uppercase();
+            let idx = CROCKFORD.iter().position(|&x| x == up)?;
+            indices[i] = idx as u8;
+        }
+        if indices[0] > 0b111 {
+            return None;
+        }
+        let mut acc: u128 = indices[0] as u128 & 0b111;
+        for &i in &indices[1..] {
+            acc = (acc << 5) | (i as u128 & 0x1F);
+        }
+        Some(acc.to_be_bytes())
+    }
+
+    /// `generate_ulid_lowercase` embeds the current Unix timestamp ms
+    /// in the first 6 bytes (10 base32 chars). Decode the first 10
+    /// chars of a freshly-generated ULID and verify the timestamp
+    /// falls within ±2 seconds of `SystemTime::now()`. This exercises
+    /// the same encoding path as the encoder unit tests while binding
+    /// the timestamp source to real wall-clock semantics.
+    #[test]
+    fn generated_ulid_timestamp_decodes_close_to_now() {
+        let captured_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let id = generate_ulid_lowercase();
+        let bytes = decode_crockford_ulid(&id)
+            .unwrap_or_else(|| panic!("generated ULID must decode: {id}"));
+        // First 6 bytes = 48-bit big-endian Unix ms timestamp.
+        let mut ts_be = [0u8; 8];
+        ts_be[2..].copy_from_slice(&bytes[..6]);
+        let ts = u64::from_be_bytes(ts_be);
+        // 2 seconds of tolerance — plenty of slack for any CI scheduler hiccup.
+        const TOLERANCE_MS: u64 = 2_000;
+        let diff = ts.abs_diff(captured_ms);
+        assert!(
+            diff <= TOLERANCE_MS,
+            "ULID timestamp {ts} drifts {diff} ms from now {captured_ms} (id: {id})",
+        );
     }
 
     #[test]

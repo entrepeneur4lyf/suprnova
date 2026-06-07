@@ -1509,57 +1509,56 @@ impl<M> Builder<M> {
         self
     }
 
-    /// Phase 10C T4 — exclude one global scope (by type) from this
-    /// query. The scope's `TypeId` is appended to the builder's
-    /// `excluded_scopes` mask; when
-    /// [`ScopeRegistry::apply_to`][reg_apply_to] walks the per-model
-    /// registry it skips any entry whose `TypeId` matches.
+    /// Append one global scope's `TypeId` to the per-builder
+    /// exclusion mask, consulted by
+    /// [`ScopeRegistry::apply_to`][reg_apply_to] when walking the
+    /// per-model registry.
     ///
-    /// ## Entry-point matters
+    /// **Not part of the public API.** This is `pub` only because the
+    /// `#[suprnova::model]` macro emits the per-model static helper
+    /// `Self::without_global_scope::<S>()` into user crates, and that
+    /// helper needs to call this method to set the mask before the
+    /// registry runs. The macro-emitted helper is the correct surface
+    /// for end users — it constructs a fresh `Builder`, sets the mask,
+    /// THEN runs the registry, so the opt-out actually lands.
     ///
-    /// `Model::query()` applies registered scopes EAGERLY at
-    /// construction time. Chaining `.without_global_scope::<S>()` onto
-    /// the resulting builder sets the mask AFTER the scope already
-    /// mutated the `where_terms` — the call has no effect on that
-    /// already-applied scope (other scopes that haven't run yet do
-    /// honour the mask, but Suprnova's `query()` applies them all in
-    /// a single shot, so the mask sees nothing remaining).
+    /// Chaining this method onto the builder returned by
+    /// `Model::query()` is silently ineffective: `query()` applies
+    /// registered scopes EAGERLY at construction time, so the scope
+    /// has already mutated `where_terms` by the time
+    /// `.without_global_scope::<S>()` adds the `TypeId` to the
+    /// exclusion mask.
     ///
-    /// Prefer the per-model static helper:
+    /// Use the macro-emitted static helper instead:
     ///
     /// ```ignore
-    /// // Correct: macro-emitted helper constructs the builder, sets
-    /// // the mask, THEN runs the registry.
+    /// // Constructs the builder, sets the mask, runs the registry —
+    /// // opt-out lands.
     /// let everything = User::without_global_scope::<TenantScope>()
     ///     .get()
     ///     .await?;
     /// ```
     ///
-    /// The chained-on-builder form remains for advanced use — e.g.
-    /// excluding a scope inside a closure that receives a
-    /// `Builder<R>` without access to `R`'s static helpers — but the
-    /// scope you exclude must not have been registered yet on the
-    /// builder for it to take effect.
-    ///
     /// [reg_apply_to]: crate::eloquent::ScopeRegistry
+    #[doc(hidden)]
     pub fn without_global_scope<S: 'static>(mut self) -> Self {
         self.excluded_scopes.push(std::any::TypeId::of::<S>());
         self
     }
 
-    /// Phase 10C T4 — bypass every registered global scope for this
-    /// query. Sets `skip_all_scopes = true`; the registry returns the
-    /// builder unchanged.
+    /// Set `skip_all_scopes = true`. Consulted by
+    /// [`ScopeRegistry::apply_to`][reg_apply_to] to short-circuit
+    /// every registered scope for this builder.
     ///
-    /// ## Entry-point matters
+    /// **Not part of the public API.** Same rationale as
+    /// [`Self::without_global_scope`]: this is `pub` only because the
+    /// `#[suprnova::model]` macro emits the per-model static helper
+    /// `Self::without_global_scopes()`, which needs to call this
+    /// method to set the bypass flag before the registry runs.
+    /// Chaining onto a builder returned by `Model::query()` is
+    /// silently ineffective — scopes already ran.
     ///
-    /// Same caveat as [`Self::without_global_scope`]: chaining onto a
-    /// builder returned by `Model::query()` is too late — scopes
-    /// already ran. Use the static helper `Model::without_global_scopes()`
-    /// emitted by `#[suprnova::model]` for the call-site that bypasses
-    /// the registry from the start.
-    ///
-    /// ## Example
+    /// Use the macro-emitted static helper instead:
     ///
     /// ```ignore
     /// // Admin tooling: read every row.
@@ -1567,6 +1566,9 @@ impl<M> Builder<M> {
     ///     .get()
     ///     .await?;
     /// ```
+    ///
+    /// [reg_apply_to]: crate::eloquent::ScopeRegistry
+    #[doc(hidden)]
     pub fn without_global_scopes(mut self) -> Self {
         self.skip_all_scopes = true;
         self
