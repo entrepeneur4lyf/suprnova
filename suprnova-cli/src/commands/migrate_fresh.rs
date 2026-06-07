@@ -1,13 +1,20 @@
 use std::path::Path;
 use std::process::Command;
 
+use crate::commands::interpret_cargo_status;
 use crate::ui;
 
 pub fn run() {
-    if !Path::new("src/migrations").exists() {
-        ui::error("No migrations directory found at src/migrations");
-        ui::hint("Run 'suprnova make:migration <name>' to create your first migration.");
+    if let Err(e) = run_inner() {
+        ui::error(&e);
         std::process::exit(1);
+    }
+}
+
+fn run_inner() -> Result<(), String> {
+    if !Path::new("src/migrations").exists() {
+        ui::hint("Run 'suprnova make:migration <name>' to create your first migration.");
+        return Err("No migrations directory found at src/migrations".to_string());
     }
 
     ui::warning("Dropping all tables and re-running migrations...");
@@ -16,11 +23,7 @@ pub fn run() {
 
     let status = Command::new("cargo")
         .args(["run", "--quiet", "--", "migrate:fresh"])
-        .status()
-        .expect("Failed to execute cargo command");
+        .status();
 
-    if !status.success() {
-        ui::error("Fresh migration failed");
-        std::process::exit(1);
-    }
+    interpret_cargo_status(status, "migrate:fresh", false)
 }
