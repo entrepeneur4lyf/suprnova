@@ -26,6 +26,15 @@ use std::sync::Arc;
 /// The channels can be parameterized by event fields (e.g.,
 /// `format!("user.{}.orders", self.user_id)`).
 ///
+/// # Multi-channel publish semantics
+///
+/// When `broadcast_on` returns multiple channels, [`BroadcastListener`]
+/// publishes to **every** channel even if one fails — a single broker hiccup
+/// on channel N does not skip delivery to channels N+1..K. The first failure
+/// is remembered and returned at the end; subsequent failures are logged at
+/// `warn`. Local in-process subscribers on channels that did succeed keep
+/// their delivery either way.
+///
 /// # Dispatch ordering with sibling listeners
 ///
 /// The dispatcher used by [`crate::events::Event::dispatch`] is **fail-fast**:
@@ -124,16 +133,252 @@ impl<E: Broadcastable> Listener<E> for BroadcastListener<E> {
         } else {
             None
         };
+        // Attempt every channel even if one fails. A `?` short-circuit here
+        // would mean a broker error on channel N silently skips local AND
+        // remote delivery to channels N+1..K — those subscribers would never
+        // observe an event the application believed was dispatched. Instead
+        // we publish through the full list, remember the first error, and
+        // log any subsequent ones at warn. The first error is then returned
+        // so EventFacade::dispatch still surfaces fanout loss to the caller.
+        let mut first_error: Option<FrameworkError> = None;
         for channel in channels {
-            let mut envelope = BroadcastEnvelope::new(channel, event_name.clone(), data.clone());
+            let mut envelope =
+                BroadcastEnvelope::new(channel.clone(), event_name.clone(), data.clone());
             envelope.except = except.clone();
-            // Propagate hub publish failures so EventFacade::dispatch
-            // returns Err on cross-process fanout loss instead of
-            // silently swallowing it. Local in-memory hubs return Ok
-            // unconditionally; multi-process backends surface broker
-            // failures here.
-            self.hub.publish(envelope).await?;
+            if let Err(e) = self.hub.publish(envelope).await {
+                if first_error.is_none() {
+                    first_error = Some(e);
+                } else {
+                    tracing::warn!(
+                        channel = %channel,
+                        event = %event_name,
+                        error = %e,
+                        "BroadcastListener: publish failed on additional channel \
+                         after an earlier failure; first error will be returned"
+                    );
+                }
+            }
+        }
+        if let Some(err) = first_error {
+            return Err(err);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::broadcasting::hub::{BroadcastEnvelope, BroadcastHub};
+    use crate::events::Event;
+    use serde::Serialize;
+    use serde_json::json;
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    use tokio::sync::broadcast;
+
+    /// A hub that records every publish attempt and can be configured to
+    /// fail on a chosen set of channels. Used to prove the multi-channel
+    /// loop continues past a failure instead of short-circuiting.
+    struct PartialFailureHub {
+        attempted: Mutex<Vec<String>>,
+        delivered: Mutex<Vec<String>>,
+        fail_on: HashSet<String>,
+    }
+
+    impl PartialFailureHub {
+        fn new(fail_on: impl IntoIterator<Item = &'static str>) -> Self {
+            Self {
+                attempted: Mutex::new(Vec::new()),
+                delivered: Mutex::new(Vec::new()),
+                fail_on: fail_on.into_iter().map(str::to_string).collect(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BroadcastHub for PartialFailureHub {
+        fn subscribe(&self, _channel: &str) -> broadcast::Receiver<BroadcastEnvelope> {
+            // Tests don't subscribe; mint an orphan receiver and drop it.
+            broadcast::channel(1).0.subscribe()
+        }
+
+        async fn publish(&self, envelope: BroadcastEnvelope) -> Result<(), FrameworkError> {
+            if let Ok(mut v) = self.attempted.lock() {
+                v.push(envelope.channel.clone());
+            }
+            if self.fail_on.contains(&envelope.channel) {
+                return Err(FrameworkError::internal(format!(
+                    "synthetic broker failure on '{}'",
+                    envelope.channel
+                )));
+            }
+            if let Ok(mut v) = self.delivered.lock() {
+                v.push(envelope.channel.clone());
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Serialize, Clone, Debug)]
+    struct MultiChannelEvent {
+        channels: Vec<String>,
+    }
+
+    impl Event for MultiChannelEvent {
+        fn event_name() -> &'static str {
+            "MultiChannelEvent"
+        }
+    }
+
+    impl Broadcastable for MultiChannelEvent {
+        fn broadcast_on(&self) -> Vec<String> {
+            self.channels.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_channel_publish_attempts_every_channel_after_failure() {
+        // Channel "b" is configured to fail. Without the fix the listener
+        // would `?` out on "b" and never try "c" / "d"; with the fix every
+        // channel is attempted and "c" / "d" still receive the event.
+        let hub = Arc::new(PartialFailureHub::new(["b"]));
+        let listener: BroadcastListener<MultiChannelEvent> =
+            BroadcastListener::new(hub.clone() as Arc<dyn BroadcastHub>);
+        let event = MultiChannelEvent {
+            channels: vec!["a".into(), "b".into(), "c".into(), "d".into()],
+        };
+
+        let result = listener.handle(&event).await;
+        assert!(
+            result.is_err(),
+            "first failure must still surface as Err so the dispatcher can react"
+        );
+
+        let attempted = hub.attempted.lock().unwrap().clone();
+        assert_eq!(
+            attempted,
+            vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                "d".to_string()
+            ],
+            "every channel must be attempted regardless of mid-loop failures"
+        );
+
+        let delivered = hub.delivered.lock().unwrap().clone();
+        assert_eq!(
+            delivered,
+            vec!["a".to_string(), "c".to_string(), "d".to_string()],
+            "channels other than the failing one must still see successful delivery"
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_channel_publish_returns_first_error_when_multiple_fail() {
+        // Channels "b" and "d" both fail. The first encountered error
+        // must be the one returned; the second is logged at warn.
+        let hub = Arc::new(PartialFailureHub::new(["b", "d"]));
+        let listener: BroadcastListener<MultiChannelEvent> =
+            BroadcastListener::new(hub.clone() as Arc<dyn BroadcastHub>);
+        let event = MultiChannelEvent {
+            channels: vec!["a".into(), "b".into(), "c".into(), "d".into()],
+        };
+
+        let err = listener
+            .handle(&event)
+            .await
+            .expect_err("at least one failure must surface");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("'b'"),
+            "expected the first failure ('b') to be the returned error, got: {msg}"
+        );
+
+        let attempted = hub.attempted.lock().unwrap().clone();
+        assert_eq!(attempted.len(), 4, "every channel must still be attempted");
+    }
+
+    #[tokio::test]
+    async fn single_channel_failure_still_surfaces_as_err() {
+        // Regression guard for the easy case — a single channel that fails
+        // must still return Err so the existing semantic for one-channel
+        // dispatches doesn't drift.
+        let hub = Arc::new(PartialFailureHub::new(["only"]));
+        let listener: BroadcastListener<MultiChannelEvent> =
+            BroadcastListener::new(hub.clone() as Arc<dyn BroadcastHub>);
+        let event = MultiChannelEvent {
+            channels: vec!["only".into()],
+        };
+
+        let result = listener.handle(&event).await;
+        assert!(result.is_err(), "single-channel failure must still error");
+    }
+
+    #[derive(Serialize, Clone, Debug)]
+    struct OptOutEvent;
+
+    impl Event for OptOutEvent {
+        fn event_name() -> &'static str {
+            "OptOutEvent"
+        }
+    }
+
+    impl Broadcastable for OptOutEvent {
+        fn broadcast_on(&self) -> Vec<String> {
+            vec!["any".into()]
+        }
+        fn broadcast_when(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcast_when_false_skips_publish_entirely() {
+        // The `broadcast_when() == false` early return predates this fix —
+        // assert it still wins so we don't burn cycles building envelopes
+        // for events that are explicitly not going on the wire.
+        let hub = Arc::new(PartialFailureHub::new(["any"]));
+        let listener: BroadcastListener<OptOutEvent> =
+            BroadcastListener::new(hub.clone() as Arc<dyn BroadcastHub>);
+        let result = listener.handle(&OptOutEvent).await;
+        assert!(result.is_ok(), "broadcast_when false must return Ok");
+        assert!(
+            hub.attempted.lock().unwrap().is_empty(),
+            "broadcast_when false must not attempt any publish"
+        );
+    }
+
+    #[derive(Serialize, Clone, Debug)]
+    struct ZeroChannelEvent;
+
+    impl Event for ZeroChannelEvent {
+        fn event_name() -> &'static str {
+            "ZeroChannelEvent"
+        }
+    }
+
+    impl Broadcastable for ZeroChannelEvent {
+        fn broadcast_on(&self) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_channel_list_is_ok_without_touching_hub() {
+        // The empty-channels early return also predates this fix; assert
+        // we don't accidentally walk through the new loop with zero
+        // iterations and synthesise an error.
+        let hub = Arc::new(PartialFailureHub::new(Vec::<&'static str>::new()));
+        let listener: BroadcastListener<ZeroChannelEvent> =
+            BroadcastListener::new(hub.clone() as Arc<dyn BroadcastHub>);
+        let _ = json!({}); // keep json! reachable
+        let result = listener.handle(&ZeroChannelEvent).await;
+        assert!(result.is_ok(), "empty channels must return Ok");
+        assert!(
+            hub.attempted.lock().unwrap().is_empty(),
+            "empty channels must not touch the hub"
+        );
     }
 }
