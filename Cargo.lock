@@ -7027,6 +7027,7 @@ dependencies = [
  "validator",
  "webauthn-rs",
  "wiremock",
+ "zeroize",
 ]
 
 [[package]]

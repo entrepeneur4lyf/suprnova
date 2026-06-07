@@ -12,6 +12,42 @@ use crate::database::DB;
 use crate::error::FrameworkError;
 use rand::RngExt;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
+use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
+
+/// Locate the index (if any) of `code` inside `codes` without
+/// short-circuiting. Visits every entry, comparing it to `code` with
+/// [`subtle::ConstantTimeEq`] and folding the result. Run-time depends
+/// on `codes.len()` only, not on whether or where a match exists, so a
+/// timing observer cannot learn which slot — or whether any slot —
+/// matched. Equal-length entries fall through to `ct_eq`; entries of a
+/// different length are skipped (recovery codes are a fixed 13-byte
+/// shape, so a length mismatch is a structural reject, not a timing
+/// oracle for a same-length attacker).
+fn find_constant_time(codes: &[String], code: &str) -> Option<usize> {
+    let candidate = code.as_bytes();
+    let mut found: Choice = Choice::from(0u8);
+    let mut idx: u32 = 0;
+    for (i, stored) in codes.iter().enumerate() {
+        let stored_bytes = stored.as_bytes();
+        let eq = if stored_bytes.len() == candidate.len() {
+            stored_bytes.ct_eq(candidate)
+        } else {
+            Choice::from(0u8)
+        };
+        // Adopt this index only on the FIRST match — `take` is set only
+        // when `eq` is true and no earlier match has been recorded.
+        // `conditional_select` keeps the assignment branch-free.
+        let take = eq & !found;
+        let take_idx = u32::conditional_select(&0u32, &(i as u32), take);
+        idx |= take_idx;
+        found |= eq;
+    }
+    if bool::from(found) {
+        Some(idx as usize)
+    } else {
+        None
+    }
+}
 
 /// Generate `count` fresh recovery codes in `NNNNNN-NNNNNN` shape
 /// (12 decimal digits with a hyphen separator, ~40 bits of entropy
@@ -48,7 +84,7 @@ pub async fn consume(user_id: &str, code: &str) -> Result<bool, FrameworkError> 
     let plaintext =
         Crypt::decrypt_string(crate::crypto::CryptPurpose::TwoFactorRecovery, &encrypted)?;
     let mut codes: Vec<String> = plaintext.lines().map(String::from).collect();
-    let Some(idx) = codes.iter().position(|c| c == code) else {
+    let Some(idx) = find_constant_time(&codes, code) else {
         return Ok(false);
     };
     codes.remove(idx);
@@ -72,7 +108,7 @@ pub async fn consume(user_id: &str, code: &str) -> Result<bool, FrameworkError> 
 
 #[cfg(test)]
 mod tests {
-    use super::generate;
+    use super::{find_constant_time, generate};
 
     #[test]
     fn generate_returns_requested_count_of_distinct_codes() {
@@ -92,5 +128,54 @@ mod tests {
             assert!(a.chars().all(|c| c.is_ascii_digit()));
             assert!(b.chars().all(|c| c.is_ascii_digit()));
         }
+    }
+
+    #[test]
+    fn ct_find_matches_at_each_index() {
+        let codes: Vec<String> = vec![
+            "111111-111111".into(),
+            "222222-222222".into(),
+            "333333-333333".into(),
+            "444444-444444".into(),
+            "555555-555555".into(),
+        ];
+        for (i, c) in codes.iter().enumerate() {
+            assert_eq!(find_constant_time(&codes, c), Some(i), "mismatch for {c}");
+        }
+    }
+
+    #[test]
+    fn ct_find_returns_none_for_unknown_code() {
+        let codes: Vec<String> = vec!["111111-111111".into(), "222222-222222".into()];
+        assert_eq!(find_constant_time(&codes, "999999-999999"), None);
+    }
+
+    #[test]
+    fn ct_find_returns_none_for_empty_list() {
+        let codes: Vec<String> = Vec::new();
+        assert_eq!(find_constant_time(&codes, "111111-111111"), None);
+    }
+
+    #[test]
+    fn ct_find_returns_none_for_length_mismatch() {
+        let codes: Vec<String> = vec!["111111-111111".into()];
+        // Same prefix but truncated — must NOT match.
+        assert_eq!(find_constant_time(&codes, "111111-11111"), None);
+        // Longer than any stored code.
+        assert_eq!(find_constant_time(&codes, "111111-1111111"), None);
+        // Completely empty candidate.
+        assert_eq!(find_constant_time(&codes, ""), None);
+    }
+
+    #[test]
+    fn ct_find_returns_first_index_for_duplicate_entries() {
+        // Generation guarantees uniqueness, but the helper should still
+        // behave deterministically if a duplicate ever slips through.
+        let codes: Vec<String> = vec![
+            "111111-111111".into(),
+            "222222-222222".into(),
+            "222222-222222".into(),
+        ];
+        assert_eq!(find_constant_time(&codes, "222222-222222"), Some(1));
     }
 }

@@ -4,14 +4,17 @@
 //! form, or generated for development.
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::FrameworkError;
 
 /// A 32-byte symmetric key used for AES-256-GCM.
 ///
 /// The `Debug` impl prints `"[REDACTED]"` so the key never leaks into
-/// logs or panic messages.
-#[derive(Clone)]
+/// logs or panic messages. Drop scrubs the 32 raw bytes via
+/// [`zeroize::ZeroizeOnDrop`] so they never linger in freed memory,
+/// allocator-reuse windows, core dumps, or swap pages.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct EncryptionKey([u8; 32]);
 
 impl EncryptionKey {
@@ -127,5 +130,29 @@ mod tests {
         // The raw bytes must not appear in the Debug output
         assert!(!dbg.contains("ab, ab"));
         assert!(!dbg.contains("171"));
+    }
+
+    #[test]
+    fn zeroize_wipes_inner_buffer() {
+        use zeroize::Zeroize as _;
+        let mut key = EncryptionKey::from_base64(&URL_SAFE_NO_PAD.encode([0xABu8; 32])).unwrap();
+        assert_eq!(key.as_bytes(), &[0xABu8; 32]);
+        key.zeroize();
+        assert_eq!(
+            key.as_bytes(),
+            &[0u8; 32],
+            "Zeroize must replace every byte with 0x00"
+        );
+    }
+
+    #[test]
+    fn drop_wipes_inner_buffer() {
+        // We can't observe freed memory safely, but `ZeroizeOnDrop` is
+        // a marker trait whose presence (and Drop hookup) is the
+        // semantic contract we care about. Confirm the trait bound is
+        // satisfied — if the derive is ever removed this fails to
+        // compile.
+        fn assert_zod<T: zeroize::ZeroizeOnDrop>() {}
+        assert_zod::<EncryptionKey>();
     }
 }

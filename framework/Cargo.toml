@@ -154,6 +154,7 @@ digest = "0.11.3"
 regex = "1.12.3"
 hmac = "0.13"
 subtle = "2"
+zeroize = { version = "1.8.2", features = ["derive"] }
 
 [features]
 default = ["testing"]
