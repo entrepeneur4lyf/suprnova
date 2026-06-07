@@ -29,6 +29,16 @@ pub use event_map::stripe_event_to_neutral;
 use stripe::Client;
 use suprnova::payments::traits::{Payment, PaymentProvider};
 
+/// Default tolerance for Stripe webhook signature timestamps, matching the
+/// 300-second window enforced by Stripe's official client libraries.
+///
+/// Webhook verification rejects payloads whose `t=<ts>` claim differs from
+/// the local clock by more than this delta — a captured signed body cannot
+/// then be replayed indefinitely. Override with
+/// [`StripeProvider::with_signature_tolerance`] when tests need to lock the
+/// clock or production has unusual NTP skew.
+pub const DEFAULT_WEBHOOK_SIGNATURE_TOLERANCE_SECONDS: i64 = 300;
+
 /// The Stripe adapter for Suprnova's provider-neutral payments surface.
 ///
 /// Holds an authenticated `stripe::Client` (hyper-backed, async), the
@@ -46,6 +56,11 @@ pub struct StripeProvider {
     /// Webhook signing secret (`whsec_…`) used to verify the HMAC-SHA256
     /// signature on incoming webhook payloads.
     webhook_signing_secret: String,
+    /// Maximum tolerated drift, in seconds, between the timestamp Stripe
+    /// includes in the signature header and the local wall clock. Webhook
+    /// payloads outside this window are rejected. Defaults to
+    /// [`DEFAULT_WEBHOOK_SIGNATURE_TOLERANCE_SECONDS`].
+    webhook_signature_tolerance_seconds: i64,
 }
 
 impl StripeProvider {
@@ -54,6 +69,10 @@ impl StripeProvider {
     /// * `secret_key`             — Stripe secret key (`sk_live_…` / `sk_test_…`).
     /// * `publishable_key`        — Stripe publishable key (`pk_live_…` / `pk_test_…`).
     /// * `webhook_signing_secret` — Webhook endpoint signing secret (`whsec_…`).
+    ///
+    /// The webhook signature tolerance defaults to
+    /// [`DEFAULT_WEBHOOK_SIGNATURE_TOLERANCE_SECONDS`]; override with
+    /// [`Self::with_signature_tolerance`].
     ///
     /// # Panics
     /// Panics if `secret_key` cannot be used as an HTTP header value (i.e. it
@@ -67,6 +86,7 @@ impl StripeProvider {
             client: Client::new(secret_key),
             publishable_key: publishable_key.into(),
             webhook_signing_secret: webhook_signing_secret.into(),
+            webhook_signature_tolerance_seconds: DEFAULT_WEBHOOK_SIGNATURE_TOLERANCE_SECONDS,
         }
     }
 
@@ -105,6 +125,29 @@ impl StripeProvider {
     /// Returns the webhook signing secret for HMAC-SHA256 signature verification.
     pub(crate) fn webhook_signing_secret(&self) -> &str {
         &self.webhook_signing_secret
+    }
+
+    /// Returns the current webhook signature timestamp tolerance, in seconds.
+    pub(crate) fn webhook_signature_tolerance_seconds(&self) -> i64 {
+        self.webhook_signature_tolerance_seconds
+    }
+
+    /// Override the webhook signature timestamp tolerance, in seconds.
+    ///
+    /// Stripe's official client libraries default to 300 seconds; lower the
+    /// window to tighten replay-resistance, raise it when the deployment has
+    /// known clock skew that Stripe's retry cadence would otherwise reject.
+    /// A negative value would reject every payload — clamped to zero so the
+    /// minimum behaviour is "exact-timestamp match" rather than always-fail.
+    ///
+    /// ```ignore
+    /// use suprnova_payments_stripe::StripeProvider;
+    /// let provider = StripeProvider::new("sk_test", "pk_test", "whsec_test")
+    ///     .with_signature_tolerance(60);
+    /// ```
+    pub fn with_signature_tolerance(mut self, tolerance_seconds: i64) -> Self {
+        self.webhook_signature_tolerance_seconds = tolerance_seconds.max(0);
+        self
     }
 }
 

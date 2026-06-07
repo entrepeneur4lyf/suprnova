@@ -123,3 +123,33 @@ async fn paddle_delete_customer_returns_not_supported() {
     let err = p.delete_customer("ctm_test").await.unwrap_err();
     assert!(matches!(err, PaymentError::NotSupported(_)));
 }
+
+/// Paddle un-schedule-cancel via Subscription::update is a distinct API
+/// surface (the resume endpoint) and was not wired in v1. Passing
+/// `cancel_at_period_end: Some(false)` previously fell through to
+/// `subscription_get`, silently returning success while the scheduled
+/// cancellation remained in place — a dual-API fail-loud violation.
+/// The branch must now surface `PaymentError::NotSupported` honestly.
+#[tokio::test]
+async fn paddle_update_unschedule_cancel_returns_not_supported() {
+    let p = PaddleProvider::new(
+        "pdl_sdbx_apikey_test",
+        "pdl_ntfset_test",
+        "live_client_test",
+        PaddleEnvironment::Sandbox,
+    )
+    .expect("provider construction");
+    let err = p
+        .update(UpdateSubscriptionRequest {
+            provider_subscription_id: "sub_test".into(),
+            new_price_refs: None,
+            cancel_at_period_end: Some(false),
+            idempotency_key: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, PaymentError::NotSupported(_)),
+        "expected NotSupported, got: {err:?}"
+    );
+}

@@ -162,6 +162,13 @@ async fn handle_webhook_inner(
 
     // 7. Hydrate inside a transaction. On failure, audit row + process_error
     //    survive the rollback; the response is 503 so the provider retries.
+    //
+    //    Provider HTTP calls (currently: subscription `provider.get`) run
+    //    BEFORE the transaction opens so the DB connection isn't pinned for
+    //    the duration of an external round-trip — a webhook burst against a
+    //    degraded provider would otherwise exhaust the pool. The pre-fetched
+    //    snapshot is passed through to `process_webhook`, which then does
+    //    only pure-DB work inside the transaction.
     match try_hydrate(db, provider.as_ref(), &event).await {
         Ok(()) => text("ok"),
         Err(e) => {
@@ -177,19 +184,56 @@ async fn handle_webhook_inner(
     }
 }
 
+/// Pre-fetch any provider-side state the hydration path needs BEFORE opening
+/// the DB transaction. Today the only network call is
+/// `Subscription::get(sub_id)` for the subscription event family — payment
+/// and customer events derive their state entirely from the webhook payload.
+/// Returning `Err` here short-circuits to the 503/mark_failed path the same
+/// way an in-transaction error would.
+async fn prefetch_provider_state(
+    provider: &dyn PaymentProvider,
+    event: &WebhookEvent,
+) -> Result<Option<SubscriptionResult>, PaymentError> {
+    let Some(neutral) = event.neutral else {
+        return Ok(None);
+    };
+
+    match neutral {
+        NeutralEventKind::SubscriptionCreated
+        | NeutralEventKind::SubscriptionUpdated
+        | NeutralEventKind::SubscriptionCanceled => {
+            let ids = provider.extract_payload_ids(event);
+            let sub_id = ids.subscription_id.as_deref().ok_or_else(|| {
+                PaymentError::Validation(format!(
+                    "subscription webhook missing subscription_id (provider_event_type={})",
+                    event.provider_event_type
+                ))
+            })?;
+            let result = provider.get(sub_id).await?;
+            Ok(Some(result))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Run `process_webhook` and `mark_processed` inside one DB transaction.
 /// On error, rolls back so partial mirror state isn't observable.
+///
+/// External provider HTTP calls are hoisted to `prefetch_provider_state`
+/// above so the transaction scope contains only DB work.
 async fn try_hydrate(
     db: &DatabaseConnection,
     provider: &dyn PaymentProvider,
     event: &WebhookEvent,
 ) -> Result<(), PaymentError> {
+    let subscription_snapshot = prefetch_provider_state(provider, event).await?;
+
     let txn = db
         .begin()
         .await
         .map_err(|e| PaymentError::Internal(format!("begin tx: {e}")))?;
 
-    match process_webhook(&txn, provider, event).await {
+    match process_webhook(&txn, provider, event, subscription_snapshot.as_ref()).await {
         Ok(()) => match mark_processed(&txn, event).await {
             Ok(()) => txn
                 .commit()
@@ -215,10 +259,15 @@ async fn try_hydrate(
 /// Missing IDs in events whose neutral kind requires one are treated as
 /// validation errors — silent success would leave the mirror stale without
 /// operator visibility.
+///
+/// `subscription_snapshot` is the pre-fetched [`SubscriptionResult`] from
+/// `prefetch_provider_state`; the subscription branch consumes it directly
+/// rather than re-issuing the network call from inside the transaction.
 async fn process_webhook<C>(
     db: &C,
     provider: &dyn PaymentProvider,
     event: &WebhookEvent,
+    subscription_snapshot: Option<&SubscriptionResult>,
 ) -> Result<(), PaymentError>
 where
     C: ConnectionTrait + Send + Sync,
@@ -239,9 +288,15 @@ where
                     event.provider_event_type
                 ))
             })?;
-            let result = provider.get(sub_id).await?;
-            upsert_subscription(db, &event.provider, &result, neutral).await?;
-            sync_subscription_items(db, &event.provider, sub_id, &result).await?;
+            let result = subscription_snapshot.ok_or_else(|| {
+                PaymentError::Internal(
+                    "subscription webhook reached process_webhook without a pre-fetched snapshot \
+                     (prefetch_provider_state contract violated)"
+                        .into(),
+                )
+            })?;
+            upsert_subscription(db, &event.provider, result, neutral).await?;
+            sync_subscription_items(db, &event.provider, sub_id, result).await?;
         }
         NeutralEventKind::CustomerCreated | NeutralEventKind::CustomerUpdated => {
             let cust_id = ids.customer_id.as_deref().ok_or_else(|| {

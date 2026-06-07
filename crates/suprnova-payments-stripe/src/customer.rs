@@ -6,6 +6,7 @@
 use crate::StripeProvider;
 use async_trait::async_trait;
 use serde::Serialize;
+use std::collections::HashMap;
 use stripe_client_core::{RequestBuilder, StripeMethod};
 use stripe_shared::{Customer, DeletedCustomer};
 use suprnova::payments::{
@@ -16,12 +17,20 @@ use suprnova::payments::{
 // ---------------------------------------------------------------------------
 // Param structs
 // ---------------------------------------------------------------------------
+//
+// Stripe accepts metadata as bracketed form pairs (`metadata[key]=value`).
+// `stripe_client_core::RequestBuilder::form` serialises with `serde_qs`, which
+// renders a `HashMap<String, String>` exactly in that shape — matching the
+// `CreateCustomerBuilder` field type in async-stripe-core's own customer
+// requests module.
 
 #[derive(Serialize)]
 struct CreateCustomerParams<'a> {
     email: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<HashMap<String, String>>,
 }
 
 #[derive(Serialize)]
@@ -30,6 +39,36 @@ struct UpdateCustomerParams<'a> {
     email: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<HashMap<String, String>>,
+}
+
+/// Flatten the public `Option<serde_json::Value>` metadata input into the
+/// Stripe-friendly `Option<HashMap<String, String>>` shape.
+///
+/// Stripe metadata is a flat map of strings to strings. Top-level scalar
+/// values are stringified (numbers, booleans, etc.); nested objects/arrays
+/// are JSON-encoded so a value still round-trips, matching how Stripe's
+/// own dashboard renders complex metadata pasted into the field.
+///
+/// `None` and `Some(serde_json::Value::Null)` both produce `None` so the
+/// `#[serde(skip_serializing_if = "Option::is_none")]` attribute keeps the
+/// outgoing form body empty when no metadata was supplied.
+fn metadata_to_string_map(value: Option<&serde_json::Value>) -> Option<HashMap<String, String>> {
+    let obj = value?.as_object()?;
+    if obj.is_empty() {
+        return None;
+    }
+    let mut map = HashMap::with_capacity(obj.len());
+    for (k, v) in obj {
+        let s = match v {
+            serde_json::Value::Null => continue,
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        map.insert(k.clone(), s);
+    }
+    if map.is_empty() { None } else { Some(map) }
 }
 
 // ---------------------------------------------------------------------------
@@ -55,6 +94,7 @@ impl CustomerStore for StripeProvider {
         let params = CreateCustomerParams {
             email: &req.email,
             name: req.name.as_deref(),
+            metadata: metadata_to_string_map(req.metadata.as_ref()),
         };
 
         let c: Customer = RequestBuilder::new(StripeMethod::Post, "/customers")
@@ -76,6 +116,7 @@ impl CustomerStore for StripeProvider {
         let params = UpdateCustomerParams {
             email: req.email.as_deref(),
             name: req.name.as_deref(),
+            metadata: metadata_to_string_map(req.metadata.as_ref()),
         };
 
         let c: Customer = RequestBuilder::new(StripeMethod::Post, &path)
@@ -113,5 +154,62 @@ impl CustomerStore for StripeProvider {
             .await
             .map_err(|e| PaymentError::Provider(format!("stripe customers.delete: {e}")))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn metadata_to_string_map_none_when_input_none() {
+        assert!(metadata_to_string_map(None).is_none());
+    }
+
+    #[test]
+    fn metadata_to_string_map_none_when_input_null() {
+        let v = serde_json::Value::Null;
+        assert!(metadata_to_string_map(Some(&v)).is_none());
+    }
+
+    #[test]
+    fn metadata_to_string_map_none_when_input_empty_object() {
+        let v = json!({});
+        assert!(metadata_to_string_map(Some(&v)).is_none());
+    }
+
+    #[test]
+    fn metadata_to_string_map_none_when_input_not_an_object() {
+        // Non-object JSON (string, array, number) cannot be Stripe metadata
+        // and should be skipped rather than silently mis-encoded.
+        for v in [json!("just-a-string"), json!([1, 2, 3]), json!(42)] {
+            assert!(metadata_to_string_map(Some(&v)).is_none(), "{v:?}");
+        }
+    }
+
+    #[test]
+    fn metadata_to_string_map_string_values_pass_through_unquoted() {
+        let v = json!({ "plan": "pro", "tier": "gold" });
+        let map = metadata_to_string_map(Some(&v)).expect("map present");
+        assert_eq!(map.get("plan").map(String::as_str), Some("pro"));
+        assert_eq!(map.get("tier").map(String::as_str), Some("gold"));
+    }
+
+    #[test]
+    fn metadata_to_string_map_scalars_are_stringified() {
+        let v = json!({ "seats": 5, "trial": true });
+        let map = metadata_to_string_map(Some(&v)).expect("map present");
+        assert_eq!(map.get("seats").map(String::as_str), Some("5"));
+        assert_eq!(map.get("trial").map(String::as_str), Some("true"));
+    }
+
+    #[test]
+    fn metadata_to_string_map_skips_null_values() {
+        let v = json!({ "valid": "yes", "skipped": serde_json::Value::Null });
+        let map = metadata_to_string_map(Some(&v)).expect("map present");
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key("valid"));
+        assert!(!map.contains_key("skipped"));
     }
 }

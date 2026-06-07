@@ -29,35 +29,54 @@ impl Subscription for PaddleProvider {
     async fn update(&self, req: UpdateSubscriptionRequest) -> PaymentResult<SubscriptionResult> {
         // v1 supports cancel_at_period_end only. Price-set replacement on a Paddle
         // subscription requires a different API shape; return NotSupported honestly.
-        // Per advisor: this is the one place NotSupported is honest, not deferral.
         if req.new_price_refs.is_some() {
             return Err(PaymentError::NotSupported(
                 "Paddle price-set replacement on existing subscription not in v1.".into(),
             ));
         }
 
-        if let Some(true) = req.cancel_at_period_end {
-            // Mirror cancel(at_period_end=true): schedule via subscription_cancel
-            // with default (NextBillingPeriod).
-            let resp = self
-                .client()
-                .subscription_cancel(req.provider_subscription_id.clone())
-                .send()
-                .await
-                .map_err(|e| {
-                    PaymentError::Provider(format!("paddle subscription_cancel (cape): {e}"))
-                })?;
-            return Ok(map_paddle_subscription(&resp.data));
+        match req.cancel_at_period_end {
+            Some(true) => {
+                // Mirror cancel(at_period_end=true): schedule via subscription_cancel
+                // with default (NextBillingPeriod).
+                let resp = self
+                    .client()
+                    .subscription_cancel(req.provider_subscription_id.clone())
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        PaymentError::Provider(format!("paddle subscription_cancel (cape): {e}"))
+                    })?;
+                Ok(map_paddle_subscription(&resp.data))
+            }
+            Some(false) => {
+                // Un-scheduling a previously-scheduled cancellation is a
+                // distinct Paddle API surface (the resume endpoint) and was
+                // not wired in v1. Falling through to subscription_get would
+                // silently return success while leaving the cancellation
+                // scheduled — a dual-API fail-loud violation. Surface it
+                // honestly so callers know to route through the dedicated
+                // resume call when it lands.
+                Err(PaymentError::NotSupported(
+                    "Paddle un-schedule-cancel (cancel_at_period_end: Some(false)) is not \
+                     supported on Subscription::update in v1. The Paddle resume endpoint \
+                     handles this case; route un-cancel requests there directly."
+                        .into(),
+                ))
+            }
+            None => {
+                // No-op update (no cancel_at_period_end delta, no price-set
+                // change): re-fetch current state via subscription_get so the
+                // caller always observes the authoritative provider snapshot.
+                let resp = self
+                    .client()
+                    .subscription_get(req.provider_subscription_id)
+                    .send()
+                    .await
+                    .map_err(|e| PaymentError::Provider(format!("paddle subscription_get: {e}")))?;
+                Ok(map_subscription_with_include(&resp.data))
+            }
         }
-
-        // No-op update: re-fetch current state via subscription_get.
-        let resp = self
-            .client()
-            .subscription_get(req.provider_subscription_id)
-            .send()
-            .await
-            .map_err(|e| PaymentError::Provider(format!("paddle subscription_get: {e}")))?;
-        Ok(map_subscription_with_include(&resp.data))
     }
 
     async fn cancel(

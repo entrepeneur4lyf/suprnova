@@ -28,6 +28,12 @@ impl WebhookHandler for StripeProvider {
     /// We recompute HMAC-SHA256 over `"<timestamp>.<body>"` using the webhook
     /// signing secret and do a constant-time comparison against every `v1=` value
     /// in the header (Stripe can rotate keys without instant cutover).
+    ///
+    /// The timestamp is also compared against the local clock and rejected
+    /// when the absolute delta exceeds
+    /// [`StripeProvider::with_signature_tolerance`] (default 300 seconds,
+    /// matching Stripe's official libraries). Without this check a signature
+    /// remains valid forever, so a captured signed body could be replayed.
     fn verify(&self, ctx: &WebhookContext<'_>) -> PaymentResult<()> {
         let header = ctx
             .headers
@@ -55,6 +61,22 @@ impl WebhookHandler for StripeProvider {
         let timestamp = timestamp.ok_or_else(|| {
             PaymentError::WebhookSignature("missing timestamp in stripe-signature header".into())
         })?;
+
+        // Reject implausible timestamps before any HMAC work: stale events
+        // can be discarded without spending CPU cycles, and a malformed `t=`
+        // value is itself a signature failure rather than a silent bypass.
+        let ts: i64 = timestamp.parse().map_err(|_| {
+            PaymentError::WebhookSignature(format!(
+                "non-numeric timestamp in stripe-signature header: {timestamp}"
+            ))
+        })?;
+        let tolerance = self.webhook_signature_tolerance_seconds();
+        let now = chrono::Utc::now().timestamp();
+        if (now - ts).abs() > tolerance {
+            return Err(PaymentError::WebhookSignature(format!(
+                "timestamp outside tolerance window of {tolerance}s (now={now}, sig_ts={ts})"
+            )));
+        }
 
         if v1_sigs.is_empty() {
             return Err(PaymentError::WebhookSignature(
