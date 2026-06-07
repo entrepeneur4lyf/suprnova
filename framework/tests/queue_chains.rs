@@ -164,6 +164,79 @@ fn chain_link_propagates_job_backoff_into_envelope() {
     );
 }
 
+static CHAIN_DRIVER_TAG: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+#[derive(Serialize, Deserialize, Clone)]
+struct DriverTagStep {
+    label: u32,
+}
+
+#[async_trait]
+impl Job for DriverTagStep {
+    fn job_name() -> &'static str {
+        "queue_chains::DriverTagStep"
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        CHAIN_DRIVER_TAG.lock().unwrap().push(self.label);
+        Ok(())
+    }
+}
+
+/// Pins L29: under a multi-driver setup, the chain's next link must land
+/// on the worker's BOUND driver, not whichever driver is globally
+/// registered via `Queue::set_driver`. The dispatch path inside
+/// `handle_completed` used to resolve through `current_driver()`, which
+/// silently picked the global registration and would have sprayed
+/// follow-up links onto the wrong queue under a per-connection worker
+/// fleet.
+#[tokio::test]
+#[serial]
+async fn chain_dispatch_uses_bound_driver_not_global() {
+    CHAIN_DRIVER_TAG.lock().unwrap().clear();
+    register_job::<DriverTagStep>();
+
+    let bound: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    let global: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+
+    // Build the chain envelope on the bound driver while the GLOBAL
+    // slot points at a different driver. Pre-fix: handle_completed
+    // would route step 2 to `global` via `current_driver()` —
+    // `bound`'s worker would then sit idle and the chain would never
+    // complete.
+    Queue::set_driver(bound.clone());
+    Queue::chain()
+        .add(DriverTagStep { label: 1 })
+        .unwrap()
+        .add(DriverTagStep { label: 2 })
+        .unwrap()
+        .dispatch()
+        .await
+        .unwrap();
+    Queue::set_driver(global.clone());
+
+    let cfg = WorkerConfig {
+        visibility_timeout: Duration::from_secs(5),
+        poll_interval: Duration::from_millis(5),
+        max_jobs: Some(2),
+    };
+    let cancel = CancellationToken::new();
+    run_worker(bound.clone(), cfg, cancel).await;
+
+    let seen = CHAIN_DRIVER_TAG.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        vec![1, 2],
+        "both chain steps must execute on the bound worker — proves the next \
+         link landed on `bound` (where the worker polls), not on `global`"
+    );
+    assert_eq!(
+        global.size().await.unwrap(),
+        0,
+        "the global driver must remain empty — no stray chain links should \
+         have leaked onto it"
+    );
+}
+
 // Forward-compat: a chain payload serialized BEFORE the M39 fix did not
 // include `backoff` on the link. The `#[serde(default)]` annotation makes
 // such payloads decode to the framework-default schedule, preserving

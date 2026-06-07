@@ -565,16 +565,20 @@ async fn handle_completed(
         }
     }
 
-    // Dispatch next link in chain (if any).
+    // Dispatch next link in chain (if any) onto the SAME driver that
+    // settled this job. The worker is bound to a specific
+    // `Arc<dyn QueueDriver>` at `run_worker(driver, ...)`; resolving
+    // through `current_driver()` would re-pick whichever driver is
+    // registered globally, which differs from the bound one under
+    // multi-connection setups (e.g. one worker per connection) and
+    // would silently land the next link on the wrong queue.
     if !env.chain_remaining.is_empty() {
         let mut tail = env.chain_remaining.clone();
         let next: ChainLink = tail.remove(0);
         let mut next_env = next.to_envelope();
         next_env.chain_remaining = tail;
         next_env.batch_id = env.batch_id.clone();
-        if let Ok(d) = crate::queue::current_driver()
-            && let Err(e) = d.push(next_env).await
-        {
+        if let Err(e) = driver.push(next_env).await {
             tracing::error!(
                 job = %env.job_name,
                 id = %env.id,
