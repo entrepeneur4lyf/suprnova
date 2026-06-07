@@ -87,6 +87,7 @@ use crate::broadcasting::hub::{
     BroadcastEnvelope, BroadcastHub, InMemoryBroadcastHub, reject_reserved_channel,
 };
 use async_trait::async_trait;
+use futures::FutureExt;
 use sea_streamer::{
     Buffer, Consumer, ConsumerMode, ConsumerOptions, Message, Producer, SeaConnectOptions,
     SeaConsumer, SeaConsumerOptions, SeaProducer, SeaProducerOptions, SeaStreamer, StreamKey,
@@ -95,6 +96,8 @@ use sea_streamer::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -473,6 +476,39 @@ impl SeaStreamerBroadcastHub {
 
 // ── background tasks ──────────────────────────────────────────────────────────
 
+/// Run a per-loop-iteration body under `catch_unwind`. On a panic the payload
+/// is logged at error level (tagged with `task_name`) and the iteration is
+/// reported as "panicked" via `Err(())`; the caller decides whether to back
+/// off before continuing.
+///
+/// Per-iteration scope is intentional: the long-lived resources (consumer,
+/// producer, cross-process view, local-member snapshot) are owned by the
+/// outer `loop` frame that never unwinds — only the body of one iteration
+/// crosses the catch boundary. `cross_process_view` is a
+/// `tokio::sync::RwLock` (does NOT poison on panic), so a panic mid-write
+/// drops the guard and the next iteration acquires cleanly.
+async fn run_iteration_guarded<F>(task_name: &'static str, body: F) -> Result<(), ()>
+where
+    F: Future<Output = ()>,
+{
+    match AssertUnwindSafe(body).catch_unwind().await {
+        Ok(()) => Ok(()),
+        Err(panic_payload) => {
+            let msg = panic_payload
+                .downcast_ref::<&'static str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| panic_payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic payload>".to_string());
+            tracing::error!(
+                task = task_name,
+                panic = %msg,
+                "SeaStreamerBroadcastHub background task iteration panicked; continuing"
+            );
+            Err(())
+        }
+    }
+}
+
 /// Long-running task that reads from the sea-streamer consumer and routes:
 ///
 /// - `__presence__` channel envelopes → `apply_presence_event` (updates
@@ -486,56 +522,66 @@ async fn consumer_pump_task(
     cross_view: CrossProcessView,
 ) {
     loop {
-        match consumer.next().await {
-            Ok(msg) => {
-                let payload = msg.message();
-                let bytes = payload.as_bytes();
-                match serde_json::from_slice::<TaggedEnvelope>(bytes) {
-                    Ok(tagged) if tagged.envelope.channel == PRESENCE_META_CHANNEL => {
-                        // Presence meta-channel — update the replicated view.
-                        // We process our OWN presence events too (no instance_id skip)
-                        // so our members appear in cross_process_view via the same
-                        // code path as remote members.
-                        match serde_json::from_value::<PresenceEvent>(tagged.envelope.data) {
-                            Ok(pe) => apply_presence_event(&cross_view, pe).await,
-                            Err(e) => {
+        let outcome = run_iteration_guarded("consumer_pump", async {
+            match consumer.next().await {
+                Ok(msg) => {
+                    let payload = msg.message();
+                    let bytes = payload.as_bytes();
+                    match serde_json::from_slice::<TaggedEnvelope>(bytes) {
+                        Ok(tagged) if tagged.envelope.channel == PRESENCE_META_CHANNEL => {
+                            // Presence meta-channel — update the replicated view.
+                            // We process our OWN presence events too (no instance_id skip)
+                            // so our members appear in cross_process_view via the same
+                            // code path as remote members.
+                            match serde_json::from_value::<PresenceEvent>(tagged.envelope.data) {
+                                Ok(pe) => apply_presence_event(&cross_view, pe).await,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "sea-streamer consumer: __presence__ payload is not a valid PresenceEvent; dropping"
+                                    );
+                                }
+                            }
+                        }
+                        Ok(tagged) if tagged.instance_id == own_id => {
+                            // Our own app-data message reflected back — skip to avoid
+                            // double delivery to local subscribers.
+                        }
+                        Ok(tagged) => {
+                            // In-memory publish is infallible; logging is just
+                            // a belt-and-braces guard against a future trait
+                            // impl that needs to surface a failure here.
+                            if let Err(e) = local.publish(tagged.envelope).await {
                                 tracing::warn!(
                                     error = %e,
-                                    "sea-streamer consumer: __presence__ payload is not a valid PresenceEvent; dropping"
+                                    "sea-streamer consumer: local hub publish failed; dropping"
                                 );
                             }
                         }
-                    }
-                    Ok(tagged) if tagged.instance_id == own_id => {
-                        // Our own app-data message reflected back — skip to avoid
-                        // double delivery to local subscribers.
-                    }
-                    Ok(tagged) => {
-                        // In-memory publish is infallible; logging is just
-                        // a belt-and-braces guard against a future trait
-                        // impl that needs to surface a failure here.
-                        if let Err(e) = local.publish(tagged.envelope).await {
+                        Err(e) => {
                             tracing::warn!(
                                 error = %e,
-                                "sea-streamer consumer: local hub publish failed; dropping"
+                                "sea-streamer consumer: payload is not a valid TaggedEnvelope; dropping"
                             );
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "sea-streamer consumer: payload is not a valid TaggedEnvelope; dropping"
-                        );
-                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "sea-streamer consumer: receive error; backing off 1s"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
             }
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    "sea-streamer consumer: receive error; backing off 1s"
-                );
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            }
+        })
+        .await;
+
+        // If the iteration panicked, back off briefly before the next attempt
+        // so a hot-loop panic source (e.g. consumer.next() itself) cannot
+        // busy-spin a worker thread.
+        if outcome.is_err() {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     }
 }
@@ -592,20 +638,26 @@ async fn heartbeat_task(
 ) {
     loop {
         tokio::time::sleep(interval).await;
-        let snapshot = {
-            let guard = local_members.read().await;
-            guard.clone()
-        };
-        for ((channel, member_id), info) in snapshot {
-            let event = PresenceEvent::Heartbeat {
-                instance_id: instance_id.clone(),
-                channel,
-                member_id,
-                info,
-                timestamp_ms: now_ms(),
+        // Body runs under catch_unwind; producer/local_members/instance_id are
+        // borrowed by reference and stay owned by the outer loop frame, so a
+        // panic here cannot kill the task or leak resources.
+        let _ = run_iteration_guarded("heartbeat", async {
+            let snapshot = {
+                let guard = local_members.read().await;
+                guard.clone()
             };
-            send_presence_via_producer(&producer, &event, &instance_id);
-        }
+            for ((channel, member_id), info) in snapshot {
+                let event = PresenceEvent::Heartbeat {
+                    instance_id: instance_id.clone(),
+                    channel,
+                    member_id,
+                    info,
+                    timestamp_ms: now_ms(),
+                };
+                send_presence_via_producer(&producer, &event, &instance_id);
+            }
+        })
+        .await;
     }
 }
 
@@ -622,13 +674,20 @@ async fn prune_task(
 ) {
     loop {
         tokio::time::sleep(interval).await;
-        let now = Instant::now();
-        let mut map = view.write().await;
-        for ch_map in map.values_mut() {
-            ch_map.retain(|_, record| now.duration_since(record.last_seen) < ttl);
-        }
-        // Also remove empty channel entries.
-        map.retain(|_, ch_map| !ch_map.is_empty());
+        // Body runs under catch_unwind; `view` is borrowed by reference and
+        // stays owned by the outer loop frame. tokio::sync::RwLock does not
+        // poison on panic, so a panic mid-write drops the guard cleanly and
+        // the next iteration acquires the lock as normal.
+        let _ = run_iteration_guarded("prune", async {
+            let now = Instant::now();
+            let mut map = view.write().await;
+            for ch_map in map.values_mut() {
+                ch_map.retain(|_, record| now.duration_since(record.last_seen) < ttl);
+            }
+            // Also remove empty channel entries.
+            map.retain(|_, ch_map| !ch_map.is_empty());
+        })
+        .await;
     }
 }
 
@@ -800,5 +859,55 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
         map.get(channel)
             .map(|ch_map| ch_map.values().map(|r| r.info.clone()).collect())
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A panic inside the guarded iteration must NOT propagate to the caller.
+    /// This is the resilience primitive the three background tasks
+    /// (consumer_pump, heartbeat, prune) all depend on: if this swallows a
+    /// panic and returns `Err(())`, those tasks' surrounding `loop { … }`
+    /// frames continue to the next iteration instead of silently dying and
+    /// freezing cross-process fanout, presence replication, or pruning.
+    #[tokio::test]
+    async fn guarded_iteration_swallows_str_panic() {
+        let outcome = run_iteration_guarded("test", async { panic!("boom") }).await;
+        assert!(
+            outcome.is_err(),
+            "panicking body should be reported as Err"
+        );
+    }
+
+    /// Same contract for a `String` panic payload (the other common shape).
+    #[tokio::test]
+    async fn guarded_iteration_swallows_string_panic() {
+        let outcome = run_iteration_guarded("test", async {
+            panic!("boom: {}", String::from("dynamic"));
+        })
+        .await;
+        assert!(outcome.is_err());
+    }
+
+    /// A non-panicking body should return `Ok(())` — i.e. the guard only
+    /// fires on real panics, not on every successful iteration.
+    #[tokio::test]
+    async fn guarded_iteration_passes_through_success() {
+        let outcome = run_iteration_guarded("test", async { /* no-op */ }).await;
+        assert!(outcome.is_ok());
+    }
+
+    /// Successive panicking iterations must each be caught independently —
+    /// proving the helper is reentrant and not a one-shot guard.
+    #[tokio::test]
+    async fn guarded_iteration_handles_repeated_panics() {
+        for _ in 0..3 {
+            let outcome = run_iteration_guarded("test", async { panic!("repeat") }).await;
+            assert!(outcome.is_err());
+        }
+        let outcome = run_iteration_guarded("test", async { /* finally normal */ }).await;
+        assert!(outcome.is_ok());
     }
 }
