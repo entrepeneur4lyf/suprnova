@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sea_orm::ConnectionTrait;
+use serial_test::serial;
 use suprnova::eloquent::{MassPrunable, Prunable};
 use suprnova::testing::TestDatabase;
 use suprnova::{Builder, Model, attrs, model};
@@ -117,6 +118,7 @@ async fn migrate(db: &TestDatabase) {
 }
 
 #[tokio::test]
+#[serial(prunable_hook_counter)]
 async fn prunable_leaves_related_posts_orphaned_by_default() {
     let db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&db).await;
@@ -154,6 +156,7 @@ async fn prunable_leaves_related_posts_orphaned_by_default() {
 }
 
 #[tokio::test]
+#[serial(prunable_hook_counter)]
 async fn mass_prunable_skips_per_row_pruning_hook() {
     let db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&db).await;
