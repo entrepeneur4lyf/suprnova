@@ -74,9 +74,22 @@ struct ForwarderEntry {
 /// let handler = BroadcastingWsHandler::new(hub.clone(), registry.clone());
 /// let router = Router::new().ws("/ws/broadcast", handler);
 /// ```
+/// Default per-connection cap on distinct channel subscriptions. A
+/// well-behaved client subscribes to a handful of channels; the cap
+/// only matters as a guardrail against a malicious or buggy client
+/// minting thousands of `orders.{id}` permutations on one connection
+/// to fill the per-connection forwarder map and tie up tasks.
+pub const DEFAULT_MAX_SUBSCRIPTIONS_PER_CONNECTION: usize = 100;
+
 pub struct BroadcastingWsHandler {
     hub: Arc<dyn BroadcastHub>,
     registry: Arc<ChannelRegistry>,
+    /// Per-connection cap on the count of distinct channel keys held
+    /// in the `forwarders` map. Re-subscribes to an already-present
+    /// channel are not counted (idempotent), so a client can refresh
+    /// an existing subscription regardless of the cap. See
+    /// [`Self::with_max_subscriptions`].
+    max_subscriptions: usize,
 }
 
 impl BroadcastingWsHandler {
@@ -85,7 +98,28 @@ impl BroadcastingWsHandler {
     /// `hub` accepts any `Arc<H>` where `H: BroadcastHub`; the
     /// coercion to `Arc<dyn BroadcastHub>` happens at the call site.
     pub fn new(hub: Arc<dyn BroadcastHub>, registry: Arc<ChannelRegistry>) -> Self {
-        Self { hub, registry }
+        Self {
+            hub,
+            registry,
+            max_subscriptions: DEFAULT_MAX_SUBSCRIPTIONS_PER_CONNECTION,
+        }
+    }
+
+    /// Override the per-connection subscription cap. Once a connection
+    /// holds `max` distinct channel keys in its forwarder map, further
+    /// `Subscribe` frames for *new* channel names are rejected with a
+    /// `ServerFrame::Error { reason: "subscription limit reached" }`
+    /// — re-subscribes to an already-active channel are still allowed
+    /// (they replace the forwarder in place and don't grow the map).
+    ///
+    /// The default is [`DEFAULT_MAX_SUBSCRIPTIONS_PER_CONNECTION`]
+    /// (`100`). Lower it on memory-constrained deployments or when an
+    /// app declaratively bounds the channel surface; raise it for a
+    /// handful of trusted-internal clients that legitimately fan out
+    /// many channels per socket.
+    pub fn with_max_subscriptions(mut self, max: usize) -> Self {
+        self.max_subscriptions = max;
+        self
     }
 }
 
@@ -151,6 +185,7 @@ impl WebSocketHandler for BroadcastingWsHandler {
                                     &forwarders,
                                     &outbound_tx,
                                     &socket_id,
+                                    self.max_subscriptions,
                                     &mut socket,
                                 )
                                 .await?;
@@ -294,8 +329,36 @@ async fn handle_subscribe(
     forwarders: &Arc<Mutex<HashMap<String, ForwarderEntry>>>,
     outbound_tx: &tokio::sync::mpsc::Sender<String>,
     socket_id: &str,
+    max_subscriptions: usize,
     socket: &mut WsSocket,
 ) -> Result<(), FrameworkError> {
+    // Per-connection subscription cap. Re-subscribes to an existing
+    // channel are exempt (they REPLACE the forwarder in place — see
+    // the `map.remove(channel)` below — so the map size doesn't grow);
+    // first-time subscribes to a brand-new channel name count against
+    // the cap. Without this gate a malicious client could subscribe
+    // to `orders.{id}` with thousands of distinct ids on one socket
+    // and inflate the per-connection forwarder map to exhaust memory
+    // and tokio task slots. Check this BEFORE `hub.subscribe` and the
+    // `tokio::spawn` so we never spawn a forwarder we'd refuse to
+    // register — frames on a single connection are processed
+    // sequentially in the `select!` loop, so reading the map here and
+    // inserting later is race-free per connection.
+    {
+        let map = forwarders.lock().await;
+        if !map.contains_key(channel) && map.len() >= max_subscriptions {
+            let err = ServerFrame::Error {
+                channel: Some(channel.to_string()),
+                reason: "subscription limit reached".into(),
+            };
+            drop(map);
+            socket
+                .send_text(serde_json::to_string(&err).unwrap_or_default())
+                .await?;
+            return Ok(());
+        }
+    }
+
     // Resolve the channel from the registry, capturing any params bound from a
     // parameterized name (e.g. `{id}` for `orders.{id}` subscribed as `orders.42`).
     let Some((ch, params)) = registry.resolve(channel) else {

@@ -783,3 +783,136 @@ async fn lagged_subscriber_receives_explicit_lagged_frame() {
     let skipped = lagged["skipped"].as_u64().expect("skipped is a number");
     assert!(skipped > 0, "lagged.skipped must be > 0 (got {skipped})");
 }
+
+/// A parameterized channel that admits any room id — used by the
+/// subscription-cap test to mint distinct channel keys cheaply
+/// (room.0, room.1, …) without registering N concrete channels.
+struct OpenRoomChannel;
+
+#[async_trait]
+impl Channel for OpenRoomChannel {
+    fn name(&self) -> &'static str {
+        "open.{id}"
+    }
+    async fn authorize(&self, _req: &Request, _params: &ChannelParams, _data: &Value) -> bool {
+        true
+    }
+}
+
+/// Spawn a broadcasting server whose handler is configured with the
+/// supplied per-connection subscription cap.
+async fn spawn_capped_broadcasting_server(cap: usize) -> u16 {
+    let hub: Arc<InMemoryBroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
+    let mut registry = ChannelRegistry::new();
+    registry.register(OpenRoomChannel);
+    let registry = Arc::new(registry);
+
+    let handler =
+        BroadcastingWsHandler::new(hub.clone(), registry.clone()).with_max_subscriptions(cap);
+    let router = Arc::new(Router::new().ws_with_config("/ws/broadcast", handler, open_ws_config()));
+    let middleware = Arc::new(MiddlewareRegistry::new());
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let io = hyper_util::rt::TokioIo::new(stream);
+            let router = router.clone();
+            let middleware = middleware.clone();
+            tokio::spawn(async move {
+                let service = hyper::service::service_fn(move |req| {
+                    let router = router.clone();
+                    let middleware = middleware.clone();
+                    async move {
+                        Ok::<_, std::convert::Infallible>(
+                            suprnova::server::handle_request(router, middleware, req).await,
+                        )
+                    }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(io, service)
+                    .with_upgrades()
+                    .await;
+            });
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    port
+}
+
+#[tokio::test]
+async fn subscribe_beyond_per_connection_cap_returns_error_frame() {
+    // Per-connection subscription cap. Without this gate a malicious
+    // client could subscribe to `open.{id}` with thousands of distinct
+    // ids on one connection, inflating the forwarder map and tying up
+    // tokio task slots. Use a low cap (2) so the test runs cheaply
+    // — the default of 100 has the same shape but would be slower.
+    let port = spawn_capped_broadcasting_server(2).await;
+    let url = format!("ws://127.0.0.1:{port}/ws/broadcast");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
+    expect_connected(&mut ws).await;
+
+    // Sub 1 and 2 succeed — distinct channel keys, under the cap.
+    for id in 1..=2u32 {
+        let sub = serde_json::to_string(
+            &json!({ "action": "subscribe", "channel": format!("open.{id}") }),
+        )
+        .unwrap();
+        ws.send(Message::text(sub)).await.unwrap();
+        let frame = read_server_frame(&mut ws).await;
+        assert_eq!(
+            frame["action"], "subscribed",
+            "open.{id} should subscribe under cap=2"
+        );
+    }
+
+    // Sub 3 is a fresh channel key — cap reached, expect an Error
+    // frame, NOT a Subscribed ack.
+    let sub =
+        serde_json::to_string(&json!({ "action": "subscribe", "channel": "open.3" })).unwrap();
+    ws.send(Message::text(sub)).await.unwrap();
+    let frame = read_server_frame(&mut ws).await;
+    assert_eq!(
+        frame["action"], "error",
+        "open.3 should hit the cap and produce an error frame"
+    );
+    assert_eq!(frame["channel"], "open.3");
+    assert_eq!(
+        frame["reason"], "subscription limit reached",
+        "error reason should name the cap explicitly"
+    );
+
+    // Re-subscribe to an EXISTING channel is exempt — it replaces the
+    // forwarder in place and doesn't grow the map. Re-subscribing to
+    // open.1 must therefore succeed even though we're at the cap.
+    let sub =
+        serde_json::to_string(&json!({ "action": "subscribe", "channel": "open.1" })).unwrap();
+    ws.send(Message::text(sub)).await.unwrap();
+    let frame = read_server_frame(&mut ws).await;
+    assert_eq!(
+        frame["action"], "subscribed",
+        "re-subscribe to an existing channel must bypass the cap (idempotent)"
+    );
+
+    ws.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn default_subscription_cap_constant_matches_documented_value() {
+    // Document the default cap as a public constant so apps can read
+    // it (e.g. for tuning notifications). This pins the value so a
+    // tightening change is a deliberate one-line edit + a noticed test
+    // update.
+    assert_eq!(
+        suprnova::broadcasting::DEFAULT_MAX_SUBSCRIPTIONS_PER_CONNECTION,
+        100
+    );
+}
