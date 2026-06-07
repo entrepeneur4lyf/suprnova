@@ -778,20 +778,23 @@ impl DB {
         // are still queries from the observer's perspective.
         if super::events::is_dispatching() || !super::events::query_observation_active() {
             return match &exec {
-                crate::database::transaction::ExecutorChoice::Tx(t) => {
+                crate::database::transaction::ExecutorChoice::Tx(t, _) => {
                     t.execute_unprepared(sql).await
                 }
-                crate::database::transaction::ExecutorChoice::Pool(c) => {
+                crate::database::transaction::ExecutorChoice::Pool(c, _) => {
                     c.inner().execute_unprepared(sql).await
                 }
             }
             .map(|_| true)
             .map_err(|e| FrameworkError::database(e.to_string()));
         }
+        let conn_name = exec.connection_name().to_string();
         let start = std::time::Instant::now();
         let res = match &exec {
-            crate::database::transaction::ExecutorChoice::Tx(t) => t.execute_unprepared(sql).await,
-            crate::database::transaction::ExecutorChoice::Pool(c) => {
+            crate::database::transaction::ExecutorChoice::Tx(t, _) => {
+                t.execute_unprepared(sql).await
+            }
+            crate::database::transaction::ExecutorChoice::Pool(c, _) => {
                 c.inner().execute_unprepared(sql).await
             }
         };
@@ -804,7 +807,7 @@ impl DB {
             sql: sql.to_string(),
             bindings: vec![],
             time: elapsed,
-            connection_name: super::PRIMARY_CONNECTION_NAME.to_string(),
+            connection_name: conn_name,
             read_write_type: Some(super::events::ReadWriteType::Write),
             result: result_for_event,
         };

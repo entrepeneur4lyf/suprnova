@@ -235,10 +235,10 @@ where
         )
         .await?;
         let row = match &exec {
-            crate::database::transaction::ExecutorChoice::Tx(t) => {
+            crate::database::transaction::ExecutorChoice::Tx(t, _) => {
                 Self::Entity::find_by_id(id).one(t.as_ref()).await
             }
-            crate::database::transaction::ExecutorChoice::Pool(c) => {
+            crate::database::transaction::ExecutorChoice::Pool(c, _) => {
                 Self::Entity::find_by_id(id).one(c.inner()).await
             }
         }
@@ -302,13 +302,13 @@ where
         )
         .await?;
         let rows = match &exec {
-            crate::database::transaction::ExecutorChoice::Tx(t) => {
+            crate::database::transaction::ExecutorChoice::Tx(t, _) => {
                 Self::Entity::find()
                     .filter(pk.into_column().is_in(id_vec.clone()))
                     .all(t.as_ref())
                     .await
             }
-            crate::database::transaction::ExecutorChoice::Pool(c) => {
+            crate::database::transaction::ExecutorChoice::Pool(c, _) => {
                 Self::Entity::find()
                     .filter(pk.into_column().is_in(id_vec.clone()))
                     .all(c.inner())
@@ -356,10 +356,10 @@ where
         )
         .await?;
         let rows = match &exec {
-            crate::database::transaction::ExecutorChoice::Tx(t) => {
+            crate::database::transaction::ExecutorChoice::Tx(t, _) => {
                 Self::Entity::find().all(t.as_ref()).await
             }
-            crate::database::transaction::ExecutorChoice::Pool(c) => {
+            crate::database::transaction::ExecutorChoice::Pool(c, _) => {
                 Self::Entity::find().all(c.inner()).await
             }
         }

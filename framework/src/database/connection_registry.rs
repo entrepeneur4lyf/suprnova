@@ -115,7 +115,11 @@ impl ConnectionRegistry {
     /// for `__primary__` lookups).
     pub async fn register(name: &str, config: DatabaseConfig) -> Result<(), FrameworkError> {
         Self::ensure_name_writable(name)?;
-        let conn = DbConnection::connect(&config).await?;
+        // Route through `connect_as(...)` so the ConnectionEstablished
+        // event carries the registered name rather than the
+        // `__primary__` sentinel — multi-pool observers (logging,
+        // metrics) need to tell pools apart.
+        let conn = DbConnection::connect_as(&config, name).await?;
         let mut r = crate::lock::write(reg(), "connection registry")?;
         r.insert(name.to_string(), conn);
         Ok(())

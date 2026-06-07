@@ -48,6 +48,21 @@ use crate::error::FrameworkError;
 use sea_orm::{ConnectionTrait, DatabaseTransaction, TransactionTrait};
 use std::sync::Arc;
 
+/// Internal state shared by [`Transaction`], [`TxHandle`], and the
+/// task-local [`CURRENT_TX`]. Pairs the SeaORM transaction handle with
+/// the logical connection name the transaction was opened against, so
+/// every `QueryExecuted` / `TransactionBeginning` / `TransactionCommitted`
+/// / `TransactionRolledBack` event carries the actual connection name
+/// rather than a hard-coded sentinel.
+///
+/// `Arc<str>` not `String` for the name — every clone of a `TxHandle`
+/// duplicates the pair, and the connection name is small + immutable
+/// for the transaction's lifetime.
+pub(crate) struct TxState {
+    pub(crate) tx: Arc<DatabaseTransaction>,
+    pub(crate) connection_name: Arc<str>,
+}
+
 tokio::task_local! {
     /// Active transaction installed by [`DB::transaction`] /
     /// [`DB::transaction_with_attempts`] for the duration of their
@@ -59,7 +74,7 @@ tokio::task_local! {
     /// Implementation detail — exposed `pub(crate)` because the
     /// executor-dispatch helpers in `eloquent::builder` and
     /// `eloquent::model` need to read it from outside this module.
-    pub(crate) static CURRENT_TX: Option<Arc<DatabaseTransaction>>;
+    pub(crate) static CURRENT_TX: Option<Arc<TxState>>;
 }
 
 /// Handle returned by [`DB::begin_transaction`] and surfaced as
@@ -75,6 +90,7 @@ tokio::task_local! {
 /// the returned `tx` handle.
 pub struct Transaction {
     pub(crate) inner: Arc<DatabaseTransaction>,
+    pub(crate) connection_name: Arc<str>,
 }
 
 /// Cheap shareable view of a [`Transaction`] used to scope a single
@@ -90,6 +106,7 @@ pub struct Transaction {
 #[derive(Clone)]
 pub struct TxHandle {
     pub(crate) inner: Arc<DatabaseTransaction>,
+    pub(crate) connection_name: Arc<str>,
 }
 
 impl TxHandle {
@@ -130,13 +147,31 @@ impl TxHandle {
 #[doc(hidden)]
 pub enum ExecutorChoice {
     /// Route through an active transaction's connection (closure form
-    /// CURRENT_TX or explicit `with_tx` override).
-    Tx(Arc<DatabaseTransaction>),
-    /// Route through the global pool from `DB::connection()`.
-    Pool(crate::database::DbConnection),
+    /// CURRENT_TX or explicit `with_tx` override). Second field is the
+    /// logical connection name the transaction was opened against —
+    /// threaded into every `QueryExecuted` / transaction-lifecycle
+    /// event so observers see the real connection.
+    Tx(Arc<DatabaseTransaction>, Arc<str>),
+    /// Route through a pool. Second field is the logical name of the
+    /// pool the executor resolved — `__primary__` for the default,
+    /// `__read_replica__` for the auto-routed replica, or whatever
+    /// name was passed to [`Builder::on`](crate::eloquent::Builder::on)
+    /// / `#[model(connection = "...")]` / [`DB::register_named`].
+    Pool(crate::database::DbConnection, Arc<str>),
 }
 
 impl ExecutorChoice {
+    /// The logical connection name this executor is bound to. Threaded
+    /// into [`QueryExecuted::connection_name`](crate::database::events::QueryExecuted::connection_name)
+    /// from the instrumentation helpers.
+    #[doc(hidden)]
+    pub fn connection_name(&self) -> &str {
+        match self {
+            ExecutorChoice::Tx(_, name) => name,
+            ExecutorChoice::Pool(_, name) => name,
+        }
+    }
+
     /// Pick the executor for an operation that has no builder-level
     /// override. Consults `CURRENT_TX` first, then falls back to
     /// the global pool.
@@ -146,10 +181,16 @@ impl ExecutorChoice {
     /// references it; user code should not call it directly.
     #[doc(hidden)]
     pub fn resolve() -> Result<Self, FrameworkError> {
-        if let Ok(Some(tx)) = CURRENT_TX.try_with(|t| t.clone()) {
-            return Ok(ExecutorChoice::Tx(tx));
+        if let Ok(Some(state)) = CURRENT_TX.try_with(|t| t.clone()) {
+            return Ok(ExecutorChoice::Tx(
+                state.tx.clone(),
+                state.connection_name.clone(),
+            ));
         }
-        Ok(ExecutorChoice::Pool(DB::connection()?))
+        Ok(ExecutorChoice::Pool(
+            DB::connection()?,
+            crate::database::PRIMARY_CONNECTION_NAME.into(),
+        ))
     }
 
     /// Pick the executor for an operation that may carry a builder-
@@ -160,7 +201,10 @@ impl ExecutorChoice {
         override_handle: Option<&TxHandle>,
     ) -> Result<Self, FrameworkError> {
         if let Some(h) = override_handle {
-            return Ok(ExecutorChoice::Tx(h.inner.clone()));
+            return Ok(ExecutorChoice::Tx(
+                h.inner.clone(),
+                h.connection_name.clone(),
+            ));
         }
         Self::resolve()
     }
@@ -192,25 +236,37 @@ impl ExecutorChoice {
     ) -> Result<Self, FrameworkError> {
         // Step 1: explicit builder-level tx override.
         if let Some(h) = tx_override {
-            return Ok(ExecutorChoice::Tx(h.inner.clone()));
+            return Ok(ExecutorChoice::Tx(
+                h.inner.clone(),
+                h.connection_name.clone(),
+            ));
         }
         // Step 2: ambient closure-form transaction.
-        if let Ok(Some(tx)) = CURRENT_TX.try_with(|t| t.clone()) {
-            return Ok(ExecutorChoice::Tx(tx));
+        if let Ok(Some(state)) = CURRENT_TX.try_with(|t| t.clone()) {
+            return Ok(ExecutorChoice::Tx(
+                state.tx.clone(),
+                state.connection_name.clone(),
+            ));
         }
         // Step 3: per-builder connection override.
         if let Some(name) = connection_override {
             if name == crate::database::PRIMARY_CONNECTION_NAME {
-                return Ok(ExecutorChoice::Pool(DB::connection()?));
+                return Ok(ExecutorChoice::Pool(
+                    DB::connection()?,
+                    crate::database::PRIMARY_CONNECTION_NAME.into(),
+                ));
             }
-            return Ok(ExecutorChoice::Pool(DB::named(name).await?));
+            return Ok(ExecutorChoice::Pool(DB::named(name).await?, name.into()));
         }
         // Step 4: per-model default connection.
         if let Some(name) = model_default_conn {
             if name == crate::database::PRIMARY_CONNECTION_NAME {
-                return Ok(ExecutorChoice::Pool(DB::connection()?));
+                return Ok(ExecutorChoice::Pool(
+                    DB::connection()?,
+                    crate::database::PRIMARY_CONNECTION_NAME.into(),
+                ));
             }
-            return Ok(ExecutorChoice::Pool(DB::named(name).await?));
+            return Ok(ExecutorChoice::Pool(DB::named(name).await?, name.into()));
         }
         // Step 5: read replica if registered.
         if crate::database::ConnectionRegistry::has(crate::database::READ_REPLICA_CONNECTION_NAME)
@@ -218,10 +274,14 @@ impl ExecutorChoice {
         {
             return Ok(ExecutorChoice::Pool(
                 DB::named(crate::database::READ_REPLICA_CONNECTION_NAME).await?,
+                crate::database::READ_REPLICA_CONNECTION_NAME.into(),
             ));
         }
         // Step 6: default pool.
-        Ok(ExecutorChoice::Pool(DB::connection()?))
+        Ok(ExecutorChoice::Pool(
+            DB::connection()?,
+            crate::database::PRIMARY_CONNECTION_NAME.into(),
+        ))
     }
 
     /// Phase 10C T12 — pick the executor for a WRITE-shape operation
@@ -240,25 +300,40 @@ impl ExecutorChoice {
         model_default_conn: Option<&'static str>,
     ) -> Result<Self, FrameworkError> {
         if let Some(h) = tx_override {
-            return Ok(ExecutorChoice::Tx(h.inner.clone()));
+            return Ok(ExecutorChoice::Tx(
+                h.inner.clone(),
+                h.connection_name.clone(),
+            ));
         }
-        if let Ok(Some(tx)) = CURRENT_TX.try_with(|t| t.clone()) {
-            return Ok(ExecutorChoice::Tx(tx));
+        if let Ok(Some(state)) = CURRENT_TX.try_with(|t| t.clone()) {
+            return Ok(ExecutorChoice::Tx(
+                state.tx.clone(),
+                state.connection_name.clone(),
+            ));
         }
         if let Some(name) = connection_override {
             if name == crate::database::PRIMARY_CONNECTION_NAME {
-                return Ok(ExecutorChoice::Pool(DB::connection()?));
+                return Ok(ExecutorChoice::Pool(
+                    DB::connection()?,
+                    crate::database::PRIMARY_CONNECTION_NAME.into(),
+                ));
             }
-            return Ok(ExecutorChoice::Pool(DB::named(name).await?));
+            return Ok(ExecutorChoice::Pool(DB::named(name).await?, name.into()));
         }
         if let Some(name) = model_default_conn {
             if name == crate::database::PRIMARY_CONNECTION_NAME {
-                return Ok(ExecutorChoice::Pool(DB::connection()?));
+                return Ok(ExecutorChoice::Pool(
+                    DB::connection()?,
+                    crate::database::PRIMARY_CONNECTION_NAME.into(),
+                ));
             }
-            return Ok(ExecutorChoice::Pool(DB::named(name).await?));
+            return Ok(ExecutorChoice::Pool(DB::named(name).await?, name.into()));
         }
         // No read-replica auto-routing on writes.
-        Ok(ExecutorChoice::Pool(DB::connection()?))
+        Ok(ExecutorChoice::Pool(
+            DB::connection()?,
+            crate::database::PRIMARY_CONNECTION_NAME.into(),
+        ))
     }
 
     /// Build an executor that routes through a specific transaction.
@@ -267,7 +342,7 @@ impl ExecutorChoice {
     /// caller has supplied the tx handle explicitly.
     #[doc(hidden)]
     pub fn from_tx(tx: &Transaction) -> Self {
-        ExecutorChoice::Tx(tx.inner.clone())
+        ExecutorChoice::Tx(tx.inner.clone(), tx.connection_name.clone())
     }
 
     /// Get the active SeaORM database backend (Postgres / MySQL /
@@ -275,8 +350,8 @@ impl ExecutorChoice {
     #[doc(hidden)]
     pub fn backend(&self) -> sea_orm::DbBackend {
         match self {
-            ExecutorChoice::Tx(t) => t.get_database_backend(),
-            ExecutorChoice::Pool(c) => c.inner().get_database_backend(),
+            ExecutorChoice::Tx(t, _) => t.get_database_backend(),
+            ExecutorChoice::Pool(c, _) => c.inner().get_database_backend(),
         }
     }
 
@@ -294,16 +369,17 @@ impl ExecutorChoice {
     {
         if super::events::is_dispatching() || !super::events::query_observation_active() {
             return match self {
-                ExecutorChoice::Tx(t) => q.all(t.as_ref()).await,
-                ExecutorChoice::Pool(c) => q.all(c.inner()).await,
+                ExecutorChoice::Tx(t, _) => q.all(t.as_ref()).await,
+                ExecutorChoice::Pool(c, _) => q.all(c.inner()).await,
             };
         }
         let stmt = sea_orm::QueryTrait::build(&q, self.backend());
         let (sql, bindings) = (stmt.sql.clone(), stmt_bindings_strings(&stmt));
+        let conn_name = self.connection_name().to_string();
         let start = std::time::Instant::now();
         let res = match self {
-            ExecutorChoice::Tx(t) => q.all(t.as_ref()).await,
-            ExecutorChoice::Pool(c) => q.all(c.inner()).await,
+            ExecutorChoice::Tx(t, _) => q.all(t.as_ref()).await,
+            ExecutorChoice::Pool(c, _) => q.all(c.inner()).await,
         };
         let elapsed = start.elapsed();
         finish_query_event(
@@ -311,6 +387,7 @@ impl ExecutorChoice {
             bindings,
             elapsed,
             super::events::ReadWriteType::Read,
+            conn_name,
             &res,
         )
         .await;
@@ -330,16 +407,17 @@ impl ExecutorChoice {
     {
         if super::events::is_dispatching() || !super::events::query_observation_active() {
             return match self {
-                ExecutorChoice::Tx(t) => q.one(t.as_ref()).await,
-                ExecutorChoice::Pool(c) => q.one(c.inner()).await,
+                ExecutorChoice::Tx(t, _) => q.one(t.as_ref()).await,
+                ExecutorChoice::Pool(c, _) => q.one(c.inner()).await,
             };
         }
         let stmt = sea_orm::QueryTrait::build(&q, self.backend());
         let (sql, bindings) = (stmt.sql.clone(), stmt_bindings_strings(&stmt));
+        let conn_name = self.connection_name().to_string();
         let start = std::time::Instant::now();
         let res = match self {
-            ExecutorChoice::Tx(t) => q.one(t.as_ref()).await,
-            ExecutorChoice::Pool(c) => q.one(c.inner()).await,
+            ExecutorChoice::Tx(t, _) => q.one(t.as_ref()).await,
+            ExecutorChoice::Pool(c, _) => q.one(c.inner()).await,
         };
         let elapsed = start.elapsed();
         finish_query_event(
@@ -347,6 +425,7 @@ impl ExecutorChoice {
             bindings,
             elapsed,
             super::events::ReadWriteType::Read,
+            conn_name,
             &res,
         )
         .await;
@@ -365,16 +444,17 @@ impl ExecutorChoice {
         use sea_orm::PaginatorTrait;
         if super::events::is_dispatching() || !super::events::query_observation_active() {
             return match self {
-                ExecutorChoice::Tx(t) => q.count(t.as_ref()).await,
-                ExecutorChoice::Pool(c) => q.count(c.inner()).await,
+                ExecutorChoice::Tx(t, _) => q.count(t.as_ref()).await,
+                ExecutorChoice::Pool(c, _) => q.count(c.inner()).await,
             };
         }
         let stmt = sea_orm::QueryTrait::build(&q, self.backend());
         let (sql, bindings) = (stmt.sql.clone(), stmt_bindings_strings(&stmt));
+        let conn_name = self.connection_name().to_string();
         let start = std::time::Instant::now();
         let res = match self {
-            ExecutorChoice::Tx(t) => q.count(t.as_ref()).await,
-            ExecutorChoice::Pool(c) => q.count(c.inner()).await,
+            ExecutorChoice::Tx(t, _) => q.count(t.as_ref()).await,
+            ExecutorChoice::Pool(c, _) => q.count(c.inner()).await,
         };
         let elapsed = start.elapsed();
         finish_query_event(
@@ -382,6 +462,7 @@ impl ExecutorChoice {
             bindings,
             elapsed,
             super::events::ReadWriteType::Read,
+            conn_name,
             &res,
         )
         .await;
@@ -402,8 +483,8 @@ impl ExecutorChoice {
         self.run_instrumented(stmt, Some(super::events::ReadWriteType::Read), |s, e| {
             Box::pin(async move {
                 match e {
-                    ExecutorChoice::Tx(t) => t.query_all(s).await,
-                    ExecutorChoice::Pool(c) => c.inner().query_all(s).await,
+                    ExecutorChoice::Tx(t, _) => t.query_all(s).await,
+                    ExecutorChoice::Pool(c, _) => c.inner().query_all(s).await,
                 }
             })
         })
@@ -420,8 +501,8 @@ impl ExecutorChoice {
         self.run_instrumented(stmt, Some(super::events::ReadWriteType::Read), |s, e| {
             Box::pin(async move {
                 match e {
-                    ExecutorChoice::Tx(t) => t.query_one(s).await,
-                    ExecutorChoice::Pool(c) => c.inner().query_one(s).await,
+                    ExecutorChoice::Tx(t, _) => t.query_one(s).await,
+                    ExecutorChoice::Pool(c, _) => c.inner().query_one(s).await,
                 }
             })
         })
@@ -439,8 +520,8 @@ impl ExecutorChoice {
         self.run_instrumented(stmt, Some(super::events::ReadWriteType::Write), |s, e| {
             Box::pin(async move {
                 match e {
-                    ExecutorChoice::Tx(t) => t.execute(s).await,
-                    ExecutorChoice::Pool(c) => c.inner().execute(s).await,
+                    ExecutorChoice::Tx(t, _) => t.execute(s).await,
+                    ExecutorChoice::Pool(c, _) => c.inner().execute(s).await,
                 }
             })
         })
@@ -483,6 +564,7 @@ impl ExecutorChoice {
             .as_ref()
             .map(|v| v.0.iter().map(|val| format!("{val:?}")).collect())
             .unwrap_or_default();
+        let conn_name = self.connection_name().to_string();
         let start = std::time::Instant::now();
         let res = f(stmt, self).await;
         let elapsed = start.elapsed();
@@ -494,7 +576,7 @@ impl ExecutorChoice {
             sql,
             bindings,
             time: elapsed,
-            connection_name: super::PRIMARY_CONNECTION_NAME.to_string(),
+            connection_name: conn_name,
             read_write_type: rw,
             result: result_for_event,
         };
@@ -514,8 +596,10 @@ impl ExecutorChoice {
         <A::Entity as sea_orm::EntityTrait>::Model: Send + sea_orm::IntoActiveModel<A>,
     {
         match self {
-            ExecutorChoice::Tx(t) => <A as sea_orm::ActiveModelTrait>::insert(am, t.as_ref()).await,
-            ExecutorChoice::Pool(c) => {
+            ExecutorChoice::Tx(t, _) => {
+                <A as sea_orm::ActiveModelTrait>::insert(am, t.as_ref()).await
+            }
+            ExecutorChoice::Pool(c, _) => {
                 <A as sea_orm::ActiveModelTrait>::insert(am, c.inner()).await
             }
         }
@@ -533,8 +617,10 @@ impl ExecutorChoice {
         <A::Entity as sea_orm::EntityTrait>::Model: Send + sea_orm::IntoActiveModel<A>,
     {
         match self {
-            ExecutorChoice::Tx(t) => <A as sea_orm::ActiveModelTrait>::update(am, t.as_ref()).await,
-            ExecutorChoice::Pool(c) => {
+            ExecutorChoice::Tx(t, _) => {
+                <A as sea_orm::ActiveModelTrait>::update(am, t.as_ref()).await
+            }
+            ExecutorChoice::Pool(c, _) => {
                 <A as sea_orm::ActiveModelTrait>::update(am, c.inner()).await
             }
         }
@@ -548,8 +634,10 @@ impl ExecutorChoice {
         A: sea_orm::ActiveModelTrait + sea_orm::ActiveModelBehavior + Send + 'static,
     {
         match self {
-            ExecutorChoice::Tx(t) => <A as sea_orm::ActiveModelTrait>::delete(am, t.as_ref()).await,
-            ExecutorChoice::Pool(c) => {
+            ExecutorChoice::Tx(t, _) => {
+                <A as sea_orm::ActiveModelTrait>::delete(am, t.as_ref()).await
+            }
+            ExecutorChoice::Pool(c, _) => {
                 <A as sea_orm::ActiveModelTrait>::delete(am, c.inner()).await
             }
         }
@@ -564,6 +652,7 @@ impl Transaction {
     pub fn handle(&self) -> TxHandle {
         TxHandle {
             inner: self.inner.clone(),
+            connection_name: self.connection_name.clone(),
         }
     }
 
@@ -615,6 +704,7 @@ impl Transaction {
     /// Fires [`TransactionCommitted`](super::events::TransactionCommitted)
     /// after a successful commit.
     pub async fn commit(self) -> Result<(), FrameworkError> {
+        let conn_name = self.connection_name.to_string();
         let tx = Arc::try_unwrap(self.inner).map_err(|_| {
             FrameworkError::internal(
                 "Transaction::commit: TxHandle clones still alive; \
@@ -625,7 +715,7 @@ impl Transaction {
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         emit_tx_event(super::events::TransactionCommitted {
-            connection_name: super::PRIMARY_CONNECTION_NAME.to_string(),
+            connection_name: conn_name,
         })
         .await;
         Ok(())
@@ -638,6 +728,7 @@ impl Transaction {
     /// Fires [`TransactionRolledBack`](super::events::TransactionRolledBack)
     /// after a successful rollback.
     pub async fn rollback(self) -> Result<(), FrameworkError> {
+        let conn_name = self.connection_name.to_string();
         let tx = Arc::try_unwrap(self.inner).map_err(|_| {
             FrameworkError::internal(
                 "Transaction::rollback: TxHandle clones still alive; \
@@ -648,7 +739,7 @@ impl Transaction {
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         emit_tx_event(super::events::TransactionRolledBack {
-            connection_name: super::PRIMARY_CONNECTION_NAME.to_string(),
+            connection_name: conn_name,
         })
         .await;
         Ok(())
@@ -718,6 +809,10 @@ impl DB {
         }
 
         let conn = DB::connection()?;
+        // DB::transaction always opens against the default pool today
+        // (no `transaction_on(name)` surface yet); when that lands, the
+        // `conn_name` Arc<str> is the only thing that needs to grow.
+        let conn_name: Arc<str> = super::PRIMARY_CONNECTION_NAME.into();
         let tx = conn
             .inner()
             .begin()
@@ -726,18 +821,22 @@ impl DB {
         // BEGIN succeeded — fire TransactionBeginning before the
         // closure runs so listeners observe the open tx.
         emit_tx_event(super::events::TransactionBeginning {
-            connection_name: super::PRIMARY_CONNECTION_NAME.to_string(),
+            connection_name: conn_name.to_string(),
         })
         .await;
         let tx_arc = Arc::new(tx);
 
         let transaction = Transaction {
             inner: tx_arc.clone(),
+            connection_name: conn_name.clone(),
         };
 
-        let result = CURRENT_TX
-            .scope(Some(tx_arc.clone()), f(&transaction))
-            .await;
+        let tx_state = Arc::new(TxState {
+            tx: tx_arc.clone(),
+            connection_name: conn_name.clone(),
+        });
+
+        let result = CURRENT_TX.scope(Some(tx_state), f(&transaction)).await;
 
         // Drop the wrapper BEFORE calling `Arc::try_unwrap`. The
         // `transaction` binding holds the second `Arc` clone (the
@@ -759,7 +858,7 @@ impl DB {
                     .await
                     .map_err(|e| FrameworkError::database(e.to_string()))?;
                 emit_tx_event(super::events::TransactionCommitted {
-                    connection_name: super::PRIMARY_CONNECTION_NAME.to_string(),
+                    connection_name: conn_name.to_string(),
                 })
                 .await;
                 Ok(value)
@@ -788,7 +887,7 @@ impl DB {
                             );
                         } else {
                             emit_tx_event(super::events::TransactionRolledBack {
-                                connection_name: super::PRIMARY_CONNECTION_NAME.to_string(),
+                                connection_name: conn_name.to_string(),
                             })
                             .await;
                         }
@@ -832,17 +931,19 @@ impl DB {
     /// single shared connection is checked out for the tx duration).
     pub async fn begin_transaction() -> Result<Transaction, FrameworkError> {
         let conn = DB::connection()?;
+        let conn_name: Arc<str> = super::PRIMARY_CONNECTION_NAME.into();
         let tx = conn
             .inner()
             .begin()
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         emit_tx_event(super::events::TransactionBeginning {
-            connection_name: super::PRIMARY_CONNECTION_NAME.to_string(),
+            connection_name: conn_name.to_string(),
         })
         .await;
         Ok(Transaction {
             inner: Arc::new(tx),
+            connection_name: conn_name,
         })
     }
 
@@ -929,6 +1030,7 @@ async fn finish_query_event<T>(
     bindings: Vec<String>,
     elapsed: std::time::Duration,
     rw: super::events::ReadWriteType,
+    connection_name: String,
     res: &Result<T, sea_orm::DbErr>,
 ) {
     let result_for_event: Result<(), String> = match res {
@@ -939,7 +1041,7 @@ async fn finish_query_event<T>(
         sql,
         bindings,
         time: elapsed,
-        connection_name: super::PRIMARY_CONNECTION_NAME.to_string(),
+        connection_name,
         read_write_type: Some(rw),
         result: result_for_event,
     };
@@ -966,12 +1068,36 @@ pub(crate) async fn emit_query_executed(event: super::events::QueryExecuted) {
         // (1) Direct DB::listen callbacks. Cloning the registry's
         // listener Vec keeps the lock window tight; listeners are
         // Arc-cloned so calling them outside the lock is safe.
+        //
+        // Each callback runs inside a `catch_unwind` boundary — the
+        // query already completed (we're emitting the post-execution
+        // event), so a panicking listener must NOT unwind through the
+        // executor and surface as a "query failed" error to the
+        // caller. Mirrors the EventFacade `dispatch_best_effort`
+        // contract: observation never fails the query.
         let callbacks: Vec<super::events::QueryListener> = match super::events::listeners().read() {
             Ok(reg) => reg.listeners.clone(),
             Err(_) => Vec::new(),
         };
         for cb in callbacks {
-            cb(&event);
+            let event_ref = &event;
+            let cb_ref = &cb;
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                cb_ref(event_ref);
+            }));
+            if let Err(payload) = result {
+                let msg = payload
+                    .downcast_ref::<&'static str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "<non-string panic payload>".to_string());
+                tracing::warn!(
+                    target: "suprnova::database",
+                    panic = %msg,
+                    sql = %event.sql,
+                    "DB::listen callback panicked; ignoring (query already completed)",
+                );
+            }
         }
         // (2) Query log.
         if let Ok(mut log) = super::events::query_log().lock()

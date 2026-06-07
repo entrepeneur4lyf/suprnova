@@ -71,8 +71,8 @@ pub(crate) async fn resolve_eager_connection(
     let exec =
         ExecutorChoice::resolve_read(tx_override, connection_override, model_default_conn).await?;
     match exec {
-        ExecutorChoice::Pool(conn) => Ok(conn),
-        ExecutorChoice::Tx(_) => crate::database::DB::connection(),
+        ExecutorChoice::Pool(conn, _) => Ok(conn),
+        ExecutorChoice::Tx(_, _) => crate::database::DB::connection(),
     }
 }
 

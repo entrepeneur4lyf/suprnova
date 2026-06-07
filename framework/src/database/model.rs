@@ -102,8 +102,8 @@ where
     async fn all() -> Result<Vec<Self::Model>, FrameworkError> {
         with_read_executor(|exec| async move {
             match exec {
-                ExecutorChoice::Tx(t) => Self::find().all(t.as_ref()).await,
-                ExecutorChoice::Pool(c) => Self::find().all(c.inner()).await,
+                ExecutorChoice::Tx(t, _) => Self::find().all(t.as_ref()).await,
+                ExecutorChoice::Pool(c, _) => Self::find().all(c.inner()).await,
             }
         })
         .await
@@ -122,8 +122,8 @@ where
         let query = Self::find_by_id(id);
         with_read_executor(|exec| async move {
             match exec {
-                ExecutorChoice::Tx(t) => query.one(t.as_ref()).await,
-                ExecutorChoice::Pool(c) => query.one(c.inner()).await,
+                ExecutorChoice::Tx(t, _) => query.one(t.as_ref()).await,
+                ExecutorChoice::Pool(c, _) => query.one(c.inner()).await,
             }
         })
         .await
@@ -157,8 +157,8 @@ where
     async fn count_all() -> Result<u64, FrameworkError> {
         with_read_executor(|exec| async move {
             match exec {
-                ExecutorChoice::Tx(t) => Self::find().count(t.as_ref()).await,
-                ExecutorChoice::Pool(c) => Self::find().count(c.inner()).await,
+                ExecutorChoice::Tx(t, _) => Self::find().count(t.as_ref()).await,
+                ExecutorChoice::Pool(c, _) => Self::find().count(c.inner()).await,
             }
         })
         .await
@@ -185,8 +185,8 @@ where
     async fn first() -> Result<Option<Self::Model>, FrameworkError> {
         with_read_executor(|exec| async move {
             match exec {
-                ExecutorChoice::Tx(t) => Self::find().one(t.as_ref()).await,
-                ExecutorChoice::Pool(c) => Self::find().one(c.inner()).await,
+                ExecutorChoice::Tx(t, _) => Self::find().one(t.as_ref()).await,
+                ExecutorChoice::Pool(c, _) => Self::find().one(c.inner()).await,
             }
         })
         .await
@@ -238,8 +238,8 @@ where
     async fn insert_one(model: Self::ActiveModel) -> Result<Self::Model, FrameworkError> {
         with_write_executor(|exec| async move {
             match exec {
-                ExecutorChoice::Tx(t) => model.insert(t.as_ref()).await,
-                ExecutorChoice::Pool(c) => model.insert(c.inner()).await,
+                ExecutorChoice::Tx(t, _) => model.insert(t.as_ref()).await,
+                ExecutorChoice::Pool(c, _) => model.insert(c.inner()).await,
             }
         })
         .await
@@ -256,8 +256,8 @@ where
     async fn update_one(model: Self::ActiveModel) -> Result<Self::Model, FrameworkError> {
         with_write_executor(|exec| async move {
             match exec {
-                ExecutorChoice::Tx(t) => model.update(t.as_ref()).await,
-                ExecutorChoice::Pool(c) => model.update(c.inner()).await,
+                ExecutorChoice::Tx(t, _) => model.update(t.as_ref()).await,
+                ExecutorChoice::Pool(c, _) => model.update(c.inner()).await,
             }
         })
         .await
@@ -276,8 +276,8 @@ where
         let stmt = Self::delete_by_id(id);
         let exec = ExecutorChoice::resolve_write(None, None, None).await?;
         let result = match exec {
-            ExecutorChoice::Tx(t) => stmt.exec(t.as_ref()).await,
-            ExecutorChoice::Pool(c) => stmt.exec(c.inner()).await,
+            ExecutorChoice::Tx(t, _) => stmt.exec(t.as_ref()).await,
+            ExecutorChoice::Pool(c, _) => stmt.exec(c.inner()).await,
         }
         .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(result.rows_affected)
@@ -299,8 +299,8 @@ where
     {
         let exec = ExecutorChoice::resolve_write(None, None, None).await?;
         let saved = match exec {
-            ExecutorChoice::Tx(t) => model.save(t.as_ref()).await,
-            ExecutorChoice::Pool(c) => model.save(c.inner()).await,
+            ExecutorChoice::Tx(t, _) => model.save(t.as_ref()).await,
+            ExecutorChoice::Pool(c, _) => model.save(c.inner()).await,
         }
         .map_err(|e| FrameworkError::database(e.to_string()))?;
         saved

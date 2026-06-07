@@ -32,6 +32,18 @@ impl DbConnection {
     /// For SQLite databases, this will automatically create the database file
     /// if it doesn't exist.
     pub async fn connect(config: &DatabaseConfig) -> Result<Self, FrameworkError> {
+        Self::connect_as(config, crate::database::PRIMARY_CONNECTION_NAME).await
+    }
+
+    /// Open a pool and fire `ConnectionEstablished` carrying the
+    /// logical name `connection_name`. The public [`Self::connect`]
+    /// delegates here with `__primary__`; [`ConnectionRegistry::register`]
+    /// calls it directly with the caller-supplied name so multi-pool
+    /// observers see the real connection identifier in the event.
+    pub(crate) async fn connect_as(
+        config: &DatabaseConfig,
+        connection_name: &str,
+    ) -> Result<Self, FrameworkError> {
         // Validate pool config before SeaORM silently accepts a
         // misconfigured `ConnectOptions` (e.g. a zero-sized pool that
         // immediately starves callers).
@@ -83,12 +95,13 @@ impl DbConnection {
             inner: Arc::new(conn),
         };
         // Fire ConnectionEstablished. The default pool reaches this
-        // path with __primary__ semantics; named pools also flow
-        // through here from ConnectionRegistry::register. Listeners
-        // observe the connection name; failures are logged-only —
-        // a listener bug must not block the pool from coming up.
+        // path with __primary__ semantics; named pools flow through
+        // here from ConnectionRegistry::register with their registered
+        // name. Listeners observe the connection name; failures are
+        // logged-only — a listener bug must not block the pool from
+        // coming up.
         let event = crate::database::events::ConnectionEstablished {
-            connection_name: crate::database::PRIMARY_CONNECTION_NAME.to_string(),
+            connection_name: connection_name.to_string(),
         };
         if crate::EventFacade::has_listeners::<crate::database::events::ConnectionEstablished>()
             && let Err(e) = crate::EventFacade::dispatch_best_effort(event).await

@@ -305,7 +305,7 @@ where
         let backend = exec.backend();
         let id = related_id.into();
         match &exec {
-            ExecutorChoice::Tx(t) => {
+            ExecutorChoice::Tx(t, _) => {
                 morph_attach_one(
                     t.as_ref(),
                     backend,
@@ -320,7 +320,7 @@ where
                 )
                 .await
             }
-            ExecutorChoice::Pool(c) => {
+            ExecutorChoice::Pool(c, _) => {
                 morph_attach_one(
                     c.inner(),
                     backend,
@@ -348,7 +348,7 @@ where
         let backend = exec.backend();
         let id = related_id.into();
         match &exec {
-            ExecutorChoice::Tx(t) => {
+            ExecutorChoice::Tx(t, _) => {
                 morph_detach_one(
                     t.as_ref(),
                     backend,
@@ -361,7 +361,7 @@ where
                 )
                 .await
             }
-            ExecutorChoice::Pool(c) => {
+            ExecutorChoice::Pool(c, _) => {
                 morph_detach_one(
                     c.inner(),
                     backend,
@@ -461,7 +461,7 @@ where
         // Atomicity: inherit from CURRENT_TX when active, else open
         // inner SeaORM tx — same precedence as BelongsToMany::sync.
         match &exec {
-            ExecutorChoice::Tx(t) => {
+            ExecutorChoice::Tx(t, _) => {
                 for related_id in detach_set.iter() {
                     morph_detach_one(
                         t.as_ref(),
@@ -491,7 +491,7 @@ where
                     .await?;
                 }
             }
-            ExecutorChoice::Pool(c) => {
+            ExecutorChoice::Pool(c, _) => {
                 let txn = c
                     .inner()
                     .begin()

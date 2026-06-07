@@ -997,10 +997,10 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 // inside `DB::transaction` land in the active tx.
                 let exec = ::suprnova::database::transaction::ExecutorChoice::resolve()?;
                 let inserted = match &exec {
-                    ::suprnova::database::transaction::ExecutorChoice::Tx(t) => {
+                    ::suprnova::database::transaction::ExecutorChoice::Tx(t, _) => {
                         ::suprnova::persist_via_seaorm(inner, t.as_ref()).await?
                     }
-                    ::suprnova::database::transaction::ExecutorChoice::Pool(c) => {
+                    ::suprnova::database::transaction::ExecutorChoice::Pool(c, _) => {
                         ::suprnova::persist_via_seaorm(inner, c.inner()).await?
                     }
                 };

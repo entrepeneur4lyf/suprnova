@@ -316,7 +316,7 @@ where
         let backend = exec.backend();
         let id = related_id.into();
         match &exec {
-            ExecutorChoice::Tx(t) => {
+            ExecutorChoice::Tx(t, _) => {
                 attach_one(
                     t.as_ref(),
                     backend,
@@ -330,7 +330,7 @@ where
                 )
                 .await
             }
-            ExecutorChoice::Pool(c) => {
+            ExecutorChoice::Pool(c, _) => {
                 attach_one(
                     c.inner(),
                     backend,
@@ -360,7 +360,7 @@ where
         let backend = exec.backend();
         let id = related_id.into();
         match &exec {
-            ExecutorChoice::Tx(t) => {
+            ExecutorChoice::Tx(t, _) => {
                 detach_one(
                     t.as_ref(),
                     backend,
@@ -372,7 +372,7 @@ where
                 )
                 .await
             }
-            ExecutorChoice::Pool(c) => {
+            ExecutorChoice::Pool(c, _) => {
                 detach_one(
                     c.inner(),
                     backend,
@@ -494,7 +494,7 @@ where
         // wrap the writes in an inner SeaORM transaction so a partial
         // failure rolls back.
         match &exec {
-            ExecutorChoice::Tx(t) => {
+            ExecutorChoice::Tx(t, _) => {
                 for related_id in detach_set.iter() {
                     detach_one(
                         t.as_ref(),
@@ -522,7 +522,7 @@ where
                     .await?;
                 }
             }
-            ExecutorChoice::Pool(c) => {
+            ExecutorChoice::Pool(c, _) => {
                 let txn = c
                     .inner()
                     .begin()

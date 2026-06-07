@@ -3038,14 +3038,14 @@ where
         // generic resolves to either `DatabaseTransaction` or
         // `DatabaseConnection`.
         let raw_rows = match &exec {
-            crate::database::transaction::ExecutorChoice::Tx(t) => {
+            crate::database::transaction::ExecutorChoice::Tx(t, _) => {
                 <<M as EloquentModel>::Entity as sea_orm::EntityTrait>::Model::find_by_statement(
                     stmt,
                 )
                 .all(t.as_ref())
                 .await
             }
-            crate::database::transaction::ExecutorChoice::Pool(c) => {
+            crate::database::transaction::ExecutorChoice::Pool(c, _) => {
                 <<M as EloquentModel>::Entity as sea_orm::EntityTrait>::Model::find_by_statement(
                     stmt,
                 )

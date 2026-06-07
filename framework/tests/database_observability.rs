@@ -595,3 +595,216 @@ async fn captured_query_to_raw_sql_inlines_bindings() {
         "to_raw_sql must substitute placeholders: {raw}",
     );
 }
+
+// ---- connection_name threading ----------------------------------------
+
+/// Regression: `QueryExecuted::connection_name` must reflect the actual
+/// connection a query ran against — not the `__primary__` sentinel that
+/// every event used to carry before the executor threaded the name
+/// through.
+#[tokio::test]
+#[serial]
+async fn query_executed_carries_actual_connection_name_on_named_pool() {
+    use suprnova::database::ConnectionRegistry;
+
+    let primary = setup().await;
+    // Share the same in-memory DB under an "alt" registry slot so the
+    // routing-correctness assertion uses one physical database (SQLite
+    // memory connections are process-private; two `connect` calls would
+    // give us two empty DBs).
+    ConnectionRegistry::register_existing("alt_audit", primary.db().clone())
+        .await
+        .unwrap();
+
+    let captured = Arc::new(Mutex::new(None::<QueryExecuted>));
+    let captured_clone = captured.clone();
+    DB::listen(move |event: &QueryExecuted| {
+        *captured_clone.lock().unwrap() = Some(event.clone());
+    })
+    .unwrap();
+
+    // Run a read explicitly on the named pool.
+    let rows = DB::table_on("alt_audit", "audit_log")
+        .filter("actor_id", 1i64)
+        .get()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+
+    let event = captured.lock().unwrap().clone().expect("listener fired");
+    assert_eq!(
+        event.connection_name, "alt_audit",
+        "QueryExecuted::connection_name must reflect the registered \
+         pool the query ran against (was hardcoded to `__primary__` \
+         before connection_name threading landed)",
+    );
+}
+
+/// Regression complement: queries on the default pool still carry
+/// `__primary__`. Pin the behaviour so the new threading path doesn't
+/// accidentally surface an empty string or `Arc<str>::to_string` quirk.
+#[tokio::test]
+#[serial]
+async fn query_executed_carries_primary_on_default_pool() {
+    let _db = setup().await;
+    let captured = Arc::new(Mutex::new(None::<QueryExecuted>));
+    let captured_clone = captured.clone();
+    DB::listen(move |event: &QueryExecuted| {
+        *captured_clone.lock().unwrap() = Some(event.clone());
+    })
+    .unwrap();
+
+    let _ = DB::table("audit_log").get().await.unwrap();
+    let event = captured.lock().unwrap().clone().expect("listener fired");
+    assert_eq!(event.connection_name, "__primary__");
+}
+
+/// Regression: transaction-lifecycle events must also carry the real
+/// connection name (was `__primary__` everywhere). The closure form
+/// opens against the default pool today, so the event is `__primary__`
+/// — pin that explicitly so a future `transaction_on(name)` patch
+/// doesn't silently revert observability.
+#[tokio::test]
+#[serial]
+async fn transaction_events_carry_connection_name() {
+    let _db = setup().await;
+    let begin_name = Arc::new(Mutex::new(String::new()));
+    let commit_name = Arc::new(Mutex::new(String::new()));
+
+    struct BeginCapture(Arc<Mutex<String>>);
+    #[suprnova::async_trait]
+    impl suprnova::Listener<TransactionBeginning> for BeginCapture {
+        async fn handle(&self, e: &TransactionBeginning) -> Result<(), suprnova::FrameworkError> {
+            *self.0.lock().unwrap() = e.connection_name.clone();
+            Ok(())
+        }
+    }
+    struct CommitCapture(Arc<Mutex<String>>);
+    #[suprnova::async_trait]
+    impl suprnova::Listener<TransactionCommitted> for CommitCapture {
+        async fn handle(&self, e: &TransactionCommitted) -> Result<(), suprnova::FrameworkError> {
+            *self.0.lock().unwrap() = e.connection_name.clone();
+            Ok(())
+        }
+    }
+
+    EventFacade::listen::<TransactionBeginning, _>(Arc::new(BeginCapture(begin_name.clone())))
+        .await;
+    EventFacade::listen::<TransactionCommitted, _>(Arc::new(CommitCapture(commit_name.clone())))
+        .await;
+
+    DB::transaction(|_tx| {
+        Box::pin(async move {
+            let _ = DB::table("audit_log")
+                .insert(suprnova::attrs! { event: "tx_name", actor_id: 7 })
+                .await?;
+            Ok::<(), suprnova::FrameworkError>(())
+        })
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+
+    assert_eq!(*begin_name.lock().unwrap(), "__primary__");
+    assert_eq!(*commit_name.lock().unwrap(), "__primary__");
+
+    EventFacade::forget::<TransactionBeginning>();
+    EventFacade::forget::<TransactionCommitted>();
+}
+
+/// Regression: ConnectionEstablished events carry the registered name
+/// when a named pool is set up via `ConnectionRegistry::register`. The
+/// `connect_as` private path threads the name through; previously every
+/// event was emitted with `__primary__`.
+#[tokio::test]
+#[serial]
+async fn connection_established_carries_registered_name() {
+    use suprnova::DatabaseConfig;
+    use suprnova::database::ConnectionRegistry;
+
+    let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+    struct NameCapture(Arc<Mutex<Vec<String>>>);
+    #[suprnova::async_trait]
+    impl suprnova::Listener<ConnectionEstablished> for NameCapture {
+        async fn handle(&self, e: &ConnectionEstablished) -> Result<(), suprnova::FrameworkError> {
+            self.0.lock().unwrap().push(e.connection_name.clone());
+            Ok(())
+        }
+    }
+    EventFacade::listen::<ConnectionEstablished, _>(Arc::new(NameCapture(captured.clone()))).await;
+
+    // Pull a real config so the registry route runs the same connect
+    // path production uses.
+    let cfg = DatabaseConfig::builder()
+        .url("sqlite::memory:")
+        .max_connections(1)
+        .min_connections(1)
+        .build();
+    ConnectionRegistry::register("named_obs_pool", cfg)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+
+    let names = captured.lock().unwrap().clone();
+    assert!(
+        names.iter().any(|n| n == "named_obs_pool"),
+        "expected ConnectionEstablished for `named_obs_pool` (registry route); \
+         captured names = {names:?}",
+    );
+
+    EventFacade::forget::<ConnectionEstablished>();
+}
+
+// ---- M11: DB::listen panic isolation -----------------------------------
+
+/// Regression: a panicking `DB::listen` callback MUST NOT discard a
+/// successful query result. The query already completed by the time
+/// listeners fire — the executor must catch the panic and continue
+/// returning the row data to the caller.
+#[tokio::test]
+#[serial]
+async fn db_listen_panicking_callback_does_not_fail_query() {
+    let _db = setup().await;
+    DB::listen(|_event: &QueryExecuted| {
+        panic!("listener intentionally panicked");
+    })
+    .unwrap();
+
+    // The SELECT must succeed and return the expected rows even though
+    // the listener panics. Pre-fix, the panic unwound the executor
+    // helper and surfaced as a 500 / propagated panic to the caller.
+    let rows = DB::select("SELECT * FROM audit_log", Vec::<sea_orm::Value>::new())
+        .await
+        .expect("query must succeed even when listener panics");
+    assert_eq!(rows.len(), 2);
+}
+
+/// Regression complement: a panicking listener does not prevent later
+/// listeners from firing. Per-callback `catch_unwind` keeps the
+/// dispatch loop running.
+#[tokio::test]
+#[serial]
+async fn db_listen_panic_does_not_block_subsequent_callbacks() {
+    let _db = setup().await;
+    let after_count = Arc::new(AtomicUsize::new(0));
+    let after_clone = after_count.clone();
+
+    // First listener panics; second listener must still fire.
+    DB::listen(|_event: &QueryExecuted| {
+        panic!("first listener panicked");
+    })
+    .unwrap();
+    DB::listen(move |_event: &QueryExecuted| {
+        after_clone.fetch_add(1, Ordering::SeqCst);
+    })
+    .unwrap();
+
+    let _ = DB::select("SELECT * FROM audit_log", Vec::<sea_orm::Value>::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        after_count.load(Ordering::SeqCst),
+        1,
+        "second listener must fire even when the first panicked",
+    );
+}
