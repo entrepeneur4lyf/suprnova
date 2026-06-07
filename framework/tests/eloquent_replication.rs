@@ -228,3 +228,84 @@ async fn replicate_into_copies_matching_fields_and_drops_target_extras() {
     // Unsaved — replicate_into never touches the database.
     assert_eq!(T13Draft::all().await.unwrap().len(), 0);
 }
+
+// ---- Model 5: eager-loaded relations survive replicate -------------------
+
+#[suprnova::model(table = "t13_rel_users", relations = {
+    posts: HasMany<T13RelPost>,
+})]
+pub struct T13RelUser {
+    pub id: i64,
+    pub name: String,
+}
+
+#[suprnova::model(table = "t13_rel_posts", timestamps = false)]
+pub struct T13RelPost {
+    pub id: i64,
+    pub t13_rel_user_id: i64,
+    pub title: String,
+}
+
+#[tokio::test]
+async fn replicate_preserves_eager_loaded_relations() {
+    // Laravel parity: `clone $user` retains `$user->posts`. The
+    // replica must carry the source's eager-load cache (deep-cloned
+    // by `EagerLoadCache::clone`) so callers don't pay a re-fetch
+    // cost just to look at relations they already loaded.
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t13_rel_users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t13_rel_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         t13_rel_user_id INTEGER NOT NULL, title TEXT NOT NULL)",
+    )
+    .await
+    .unwrap();
+
+    let u = T13RelUser::create(attrs! { name: "alice" }).await.unwrap();
+    let _ = T13RelPost::create(attrs! { t13_rel_user_id: u.id, title: "post-a" })
+        .await
+        .unwrap();
+    let _ = T13RelPost::create(attrs! { t13_rel_user_id: u.id, title: "post-b" })
+        .await
+        .unwrap();
+
+    // Eager-load posts on the source row.
+    let users = T13RelUser::with(["posts"]).get().await.unwrap();
+    let source = users.iter().find(|x| x.id == u.id).unwrap();
+    assert_eq!(source.posts_loaded().len(), 2, "fixture eager-load sanity");
+
+    // Replicate. If `replicate_with` reset `__eager` to
+    // `EagerLoadCache::default()` instead of cloning it, this
+    // assertion would see zero loaded posts on the replica.
+    let replica = source.replicate().await.unwrap();
+    assert_eq!(replica.id, 0, "PK reset on the replica");
+    assert_eq!(
+        replica.posts_loaded().len(),
+        2,
+        "eager-loaded `posts` must survive replicate (Laravel parity)"
+    );
+
+    // `replicate_except` follows the same parity rule — the `except`
+    // list filters column values, not relation cache entries.
+    let replica2 = source.replicate_except(["name"]).await.unwrap();
+    assert_eq!(replica2.name, "", "name cleared by `except`");
+    assert_eq!(
+        replica2.posts_loaded().len(),
+        2,
+        "eager-loaded `posts` must survive replicate_except"
+    );
+
+    // Mutating the replica's cache must not bleed back into the
+    // source — `EagerLoadCache::clone` is deep, not Arc-shared.
+    let mut owned = replica;
+    owned.__eager = Default::default();
+    assert_eq!(
+        source.posts_loaded().len(),
+        2,
+        "clearing the replica's cache must not affect the source"
+    );
+}

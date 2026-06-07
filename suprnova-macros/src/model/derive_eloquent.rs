@@ -138,16 +138,29 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     // through this accessor.
     let field_value_method = serialization::emit_field_value(&field_idents);
 
-    // Phase 10B T1 — every Self { ... } constructor that materialises
-    // a user struct (From<inner::Model>, Default, replicate_with) must
-    // initialise the auto-injected `__eager` / `__pivot` slots so the
-    // struct literal stays exhaustive. `EagerLoadCache::default()`
-    // returns the empty cache; `Option::<...>::None` is the pivot
-    // default. This token stream is appended after the per-column
-    // initialisers in every reverse path.
+    // Every Self { ... } constructor that materialises a user struct
+    // from a fresh-row source (`From<inner::Model>`, `Default`,
+    // `try_from_storage`) must initialise the auto-injected `__eager`
+    // / `__pivot` slots so the struct literal stays exhaustive.
+    // `EagerLoadCache::default()` returns the empty cache;
+    // `Option::<...>::None` is the pivot default. None of those
+    // constructors have a `self` in scope, so empty defaults are the
+    // only correct shape for them.
     let relations_fields_init = quote! {
         __eager: ::core::default::Default::default(),
         __pivot: ::core::default::Default::default(),
+    };
+
+    // `replicate_with` is the lone Self { ... } site that DOES have a
+    // `self` in scope and must preserve relation state. Laravel's
+    // `Model::replicate` carries the source's loaded relations onto
+    // the replica (`clone $user` preserves `$user->posts`), and our
+    // `EagerLoadCache` docstring explicitly promises the same parity
+    // via its `Clone` impl. The pivot context is a cheap `Arc` clone
+    // and follows the same parity rule.
+    let replicate_relations_init = quote! {
+        __eager: self.__eager.clone(),
+        __pivot: self.__pivot.clone(),
     };
 
     // T7a — route per-field through `casts::apply_arm`. Fields with a
@@ -1012,7 +1025,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             fn replicate_with(&self, except: ::std::vec::Vec<::std::string::String>) -> Self {
                 Self {
                     #( #replicate_arms, )*
-                    #relations_fields_init
+                    #replicate_relations_init
                 }
             }
         }

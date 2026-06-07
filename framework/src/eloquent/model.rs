@@ -773,7 +773,19 @@ where
     /// Build an unsaved clone with the PK reset and any auto-managed
     /// columns cleared. Caller saves explicitly.
     ///
-    /// ## Lifecycle events (Phase 10C T13)
+    /// ## Relation state
+    ///
+    /// Eager-loaded relations and pivot context are preserved on the
+    /// replica (Laravel parity: `clone $user` retains `$user->posts`).
+    /// The macro-emitted `replicate_with` clones the source's
+    /// `__eager` cache via [`EagerLoadCache::clone`] — each cell
+    /// carries a clone trampoline so the replica's loaded rows are
+    /// independent of the source's — and `Arc`-clones the pivot slot.
+    /// Use [`Self::replicate_except`] if a specific relation should
+    /// be dropped on the replica (column names only; relation cache
+    /// keys are out of scope for the `except` filter).
+    ///
+    /// ## Lifecycle events
     ///
     /// Fires `Replicating { source, replica }` AFTER the in-memory
     /// clone is constructed and BEFORE this method returns. The
