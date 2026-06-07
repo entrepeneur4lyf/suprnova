@@ -19,6 +19,13 @@ use suprnova::{FrameworkError, HttpError, domain_error};
 #[domain_error(status = 404, message = "User not found")]
 pub struct UserNotFound;
 
+// Regression for the format-string trap: the message is rendered
+// through `f.write_str`, so unescaped braces in the literal must NOT
+// be interpreted as format positional arguments. The whole test file
+// failed to compile before the fix.
+#[domain_error(status = 404, message = "User {id} not found")]
+pub struct UserNotFoundWithBraces;
+
 #[domain_error(status = 422, message = "Bad input")]
 pub struct InvalidInput(pub String);
 
@@ -57,6 +64,15 @@ fn named_struct_form_compiles_and_renders() {
     assert_eq!(err.status_code(), 402);
     assert_eq!(err.error_message(), "Insufficient funds");
     let _cloned = err.clone();
+}
+
+#[test]
+fn message_with_braces_renders_verbatim() {
+    let err = UserNotFoundWithBraces;
+    assert_eq!(err.status_code(), 404);
+    // The literal `{id}` is part of the message, not a format spec.
+    assert_eq!(err.error_message(), "User {id} not found");
+    assert_eq!(format!("{err}"), "User {id} not found");
 }
 
 #[test]

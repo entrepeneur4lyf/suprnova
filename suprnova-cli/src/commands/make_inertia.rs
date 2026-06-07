@@ -42,15 +42,20 @@ fn run_data_struct(name: String) {
     }
 
     let file_name = to_snake_case(&struct_name);
-    let props_dir = Path::new("app/src/props");
+    let props_dir = Path::new("src/props");
     let props_file = props_dir.join(format!("{}.rs", file_name));
 
-    // Create the props directory if it doesn't exist.
-    if !props_dir.exists()
-        && let Err(e) = fs::create_dir_all(props_dir)
-    {
-        ui::error(&format!("Failed to create directory app/src/props: {}", e));
+    // Create the props directory if it doesn't exist. Warn on
+    // first-time creation so the user remembers to add the module
+    // declaration to `src/lib.rs` — the file is otherwise orphaned
+    // and the new Data struct is invisible to the rest of the crate.
+    let first_time = !props_dir.exists();
+    if first_time && let Err(e) = fs::create_dir_all(props_dir) {
+        ui::error(&format!("Failed to create directory src/props: {}", e));
         std::process::exit(1);
+    }
+    if first_time {
+        ui::warning("Make sure to add `pub mod props;` to your src/lib.rs");
     }
 
     if props_file.exists() {

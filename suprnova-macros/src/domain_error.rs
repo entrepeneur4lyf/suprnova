@@ -194,7 +194,14 @@ pub fn domain_error_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
 
                 impl #impl_generics ::std::fmt::Display for #name #ty_generics #where_clause {
                     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-                        write!(f, #message)
+                        // `#message` is a user-supplied string literal embedded
+                        // via quote! into the call site. Passing it as the
+                        // format-spec argument of `write!` would re-interpret
+                        // any `{...}` it contains as a positional argument —
+                        // a hostile compile error for messages like
+                        // `"User {id} not found"`. `f.write_str` skips the
+                        // format machinery and prints the message verbatim.
+                        f.write_str(#message)
                     }
                 }
 
