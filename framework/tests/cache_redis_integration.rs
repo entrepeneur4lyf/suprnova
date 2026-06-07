@@ -251,3 +251,81 @@ async fn redis_add_with_subsecond_ttl_expires() {
     let v: Option<String> = s.get_raw("k").await.unwrap();
     assert_eq!(v.as_deref(), Some("v3"));
 }
+
+/// A regular `Cache::forget("lock:foo")` MUST NOT release a held
+/// distributed lock for `foo`. Pre-isolation, the lock value lived at
+/// `<prefix>lock:foo` and was indistinguishable from a user-side
+/// `forget("lock:foo")` (which also produced `<prefix>lock:foo`).
+#[tokio::test]
+#[ignore = "requires Redis at CACHE_REDIS_TEST_URL or default localhost"]
+async fn redis_forget_with_lock_prefixed_key_does_not_release_held_lock() {
+    let s = fresh_store("redis-lock-iso-1").await;
+    let token = s
+        .acquire_lock("printer", Duration::from_secs(30))
+        .await
+        .unwrap()
+        .expect("lock acquired");
+
+    // User-side `forget("lock:printer")` must NOT touch the lock's
+    // internal slot.
+    let _ = s.forget("lock:printer").await.unwrap();
+
+    assert!(
+        s.acquire_lock("printer", Duration::from_secs(30))
+            .await
+            .unwrap()
+            .is_none(),
+        "lock keyspace must be isolated from user `forget(\"lock:...\")`"
+    );
+    assert!(s.release_lock("printer", &token).await.unwrap());
+}
+
+/// A user-side `put("lock:foo", ...)` MUST NOT overwrite a held
+/// distributed lock for `foo`.
+#[tokio::test]
+#[ignore = "requires Redis at CACHE_REDIS_TEST_URL or default localhost"]
+async fn redis_put_with_lock_prefixed_key_does_not_overwrite_held_lock() {
+    let s = fresh_store("redis-lock-iso-2").await;
+    let token = s
+        .acquire_lock("job", Duration::from_secs(30))
+        .await
+        .unwrap()
+        .expect("lock acquired");
+
+    s.put_raw("lock:job", "hijacked-token", Some(Duration::from_secs(30)))
+        .await
+        .unwrap();
+
+    assert!(
+        s.acquire_lock("job", Duration::from_secs(30))
+            .await
+            .unwrap()
+            .is_none(),
+        "lock keyspace must be isolated from user `put(\"lock:...\")`"
+    );
+    assert!(s.release_lock("job", &token).await.unwrap());
+}
+
+/// A `Cache::forget("tag:users")` MUST NOT clobber the tag forward
+/// index for `users`. Pre-isolation, the forward index lived at
+/// `<prefix>tag:users` and could be deleted by a user-side
+/// `forget("tag:users")`, breaking subsequent `flush_tags(["users"])`.
+#[tokio::test]
+#[ignore = "requires Redis at CACHE_REDIS_TEST_URL or default localhost"]
+async fn redis_forget_with_tag_prefixed_key_does_not_clobber_tag_index() {
+    let s = fresh_store("redis-tag-iso").await;
+    s.tagged_put_raw(&["users"], "u:1", "{\"id\":1}", None)
+        .await
+        .unwrap();
+
+    // User-side forget against the same prefix we used to store the
+    // forward index — must miss because the internal index lives in
+    // a NUL-byte-prefixed slot the user cannot reach.
+    let _ = s.forget("tag:users").await.unwrap();
+
+    s.flush_tags(&["users"]).await.unwrap();
+    assert!(
+        !s.has("u:1").await.unwrap(),
+        "flush_tags must still find and delete tagged keys"
+    );
+}

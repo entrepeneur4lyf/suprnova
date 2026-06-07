@@ -89,6 +89,28 @@ impl RedisCache {
         format!("{}{}", self.prefix, key)
     }
 
+    /// Distributed-lock keyspace key for `key`.
+    ///
+    /// Locks live under a NUL-byte sentinel after the configured prefix
+    /// so they cannot collide with any user-supplied cache key. User
+    /// keys are always passed through `prefixed_key(...)` which does not
+    /// inject the sentinel, so a caller doing `Cache::forget("lock:foo")`
+    /// targets `<prefix>lock:foo` — distinct from the lock's
+    /// `<prefix>\0lock:foo` slot. This prevents a regular `forget` /
+    /// `put` from releasing or overwriting a held distributed lock.
+    fn locked_key(&self, key: &str) -> String {
+        format!("{}\0lock:{}", self.prefix, key)
+    }
+
+    /// Tag forward-index key (`tag -> set of value keys`).
+    ///
+    /// Hidden under the same NUL-byte sentinel as the lock keyspace so
+    /// `Cache::forget("tag:users")` cannot drop the forward index for
+    /// the `users` tag.
+    fn tag_index_key(&self, tag: &str) -> String {
+        format!("{}\0tag:{}", self.prefix, tag)
+    }
+
     /// Aux SET that records the tag memberships for a value key.
     ///
     /// This lets `flush_tags` validate "is this key STILL tagged with `t`"
@@ -98,8 +120,12 @@ impl RedisCache {
     /// The aux set carries the same TTL as the value key, so an expired
     /// value's tag entries age out together rather than accumulating
     /// forever in the forward `tag:{t}` set.
+    ///
+    /// Stored under the same NUL-byte sentinel as the lock and tag
+    /// forward index so the bookkeeping is unreachable from caller-side
+    /// `Cache::put/forget/get`.
     fn key_tags_set(&self, prefixed_key: &str) -> String {
-        format!("{}__key_tags__:{}", self.prefix, prefixed_key)
+        format!("{}\0key_tags:{}", self.prefix, prefixed_key)
     }
 }
 
@@ -349,7 +375,7 @@ impl CacheStore for RedisCache {
         // list by flush_tags; the aux set is the source of truth for
         // "is this key still tagged with t" at deletion time.
         for t in tags {
-            let tag_key = format!("{}tag:{}", self.prefix, t);
+            let tag_key = self.tag_index_key(t);
             pipe.cmd("SADD").arg(&tag_key).arg(&pkey).ignore();
         }
         pipe.query_async::<()>(&mut conn)
@@ -361,7 +387,7 @@ impl CacheStore for RedisCache {
     async fn flush_tags(&self, tags: &[&str]) -> Result<(), FrameworkError> {
         let mut conn = self.conn.clone();
         for t in tags {
-            let tag_key = format!("{}tag:{}", self.prefix, t);
+            let tag_key = self.tag_index_key(t);
             let members: Vec<String> = redis::cmd("SMEMBERS")
                 .arg(&tag_key)
                 .query_async(&mut conn)
@@ -411,7 +437,7 @@ impl CacheStore for RedisCache {
         ttl: Duration,
     ) -> Result<Option<String>, FrameworkError> {
         let mut conn = self.conn.clone();
-        let pkey = format!("{}lock:{}", self.prefix, key);
+        let pkey = self.locked_key(key);
         let token = uuid::Uuid::new_v4().to_string();
 
         // SET key token NX PX ttl_ms — atomic: only sets if key does not
@@ -433,7 +459,7 @@ impl CacheStore for RedisCache {
 
     async fn release_lock(&self, key: &str, token: &str) -> Result<bool, FrameworkError> {
         let mut conn = self.conn.clone();
-        let pkey = format!("{}lock:{}", self.prefix, key);
+        let pkey = self.locked_key(key);
         // Atomically: if GET key == token then DEL key, else return 0
         let script = redis::Script::new(
             "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
@@ -454,7 +480,7 @@ impl CacheStore for RedisCache {
         ttl: Duration,
     ) -> Result<bool, FrameworkError> {
         let mut conn = self.conn.clone();
-        let pkey = format!("{}lock:{}", self.prefix, key);
+        let pkey = self.locked_key(key);
         // Atomically: if GET key == token then PEXPIRE key ttl_ms, else
         // return 0. PEXPIRE preserves sub-second precision — EXPIRE
         // would truncate, and `EXPIRE key 0` deletes the key, which

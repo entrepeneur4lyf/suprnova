@@ -397,8 +397,28 @@ impl Middleware for SessionMiddleware {
         // request. `None` when no cookie was present or when the
         // cookie was unreadable — neither case names a real row, so
         // there's nothing to migrate away from.
+        //
+        // Shape validation: even a successfully-decrypted id must
+        // match the 40-char lowercase-alphanumeric shape minted by
+        // `generate_session_id` before we let it reach the store.
+        // The AES-256-GCM cookie is authenticated, so a foreign id
+        // requires a key-compromise OR a rotated key whose ciphertext
+        // we can no longer trust — either way, the right move is to
+        // mint a fresh id rather than route an attacker-controlled
+        // string into the session-store lookup. Mirrors Laravel's
+        // `Store::isValidId` check in `Illuminate/Session/Store.php`
+        // (the source of [`super::store::is_valid_session_id`]).
         let original_session_id: Option<String> = match request.cookie(&self.config.cookie_name) {
-            Some(raw) => Cookie::read_encrypted(&raw).ok(),
+            Some(raw) => match Cookie::read_encrypted(&raw) {
+                Ok(id) if super::store::is_valid_session_id(&id) => Some(id),
+                Ok(_) => {
+                    tracing::debug!(
+                        "session cookie decrypted to an id with an unexpected shape; minting a fresh id"
+                    );
+                    None
+                }
+                Err(_) => None,
+            },
             None => None,
         };
         let session_id = original_session_id

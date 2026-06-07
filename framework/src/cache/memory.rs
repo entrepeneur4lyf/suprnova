@@ -111,6 +111,19 @@ impl InMemoryCache {
         format!("{}{}", self.prefix, key)
     }
 
+    /// Distributed-lock keyspace key for `key`.
+    ///
+    /// Locks live under a NUL-byte sentinel after the configured prefix
+    /// so they cannot collide with any user-supplied cache key. User
+    /// keys are always passed through `prefixed_key(...)` which does not
+    /// inject the sentinel, so a caller doing `Cache::forget("lock:foo")`
+    /// targets `<prefix>lock:foo` — distinct from the lock's
+    /// `<prefix>\0lock:foo` slot. This prevents a regular `forget` /
+    /// `put` from releasing or overwriting a held distributed lock.
+    fn locked_key(&self, key: &str) -> String {
+        format!("{}\0lock:{}", self.prefix, key)
+    }
+
     /// Walk the value store and drop every entry whose TTL has elapsed.
     ///
     /// Read paths (`get_raw`, `has`, `add_raw`) already purge an
@@ -533,7 +546,7 @@ impl CacheStore for InMemoryCache {
         key: &str,
         ttl: Duration,
     ) -> Result<Option<String>, FrameworkError> {
-        let pkey = self.prefixed_key(&format!("lock:{key}"));
+        let pkey = self.locked_key(key);
         let mut s = self
             .store
             .write()
@@ -555,7 +568,7 @@ impl CacheStore for InMemoryCache {
     }
 
     async fn release_lock(&self, key: &str, token: &str) -> Result<bool, FrameworkError> {
-        let pkey = self.prefixed_key(&format!("lock:{key}"));
+        let pkey = self.locked_key(key);
         let mut s = self
             .store
             .write()
@@ -575,7 +588,7 @@ impl CacheStore for InMemoryCache {
         token: &str,
         ttl: Duration,
     ) -> Result<bool, FrameworkError> {
-        let pkey = self.prefixed_key(&format!("lock:{key}"));
+        let pkey = self.locked_key(key);
         let mut s = self
             .store
             .write()
@@ -696,5 +709,72 @@ mod tests {
             idx_size, 0,
             "tag index must not retain dangling pointer to evicted key"
         );
+    }
+
+    #[tokio::test]
+    async fn forget_with_lock_prefixed_key_does_not_release_held_lock() {
+        let cache = InMemoryCache::with_prefix("t:");
+        // Acquire a real distributed lock.
+        let token = cache
+            .acquire_lock("printer", Duration::from_secs(30))
+            .await
+            .unwrap()
+            .expect("lock should be acquired");
+
+        // A caller using a regular cache key with the "lock:" prefix
+        // must NOT be able to release the held lock — even though
+        // before the keyspace isolation fix this was effectively a
+        // user-reachable DEL of the lock's storage slot.
+        let _ = cache.forget("lock:printer").await.unwrap();
+
+        // The lock must remain held — a fresh attempt should still
+        // contend, and the original token must still release.
+        assert!(
+            cache
+                .acquire_lock("printer", Duration::from_secs(30))
+                .await
+                .unwrap()
+                .is_none(),
+            "lock keyspace must be isolated from user `forget(\"lock:...\")`"
+        );
+        assert!(
+            cache.release_lock("printer", &token).await.unwrap(),
+            "original token must still own the lock after a user-side forget collision"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_with_lock_prefixed_key_does_not_overwrite_held_lock() {
+        let cache = InMemoryCache::with_prefix("t:");
+        let token = cache
+            .acquire_lock("job", Duration::from_secs(30))
+            .await
+            .unwrap()
+            .expect("lock should be acquired");
+
+        // A user-side put with a "lock:" key MUST NOT corrupt the
+        // lock's internal slot. The lock must keep its original token.
+        cache
+            .put_raw("lock:job", "hijacked-token", Some(Duration::from_secs(30)))
+            .await
+            .unwrap();
+
+        // The lock is still held by the original owner.
+        assert!(
+            cache
+                .acquire_lock("job", Duration::from_secs(30))
+                .await
+                .unwrap()
+                .is_none(),
+            "lock keyspace must be isolated from user `put(\"lock:...\")`"
+        );
+        // And the original token is still valid for release/refresh.
+        assert!(
+            cache
+                .refresh_lock("job", &token, Duration::from_secs(30))
+                .await
+                .unwrap()
+        );
+        assert!(cache.release_lock("job", &token).await.unwrap());
     }
 }
