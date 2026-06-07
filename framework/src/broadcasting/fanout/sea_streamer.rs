@@ -83,7 +83,9 @@
 //! own native cross-process behaviour).
 
 use crate::FrameworkError;
-use crate::broadcasting::hub::{BroadcastEnvelope, BroadcastHub, InMemoryBroadcastHub};
+use crate::broadcasting::hub::{
+    BroadcastEnvelope, BroadcastHub, InMemoryBroadcastHub, reject_reserved_channel,
+};
 use async_trait::async_trait;
 use sea_streamer::{
     Buffer, Consumer, ConsumerMode, ConsumerOptions, Message, Producer, SeaConnectOptions,
@@ -682,6 +684,16 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
     }
 
     async fn publish(&self, envelope: BroadcastEnvelope) -> Result<(), FrameworkError> {
+        // Reject reserved meta-channel names BEFORE any side effect. A
+        // publish to `__presence__` here would serialise a TaggedEnvelope
+        // to the stream that every peer's consumer pump routes straight
+        // into `apply_presence_event` — injecting phantom presence into
+        // every process's `cross_process_view`. The hub itself fans
+        // presence out via a dedicated producer path (`send_presence_event`)
+        // that never traverses this method, so the guard never blocks
+        // legitimate framework traffic.
+        reject_reserved_channel(&envelope.channel)?;
+
         // Local fanout — immediate, no round-trip. Local subscribers
         // see this envelope even if the cross-process fanout below
         // fails: the local delivery and the wire delivery are

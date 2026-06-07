@@ -108,6 +108,47 @@ async fn publish_with_no_subscriber_is_silent() {
         .unwrap();
 }
 
+/// Publishing to the reserved `__presence__` meta-channel (or any
+/// `__`-prefixed name) must be rejected at the publish boundary. The
+/// vulnerability the guard closes: a TaggedEnvelope serialised to the
+/// stream on `__presence__` is routed by every peer's consumer pump
+/// straight into `apply_presence_event`, injecting phantom presence
+/// records into every process's `cross_process_view`. The hub itself
+/// produces legitimate presence traffic via a dedicated path that
+/// never crosses `publish`, so the guard is total.
+#[tokio::test]
+async fn publish_rejects_reserved_presence_channel() {
+    let hub = SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-reserved")
+        .await
+        .expect("hub connect");
+
+    let err = hub
+        .publish(envelope(
+            "__presence__",
+            "member_added",
+            json!({ "spoof": true }),
+        ))
+        .await
+        .expect_err("publish to __presence__ must be rejected at the boundary");
+    assert!(
+        err.to_string().contains("reserved prefix '__'"),
+        "error must name the reserved prefix; got: {err}"
+    );
+
+    // Any other __-prefixed name is equally reserved — the registry
+    // forbids registration of the family, not just the one literal.
+    let err2 = hub
+        .publish(envelope("__rpc__", "ping", json!({})))
+        .await
+        .expect_err("any __-prefixed channel must be rejected");
+    assert!(err2.to_string().contains("reserved prefix '__'"));
+
+    // A regular channel still publishes successfully through the same hub.
+    hub.publish(envelope("chat.42", "Tick", json!({})))
+        .await
+        .expect("non-reserved channel still publishes");
+}
+
 /// `subscriber_count` reflects the live receivers.
 #[tokio::test]
 async fn subscriber_count_reflects_receivers() {

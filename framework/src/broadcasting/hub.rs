@@ -28,6 +28,29 @@ use tokio::sync::broadcast;
 /// chat/presence workloads.
 const CHANNEL_CAPACITY: usize = 256;
 
+/// Reject publishes to channels whose names begin with `"__"`. The
+/// double-underscore prefix is reserved for framework meta-channels —
+/// `__presence__` carries cross-process presence replication and is
+/// fed by the hub itself via a dedicated producer path, never through
+/// `publish`. Letting application code (or a compromised handler) call
+/// `hub.publish` with a reserved channel would inject phantom presence
+/// events into every peer's `cross_process_view`.
+///
+/// The `ChannelRegistry` already blocks registration of `__`-prefixed
+/// names; this is the matching guard at the publish boundary so the
+/// invariant holds even for code that publishes without a registered
+/// channel.
+pub(crate) fn reject_reserved_channel(channel: &str) -> Result<(), FrameworkError> {
+    if channel.starts_with("__") {
+        return Err(FrameworkError::internal(format!(
+            "BroadcastHub::publish: channel name '{channel}' starts with reserved \
+             prefix '__'; this prefix is reserved for framework meta-channels \
+             (e.g. __presence__ for cross-process presence replication)"
+        )));
+    }
+    Ok(())
+}
+
 /// One published event on a channel.
 ///
 /// Named `BroadcastEnvelope` (rather than `Envelope`) to avoid a
@@ -220,6 +243,7 @@ impl BroadcastHub for InMemoryBroadcastHub {
     }
 
     async fn publish(&self, envelope: BroadcastEnvelope) -> Result<(), FrameworkError> {
+        reject_reserved_channel(&envelope.channel)?;
         if let Some(sender) = self.sender_for_publish(&envelope.channel) {
             // send() Errs only when there are no subscribers; that's
             // not an error from the publisher's perspective.
@@ -309,6 +333,42 @@ mod tests {
 
         // Three live (1, 2, 4); user.3 evicted.
         assert_eq!(hub.channel_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn publish_rejects_reserved_double_underscore_prefix() {
+        // The double-underscore prefix is reserved for framework meta-channels
+        // such as __presence__. The ChannelRegistry blocks `__`-prefixed names
+        // at registration; the matching guard at the publish boundary keeps a
+        // server-side caller — or a compromised handler — from injecting
+        // phantom envelopes onto a reserved meta-channel.
+        let hub = InMemoryBroadcastHub::new();
+
+        let err = hub
+            .publish(BroadcastEnvelope::new(
+                "__presence__",
+                "member_added",
+                json!({ "spoof": true }),
+            ))
+            .await
+            .expect_err("publish to __presence__ must be rejected");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("reserved prefix '__'"),
+            "error must name the reserved prefix; got: {msg}"
+        );
+
+        let err2 = hub
+            .publish(BroadcastEnvelope::new("__rpc__", "Tick", json!({})))
+            .await
+            .expect_err("any __-prefixed channel must be rejected, not just __presence__");
+        assert!(err2.to_string().contains("reserved prefix '__'"));
+
+        // Non-reserved publishes still succeed.
+        hub.publish(BroadcastEnvelope::new("chat.42", "Tick", json!({})))
+            .await
+            .expect("non-reserved channel still publishes");
     }
 
     #[tokio::test]
