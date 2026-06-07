@@ -212,6 +212,29 @@ impl SupervisorRegistry {
         }
     }
 
+    /// Spawn a runtime-constructed [`Supervisor`] into the same restart loop
+    /// and shutdown drain pool used by inventory-registered supervisors.
+    ///
+    /// Inventory entries store a bare `fn() -> Box<dyn Supervisor>` factory,
+    /// which cannot capture per-instance state like a `Arc<dyn SessionStore>`
+    /// or a runtime-chosen `Duration`. Supervisors that need such state are
+    /// constructed at boot and handed in here.
+    ///
+    /// Initializes `SUPERVISOR_TASKS` and `SUPERVISOR_CANCEL` lazily so it is
+    /// safe to call before, after, or instead of [`start_all`](Self::start_all).
+    /// The spawned task participates in the same drain that
+    /// [`shutdown`](Self::shutdown) runs at server shutdown.
+    pub async fn spawn(supervisor: Arc<dyn Supervisor>) {
+        let _ = SUPERVISOR_TASKS.set(TokioMutex::new(JoinSet::new()));
+        let cancel = SUPERVISOR_CANCEL
+            .get_or_init(CancellationToken::new)
+            .clone();
+        let name = supervisor.name();
+        let mut tasks_guard = SUPERVISOR_TASKS.get().unwrap().lock().await;
+        tasks_guard.spawn(run_with_restart(supervisor, cancel));
+        tracing::info!(supervisor = name, "supervisor started (runtime spawn)");
+    }
+
     /// Cancel all running supervisors and drain their tasks.
     ///
     /// 1. Fires `SUPERVISOR_CANCEL` so every supervisor that

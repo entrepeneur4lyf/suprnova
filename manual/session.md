@@ -274,19 +274,22 @@ use suprnova::{global_middleware, CsrfMiddleware, SessionConfig, SessionMiddlewa
 pub async fn bootstrap() {
     let config = SessionConfig::from_env();
 
-    // `install` spawns a once-per-hour GC background task as well.
+    // `install` registers a once-per-hour GC supervisor as well.
     // Use `SessionMiddleware::new(config)` if you'd rather schedule GC
     // yourself via `Schedule`.
-    global_middleware!(SessionMiddleware::install(config));
+    global_middleware!(SessionMiddleware::install(config).await);
 
     global_middleware!(CsrfMiddleware::new());
 }
 ```
 
-`SessionMiddleware::install` runs garbage collection once an hour in a
-spawned Tokio task. The variant `install_with_gc(config, interval)`
-takes a custom interval; `new(config)` skips the GC task (useful if
-you'd rather call `gc()` from a [Schedule](scheduling.md) entry).
+`SessionMiddleware::install` registers a [supervised](supervisors.md)
+gc task that calls `gc()` once an hour. The variant
+`install_with_gc(config, interval).await` takes a custom interval;
+`new(config)` skips the gc task (useful if you'd rather call `gc()`
+from a [Schedule](scheduling.md) entry). The supervised task
+participates in the framework's shutdown drain, so the gc loop exits
+cleanly on `Ctrl-C` / `SIGTERM` instead of being force-aborted.
 
 To use a non-database store — for tests, or for a Redis-backed driver
 you write yourself — implement `SessionStore` and pass it via
@@ -330,10 +333,11 @@ make differently:
 **Garbage collection.** Laravel runs a 2/100 lottery on every request:
 each request has a 2% chance of triggering session GC inline. It works
 on PHP because every request spawns a fresh process anyway. On Tokio
-we have long-lived workers, so `SessionMiddleware::install` spawns one
-background task that calls `gc()` on a fixed interval. No per-request
-overhead, no probabilistic surprise — explicit scheduling instead of a
-lottery.
+we have long-lived workers, so `SessionMiddleware::install` registers
+one [supervised](supervisors.md) task that calls `gc()` on a fixed
+interval. No per-request overhead, no probabilistic surprise — explicit
+scheduling instead of a lottery, and the supervisor restart loop
+catches panics so a single bad gc doesn't kill the daemon.
 
 **Closure-form `session_mut`.** Laravel hands you `$request->session()`
 and lets you call methods on it. We don't, because handlers in Suprnova

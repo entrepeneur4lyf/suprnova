@@ -169,40 +169,38 @@ impl SessionMiddleware {
         Self { config, store }
     }
 
-    /// Construct the middleware AND spawn a background task that
-    /// calls [`SessionStore::gc`] once per `interval`. The Tokio
+    /// Construct the middleware AND register a [`SessionGcSupervisor`]
+    /// that calls [`SessionStore::gc`] once per `interval`. The Tokio
     /// equivalent of Laravel's `StartSession::collectGarbage` lottery
-    /// — a real spawned task instead of a 2/100 chance per request.
+    /// — a real supervised task instead of a 2/100 chance per request.
+    ///
+    /// The gc loop is spawned through
+    /// [`crate::supervisor::SupervisorRegistry::spawn`] so it (a) gets
+    /// a proper restart loop with exponential backoff on panic, and
+    /// (b) participates in the framework's shutdown drain — when
+    /// `Server::run` fires its supervisor cancellation token, the gc
+    /// loop exits cleanly within the 5-second grace window instead of
+    /// being silently force-aborted.
     ///
     /// Errors from `gc()` are logged at `warn!` and do not kill the
     /// loop. Apps that want explicit scheduling control should keep
     /// using `new` / `with_store` and register their own
     /// [`crate::Schedule`] entry.
-    pub fn install_with_gc(config: SessionConfig, interval: std::time::Duration) -> Self {
+    pub async fn install_with_gc(config: SessionConfig, interval: std::time::Duration) -> Self {
         let me = Self::new(config);
-        let store = me.store.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(interval).await;
-                match store.gc().await {
-                    Ok(removed) if removed > 0 => {
-                        tracing::debug!(removed, "session gc removed expired rows");
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(error = %e, "session gc failed");
-                    }
-                }
-            }
+        let supervisor: Arc<dyn crate::supervisor::Supervisor> = Arc::new(SessionGcSupervisor {
+            store: me.store.clone(),
+            interval,
         });
+        crate::supervisor::SupervisorRegistry::spawn(supervisor).await;
         me
     }
 
-    /// Convenience: spawn a once-per-hour `gc()` background task and
-    /// return the middleware. Drop-in replacement for `new(config)` in
+    /// Convenience: register a once-per-hour gc supervisor and return
+    /// the middleware. Drop-in replacement for `new(config)` in
     /// production bootstrap code.
-    pub fn install(config: SessionConfig) -> Self {
-        Self::install_with_gc(config, std::time::Duration::from_secs(3600))
+    pub async fn install(config: SessionConfig) -> Self {
+        Self::install_with_gc(config, std::time::Duration::from_secs(3600)).await
     }
 
     /// Read access to the bound session store. Lets callers feed the
@@ -311,6 +309,61 @@ pub fn create_forget_remember_cookie(config: &SessionConfig) -> Cookie {
         cookie = cookie.domain(domain);
     }
     cookie
+}
+
+/// Framework-managed supervisor that runs `SessionStore::gc` on a fixed
+/// interval. Registered by [`SessionMiddleware::install_with_gc`] /
+/// [`SessionMiddleware::install`] and lives inside the same
+/// `SUPERVISOR_TASKS` JoinSet the rest of the framework drains on
+/// shutdown.
+///
+/// The loop honours the supervisor cancellation token via
+/// `tokio::select!` so it exits cleanly within the 5-second drain
+/// window instead of being aborted. Per-tick `gc()` errors are
+/// `warn!`-logged and the loop keeps going — the call site treats
+/// transient backend failure as something to ride out, not something
+/// to kill the daemon over. Panics escape this `run()` and are caught
+/// then restarted with exponential backoff by the supervisor restart
+/// machinery.
+pub struct SessionGcSupervisor {
+    pub store: Arc<dyn SessionStore>,
+    pub interval: std::time::Duration,
+}
+
+#[async_trait]
+impl crate::supervisor::Supervisor for SessionGcSupervisor {
+    fn name(&self) -> &'static str {
+        "session_gc"
+    }
+
+    async fn run(
+        &self,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<(), crate::FrameworkError> {
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                _ = tokio::time::sleep(self.interval) => {
+                    match self.store.gc().await {
+                        Ok(removed) if removed > 0 => {
+                            tracing::debug!(removed, "session gc removed expired rows");
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(error = %e, "session gc failed");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn restart_policy(&self) -> crate::supervisor::RestartPolicy {
+        // run() only returns Ok on cancellation (which we don't want to
+        // restart after) and never returns Err. Panics are still routed
+        // through the supervisor restart loop.
+        crate::supervisor::RestartPolicy::OnError
+    }
 }
 
 #[async_trait]
