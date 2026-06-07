@@ -2,9 +2,11 @@
 
 use super::{ErasedListener, Listener, ListenerWrap};
 use crate::FrameworkError;
+use futures::FutureExt;
 use rand::RngExt;
 use std::any::TypeId;
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::{Mutex as TokioMutex, Semaphore};
@@ -373,7 +375,23 @@ impl EventDispatcher {
             let _permit = permit; // released when the task ends
             let mut attempt: u32 = 1;
             loop {
-                match listener.dispatch(&event).await {
+                // Wrap each attempt in a panic boundary so a panicking
+                // listener feeds the existing retry-on-Err branch (bounded by
+                // MAX_QUEUED_ATTEMPTS) instead of aborting the spawned task
+                // and silently disappearing — see drain_queued's is_panic
+                // log for the defense-in-depth case where a panic somehow
+                // escapes this boundary.
+                let attempt_result = match AssertUnwindSafe(listener.dispatch(&event))
+                    .catch_unwind()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(payload) => Err(FrameworkError::internal(format!(
+                        "queued listener panicked: {}",
+                        crate::server::panic_payload_message(&payload)
+                    ))),
+                };
+                match attempt_result {
                     Ok(()) => return,
                     Err(e) if attempt >= MAX_QUEUED_ATTEMPTS => {
                         error!(
@@ -423,8 +441,25 @@ impl EventDispatcher {
         loop {
             tokio::select! {
                 next = set.join_next() => {
-                    if next.is_none() {
-                        return 0; // all drained
+                    match next {
+                        None => return 0, // all drained
+                        // Defense-in-depth: each spawned task body catches
+                        // its own panic before this point, so an is_panic
+                        // JoinError here means something escaped the
+                        // boundary (e.g. an abort during shutdown that
+                        // races with a panic). Log it so a missed surface
+                        // is observable rather than silently swallowed.
+                        Some(Err(join_err)) if join_err.is_panic() => {
+                            tracing::error!(
+                                target: "suprnova::events",
+                                panic = ?join_err,
+                                "queued listener task panicked outside the per-attempt boundary"
+                            );
+                        }
+                        Some(Err(_cancelled)) => {
+                            // Cancellation during shutdown is expected; no log.
+                        }
+                        Some(Ok(())) => {}
                     }
                 }
                 _ = &mut deadline => {
@@ -977,6 +1012,60 @@ mod tests {
             succeeded.load(Ordering::SeqCst),
             1,
             "listener should ultimately succeed after retrying transient failures"
+        );
+    }
+
+    struct AlwaysPanicListener {
+        attempts: Arc<AtomicI64>,
+    }
+    #[async_trait]
+    impl Listener<QueuedPing> for AlwaysPanicListener {
+        async fn handle(&self, _event: &QueuedPing) -> Result<(), FrameworkError> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            panic!("deliberate queued listener panic for isolation test");
+        }
+    }
+
+    /// A panicking queued listener must be (a) retried by the existing
+    /// MAX_QUEUED_ATTEMPTS loop (3 attempts total) rather than silently
+    /// aborting the spawned task, and (b) surfaced via the
+    /// "failed after retries; giving up" error trace with the event name.
+    /// Before the panic boundary, a panic in `listener.dispatch(...)` would
+    /// unwind the spawned task to a JoinError and `drain_queued` would
+    /// previously drop that on the floor — no retry, no log.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn queued_listener_panic_is_caught_retried_and_logged() {
+        let d = EventDispatcher::new();
+        let attempts = Arc::new(AtomicI64::new(0));
+        d.listen::<QueuedPing, _>(Arc::new(AlwaysPanicListener {
+            attempts: attempts.clone(),
+        }))
+        .await;
+        d.dispatch(QueuedPing).await.unwrap();
+        // Drain with a generous deadline so the full retry sequence
+        // (3 attempts + sub-second backoffs in between) finishes.
+        let remaining = d.drain_queued(std::time::Duration::from_secs(5)).await;
+        assert_eq!(
+            remaining, 0,
+            "task must terminate after retries (not stay running)"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            MAX_QUEUED_ATTEMPTS as i64,
+            "panicking listener must be retried up to MAX_QUEUED_ATTEMPTS",
+        );
+        assert!(
+            logs_contain("queued listener failed after retries; giving up"),
+            "expected the final retries-exhausted error log"
+        );
+        assert!(
+            logs_contain("QueuedPing"),
+            "expected the event name to appear in the structured log"
+        );
+        assert!(
+            logs_contain("queued listener panicked"),
+            "expected the synthesized panic error message in the per-attempt log"
         );
     }
 

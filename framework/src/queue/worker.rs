@@ -39,8 +39,10 @@ use crate::queue::outcome::JobOutcome;
 use crate::queue::retry::next_delay;
 use crate::telemetry::Metrics;
 use chrono::Utc;
+use futures::FutureExt;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -348,17 +350,33 @@ pub async fn run_worker(
 
         let timeout_opt = env.timeout_secs.map(Duration::from_secs);
         let env_for_dispatch = env.clone();
-        let dispatch_fut = run_through_middleware(env_for_dispatch);
+        // Wrap dispatch in a panic boundary so a panicking handler (or panicking
+        // middleware) is converted to a `DispatchOutcome::Failed` and flows
+        // through the existing retry / dead-letter path. Without the boundary,
+        // a panic would unwind out of `run_worker`, kill the worker task, and
+        // strand the envelope's reservation until visibility expiry.
+        let dispatch_fut =
+            AssertUnwindSafe(run_through_middleware(env_for_dispatch)).catch_unwind();
 
         let outcome = match timeout_opt {
             Some(t) => match tokio::time::timeout(t, dispatch_fut).await {
-                Ok(Ok(o)) => DispatchOutcome::Settled(o),
-                Ok(Err(e)) => DispatchOutcome::Failed(e),
+                Ok(Ok(Ok(o))) => DispatchOutcome::Settled(o),
+                Ok(Ok(Err(e))) => DispatchOutcome::Failed(e),
+                Ok(Err(panic_payload)) => {
+                    DispatchOutcome::Failed(FrameworkError::internal(format!(
+                        "job panicked: {}",
+                        crate::server::panic_payload_message(&panic_payload)
+                    )))
+                }
                 Err(_elapsed) => DispatchOutcome::TimedOut(t),
             },
             None => match dispatch_fut.await {
-                Ok(o) => DispatchOutcome::Settled(o),
-                Err(e) => DispatchOutcome::Failed(e),
+                Ok(Ok(o)) => DispatchOutcome::Settled(o),
+                Ok(Err(e)) => DispatchOutcome::Failed(e),
+                Err(panic_payload) => DispatchOutcome::Failed(FrameworkError::internal(format!(
+                    "job panicked: {}",
+                    crate::server::panic_payload_message(&panic_payload)
+                ))),
             },
         };
 

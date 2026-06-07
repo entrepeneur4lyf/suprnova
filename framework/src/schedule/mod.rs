@@ -327,8 +327,24 @@ where
                 (name, result)
             });
         } else {
-            let result = task.run().await;
-            inline.push((task.name.clone(), result));
+            // Inline tasks run on the caller's task; without a panic boundary
+            // a panicking handler would unwind the scheduler daemon
+            // (`schedule:work`) entirely. Mirror the background-spawn path:
+            // catch the panic, convert it into a typed Err carrying the task
+            // name, and push it into the inline result vec like any other
+            // failure.
+            let name = task.name.clone();
+            let panic_name = name.clone();
+            let result = match AssertUnwindSafe(task.run()).catch_unwind().await {
+                Ok(r) => r,
+                Err(payload) => {
+                    let msg = crate::server::panic_payload_message(&payload);
+                    Err(FrameworkError::internal(format!(
+                        "scheduled task '{panic_name}' panicked: {msg}"
+                    )))
+                }
+            };
+            inline.push((name, result));
         }
     }
     inline
@@ -558,6 +574,60 @@ mod tests {
         assert!(
             survivor.is_ok(),
             "panic in one background task must not abort another",
+        );
+    }
+
+    /// A panicking *inline* task (no `run_in_background`) must surface as
+    /// `Err(...)` carrying the task name, NOT unwind the `schedule:work`
+    /// daemon. The background path already does this; before the inline
+    /// panic boundary, a panic in `task.run().await` would unwind through
+    /// `run_tasks_into` and tear the scheduler down. A subsequent inline
+    /// task must still run.
+    #[tokio::test]
+    async fn inline_panic_is_isolated_and_named() {
+        let mut schedule = Schedule::new();
+        let b = schedule
+            .call(|| async {
+                panic!("intentional panic for inline isolation test");
+            })
+            .every_minute()
+            .name("inline-panicky");
+        schedule.add(b);
+        let b = schedule
+            .call(|| async { Ok(()) })
+            .every_minute()
+            .name("inline-survivor");
+        schedule.add(b);
+
+        let results = schedule.run_due_tasks().await;
+        assert_eq!(results.len(), 2);
+
+        let by_name: std::collections::BTreeMap<_, _> =
+            results.iter().map(|(n, r)| (n.as_str(), r)).collect();
+
+        let panicky = by_name
+            .get("inline-panicky")
+            .expect("panicky inline task must appear in results");
+        match panicky {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("panicked"),
+                    "panic must be surfaced as a typed error: {msg}",
+                );
+                assert!(
+                    msg.contains("inline-panicky"),
+                    "error message must name the panicking task: {msg}",
+                );
+            }
+            Ok(()) => panic!("panicking inline task must NOT produce Ok"),
+        }
+        let survivor = by_name
+            .get("inline-survivor")
+            .expect("survivor inline task must still complete");
+        assert!(
+            survivor.is_ok(),
+            "panic in one inline task must not abort the next",
         );
     }
 
