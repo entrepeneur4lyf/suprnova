@@ -83,11 +83,38 @@ pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
                 .unwrap_or(587);
             let user = std::env::var("MAIL_SMTP_USER").ok();
             let pass = std::env::var("MAIL_SMTP_PASS").ok();
-            // Note: partial creds (only USER, only PASS) intentionally fall
-            // through to unencrypted local-dev mode. Set BOTH to authenticate.
+            // Both unset → silent dev mode (local maildev / mailpit /
+            // mailhog all listen on 1025 unauthenticated). Both set →
+            // STARTTLS with the credentials. Exactly one set is almost
+            // always a misconfiguration (env file copied without the
+            // pair, secret-manager rotation half-applied) and silently
+            // booting unencrypted there would let mail go out without
+            // the auth the operator clearly intended — surface a loud
+            // warn so it shows up in `mail:configure` logs immediately
+            // instead of after a forensic dive.
             let transport = match (user, pass) {
                 (Some(u), Some(p)) => SmtpMailTransport::starttls(&host, port, &u, &p)?,
-                _ => SmtpMailTransport::unencrypted(&host, port)?,
+                (Some(_), None) => {
+                    tracing::warn!(
+                        host = %host,
+                        port = port,
+                        "MAIL_SMTP_USER is set but MAIL_SMTP_PASS is not — SMTP \
+                         auth is DISABLED and mail will go out unencrypted; set \
+                         BOTH variables to authenticate"
+                    );
+                    SmtpMailTransport::unencrypted(&host, port)?
+                }
+                (None, Some(_)) => {
+                    tracing::warn!(
+                        host = %host,
+                        port = port,
+                        "MAIL_SMTP_PASS is set but MAIL_SMTP_USER is not — SMTP \
+                         auth is DISABLED and mail will go out unencrypted; set \
+                         BOTH variables to authenticate"
+                    );
+                    SmtpMailTransport::unencrypted(&host, port)?
+                }
+                (None, None) => SmtpMailTransport::unencrypted(&host, port)?,
             };
             Mail::set_transport(Arc::new(transport))?;
         }

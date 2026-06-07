@@ -470,6 +470,27 @@ pub enum FrameworkError {
     /// HTTP-flavored.
     #[error("")]
     AlreadyReported,
+
+    /// Throttled by a downstream service that supplied a retry hint.
+    ///
+    /// Carries the optional `Retry-After` duration so callers (queue
+    /// retry policies, jitter scheduling, HTTP `Retry-After` headers)
+    /// can honour the hint instead of stripping it off at the
+    /// `FrameworkError::internal` boundary. `message` keeps the
+    /// downstream service's text for the structured log.
+    #[error("Rate limited: {message}{retry_hint}",
+        retry_hint = retry_after
+            .map(|d| format!(" (retry after {}s)", d.as_secs()))
+            .unwrap_or_default()
+    )]
+    RateLimited {
+        /// Hint from the downstream service. `None` when the service
+        /// rejected without a `Retry-After` header.
+        retry_after: Option<std::time::Duration>,
+        /// Human-readable description of the failure that prompted the
+        /// rate-limit response.
+        message: String,
+    },
 }
 
 impl FrameworkError {
@@ -592,6 +613,32 @@ impl FrameworkError {
             Self::PrecognitionSuccess => 204,
             Self::PrecognitionFailure(_) => 422,
             Self::AlreadyReported => 500,
+            Self::RateLimited { .. } => 429,
+        }
+    }
+
+    /// Construct a [`Self::RateLimited`] error preserving the downstream
+    /// `Retry-After` hint. Use this at integration boundaries that bridge
+    /// rate-limited services into framework errors (web-push, HTTP
+    /// clients, etc.) so the duration survives instead of collapsing into
+    /// the message body.
+    pub fn rate_limited(
+        retry_after: Option<std::time::Duration>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::RateLimited {
+            retry_after,
+            message: message.into(),
+        }
+    }
+
+    /// Pull the structured `Retry-After` duration off a
+    /// [`Self::RateLimited`] error. Returns `None` for other variants and
+    /// for `RateLimited` errors that didn't carry a hint.
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::RateLimited { retry_after, .. } => *retry_after,
+            _ => None,
         }
     }
 
@@ -697,6 +744,7 @@ impl FrameworkError {
             Self::PrecognitionSuccess => "Precognition validation passed",
             Self::PrecognitionFailure(_) => "Precognition validation failed",
             Self::AlreadyReported => "",
+            Self::RateLimited { message, .. } => message,
         }
     }
 
@@ -768,6 +816,16 @@ impl FrameworkError {
             } => Self::ParamParse {
                 param: format!("{}: {}", prefix, param),
                 expected_type,
+            },
+            // Preserve the structured retry hint when contexting a
+            // rate-limit error — collapsing to Domain would strip the
+            // duration and defeat the whole point of the variant.
+            Self::RateLimited {
+                retry_after,
+                message,
+            } => Self::RateLimited {
+                retry_after,
+                message: format!("{}: {}", prefix, message),
             },
             // Variants whose body is fully fixed by the variant itself
             // (no caller-visible message field). Preserve the variant
@@ -907,6 +965,50 @@ mod context_tests {
         assert!(matches!(p, FrameworkError::PrecognitionSuccess));
         let a = FrameworkError::silent().context("ignored");
         assert!(matches!(a, FrameworkError::AlreadyReported));
+    }
+
+    #[test]
+    fn rate_limited_carries_status_429_and_retry_hint() {
+        let with_hint = FrameworkError::rate_limited(
+            Some(std::time::Duration::from_secs(45)),
+            "downstream throttled",
+        );
+        assert_eq!(with_hint.status_code(), 429);
+        assert_eq!(
+            with_hint.retry_after(),
+            Some(std::time::Duration::from_secs(45))
+        );
+        assert!(with_hint.to_string().contains("retry after 45s"));
+
+        let no_hint = FrameworkError::rate_limited(None, "no header sent");
+        assert_eq!(no_hint.status_code(), 429);
+        assert_eq!(no_hint.retry_after(), None);
+        assert!(!no_hint.to_string().contains("retry after"));
+    }
+
+    #[test]
+    fn context_preserves_rate_limited_variant_and_retry_after() {
+        let err = FrameworkError::rate_limited(
+            Some(std::time::Duration::from_secs(12)),
+            "push service",
+        );
+        let wrapped = err.context("delivering notification");
+        // Variant and the structured duration must survive the wrap —
+        // otherwise upstream retry logic loses the hint.
+        assert_eq!(
+            wrapped.retry_after(),
+            Some(std::time::Duration::from_secs(12))
+        );
+        assert!(matches!(wrapped, FrameworkError::RateLimited { .. }));
+        assert!(wrapped.to_string().contains("delivering notification"));
+        assert!(wrapped.to_string().contains("push service"));
+    }
+
+    #[test]
+    fn retry_after_returns_none_for_non_rate_limited_variants() {
+        assert_eq!(FrameworkError::internal("x").retry_after(), None);
+        assert_eq!(FrameworkError::Unauthorized.retry_after(), None);
+        assert_eq!(FrameworkError::bad_request("x").retry_after(), None);
     }
 }
 

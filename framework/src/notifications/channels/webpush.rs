@@ -88,6 +88,14 @@ impl Channel for WebPushChannel {
                 );
                 Ok(())
             }
+            Err(WebPushError::PushServiceRejected {
+                retry_after: Some(retry_after),
+                status,
+                ..
+            }) => Err(FrameworkError::rate_limited(
+                Some(retry_after),
+                format!("WebPushChannel: push service rejected (status {status})"),
+            )),
             Err(e) => Err(FrameworkError::internal(format!("WebPushChannel: {e}"))),
         }
     }
