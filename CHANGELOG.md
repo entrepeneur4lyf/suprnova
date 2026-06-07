@@ -23,7 +23,8 @@ Today's parity target is Laravel 13.x.
 - `Router` with route groups, prefixes, parameter constraints, named routes
 - Compile-time-validated route registration via the `routes!` macro
 - Resource routing (`Router::resource`) producing the seven standard routes
-- Signed URLs (`URL::signed_route`, `URL::temporary_signed_route`)
+- Signed URLs (`url::signed_route` / `url::temporary_signed_route` free
+  functions, plus `Redirect::signed_route` / `Redirect::temporary_signed_route`)
 - Redirect helpers — `Redirect::to`, `Redirect::back`, `Redirect::route`,
   `Redirect::with_input`, `Redirect::with_errors`, `with_flash`
 - Middleware trait with global, group, and per-route layers
@@ -42,7 +43,8 @@ Today's parity target is Laravel 13.x.
   **React 19**, **Vue 3.5** — all on Inertia 3.1.1 + Vite 6 + Tailwind v4
 - Partial reloads (`only` / `except`), deferred props, persistent
   layout, encrypted history, scroll preservation
-- `Inertia::paginate(key, paginator)` for paginator → Inertia prop wiring
+- `Inertia::paginate(component, key, paginator)` for paginator → Inertia
+  prop wiring
 
 #### Eloquent-style ORM (over SeaORM)
 
@@ -157,7 +159,7 @@ Today's parity target is Laravel 13.x.
 
 #### Notifications and mail
 
-- `Notification` trait + `Notification::send(recipient, notification)`
+- `Notification` trait + `Notify::send(recipient, notification).await`
 - Mailable + Markdown template rendering
 - Database / mail / broadcast / web-push channels
 - VAPID signing + RFC 8291 ECE payload encryption (via
