@@ -376,7 +376,7 @@ impl VectorDriver for QdrantVectorDriver {
             ));
         }
 
-        let response = self
+        match self
             .client
             .query(
                 QueryPointsBuilder::new(store)
@@ -385,13 +385,26 @@ impl VectorDriver for QdrantVectorDriver {
                     .with_payload(true),
             )
             .await
-            .map_err(|e| FrameworkError::internal(format!("qdrant query on '{store}': {e}")))?;
-
-        Ok(response
-            .result
-            .into_iter()
-            .map(Self::decode_match)
-            .collect())
+        {
+            Ok(response) => Ok(response
+                .result
+                .into_iter()
+                .map(Self::decode_match)
+                .collect()),
+            Err(e) if Self::looks_like_collection_missing(&e) => {
+                // Stale cache: ensure_collection had marked this store
+                // as known, but the server says it's gone (dropped
+                // externally, restart-without-persistence). Drop the
+                // cache entry so the next ensure_collection re-creates
+                // the collection on demand; a missing collection has
+                // no matches, so the read-path answer is "no results."
+                self.known_collections.write().await.remove(store);
+                Ok(Vec::new())
+            }
+            Err(e) => Err(FrameworkError::internal(format!(
+                "qdrant query on '{store}': {e}"
+            ))),
+        }
     }
 
     async fn delete(&self, store: &str, ids: Vec<String>) -> Result<(), FrameworkError> {
@@ -399,7 +412,8 @@ impl VectorDriver for QdrantVectorDriver {
             return Ok(());
         }
         let point_ids: Vec<PointId> = ids.iter().map(|id| Self::resolve_point_id(id)).collect();
-        self.client
+        match self
+            .client
             .delete_points(
                 DeletePointsBuilder::new(store)
                     .points(PointsSelectorOneOf::Points(PointsIdsList {
@@ -408,16 +422,83 @@ impl VectorDriver for QdrantVectorDriver {
                     .wait(true),
             )
             .await
-            .map_err(|e| FrameworkError::internal(format!("qdrant delete from '{store}': {e}")))?;
-        Ok(())
+        {
+            Ok(_) => Ok(()),
+            Err(e) if Self::looks_like_collection_missing(&e) => {
+                // Same recovery as similar(): a missing collection
+                // means there's nothing to delete. Drop the cache
+                // entry so subsequent writes recreate the collection
+                // via ensure_collection.
+                self.known_collections.write().await.remove(store);
+                Ok(())
+            }
+            Err(e) => Err(FrameworkError::internal(format!(
+                "qdrant delete from '{store}': {e}"
+            ))),
+        }
     }
 
     async fn count(&self, store: &str) -> Result<usize, FrameworkError> {
-        let response = self
+        match self
             .client
             .count(CountPointsBuilder::new(store).exact(true))
             .await
-            .map_err(|e| FrameworkError::internal(format!("qdrant count on '{store}': {e}")))?;
-        Ok(response.result.map(|r| r.count as usize).unwrap_or(0))
+        {
+            Ok(response) => Ok(response.result.map(|r| r.count as usize).unwrap_or(0)),
+            Err(e) if Self::looks_like_collection_missing(&e) => {
+                // A missing collection means 0 points. Invalidate the
+                // cache so the next ensure_collection writes the
+                // collection back rather than blindly trusting a stale
+                // entry that points at a server-side absence.
+                self.known_collections.write().await.remove(store);
+                Ok(0)
+            }
+            Err(e) => Err(FrameworkError::internal(format!(
+                "qdrant count on '{store}': {e}"
+            ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn err(msg: &str) -> QdrantError {
+        // QdrantError::ConversionError lets us wrap an arbitrary string
+        // without dragging tonic into dev-deps. The recovery helper
+        // matches on the lowercased Display body, which works the same
+        // shape regardless of which variant produced the text.
+        QdrantError::ConversionError(msg.to_string())
+    }
+
+    /// All three read/delete recovery paths route through
+    /// `looks_like_collection_missing`. Pin its substring set so a
+    /// silent variant rename in qdrant-client (or a server-side message
+    /// rewording) doesn't quietly cause every recovery arm to stop
+    /// firing — which would re-introduce the L32 leak of stale cache
+    /// entries on read paths.
+    #[test]
+    fn looks_like_collection_missing_matches_known_messages() {
+        // Qdrant historically returned each of these phrasings; new
+        // releases occasionally swap between them. Match on all three
+        // case-insensitively.
+        assert!(QdrantVectorDriver::looks_like_collection_missing(&err(
+            "Collection `users` doesn't exist!"
+        )));
+        assert!(QdrantVectorDriver::looks_like_collection_missing(&err(
+            "Collection users does not exist"
+        )));
+        assert!(QdrantVectorDriver::looks_like_collection_missing(&err(
+            "Not found: collection users"
+        )));
+        // Should NOT match unrelated errors — e.g. dimension mismatch
+        // is a different recovery class entirely.
+        assert!(!QdrantVectorDriver::looks_like_collection_missing(&err(
+            "Wrong vector size: expected 768, got 1536"
+        )));
+        assert!(!QdrantVectorDriver::looks_like_collection_missing(&err(
+            "Internal server error"
+        )));
     }
 }

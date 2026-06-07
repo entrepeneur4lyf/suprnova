@@ -228,7 +228,7 @@ For migration generators that don't have a driver in scope (CLI tools, build scr
 | Cosine    | `[0, 2]` (`1 - cos`)  | `1.0 - d / 2.0` → `[0, 1]`   |
 | Euclidean | `[0, ∞)` L2 norm      | `1.0 / (1.0 + d)` → `(0, 1]` |
 
-In both cases, ranking is preserved (best result first); the score is comparable across drivers because every backend lands on the same `higher = better` convention.
+In both cases, ranking is preserved (best result first), but the absolute score values are NOT comparable across drivers — only the ordering is. Each backend lands on a `higher = better` convention, but the ranges differ: Memory's cosine returns `[-1, 1]`, MariaDB's normalized cosine returns `[0, 1]`, Qdrant emits its native cosine similarity in `[-1, 1]`, and Pinecone returns the raw similarity for whichever metric the index was created with. Use `score` to sort within a single driver's result set; don't compare numeric scores across drivers without re-normalizing yourself.
 
 **Trapdoor.** `driver.pool()` returns the underlying `sqlx::MySqlPool` for raw queries the trait doesn't cover. `MariaDbVectorDriver::embedding_to_vec_text`, `score_from_distance`, and `ensure_table_sql` are pure functions you can call independently when mixing direct SQL with trait-routed calls.
 
