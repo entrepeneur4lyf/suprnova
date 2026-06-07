@@ -898,8 +898,9 @@ mod credential_blob_tests {
     /// name / created_at fields are preserved.
     #[tokio::test]
     async fn update_blob_preserves_row_and_overwrites_public_key() {
+        let _guard = crate::container::testing::TestContainer::fake();
         let (conn, credential_id, _old_pk, new_pk) = fresh_test_db().await;
-        crate::App::singleton(conn.clone());
+        crate::container::testing::TestContainer::singleton(conn.clone());
 
         update_passkey_credential_blob(&credential_id, &new_pk)
             .await
@@ -938,8 +939,9 @@ mod credential_blob_tests {
     /// produce an internal error rather than silently no-op.
     #[tokio::test]
     async fn update_blob_errors_when_credential_missing() {
+        let _guard = crate::container::testing::TestContainer::fake();
         let (conn, _credential_id, _, new_pk) = fresh_test_db().await;
-        crate::App::singleton(conn);
+        crate::container::testing::TestContainer::singleton(conn);
 
         let err = update_passkey_credential_blob(&[99u8, 99, 99], &new_pk)
             .await
