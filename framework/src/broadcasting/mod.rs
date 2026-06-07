@@ -25,7 +25,7 @@ pub use broadcastable::{BroadcastListener, Broadcastable};
 pub use channel::{
     BoxedChannel, Channel, ChannelParams, ChannelRegistry, PresenceChannel, PrivateChannel,
 };
-pub use handler::BroadcastingWsHandler;
+pub use handler::{BroadcastingWsHandler, DEFAULT_MAX_SUBSCRIPTIONS_PER_CONNECTION};
 pub use hub::{BroadcastEnvelope, BroadcastHub, InMemoryBroadcastHub};
 pub use protocol::{ClientFrame, ServerFrame};
 pub use testing::RecordingBroadcastHub;

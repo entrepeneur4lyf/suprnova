@@ -1095,9 +1095,7 @@ async fn defer_rescue_dispatches_error_occurred_event() {
             "permissions",
             suprnova::DeferOptions::new().rescue(),
             || async {
-                Err::<serde_json::Value, _>(suprnova::FrameworkError::internal(
-                    "rescued failure",
-                ))
+                Err::<serde_json::Value, _>(suprnova::FrameworkError::internal("rescued failure"))
             },
         )
         .resolve(&req)

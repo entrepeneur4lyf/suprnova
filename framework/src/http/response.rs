@@ -1129,7 +1129,17 @@ impl From<RedirectRouteBuilder> for Response {
         let url = match redirect.build_url() {
             Ok(u) => u,
             Err(e) => {
-                return Err(HttpResponse::text(e.to_string()).status(500));
+                // Route the failure through the canonical
+                // `FrameworkError -> HttpResponse` converter so the 5xx
+                // sanitisation policy applies: generic `{"message":
+                // "Internal Server Error"}` body on the wire, full
+                // detail in the structured log, `ErrorOccurred`
+                // dispatched, `request_id` injected. The raw
+                // `RouteUrlError` message (which names the route +
+                // missing params) stays inside the log path only.
+                return Err(HttpResponse::from(crate::error::FrameworkError::internal(
+                    e.to_string(),
+                )));
             }
         };
         flash_preserve_fragment_if_set(redirect.preserve_fragment);

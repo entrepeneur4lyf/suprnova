@@ -1056,8 +1056,7 @@ async fn resolve_props(
                                 };
                                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                                     handle.spawn(async move {
-                                        let _ =
-                                            crate::events::EventFacade::dispatch(evt).await;
+                                        let _ = crate::events::EventFacade::dispatch(evt).await;
                                     });
                                 }
                                 Ok(TaskOutcome::Rescued { key })

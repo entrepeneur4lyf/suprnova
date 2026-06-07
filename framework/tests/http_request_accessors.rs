@@ -612,3 +612,39 @@ async fn user_agent_returns_header_value() {
     .await;
     assert_eq!(req.user_agent(), Some("suprnova-test/1.0"));
 }
+
+/// Compile-only test pinning the hyper aliasing surface at the crate
+/// root. `Request::method()` returns `&Method`, `uri()` returns `&Uri`,
+/// `headers()` returns `&HeaderMap`, and the streaming body type is
+/// `Incoming` — all hyper-owned. Re-exporting them under `suprnova::*`
+/// means consumers never need to add `hyper` to their Cargo.toml just
+/// to name those types in a handler signature.
+#[test]
+fn hyper_types_reachable_via_crate_root() {
+    // Named imports: these will fail to resolve if the re-exports go
+    // away.
+    use suprnova::{HeaderMap, Method, RequestBodyStream, StatusCode, Uri};
+
+    // Documented escape hatch: the full `hyper` module is reachable as
+    // `suprnova::hyper::*` for anything the explicit aliases don't
+    // cover.
+    use suprnova::hyper;
+
+    // Construct one of each to prove the aliases name the right hyper
+    // types. The compiler does the work; runtime asserts just keep the
+    // bindings live.
+    let _: Method = Method::GET;
+    let _: StatusCode = StatusCode::OK;
+    let _: Uri = "/".parse().unwrap();
+    let _: HeaderMap = HeaderMap::new();
+
+    // `RequestBodyStream` is `hyper::body::Incoming`. We can't
+    // construct one directly (no public ctor) but we CAN prove the
+    // alias and the escape-hatch path resolve to the same type via a
+    // type-checked transmute trick: a fn pointer with two
+    // ostensibly-different parameter types only compiles if rustc sees
+    // them as the same type.
+    fn _alias_matches_escape_hatch(a: RequestBodyStream) -> hyper::body::Incoming {
+        a
+    }
+}
