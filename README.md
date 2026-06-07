@@ -7,7 +7,7 @@
 Build web applications in Rust with the developer experience you love from Laravel and Rails. Suprnova gives you expressive routing, powerful tooling, and batteries-included features — without sacrificing Rust's performance.
 
 Familiar API surface (`Auth::login(user)`, `Cache::remember(...)`,
-`Mail::to(...)`, `Event::dispatch(...)`); first-class Inertia 3 + React 19 /
+`Mail::to(...)`, `EventFacade::dispatch(...)`); first-class Inertia 3 + React 19 /
 Vue 3 / Svelte 5 starters; no gatekeeping on backends (vector DBs, graph
 DBs, queues, mailers — pick the right tool, not the framework author's
 favorite). See **[ROADMAP.md](./ROADMAP.md)** for the design principles,
@@ -32,9 +32,9 @@ If you've used Laravel or Rails, this will feel familiar:
 use suprnova::{get, post, routes, json_response, Request, Response};
 
 routes! {
-    get("/", index),
-    get("/users/{id}", show),
-    post("/users", store),
+    get!("/", index),
+    get!("/users/{id}", show),
+    post!("/users", store),
 }
 
 async fn index(_req: Request) -> Response {
@@ -55,7 +55,7 @@ async fn store(_req: Request) -> Response {
 ## Why suprnova?
 
 - **Familiar patterns** — Routes, controllers, middleware, service container
-- **CLI generators** — `suprnova make:controller`, `suprnova make:model`, `suprnova migrate`, `suprnova ssr:start`
+- **CLI generators** — `suprnova make:controller`, `suprnova make:migration`, `suprnova migrate`, `suprnova ssr:start`
 - **Database built-in** — SeaORM-backed, migrations, query builder, three drivers (MySQL, Postgres, SQLite)
 - **Modern frontend** — First-class Inertia 3 + **React 19 / Vue 3 / Svelte 5** starters with automatic TypeScript types
 - **Real concurrency** — Tokio-native; long-lived connections, in-process workers, async-by-default — no request-per-process model

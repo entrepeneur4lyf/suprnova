@@ -25,7 +25,7 @@ shape, and the few things Rust gives you for free that PHP can't.
 | `Notification::send($u, new Invoice($i))` | `Notify::send(&u, &InvoiceNotification { invoice }).await?` |
 | `Gate::allows('update', $post)` | `Gate::allows::<PostPolicy, _>("update", &user, &post).await?` |
 | `request()->validate([...])` | `#[handler]` extracts an `#[derive(Data, Validate)]` arg directly |
-| `event(new OrderShipped($order))` | `Event::dispatch(OrderShipped { order }).await?` |
+| `event(new OrderShipped($order))` | `EventFacade::dispatch(OrderShipped { order }).await?` |
 | `Bus::dispatch(new ProcessFoo($x))` | `Bus::dispatch(ProcessFoo { x }).await?` |
 | `php artisan schedule:list` | `suprnova schedule:list` |
 | `php artisan tinker` | (no REPL — write a one-off `cargo run` script or test) |

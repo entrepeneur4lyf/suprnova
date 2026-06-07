@@ -485,6 +485,40 @@ impl Auth {
         Ok(user)
     }
 
+    /// Get the currently authenticated user, or fail with an unauthorised
+    /// error.
+    ///
+    /// Mirrors Laravel's `Auth::userOrFail()`. Use this in handlers that
+    /// have already passed an auth middleware — the request is known to be
+    /// authenticated, so resolving the user is expected to succeed, and a
+    /// missing user means the precondition was violated rather than that
+    /// the handler must branch on a `None`. The `?` operator then turns the
+    /// error into the framework's standard "unauthorised" response.
+    ///
+    /// # Errors
+    ///
+    /// - [`FrameworkError::Unauthorized`] when no user is currently
+    ///   authenticated (i.e. [`Auth::user`](Self::user) returns
+    ///   `Ok(None)`).
+    /// - Whatever error [`Auth::user`](Self::user) returns when the
+    ///   underlying provider lookup fails.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use suprnova::Auth;
+    ///
+    /// // In a handler behind `Authenticate` middleware:
+    /// let user = Auth::user_or_fail().await?;
+    /// println!("Welcome, user {}!", user.get_auth_identifier());
+    /// ```
+    pub async fn user_or_fail() -> Result<Arc<dyn Authenticatable>, crate::error::FrameworkError> {
+        match Self::user().await? {
+            Some(user) => Ok(user),
+            None => Err(crate::error::FrameworkError::Unauthorized),
+        }
+    }
+
     /// Get the authenticated user, cast to a concrete type
     ///
     /// This is a convenience method that retrieves the user and downcasts
@@ -913,6 +947,36 @@ mod tests {
                     .expect("user_as ok")
                     .is_some()
             );
+        })
+        .await;
+    }
+
+    // `user_or_fail` is the Laravel `Auth::userOrFail()` analogue: surface
+    // the authenticated user OR turn the absence into a typed error so a
+    // handler can propagate via `?`. Inside a request scope with no user
+    // resolved it must return `Err(Unauthorized)`; with a `set_user` it
+    // must surface that same user.
+    #[tokio::test]
+    async fn user_or_fail_errors_when_unauthenticated_and_returns_user_otherwise() {
+        let _scope = TestContainer::fake();
+        TestContainer::singleton(AuthManager::new(AuthConfig::default()));
+        Auth::register_provider("users", Arc::new(FakeProvider)).expect("register provider");
+
+        request_state::request_state_scope_for_test(async {
+            // No user resolved → typed Unauthorized error. `Arc<dyn Authenticatable>`
+            // is not `Debug`, so unwrap-by-match rather than `expect_err`.
+            match Auth::user_or_fail().await {
+                Err(crate::error::FrameworkError::Unauthorized) => {}
+                Err(other) => panic!("expected FrameworkError::Unauthorized; got: {other:?}"),
+                Ok(_) => panic!("user_or_fail must error when no user is authenticated"),
+            }
+
+            // After `set_user` the request-scoped current user surfaces.
+            Auth::set_user(Arc::new(TestUser));
+            let user = Auth::user_or_fail()
+                .await
+                .expect("user_or_fail must return the authenticated user");
+            assert_eq!(user.get_auth_identifier(), "7");
         })
         .await;
     }
