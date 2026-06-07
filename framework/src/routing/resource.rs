@@ -350,6 +350,11 @@ impl ResourceRoutes {
         // (`posts` → `{post}`).
         let param = parameter.unwrap_or_else(|| default_param_name(&name));
 
+        // Captured before the loop consumes `actions` so the post-loop
+        // PATCH-alongside-PUT registration knows whether Update was in
+        // the set without re-walking.
+        let had_update = actions.contains(&ResourceAction::Update);
+
         for action in actions {
             let (method, path, default_name) = resource_route(&base, &param, action);
             let handler = make_handler(controller.clone(), action);
@@ -377,11 +382,17 @@ impl ResourceRoutes {
         }
 
         // PUT and PATCH share the update action — Laravel registers both
-        // by default. We do so unconditionally when Update is in the set.
-        // The PUT registration above already happened; we need to layer
-        // PATCH on top so callers can use either verb.
-        // (PUT was registered via the Update branch; PATCH is a parallel
-        // entry on the same handler.)
+        // by default. The action-loop above registers PUT (the verb
+        // returned by `resource_route(Update)`); layer a parallel PATCH
+        // entry on the same path against the same handler so callers
+        // can use either verb. The route NAME has already been claimed
+        // by the PUT registration above — re-registering it would
+        // conflict, so we only insert the PATCH verb here.
+        if had_update {
+            let (_method, path, _name) = resource_route(&base, &param, ResourceAction::Update);
+            let handler = make_handler(controller.clone(), ResourceAction::Update);
+            router.try_insert_patch(&path, handler)?;
+        }
         Ok(router)
     }
 }
@@ -604,6 +615,39 @@ mod tests {
         assert!(router.match_route(&Method::GET, "/posts/42/edit").is_some());
         assert!(router.match_route(&Method::PUT, "/posts/42").is_some());
         assert!(router.match_route(&Method::DELETE, "/posts/42").is_some());
+    }
+
+    #[test]
+    fn update_action_registers_both_put_and_patch() {
+        // Laravel registers PUT and PATCH for the update action; both
+        // verbs must route to the same handler. The action-loop
+        // dispatches PUT directly; the PATCH-alongside step layers a
+        // parallel entry on the same path. Without it, a client sending
+        // `PATCH /posts/42` would 404 even though the resource declared
+        // an `update` action.
+        let router: Router = Router::new().resource("posts", Ctl).unnamed().into();
+        assert!(
+            router.match_route(&Method::PUT, "/posts/42").is_some(),
+            "PUT /posts/{{id}} must route to update"
+        );
+        assert!(
+            router.match_route(&Method::PATCH, "/posts/42").is_some(),
+            "PATCH /posts/{{id}} must route to update"
+        );
+    }
+
+    #[test]
+    fn update_dropped_does_not_register_patch() {
+        // The PATCH-alongside-PUT step is gated on Update being in the
+        // action set. If a caller drops Update via `.except`, neither
+        // PUT nor PATCH should be registered.
+        let router: Router = Router::new()
+            .resource("posts", Ctl)
+            .except(&[ResourceAction::Update])
+            .unnamed()
+            .into();
+        assert!(router.match_route(&Method::PUT, "/posts/42").is_none());
+        assert!(router.match_route(&Method::PATCH, "/posts/42").is_none());
     }
 
     #[test]

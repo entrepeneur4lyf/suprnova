@@ -76,6 +76,61 @@ enum CronField {
     StepFrom(u32, u32), // 5/10 (start at 5, every 10)
 }
 
+/// Per-field value bounds, plus a human label used in error messages.
+///
+/// Each cron field has a fixed inclusive range (minute 0..=59, hour
+/// 0..=23, day-of-month 1..=31, month 1..=12, day-of-week 0..=6). Without
+/// bounds the parser silently accepts `99 25 99 13 9` and ships a
+/// never-firing schedule; the schedule entry then sits forever as
+/// dead weight and the operator never learns about the typo.
+#[derive(Clone, Copy)]
+struct FieldBounds {
+    /// Smallest value accepted in this field (inclusive).
+    min: u32,
+    /// Largest value accepted in this field (inclusive).
+    max: u32,
+    /// Human label for error messages — `"minute"`, `"hour"`, etc.
+    name: &'static str,
+}
+
+impl FieldBounds {
+    const MINUTE: Self = Self {
+        min: 0,
+        max: 59,
+        name: "minute",
+    };
+    const HOUR: Self = Self {
+        min: 0,
+        max: 23,
+        name: "hour",
+    };
+    const DAY_OF_MONTH: Self = Self {
+        min: 1,
+        max: 31,
+        name: "day-of-month",
+    };
+    const MONTH: Self = Self {
+        min: 1,
+        max: 12,
+        name: "month",
+    };
+    const DAY_OF_WEEK: Self = Self {
+        min: 0,
+        max: 6,
+        name: "day-of-week",
+    };
+
+    fn check(&self, value: u32, label: &str, raw: &str) -> Result<(), String> {
+        if value < self.min || value > self.max {
+            return Err(format!(
+                "{} {label} `{value}` out of range {}..={} in '{}'",
+                self.name, self.min, self.max, raw
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl CronField {
     fn matches(&self, value: u32) -> bool {
         match self {
@@ -90,7 +145,17 @@ impl CronField {
         }
     }
 
-    fn parse(s: &str) -> Result<Self, String> {
+    /// Parse a single cron-field token against the supplied bounds.
+    ///
+    /// `bounds` carries the per-field inclusive range (minute 0..=59,
+    /// hour 0..=23, etc.) and a human label used to build a clear error
+    /// message. Numeric values, range endpoints, and list entries are
+    /// each checked against the bounds; a `Range(start, end)` further
+    /// requires `start <= end`. `Step(0)` / `StepFrom(_, 0)` are
+    /// rejected: a step of zero degenerates to "every value congruent
+    /// to 0 mod 0" which only matches `value == 0`, silently turning a
+    /// `*/0 * * * *` schedule into "every hour at minute 0".
+    fn parse(s: &str, bounds: FieldBounds) -> Result<Self, String> {
         if s == "*" {
             return Ok(CronField::Any);
         }
@@ -100,6 +165,12 @@ impl CronField {
             let step: u32 = rest
                 .parse()
                 .map_err(|_| format!("Invalid step value in '{}'", s))?;
+            if step == 0 {
+                return Err(format!(
+                    "{} step `*/0` is invalid (step must be positive) in '{}'",
+                    bounds.name, s
+                ));
+            }
             return Ok(CronField::Step(step));
         }
 
@@ -113,16 +184,28 @@ impl CronField {
                 let step: u32 = parts[1]
                     .parse()
                     .map_err(|_| format!("Invalid step value in '{}'", s))?;
+                if step == 0 {
+                    return Err(format!(
+                        "{} step `{start}/0` is invalid (step must be positive) in '{}'",
+                        bounds.name, s
+                    ));
+                }
+                bounds.check(start, "start", s)?;
                 return Ok(CronField::StepFrom(start, step));
             }
         }
 
         // Handle comma-separated list (1,3,5)
         if s.contains(',') {
-            let values: Result<Vec<u32>, _> = s.split(',').map(|v| v.trim().parse()).collect();
-            return Ok(CronField::List(
-                values.map_err(|_| format!("Invalid list value in '{}'", s))?,
-            ));
+            let values: Vec<u32> = s
+                .split(',')
+                .map(|v| v.trim().parse::<u32>())
+                .collect::<Result<_, _>>()
+                .map_err(|_| format!("Invalid list value in '{}'", s))?;
+            for v in &values {
+                bounds.check(*v, "list entry", s)?;
+            }
+            return Ok(CronField::List(values));
         }
 
         // Handle range (1-5)
@@ -135,12 +218,21 @@ impl CronField {
                 let end: u32 = parts[1]
                     .parse()
                     .map_err(|_| format!("Invalid range end in '{}'", s))?;
+                if start > end {
+                    return Err(format!(
+                        "{} range start `{start}` is greater than end `{end}` in '{}'",
+                        bounds.name, s
+                    ));
+                }
+                bounds.check(start, "range start", s)?;
+                bounds.check(end, "range end", s)?;
                 return Ok(CronField::Range(start, end));
             }
         }
 
         // Handle single value
         let value: u32 = s.parse().map_err(|_| format!("Invalid value in '{}'", s))?;
+        bounds.check(value, "value", s)?;
         Ok(CronField::Value(value))
     }
 }
@@ -189,11 +281,11 @@ impl CronExpression {
 
         Ok(Self {
             raw: expression.to_string(),
-            minute: CronField::parse(parts[0])?,
-            hour: CronField::parse(parts[1])?,
-            day_of_month: CronField::parse(parts[2])?,
-            month: CronField::parse(parts[3])?,
-            day_of_week: CronField::parse(parts[4])?,
+            minute: CronField::parse(parts[0], FieldBounds::MINUTE)?,
+            hour: CronField::parse(parts[1], FieldBounds::HOUR)?,
+            day_of_month: CronField::parse(parts[2], FieldBounds::DAY_OF_MONTH)?,
+            month: CronField::parse(parts[3], FieldBounds::MONTH)?,
+            day_of_week: CronField::parse(parts[4], FieldBounds::DAY_OF_WEEK)?,
         })
     }
 
@@ -536,5 +628,108 @@ mod tests {
         assert!(catch_unwind(|| CronExpression::every_n_minutes(0)).is_err());
         // Sanity: valid inputs still build the expected expression.
         assert_eq!(CronExpression::hourly_at(30).expression(), "30 * * * *");
+    }
+
+    // ---- field-level range validation -----------------------------------
+    //
+    // Before this hardening landed, the parser accepted any `u32` per
+    // field. `CronExpression::parse("99 25 99 13 9")` returned `Ok` and
+    // built a never-firing schedule. `*/0 * * * *` parsed as `Step(0)`,
+    // and `value.is_multiple_of(0)` is true only for `value == 0`, so
+    // the expression silently became "every hour at minute 0". A range
+    // with `start > end` (e.g. `5-1`) parsed but matched nothing.
+
+    #[test]
+    fn parse_rejects_out_of_range_field_values() {
+        // Each field exceeds its inclusive max.
+        let err = CronExpression::parse("99 25 99 13 9").unwrap_err();
+        assert!(
+            err.contains("minute") && err.contains("0..=59"),
+            "first failure should call out the minute bounds: {err}"
+        );
+        assert!(CronExpression::parse("0 25 * * *").is_err(), "hour > 23");
+        assert!(
+            CronExpression::parse("0 0 32 * *").is_err(),
+            "day-of-month > 31"
+        );
+        assert!(CronExpression::parse("0 0 * 13 *").is_err(), "month > 12");
+        assert!(
+            CronExpression::parse("0 0 * * 7").is_err(),
+            "day-of-week > 6"
+        );
+
+        // Per-field minimums: day-of-month and month are 1-based.
+        assert!(
+            CronExpression::parse("0 0 0 * *").is_err(),
+            "day-of-month = 0 is below the 1..=31 floor"
+        );
+        assert!(
+            CronExpression::parse("0 0 * 0 *").is_err(),
+            "month = 0 is below the 1..=12 floor"
+        );
+
+        // Valid edge cases still parse — defends against regressions
+        // that would tighten the bounds incorrectly.
+        assert!(CronExpression::parse("59 23 31 12 6").is_ok());
+        assert!(CronExpression::parse("0 0 1 1 0").is_ok());
+    }
+
+    #[test]
+    fn parse_rejects_zero_step_in_steps() {
+        // `*/0 * * * *` previously parsed as `Step(0)` and matched only
+        // value 0 — silently became "every hour at minute 0".
+        let err = CronExpression::parse("*/0 * * * *").unwrap_err();
+        assert!(
+            err.contains("step") && err.contains("invalid"),
+            "should reject `*/0` as a malformed step: {err}"
+        );
+        // `5/0 * * * *` — StepFrom with zero step — same issue.
+        assert!(CronExpression::parse("5/0 * * * *").is_err());
+
+        // Non-zero steps still parse.
+        assert!(CronExpression::parse("*/5 * * * *").is_ok());
+        assert!(CronExpression::parse("5/10 * * * *").is_ok());
+    }
+
+    #[test]
+    fn parse_rejects_inverted_range() {
+        // `5-1` previously built `Range(5, 1)` which `matches` never
+        // satisfied — a silent no-op schedule.
+        let err = CronExpression::parse("5-1 * * * *").unwrap_err();
+        assert!(
+            err.contains("range start") && err.contains("greater than end"),
+            "should describe the inverted-range failure: {err}"
+        );
+        // Range endpoints also have to live in the field's bounds.
+        assert!(
+            CronExpression::parse("0-99 * * * *").is_err(),
+            "range end exceeds minute bounds"
+        );
+
+        // Well-formed ranges still parse.
+        assert!(CronExpression::parse("1-5 * * * *").is_ok());
+    }
+
+    #[test]
+    fn parse_rejects_out_of_range_list_entries() {
+        // A list with an entry outside the field's range silently
+        // contributed a dead value to the firing set. Reject the whole
+        // field.
+        assert!(CronExpression::parse("1,3,99 * * * *").is_err());
+        assert!(CronExpression::parse("0 0 * * 0,3,9").is_err());
+
+        // In-range lists still parse.
+        assert!(CronExpression::parse("1,3,5 * * * *").is_ok());
+    }
+
+    #[test]
+    fn parse_rejects_out_of_range_step_from_start() {
+        // `99/5 * * * *` — start is out of minute range; previously
+        // accepted silently.
+        let err = CronExpression::parse("99/5 * * * *").unwrap_err();
+        assert!(
+            err.contains("0..=59"),
+            "should call out the minute bounds: {err}"
+        );
     }
 }
