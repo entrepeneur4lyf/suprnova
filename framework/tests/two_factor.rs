@@ -901,6 +901,72 @@ async fn re_enroll_without_existing_enrollment_errors() {
 }
 
 #[tokio::test]
+async fn verify_stamps_forward_skew_edge_to_block_next_step_replay() {
+    // The TOTP construction in this module accepts codes across a
+    // ±1 step skew window. If the replay stamp lands on the bare
+    // `current` step, the same observed code is still in the
+    // accept window at `current + 1` and the fast-path predicate
+    // `current_step <= last` does not block it. Stamping
+    // `current + 1` closes that gap. This test pins the stamp's
+    // numeric value so any regression that drops the forward edge
+    // is caught.
+    let db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
+    ensure_crypt();
+
+    let user = FakeUser {
+        id: "stamp-edge-uid".into(),
+        email: "stamp-edge@example.com".into(),
+    };
+
+    let resp = TwoFactor::enroll(&user).await.unwrap();
+    TwoFactor::confirm(&user, &totp_code_for(&resp.otpauth_url))
+        .await
+        .unwrap();
+
+    let before_step = chrono::Utc::now().timestamp() / 30;
+    let live = totp_code_for(&resp.otpauth_url);
+    assert!(TwoFactor::verify(&user, &live).await.unwrap());
+
+    // Inspect the row directly via SeaORM. The
+    // `last_used_timestep` column must be the *forward* edge of
+    // the skew window, i.e. at least `before_step + 1`. Reading
+    // the timestep twice across the verify is allowed (the
+    // current step could have advanced by the time the verify
+    // wrote), so the assertion is ">= before_step + 1" rather
+    // than equality — that keeps the test stable across
+    // 30-second-boundary scheduling without losing the regression
+    // signal (any bare-current stamp lands at most at the
+    // current step).
+    use suprnova::EntityTrait;
+    let row = suprnova::auth_flows::two_factor::entity::Entity::find_by_id(user.id.clone())
+        .one(db.conn())
+        .await
+        .unwrap()
+        .expect("row must exist after a successful verify");
+    let stamped = row.last_used_timestep.expect("stamp must be populated");
+    assert!(
+        stamped > before_step,
+        "replay stamp must land on `current + 1` (forward skew edge); \
+         pre-verify step={before_step}, stamped={stamped} — a bare-`current` \
+         stamp would leave the captured code replayable for one more step"
+    );
+
+    // The replay guard is the WHERE clause `last_used_timestep IS
+    // NULL OR last_used_timestep < claim_to`. With `claim_to =
+    // current + 1` the next verify in the same skew window must
+    // affect zero rows and report Ok(false). Re-submitting the
+    // same code (which TOTP::generate_current produced and which
+    // remains valid for the rest of the 30s window plus the ±1
+    // skew) must therefore be rejected — even when the bare
+    // `check_code` would still accept it.
+    assert!(
+        !TwoFactor::verify(&user, &live).await.unwrap(),
+        "the same code must NOT verify a second time — \
+         stamping current+1 closes the next-step replay window"
+    );
+}
+
+#[tokio::test]
 async fn verify_replay_state_resets_on_re_enrollment() {
     let _db = TestDatabase::fresh::<TestMigrator>().await.unwrap();
     ensure_crypt();

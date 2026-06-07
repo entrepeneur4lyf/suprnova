@@ -344,6 +344,27 @@ impl Crypt {
         CRYPT_RING.get().map(|r| r.current.as_bytes().to_vec())
     }
 
+    /// Raw 32-byte payloads for every `APP_KEY_PREVIOUS` entry, in
+    /// rotation order (oldest first by convention — the same order
+    /// `decrypt_with_ring` walks).
+    ///
+    /// Internal hook for derive-key consumers that need to verify
+    /// material produced by an older key during a rotation window:
+    /// signed-URL HMAC matches the AEAD rotation story so URLs minted
+    /// before an `APP_KEY` flip stay verifiable, with the consumer
+    /// emitting a `tracing::warn!` on a previous-key hit so an operator
+    /// can complete the rotation.
+    ///
+    /// **Not exported.** Same secrecy contract as
+    /// [`Self::current_key_bytes`]: callers must treat the bytes as
+    /// HMAC/KDF material and never log them.
+    pub(crate) fn previous_key_bytes() -> Vec<Vec<u8>> {
+        CRYPT_RING
+            .get()
+            .map(|r| r.previous.iter().map(|k| k.as_bytes().to_vec()).collect())
+            .unwrap_or_default()
+    }
+
     /// Test-and-internal hook: decrypt a string under `purpose` AND
     /// report which key in the ring succeeded. Exposed at `pub(crate)`
     /// so tests in the same crate (and the macro-generated

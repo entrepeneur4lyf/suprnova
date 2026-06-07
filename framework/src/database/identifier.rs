@@ -103,6 +103,55 @@ fn validate_segment(full: &str, segment: &str) -> Result<(), FrameworkError> {
     Ok(())
 }
 
+/// Maximum allowed savepoint name length. Postgres/MySQL identifiers
+/// max out at 63/64 chars; we cap savepoint names at 64 to stay
+/// portable across every first-class backend while ensuring the
+/// validator's error bites well before a malformed name reaches the
+/// SQL executor.
+const MAX_SAVEPOINT_NAME_LEN: usize = 64;
+
+/// Validate a SQL savepoint identifier. Stricter than
+/// [`validate_identifier`]: savepoints do not allow schema qualification
+/// or quoting, so the regex is the unqualified
+/// `[A-Za-z_][A-Za-z0-9_]*` with a 64-char cap.
+///
+/// Returns the input borrow on success so callers can drop it straight
+/// into `format!("SAVEPOINT {name}")`.
+///
+/// # Errors
+///
+/// Returns [`FrameworkError::bad_request`] when the input is empty,
+/// exceeds the length cap, or contains any character outside
+/// `[A-Za-z0-9_]` (or starts with a digit).
+pub fn validate_savepoint_name(name: &str) -> Result<&str, FrameworkError> {
+    if name.is_empty() {
+        return Err(FrameworkError::bad_request(
+            "savepoint name cannot be empty",
+        ));
+    }
+    if name.len() > MAX_SAVEPOINT_NAME_LEN {
+        return Err(FrameworkError::bad_request(format!(
+            "savepoint name '{name}' exceeds {MAX_SAVEPOINT_NAME_LEN} characters"
+        )));
+    }
+    let mut chars = name.chars();
+    let first = chars.next().expect("non-empty checked above");
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return Err(FrameworkError::bad_request(format!(
+            "savepoint name '{name}' must start with a letter or '_' (got '{first}')"
+        )));
+    }
+    for c in chars {
+        if !(c.is_ascii_alphanumeric() || c == '_') {
+            return Err(FrameworkError::bad_request(format!(
+                "savepoint name '{name}' contains invalid character '{c}' \
+                 (allowed: A-Z a-z 0-9 _)"
+            )));
+        }
+    }
+    Ok(name)
+}
+
 /// Allowlist of SQL comparison / membership operators accepted by
 /// [`DbTableBuilder::filter_op`]. Validated case-insensitively for
 /// the alpha operators; punctuation operators are case-irrelevant
@@ -246,5 +295,48 @@ mod tests {
                 "must reject operator: {op:?}"
             );
         }
+    }
+
+    #[test]
+    fn savepoint_name_accepts_unqualified_ident() {
+        assert_eq!(validate_savepoint_name("inner").unwrap(), "inner");
+        assert_eq!(validate_savepoint_name("sp_1").unwrap(), "sp_1");
+        assert_eq!(validate_savepoint_name("_internal").unwrap(), "_internal");
+    }
+
+    #[test]
+    fn savepoint_name_rejects_dot_qualified() {
+        // Savepoints are unqualified — `public.inner` is invalid SQL
+        // and must be rejected before reaching the executor.
+        assert!(validate_savepoint_name("public.inner").is_err());
+    }
+
+    #[test]
+    fn savepoint_name_rejects_injection_payloads() {
+        for payload in [
+            "",
+            "foo; DROP TABLE users",
+            "foo; DROP TABLE users; --",
+            "1foo",
+            "foo bar",
+            "foo'",
+            "foo\"",
+            "foo--",
+            "foo\n",
+            "foo\0",
+        ] {
+            let err = validate_savepoint_name(payload).unwrap_err();
+            assert_eq!(
+                err.status_code(),
+                400,
+                "savepoint validation must surface as a 400, not 500, for {payload:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn savepoint_name_rejects_too_long() {
+        let long = "a".repeat(MAX_SAVEPOINT_NAME_LEN + 1);
+        assert!(validate_savepoint_name(&long).is_err());
     }
 }

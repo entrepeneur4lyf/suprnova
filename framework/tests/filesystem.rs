@@ -469,3 +469,101 @@ async fn register_azblob_derives_endpoint_when_omitted() {
     );
     assert!(Storage::disk("az_derived_endpoint").is_ok());
 }
+
+// ---------------------------------------------------------------------------
+// Secret-bearing config structs must have hand-written `Debug` impls that
+// redact credentials, so a stray `dbg!()` or `tracing::info!(?cfg)` does not
+// leak AWS / Azure / GCS credentials into logs.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn s3_config_debug_redacts_secret_access_key() {
+    let cfg = S3Config {
+        bucket: "my-bucket".into(),
+        region: Some("us-east-1".into()),
+        endpoint: None,
+        access_key_id: Some("AKIA-not-secret".into()),
+        secret_access_key: Some("secret-XYZ-do-not-log".into()),
+        root: None,
+    };
+    let rendered = format!("{cfg:?}");
+    assert!(
+        !rendered.contains("secret-XYZ-do-not-log"),
+        "S3Config Debug must NOT leak secret_access_key, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("[REDACTED]"),
+        "S3Config Debug must mark the secret as [REDACTED], got: {rendered}"
+    );
+    // Non-secret fields must still be visible — debug remains useful.
+    assert!(rendered.contains("my-bucket"));
+    assert!(rendered.contains("us-east-1"));
+    assert!(rendered.contains("AKIA-not-secret"));
+}
+
+#[test]
+fn s3_config_debug_renders_none_when_secret_unset() {
+    // The redacted Debug must distinguish "set but redacted" from
+    // "absent" — otherwise an operator scanning logs can't tell
+    // whether credentials are configured.
+    let cfg = S3Config {
+        bucket: "b".into(),
+        ..Default::default()
+    };
+    let rendered = format!("{cfg:?}");
+    assert!(
+        rendered.contains("secret_access_key: None"),
+        "unset secret must render as None, got: {rendered}"
+    );
+}
+
+#[test]
+fn azblob_config_debug_redacts_account_key() {
+    let cfg = AzBlobConfig {
+        container: "c".into(),
+        account_name: "myacct".into(),
+        account_key: "shared-key-XYZ-do-not-log".into(),
+        endpoint: None,
+        root: None,
+    };
+    let rendered = format!("{cfg:?}");
+    assert!(
+        !rendered.contains("shared-key-XYZ-do-not-log"),
+        "AzBlobConfig Debug must NOT leak account_key, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("[REDACTED]"),
+        "AzBlobConfig Debug must mark the secret as [REDACTED], got: {rendered}"
+    );
+    assert!(rendered.contains("myacct"));
+}
+
+#[test]
+fn azblob_config_debug_distinguishes_unset_from_set_account_key() {
+    let cfg = AzBlobConfig::default();
+    let rendered = format!("{cfg:?}");
+    assert!(
+        rendered.contains("[unset]") && !rendered.contains("[REDACTED]"),
+        "default AzBlobConfig must render account_key as [unset], got: {rendered}"
+    );
+}
+
+#[test]
+fn gcs_config_debug_redacts_credential() {
+    let cfg = GcsConfig {
+        bucket: "b".into(),
+        credential: Some("{\"private_key\":\"do-not-log\"}".into()),
+        credential_path: Some("/etc/gcs.json".into()),
+        endpoint: None,
+        root: None,
+    };
+    let rendered = format!("{cfg:?}");
+    assert!(
+        !rendered.contains("do-not-log"),
+        "GcsConfig Debug must NOT leak inline credential, got: {rendered}"
+    );
+    assert!(rendered.contains("[REDACTED]"));
+    // credential_path is a filesystem path, not the credential itself —
+    // remains visible so an operator can audit where the SA key lives.
+    assert!(rendered.contains("/etc/gcs.json"));
+}

@@ -198,10 +198,7 @@ impl MaintenanceMode for FileMaintenanceMode {
         // silently treated as "up". Callers that want the prior fail-open
         // behaviour wrap with `.unwrap_or(false)` (see MaintenanceMiddleware).
         tokio::fs::try_exists(&self.path).await.map_err(|e| {
-            FrameworkError::internal(format!(
-                "maintenance: probe {}: {e}",
-                self.path.display()
-            ))
+            FrameworkError::internal(format!("maintenance: probe {}: {e}", self.path.display()))
         })
     }
 

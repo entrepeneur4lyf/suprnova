@@ -663,9 +663,14 @@ impl Transaction {
     /// backends — SQLite's `SAVEPOINT` is fully functional even
     /// though SQLite has no row-level locking.
     ///
-    /// The savepoint name is interpolated verbatim into the SQL — do
-    /// NOT splice user input into it. Use a static identifier.
+    /// The savepoint name is validated as an unqualified SQL
+    /// identifier (ASCII alphanumeric + underscore, leading letter
+    /// or underscore, max 64 chars) before interpolation. A caller
+    /// that splices untrusted input gets a
+    /// [`FrameworkError::bad_request`] instead of an injected
+    /// statement. [`Self::rollback_to`] applies the same guard.
     pub async fn savepoint(&self, name: &str) -> Result<(), FrameworkError> {
+        let name = super::identifier::validate_savepoint_name(name)?;
         let sql = format!("SAVEPOINT {name}");
         self.inner
             .execute_unprepared(&sql)
@@ -678,9 +683,11 @@ impl Transaction {
     /// transaction. Drops every change made inside the savepoint
     /// without aborting the outer transaction.
     ///
-    /// The savepoint name is interpolated verbatim into the SQL — do
-    /// NOT splice user input into it.
+    /// The savepoint name is validated the same way as
+    /// [`Self::savepoint`] before interpolation — see that method
+    /// for the accepted shape.
     pub async fn rollback_to(&self, name: &str) -> Result<(), FrameworkError> {
+        let name = super::identifier::validate_savepoint_name(name)?;
         let sql = format!("ROLLBACK TO SAVEPOINT {name}");
         self.inner
             .execute_unprepared(&sql)

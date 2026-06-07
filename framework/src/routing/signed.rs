@@ -218,10 +218,24 @@ pub fn sign_url(
 /// Behaviour:
 /// - Returns [`SignatureVerdict::Invalid`] when `signature` is missing,
 ///   malformed (non-hex, wrong length), or does not match the recomputed
-///   HMAC.
-/// - Returns [`SignatureVerdict::Expired`] when the HMAC is valid but the
-///   embedded `expires` value is in the past relative to `now_epoch_seconds`.
+///   HMAC under the current key OR any `APP_KEY_PREVIOUS` entry.
+/// - Returns [`SignatureVerdict::Expired`] when some key in the ring
+///   produces a matching HMAC but the embedded `expires` value is in
+///   the past relative to `now_epoch_seconds`.
 /// - Returns [`SignatureVerdict::Valid`] otherwise.
+///
+/// ## Key rotation
+///
+/// The current key is tried first; on a mismatch, each `APP_KEY_PREVIOUS`
+/// entry is tried in registration order (mirroring the AEAD rotation
+/// fallback in [`crate::crypto::Crypt::decrypt_string`]). A previous-key
+/// hit emits a `tracing::warn!` carrying the zero-based ring index so an
+/// operator running a log search for "APP_KEY_PREVIOUS" sees one
+/// consistent rotation-in-progress signal across the crypto surface,
+/// then continues to validate / expire-check the URL normally. This
+/// keeps outstanding signed URLs verifiable across an `APP_KEY` flip;
+/// without the fallback every minted link would invalidate the instant
+/// the operator rotates.
 ///
 /// Pass `now_epoch_seconds` so the caller controls the clock (testability +
 /// monotonic-test parity with Laravel's `Carbon::now()->getTimestamp()` in
@@ -234,7 +248,34 @@ pub fn verify_signature(
     url: &str,
     now_epoch_seconds: i64,
 ) -> Result<SignatureVerdict, FrameworkError> {
-    let key = signed_url_key()?;
+    let current_key = signed_url_key()?;
+    let previous_keys = Crypt::previous_key_bytes();
+    Ok(verify_signature_with_keys(
+        url,
+        now_epoch_seconds,
+        &current_key,
+        &previous_keys,
+    ))
+}
+
+/// Pure verification primitive. Takes the keyring explicitly so the
+/// rotation fallback is exercisable from a unit test without seeding
+/// the process-global [`Crypt`] ring (which is sealed by OnceLock at
+/// boot and not safe to mutate from a test that races with other
+/// `Crypt::init` callers in the same lib-test binary).
+///
+/// Tries `current_key` first. If that misses, walks `previous_keys`
+/// in order — mirroring [`crate::crypto::Crypt::decrypt_string`]'s
+/// fallback — and emits a single `tracing::warn!` with the matching
+/// previous-ring index on a hit so an operator running a log search
+/// for "APP_KEY_PREVIOUS" sees one consistent rotation-in-progress
+/// signal across the crypto surface.
+fn verify_signature_with_keys(
+    url: &str,
+    now_epoch_seconds: i64,
+    current_key: &[u8],
+    previous_keys: &[Vec<u8>],
+) -> SignatureVerdict {
     let (path, pairs) = split_url(url);
 
     // Extract the candidate signature and the expires value.
@@ -252,31 +293,56 @@ pub fn verify_signature(
         }
     }
     let Some(sig) = sig else {
-        return Ok(SignatureVerdict::Invalid);
+        return SignatureVerdict::Invalid;
     };
 
-    // Canonical recomputation.
+    // Canonical recomputation. Build once — the payload is identical
+    // across every key in the ring.
     let sorted: BTreeMap<String, String> = rest.into_iter().collect();
     let canonical = canonicalize(&path, &sorted);
-    let expected = hmac_hex(&key, canonical.as_bytes());
 
-    // Constant-time compare. Length mismatch fails closed in the
-    // `ConstantTimeEq` impl, but we short-circuit for hex-encoding
-    // sanity (malformed `signature` should never near `ct_eq`).
-    if sig.len() != expected.len() {
-        return Ok(SignatureVerdict::Invalid);
-    }
-    let valid: bool = sig.as_bytes().ct_eq(expected.as_bytes()).into();
-    if !valid {
-        return Ok(SignatureVerdict::Invalid);
+    // Current key first.
+    let expected_current = hmac_hex(current_key, canonical.as_bytes());
+    if signatures_match(&sig, &expected_current) {
+        return verdict_for_expiry(expires, now_epoch_seconds);
     }
 
+    // Walk APP_KEY_PREVIOUS in ring order.
+    for (index, key) in previous_keys.iter().enumerate() {
+        let expected = hmac_hex(key, canonical.as_bytes());
+        if signatures_match(&sig, &expected) {
+            tracing::warn!(
+                previous_index = index,
+                "signed URL verified against APP_KEY_PREVIOUS[{index}]; \
+                 re-mint outstanding signed links so the rotation can complete",
+            );
+            return verdict_for_expiry(expires, now_epoch_seconds);
+        }
+    }
+
+    SignatureVerdict::Invalid
+}
+
+/// Constant-time signature comparison guarded by a length check so the
+/// hex-encoding step never near `ct_eq` on a malformed `signature` query
+/// param.
+fn signatures_match(actual: &str, expected: &str) -> bool {
+    if actual.len() != expected.len() {
+        return false;
+    }
+    actual.as_bytes().ct_eq(expected.as_bytes()).into()
+}
+
+/// Resolve `Valid` / `Expired` for a successful HMAC match. Called once
+/// per ring hit so the verdict path is identical whether the URL was
+/// signed under the current key or a rotated previous key.
+fn verdict_for_expiry(expires: Option<i64>, now_epoch_seconds: i64) -> SignatureVerdict {
     if let Some(ts) = expires
         && now_epoch_seconds > ts
     {
-        return Ok(SignatureVerdict::Expired);
+        return SignatureVerdict::Expired;
     }
-    Ok(SignatureVerdict::Valid)
+    SignatureVerdict::Valid
 }
 
 /// Convenience: sign a named route lookup.
@@ -439,5 +505,130 @@ mod tests {
         // Bare junk in the signature slot.
         let url = "/x?signature=not-hex-at-all";
         assert_eq!(verify_signature(url, 0).unwrap(), SignatureVerdict::Invalid,);
+    }
+
+    /// Mint a URL signed against an arbitrary key, bypassing the
+    /// `sign_url` keyring resolution. Mirrors `sign_url`'s canonical
+    /// build so the rotation-fallback tests can simulate a URL that
+    /// was minted under what is now an `APP_KEY_PREVIOUS` entry.
+    fn sign_url_with_key(url: &str, key: &[u8], expires: Option<i64>) -> String {
+        let (path, mut pairs) = split_url(url);
+        pairs.retain(|(k, _)| k != SIGNATURE_KEY && k != EXPIRES_KEY);
+        if let Some(ts) = expires {
+            pairs.push((EXPIRES_KEY.to_string(), ts.to_string()));
+        }
+        let sorted: BTreeMap<String, String> = pairs.into_iter().collect();
+        let canonical = canonicalize(&path, &sorted);
+        let signature = hmac_hex(key, canonical.as_bytes());
+        let mut out = canonical;
+        if sorted.is_empty() {
+            out.push('?');
+        } else {
+            out.push('&');
+        }
+        out.push_str(SIGNATURE_KEY);
+        out.push('=');
+        out.push_str(&signature);
+        out
+    }
+
+    // M22 — Signed URL APP_KEY_PREVIOUS fallback. The lib-test binary
+    // shares one `Crypt` OnceLock across every test module, so we
+    // can't reliably install a multi-key ring from here. Instead we
+    // drive [`verify_signature_with_keys`] directly with the ring
+    // laid out per-test. The `verify_signature` public path is
+    // already covered by the existing tests above; the keys-explicit
+    // primitive is the single point where the rotation walk lives.
+
+    #[test]
+    fn rotation_fallback_validates_url_signed_by_previous_key() {
+        // Operator rotated APP_KEY; the now-current key was not the
+        // key that signed this URL, but a previous key (still
+        // installed via APP_KEY_PREVIOUS) was. The verifier must
+        // walk the ring and accept the URL — otherwise every
+        // outstanding signed link breaks the moment the operator
+        // rotates.
+        let current = EncryptionKey::generate();
+        let prev = EncryptionKey::generate();
+        let signed = sign_url_with_key("/orders/42?foo=1", prev.as_bytes(), None);
+        let verdict =
+            verify_signature_with_keys(&signed, 0, current.as_bytes(), &[prev.as_bytes().to_vec()]);
+        assert_eq!(
+            verdict,
+            SignatureVerdict::Valid,
+            "URL signed by APP_KEY_PREVIOUS must validate via the ring fallback so \
+             outstanding signed links survive an APP_KEY rotation"
+        );
+    }
+
+    #[test]
+    fn rotation_fallback_walks_multiple_previous_keys_in_order() {
+        // Multi-step rotation: the URL was signed by the oldest
+        // previous key. The walk must reach it, not stop at the
+        // first miss.
+        let current = EncryptionKey::generate();
+        let mid = EncryptionKey::generate();
+        let oldest = EncryptionKey::generate();
+        let signed = sign_url_with_key("/x?a=1&b=2", oldest.as_bytes(), None);
+        let previous = vec![oldest.as_bytes().to_vec(), mid.as_bytes().to_vec()];
+        let verdict = verify_signature_with_keys(&signed, 0, current.as_bytes(), &previous);
+        assert_eq!(verdict, SignatureVerdict::Valid);
+    }
+
+    #[test]
+    fn rotation_fallback_preserves_expiry_verdict() {
+        // The fallback must NOT downgrade the verdict — a previous-
+        // key-signed URL that has since elapsed `expires=` returns
+        // Expired (not Valid, not Invalid).
+        let current = EncryptionKey::generate();
+        let prev = EncryptionKey::generate();
+        let signed = sign_url_with_key("/reset", prev.as_bytes(), Some(1000));
+        let verdict = verify_signature_with_keys(
+            &signed,
+            2000,
+            current.as_bytes(),
+            &[prev.as_bytes().to_vec()],
+        );
+        assert_eq!(
+            verdict,
+            SignatureVerdict::Expired,
+            "expiry must apply equally to previous-key-signed URLs"
+        );
+    }
+
+    #[test]
+    fn rotation_fallback_rejects_url_signed_by_key_outside_ring() {
+        // A URL signed by a key that is in NEITHER `current` nor
+        // `previous` must be rejected as Invalid — the fallback is
+        // bounded by the installed ring, not an open sesame.
+        let current = EncryptionKey::generate();
+        let prev = EncryptionKey::generate();
+        let unrelated = EncryptionKey::generate();
+        let signed = sign_url_with_key("/orders/42", unrelated.as_bytes(), None);
+        let verdict =
+            verify_signature_with_keys(&signed, 0, current.as_bytes(), &[prev.as_bytes().to_vec()]);
+        assert_eq!(verdict, SignatureVerdict::Invalid);
+    }
+
+    #[test]
+    fn rotation_fallback_current_key_match_does_not_walk_previous() {
+        // Sanity: when the current key matches, the previous list is
+        // ignored (no rotation warning, no waste of HMAC ops). We
+        // can't easily assert "no log emitted" without a tracing
+        // subscriber, but we can pin the verdict alongside an empty
+        // previous list and prove the answer doesn't shift when a
+        // non-matching previous key is added.
+        let current = EncryptionKey::generate();
+        let signed = sign_url_with_key("/x", current.as_bytes(), None);
+        let no_prev = verify_signature_with_keys(&signed, 0, current.as_bytes(), &[]);
+        let other = EncryptionKey::generate();
+        let with_prev = verify_signature_with_keys(
+            &signed,
+            0,
+            current.as_bytes(),
+            &[other.as_bytes().to_vec()],
+        );
+        assert_eq!(no_prev, SignatureVerdict::Valid);
+        assert_eq!(with_prev, SignatureVerdict::Valid);
     }
 }

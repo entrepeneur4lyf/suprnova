@@ -362,6 +362,46 @@ async fn create_with_tx_commits_atomically() {
 }
 
 #[tokio::test]
+async fn savepoint_rejects_injection_payload_with_bad_request() {
+    let _db = fixture().await;
+
+    let outcome = DB::transaction(|tx| {
+        Box::pin(async move {
+            let err = tx
+                .savepoint("foo; DROP TABLE t11_accounts; --")
+                .await
+                .expect_err("must reject injection-shaped savepoint name");
+            assert_eq!(
+                err.status_code(),
+                400,
+                "savepoint validation must surface as 400 bad-request, not 500"
+            );
+
+            let err = tx
+                .rollback_to("foo'")
+                .await
+                .expect_err("rollback_to must apply the same guard");
+            assert_eq!(err.status_code(), 400);
+
+            // Sanity: well-formed names still work alongside the
+            // rejected ones — the guard does not break the legitimate path.
+            tx.savepoint("inner_ok").await?;
+            tx.rollback_to("inner_ok").await?;
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await;
+    outcome.expect("transaction must surface bad savepoint as recoverable Err");
+
+    // The table is still there.
+    let rows = T11Account::query().get().await.unwrap();
+    assert!(
+        !rows.is_empty(),
+        "injection payload must not drop the table"
+    );
+}
+
+#[tokio::test]
 async fn create_with_tx_rolls_back_when_handle_dropped_without_commit() {
     let _db = fixture().await;
 

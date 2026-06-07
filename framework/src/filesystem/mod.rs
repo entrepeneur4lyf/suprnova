@@ -53,7 +53,12 @@ pub struct Storage;
 /// Mirrors `opendal::services::S3` — credentials and region are optional so
 /// the underlying SDK can fall back to its credential providers (environment,
 /// IMDS, profile chain) when omitted.
-#[derive(Debug, Clone, Default)]
+///
+/// The `Debug` impl masks `secret_access_key` (the only secret-bearing
+/// field) as `Some("[REDACTED]")` / `None` so a stray `dbg!()` or
+/// `tracing::info!(?config)` does not leak AWS credentials. Pattern
+/// mirrors [`crate::EncryptionKey`]'s redacting `Debug`.
+#[derive(Clone, Default)]
 pub struct S3Config {
     /// Bucket name. Required.
     pub bucket: String,
@@ -69,8 +74,28 @@ pub struct S3Config {
     pub root: Option<String>,
 }
 
+impl std::fmt::Debug for S3Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3Config")
+            .field("bucket", &self.bucket)
+            .field("region", &self.region)
+            .field("endpoint", &self.endpoint)
+            .field("access_key_id", &self.access_key_id)
+            .field(
+                "secret_access_key",
+                &self.secret_access_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("root", &self.root)
+            .finish()
+    }
+}
+
 /// Configuration for the Azure Blob Storage driver.
-#[derive(Debug, Clone, Default)]
+///
+/// The `Debug` impl masks `account_key` (the storage account secret)
+/// so a stray `dbg!()` or `tracing::info!(?config)` does not leak the
+/// shared key.
+#[derive(Clone, Default)]
 pub struct AzBlobConfig {
     /// Container name. Required.
     pub container: String,
@@ -86,8 +111,33 @@ pub struct AzBlobConfig {
     pub root: Option<String>,
 }
 
+impl std::fmt::Debug for AzBlobConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `account_key` is a String (not Option<String>), so render
+        // it as a marker that distinguishes "set" from "empty" without
+        // leaking the value.
+        let account_key_repr = if self.account_key.is_empty() {
+            "[unset]"
+        } else {
+            "[REDACTED]"
+        };
+        f.debug_struct("AzBlobConfig")
+            .field("container", &self.container)
+            .field("account_name", &self.account_name)
+            .field("account_key", &account_key_repr)
+            .field("endpoint", &self.endpoint)
+            .field("root", &self.root)
+            .finish()
+    }
+}
+
 /// Configuration for the Google Cloud Storage driver.
-#[derive(Debug, Clone, Default)]
+///
+/// The `Debug` impl masks `credential` (the inline JSON service-account
+/// key) so a stray `dbg!()` or `tracing::info!(?config)` does not leak
+/// the JSON key bytes. `credential_path` is NOT redacted because it's a
+/// filesystem path, not the credential itself.
+#[derive(Clone, Default)]
 pub struct GcsConfig {
     /// Bucket name. Required.
     pub bucket: String,
@@ -99,6 +149,21 @@ pub struct GcsConfig {
     pub endpoint: Option<String>,
     /// Root prefix within the bucket.
     pub root: Option<String>,
+}
+
+impl std::fmt::Debug for GcsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GcsConfig")
+            .field("bucket", &self.bucket)
+            .field(
+                "credential",
+                &self.credential.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("credential_path", &self.credential_path)
+            .field("endpoint", &self.endpoint)
+            .field("root", &self.root)
+            .finish()
+    }
 }
 
 /// Default resilience layer applied by the cloud convenience constructors

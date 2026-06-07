@@ -44,6 +44,14 @@ const ISSUER_ENV: &str = "APP_NAME";
 const DEFAULT_ISSUER: &str = "Suprnova";
 const RECOVERY_CODE_COUNT: usize = 10;
 
+/// Forward-skew window the TOTP construction in [`check_code`] accepts
+/// (`skew=1`). The replay-claim stamp uses `current + TOTP_SKEW_STEPS`
+/// so the next-timestep replay of the same code is rejected — a bare
+/// `current` stamp leaves a one-step gap where the captured code still
+/// validates and the predicate `current_step <= last` does not yet
+/// fire. See [`TwoFactor::verify`]'s replay-protection comment.
+const TOTP_SKEW_STEPS: i64 = 1;
+
 /// Static facade for the 2FA TOTP lifecycle. See module docs.
 pub struct TwoFactor;
 
@@ -52,7 +60,13 @@ pub struct TwoFactor;
 /// The recovery codes are plaintext and MUST be displayed to the user
 /// exactly once - there is no API for retrieving them again after the
 /// response is dropped.
-#[derive(Debug, Clone)]
+///
+/// The `Debug` impl is hand-written rather than derived so a stray
+/// `dbg!()` or `tracing::info!(?response)` does not leak the
+/// `otpauth_url` (which contains the raw shared secret in its
+/// `secret=` query parameter) or the plaintext recovery codes.
+/// Pattern mirrors [`crate::EncryptionKey`]'s redacting `Debug`.
+#[derive(Clone)]
 pub struct EnrollmentResponse {
     /// `otpauth://totp/...` URL suitable for QR-app deep linking.
     pub otpauth_url: String,
@@ -61,6 +75,28 @@ pub struct EnrollmentResponse {
     pub qr_code_svg: String,
     /// Ten single-use recovery codes. Plaintext - show once.
     pub recovery_codes: Vec<String>,
+}
+
+impl std::fmt::Debug for EnrollmentResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The otpauth URL embeds the shared secret in its query
+        // string — treat the whole URL as opaque, just like the
+        // recovery codes. The QR-code SVG is derived from the same
+        // secret and equally sensitive, so it gets the same redacting
+        // treatment (length is non-secret and useful for debugging
+        // "did the QR encoder run?").
+        f.debug_struct("EnrollmentResponse")
+            .field("otpauth_url", &"[REDACTED]")
+            .field(
+                "qr_code_svg",
+                &format!("[REDACTED; {} bytes]", self.qr_code_svg.len()),
+            )
+            .field(
+                "recovery_codes",
+                &format!("[REDACTED; {} codes]", self.recovery_codes.len()),
+            )
+            .finish()
+    }
 }
 
 /// Minimum contract for a user the [`TwoFactor`] facade can act on.
@@ -267,15 +303,22 @@ impl TwoFactor {
     ///
     /// # Replay protection
     ///
-    /// On a successful verify the server's current TOTP timestep is
-    /// persisted to `last_used_timestep`. Subsequent verifications
-    /// where `current_timestep <= last_used_timestep` are rejected
-    /// even when the code itself is structurally valid — preventing
-    /// an attacker who observed a valid code from re-submitting it
-    /// within the same 30-second window. The legitimate cost is that
-    /// a user who needs to 2FA twice within 30 seconds must wait for
-    /// the next timestep; for the typical "verify once per login"
-    /// flow this is invisible.
+    /// On a successful verify the row is stamped with `claim_to`,
+    /// computed as `current_timestep + TOTP_SKEW_STEPS` (= `current + 1`,
+    /// matching the `skew=1` the [`check_code`] TOTP construction
+    /// accepts). Subsequent verifications where
+    /// `current_timestep <= last_used_timestep` are rejected even when
+    /// the code itself is structurally valid.
+    ///
+    /// Stamping the *forward* edge of the skew window is what blocks
+    /// the next-timestep replay that a bare `current_timestep` stamp
+    /// would miss. An attacker who observes a code at server time T
+    /// cannot replay it at T+1, even though `check_code` would still
+    /// accept the same code in that window.
+    ///
+    /// The legitimate cost is that a user who needs to 2FA twice across
+    /// the same skew window must wait until the next one — for the
+    /// typical "verify once per login" flow this is invisible.
     ///
     /// The timestep claim is atomic. The stamp is written with a
     /// conditional `UPDATE ... WHERE last_used_timestep IS NULL OR
@@ -336,22 +379,27 @@ impl TwoFactor {
 
         // Atomically claim this timestep. The conditional WHERE turns
         // check-and-stamp into a single statement: the first verify in a
-        // given timestep flips `last_used_timestep` to `current`, and any
-        // concurrent verify's predicate (`< current`) no longer matches,
-        // so it affects zero rows. This is what makes the replay guard
-        // hold under concurrency — the previous read-modify-write let two
+        // given timestep flips `last_used_timestep` to `claim_to`, and
+        // any concurrent verify's predicate no longer matches, so it
+        // affects zero rows. This is what makes the replay guard hold
+        // under concurrency — the previous read-modify-write let two
         // racing verifies both stamp and both succeed (a TOCTOU race).
+        //
+        // `claim_to` is the *forward* edge of the TOTP skew window
+        // (`current + TOTP_SKEW_STEPS`). Stamping the bare `current`
+        // would leave the same code replayable at the next timestep,
+        // because `check_code` accepts codes for [T-1, T, T+1] at server
+        // time T — a captured code from T is still in [T, T+1, T+2] at
+        // T+1, and a bare-current stamp would not block it.
+        let claim_to = current_timestep + TOTP_SKEW_STEPS;
         let claim = entity::Entity::update_many()
-            .col_expr(
-                entity::Column::LastUsedTimestep,
-                Expr::value(current_timestep),
-            )
+            .col_expr(entity::Column::LastUsedTimestep, Expr::value(claim_to))
             .col_expr(entity::Column::UpdatedAt, Expr::value(chrono::Utc::now()))
             .filter(entity::Column::UserId.eq(user.user_id()))
             .filter(
                 Condition::any()
                     .add(entity::Column::LastUsedTimestep.is_null())
-                    .add(entity::Column::LastUsedTimestep.lt(current_timestep)),
+                    .add(entity::Column::LastUsedTimestep.lt(claim_to)),
             )
             .exec(db.inner())
             .await
@@ -440,17 +488,17 @@ impl TwoFactor {
             return Ok(false);
         }
 
+        // Stamp the forward edge of the skew window — see
+        // [`Self::verify`]'s comment block for the full reasoning.
+        let claim_to = current_timestep + TOTP_SKEW_STEPS;
         let claim = entity::Entity::update_many()
-            .col_expr(
-                entity::Column::LastUsedTimestep,
-                Expr::value(current_timestep),
-            )
+            .col_expr(entity::Column::LastUsedTimestep, Expr::value(claim_to))
             .col_expr(entity::Column::UpdatedAt, Expr::value(chrono::Utc::now()))
             .filter(entity::Column::UserId.eq(user.user_id()))
             .filter(
                 Condition::any()
                     .add(entity::Column::LastUsedTimestep.is_null())
-                    .add(entity::Column::LastUsedTimestep.lt(current_timestep)),
+                    .add(entity::Column::LastUsedTimestep.lt(claim_to)),
             )
             .exec(db.inner())
             .await
