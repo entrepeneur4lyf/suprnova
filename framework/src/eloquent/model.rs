@@ -1045,30 +1045,94 @@ where
     /// Variant of [`Self::update`] that returns
     /// `FrameworkError::not_found` when the row no longer exists.
     /// Mirrors Laravel's `Model::updateOrFail`.
+    ///
+    /// The find + UPDATE pair runs inside a single transaction so a
+    /// concurrent DELETE cannot slip between the existence check and
+    /// the write. When the caller is already inside a
+    /// [`DB::transaction`](crate::DB::transaction) closure the
+    /// ambient transaction is reused (opening a fresh `DB::transaction`
+    /// would be rejected as nested); otherwise one is opened for the
+    /// duration of the call.
+    ///
+    /// SeaORM's `ActiveModelTrait::update` already surfaces a
+    /// missing-row UPDATE as [`sea_orm::DbErr::RecordNotUpdated`] /
+    /// [`sea_orm::DbErr::RecordNotFound`]; both are translated to
+    /// `FrameworkError::not_found` here so a TOCTOU loss looks the
+    /// same to the caller as a stale-handle pre-flight failure (HTTP
+    /// 404 rather than a generic 500).
     async fn update_or_fail(self, attrs: Attrs) -> Result<Self, FrameworkError> {
-        // Pre-flight: re-fetch by PK to make the "row vanished mid-flight"
-        // case surface as 404 rather than a noop UPDATE returning the
-        // stale in-memory row.
-        let pk = self.primary_key_value();
-        if Self::find(pk).await?.is_none() {
-            return Err(FrameworkError::not_found(
-                "update_or_fail: row no longer exists",
-            ));
+        use crate::database::transaction::CURRENT_TX;
+
+        let in_tx = CURRENT_TX.try_with(|t| t.is_some()).unwrap_or(false);
+
+        if in_tx {
+            // Already inside `DB::transaction` — the surrounding
+            // closure owns atomicity. Run the UPDATE through the
+            // ambient tx and translate SeaORM's missing-row signals
+            // (`RecordNotUpdated` on the WHERE miss,
+            // `RecordNotFound` on the post-UPDATE re-fetch miss the
+            // non-RETURNING backends use) into 404 instead of the
+            // generic 500 a `DbErr::Database(...)` would map to.
+            return self.update(attrs).await.map_err(|e| {
+                if is_record_missing(&e) {
+                    FrameworkError::not_found("update_or_fail: row no longer exists")
+                } else {
+                    e
+                }
+            });
         }
-        self.update(attrs).await
+
+        // No ambient transaction — open one so a concurrent DELETE
+        // can't slip between the pre-flight existence check and the
+        // write. Inside the closure the UPDATE acquires the write
+        // lock atomically with no separate read step, eliminating
+        // the TOCTOU window the old implementation had between
+        // `Self::find(pk)` and `Self::update(attrs)`.
+        crate::database::DB::transaction(|tx| {
+            Box::pin(async move {
+                self.update_with_tx(tx, attrs).await.map_err(|e| {
+                    if is_record_missing(&e) {
+                        FrameworkError::not_found("update_or_fail: row no longer exists")
+                    } else {
+                        e
+                    }
+                })
+            })
+        })
+        .await
     }
 
     /// Variant of [`Self::delete`] that returns
     /// `FrameworkError::not_found` when the row no longer exists.
     /// Mirrors Laravel's `Model::deleteOrFail`.
+    ///
+    /// Atomicity follows the same shape as
+    /// [`Self::update_or_fail`] — the existence check and the DELETE
+    /// share a transaction (ambient when one is in scope, otherwise a
+    /// freshly opened one). SeaORM's `ActiveModelTrait::delete`
+    /// returns `Ok` even when the WHERE clause matched zero rows, so
+    /// we additionally inspect [`sea_orm::DeleteResult::rows_affected`]
+    /// after the DELETE lands and surface `0` as 404 — matching what
+    /// the caller would have seen had the pre-flight observed the
+    /// missing row.
     async fn delete_or_fail(self) -> Result<(), FrameworkError> {
-        let pk = self.primary_key_value();
-        if Self::find(pk).await?.is_none() {
-            return Err(FrameworkError::not_found(
-                "delete_or_fail: row no longer exists",
-            ));
+        use crate::database::transaction::CURRENT_TX;
+
+        let in_tx = CURRENT_TX.try_with(|t| t.is_some()).unwrap_or(false);
+
+        if in_tx {
+            return delete_one_or_fail::<Self>(self, None).await;
         }
-        self.delete().await
+
+        // No ambient transaction — wrap the DELETE in one so the
+        // row-existence check and the write are atomic. Unlike
+        // `Self::delete`, this helper inspects
+        // `DeleteResult::rows_affected` and surfaces `0` as 404
+        // instead of letting it look like a successful no-op.
+        crate::database::DB::transaction(|tx| {
+            Box::pin(async move { delete_one_or_fail::<Self>(self, Some(tx)).await })
+        })
+        .await
     }
 
     // --- Hooks the macro-generated impl fills in ---
@@ -1321,4 +1385,81 @@ where
     /// Build an unsaved in-memory instance from `attrs`. Used by
     /// `first_or_new` / `find_or_new`. The macro fills this in.
     fn from_attrs_unsaved(attrs: Attrs) -> Result<Self, FrameworkError>;
+}
+
+/// Return `true` when `err` came from SeaORM signalling the WHERE
+/// clause matched no rows (`RecordNotUpdated`) or the post-UPDATE
+/// re-fetch found nothing (`RecordNotFound`). Used by `update_or_fail`
+/// to translate a TOCTOU loss into HTTP 404 instead of a generic 500.
+///
+/// `FrameworkError::From<DbErr>` flattens the variant to its
+/// `Display` form, so the match is by message prefix — both messages
+/// are stable across SeaORM 1.x and unique enough to avoid
+/// collisions with user error text.
+fn is_record_missing(err: &FrameworkError) -> bool {
+    if let FrameworkError::Database(msg) = err {
+        msg.starts_with("None of the records are updated")
+            || msg.starts_with("RecordNotFound Error")
+    } else {
+        false
+    }
+}
+
+/// Execute a hard DELETE for `model` and assert that exactly one row
+/// was removed. Shared between `delete_or_fail` and its
+/// ambient-transaction branch so both paths fire the same lifecycle
+/// events (`Deleting` → DELETE → `Deleted`) and the same
+/// `rows_affected == 1` check.
+///
+/// When `tx` is `Some` the DELETE is pinned to the supplied
+/// transaction (the `delete_or_fail` no-ambient-tx path uses this
+/// after opening its own `DB::transaction`). When `tx` is `None` the
+/// DELETE flows through whatever the ambient `CURRENT_TX` /
+/// per-model default connection routing resolves to — which inside
+/// `delete_or_fail`'s ambient-tx branch is the surrounding closure
+/// transaction.
+async fn delete_one_or_fail<M>(
+    model: M,
+    tx: Option<&crate::database::Transaction>,
+) -> Result<(), FrameworkError>
+where
+    M: Model,
+    M: From<<M::Entity as EntityTrait>::Model>,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    M::__dispatch_deleting(&model, false).await?;
+
+    let snapshot = model.clone();
+    let row = model.try_into_storage()?;
+    let am = row.into_active_model();
+    let exec = match tx {
+        Some(t) => crate::database::transaction::ExecutorChoice::from_tx(t),
+        None => {
+            crate::database::transaction::ExecutorChoice::resolve_write(
+                None,
+                None,
+                M::default_connection_name(),
+            )
+            .await?
+        }
+    };
+    let result = exec
+        .delete_active(am)
+        .await
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
+    if result.rows_affected == 0 {
+        return Err(FrameworkError::not_found(
+            "delete_or_fail: row no longer exists",
+        ));
+    }
+
+    M::__dispatch_deleted(&snapshot, false).await?;
+    Ok(())
 }

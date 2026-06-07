@@ -404,6 +404,185 @@ async fn delete_or_fail_errors_when_row_gone() {
 }
 
 #[tokio::test]
+async fn update_or_fail_returns_404_status_when_row_vanished() {
+    // A TOCTOU loss between the existence check and the UPDATE must
+    // surface as `FrameworkError::not_found` (HTTP 404), the same
+    // shape a stale-handle pre-flight failure would produce — not
+    // as the generic 500 a `DbErr::RecordNotUpdated` would otherwise
+    // map to.
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    let row = ParUser::create(attrs! { name: "A", views: 0, likes: 0 })
+        .await
+        .unwrap();
+    let handle = row.clone();
+    handle.delete().await.unwrap();
+
+    let err = row.update_or_fail(attrs! { name: "Z" }).await.unwrap_err();
+    assert_eq!(
+        err.status_code(),
+        404,
+        "update_or_fail must surface a missing row as 404, got {err}"
+    );
+}
+
+#[tokio::test]
+async fn delete_or_fail_returns_404_status_when_row_vanished() {
+    // `Self::delete` returns `Ok(())` even when the WHERE clause
+    // matched zero rows; the hardened path inspects
+    // `DeleteResult::rows_affected` and surfaces 0 as 404.
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    let row = ParUser::create(attrs! { name: "A", views: 0, likes: 0 })
+        .await
+        .unwrap();
+    let handle = row.clone();
+    handle.delete().await.unwrap();
+
+    let err = row.delete_or_fail().await.unwrap_err();
+    assert_eq!(
+        err.status_code(),
+        404,
+        "delete_or_fail must surface a missing row as 404, got {err}"
+    );
+}
+
+#[tokio::test]
+async fn update_or_fail_succeeds_on_live_row() {
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    let row = ParUser::create(attrs! { name: "A", views: 0, likes: 0 })
+        .await
+        .unwrap();
+    let id = row.id;
+    let updated = row
+        .update_or_fail(attrs! { name: "B", views: 7, likes: 1 })
+        .await
+        .expect("update_or_fail against live row must succeed");
+    assert_eq!(updated.id, id);
+    assert_eq!(updated.name, "B");
+    assert_eq!(updated.views, 7);
+
+    let reloaded = ParUser::find(id).await.unwrap().unwrap();
+    assert_eq!(reloaded.name, "B");
+    assert_eq!(reloaded.views, 7);
+}
+
+#[tokio::test]
+async fn delete_or_fail_succeeds_on_live_row() {
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    let row = ParUser::create(attrs! { name: "A", views: 0, likes: 0 })
+        .await
+        .unwrap();
+    let id = row.id;
+    row.delete_or_fail()
+        .await
+        .expect("delete_or_fail against live row must succeed");
+
+    let reloaded = ParUser::find(id).await.unwrap();
+    assert!(
+        reloaded.is_none(),
+        "row should be gone after delete_or_fail"
+    );
+}
+
+#[tokio::test]
+async fn update_or_fail_inside_ambient_transaction_succeeds() {
+    // When `update_or_fail` runs inside an ambient `DB::transaction`
+    // closure it must reuse that transaction (a fresh
+    // `DB::transaction` would be rejected as nested). This exercise
+    // proves both that the nested-tx guard isn't tripped and that
+    // the UPDATE commits alongside the rest of the closure's work.
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    let row = ParUser::create(attrs! { name: "A", views: 0, likes: 0 })
+        .await
+        .unwrap();
+    let id = row.id;
+
+    let updated_name = suprnova::DB::transaction(|_tx| {
+        Box::pin(async move {
+            let updated = row.update_or_fail(attrs! { name: "tx-updated" }).await?;
+            Ok::<String, suprnova::FrameworkError>(updated.name)
+        })
+    })
+    .await
+    .expect("ambient-tx update_or_fail must commit");
+    assert_eq!(updated_name, "tx-updated");
+
+    let reloaded = ParUser::find(id).await.unwrap().unwrap();
+    assert_eq!(reloaded.name, "tx-updated");
+}
+
+#[tokio::test]
+async fn delete_or_fail_inside_ambient_transaction_succeeds() {
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    let row = ParUser::create(attrs! { name: "A", views: 0, likes: 0 })
+        .await
+        .unwrap();
+    let id = row.id;
+
+    suprnova::DB::transaction(|_tx| {
+        Box::pin(async move {
+            row.delete_or_fail().await?;
+            Ok::<(), suprnova::FrameworkError>(())
+        })
+    })
+    .await
+    .expect("ambient-tx delete_or_fail must commit");
+
+    let reloaded = ParUser::find(id).await.unwrap();
+    assert!(reloaded.is_none());
+}
+
+#[tokio::test]
+async fn delete_or_fail_404_inside_ambient_transaction() {
+    // Inside an ambient tx the row-vanished path still has to return
+    // 404 rather than silently succeeding (the `delete` shim drops
+    // the `DeleteResult`).
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    let row = ParUser::create(attrs! { name: "A", views: 0, likes: 0 })
+        .await
+        .unwrap();
+    let handle = row.clone();
+    handle.delete().await.unwrap();
+
+    let result = suprnova::DB::transaction(|_tx| {
+        Box::pin(async move {
+            row.delete_or_fail().await?;
+            Ok::<(), suprnova::FrameworkError>(())
+        })
+    })
+    .await;
+    let err = result.expect_err("delete_or_fail of vanished row inside tx must fail");
+    assert_eq!(err.status_code(), 404);
+}
+
+#[tokio::test]
+async fn update_or_fail_404_inside_ambient_transaction() {
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    let row = ParUser::create(attrs! { name: "A", views: 0, likes: 0 })
+        .await
+        .unwrap();
+    let handle = row.clone();
+    handle.delete().await.unwrap();
+
+    let result = suprnova::DB::transaction(|_tx| {
+        Box::pin(async move {
+            row.update_or_fail(attrs! { name: "X" }).await?;
+            Ok::<(), suprnova::FrameworkError>(())
+        })
+    })
+    .await;
+    let err = result.expect_err("update_or_fail of vanished row inside tx must fail");
+    assert_eq!(err.status_code(), 404);
+}
+
+#[tokio::test]
 async fn find_or_runs_fallback_when_missing() {
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
