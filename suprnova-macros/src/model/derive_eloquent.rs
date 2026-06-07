@@ -620,9 +620,19 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                         "UPDATE {table} SET {} = NULL WHERE {pk_name} = ?",
                         #soft_delete_col,
                     );
-                    // T11: route through ExecutorChoice so restores
-                    // inside `DB::transaction` land in the active tx.
-                    let exec = ::suprnova::database::transaction::ExecutorChoice::resolve()?;
+                    // Route through `resolve_write` (not `resolve`) so
+                    // restores honour the full write-side precedence
+                    // chain — tx override → ambient CURRENT_TX → builder
+                    // `on(name)` → per-model `#[model(connection = ".")]`
+                    // → primary. The bare `resolve()` would only consult
+                    // CURRENT_TX and fall back to `DB::connection()`,
+                    // silently ignoring per-model connection routing.
+                    let exec = ::suprnova::database::transaction::ExecutorChoice::resolve_write(
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        <Self as ::suprnova::eloquent::Model>::default_connection_name(),
+                    )
+                    .await?;
                     let backend = exec.backend();
                     exec.run(
                         ::suprnova::sea_orm::Statement::from_sql_and_values(
@@ -776,6 +786,16 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         quote! {}
     };
 
+    // Soft-delete column for the `const SOFT_DELETES_COLUMN` initialiser
+    // on `impl EloquentModel`. Empty when the model didn't opt into
+    // `#[model(soft_deletes)]` — the has/where-has engine treats `""` as
+    // "do not auto-apply the deleted_at IS NULL filter".
+    let soft_deletes_column_const: &str = if input.soft_deletes {
+        &input.soft_deletes_column
+    } else {
+        ""
+    };
+
     Ok(quote! {
         impl ::suprnova::eloquent::EloquentModel for #struct_ident {
             type Entity = #module_name::Entity;
@@ -783,6 +803,18 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             // Literal table string captured at parse time — see T3
             // for why this is the literal rather than a SeaORM call.
             const TABLE: &'static str = #table;
+            // The macro-parsed primary key name. Mirrors the
+            // `primary_key_name()` method on `Model` but as a `const`,
+            // so the has/where-has engine can read it through
+            // `inventory::submit!` initialisers (which require const
+            // evaluation).
+            const PRIMARY_KEY: &'static str = #pk_name;
+            // Soft-delete column when `#[model(soft_deletes)]` is set;
+            // empty string otherwise. The existence engine consults
+            // this through the `RelationEntry` table — the related
+            // model's PK and soft-delete column are baked into each
+            // relation's inventory entry at link time.
+            const SOFT_DELETES_COLUMN: &'static str = #soft_deletes_column_const;
         }
 
         // Bridge the user struct <-> SeaORM Model row. The inner

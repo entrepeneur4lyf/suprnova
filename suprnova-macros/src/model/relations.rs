@@ -659,6 +659,30 @@ fn emit_relation_inventory(
         },
     };
 
+    // Target primary key — used by the existence engine to render
+    // `pivot.related = target.<pk>` joins. Read from the related model's
+    // `const PRIMARY_KEY` so models with `primary_key = "uuid"` join
+    // through the correct column. MorphTo has no single target table
+    // and no single PK column; emit `""` as the sentinel.
+    let target_primary_key_expr: TokenStream = match rel.kind {
+        RelationKindAttr::MorphTo => quote! { "" },
+        _ => quote! {
+            <#target_ty as ::suprnova::eloquent::EloquentModel>::PRIMARY_KEY
+        },
+    };
+
+    // Related model's soft-delete column. The macro-emitted const on
+    // the target's `impl EloquentModel` returns `""` when the related
+    // model does NOT opt into `#[model(soft_deletes)]`, so the engine
+    // can treat empty as "no auto soft-delete filter". MorphTo cannot
+    // bind to a single target type at the parent's expansion site.
+    let related_soft_deletes_column_expr: TokenStream = match rel.kind {
+        RelationKindAttr::MorphTo => quote! { "" },
+        _ => quote! {
+            <#target_ty as ::suprnova::eloquent::EloquentModel>::SOFT_DELETES_COLUMN
+        },
+    };
+
     // Parent key (PK on the OWNER's side). LK override applies to the
     // has-family relations. BelongsTo's "parent_key" maps to the OWNED
     // model's PK column ("id" by default). All others default to "id".
@@ -748,6 +772,8 @@ fn emit_relation_inventory(
                 &related_pivot_col,
                 "",
                 "",
+                &target_primary_key_expr,
+                &related_soft_deletes_column_expr,
             );
         }
         RelationKindAttr::MorphToMany | RelationKindAttr::MorphedByMany => {
@@ -802,6 +828,8 @@ fn emit_relation_inventory(
                 &pivot_related_col,
                 &parent_morph_type_col,
                 &morph_type_value_str,
+                &target_primary_key_expr,
+                &related_soft_deletes_column_expr,
             );
         }
         _ => (String::new(), String::new(), String::new()),
@@ -834,6 +862,8 @@ fn emit_relation_inventory(
         &pivot_related_key_str,
         &morph_type_column_str,
         &morph_type_value_str,
+        &target_primary_key_expr,
+        &related_soft_deletes_column_expr,
     )
 }
 
@@ -856,6 +886,8 @@ fn emit_inventory_token(
     pivot_related_key: &str,
     morph_type_column: &str,
     morph_type_value: &str,
+    target_primary_key_expr: &TokenStream,
+    related_soft_deletes_column_expr: &TokenStream,
 ) -> TokenStream {
     quote! {
         ::suprnova::inventory::submit! {
@@ -874,6 +906,8 @@ fn emit_inventory_token(
                 pivot_related_key: #pivot_related_key,
                 morph_type_column: #morph_type_column,
                 morph_type_value: #morph_type_value,
+                target_primary_key: #target_primary_key_expr,
+                related_soft_deletes_column: #related_soft_deletes_column_expr,
             }
         }
     }

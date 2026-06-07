@@ -260,3 +260,108 @@ async fn or_has_combines_via_or() {
     assert!(names.contains(&"Bob"));
     assert_eq!(either.len(), 2);
 }
+
+// ---- Pivot join honours target's `#[model(primary_key = "...")]` -------
+//
+// Regression — the existence engine used to hardcode the pivot's
+// target-side join column to `"id"`. A target model with a renamed
+// primary key (e.g. `uuid`) joined through the wrong column and
+// rendered `pivot.col = target.id` against a target whose PK column
+// is `uuid`, producing a runtime SQL error or silently empty results.
+
+#[model(table = "hex_pivot_groups", primary_key = "uuid", key_type = "String")]
+pub struct HexPivotGroup {
+    pub uuid: String,
+    pub name: String,
+}
+
+#[model(table = "hex_pivot_users", relations = {
+    groups: BelongsToMany<HexPivotGroup, HexPivotMembership>,
+})]
+pub struct HexPivotUser {
+    pub id: i64,
+    pub email: String,
+}
+
+#[model(table = "hex_pivot_memberships")]
+pub struct HexPivotMembership {
+    pub id: i64,
+    pub hex_pivot_user_id: i64,
+    pub hex_pivot_group_id: String,
+}
+
+#[tokio::test]
+async fn has_through_pivot_joins_against_targets_custom_primary_key() {
+    use suprnova::sea_orm::DbBackend;
+
+    // The generated SQL for the pivot-shaped EXISTS must qualify the
+    // target side join column with the target model's PK
+    // (`hex_pivot_groups.uuid`), NOT a hardcoded `"id"`.
+    let (sql, _vals) = HexPivotUser::query()
+        .has("groups")
+        .to_sql_with_bindings_for(DbBackend::Postgres);
+
+    assert!(
+        sql.contains("hex_pivot_memberships.hex_pivot_group_id = hex_pivot_groups.uuid"),
+        "pivot join must use target's custom PK (`uuid`), got SQL: {sql}",
+    );
+    assert!(
+        !sql.contains("= hex_pivot_groups.id"),
+        "pivot join must NOT use hardcoded `id` PK, got SQL: {sql}",
+    );
+}
+
+// ---- has/where_has auto-applies related soft-delete scope --------------
+//
+// Regression — Laravel's `has`/`where_has` walks the related model's
+// default scope, which includes `deleted_at IS NULL` for soft-deleting
+// models. Before the fix, `User::query().has("posts")` returned users
+// whose only posts were soft-deleted; the EXISTS subquery did not
+// filter on `posts.deleted_at IS NULL`.
+
+#[model(table = "sd_has_users", relations = {
+    posts: HasMany<SdHasPost>,
+})]
+pub struct SdHasUser {
+    pub id: i64,
+    pub name: String,
+}
+
+#[model(table = "sd_has_posts", soft_deletes)]
+pub struct SdHasPost {
+    pub id: i64,
+    pub sd_has_user_id: i64,
+    pub title: String,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[tokio::test]
+async fn has_subquery_appends_related_soft_delete_filter_when_target_soft_deletes() {
+    use suprnova::sea_orm::DbBackend;
+
+    let (sql, _vals) = SdHasUser::query()
+        .has("posts")
+        .to_sql_with_bindings_for(DbBackend::Postgres);
+
+    assert!(
+        sql.contains("sd_has_posts.deleted_at IS NULL"),
+        "has() on a target with `soft_deletes` must auto-apply IS NULL filter, \
+         got SQL: {sql}",
+    );
+}
+
+#[tokio::test]
+async fn has_subquery_does_not_append_soft_delete_filter_when_target_has_none() {
+    use suprnova::sea_orm::DbBackend;
+
+    // HexPost does NOT soft-delete; the engine must NOT inject any
+    // `deleted_at IS NULL` filter for the non-soft-delete target.
+    let (sql, _vals) = HexUser::query()
+        .has("posts")
+        .to_sql_with_bindings_for(DbBackend::Postgres);
+
+    assert!(
+        !sql.contains("deleted_at IS NULL"),
+        "has() on a target without soft_deletes must NOT inject IS NULL, got SQL: {sql}",
+    );
+}

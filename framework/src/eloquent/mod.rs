@@ -67,4 +67,18 @@ pub trait EloquentModel: Sized {
     type Entity: crate::EntityTrait;
     type Column;
     const TABLE: &'static str;
+    /// Primary-key column name. The macro emits the value from the
+    /// `primary_key = "..."` attribute (default `"id"`). Mirrors
+    /// [`crate::eloquent::Model::primary_key_name`] but as a `const`
+    /// so it can be read by `inventory::submit!` initialisers — the
+    /// has/where-has engine pulls each relation's target PK from here
+    /// at link time to render the correct pivot join.
+    const PRIMARY_KEY: &'static str = "id";
+    /// Soft-delete column on this model. `""` when the model does NOT
+    /// opt into `#[model(soft_deletes)]`; otherwise the model's
+    /// configured `deleted_at` column name. Read by the has/where-has
+    /// engine to auto-apply the related model's soft-delete scope to
+    /// EXISTS subqueries (a parent with only soft-deleted children
+    /// must NOT match `has("children")`).
+    const SOFT_DELETES_COLUMN: &'static str = "";
 }

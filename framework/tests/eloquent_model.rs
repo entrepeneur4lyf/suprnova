@@ -369,3 +369,68 @@ async fn create_rejects_unknown_column() {
     .await;
     assert!(result.is_err(), "expected error for unknown column");
 }
+
+// ---- create_or_first narrows on FrameworkError::Database --------------
+//
+// Regression — the original implementation matched `Err(_)`
+// indiscriminately and re-queried by `lookup` for every error. A
+// non-DB failure (validation, listener cancel) had its original
+// error swallowed and the re-query result returned instead. The fix
+// narrows the match to `FrameworkError::Database(_)` and propagates
+// every other variant.
+
+#[tokio::test]
+async fn create_or_first_returns_existing_row_on_unique_violation() {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    migrate(&db).await;
+
+    let existing = T4User::create(attrs! { name: "Alice", email: "race@x.com" })
+        .await
+        .unwrap();
+
+    // Second create_or_first hits the UNIQUE constraint on email and
+    // re-queries by lookup; the existing row is returned.
+    let same = T4User::create_or_first(
+        attrs! { email: "race@x.com" },
+        attrs! { name: "Replacement" },
+    )
+    .await
+    .expect("DB error must trigger re-query path");
+
+    assert_eq!(same.id, existing.id);
+    assert_eq!(same.name, "Alice");
+}
+
+#[tokio::test]
+async fn create_or_first_propagates_non_database_errors_unchanged() {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    migrate(&db).await;
+
+    // Unknown column triggers `FrameworkError::Domain` (not
+    // `Database`) from the fillable/column validation path. The
+    // create_or_first matcher must NOT re-query by lookup; it must
+    // surface the original error unchanged.
+    let err = T4User::create_or_first(
+        attrs! { email: "validate@x.com" },
+        attrs! { name: "Newcomer", nonexistent: "bad" },
+    )
+    .await
+    .expect_err("unknown column must surface as a non-DB error");
+
+    // Surfaced error must not be the synthetic "row is not present"
+    // internal error — that's the original buggy behaviour.
+    let msg = err.to_string();
+    assert!(
+        !msg.contains("row is not present"),
+        "non-DB errors must propagate unchanged; got: {msg}",
+    );
+    // And the lookup must NOT have been re-run; the row must not exist.
+    assert!(
+        T4User::query()
+            .filter("email", "validate@x.com")
+            .first()
+            .await
+            .unwrap()
+            .is_none(),
+    );
+}

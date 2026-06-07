@@ -258,6 +258,20 @@ pub struct RelationEntry {
     /// macro expansion site (`MorphTo` — the value lives on the child
     /// row itself).
     pub morph_type_value: &'static str,
+    /// Primary-key column name on the related/target side. Used by the
+    /// existence engine to join pivot rows against the target table
+    /// (`pivot.related_key = target.target_primary_key`). The macro
+    /// emits the target model's `EloquentModel::PRIMARY_KEY` value;
+    /// defaults to `"id"` for backwards compatibility with the old
+    /// hardcoded behaviour. `""` for `MorphTo` where the target table
+    /// is variable.
+    pub target_primary_key: &'static str,
+    /// `deleted_at` (or custom `soft_deletes_column`) on the related
+    /// model when it opts into `#[model(soft_deletes)]`. `""` when the
+    /// related model does not soft-delete. The existence engine appends
+    /// `target.<col> IS NULL` to has/where-has subqueries so the parent
+    /// scope agrees with the child's default soft-delete scope.
+    pub related_soft_deletes_column: &'static str,
 }
 
 inventory::collect!(RelationEntry);

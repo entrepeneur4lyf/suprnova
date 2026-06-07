@@ -209,6 +209,12 @@ pub(crate) struct ExistsSpec {
     /// Stable morph-type string the discriminator must equal. Empty
     /// for non-morph kinds.
     pub morph_type_value: String,
+    /// Soft-delete column on the related model (`deleted_at` by default,
+    /// or the model's custom `soft_deletes_column`). Empty when the
+    /// related model does not soft-delete. When present, the renderer
+    /// appends `<target>.<col> IS NULL` to the EXISTS subquery WHERE so
+    /// `has`/`where_has` agrees with the related model's default scope.
+    pub related_soft_deletes_column: String,
     /// Polarity: `true` renders `EXISTS (...)`, `false` renders
     /// `NOT EXISTS (...)`.
     pub positive: bool,
@@ -1726,6 +1732,19 @@ fn render_exists(
         }
     };
 
+    // Auto-apply the related model's soft-delete scope, so `has` /
+    // `where_has` agrees with the related model's default scope.
+    // Skip on the degenerate "no target table" path above (which
+    // already returned 1 = 0); skip when the related model does not
+    // soft-delete. Always qualify with the target table when present
+    // so the column reads unambiguously inside the subquery.
+    if !spec.related_soft_deletes_column.is_empty() && !spec.target_table.is_empty() {
+        where_parts.push(format!(
+            "{}.{} IS NULL",
+            spec.target_table, spec.related_soft_deletes_column,
+        ));
+    }
+
     // Inner constraint from `where_has`'s closure.
     for t in &spec.inner_terms {
         let part = render_subquery_term(backend, t, values, n);
@@ -2368,10 +2387,11 @@ where
                 related_pk: if e.pivot_table.is_empty() {
                     String::new()
                 } else {
-                    "id".to_string()
+                    e.target_primary_key.to_string()
                 },
                 morph_type_column: e.morph_type_column.to_string(),
                 morph_type_value: e.morph_type_value.to_string(),
+                related_soft_deletes_column: e.related_soft_deletes_column.to_string(),
                 positive,
                 count_op: count_op.map(str::to_string),
                 count_value,
@@ -2391,6 +2411,7 @@ where
                 related_pk: String::new(),
                 morph_type_column: String::new(),
                 morph_type_value: String::new(),
+                related_soft_deletes_column: String::new(),
                 positive,
                 count_op: count_op.map(str::to_string),
                 count_value,

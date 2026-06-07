@@ -1284,22 +1284,25 @@ where
 
     /// Laravel's `createOrFirst` — race-safe insert. Try to create the
     /// row; if it conflicts on a unique constraint, return the
-    /// existing row. The conflict detection here is per-attempt — when
-    /// the create errors with a database error (which on most engines
-    /// indicates a uniqueness violation), we re-fetch by `lookup`.
+    /// existing row. The conflict detection narrows on
+    /// `FrameworkError::Database` only: validation failures,
+    /// listener cancellations, or any other non-DB error variant
+    /// propagate to the caller unchanged. If the re-query finds no
+    /// row after a DB error, surface the original DB error (the
+    /// "conflict + lookup hits nothing" combination is almost
+    /// certainly a serialization / connection failure rather than
+    /// a real uniqueness conflict).
     async fn create_or_first(lookup: Attrs, extras: Attrs) -> Result<Self, FrameworkError> {
         let attrs = lookup.clone().merge(extras);
         match Self::create(attrs).await {
             Ok(row) => Ok(row),
-            Err(_) => Self::query()
-                .filter_attrs(&lookup)
-                .first()
-                .await?
-                .ok_or_else(|| {
-                    FrameworkError::internal(
-                        "create_or_first: create failed and the row is not present",
-                    )
-                }),
+            Err(err @ FrameworkError::Database(_)) => {
+                match Self::query().filter_attrs(&lookup).first().await? {
+                    Some(found) => Ok(found),
+                    None => Err(err),
+                }
+            }
+            Err(other) => Err(other),
         }
     }
 
