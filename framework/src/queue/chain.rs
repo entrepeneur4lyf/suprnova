@@ -13,6 +13,7 @@
 use crate::error::FrameworkError;
 use crate::queue::Job;
 use crate::queue::envelope::Envelope;
+use crate::queue::job::BackoffSchedule;
 use serde::{Deserialize, Serialize};
 
 /// Serialized form of one chained envelope, persisted on the active
@@ -24,12 +25,17 @@ pub struct ChainLink {
     pub max_tries: u32,
     pub timeout_secs: Option<u64>,
     pub fail_on_timeout: bool,
+    /// Job-side backoff schedule captured at chain-build time. `#[serde(default)]`
+    /// keeps schema-v2 chain payloads (which omitted this field) decoding —
+    /// they get the framework default just as they did before.
+    #[serde(default)]
+    pub backoff: BackoffSchedule,
 }
 
 impl ChainLink {
     /// Build a chain-link entry from a typed `Job`. Uses the job's
-    /// `J::max_tries()` / `J::timeout()` defaults exactly the way
-    /// `Queue::push` would.
+    /// `J::max_tries()` / `J::timeout()` / `J::backoff()` defaults exactly
+    /// the way `Queue::push` would.
     pub fn from_job<J: Job>(job: J) -> Result<Self, FrameworkError> {
         Ok(Self {
             job_name: J::job_name().to_string(),
@@ -38,6 +44,7 @@ impl ChainLink {
             max_tries: J::max_tries(),
             timeout_secs: J::timeout().map(|d| d.as_secs()),
             fail_on_timeout: J::fail_on_timeout(),
+            backoff: J::backoff(),
         })
     }
 
@@ -53,7 +60,7 @@ impl ChainLink {
             available_at: now,
             attempts: 0,
             max_tries: self.max_tries,
-            backoff: crate::queue::BackoffSchedule::default(),
+            backoff: self.backoff.clone(),
             timeout_secs: self.timeout_secs,
             fail_on_timeout: self.fail_on_timeout,
             idempotency_key: None,

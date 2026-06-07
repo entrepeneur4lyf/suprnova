@@ -131,3 +131,57 @@ async fn chain_stops_after_a_failing_link() {
         "no further chain envelopes after the failure"
     );
 }
+
+// Lights up the M39 fix: a job overriding `Job::backoff()` must propagate
+// that schedule through the chain — `ChainLink::to_envelope` previously
+// hardcoded `BackoffSchedule::default()` and dropped the override on
+// rehydration.
+#[derive(Serialize, Deserialize, Clone)]
+struct FixedBackoffJob;
+
+#[async_trait]
+impl Job for FixedBackoffJob {
+    fn job_name() -> &'static str {
+        "queue_chains::FixedBackoffJob"
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+    fn backoff() -> suprnova::queue::BackoffSchedule {
+        suprnova::queue::BackoffSchedule::Fixed { secs: 7 }
+    }
+}
+
+#[test]
+fn chain_link_propagates_job_backoff_into_envelope() {
+    let link =
+        suprnova::queue::chain::ChainLink::from_job(FixedBackoffJob).expect("chain link encode");
+    let env = link.to_envelope();
+    assert_eq!(
+        env.backoff,
+        suprnova::queue::BackoffSchedule::Fixed { secs: 7 },
+        "chain envelope must carry the job's custom backoff schedule"
+    );
+}
+
+// Forward-compat: a chain payload serialized BEFORE the M39 fix did not
+// include `backoff` on the link. The `#[serde(default)]` annotation makes
+// such payloads decode to the framework-default schedule, preserving
+// pre-fix behaviour for in-flight messages.
+#[test]
+fn v2_chain_link_without_backoff_decodes_to_default() {
+    let v2_payload = serde_json::json!({
+        "job_name": "queue_chains::FixedBackoffJob",
+        "payload": {},
+        "max_tries": 3,
+        "timeout_secs": null,
+        "fail_on_timeout": false,
+    });
+    let link: suprnova::queue::chain::ChainLink =
+        serde_json::from_value(v2_payload).expect("v2 chain link must decode under serde(default)");
+    assert_eq!(
+        link.backoff,
+        suprnova::queue::BackoffSchedule::default(),
+        "missing backoff must fall back to framework default"
+    );
+}

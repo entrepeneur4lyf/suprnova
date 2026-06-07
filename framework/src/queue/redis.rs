@@ -134,6 +134,10 @@ pub struct RedisQueueDriver {
     /// `available_at` is still in the future. Promoted into the stream by
     /// every `pop` via `PROMOTE_DUE_SCRIPT`.
     delayed_key: String,
+    /// Consumer-group name. Captured at construction so the introspection
+    /// methods (`reserved_size`, `pending_size`) can scope XPENDING queries
+    /// to the same group the consumer reads from.
+    group_name: String,
     /// Direct Redis connection used for ZADD on `push`/`nack` and EVAL on
     /// `pop`. Sea-streamer's `RedisProducer` is intentionally bypassed for
     /// these operations because it speaks only XADD; the
@@ -217,6 +221,7 @@ impl RedisQueueDriver {
             consumer,
             stream_key,
             delayed_key,
+            group_name: group.to_string(),
             conn,
             pending: Mutex::new(HashMap::new()),
         })
@@ -445,7 +450,132 @@ impl QueueDriver for RedisQueueDriver {
         Ok(())
     }
 
+    /// Total envelopes the driver currently holds across the live stream
+    /// plus the delayed ZSET.
+    ///
+    /// `XLEN` counts every entry that's been XADD'd minus those XDEL'd or
+    /// XTRIM'd. Acknowledged entries remain in the stream until trimmed, so
+    /// this is an upper bound on "live work" rather than a strict count of
+    /// undelivered jobs — adequate for the same dashboarding role Laravel's
+    /// `Queue::size()` plays. For "ready to pop" backlog use
+    /// `pending_size()` (subtracts the PEL); for explicit reserved counts
+    /// use `reserved_size()`.
+    async fn size(&self) -> Result<u64, FrameworkError> {
+        let stream_len = self.xlen_stream().await?;
+        let delayed = self.zcard_delayed().await?;
+        Ok(stream_len.saturating_add(delayed))
+    }
+
+    /// Envelopes on the stream that no consumer has claimed yet —
+    /// approximated as `XLEN(stream) - XPENDING(group)`.
+    ///
+    /// This is the closest analogue to "available for the next pop" on
+    /// Redis Streams. It can read high when a previous run left acked
+    /// entries on the stream awaiting `XTRIM`/`XDEL`; treat it as an upper
+    /// bound on backlog rather than a strict ready-count.
+    async fn pending_size(&self) -> Result<u64, FrameworkError> {
+        let stream_len = self.xlen_stream().await?;
+        let reserved = self.reserved_size().await.unwrap_or(0);
+        Ok(stream_len.saturating_sub(reserved))
+    }
+
+    /// Envelopes parked on the `<stream>:delayed` ZSET because their
+    /// `available_at` is still in the future.
+    async fn delayed_size(&self) -> Result<u64, FrameworkError> {
+        self.zcard_delayed().await
+    }
+
+    /// Envelopes currently held in the consumer group's Pending Entries
+    /// List — i.e. delivered to some consumer but not yet `XACK`'d.
+    async fn reserved_size(&self) -> Result<u64, FrameworkError> {
+        self.xpending_count().await
+    }
+
+    /// Delete every envelope the driver tracks: the stream itself, the
+    /// delayed ZSET, and the in-process pending-reservation map.
+    ///
+    /// Returns an approximate count of dropped envelopes (stream entries +
+    /// delayed entries observed at the moment `XLEN`/`ZCARD` ran). The
+    /// stream's consumer group is destroyed alongside the stream; it is
+    /// re-created on the next `pop` because the consumer is configured with
+    /// `mkstream` + Earliest reset.
+    async fn clear(&self) -> Result<u64, FrameworkError> {
+        let mut conn = self.conn.clone();
+        let stream_len = self.xlen_stream().await?;
+        let delayed = self.zcard_delayed().await?;
+
+        let stream_name = self.stream_key.name();
+        let _: i64 = redis::cmd("DEL")
+            .arg(stream_name)
+            .arg(&self.delayed_key)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("redis clear DEL: {e}")))?;
+
+        // Reservation tokens issued before clear are no longer meaningful;
+        // drop the in-process map so ack/nack on them are silent no-ops.
+        if let Ok(mut g) = lock::lock(&self.pending, "redis queue pending map") {
+            g.clear();
+        }
+
+        Ok(stream_len.saturating_add(delayed))
+    }
+
     fn name(&self) -> &'static str {
         "redis-streams"
+    }
+}
+
+impl RedisQueueDriver {
+    /// `XLEN <stream>` — total entries currently held by the stream
+    /// (including acknowledged-but-not-trimmed ones).
+    async fn xlen_stream(&self) -> Result<u64, FrameworkError> {
+        let mut conn = self.conn.clone();
+        let n: i64 = redis::cmd("XLEN")
+            .arg(self.stream_key.name())
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("redis XLEN: {e}")))?;
+        Ok(n.max(0) as u64)
+    }
+
+    /// `ZCARD <stream>:delayed` — entries parked awaiting their
+    /// `available_at` deadline.
+    async fn zcard_delayed(&self) -> Result<u64, FrameworkError> {
+        let mut conn = self.conn.clone();
+        let n: i64 = redis::cmd("ZCARD")
+            .arg(&self.delayed_key)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("redis ZCARD delayed: {e}")))?;
+        Ok(n.max(0) as u64)
+    }
+
+    /// `XPENDING <stream> <group>` summary — first element is the total
+    /// count of entries in the group's Pending Entries List (delivered but
+    /// not yet acked). Returns 0 if the group does not exist (cleared
+    /// stream, never-popped driver instance).
+    async fn xpending_count(&self) -> Result<u64, FrameworkError> {
+        let mut conn = self.conn.clone();
+        // XPENDING summary form returns
+        //   [count, smallest-id, largest-id, [[consumer, count], ...]]
+        // or all-nil when the group is empty. We only need the first cell.
+        let resp: redis::Value = redis::cmd("XPENDING")
+            .arg(self.stream_key.name())
+            .arg(&self.group_name)
+            .query_async(&mut conn)
+            .await
+            // The group may not exist yet (no `pop` has run on a fresh stream),
+            // which surfaces as a Redis error. Treat that as "0 reserved".
+            .unwrap_or(redis::Value::Nil);
+        let count = match resp {
+            redis::Value::Array(parts) | redis::Value::Set(parts) => match parts.first() {
+                Some(redis::Value::Int(n)) => (*n).max(0) as u64,
+                _ => 0,
+            },
+            redis::Value::Int(n) => n.max(0) as u64,
+            _ => 0,
+        };
+        Ok(count)
     }
 }

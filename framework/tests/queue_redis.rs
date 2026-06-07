@@ -159,3 +159,74 @@ async fn redis_driver_nack_with_delay_defers_redelivery() {
     assert_eq!(r2.envelope.job_name, "retry");
     assert_eq!(r2.envelope.attempts, 1);
 }
+
+/// Lights up the M40 fix. With no overrides, the trait defaults for
+/// `size`/`pending_size`/`reserved_size`/`delayed_size`/`clear` returned
+/// `Err("does not implement")` — admin dashboards inspecting a Redis
+/// queue got no number back. The overrides round-trip:
+///   - push 2 immediate + 1 delayed → size = 3, delayed = 1
+///   - pop one → reserved = 1, pending shrinks accordingly
+///   - clear → everything = 0
+#[ignore = "requires a real Redis"]
+#[tokio::test]
+async fn redis_driver_size_introspection_round_trip() {
+    let stream = format!("test-{}", uuid::Uuid::new_v4());
+    let d = RedisQueueDriver::connect(
+        "redis://127.0.0.1:6379",
+        &stream,
+        "g-size",
+        "c-size",
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+
+    // Pre-pop the empty stream so the consumer group exists for XPENDING.
+    let _ = d.pop(Duration::from_millis(50)).await.unwrap();
+
+    // Empty state.
+    assert_eq!(d.size().await.unwrap(), 0);
+    assert_eq!(d.pending_size().await.unwrap(), 0);
+    assert_eq!(d.delayed_size().await.unwrap(), 0);
+    assert_eq!(d.reserved_size().await.unwrap(), 0);
+
+    // Push 2 immediate + 1 delayed.
+    d.push(env("s1")).await.unwrap();
+    d.push(env("s2")).await.unwrap();
+    let mut delayed = env("s3-late");
+    delayed.available_at = Utc::now() + chrono::Duration::milliseconds(3_000);
+    d.push(delayed).await.unwrap();
+
+    assert_eq!(
+        d.size().await.unwrap(),
+        3,
+        "size = XLEN(stream) + ZCARD(delayed) = 2 + 1"
+    );
+    assert_eq!(
+        d.delayed_size().await.unwrap(),
+        1,
+        "one envelope parked on the delayed ZSET"
+    );
+    assert_eq!(d.reserved_size().await.unwrap(), 0, "nothing reserved yet");
+
+    // Pop one; reservation count climbs.
+    let r1 = d.pop(Duration::from_secs(5)).await.unwrap().unwrap();
+    assert_eq!(
+        d.reserved_size().await.unwrap(),
+        1,
+        "one entry should be in the consumer group's PEL"
+    );
+
+    // Ack it; reservation count drops.
+    d.ack(&r1.token).await.unwrap();
+    assert_eq!(d.reserved_size().await.unwrap(), 0);
+
+    // clear() returns an approximate count and drains everything.
+    let cleared = d.clear().await.unwrap();
+    assert!(cleared >= 1, "clear must report dropped envelopes");
+    assert_eq!(
+        d.delayed_size().await.unwrap(),
+        0,
+        "delayed key must be empty after clear"
+    );
+}

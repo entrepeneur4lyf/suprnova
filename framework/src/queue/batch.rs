@@ -400,6 +400,15 @@ impl PendingBatch {
 
     /// Persist the batch and dispatch every queued job via the configured
     /// driver. Returns the batch id.
+    ///
+    /// If any `driver.push` fails mid-loop, the batch row is deleted before
+    /// returning the error. A half-pushed batch with `pending_jobs == total`
+    /// would otherwise sit unfinished forever — workers only see the
+    /// envelopes that made it into the queue, so pending can never reach 0
+    /// and `then`/`catch`/`finally` would never fire. Deleting the batch
+    /// makes the in-flight pushes orphan (their `record_successful_job`
+    /// returns `Err` and the worker logs but does not finalize), and the
+    /// caller gets a hard error to surface or retry.
     pub async fn dispatch(self) -> Result<String, FrameworkError> {
         ensure_default_repository();
         let repo = current_repository()
@@ -424,7 +433,20 @@ impl PendingBatch {
         let driver = crate::queue::current_driver()?;
         for mut env in self.envelopes {
             env.batch_id = Some(id.clone());
-            driver.push(env).await?;
+            if let Err(e) = driver.push(env).await {
+                // Roll the batch back so it can't sit stuck on the
+                // permanently-non-zero `pending_jobs`. Repository delete
+                // failures are logged but do not mask the original push
+                // error — the caller needs the original cause.
+                if let Err(del_err) = repo.delete(&id).await {
+                    tracing::warn!(
+                        batch_id = %id,
+                        error = %del_err,
+                        "queue batch dispatch: failed to delete partially-pushed batch row"
+                    );
+                }
+                return Err(e);
+            }
         }
         Ok(id)
     }

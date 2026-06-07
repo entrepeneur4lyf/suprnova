@@ -550,7 +550,16 @@ async fn handle_completed(
         {
             let _ = repo.mark_finished(batch_id).await;
             if let Ok(Some(b)) = repo.find(batch_id).await {
-                fire_batch_callbacks(&b, BatchPhase::Then).await;
+                // If any prior job failed or the batch was cancelled
+                // mid-flight, finalize via Catch — Then is only correct
+                // when the entire batch succeeded. Whichever settlement
+                // path drives pending to 0 must agree on the callback.
+                let phase = if b.failed_jobs > 0 || b.cancelled() {
+                    BatchPhase::Catch
+                } else {
+                    BatchPhase::Then
+                };
+                fire_batch_callbacks(&b, phase).await;
                 fire_batch_callbacks(&b, BatchPhase::Finally).await;
             }
         }
