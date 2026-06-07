@@ -29,9 +29,7 @@ struct FormRequestAttrs {
 /// - `custom_hooks` — suppress the auto-emitted `impl FormRequest` so the
 ///   caller can write their own to override `authorize` /
 ///   `after_validation` / `after_validation_async`.
-fn parse_form_request_attrs(
-    attrs: &[syn::Attribute],
-) -> Result<FormRequestAttrs, syn::Error> {
+fn parse_form_request_attrs(attrs: &[syn::Attribute]) -> Result<FormRequestAttrs, syn::Error> {
     let mut max_body_bytes: Option<proc_macro2::TokenStream> = None;
     let mut custom_hooks = false;
     for attr in attrs {
