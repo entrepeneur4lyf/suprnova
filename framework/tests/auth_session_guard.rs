@@ -22,7 +22,7 @@ use suprnova::auth::request_state;
 use suprnova::events::testing::{assert_dispatched, assert_not_dispatched};
 use suprnova::{
     Auth, AuthConfig, AuthManager, Authenticatable, Credentials, EventFacade, FrameworkError,
-    SessionGuard, StatefulGuard, UserProvider,
+    SessionGuard, SessionMiddleware, StatefulGuard, UserProvider,
 };
 
 /// Shared runtime — SQLx pools die with their creating runtime, so every
@@ -558,6 +558,250 @@ fn facade_logout_and_invalidate_rotates_session_id() {
         .await;
 
         assert_dispatched::<Logout>(|e| e.guard == "web" && e.user_id.as_deref() == Some("7"));
+    });
+}
+
+/// Action that the inner handler runs against the per-request session
+/// scope — boxed so the harness can dispatch any async fn (login,
+/// logout_and_invalidate, both) without the type signature mentioning
+/// each one. Returns a `Pin<Box<dyn Future>>` so the harness can `.await`
+/// it; takes `()` (the closures own everything they need).
+type HandlerAction =
+    Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
+
+/// Drive `action` inside a real cookie-bearing `Request` through
+/// `SessionMiddleware::handle`. The cookie carries the encrypted form of
+/// `seed_id`; the middleware loads the row, runs `action` inside the
+/// per-request session + auth-request-state scopes, then (if the action
+/// rotated the id) writes the new row + destroys the old one. Returns
+/// the post-rotation session id observed inside the scope and the
+/// middleware's response.
+///
+/// `Next` is `Arc<dyn Fn(Request) -> Pin<Box<...>>>` — it's stored
+/// in `MiddlewareChain` so it MUST be `Send + Sync + 'static` and
+/// independent of any per-request lifetimes.
+async fn drive_middleware_with_session_cookie(
+    seed_id: &str,
+    seed_user_id: Option<&str>,
+    middleware: &SessionMiddleware,
+    action: HandlerAction,
+) -> (
+    Option<String>,
+    Result<suprnova::HttpResponse, suprnova::HttpResponse>,
+) {
+    use bytes::Bytes;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use std::convert::Infallible;
+    use suprnova::Request;
+    use suprnova::middleware::Middleware;
+    use tokio::io::AsyncWriteExt;
+    use tokio::sync::oneshot;
+
+    // Step 1: seed the store row so `read(seed_id)` returns it.
+    let store = middleware.store();
+    let mut seed =
+        suprnova::session::SessionData::new(seed_id.to_string(), "seed-csrf-token".to_string());
+    seed.user_id = seed_user_id.map(|s| s.to_string());
+    store
+        .write(&seed)
+        .await
+        .expect("seed pre-rotation session row");
+
+    // Step 2: encrypt the seed id into the wire format the middleware
+    // will read off the inbound `suprnova_session` cookie.
+    let encrypted_cookie = suprnova::Crypt::encrypt_string(suprnova::CryptPurpose::Cookie, seed_id)
+        .expect("encrypt seed session id");
+
+    // Step 3: build a real `Request` over a duplex pipe — same shape
+    // as `framework/tests/remember_me.rs::middleware_hydrates_session_from_remember_cookie`.
+    let mut http_bytes = Vec::new();
+    http_bytes.extend_from_slice(b"GET / HTTP/1.1\r\n");
+    http_bytes.extend_from_slice(b"Host: localhost\r\n");
+    http_bytes
+        .extend_from_slice(format!("Cookie: suprnova_session={encrypted_cookie}\r\n").as_bytes());
+    http_bytes.extend_from_slice(b"Content-Length: 0\r\n\r\n");
+
+    let (req_tx, req_rx) = oneshot::channel::<Request>();
+    let req_tx = std::sync::Mutex::new(Some(req_tx));
+    let duplex_cap = http_bytes.len() + 64 * 1024;
+    let (client_io, server_io) = tokio::io::duplex(duplex_cap);
+
+    tokio::spawn(async move {
+        let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+            let wrapped = Request::new(req);
+            if let Ok(mut guard) = req_tx.lock()
+                && let Some(tx) = guard.take()
+            {
+                let _ = tx.send(wrapped);
+            }
+            async {
+                std::future::pending::<()>().await;
+                Ok::<_, Infallible>(hyper::Response::new(http_body_util::Empty::<Bytes>::new()))
+            }
+        });
+        let _ = http1::Builder::new()
+            .serve_connection(TokioIo::new(server_io), svc)
+            .await;
+    });
+
+    {
+        let mut client = client_io;
+        client.write_all(&http_bytes).await.unwrap();
+    }
+    let request = req_rx.await.expect("server received request");
+
+    // Step 4: the handler runs the caller's `action` (e.g. `Auth::login`),
+    // then captures the rotated session id from the per-request scope and
+    // hands it back through the shared cell.
+    let observed = Arc::new(std::sync::Mutex::new(None::<String>));
+    let observed_clone = observed.clone();
+    let next: suprnova::middleware::Next = Arc::new(move |_req| {
+        let observed = observed_clone.clone();
+        let action = action.clone();
+        Box::pin(async move {
+            // Auth request-state scope must wrap the inner work so
+            // `Auth::id()` / `request_state::clear_current_user()` behave
+            // the way they do in a real request — they're task-locals,
+            // and the middleware doesn't install them itself.
+            request_state::request_state_scope_for_test(async move {
+                action().await;
+                let id = suprnova::session::session().map(|s| s.id);
+                *observed.lock().unwrap() = id;
+                Ok(suprnova::HttpResponse::text("ok"))
+            })
+            .await
+        })
+    });
+
+    let response = middleware.handle(request, next).await;
+    let new_id = observed.lock().unwrap().clone();
+    (new_id, response)
+}
+
+/// `Auth::logout_and_invalidate` rotates the session id; the middleware
+/// MUST destroy the row keyed on the OLD id so an attacker holding the
+/// prior encrypted cookie cannot replay it to remain authenticated.
+/// Mirrors Laravel `Store::migrate(true)` semantics and closes HIGH H3.
+#[test]
+fn logout_and_invalidate_destroys_old_session_row() {
+    Lazy::force(&SETUP);
+    RT.block_on(async {
+        let _serial = TEST_LOCK.lock().await;
+        let _fake = EventFacade::fake();
+
+        let seed_id = "h3_old_session_id_aaaaaaaaaaaaaaaaaaaaaa".to_string();
+        let middleware = SessionMiddleware::with_store(
+            // `cookie_secure(false)` keeps the test HTTPS-agnostic, same
+            // as `remember_me.rs::middleware_hydrates...`.
+            suprnova::session::SessionConfig {
+                cookie_secure: false,
+                ..suprnova::session::SessionConfig::default()
+            },
+            Arc::new(suprnova::session::DatabaseSessionDriver::new(
+                std::time::Duration::from_secs(3600),
+            )),
+        );
+
+        // Pre-flight: seed an authed session, then drive a request that
+        // calls `logout_and_invalidate`. The middleware-side fix MUST
+        // destroy the seed row keyed on the OLD id.
+        let action: HandlerAction = Arc::new(|| {
+            Box::pin(async move {
+                Auth::login(the_user(), false).await.unwrap();
+                Auth::logout_and_invalidate().await.unwrap();
+            })
+        });
+        let (new_id, _response) =
+            drive_middleware_with_session_cookie(&seed_id, Some("7"), &middleware, action).await;
+
+        let new_id = new_id.expect("handler observed a rotated session id");
+        assert_ne!(
+            new_id, seed_id,
+            "logout_and_invalidate must rotate the session id away from the inbound cookie's id"
+        );
+
+        // The real assertion: the OLD row keyed on `seed_id` is gone.
+        // Without the middleware fix, this row would survive — still
+        // carrying `user_id = Some("7")` from when we seeded it — and
+        // the prior cookie would replay successfully.
+        let store = middleware.store();
+        let leftover = store
+            .read(&seed_id)
+            .await
+            .expect("read seed id after rotation");
+        assert!(
+            leftover.is_none(),
+            "old session row at {seed_id} must be destroyed once the id rotates; \
+             leaving it lets an attacker replay the prior encrypted cookie"
+        );
+        // And the new row exists — proving we actually persisted to the
+        // new id rather than just dropping everything.
+        let post = store.read(&new_id).await.expect("read post-rotation id");
+        assert!(
+            post.is_some(),
+            "rotated session row at {new_id} must exist; cookie would otherwise name a phantom"
+        );
+    });
+}
+
+/// `Auth::login` rotates the session id at pre-auth → post-auth (session
+/// fixation defence). The pre-auth row must be destroyed for the same
+/// reason as H3, even though `login` is the well-trodden path: leaving
+/// the pre-auth row alive accumulates a DB-row leak at the request rate
+/// and (if any anonymous state was stashed there) lets it survive past
+/// the rotation. Closes MEDIUM M3.
+#[test]
+fn login_destroys_pre_auth_session_row() {
+    Lazy::force(&SETUP);
+    RT.block_on(async {
+        let _serial = TEST_LOCK.lock().await;
+        let _fake = EventFacade::fake();
+
+        let seed_id = "m3_pre_auth_session_id_bbbbbbbbbbbbbbbb".to_string();
+        let middleware = SessionMiddleware::with_store(
+            suprnova::session::SessionConfig {
+                cookie_secure: false,
+                ..suprnova::session::SessionConfig::default()
+            },
+            Arc::new(suprnova::session::DatabaseSessionDriver::new(
+                std::time::Duration::from_secs(3600),
+            )),
+        );
+
+        // Seed a pre-auth (anonymous) session row, then drive a request
+        // that calls `Auth::login`. The middleware fix MUST destroy the
+        // pre-auth row.
+        let action: HandlerAction = Arc::new(|| {
+            Box::pin(async move {
+                Auth::login(the_user(), false).await.unwrap();
+            })
+        });
+        let (new_id, _response) =
+            drive_middleware_with_session_cookie(&seed_id, None, &middleware, action).await;
+
+        let new_id = new_id.expect("handler observed a rotated session id");
+        assert_ne!(
+            new_id, seed_id,
+            "Auth::login must rotate the session id (fixation defence)"
+        );
+
+        let store = middleware.store();
+        let leftover = store
+            .read(&seed_id)
+            .await
+            .expect("read pre-auth id after login");
+        assert!(
+            leftover.is_none(),
+            "pre-auth session row at {seed_id} must be destroyed once login rotates the id; \
+             leaving it lets stale anonymous state survive AND leaks one DB row per login at TTL"
+        );
+        let post = store.read(&new_id).await.expect("read post-login id");
+        assert!(
+            post.is_some(),
+            "post-login session row at {new_id} must exist"
+        );
     });
 }
 

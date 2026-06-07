@@ -335,12 +335,22 @@ impl Middleware for SessionMiddleware {
         // key rotation) silently mints a fresh session id rather than
         // logging per-request — same fail-quietly semantics as Laravel
         // when the SESSION cookie is unreadable.
-        let session_id = match request.cookie(&self.config.cookie_name) {
-            Some(raw) => Cookie::read_encrypted(&raw)
-                .ok()
-                .unwrap_or_else(generate_session_id),
-            None => generate_session_id(),
+        //
+        // `original_session_id` carries the id we LOADED the session
+        // with so the regeneration-aware persistence step at the
+        // bottom of `handle` knows which store row to destroy when a
+        // handler (login, 2FA promotion, remember-me hydration, manual
+        // regenerate, logout_and_invalidate) rotated the id this
+        // request. `None` when no cookie was present or when the
+        // cookie was unreadable — neither case names a real row, so
+        // there's nothing to migrate away from.
+        let original_session_id: Option<String> = match request.cookie(&self.config.cookie_name) {
+            Some(raw) => Cookie::read_encrypted(&raw).ok(),
+            None => None,
         };
+        let session_id = original_session_id
+            .clone()
+            .unwrap_or_else(generate_session_id);
 
         // Load session from store
         let mut session = match self.store.read(&session_id).await {
@@ -522,6 +532,51 @@ impl Middleware for SessionMiddleware {
 
         // Save session and add cookie to response
         if let Some(session) = session {
+            // Regeneration-aware migration: when the session id changed
+            // during this request (login, 2FA promotion, remember-me
+            // hydration, manual regenerate, logout_and_invalidate),
+            // destroy the row keyed on the OLD id before writing the
+            // new one. Mirrors Laravel's `Store::migrate(true)` which
+            // calls `handler->destroy($oldId)` as part of regenerate.
+            //
+            // Without this, the old row keeps carrying its prior
+            // `user_id` (or whatever state it had) until TTL — an
+            // attacker holding the prior encrypted session cookie can
+            // replay it and remain authenticated, which is the exact
+            // inverse of what `logout_and_invalidate` documents. This
+            // also closes the silent DB-row leak that login,
+            // 2FA-complete, and remember-me hydration would otherwise
+            // accumulate at TTL.
+            //
+            // The inequality check is load-bearing: a normal navigation
+            // keeps the same id, and destroying-then-writing would race
+            // with concurrent reads on the same row. Destroy is
+            // best-effort cleanup of OLD state — failures are
+            // `warn!`-logged and never fail the request, because a 500
+            // here wouldn't undo the regeneration in memory and would
+            // block legitimate logouts. GC reaps the stale row at TTL.
+            if let Some(ref old_id) = original_session_id
+                && old_id != &session.id
+            {
+                match self.store.destroy(old_id).await {
+                    Ok(()) => {
+                        tracing::debug!(
+                            old_session_id = %old_id,
+                            new_session_id = %session.id,
+                            "session id rotated; destroyed old store row"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            old_session_id = %old_id,
+                            new_session_id = %session.id,
+                            "session id rotated; failed to destroy old store row (gc will reap at TTL)"
+                        );
+                    }
+                }
+            }
+
             // Always save — even an unmodified session gets its
             // last_activity bumped (sliding expiration).
             if let Err(e) = self.store.write(&session).await {
