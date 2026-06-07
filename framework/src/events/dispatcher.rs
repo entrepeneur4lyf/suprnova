@@ -244,7 +244,32 @@ impl EventDispatcher {
             }
         } else {
             for l in listeners {
-                l.dispatch(&event).await?;
+                // Synchronous listeners run inline on the dispatching task.
+                // HTTP requests funnel through `execute_chain_safely`, which
+                // catches handler panics; but events also dispatch from queue
+                // workers, scheduled tasks, broadcasting bridges, and model
+                // lifecycle hooks where a panicking listener would tear down
+                // the dispatching task. Mirror the queued-listener boundary
+                // in `spawn_queued_listener`: convert the panic into a
+                // FrameworkError so the fail-fast caller sees it, and emit a
+                // separate tracing::error so observability captures the panic
+                // payload.
+                let attempt = AssertUnwindSafe(l.dispatch(&event)).catch_unwind().await;
+                match attempt {
+                    Ok(r) => r?,
+                    Err(payload) => {
+                        let panic_msg = crate::server::panic_payload_message(&payload);
+                        tracing::error!(
+                            event = E::event_name(),
+                            panic = %panic_msg,
+                            "synchronous event listener panicked"
+                        );
+                        return Err(FrameworkError::internal(format!(
+                            "listener for {} panicked",
+                            E::event_name()
+                        )));
+                    }
+                }
             }
         }
 
@@ -339,7 +364,27 @@ impl EventDispatcher {
 
         let mut first_err: Option<FrameworkError> = None;
         for l in listeners {
-            if let Err(e) = l.dispatch(&event).await {
+            // Best-effort fanout: a panicking listener is converted to a
+            // FrameworkError and feeds the same first-error capture path so
+            // the remaining listeners still get their turn. The panic
+            // payload goes to tracing so observability captures it
+            // separately from the synthesized error message.
+            let outcome = match AssertUnwindSafe(l.dispatch(&event)).catch_unwind().await {
+                Ok(r) => r,
+                Err(payload) => {
+                    let panic_msg = crate::server::panic_payload_message(&payload);
+                    tracing::error!(
+                        event = E::event_name(),
+                        panic = %panic_msg,
+                        "synchronous event listener panicked (best-effort; continuing)"
+                    );
+                    Err(FrameworkError::internal(format!(
+                        "listener for {} panicked",
+                        E::event_name()
+                    )))
+                }
+            };
+            if let Err(e) = outcome {
                 error!(event = E::event_name(), error = %e, "listener failed (best-effort; continuing)");
                 if first_err.is_none() {
                     first_err = Some(e);
@@ -1024,6 +1069,82 @@ mod tests {
             self.attempts.fetch_add(1, Ordering::SeqCst);
             panic!("deliberate queued listener panic for isolation test");
         }
+    }
+
+    struct PanickingSyncListener {
+        attempts: Arc<AtomicI64>,
+    }
+    #[async_trait]
+    impl Listener<Pinged> for PanickingSyncListener {
+        async fn handle(&self, _event: &Pinged) -> Result<(), FrameworkError> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            panic!("deliberate synchronous listener panic for isolation test");
+        }
+    }
+
+    /// A panicking synchronous listener must be caught and converted to
+    /// `FrameworkError::internal("listener for <name> panicked")` rather
+    /// than unwinding past the dispatcher. Without the boundary the panic
+    /// tears down the dispatching task — fine on the HTTP request path
+    /// (caught by `execute_chain_safely`) but fatal for queue workers,
+    /// scheduled tasks, model lifecycle hooks, and broadcasting bridges.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn synchronous_listener_panic_is_caught_and_returned_as_error() {
+        let d = EventDispatcher::new();
+        let attempts = Arc::new(AtomicI64::new(0));
+        d.listen::<Pinged, _>(Arc::new(PanickingSyncListener {
+            attempts: attempts.clone(),
+        }))
+        .await;
+        let result = d.dispatch(Pinged { n: 1 }).await;
+        let err = result.expect_err("a panicking synchronous listener must surface as Err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("listener for Pinged panicked"),
+            "expected the synthesized error to name the event type, got: {msg}"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "the listener body ran exactly once before panicking"
+        );
+        assert!(
+            logs_contain("synchronous event listener panicked"),
+            "tracing must capture the panic event separately from the synthesized error"
+        );
+    }
+
+    /// Same boundary applies to best-effort fanout: a panicking listener
+    /// feeds the first-error capture path while subsequent listeners still
+    /// run. Otherwise a single panicker would tear down the dispatching
+    /// task and silently skip every listener that follows.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn best_effort_synchronous_panic_is_caught_and_does_not_skip_later_listeners() {
+        let d = EventDispatcher::new();
+        let panic_attempts = Arc::new(AtomicI64::new(0));
+        let after = Arc::new(AtomicI64::new(0));
+        d.listen::<Pinged, _>(Arc::new(PanickingSyncListener {
+            attempts: panic_attempts.clone(),
+        }))
+        .await;
+        d.listen::<Pinged, _>(Arc::new(Counter(after.clone())))
+            .await;
+        let result = d.dispatch_best_effort(Pinged { n: 7 }).await;
+        let err =
+            result.expect_err("best-effort must surface the synthesized panic-as-error first");
+        assert!(err.to_string().contains("listener for Pinged panicked"));
+        assert_eq!(panic_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            after.load(Ordering::SeqCst),
+            7,
+            "best-effort must run subsequent listeners even after a panic"
+        );
+        assert!(
+            logs_contain("synchronous event listener panicked (best-effort"),
+            "best-effort variant must carry its own panic log message"
+        );
     }
 
     /// A panicking queued listener must be (a) retried by the existing

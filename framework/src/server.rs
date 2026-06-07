@@ -1195,7 +1195,30 @@ async fn handle_ws_upgrade(
                 ));
                 let heartbeat_handle = heartbeat.abort_handle();
 
-                let result = handler.handle(socket, suprnova_req).await;
+                // Wrap the handler call in a panic boundary so a user-authored
+                // handler panic still routes into the Close(1011) + teardown
+                // arm below — without this the unwind tears down the WS task,
+                // skipping the heartbeat abort, the explicit Close frame, and
+                // the forwarder drain. `outbound`, `heartbeat_handle`, and
+                // `forwarder_handle` are extracted above, so they survive the
+                // panic and the cleanup proceeds normally.
+                let result = match AssertUnwindSafe(handler.handle(socket, suprnova_req))
+                    .catch_unwind()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(payload) => {
+                        let msg = panic_payload_message(&payload);
+                        tracing::error!(
+                            panic = %msg,
+                            route = %pattern,
+                            "websocket handler panicked — sending Close(1011)"
+                        );
+                        Err(crate::error::FrameworkError::internal(format!(
+                            "websocket handler panicked: {msg}"
+                        )))
+                    }
+                };
 
                 // Abort the heartbeat FIRST so its sender clone drops
                 // and only `outbound` remains feeding the bridge.

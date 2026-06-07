@@ -1076,6 +1076,52 @@ async fn defer_rescue_catches_resolver_error() {
     assert_eq!(page["rescuedProps"], serde_json::json!(["permissions"]));
 }
 
+/// The ErrorOccurred event must be dispatched on the rescue path so observability
+/// listeners (Sentry, Pagerduty, custom shippers) see the rescued resolver error.
+/// The dispatch is **spawned**, not awaited — mirroring the http/response.rs
+/// pattern and the documented `events::builtins::ErrorOccurred` best-effort
+/// contract — so the Inertia partial-response collector never blocks on listener
+/// execution.
+#[tokio::test]
+async fn defer_rescue_dispatches_error_occurred_event() {
+    let _guard = suprnova::EventFacade::fake();
+    let req = MockReq::new("/")
+        .inertia()
+        .header("X-Inertia-Partial-Component", "Users")
+        .header("X-Inertia-Partial-Data", "permissions");
+
+    let resp = InertiaResponse::new("Users")
+        .defer_with(
+            "permissions",
+            suprnova::DeferOptions::new().rescue(),
+            || async {
+                Err::<serde_json::Value, _>(suprnova::FrameworkError::internal(
+                    "rescued failure",
+                ))
+            },
+        )
+        .resolve(&req)
+        .await
+        .unwrap();
+
+    // The response itself still resolves cleanly with the rescued marker —
+    // proving the inline path returned promptly and did not hang on the
+    // spawned event dispatch.
+    let body = body_to_string(resp.into_hyper().into_body());
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(page["rescuedProps"], serde_json::json!(["permissions"]));
+
+    // The spawn happens on the current Tokio runtime — yield + a short
+    // sleep so the spawned dispatcher task lands its record. Mirrors the
+    // pattern in tests/events.rs::server_error_dispatches_error_occurred.
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    suprnova::events::testing::assert_dispatched::<suprnova::ErrorOccurred>(|e| {
+        e.status_code == 500 && e.error_message.contains("rescued failure")
+    });
+}
+
 #[tokio::test]
 async fn defer_without_rescue_propagates_error() {
     let req = MockReq::new("/")

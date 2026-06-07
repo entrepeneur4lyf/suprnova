@@ -297,3 +297,90 @@ async fn idle_connection_survives_quiet_period_and_can_still_send() {
 
     ws.close(None).await.unwrap();
 }
+
+struct PanickingHandler;
+
+#[async_trait]
+impl WebSocketHandler for PanickingHandler {
+    async fn handle(&self, _socket: WsSocket, _req: Request) -> Result<(), FrameworkError> {
+        panic!("deliberate WS handler panic for isolation test");
+    }
+}
+
+async fn spawn_panicking_server() -> u16 {
+    let router =
+        Arc::new(Router::new().ws_with_config("/ws/panic", PanickingHandler, open_ws_config()));
+    let middleware = Arc::new(MiddlewareRegistry::new());
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind free port");
+    let port = listener.local_addr().expect("local_addr").port();
+
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let io = hyper_util::rt::TokioIo::new(stream);
+            let router = router.clone();
+            let middleware = middleware.clone();
+            tokio::spawn(async move {
+                let service = hyper::service::service_fn(move |req| {
+                    let router = router.clone();
+                    let middleware = middleware.clone();
+                    async move {
+                        Ok::<_, std::convert::Infallible>(
+                            suprnova::server::handle_request(router, middleware, req).await,
+                        )
+                    }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(io, service)
+                    .with_upgrades()
+                    .await;
+            });
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    port
+}
+
+/// A panicking WebSocketHandler must NOT tear down the WS task. The handler
+/// future is wrapped in a panic boundary that synthesises an Err and routes
+/// into the Close(1011) + heartbeat-abort + forwarder-drain path. The peer
+/// observes Close(1011) on the wire rather than a TCP reset.
+#[tokio::test]
+async fn ws_handler_panic_sends_close_1011_to_peer() {
+    let port = spawn_panicking_server().await;
+    let url = format!("ws://127.0.0.1:{port}/ws/panic");
+
+    let (mut ws, response) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect to panicking ws endpoint");
+    assert_eq!(response.status(), 101, "handshake must succeed");
+
+    // The next frame the peer reads after the upgrade is the Close(1011)
+    // emitted by the panic-boundary cleanup.
+    let frame = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .expect("close frame must arrive within deadline")
+        .expect("stream must yield a frame")
+        .expect("frame must not be an error");
+
+    match frame {
+        Message::Close(Some(close_frame)) => {
+            assert_eq!(
+                u16::from(close_frame.code),
+                1011,
+                "WS handler panic must close with 1011 (internal error)"
+            );
+        }
+        Message::Close(None) => {
+            panic!("Close frame must carry an explicit 1011 code, not protocol-default 1005");
+        }
+        other => panic!("expected Close(1011), got {other:?}"),
+    }
+}

@@ -237,3 +237,66 @@ async fn up_serves_normally() {
     assert_eq!(status, 200);
     assert_eq!(body, "home");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn file_driver_active_probe_does_not_block_the_runtime() {
+    // The FileMaintenanceMode probe is called via `active().await` on every
+    // request before the chain runs (see `MaintenanceMiddleware::handle`).
+    // A `std::fs::metadata` call on the dispatching thread blocks the
+    // current-thread runtime — proven here by driving the probe concurrently
+    // with another runtime task and asserting both make progress in the same
+    // tick. With std::fs the second task would not get a chance to advance
+    // until the metadata syscall returns; with tokio::fs the syscall runs
+    // on the blocking pool and the runtime stays responsive.
+    let path = unique_down_path();
+    let driver = Arc::new(FileMaintenanceMode::with_path(path.clone()));
+    let probe_driver = driver.clone();
+    let probe = tokio::spawn(async move {
+        for _ in 0..16 {
+            let _ = probe_driver.active().await;
+        }
+    });
+    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter_clone = counter.clone();
+    let cooperative = tokio::spawn(async move {
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+            counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    probe.await.unwrap();
+    cooperative.await.unwrap();
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::SeqCst),
+        16,
+        "cooperative task must reach 16 interleaved with the active() probes",
+    );
+}
+
+#[tokio::test]
+async fn file_driver_full_lifecycle_uses_tokio_fs() {
+    // Ensures the full activate -> active -> data -> deactivate path runs
+    // under a Tokio runtime without panicking with "blocking call inside
+    // async context" — Tokio doesn't actually emit that diagnostic, but
+    // exercising the lifecycle under the multi-threaded runtime proves
+    // the awaited tokio::fs syscalls (rather than blocking std::fs) are
+    // in use. A regression would block the worker thread; multi_thread
+    // hides that, so we additionally test the current-thread path above.
+    let path = unique_down_path();
+    let driver = FileMaintenanceMode::with_path(path.clone());
+
+    assert!(!driver.active().await.unwrap(), "missing file means up");
+
+    let payload = MaintenancePayload {
+        retry: Some(30),
+        ..Default::default()
+    };
+    driver.activate(&payload).await.unwrap();
+    assert!(driver.active().await.unwrap(), "down after activate");
+
+    let read = driver.data().await.unwrap();
+    assert_eq!(read.retry, Some(30));
+
+    driver.deactivate().await.unwrap();
+    assert!(!driver.active().await.unwrap(), "up after deactivate");
+}

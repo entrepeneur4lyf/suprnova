@@ -1039,15 +1039,27 @@ async fn resolve_props(
                                     error = %e,
                                     "inertia deferred prop resolver failed; rescued per spec",
                                 );
-                                let _ = crate::events::EventFacade::dispatch(
-                                    crate::events::ErrorOccurred {
-                                        error_message: e.to_string(),
-                                        status_code: 500,
-                                        request_id: crate::logging::current_request_id()
-                                            .map(|id| id.as_str().to_string()),
-                                    },
-                                )
-                                .await;
+                                // Build the event on the current task so the
+                                // REQUEST_ID task-local is in scope (a spawned
+                                // task wouldn't inherit it). The dispatch
+                                // itself is spawned per the documented
+                                // ErrorOccurred best-effort contract — see
+                                // `events/builtins.rs` and the matching
+                                // pattern in `http/response.rs` — so we do
+                                // not block the Inertia partial-response
+                                // collector on listener execution.
+                                let evt = crate::events::ErrorOccurred {
+                                    error_message: e.to_string(),
+                                    status_code: 500,
+                                    request_id: crate::logging::current_request_id()
+                                        .map(|id| id.as_str().to_string()),
+                                };
+                                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                                    handle.spawn(async move {
+                                        let _ =
+                                            crate::events::EventFacade::dispatch(evt).await;
+                                    });
+                                }
                                 Ok(TaskOutcome::Rescued { key })
                             }
                             Err(e) => Err(e),

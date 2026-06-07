@@ -42,7 +42,13 @@ const BYPASS_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 
 /// The data recorded when the application is taken down. Mirrors the fields
 /// Laravel writes to its "down" file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The `Debug` impl is hand-written rather than derived so a stray
+/// `dbg!()` or `tracing::info!(?payload)` does not leak the bypass
+/// `secret` (anyone who possesses it can issue themselves the bypass
+/// cookie). Pattern mirrors [`crate::EncryptionKey`]'s redacting
+/// `Debug`.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MaintenancePayload {
     /// Request paths that stay reachable while down — exact match or a
     /// trailing-`*` prefix (e.g. `"api/health"`, `"webhooks/*"`).
@@ -67,6 +73,20 @@ pub struct MaintenancePayload {
     /// Pre-rendered HTML body served instead of the plain text response.
     #[serde(default)]
     pub template: Option<String>,
+}
+
+impl std::fmt::Debug for MaintenancePayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MaintenancePayload")
+            .field("except", &self.except)
+            .field("redirect", &self.redirect)
+            .field("retry", &self.retry)
+            .field("refresh", &self.refresh)
+            .field("secret", &self.secret.as_ref().map(|_| "[REDACTED]"))
+            .field("status", &self.status)
+            .field("template", &self.template)
+            .finish()
+    }
 }
 
 fn default_status() -> u16 {
@@ -137,7 +157,7 @@ impl Default for FileMaintenanceMode {
 impl MaintenanceMode for FileMaintenanceMode {
     async fn activate(&self, payload: &MaintenancePayload) -> Result<(), FrameworkError> {
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 FrameworkError::internal(format!("maintenance: create {}: {e}", parent.display()))
             })?;
         }
@@ -148,10 +168,10 @@ impl MaintenanceMode for FileMaintenanceMode {
         // concurrently with `down` never observes a half-written (and thus
         // unparseable) file — which would otherwise surface as a 500.
         let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, json).map_err(|e| {
+        tokio::fs::write(&tmp, json).await.map_err(|e| {
             FrameworkError::internal(format!("maintenance: write {}: {e}", tmp.display()))
         })?;
-        std::fs::rename(&tmp, &self.path).map_err(|e| {
+        tokio::fs::rename(&tmp, &self.path).await.map_err(|e| {
             FrameworkError::internal(format!(
                 "maintenance: rename into {}: {e}",
                 self.path.display()
@@ -160,7 +180,7 @@ impl MaintenanceMode for FileMaintenanceMode {
     }
 
     async fn deactivate(&self) -> Result<(), FrameworkError> {
-        match std::fs::remove_file(&self.path) {
+        match tokio::fs::remove_file(&self.path).await {
             Ok(()) => Ok(()),
             // Already up — idempotent.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -172,11 +192,21 @@ impl MaintenanceMode for FileMaintenanceMode {
     }
 
     async fn active(&self) -> Result<bool, FrameworkError> {
-        Ok(self.path.exists())
+        // tokio::fs::try_exists returns Ok(false) on NotFound (mirroring the
+        // std::path::Path::exists semantics we used before) and Err on other
+        // IO errors — surface those so a flaky FS shows up rather than being
+        // silently treated as "up". Callers that want the prior fail-open
+        // behaviour wrap with `.unwrap_or(false)` (see MaintenanceMiddleware).
+        tokio::fs::try_exists(&self.path).await.map_err(|e| {
+            FrameworkError::internal(format!(
+                "maintenance: probe {}: {e}",
+                self.path.display()
+            ))
+        })
     }
 
     async fn data(&self) -> Result<MaintenancePayload, FrameworkError> {
-        let raw = std::fs::read_to_string(&self.path).map_err(|e| {
+        let raw = tokio::fs::read_to_string(&self.path).await.map_err(|e| {
             FrameworkError::internal(format!("maintenance: read {}: {e}", self.path.display()))
         })?;
         serde_json::from_str(&raw).map_err(|e| {
