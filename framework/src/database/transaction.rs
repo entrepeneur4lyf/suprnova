@@ -45,8 +45,10 @@
 
 use crate::database::DB;
 use crate::error::FrameworkError;
+use rand::RngExt;
 use sea_orm::{ConnectionTrait, DatabaseTransaction, TransactionTrait};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Internal state shared by [`Transaction`], [`TxHandle`], and the
 /// task-local [`CURRENT_TX`]. Pairs the SeaORM transaction handle with
@@ -971,7 +973,11 @@ impl DB {
     ///   `Deadlock found when trying to get lock` and any user-
     ///   surfaced deadlock string)
     ///
-    /// On the final attempt the error propagates unchanged.
+    /// Between attempts a jittered backoff sleeps for
+    /// [`deadlock_retry_backoff`]'s computed duration — exponential
+    /// with full jitter, capped at 500ms — so contending writers don't
+    /// thrash the database after a deadlock victim is chosen. On the
+    /// final attempt the error propagates unchanged with no sleep.
     pub async fn transaction_with_attempts<F, T>(
         attempts: u32,
         mut f: F,
@@ -998,13 +1004,16 @@ impl DB {
             match DB::transaction(|tx| f(tx)).await {
                 Ok(v) => return Ok(v),
                 Err(e) if is_deadlock(&e) && attempt < attempts => {
+                    let backoff = deadlock_retry_backoff(attempt);
                     tracing::warn!(
                         target: "suprnova::eloquent::tx",
                         attempt,
                         max_attempts = attempts,
+                        backoff_ms = backoff.as_millis() as u64,
                         error = %e,
                         "transaction deadlocked, retrying"
                     );
+                    tokio::time::sleep(backoff).await;
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -1016,6 +1025,29 @@ impl DB {
             "transaction_with_attempts: loop exited without returning",
         ))
     }
+}
+
+/// Backoff for [`DB::transaction_with_attempts`]: exponential with
+/// full jitter, base 10ms, doubled per attempt, capped at 500ms.
+///
+/// - attempt 1 → uniform in `[0, 10ms]`
+/// - attempt 2 → uniform in `[0, 20ms]`
+/// - attempt 3 → uniform in `[0, 40ms]`
+/// - attempt 4 → uniform in `[0, 80ms]`
+/// - ...
+/// - attempt 7+ → uniform in `[0, 500ms]`
+///
+/// Full jitter (uniform `[0, capped]`) is the AWS-recommended shape
+/// for transient-fault retries: it spreads contending writers across
+/// the entire window so they don't synchronise on the same retry
+/// instant. The cap keeps the worst-case latency bounded; deadlock
+/// resolution should not stretch into multi-second territory.
+fn deadlock_retry_backoff(attempt: u32) -> Duration {
+    let base_ms: u64 = 10;
+    let raw = base_ms.saturating_mul(1u64 << (attempt.saturating_sub(1)).min(6));
+    let capped = raw.min(500);
+    let jittered = rand::rng().random_range(0..=capped);
+    Duration::from_millis(jittered)
 }
 
 /// Render every bound value of a `Statement` as a debug string. The
@@ -1170,5 +1202,49 @@ mod tests {
             "connection refused"
         )));
         assert!(!is_deadlock(&FrameworkError::internal("oops")));
+    }
+
+    #[test]
+    fn deadlock_retry_backoff_caps_at_500ms() {
+        // 1000 samples per attempt: every sampled value must respect
+        // the documented cap. Late attempts saturate at the 500ms
+        // ceiling regardless of which `attempt` value comes in.
+        for attempt in 1..=20u32 {
+            for _ in 0..1000 {
+                let d = deadlock_retry_backoff(attempt);
+                assert!(
+                    d <= Duration::from_millis(500),
+                    "attempt {attempt} produced {d:?} which exceeds the 500ms cap"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn deadlock_retry_backoff_window_grows_with_attempt() {
+        // Full jitter is uniform in `[0, capped_ms]`. Sample heavily
+        // and assert the empirical maximum reaches at least 50% of the
+        // expected ceiling for each early attempt — looser than the
+        // upper bound but tight enough to catch a regression that
+        // accidentally drops the exponential growth.
+        let expected_ceilings = [10u64, 20, 40, 80, 160, 320, 500];
+        for (i, ceiling) in expected_ceilings.iter().enumerate() {
+            let attempt = (i + 1) as u32;
+            let mut observed_max = 0u64;
+            for _ in 0..2000 {
+                let d = deadlock_retry_backoff(attempt).as_millis() as u64;
+                if d > observed_max {
+                    observed_max = d;
+                }
+                assert!(
+                    d <= *ceiling,
+                    "attempt {attempt}: sample {d}ms exceeded ceiling {ceiling}ms"
+                );
+            }
+            assert!(
+                observed_max >= ceiling / 2,
+                "attempt {attempt}: observed_max {observed_max}ms is below half of ceiling {ceiling}ms — jitter window may have collapsed"
+            );
+        }
     }
 }

@@ -118,8 +118,13 @@ impl QueryExecuted {
     pub fn to_raw_sql(&self) -> String {
         if self.sql.contains('$') {
             // Postgres: $1, $2, ...
+            //
+            // Iterate highest-index-first so longer placeholder needles
+            // are substituted before their prefixes. Otherwise replacing
+            // `$1` first globally corrupts `$10`, `$11`, ... — turning
+            // `WHERE id = $10` into `<value-of-$1>0`.
             let mut rendered = self.sql.clone();
-            for (i, b) in self.bindings.iter().enumerate() {
+            for (i, b) in self.bindings.iter().enumerate().rev() {
                 let needle = format!("${}", i + 1);
                 rendered = rendered.replace(&needle, b);
             }
@@ -365,5 +370,48 @@ mod tests {
             result: Ok(()),
         };
         assert_eq!(q.to_raw_sql(), "SELECT NOW()");
+    }
+
+    #[test]
+    fn to_raw_sql_postgres_double_digit_placeholders_do_not_collide_with_prefixes() {
+        // Bug guard: substituting `$1` before `$10` corrupts `$10` to
+        // `<value-of-$1>0`. We iterate highest-index-first to avoid
+        // this. Twelve bindings exercises the $1-vs-$10/$11/$12 case.
+        let bindings: Vec<String> = (1..=12).map(|n| format!("v{n}")).collect();
+        let q = QueryExecuted {
+            sql: "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)".into(),
+            bindings,
+            time: Duration::from_millis(1),
+            connection_name: "__primary__".into(),
+            read_write_type: Some(ReadWriteType::Write),
+            result: Ok(()),
+        };
+        assert_eq!(
+            q.to_raw_sql(),
+            "VALUES (v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12)"
+        );
+    }
+
+    #[test]
+    fn to_raw_sql_postgres_placeholder_in_arbitrary_order() {
+        // Mixed placeholder ordering with double-digit indices interleaved
+        // among single-digit ones — the substitution must still be index-
+        // correct regardless of textual position.
+        let bindings: Vec<String> = (1..=11).map(|n| format!("b{n}")).collect();
+        let q = QueryExecuted {
+            sql: "SELECT $11, $1, $10, $2 FROM t WHERE a = $3 AND b = $4 AND c = $5 \
+                  AND d = $6 AND e = $7 AND f = $8 AND g = $9"
+                .into(),
+            bindings,
+            time: Duration::from_millis(1),
+            connection_name: "__primary__".into(),
+            read_write_type: Some(ReadWriteType::Read),
+            result: Ok(()),
+        };
+        assert_eq!(
+            q.to_raw_sql(),
+            "SELECT b11, b1, b10, b2 FROM t WHERE a = b3 AND b = b4 AND c = b5 \
+             AND d = b6 AND e = b7 AND f = b8 AND g = b9"
+        );
     }
 }
