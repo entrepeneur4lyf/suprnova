@@ -9,6 +9,7 @@
 //! bound mail transport.
 
 use crate::error::FrameworkError;
+use crate::mail::address::Attachment;
 use crate::mail::mailable_registry;
 use crate::mail::{Address, Mail, dispatch_with_telemetry};
 use crate::queue::Job;
@@ -35,6 +36,15 @@ pub struct SendMailJob {
     pub headers: Vec<(String, String)>,
     #[serde(default)]
     pub return_path: Option<Address>,
+    /// Builder-side subject override. When `Some`, replaces the mailable's
+    /// `render_subject()` output on the queue path — matches the send
+    /// path's precedence (see `MailBuilder::send`).
+    #[serde(default)]
+    pub subject_override: Option<String>,
+    /// Builder-side extra attachments. Appended after the mailable's own
+    /// `attachments()` — matches the send path's order.
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
 }
 
 #[async_trait]
@@ -58,6 +68,8 @@ impl Job for SendMailJob {
             self.priority,
             self.headers,
             self.return_path,
+            self.subject_override,
+            self.attachments,
         )?;
         // Apply Mail::always_* defaults on the queue side too. Without
         // this the queue path would bypass `always_from` / `always_to`

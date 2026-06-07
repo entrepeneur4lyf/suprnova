@@ -173,8 +173,10 @@ impl NotificationDispatcher {
     ///
     /// Returns on the first channel error; channels that already succeeded
     /// are not rolled back. For at-least-once semantics across multiple
-    /// channels, dispatch each side via the queue (idempotency keys at the
-    /// envelope layer protect against double-sends on retry).
+    /// channels, dispatch via [`Notify::queue`] — which pushes one job per
+    /// declared channel so a transient failure on channel B retries only
+    /// channel B, never re-sending the channel-A side that already
+    /// succeeded.
     ///
     /// Lifecycle events:
     /// - [`NotificationSending`](events::NotificationSending) fires immediately before each channel's
@@ -386,34 +388,41 @@ pub struct Notify;
 
 impl Notify {
     /// Queue a notification for asynchronous delivery via the bound
-    /// dispatcher. Pre-resolves the per-channel routes from `recipient` so
+    /// dispatcher. Pre-resolves the per-channel route from `recipient` so
     /// the worker does not need a `Notifiable` handle at execute time.
+    ///
+    /// Pushes ONE [`SendNotificationJob`] per declared channel that
+    /// resolves a route. This makes retries per-channel: if the mail
+    /// channel fails after the database row was already inserted, only
+    /// the mail job re-runs — the recipient does not get the database row
+    /// inserted twice. Channels with no matching route on `recipient` are
+    /// skipped, mirroring the dispatcher's `route_for(channel).is_none()`
+    /// behaviour.
+    ///
+    /// The push loop is non-atomic across channels: if the second of
+    /// three pushes fails, the first channel is already queued and the
+    /// caller sees `Err`. The trade-off is intentional — it is strictly
+    /// better than the previous shape's worker-side double-send on
+    /// partial failure.
     ///
     /// Under [`Notify::fake`] the notification is recorded for each
     /// declared channel that resolves a route — no queue push, no channel
-    /// execution. Channels with no matching route are skipped, mirroring
-    /// the dispatcher's `route_for(channel).is_none()` behaviour.
+    /// execution.
     pub async fn queue<N, R>(recipient: &R, notification: N) -> Result<(), FrameworkError>
     where
         N: Notification,
         R: Notifiable + ?Sized,
     {
         let channels = notification.channels();
-        let mut routes: HashMap<String, String> = HashMap::new();
-        for c in &channels {
-            if let Some(r) = recipient.route_for(c) {
-                routes.insert((*c).to_string(), r);
-            }
-        }
 
         if testing::is_active() {
             let data = notification.data();
             for c in &channels {
-                if let Some(route) = routes.get(*c) {
+                if let Some(route) = recipient.route_for(c) {
                     testing::record(testing::FakeRecord {
                         notification: N::notification_name().to_string(),
                         channel: (*c).to_string(),
-                        route: route.clone(),
+                        route,
                         data: data.clone(),
                     });
                 }
@@ -423,13 +432,23 @@ impl Notify {
 
         let payload = serde_json::to_value(&notification)
             .map_err(|e| FrameworkError::internal(format!("Notify::queue encode: {e}")))?;
-        let job = SendNotificationJob {
-            notifiable_route_per_channel: routes,
-            notification_name: N::notification_name().to_string(),
-            notification_payload: payload,
-            channels: channels.into_iter().map(String::from).collect(),
-        };
-        crate::queue::Queue::push(job).await
+        let name = N::notification_name().to_string();
+
+        for channel in &channels {
+            let Some(route) = recipient.route_for(channel) else {
+                continue;
+            };
+            let mut routes: HashMap<String, String> = HashMap::new();
+            routes.insert((*channel).to_string(), route);
+            let job = SendNotificationJob {
+                notifiable_route_per_channel: routes,
+                notification_name: name.clone(),
+                notification_payload: payload.clone(),
+                channels: vec![(*channel).to_string()],
+            };
+            crate::queue::Queue::push(job).await?;
+        }
+        Ok(())
     }
 
     /// Send a notification synchronously (in-process, no queue) via the

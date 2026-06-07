@@ -215,3 +215,131 @@ async fn notify_send_delivers_synchronously_through_bound_dispatcher() {
         "Notify::send must invoke the bound dispatcher exactly once"
     );
 }
+
+// Multi-channel notification with two routed channels.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct DualChannelAlert {
+    body: String,
+}
+
+impl Notification for DualChannelAlert {
+    fn notification_name() -> &'static str {
+        "DualChannelAlert"
+    }
+    fn channels(&self) -> Vec<&'static str> {
+        vec!["database", "mail"]
+    }
+    fn data(&self) -> serde_json::Value {
+        serde_json::json!({ "body": self.body })
+    }
+}
+
+struct DualUser {
+    id: i64,
+    email: String,
+}
+
+impl Notifiable for DualUser {
+    fn route_for(&self, channel: &str) -> Option<String> {
+        match channel {
+            "database" => Some(self.id.to_string()),
+            "mail" => Some(self.email.clone()),
+            _ => None,
+        }
+    }
+}
+
+// Regression: Notify::queue must push ONE SendNotificationJob per declared,
+// routed channel. Before the fix, a single envelope carried the full
+// channel list — so any per-channel failure restarted ALL channels on
+// retry, causing the database channel to insert twice and the recipient
+// to receive the same email twice.
+#[tokio::test]
+#[serial]
+async fn notify_queue_pushes_one_envelope_per_routed_channel() {
+    use suprnova::queue::driver::Reservation;
+
+    // Dispatcher binding is needed only to satisfy register_notification_factory.
+    let _ = suprnova::notifications::set_dispatcher(Arc::new(NotificationDispatcher::new()));
+    let _ = suprnova::notifications::register_notification_factory::<DualChannelAlert>();
+    register_job::<SendNotificationJob>();
+
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    Notify::queue(
+        &DualUser {
+            id: 99,
+            email: "x@example.org".into(),
+        },
+        DualChannelAlert {
+            body: "ping".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Drain the driver and count envelopes + assert each carries exactly
+    // one channel.
+    let mut popped: Vec<Reservation> = Vec::new();
+    while let Some(r) = driver.pop(Duration::from_secs(1)).await.unwrap() {
+        popped.push(r);
+    }
+    assert_eq!(
+        popped.len(),
+        2,
+        "queue must hold one envelope per routed channel (database + mail = 2)",
+    );
+    for r in &popped {
+        let job: SendNotificationJob = serde_json::from_value(r.envelope.payload.clone())
+            .expect("payload decodes to SendNotificationJob");
+        assert_eq!(
+            job.channels.len(),
+            1,
+            "each envelope must carry exactly one channel for retry isolation",
+        );
+        assert_eq!(
+            job.notifiable_route_per_channel.len(),
+            1,
+            "each envelope must carry exactly one route for its own channel",
+        );
+    }
+}
+
+// Regression: a recipient whose `route_for` returns None for a declared
+// channel must not produce an envelope for that channel — matches the
+// pre-fix behaviour where the handle path skipped unrouted channels.
+#[tokio::test]
+#[serial]
+async fn notify_queue_skips_channels_with_no_route() {
+    // Dispatcher binding is needed only to satisfy register_notification_factory.
+    let _ = suprnova::notifications::set_dispatcher(Arc::new(NotificationDispatcher::new()));
+    let _ = suprnova::notifications::register_notification_factory::<DualChannelAlert>();
+    register_job::<SendNotificationJob>();
+
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    // User resolves only the database channel; mail returns None.
+    Notify::queue(
+        &User { id: 99 },
+        DualChannelAlert {
+            body: "ping".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let r = driver
+        .pop(Duration::from_secs(1))
+        .await
+        .unwrap()
+        .expect("the database channel must produce an envelope");
+    let job: SendNotificationJob =
+        serde_json::from_value(r.envelope.payload.clone()).expect("decode");
+    assert_eq!(job.channels, vec!["database".to_string()]);
+    assert!(
+        driver.pop(Duration::from_secs(1)).await.unwrap().is_none(),
+        "no envelope for the mail channel (route_for returned None)",
+    );
+}

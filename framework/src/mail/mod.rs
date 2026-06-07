@@ -568,6 +568,8 @@ impl MailBuilder {
             priority: self.priority,
             headers: self.headers,
             return_path: self.return_path,
+            subject_override: self.subject_override,
+            attachments: self.attachments,
         })
     }
 }

@@ -140,6 +140,8 @@ pub fn render_outgoing(
     extra_priority: Option<u8>,
     extra_headers: Vec<(String, String)>,
     return_path_override: Option<Address>,
+    subject_override: Option<String>,
+    extra_attachments: Vec<Attachment>,
 ) -> Result<OutgoingMessage, FrameworkError> {
     let from = from_override
         .or_else(|| any.from())
@@ -173,16 +175,29 @@ pub fn render_outgoing(
     let priority = extra_priority.or_else(|| any.priority());
     let return_path = return_path_override.or_else(|| any.return_path());
 
+    // Subject: builder override wins over mailable's render_subject —
+    // only call render_subject when there is no override. Mirrors the
+    // send path (`MailBuilder::send`).
+    let subject = match subject_override {
+        Some(s) => s,
+        None => any.render_subject()?,
+    };
+
+    // Attachments: mailable's first, then builder-side appended.
+    // Mirrors the send path's order.
+    let mut attachments = any.attachments();
+    attachments.extend(extra_attachments);
+
     Ok(OutgoingMessage {
         from,
         to,
         cc,
         bcc,
         reply_to,
-        subject: any.render_subject()?,
+        subject,
         html,
         text,
-        attachments: any.attachments(),
+        attachments,
         tags,
         metadata,
         priority,

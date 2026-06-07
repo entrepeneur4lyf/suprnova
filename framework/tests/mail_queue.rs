@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use suprnova::FrameworkError;
 use suprnova::async_trait;
+use suprnova::mail::address::Attachment;
 use suprnova::mail::memory::InMemoryMailTransport;
 use suprnova::mail::send_job::SendMailJob;
 use suprnova::mail::{Address, Mail, Mailable};
@@ -154,6 +155,8 @@ async fn mail_queue_unregistered_mailable_surfaces_unknown_error_from_job() {
         priority: None,
         headers: vec![],
         return_path: None,
+        subject_override: None,
+        attachments: vec![],
     };
     let err = job.handle().await.unwrap_err();
     let msg = format!("{err}");
@@ -238,4 +241,64 @@ async fn mail_queue_accepts_mailable_that_overrides_render_without_template_sour
         msgs[0].text.is_none(),
         "no text body — only the html override produced output"
     );
+}
+
+// Regression: a builder-side `.subject("...")` override and `.attach(...)`
+// extras applied to `Mail::to(...).queue(mailable)` must reach the rendered
+// outgoing message exactly the way they would on the sync `.send(...)` path.
+// Prior to the fix, both were silently dropped by `build_send_job`.
+#[tokio::test]
+#[serial]
+async fn mail_queue_threads_builder_subject_override_and_attachments_to_worker() {
+    let capture = Arc::new(InMemoryMailTransport::new());
+    let _ = Mail::set_transport(capture.clone());
+
+    let _ = suprnova::mail::register_mailable_factory::<WelcomeMail>();
+    register_job::<SendMailJob>();
+
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    let invoice = Attachment::new("invoice.txt", b"PAID".to_vec(), "text/plain");
+
+    Mail::to("alice@example.org")
+        .subject("Override Subject")
+        .attach(invoice.clone())
+        .queue(WelcomeMail {
+            name: "Alice".into(),
+        })
+        .await
+        .unwrap();
+
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        WorkerConfig {
+            visibility_timeout: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(5),
+            max_jobs: None,
+        },
+        CancellationToken::new(),
+    ));
+    for _ in 0..200 {
+        if !capture.captured().is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    handle.abort();
+
+    let msgs = capture.captured();
+    assert_eq!(msgs.len(), 1, "queued mail must end up in the transport");
+    assert_eq!(
+        msgs[0].subject, "Override Subject",
+        "builder .subject(...) must override the mailable's render_subject on the queue path",
+    );
+    assert_eq!(
+        msgs[0].attachments.len(),
+        1,
+        "builder .attach(...) must reach the rendered message on the queue path",
+    );
+    assert_eq!(msgs[0].attachments[0].filename, "invoice.txt");
+    assert_eq!(msgs[0].attachments[0].content, b"PAID");
 }
