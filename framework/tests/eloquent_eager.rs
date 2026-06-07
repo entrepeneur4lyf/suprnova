@@ -550,3 +550,41 @@ async fn static_helpers_match_query_chain() {
     let c = via_chain.iter().find(|u| u.name == "u1").unwrap();
     assert_eq!(s.posts_count(), c.posts_count());
 }
+
+#[tokio::test]
+async fn with_where_closure_type_mismatch_is_loud() {
+    // `posts` is declared `HasMany<EgPost>` on `EgUser`, but the user
+    // wrote `Builder<EgComment>` in the closure parameter. The macro
+    // boxes the closure type-erased, and the per-relation dispatcher
+    // arm downcasts to the statically-known `Builder<EgPost>`. The
+    // wrong-typed box must NOT silently drop the predicate (which
+    // would run an unfiltered IN-query against `eg_posts`) — it must
+    // return a loud `FrameworkError` naming the relation and the
+    // expected target type.
+    let _db = fixture().await;
+    let result = EgUser::query()
+        .with_where((
+            "posts",
+            // Wrong target type: EgComment instead of EgPost. The
+            // filter column would be meaningless for `eg_posts` either
+            // way; the test exists to prove the dispatcher errors
+            // BEFORE the IN-query lands, not silently corrupts.
+            |q: Builder<EgComment>| q.filter("body", "anything"),
+        ))
+        .get()
+        .await;
+    let err = result.expect_err("with_where closure type mismatch should error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("with_where(`posts`"),
+        "error should name the relation: {msg}"
+    );
+    assert!(
+        msg.contains("type mismatch"),
+        "error should describe the failure mode: {msg}"
+    );
+    assert!(
+        msg.contains("Builder<"),
+        "error should name the expected typed Builder: {msg}"
+    );
+}

@@ -2009,16 +2009,26 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
 ///
 /// The closure shape is
 /// `Box<dyn FnOnce(Builder<R>) -> Builder<R> + Send + Sync + 'static>`
-/// — exactly what `Builder::with_where` boxes up. The downcast cannot
-/// fail on a well-typed program: the only way to populate the slot
-/// with a different shape is to manually call `__eager_load` with a
-/// hand-rolled `Box<dyn Any>`, which is a framework-internal call.
+/// — exactly what `Builder::with_where` boxes up. On a well-typed
+/// program the downcast targets the statically-known `#target_ty` and
+/// succeeds. If the caller spelled the closure's `Builder<T>` parameter
+/// with the WRONG `T` for the named relation (e.g.
+/// `.with_where(("posts", |q: Builder<Comment>| ...))` against a
+/// `posts: HasMany<Post>` declaration), the closure was boxed under
+/// `Box<dyn Any>` with the wrong typed shape and the downcast fails.
+///
+/// Failing silently here is the bug: the predicate gets dropped and the
+/// eager-load runs UNFILTERED — the user thinks they constrained the
+/// relation when they didn't. The emitted extractor turns that into a
+/// loud `FrameworkError::internal` that names the relation and the
+/// statically-known target type, so the dispatcher returns `Err` and
+/// the call site sees the mismatch instead of silent corruption.
 ///
 /// Emits a let-binding `__sn_pred: Option<Box<dyn FnOnce(Builder<R>) ->
 /// Builder<R>>>`. The matching arm consumes the closure exactly once
 /// before issuing `.get()`. Other arms ignore the predicate entirely
 /// (the binding is shadowed by `_` later).
-fn emit_predicate_extractor(target_ty: &syn::Type) -> TokenStream {
+fn emit_predicate_extractor(target_ty: &syn::Type, name_str: &str) -> TokenStream {
     quote! {
         let mut __sn_pred: ::std::option::Option<
             ::std::boxed::Box<
@@ -2029,10 +2039,10 @@ fn emit_predicate_extractor(target_ty: &syn::Type) -> TokenStream {
                     + ::core::marker::Sync
                     + 'static,
             >,
-        > = predicate
-            .take()
-            .and_then(|p| {
-                p.downcast::<
+        > = match predicate.take() {
+            ::core::option::Option::None => ::core::option::Option::None,
+            ::core::option::Option::Some(p) => {
+                match p.downcast::<
                     ::std::boxed::Box<
                         dyn ::core::ops::FnOnce(
                                 ::suprnova::Builder<#target_ty>,
@@ -2042,10 +2052,21 @@ fn emit_predicate_extractor(target_ty: &syn::Type) -> TokenStream {
                             + ::core::marker::Sync
                             + 'static,
                     >,
-                >()
-                .ok()
-                .map(|b| *b)
-            });
+                >() {
+                    ::core::result::Result::Ok(b) => ::core::option::Option::Some(*b),
+                    ::core::result::Result::Err(_) => {
+                        return ::core::result::Result::Err(
+                            ::suprnova::FrameworkError::internal(::std::format!(
+                                "with_where(`{}`, ...) closure type mismatch \
+                                 \u{2014} expected `Builder<{}>`",
+                                #name_str,
+                                ::std::any::type_name::<#target_ty>(),
+                            )),
+                        );
+                    }
+                }
+            }
+        };
     }
 }
 
@@ -2070,7 +2091,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             // contract. The `with_where(("profile", |q| ...))` user
             // call lands here type-erased; the downcast targets the
             // statically-known `#target_ty`.
-            let pred_extractor = emit_predicate_extractor(target_ty);
+            let pred_extractor = emit_predicate_extractor(target_ty, &name_str);
 
             // Build a JSON Vec of parent PK values, issue an
             // `IN (...)` against the child table, group by FK on each
@@ -2165,7 +2186,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             // contract. The `with_where(("user", |q| ...))` user
             // call lands here type-erased; downcast targets
             // `#target_ty`.
-            let pred_extractor = emit_predicate_extractor(target_ty);
+            let pred_extractor = emit_predicate_extractor(target_ty, &name_str);
 
             Ok(Some(quote! {
                 #name_str => {
@@ -2270,7 +2291,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             // `FnOnce(Builder<R>) -> Builder<R>` and binds it as
             // `__sn_pred`. The arm body applies it just before
             // `.get()` on the inner builder.
-            let pred_extractor = emit_predicate_extractor(target_ty);
+            let pred_extractor = emit_predicate_extractor(target_ty, &name_str);
 
             // Same JSON-pluck FK-reading pattern as HasOne's eager
             // arm — see the long-form comment there for why we don't
@@ -2356,7 +2377,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             // Predicate extractor — `with_where(("roles", |q| ...))`
             // applies its closure to the RELATED-table query (not the
             // pivot scan). The downcast targets `#target_ty`.
-            let pred_extractor = emit_predicate_extractor(target_ty);
+            let pred_extractor = emit_predicate_extractor(target_ty, &name_str);
 
             Ok(Some(quote! {
                 #name_str => {
@@ -2569,7 +2590,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
 
             // Predicate extractor — `with_where(("posts", |q| ...))`
             // applies its closure to the final-target `C` query.
-            let pred_extractor = emit_predicate_extractor(target_ty);
+            let pred_extractor = emit_predicate_extractor(target_ty, &name_str);
 
             Ok(Some(quote! {
                 #name_str => {
@@ -2801,7 +2822,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             };
             // Predicate extractor — applies to the child-table query
             // before the IN + type filter are issued.
-            let pred_extractor = emit_predicate_extractor(target_ty);
+            let pred_extractor = emit_predicate_extractor(target_ty, &name_str);
 
             Ok(Some(quote! {
                 #name_str => {
@@ -2880,7 +2901,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 .unwrap_or_else(|| format!("{}_id", to_snake(&last_segment_name(target_ty))));
             // Predicate extractor — `with_where` applies to the
             // RELATED-table query (Step 2), mirroring BelongsToMany.
-            let pred_extractor = emit_predicate_extractor(target_ty);
+            let pred_extractor = emit_predicate_extractor(target_ty, &name_str);
             Ok(Some(quote! {
                 #name_str => {
                     if parents.is_empty() { return ::core::result::Result::Ok(()); }
@@ -3041,7 +3062,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 .unwrap_or_else(|| format!("{}_id", to_snake(&parent_name)));
             // Predicate extractor — `with_where` applies to the
             // TARGET-table query (Step 2). Mirrors MorphToMany.
-            let pred_extractor = emit_predicate_extractor(target_ty);
+            let pred_extractor = emit_predicate_extractor(target_ty, &name_str);
             Ok(Some(quote! {
                 #name_str => {
                     if parents.is_empty() { return ::core::result::Result::Ok(()); }
