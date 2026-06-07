@@ -39,7 +39,7 @@
 //! const-evaluable `Feature` definitions, and the
 //! `is_enabled!` / `feature!` / `context!` macros. We add persistence
 //! and middleware; reinventing the primitives layer would have been
-//! significantly more work for no benefit. See `docs/core/feature-flags.md`
+//! significantly more work for no benefit. See `manual/feature-flags.md`
 //! for end-to-end usage.
 
 pub use featureflag::{

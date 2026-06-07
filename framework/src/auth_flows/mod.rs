@@ -20,7 +20,7 @@
 //! [`crate::Mail`] facade — torii's optional `mailer` feature is
 //! intentionally disabled (see `framework/Cargo.toml`).
 //!
-//! See `docs/core/auth-flows.md` for end-to-end usage.
+//! See `manual/auth-flows.md` for end-to-end usage.
 
 pub mod brute_force;
 pub mod email_verified_middleware;

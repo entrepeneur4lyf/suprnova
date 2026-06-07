@@ -23,7 +23,13 @@ pub trait Authorizable: Sized + 'static {
     fn cannot<R: 'static>(&self, action: &str, resource: &R) -> bool {
         Gate::denies(action, self, resource)
     }
-    /// Return `Err(FrameworkError::Unauthorized)` when denied.
+    /// Authorize the action, returning the denial as an error.
+    ///
+    /// A bare denial maps to `FrameworkError::Unauthorized` (403). A rich
+    /// denial — from a [`Gate::define_with`] gate that returned a [`Response`]
+    /// with a custom message/status — maps to `FrameworkError::Domain`
+    /// carrying that message and status (e.g. 404 from
+    /// `Response::deny_as_not_found()`).
     fn authorize<R: 'static>(
         &self,
         action: &str,
@@ -55,7 +61,10 @@ pub trait Authorizable: Sized + 'static {
     {
         Box::pin(Gate::denies_async(action, self, resource))
     }
-    /// Async sibling of [`Authorizable::authorize`].
+    /// Async sibling of [`Authorizable::authorize`]. Same error mapping:
+    /// bare denials become `FrameworkError::Unauthorized`, rich denials
+    /// (from `Gate::define_async_with`) become `FrameworkError::Domain`
+    /// preserving the message and status.
     fn authorize_async<'a, R>(
         &'a self,
         action: &'a str,

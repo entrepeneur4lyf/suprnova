@@ -17,7 +17,7 @@
 //! - A `Notifiable` recipient supplies its push endpoint by returning the
 //!   JSON-serialized [`SubscriptionInfo`] from `route_for("webpush")`.
 //!
-//! See `docs/core/notifications.md` for end-to-end wiring including
+//! See `manual/notifications.md` for end-to-end wiring including
 //! channel registration and queued delivery.
 
 pub use suprnova_web_push::{

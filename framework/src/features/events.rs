@@ -5,7 +5,7 @@
 //! checks any flag would multiply that event volume by N flags
 //! checked. Production deployments that need read-path audit can
 //! wire a custom `Evaluator` wrapper with a bounded log channel
-//! (out of v1 scope; documented in `docs/core/feature-flags.md`).
+//! (out of v1 scope; documented in `manual/feature-flags.md`).
 
 use crate::events::Event;
 

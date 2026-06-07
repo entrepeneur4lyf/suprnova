@@ -1,6 +1,6 @@
 //! Provider-neutral payments surface.
 //!
-//! See `docs/core/payments.md` for the user-facing guide.
+//! See `manual/payments.md` for the user-facing guide.
 
 pub mod dto;
 pub mod entities;

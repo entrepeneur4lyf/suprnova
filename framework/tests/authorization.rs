@@ -574,6 +574,52 @@ async fn authorizable_authorize_returns_unauthorized_on_deny() {
 }
 
 #[tokio::test]
+async fn authorizable_authorize_maps_rich_denial_to_domain() {
+    // The `Authorizable::authorize` doc promises that bare denials become
+    // `FrameworkError::Unauthorized` while rich denials (from
+    // `Gate::define_with` / `Gate::define_async_with`) become
+    // `FrameworkError::Domain` carrying the message + status.
+    Gate::define_with::<User, Post>("auth-trait-rich-deny", |_u, _p| {
+        Response::deny_as_not_found()
+    });
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
+    let post = Post {
+        id: 1,
+        author_id: 99,
+        is_public: false,
+    };
+
+    match alice.authorize("auth-trait-rich-deny", &post) {
+        Err(FrameworkError::Domain { status_code, .. }) => assert_eq!(status_code, 404),
+        other => panic!("expected Domain 404 from rich denial, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn authorizable_authorize_async_maps_rich_denial_to_domain() {
+    Gate::define_async_with::<User, Post, _, _>("auth-trait-rich-deny-async", |_u, _p| async {
+        Response::deny_as_not_found()
+    });
+    let alice = User {
+        id: 1,
+        is_admin: false,
+    };
+    let post = Post {
+        id: 1,
+        author_id: 99,
+        is_public: false,
+    };
+
+    match alice.authorize_async("auth-trait-rich-deny-async", &post).await {
+        Err(FrameworkError::Domain { status_code, .. }) => assert_eq!(status_code, 404),
+        other => panic!("expected Domain 404 from rich denial, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn authorizable_can_async_dispatches_async_gates() {
     Gate::define_async::<User, Post, _, _>("can-async-view", |_u, p| {
         let public = p.is_public;

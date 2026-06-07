@@ -1,7 +1,6 @@
 //! Eloquent — Laravel-shape API layered over SeaORM.
 //!
-//! See `docs/core/eloquent.md` for the user guide and
-//! `docs/superpowers/specs/phase-10/` for the design contract.
+//! See `manual/eloquent.md` for the user guide.
 //!
 //! Phase 10A ships the foundation: `#[suprnova::model]` macro,
 //! `Model` trait (CRUD lifecycle), `Builder<M>` (dual-API where
