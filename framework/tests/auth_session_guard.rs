@@ -691,7 +691,11 @@ fn logout_and_invalidate_destroys_old_session_row() {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 
-        let seed_id = "h3_old_session_id_aaaaaaaaaaaaaaaaaaaaaa".to_string();
+        // Seed id MUST match `is_valid_session_id`'s shape (40
+        // lowercase-alphanumeric, no underscores) so the L8 cookie
+        // shape gate accepts it as a legitimate inbound id rather
+        // than minting a fresh one.
+        let seed_id = "h3oldsessionidaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
         let middleware = SessionMiddleware::with_store(
             // `cookie_secure(false)` keeps the test HTTPS-agnostic, same
             // as `remember_me.rs::middleware_hydrates...`.
@@ -759,7 +763,10 @@ fn login_destroys_pre_auth_session_row() {
         let _serial = TEST_LOCK.lock().await;
         let _fake = EventFacade::fake();
 
-        let seed_id = "m3_pre_auth_session_id_bbbbbbbbbbbbbbbb".to_string();
+        // Seed id MUST match `is_valid_session_id`'s shape (40
+        // lowercase-alphanumeric, no underscores) so the L8 cookie
+        // shape gate accepts it as a legitimate inbound id.
+        let seed_id = "m3preauthsessionidbbbbbbbbbbbbbbbbbbbbbb".to_string();
         let middleware = SessionMiddleware::with_store(
             suprnova::session::SessionConfig {
                 cookie_secure: false,
