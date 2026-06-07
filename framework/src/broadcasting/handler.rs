@@ -118,120 +118,136 @@ impl WebSocketHandler for BroadcastingWsHandler {
             )
             .await?;
 
-        loop {
-            tokio::select! {
-                // Outbound arm: a forwarder pushed an event.
-                Some(text) = outbound_rx.recv() => {
-                    socket.send_text(text).await?;
-                }
-                // Inbound arm: client sent a frame.
-                inbound = socket.recv_text() => {
-                    let text = match inbound? {
-                        Some(t) => t,
-                        None => break, // connection closed cleanly
-                    };
+        // Inner-async-block pattern: every exit out of the loop body
+        // (clean break on `Ok(None)`, `?` on outbound/inbound IO, `?` from
+        // helper functions) lands here in `result`, after which the
+        // teardown loop below runs unconditionally. Without this wrapping
+        // the typical browser disconnect — tab close, network drop, OS
+        // RST — would skip teardown entirely: presence members would leak
+        // forever, forwarder tasks would detach blocked on `rx.recv()`,
+        // and the hub channel would stay pinned by their receiver count.
+        let result: Result<(), FrameworkError> = async {
+            loop {
+                tokio::select! {
+                    // Outbound arm: a forwarder pushed an event.
+                    Some(text) = outbound_rx.recv() => {
+                        socket.send_text(text).await?;
+                    }
+                    // Inbound arm: client sent a frame.
+                    inbound = socket.recv_text() => {
+                        let text = match inbound? {
+                            Some(t) => t,
+                            None => break, // connection closed cleanly
+                        };
 
-                    match serde_json::from_str::<ClientFrame>(&text) {
-                        Ok(ClientFrame::Subscribe { channel, data }) => {
-                            handle_subscribe(
-                                &channel,
-                                &data,
-                                &req,
-                                &self.hub,
-                                &self.registry,
-                                &forwarders,
-                                &outbound_tx,
-                                &socket_id,
-                                &mut socket,
-                            )
-                            .await?;
-                        }
-                        Ok(ClientFrame::Unsubscribe { channel }) => {
-                            handle_unsubscribe(
-                                &channel,
-                                &self.hub,
-                                &forwarders,
-                                &mut socket,
-                            )
-                            .await?;
-                        }
-                        Ok(ClientFrame::Publish { channel, event, data }) => {
-                            // Two-stage publish authorization. Fail closed on:
-                            //   - Connection never subscribed: no entry in
-                            //     `forwarders` → reject (Pusher client-event
-                            //     contract requires an established subscription)
-                            //   - Unknown channel: no impl to consult → reject
-                            //   - Channel says no: reject with Error frame
-                            //   - Channel says yes: proceed to hub.publish
-                            let is_subscribed = {
-                                let map = forwarders.lock().await;
-                                map.contains_key(&channel)
-                            };
-
-                            let allowed = if !is_subscribed {
-                                false
-                            } else {
-                                match self.registry.resolve(&channel) {
-                                    Some((ch, params)) => {
-                                        ch.authorize_publish(&req, &params, &event, &data).await
-                                    }
-                                    None => false,
-                                }
-                            };
-
-                            if !allowed {
-                                let err = ServerFrame::Error {
-                                    channel: Some(channel.clone()),
-                                    reason: "publish unauthorized".into(),
+                        match serde_json::from_str::<ClientFrame>(&text) {
+                            Ok(ClientFrame::Subscribe { channel, data }) => {
+                                handle_subscribe(
+                                    &channel,
+                                    &data,
+                                    &req,
+                                    &self.hub,
+                                    &self.registry,
+                                    &forwarders,
+                                    &outbound_tx,
+                                    &socket_id,
+                                    &mut socket,
+                                )
+                                .await?;
+                            }
+                            Ok(ClientFrame::Unsubscribe { channel }) => {
+                                handle_unsubscribe(
+                                    &channel,
+                                    &self.hub,
+                                    &forwarders,
+                                    &mut socket,
+                                )
+                                .await?;
+                            }
+                            Ok(ClientFrame::Publish { channel, event, data }) => {
+                                // Two-stage publish authorization. Fail closed on:
+                                //   - Connection never subscribed: no entry in
+                                //     `forwarders` → reject (Pusher client-event
+                                //     contract requires an established subscription)
+                                //   - Unknown channel: no impl to consult → reject
+                                //   - Channel says no: reject with Error frame
+                                //   - Channel says yes: proceed to hub.publish
+                                let is_subscribed = {
+                                    let map = forwarders.lock().await;
+                                    map.contains_key(&channel)
                                 };
-                                socket
-                                    .send_text(
-                                        serde_json::to_string(&err).unwrap_or_default(),
-                                    )
-                                    .await?;
-                            } else {
-                                // Client publishes are not socket-excluded — the
-                                // publisher receives its own event like any other
-                                // subscriber (see broadcasting docs).
-                                let chan_for_err = channel.clone();
-                                if let Err(e) = self
-                                    .hub
-                                    .publish(BroadcastEnvelope::new(channel, event, data))
-                                    .await
-                                {
-                                    // Surface broker / fanout failures back to
-                                    // the originating client so it knows the
-                                    // publish didn't reach other processes.
+
+                                let allowed = if !is_subscribed {
+                                    false
+                                } else {
+                                    match self.registry.resolve(&channel) {
+                                        Some((ch, params)) => {
+                                            ch.authorize_publish(&req, &params, &event, &data).await
+                                        }
+                                        None => false,
+                                    }
+                                };
+
+                                if !allowed {
                                     let err = ServerFrame::Error {
-                                        channel: Some(chan_for_err),
-                                        reason: format!("publish failed: {e}"),
+                                        channel: Some(channel.clone()),
+                                        reason: "publish unauthorized".into(),
                                     };
                                     socket
                                         .send_text(
                                             serde_json::to_string(&err).unwrap_or_default(),
                                         )
                                         .await?;
+                                } else {
+                                    // Client publishes are not socket-excluded — the
+                                    // publisher receives its own event like any other
+                                    // subscriber (see broadcasting docs).
+                                    let chan_for_err = channel.clone();
+                                    if let Err(e) = self
+                                        .hub
+                                        .publish(BroadcastEnvelope::new(channel, event, data))
+                                        .await
+                                    {
+                                        // Surface broker / fanout failures back to
+                                        // the originating client so it knows the
+                                        // publish didn't reach other processes.
+                                        let err = ServerFrame::Error {
+                                            channel: Some(chan_for_err),
+                                            reason: format!("publish failed: {e}"),
+                                        };
+                                        socket
+                                            .send_text(
+                                                serde_json::to_string(&err).unwrap_or_default(),
+                                            )
+                                            .await?;
+                                    }
                                 }
                             }
-                        }
-                        Err(e) => {
-                            let err = ServerFrame::Error {
-                                channel: None,
-                                reason: format!("malformed envelope: {e}"),
-                            };
-                            socket
-                                .send_text(serde_json::to_string(&err).unwrap_or_default())
-                                .await?;
+                            Err(e) => {
+                                let err = ServerFrame::Error {
+                                    channel: None,
+                                    reason: format!("malformed envelope: {e}"),
+                                };
+                                socket
+                                    .send_text(serde_json::to_string(&err).unwrap_or_default())
+                                    .await?;
+                            }
                         }
                     }
                 }
             }
+            Ok(())
         }
+        .await;
 
-        // Connection closed — publish presence.left for any remaining
-        // presence subscriptions, then abort all forwarder tasks. This
-        // is a cleanup loop; a hub publish failure on shutdown gets
-        // logged but doesn't tear down the surrounding handler.
+        // Teardown runs on every exit path, not just the clean `Ok(None)`
+        // break above. Publish `presence.left` for any remaining presence
+        // subscriptions, then abort each forwarder task deterministically
+        // — relying on `JoinHandle`'s detach-on-drop semantics would let
+        // the task block on `rx.recv().await` indefinitely if the broadcast
+        // sender is kept alive elsewhere. A hub publish failure on shutdown
+        // is logged but doesn't replace the original exit reason in
+        // `result`.
         let mut map = forwarders.lock().await;
         for (channel, entry) in map.drain() {
             if let Some(ps) = entry.presence {
@@ -254,7 +270,10 @@ impl WebSocketHandler for BroadcastingWsHandler {
             }
             entry.handle.abort();
         }
-        Ok(())
+        drop(map);
+
+        // Re-raise the inner loop's exit reason after teardown ran.
+        result
     }
 }
 

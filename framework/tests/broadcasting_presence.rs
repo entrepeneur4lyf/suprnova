@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use suprnova::FrameworkError;
 use suprnova::broadcasting::{
-    BroadcastingWsHandler, Channel, ChannelParams, ChannelRegistry, InMemoryBroadcastHub,
-    PresenceChannel,
+    BroadcastHub, BroadcastingWsHandler, Channel, ChannelParams, ChannelRegistry,
+    InMemoryBroadcastHub, PresenceChannel,
 };
 use suprnova::http::Request;
 use suprnova::routing::Router;
@@ -57,6 +57,12 @@ impl PresenceChannel for PresenceLobby {
 // ---------------------------------------------------------------------------
 
 async fn spawn_presence_server() -> u16 {
+    spawn_presence_server_with_hub().await.0
+}
+
+/// Same as `spawn_presence_server` but also hands back the hub so a
+/// test can introspect subscriber counts or call methods on it directly.
+async fn spawn_presence_server_with_hub() -> (u16, Arc<InMemoryBroadcastHub>) {
     let hub: Arc<InMemoryBroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
     let mut registry = ChannelRegistry::new();
     registry.register(PresenceLobby);
@@ -107,7 +113,7 @@ async fn spawn_presence_server() -> u16 {
     });
     // Give the listener a moment to be ready.
     tokio::time::sleep(Duration::from_millis(50)).await;
-    port
+    (port, hub)
 }
 
 // ---------------------------------------------------------------------------
@@ -301,4 +307,113 @@ async fn presence_channel_broadcasts_left_on_disconnect() {
     );
 
     alice.close(None).await.unwrap();
+}
+
+/// Abrupt disconnect — Bob's connection is dropped without a Close
+/// frame, the way a browser tab close or OS-level RST disconnects.
+/// The teardown loop (untrack_member + `presence.left` publish +
+/// forwarder abort) must still run, so Alice receives `presence.left`
+/// regardless of whether Bob exited via the clean `Ok(None)` break or
+/// via a `?` error path inside the inbound/outbound select arms.
+#[tokio::test]
+async fn presence_channel_broadcasts_left_on_abrupt_disconnect() {
+    let port = spawn_presence_server().await;
+    let url = format!("ws://127.0.0.1:{port}/ws/presence");
+
+    // Alice subscribes first and drains her own setup frames.
+    let mut alice = connect(&url).await;
+    subscribe(&mut alice, "presence.lobby").await;
+    let _ = next_frame(&mut alice).await; // subscribed
+    let _ = next_frame(&mut alice).await; // presence.here (empty)
+    let f = next_frame(&mut alice).await;
+    assert_eq!(
+        f["event"], "presence.joined",
+        "expected alice's own join, got {f}"
+    );
+
+    // Bob subscribes second.
+    let mut bob = connect(&url).await;
+    subscribe(&mut bob, "presence.lobby").await;
+    let _ = next_frame(&mut bob).await; // subscribed
+    let _ = next_frame(&mut bob).await; // presence.here (alice listed)
+    let f = timeout(TokioDuration::from_secs(2), next_frame(&mut bob))
+        .await
+        .expect("bob receives own presence.joined within 2s");
+    assert_eq!(
+        f["event"], "presence.joined",
+        "expected bob's own join, got {f}"
+    );
+
+    // Drain Alice's presence.joined-for-Bob so the next frame she sees is
+    // the post-teardown presence.left we're actually testing for.
+    let joined = timeout(TokioDuration::from_secs(2), next_frame(&mut alice))
+        .await
+        .expect("alice receives presence.joined for bob within 2s");
+    assert_eq!(joined["event"], "presence.joined", "got {joined}");
+
+    // Drop bob WITHOUT calling `close(None).await`. The tokio-tungstenite
+    // client's Drop closes the underlying TCP socket without first sending
+    // a WS Close frame — the same way a browser tab close or OS-level RST
+    // does. Teardown must still publish `presence.left` regardless of the
+    // exit path the server-side handler observed (`Ok(None)` EOF or an
+    // `Err` from recv_text / a pending send to a closed socket).
+    drop(bob);
+
+    let left = timeout(TokioDuration::from_secs(2), next_frame(&mut alice))
+        .await
+        .expect("alice receives presence.left within 2s after bob abruptly disconnects");
+    assert_eq!(left["action"], "event", "got {left}");
+    assert_eq!(left["event"], "presence.left", "got {left}");
+    assert_eq!(left["channel"], "presence.lobby");
+    assert!(
+        left["data"]["user_id"].is_number(),
+        "expected user_id in presence.left data, got {left}"
+    );
+
+    alice.close(None).await.unwrap();
+}
+
+/// The forwarder task holds a `broadcast::Receiver` for each
+/// subscription. If teardown doesn't abort it on connection close, the
+/// receiver pins the channel's `receiver_count() > 0` forever and
+/// `sweep_dead_channels` (run on each new subscribe) can never reclaim
+/// it — a per-channel leak across every ungraceful disconnect. After
+/// an abrupt drop, the forwarder must be aborted; the hub's
+/// `subscriber_count` then returns to zero once the task winds down.
+#[tokio::test]
+async fn subscriber_count_returns_to_zero_after_abrupt_disconnect() {
+    let (port, hub) = spawn_presence_server_with_hub().await;
+    let url = format!("ws://127.0.0.1:{port}/ws/presence");
+
+    let mut alice = connect(&url).await;
+    subscribe(&mut alice, "presence.lobby").await;
+    let _ = next_frame(&mut alice).await; // subscribed
+    let _ = next_frame(&mut alice).await; // presence.here
+    let _ = next_frame(&mut alice).await; // presence.joined (self)
+
+    assert_eq!(
+        hub.subscriber_count("presence.lobby"),
+        1,
+        "subscriber count should be 1 while alice is connected"
+    );
+
+    // Abrupt disconnect — no Close frame.
+    drop(alice);
+
+    // Poll until subscriber_count drops to 0 or we hit the deadline. The
+    // abort signal is asynchronous; the broadcast::Receiver is dropped
+    // once the forwarder task winds down past its next await point.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut current = hub.subscriber_count("presence.lobby");
+    while std::time::Instant::now() < deadline && current > 0 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        current = hub.subscriber_count("presence.lobby");
+    }
+
+    assert_eq!(
+        current, 0,
+        "subscriber_count did not return to 0 within 2s after abrupt disconnect; \
+         the forwarder's broadcast::Receiver was not dropped — teardown never \
+         called .abort() on the forwarder JoinHandle"
+    );
 }
