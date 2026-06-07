@@ -43,6 +43,18 @@ impl Bucket {
         let elapsed = now.saturating_duration_since(oldest);
         Some(window.saturating_sub(elapsed))
     }
+
+    /// Whether every recorded hit on this bucket has aged out beyond
+    /// `window` as of `now`. Used by the in-memory driver's periodic
+    /// sweep to evict buckets that no longer carry any state — without
+    /// this, attacker-controlled keying (e.g. `X-Forwarded-For` with
+    /// no trusted-proxy gating) can grow the bucket map unboundedly.
+    pub fn is_inactive(&self, window: Duration, now: Instant) -> bool {
+        match self.hits.back().copied() {
+            Some(last) => now.saturating_duration_since(last) >= window,
+            None => true,
+        }
+    }
 }
 
 impl Default for Bucket {

@@ -5,6 +5,7 @@ mod extract;
 mod form_request;
 mod request;
 mod response;
+mod trusted_proxies;
 pub mod upload;
 
 pub use abort::{abort as abort_with, abort_if, abort_unless};
@@ -14,6 +15,7 @@ pub use extract::{FromParam, FromRequest};
 pub use form_request::FormRequest;
 pub use request::{BodyState, Request, RequestParts};
 pub use response::{HttpResponse, Redirect, RedirectRouteBuilder, Response, ResponseExt};
+pub use trusted_proxies::TrustedProxiesConfig;
 
 /// Error type for missing route parameters
 ///

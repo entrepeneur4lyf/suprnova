@@ -32,7 +32,14 @@ pub mod remember_me;
 pub mod two_factor;
 pub mod two_factor_challenge_middleware;
 
-pub use brute_force::{BruteForce, LoginThrottleMiddleware};
+pub use brute_force::{
+    BackendErrorPolicy as LoginThrottleBackendErrorPolicy, BruteForce, LoginThrottleMiddleware,
+};
+// Also re-export `BackendErrorPolicy` under its short name for
+// callers who reach for it via `auth_flows::BackendErrorPolicy`.
+// Two re-exports of the same type aren't ambiguous — they share an
+// identity.
+pub use brute_force::BackendErrorPolicy;
 pub use email_verified_middleware::EnsureEmailVerifiedMiddleware;
 pub use email_verify::EmailVerification;
 pub use events::{

@@ -111,9 +111,12 @@ pub fn registry() -> &'static NamedLimiterRegistry {
 /// ```rust,ignore
 /// use suprnova::rate_limit::{Limit, RateLimiter};
 ///
-/// // Register a named limiter at boot.
+/// // Register a named limiter at boot. Key by `req.ip()` — that goes
+/// // through the trusted-proxy gating in `Request::ip`, so the bucket
+/// // key reflects the real peer unless the operator has explicitly
+/// // configured `APP_TRUSTED_PROXIES`.
 /// RateLimiter::define("api", |req| {
-///     let key = req.header("x-forwarded-for").unwrap_or("anon");
+///     let key = req.ip().unwrap_or_else(|| "anon".into());
 ///     Limit::per_minute(60).by(format!("ip:{key}")).into()
 /// });
 ///
@@ -123,6 +126,19 @@ pub fn registry() -> &'static NamedLimiterRegistry {
 /// }
 /// RateLimiter::hit("login:1.2.3.4", 60).await?;
 /// ```
+///
+/// # Security note on bucket keys
+///
+/// Never key a limiter directly off `X-Forwarded-For` or `X-Real-IP`:
+/// those headers are client-controlled and any inbound request can
+/// carry them. Use [`Request::ip`](crate::Request::ip), which honours
+/// the configured trusted-proxy allowlist — see
+/// [`TrustedProxiesConfig`](crate::http::TrustedProxiesConfig). On a
+/// deployment without a terminating proxy, an XFF-keyed limiter is a
+/// DoS amplifier: an attacker rotates the header to mint unbounded
+/// distinct keys. The in-memory driver's periodic sweep
+/// ([`super::memory::InMemoryRateLimiter::with_periodic_sweep`]) is a
+/// backstop against that growth, not a substitute for the right key.
 pub struct RateLimiter;
 
 const TIMER_SUFFIX: &str = ":timer";

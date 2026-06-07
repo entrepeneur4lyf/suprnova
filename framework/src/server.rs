@@ -551,6 +551,12 @@ pub async fn handle_request_with_peer(
         if let Some(ip) = peer_ip {
             request = request.with_peer_addr(ip);
         }
+        // Install the same trusted-proxies allowlist the routed paths
+        // see so a health probe sourced through a real proxy hop
+        // reports the proxy's `X-Forwarded-*` headers consistently.
+        if let Some(cfg) = crate::config::Config::get::<crate::config::AppConfig>() {
+            request = request.with_trusted_proxies(cfg.trusted_proxies);
+        }
         let request_id = crate::logging::request_id::resolve_request_id(&request);
         let query = request.query().unwrap_or("").to_string();
         return health_response(&query, &request_id).await;
@@ -661,15 +667,26 @@ async fn handle_request_inner(
     path: &str,
     peer_ip: Option<std::net::IpAddr>,
 ) -> hyper::Response<ServerBody> {
-    // Helper: stamp the peer IP on a freshly-constructed Request if the
-    // accept loop captured one. Stays an `Option` because in-process
-    // callers (the testing harness, the WS upgrade replay) may invoke
-    // `handle_request` directly without a real TCP peer.
+    // Resolve the trusted-proxies allowlist for this request at the top
+    // of the entry-point so the accessor methods stay pure `&self`
+    // lookups. Falls back to the empty default whenever `Config::init`
+    // hasn't been run yet (in-process tests, WS-upgrade replay) — the
+    // accessors then ignore proxy headers, which is the fail-safe
+    // policy spelled out in `TrustedProxiesConfig`'s docs.
+    let trusted_proxies = crate::config::Config::get::<crate::config::AppConfig>()
+        .map(|cfg| cfg.trusted_proxies)
+        .unwrap_or_else(crate::http::TrustedProxiesConfig::empty);
+
+    // Helper: stamp the peer IP and trusted-proxy allowlist on a
+    // freshly-constructed Request. `peer_ip` stays an `Option` because
+    // in-process callers (the testing harness, the WS upgrade replay)
+    // may invoke `handle_request` directly without a real TCP peer.
     let stamp_peer = |r: Request| -> Request {
-        match peer_ip {
+        let r = match peer_ip {
             Some(ip) => r.with_peer_addr(ip),
             None => r,
-        }
+        };
+        r.with_trusted_proxies(trusted_proxies.clone())
     };
     // RFC 9110 §9.3.2: a HEAD request that lacks an explicit handler falls
     // back to GET inside `Router::match_route`. The middleware list for
@@ -980,6 +997,12 @@ async fn handle_ws_upgrade(
         .with_route_pattern(pattern.clone());
     if let Some(ip) = peer_ip {
         initial_request = initial_request.with_peer_addr(ip);
+    }
+    // Install the same trusted-proxies allowlist HTTP requests use so
+    // a WS upgrade routed through a real proxy hop sees consistent
+    // header trust during middleware authentication / CSRF / etc.
+    if let Some(cfg) = crate::config::Config::get::<crate::config::AppConfig>() {
+        initial_request = initial_request.with_trusted_proxies(cfg.trusted_proxies);
     }
 
     // Resolve the request id once for the whole upgrade. It is echoed on

@@ -267,16 +267,27 @@ fn prefixed_key(limit: &Limit, mode: &Mode, prefix: &str) -> Option<String> {
 }
 
 fn default_request_key(request: &Request) -> String {
-    // Use the same fallback Laravel uses: an XFF-derived IP when
-    // present, then the bare path. `route()` isn't available here so the
-    // path is the second-best discriminator. The middleware's `prefix`
-    // is prepended later inside `prefixed_key`; do not bake it in here
-    // or it lands twice.
-    let ip = request
-        .header("x-forwarded-for")
-        .and_then(|v| v.split(',').next())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "anon".into());
+    // Use `request.ip()` so the resolution goes through the
+    // trusted-proxy gating in `Request::ip`: `X-Forwarded-For` /
+    // `X-Real-IP` are honoured only when the TCP peer is in the
+    // configured allowlist, and otherwise the TCP peer wins. Falls
+    // back to the literal `"unknown"` only when no peer was threaded
+    // into the request — that path is reserved for in-process tests
+    // and the WS upgrade replay; production traffic always has a
+    // peer.
+    //
+    // The middleware's `prefix` is prepended later inside
+    // `prefixed_key`; do not bake it in here or it lands twice.
+    //
+    // # Security note
+    //
+    // Without a `TrustedProxiesConfig` opt-in, the bucket key is
+    // grounded in the TCP peer — there is no XFF spoofing path. With
+    // an opt-in, the operator has already attested that the listed
+    // proxy hops can be trusted. Either way, the historical "every
+    // anonymous caller shares one `anon` bucket" failure mode is
+    // gone.
+    let ip = request.ip().unwrap_or_else(|| "unknown".into());
     format!("ip:{ip}:path:{}", request.path())
 }
 

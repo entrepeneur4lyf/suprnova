@@ -1,6 +1,7 @@
 use super::ParamError;
 use super::body::{collect_body_with_cap, global_max_request_body_bytes, parse_form, parse_json};
 use super::cookie::parse_cookies;
+use super::trusted_proxies::TrustedProxiesConfig;
 use crate::error::FrameworkError;
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
@@ -43,6 +44,17 @@ pub struct Request {
     /// `SocketAddr` when available, and consulted by [`Request::ip`] as
     /// the trusted fallback when no proxy header is present.
     peer_addr: Option<std::net::IpAddr>,
+    /// Allowlist of TCP peer addresses whose `X-Forwarded-*` /
+    /// `X-Real-IP` headers may be honoured by the proxy-aware
+    /// accessors ([`Request::ip`], [`Request::secure`], [`Request::host`],
+    /// [`Request::http_host`], [`Request::port`], [`Request::ips`]).
+    ///
+    /// Defaults to an empty config — proxy headers ignored. The server
+    /// installs the [`AppConfig`](crate::config::AppConfig)-derived
+    /// allowlist via [`Request::with_trusted_proxies`] in
+    /// `handle_request_with_peer`; in-process tests can install one
+    /// directly without touching the global container.
+    trusted_proxies: TrustedProxiesConfig,
 }
 
 impl Request {
@@ -54,6 +66,7 @@ impl Request {
             params: HashMap::new(),
             route_pattern: None,
             peer_addr: None,
+            trusted_proxies: TrustedProxiesConfig::empty(),
         }
     }
 
@@ -79,6 +92,36 @@ impl Request {
     pub fn with_peer_addr(mut self, addr: std::net::IpAddr) -> Self {
         self.peer_addr = Some(addr);
         self
+    }
+
+    /// Install the trusted-proxies allowlist for the proxy-aware
+    /// accessors ([`Request::ip`], [`Request::secure`], [`Request::host`],
+    /// [`Request::http_host`], [`Request::port`], [`Request::ips`]).
+    ///
+    /// Called by [`crate::server::handle_request_with_peer`] with the
+    /// [`AppConfig`](crate::config::AppConfig)-derived allowlist
+    /// resolved at request-entry; in-process tests can build a
+    /// [`TrustedProxiesConfig`] directly and pass it here to assert
+    /// proxy-trust behaviour without touching the global container.
+    pub fn with_trusted_proxies(mut self, cfg: TrustedProxiesConfig) -> Self {
+        self.trusted_proxies = cfg;
+        self
+    }
+
+    /// The trusted-proxies allowlist currently installed on this
+    /// request. Returns the empty default when no allowlist was
+    /// configured. Useful for middleware that needs to consult the
+    /// gating policy without invoking the accessors directly.
+    pub fn trusted_proxies(&self) -> &TrustedProxiesConfig {
+        &self.trusted_proxies
+    }
+
+    /// Whether the connecting TCP peer is in the trusted-proxy
+    /// allowlist. The gating predicate behind every proxy-aware
+    /// accessor; documented here so middleware can reuse it without
+    /// duplicating the resolution logic.
+    pub fn peer_is_trusted_proxy(&self) -> bool {
+        self.trusted_proxies.trusts(self.peer_addr)
     }
 
     /// Get the request method
@@ -255,21 +298,32 @@ impl Request {
     /// 1. URI scheme on the request line (set by hyper when TLS is
     ///    terminated in-process).
     /// 2. `X-Forwarded-Proto` (single-value or first comma-split
-    ///    value, case-insensitive) — covers the common terminating-proxy
-    ///    deployment.
-    /// 3. `X-Forwarded-Ssl: on` — older proxies (nginx legacy default).
+    ///    value, case-insensitive) — only honoured when the TCP peer
+    ///    matches the [trusted-proxy allowlist](TrustedProxiesConfig).
+    /// 3. `X-Forwarded-Ssl: on` — older proxies (nginx legacy default),
+    ///    same trusted-proxy gating.
     ///
     /// Mirrors Laravel's `Request::secure()` /
-    /// `Symfony Request::isSecure()`. No header-trust gating because
-    /// upstream Suprnova does not have a configurable trusted-proxy
-    /// list yet; consumers behind an untrusted edge must strip these
-    /// headers at the proxy layer (the same precaution Laravel docs
-    /// recommend pre-`TrustProxies`).
+    /// `Symfony Request::isSecure()`.
+    ///
+    /// # Security note
+    ///
+    /// Default behaviour ignores proxy headers — the TCP peer is
+    /// untrusted until the operator opts in via
+    /// `APP_TRUSTED_PROXIES` (or
+    /// [`AppConfigBuilder::trusted_proxies`](crate::config::AppConfigBuilder::trusted_proxies)).
+    /// Without that opt-in, a client behind a terminating TLS proxy
+    /// will read as `secure() == false` here — the framework cannot
+    /// distinguish a real proxy hop from a spoofed `X-Forwarded-Proto`
+    /// without an allowlist.
     pub fn secure(&self) -> bool {
         if let Some(scheme) = self.parts.uri.scheme_str()
             && scheme.eq_ignore_ascii_case("https")
         {
             return true;
+        }
+        if !self.peer_is_trusted_proxy() {
+            return false;
         }
         if let Some(proto) = self.header("X-Forwarded-Proto") {
             let first = proto.split(',').next().unwrap_or("").trim();
@@ -294,27 +348,41 @@ impl Request {
     /// Get the connecting peer IP address.
     ///
     /// Resolution order:
-    /// 1. `X-Forwarded-For` — first non-empty comma-split value.
-    /// 2. `X-Real-IP` — single value.
+    /// 1. `X-Forwarded-For` — first non-empty comma-split value (only
+    ///    when the TCP peer is in the trusted-proxy allowlist).
+    /// 2. `X-Real-IP` — single value (same trusted-proxy gating).
     /// 3. The TCP peer address recorded by the server
-    ///    ([`Request::with_peer_addr`]) when no proxy header is set.
+    ///    ([`Request::with_peer_addr`]) — the fail-safe fallback used
+    ///    whenever the proxy headers are absent or the peer is not a
+    ///    trusted proxy.
     ///
-    /// Returns `None` only when both the proxy headers and the
-    /// peer-addr accessor are absent (e.g. tests that construct a
-    /// `Request` directly from `Request::new(...)` without threading
-    /// the peer). Mirrors Laravel's `Request::ip()` /
-    /// `Symfony Request::getClientIp()`.
+    /// Returns `None` only when the peer-addr accessor is absent
+    /// (e.g. tests that construct a `Request` directly from
+    /// `Request::new(...)` without threading the peer) AND the
+    /// configured proxy headers cannot be honoured. Mirrors Laravel's
+    /// `Request::ip()` / `Symfony Request::getClientIp()`.
+    ///
+    /// # Security note
+    ///
+    /// `X-Forwarded-For` and `X-Real-IP` are client-controlled headers
+    /// — any inbound request can carry them. They are honoured only
+    /// when the TCP peer matches an address listed in
+    /// [`AppConfig::trusted_proxies`](crate::config::AppConfig::trusted_proxies)
+    /// (configurable via `APP_TRUSTED_PROXIES`). With the default
+    /// empty allowlist, this method always returns the TCP peer.
     pub fn ip(&self) -> Option<String> {
-        if let Some(xff) = self.header("X-Forwarded-For") {
-            let first = xff.split(',').next().unwrap_or("").trim();
-            if !first.is_empty() {
-                return Some(first.to_string());
+        if self.peer_is_trusted_proxy() {
+            if let Some(xff) = self.header("X-Forwarded-For") {
+                let first = xff.split(',').next().unwrap_or("").trim();
+                if !first.is_empty() {
+                    return Some(first.to_string());
+                }
             }
-        }
-        if let Some(real) = self.header("X-Real-IP") {
-            let v = real.trim();
-            if !v.is_empty() {
-                return Some(v.to_string());
+            if let Some(real) = self.header("X-Real-IP") {
+                let v = real.trim();
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
             }
         }
         self.peer_addr.map(|ip| ip.to_string())
@@ -324,20 +392,27 @@ impl Request {
     /// recorded peer address. Order: leftmost (originating client) →
     /// rightmost (closest hop). Mirrors Laravel's `Request::ips()` /
     /// `Symfony Request::getClientIps()`.
+    ///
+    /// `X-Forwarded-For` / `X-Real-IP` contribute to the chain only
+    /// when the TCP peer matches the trusted-proxy allowlist — see
+    /// [`Request::ip`] for the security rationale. The peer address
+    /// itself is always appended (it is the only authoritative hop).
     pub fn ips(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
-        if let Some(xff) = self.header("X-Forwarded-For") {
-            for piece in xff.split(',') {
-                let t = piece.trim();
-                if !t.is_empty() {
-                    out.push(t.to_string());
+        if self.peer_is_trusted_proxy() {
+            if let Some(xff) = self.header("X-Forwarded-For") {
+                for piece in xff.split(',') {
+                    let t = piece.trim();
+                    if !t.is_empty() {
+                        out.push(t.to_string());
+                    }
                 }
             }
-        }
-        if let Some(real) = self.header("X-Real-IP") {
-            let t = real.trim();
-            if !t.is_empty() && !out.iter().any(|v| v == t) {
-                out.push(t.to_string());
+            if let Some(real) = self.header("X-Real-IP") {
+                let t = real.trim();
+                if !t.is_empty() && !out.iter().any(|v| v == t) {
+                    out.push(t.to_string());
+                }
             }
         }
         if let Some(peer) = self.peer_addr {
@@ -355,11 +430,15 @@ impl Request {
         self.header("User-Agent")
     }
 
-    /// The host name (no port, no scheme). Resolution: `X-Forwarded-Host`
-    /// first, then `Host` header, then URI authority host. Mirrors
-    /// Symfony's `getHost()`.
+    /// The host name (no port, no scheme). Resolution:
+    /// `X-Forwarded-Host` first (only when the TCP peer is in the
+    /// trusted-proxy allowlist), then `Host` header, then URI
+    /// authority host. Mirrors Symfony's `getHost()`. See
+    /// [`Request::ip`] for the trusted-proxy security rationale.
     pub fn host(&self) -> Option<String> {
-        if let Some(fhost) = self.header("X-Forwarded-Host") {
+        if self.peer_is_trusted_proxy()
+            && let Some(fhost) = self.header("X-Forwarded-Host")
+        {
             let first = fhost.split(',').next().unwrap_or("").trim();
             if !first.is_empty() {
                 return Some(strip_port(first).to_string());
@@ -398,22 +477,32 @@ impl Request {
     }
 
     /// The port the client is connecting to. Resolution: explicit
-    /// `:port` on the Host (or X-Forwarded-Host) header → explicit
-    /// `X-Forwarded-Port` → URI authority port → `None` (caller treats
-    /// as the scheme default).
+    /// `:port` on the `X-Forwarded-Host` header → explicit
+    /// `X-Forwarded-Port` → explicit `:port` on the `Host` header →
+    /// URI authority port → `None` (caller treats as the scheme
+    /// default).
+    ///
+    /// `X-Forwarded-Host` / `X-Forwarded-Port` are honoured only when
+    /// the TCP peer is in the trusted-proxy allowlist — see
+    /// [`Request::ip`] for the security rationale.
     pub fn port(&self) -> Option<u16> {
-        let host_header = self
-            .header("X-Forwarded-Host")
-            .and_then(|v| v.split(',').next())
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .or_else(|| self.header("Host"));
+        let trusted = self.peer_is_trusted_proxy();
+        let forwarded_host = if trusted {
+            self.header("X-Forwarded-Host")
+                .and_then(|v| v.split(',').next())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        };
+        let host_header = forwarded_host.or_else(|| self.header("Host"));
         if let Some(h) = host_header
             && let Some(p) = port_of(h)
         {
             return Some(p);
         }
-        if let Some(port) = self.header("X-Forwarded-Port")
+        if trusted
+            && let Some(port) = self.header("X-Forwarded-Port")
             && let Ok(p) = port.trim().parse::<u16>()
         {
             return Some(p);

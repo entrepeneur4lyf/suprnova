@@ -12,7 +12,16 @@ use hyper::service::service_fn;
 use std::convert::Infallible;
 use std::net::IpAddr;
 use suprnova::Request;
+use suprnova::http::TrustedProxiesConfig;
 use suprnova::routing::register_route_name;
+
+/// Trusted-proxy config that lists `127.0.0.1` — paired with a
+/// `with_peer_addr(127.0.0.1)` it makes the proxy-aware accessors
+/// honour the configured `X-Forwarded-*` / `X-Real-IP` headers, which
+/// is the deployment shape these legacy tests exercise.
+fn trust_loopback() -> TrustedProxiesConfig {
+    TrustedProxiesConfig::with_ips([IpAddr::from([127, 0, 0, 1])])
+}
 
 /// Construct a `suprnova::Request` from a hyper `Request<Full<Bytes>>`
 /// by piping it through a hyper service so the body becomes
@@ -181,7 +190,9 @@ async fn secure_detects_x_forwarded_proto_https() {
             .header("X-Forwarded-Proto", "https"),
         "",
     )
-    .await;
+    .await
+    .with_peer_addr(IpAddr::from([127, 0, 0, 1]))
+    .with_trusted_proxies(trust_loopback());
     assert!(req.secure());
     assert_eq!(req.scheme(), "https");
 }
@@ -194,7 +205,9 @@ async fn secure_detects_x_forwarded_ssl_on() {
             .header("X-Forwarded-Ssl", "on"),
         "",
     )
-    .await;
+    .await
+    .with_peer_addr(IpAddr::from([127, 0, 0, 1]))
+    .with_trusted_proxies(trust_loopback());
     assert!(req.secure());
 }
 
@@ -206,6 +219,26 @@ async fn secure_returns_false_without_proxy_headers() {
 }
 
 #[tokio::test]
+async fn secure_ignores_x_forwarded_proto_from_untrusted_peer() {
+    // Peer is NOT in the (empty) allowlist — header must be ignored,
+    // matching the fail-safe default that protects deployments behind
+    // an untrusted edge.
+    let req = build_request(
+        hyper::Request::builder()
+            .uri("/")
+            .header("X-Forwarded-Proto", "https"),
+        "",
+    )
+    .await
+    .with_peer_addr(IpAddr::from([127, 0, 0, 1]));
+    assert!(
+        !req.secure(),
+        "untrusted peer must not lift the secure flag"
+    );
+    assert_eq!(req.scheme(), "http");
+}
+
+#[tokio::test]
 async fn ip_reads_x_forwarded_for_first_hop() {
     let req = build_request(
         hyper::Request::builder()
@@ -213,7 +246,9 @@ async fn ip_reads_x_forwarded_for_first_hop() {
             .header("X-Forwarded-For", "203.0.113.5, 10.0.0.1, 10.0.0.2"),
         "",
     )
-    .await;
+    .await
+    .with_peer_addr(IpAddr::from([127, 0, 0, 1]))
+    .with_trusted_proxies(trust_loopback());
     assert_eq!(req.ip().as_deref(), Some("203.0.113.5"));
 }
 
@@ -225,7 +260,9 @@ async fn ip_falls_back_to_x_real_ip() {
             .header("X-Real-IP", "198.51.100.7"),
         "",
     )
-    .await;
+    .await
+    .with_peer_addr(IpAddr::from([127, 0, 0, 1]))
+    .with_trusted_proxies(trust_loopback());
     assert_eq!(req.ip().as_deref(), Some("198.51.100.7"));
 }
 
@@ -238,7 +275,42 @@ async fn ip_falls_back_to_peer_addr() {
 }
 
 #[tokio::test]
+async fn ip_ignores_x_forwarded_for_from_untrusted_peer() {
+    // Same shape as the trusted-XFF test but without a configured
+    // allowlist — the framework MUST return the TCP peer, not the
+    // attacker-controlled XFF.
+    let req = build_request(
+        hyper::Request::builder()
+            .uri("/")
+            .header("X-Forwarded-For", "203.0.113.5"),
+        "",
+    )
+    .await
+    .with_peer_addr(IpAddr::from([198, 51, 100, 2]));
+    assert_eq!(
+        req.ip().as_deref(),
+        Some("198.51.100.2"),
+        "untrusted peer must not propagate spoofed XFF"
+    );
+}
+
+#[tokio::test]
 async fn ips_chains_proxy_headers_and_peer_addr() {
+    let req = build_request(
+        hyper::Request::builder()
+            .uri("/")
+            .header("X-Forwarded-For", "203.0.113.5, 10.0.0.1"),
+        "",
+    )
+    .await
+    .with_peer_addr(IpAddr::from([127, 0, 0, 1]))
+    .with_trusted_proxies(trust_loopback());
+    let chain = req.ips();
+    assert_eq!(chain, vec!["203.0.113.5", "10.0.0.1", "127.0.0.1"]);
+}
+
+#[tokio::test]
+async fn ips_with_untrusted_peer_omits_x_forwarded_for_entries() {
     let req = build_request(
         hyper::Request::builder()
             .uri("/")
@@ -248,7 +320,11 @@ async fn ips_chains_proxy_headers_and_peer_addr() {
     .await
     .with_peer_addr(IpAddr::from([127, 0, 0, 1]));
     let chain = req.ips();
-    assert_eq!(chain, vec!["203.0.113.5", "10.0.0.1", "127.0.0.1"]);
+    assert_eq!(
+        chain,
+        vec!["127.0.0.1"],
+        "spoofed XFF hops must not appear in the chain when the peer isn't a trusted proxy"
+    );
 }
 
 #[tokio::test]
@@ -259,7 +335,9 @@ async fn host_reads_x_forwarded_host_then_host() {
             .header("X-Forwarded-Host", "api.example.com:8443"),
         "",
     )
-    .await;
+    .await
+    .with_peer_addr(IpAddr::from([127, 0, 0, 1]))
+    .with_trusted_proxies(trust_loopback());
     // Port stripped, host returned bare.
     assert_eq!(req.host().as_deref(), Some("api.example.com"));
     assert_eq!(req.port(), Some(8443));
@@ -304,7 +382,9 @@ async fn url_and_full_url_with_proxy_host() {
             .header("X-Forwarded-Proto", "https"),
         "",
     )
-    .await;
+    .await
+    .with_peer_addr(IpAddr::from([127, 0, 0, 1]))
+    .with_trusted_proxies(trust_loopback());
     assert_eq!(req.url(), "https://app.example.com/dashboard");
     assert_eq!(
         req.full_url(),
@@ -321,7 +401,9 @@ async fn full_url_with_query_overrides_and_appends() {
             .header("X-Forwarded-Proto", "https"),
         "",
     )
-    .await;
+    .await
+    .with_peer_addr(IpAddr::from([127, 0, 0, 1]))
+    .with_trusted_proxies(trust_loopback());
     let merged = req.full_url_with_query(&[("c", "3"), ("d", "4")]);
     assert!(merged.contains("c=3"));
     assert!(merged.contains("d=4"));

@@ -1,5 +1,7 @@
 use crate::config::env::{Environment, env, env_strict};
 use crate::error::FrameworkError;
+use crate::http::TrustedProxiesConfig;
+use std::net::IpAddr;
 
 /// Application configuration
 #[derive(Debug, Clone)]
@@ -12,6 +14,21 @@ pub struct AppConfig {
     pub debug: bool,
     /// Application URL
     pub url: String,
+    /// Allowlist of TCP peer addresses whose `X-Forwarded-*` and
+    /// `X-Real-IP` headers may be trusted by
+    /// [`Request::ip`](crate::Request::ip) and the related host /
+    /// scheme / port accessors.
+    ///
+    /// Defaults to an **empty** allowlist — proxy headers are ignored
+    /// on every request unless the operator opts in. Behind a real
+    /// terminating proxy (nginx, ALB, Cloudflare), list the addresses
+    /// from which the proxy hops can reach the framework.
+    ///
+    /// Reads `APP_TRUSTED_PROXIES` from the environment as a
+    /// comma-separated list of IP addresses, e.g.
+    /// `APP_TRUSTED_PROXIES=127.0.0.1,10.0.0.1`. An unparseable entry
+    /// fails boot via [`Self::try_from_env`].
+    pub trusted_proxies: TrustedProxiesConfig,
 }
 
 impl AppConfig {
@@ -52,6 +69,7 @@ impl AppConfig {
             environment,
             debug,
             url: env("APP_URL", "http://localhost:8080".to_string()),
+            trusted_proxies: parse_trusted_proxies_lenient(),
         }
     }
 
@@ -67,11 +85,13 @@ impl AppConfig {
             env_strict::<String>("APP_NAME")?.unwrap_or_else(|| "Suprnova Application".to_string());
         let url =
             env_strict::<String>("APP_URL")?.unwrap_or_else(|| "http://localhost:8080".to_string());
+        let trusted_proxies = parse_trusted_proxies_strict()?;
         Ok(Self {
             name,
             environment,
             debug,
             url,
+            trusted_proxies,
         })
     }
 
@@ -114,6 +134,54 @@ fn default_debug_for_env(env: &Environment) -> bool {
     )
 }
 
+/// Parse `APP_TRUSTED_PROXIES` lenient — bad entries fall back to an
+/// empty allowlist with a `tracing::warn!`. Used by `from_env`.
+fn parse_trusted_proxies_lenient() -> TrustedProxiesConfig {
+    let Ok(raw) = std::env::var("APP_TRUSTED_PROXIES") else {
+        return TrustedProxiesConfig::empty();
+    };
+    match parse_ip_list(&raw) {
+        Ok(ips) => TrustedProxiesConfig::with_ips(ips),
+        Err(bad) => {
+            tracing::warn!(
+                env_var = "APP_TRUSTED_PROXIES",
+                bad_entry = %bad,
+                "APP_TRUSTED_PROXIES contains an unparseable IP; falling back to empty allowlist"
+            );
+            TrustedProxiesConfig::empty()
+        }
+    }
+}
+
+/// Parse `APP_TRUSTED_PROXIES` strict — bad entries abort boot. Used
+/// by `try_from_env` (`Config::init` calls this).
+fn parse_trusted_proxies_strict() -> Result<TrustedProxiesConfig, FrameworkError> {
+    let Ok(raw) = std::env::var("APP_TRUSTED_PROXIES") else {
+        return Ok(TrustedProxiesConfig::empty());
+    };
+    let ips = parse_ip_list(&raw).map_err(|bad| {
+        FrameworkError::internal(format!(
+            "APP_TRUSTED_PROXIES contains an unparseable IP address: {bad:?}"
+        ))
+    })?;
+    Ok(TrustedProxiesConfig::with_ips(ips))
+}
+
+fn parse_ip_list(raw: &str) -> Result<Vec<IpAddr>, String> {
+    let mut out = Vec::new();
+    for entry in raw.split(',') {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match trimmed.parse::<IpAddr>() {
+            Ok(ip) => out.push(ip),
+            Err(_) => return Err(trimmed.to_string()),
+        }
+    }
+    Ok(out)
+}
+
 /// Builder for AppConfig
 #[derive(Default)]
 pub struct AppConfigBuilder {
@@ -121,6 +189,7 @@ pub struct AppConfigBuilder {
     environment: Option<Environment>,
     debug: Option<bool>,
     url: Option<String>,
+    trusted_proxies: Option<TrustedProxiesConfig>,
 }
 
 impl AppConfigBuilder {
@@ -148,6 +217,13 @@ impl AppConfigBuilder {
         self
     }
 
+    /// Set the trusted-proxies allowlist that gates
+    /// [`Request::ip`](crate::Request::ip) and the related accessors.
+    pub fn trusted_proxies(mut self, cfg: TrustedProxiesConfig) -> Self {
+        self.trusted_proxies = Some(cfg);
+        self
+    }
+
     /// Build the AppConfig
     pub fn build(self) -> AppConfig {
         let default = AppConfig::from_env();
@@ -156,6 +232,7 @@ impl AppConfigBuilder {
             environment: self.environment.unwrap_or(default.environment),
             debug: self.debug.unwrap_or(default.debug),
             url: self.url.unwrap_or(default.url),
+            trusted_proxies: self.trusted_proxies.unwrap_or(default.trusted_proxies),
         }
     }
 }
@@ -207,5 +284,54 @@ mod tests {
         assert!(!default_debug_for_env(&Environment::Custom(
             "k8s-prod".into()
         )));
+    }
+
+    #[test]
+    fn parse_ip_list_returns_each_address() {
+        let ips = parse_ip_list("127.0.0.1, 10.0.0.1, ::1").expect("parse");
+        assert_eq!(ips.len(), 3);
+    }
+
+    #[test]
+    fn parse_ip_list_skips_empty_entries() {
+        let ips = parse_ip_list(",,127.0.0.1, , 10.0.0.1,").expect("parse");
+        assert_eq!(ips.len(), 2);
+    }
+
+    #[test]
+    fn parse_ip_list_returns_bad_entry_on_error() {
+        let err = parse_ip_list("127.0.0.1, not-an-ip").expect_err("bad entry");
+        assert_eq!(err, "not-an-ip");
+    }
+
+    #[test]
+    #[serial_test::serial(app_config_env)]
+    fn try_from_env_rejects_unparseable_trusted_proxy() {
+        let prior = std::env::var("APP_TRUSTED_PROXIES").ok();
+        // SAFETY: single-threaded mutation of a process-global env var
+        // gated by the `app_config_env` serial token (shared with the
+        // sibling tests in this module). We restore the prior value at
+        // the end.
+        unsafe {
+            std::env::set_var("APP_TRUSTED_PROXIES", "127.0.0.1, not-an-ip");
+        }
+        let err = AppConfig::try_from_env().expect_err("bad IP must error");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("APP_TRUSTED_PROXIES"),
+            "error should name the env var: {:?}",
+            msg
+        );
+        assert!(
+            msg.contains("not-an-ip"),
+            "error should quote the bad entry: {:?}",
+            msg
+        );
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("APP_TRUSTED_PROXIES", v),
+                None => std::env::remove_var("APP_TRUSTED_PROXIES"),
+            }
+        }
     }
 }

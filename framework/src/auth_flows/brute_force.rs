@@ -220,25 +220,34 @@ use std::sync::Arc;
 ///   if the timestamp is somehow absent.
 /// * Body: `"Account locked due to too many failed login attempts. Try again later."`
 ///
-/// # Fail-open semantics
+/// # Backend-error policy
 ///
-/// If the brute-force backend errors (e.g. database hiccup), the
-/// middleware passes the request through. The downstream login
-/// handler will then make the call itself and can decide whether to
-/// fail closed or open — the middleware errs on the side of
-/// availability to avoid taking down the login endpoint when the
-/// auth database has a transient blip.
+/// When `BruteForce::get_lockout_status` errors (database hiccup,
+/// torii outage), the middleware's response is governed by an
+/// explicit [`BackendErrorPolicy`] that defaults to
+/// [`BackendErrorPolicy::FailClosed`]: a 503 with `Retry-After: 1`.
+/// The login endpoint is the most sensitive route in the stack — an
+/// attacker who can degrade the backing store must not be able to
+/// bypass brute-force protection and resume credential-stuffing.
+/// Deployments that prefer to keep login available during a
+/// brute-force-backend outage can opt into [`BackendErrorPolicy::FailOpen`]
+/// via [`LoginThrottleMiddleware::on_backend_error`]; the error is
+/// logged at `error` regardless of policy.
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use suprnova::auth_flows::LoginThrottleMiddleware;
+/// use suprnova::auth_flows::{BackendErrorPolicy, LoginThrottleMiddleware};
 /// use suprnova::Router;
 ///
 /// let throttle = LoginThrottleMiddleware::new(|req| {
 ///     // Pull the email from a header your login form populates.
 ///     req.header("X-Login-Email").map(|s| s.to_string())
 /// });
+///
+/// // To prefer availability over the lockout guarantee during a
+/// // backend outage:
+/// let throttle = throttle.on_backend_error(BackendErrorPolicy::FailOpen);
 ///
 /// let router = Router::new()
 ///     .post("/login", login_handler)
@@ -249,21 +258,75 @@ use std::sync::Arc;
 /// middleware's docs for why body access isn't possible.
 type EmailExtractor = dyn Fn(&Request) -> Option<String> + Send + Sync + 'static;
 
+/// Policy for how [`LoginThrottleMiddleware`] reacts when the
+/// brute-force backend itself errors (database hiccup, torii
+/// outage), as opposed to a request legitimately being over its
+/// lockout threshold.
+///
+/// Distinct from the over-quota path (always HTTP 429 with the
+/// `Retry-After` from `LockoutStatus::retry_after_seconds`). A
+/// backend error means the middleware cannot make a lockout
+/// decision at all, so it must choose between availability and the
+/// lockout guarantee — and for a credential-stuffing-sensitive
+/// route, the right default is to refuse the request.
+///
+/// This mirrors [`crate::rate_limit::BackendErrorPolicy`] for the
+/// generic rate-limit middleware, but defaults the OPPOSITE way:
+/// `FailClosed` for login (refuse the request) versus the
+/// rate-limit default of `FailOpen` (let traffic through).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackendErrorPolicy {
+    /// Pass the request through when the backend errors.
+    /// Prioritizes availability: a torii outage does not block the
+    /// login endpoint. Useful for low-risk deployments where
+    /// downtime is the bigger threat than credential stuffing. The
+    /// error is logged at `error` so the outage is still visible.
+    FailOpen,
+    /// Reject the request with HTTP 503 (`Retry-After: 1`) when the
+    /// backend errors. Prioritizes the lockout guarantee: during a
+    /// brute-force-backend outage, an attacker would otherwise have
+    /// an open window to retry credential stuffing without
+    /// lockout. The default; the error is logged at `error`.
+    #[default]
+    FailClosed,
+}
+
 pub struct LoginThrottleMiddleware {
     extract_email: Arc<EmailExtractor>,
+    on_backend_error: BackendErrorPolicy,
 }
 
 impl LoginThrottleMiddleware {
     /// Build a `LoginThrottleMiddleware` with `extract_email` as the
     /// closure that maps each request to an optional email to check.
     /// Returning `None` passes the request through.
+    ///
+    /// The backend-error policy defaults to
+    /// [`BackendErrorPolicy::FailClosed`]; flip it explicitly via
+    /// [`Self::on_backend_error`] when availability outweighs the
+    /// lockout guarantee for the deployment's threat model.
     pub fn new<F>(extract_email: F) -> Self
     where
         F: Fn(&Request) -> Option<String> + Send + Sync + 'static,
     {
         Self {
             extract_email: Arc::new(extract_email),
+            // Default fail-closed: a sensitive route under brute-force
+            // protection must not silently lose the protection when the
+            // backing store hiccups. Operators can flip to FailOpen via
+            // `on_backend_error` when availability outweighs the
+            // lockout guarantee for their threat model.
+            on_backend_error: BackendErrorPolicy::FailClosed,
         }
+    }
+
+    /// Choose how the middleware reacts to a brute-force-backend
+    /// error (e.g. torii's database is unreachable), as distinct from
+    /// the over-quota path (always HTTP 429). Defaults to
+    /// [`BackendErrorPolicy::FailClosed`].
+    pub fn on_backend_error(mut self, policy: BackendErrorPolicy) -> Self {
+        self.on_backend_error = policy;
+        self
     }
 }
 
@@ -277,10 +340,24 @@ impl Middleware for LoginThrottleMiddleware {
 
         // 2. Fetch lockout status in one round-trip so the retry-after
         //    seconds reflect the real `locked_until` and not a constant.
-        //    Fail-open on backend error.
+        //    Backend errors route through the configured policy.
         let status = match BruteForce::get_lockout_status(&email).await {
             Ok(s) => s,
-            Err(_) => return next(request).await,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    email = %email,
+                    "brute-force backend error in login throttle middleware"
+                );
+                return match self.on_backend_error {
+                    BackendErrorPolicy::FailOpen => next(request).await,
+                    BackendErrorPolicy::FailClosed => Err(HttpResponse::text(
+                        "Login throttle backend unavailable. Try again shortly.",
+                    )
+                    .status(503)
+                    .header("retry-after", "1")),
+                };
+            }
         };
 
         if !status.is_locked {
@@ -301,5 +378,31 @@ impl Middleware for LoginThrottleMiddleware {
         )
         .status(429)
         .header("retry-after", retry_after.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod login_throttle_policy_tests {
+    use super::*;
+
+    /// `LoginThrottleMiddleware::new` must default to FailClosed —
+    /// regression test for the policy default.
+    #[test]
+    fn default_policy_is_fail_closed() {
+        let mw = LoginThrottleMiddleware::new(|_req: &Request| Some("a@b.c".into()));
+        assert_eq!(mw.on_backend_error, BackendErrorPolicy::FailClosed);
+        assert_eq!(
+            BackendErrorPolicy::default(),
+            BackendErrorPolicy::FailClosed
+        );
+    }
+
+    /// `on_backend_error` is the builder method — assert the override
+    /// actually flips the field.
+    #[test]
+    fn on_backend_error_overrides_default_policy() {
+        let mw = LoginThrottleMiddleware::new(|_req: &Request| Some("a@b.c".into()))
+            .on_backend_error(BackendErrorPolicy::FailOpen);
+        assert_eq!(mw.on_backend_error, BackendErrorPolicy::FailOpen);
     }
 }

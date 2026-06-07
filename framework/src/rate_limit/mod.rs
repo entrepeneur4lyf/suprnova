@@ -84,12 +84,35 @@ pub trait RateLimiterDriver: Send + Sync {
 
 use crate::container::App;
 
+/// Default sweep interval for the in-memory bucket map. The map drops
+/// any bucket whose last hit aged out past
+/// [`DEFAULT_INACTIVITY_WINDOW`], so a request burst followed by
+/// silence frees the map within one sweep cycle.
+const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Default inactivity window for the in-memory bucket map. Buckets
+/// whose most-recent hit is this old or older are dropped on the next
+/// sweep. Set to 15 minutes to comfortably outlive every Laravel
+/// default window (1-minute / 5-minute throttles) while still
+/// reclaiming attacker-spammed keys within a short cycle.
+const DEFAULT_INACTIVITY_WINDOW: Duration = Duration::from_secs(900);
+
 /// Wire the in-memory rate limiter as the default. Idempotent.
+///
+/// The driver is registered with a periodic sweep task — the bucket
+/// map drops any bucket whose last hit aged out past 15 minutes,
+/// preventing unbounded growth when keying by an attacker-controlled
+/// signature. The sweep self-terminates when the driver `Arc` count
+/// drops to zero (see [`memory::InMemoryRateLimiter::with_periodic_sweep`]).
 pub async fn bootstrap_default() {
     if App::has_binding::<dyn RateLimiterDriver>() {
         return;
     }
-    App::bind::<dyn RateLimiterDriver>(std::sync::Arc::new(memory::InMemoryRateLimiter::new()));
+    let driver = memory::InMemoryRateLimiter::with_periodic_sweep(
+        DEFAULT_SWEEP_INTERVAL,
+        DEFAULT_INACTIVITY_WINDOW,
+    );
+    App::bind::<dyn RateLimiterDriver>(driver);
 }
 
 /// Read `RATE_LIMIT_DRIVER` env and configure the matching driver. Falls back
