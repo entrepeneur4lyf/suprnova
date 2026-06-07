@@ -107,10 +107,19 @@ where
     L: CancellableListener<E>,
 {
     async fn dispatch(&self, event: &(dyn std::any::Any + Send + Sync)) -> EventResult {
-        let typed = event
-            .downcast_ref::<E>()
-            .expect("dispatcher routed cancellable event to wrong listener type");
-        self.listener.handle(typed).await
+        match event.downcast_ref::<E>() {
+            Some(typed) => self.listener.handle(typed).await,
+            None => {
+                tracing::error!(
+                    event_type = std::any::type_name::<E>(),
+                    "cancellable event dispatcher routed an event to a listener \
+                     whose typed payload does not match; degrading to non-cancel \
+                     (operation proceeds) rather than panicking. This indicates \
+                     TypeId-keying corruption in the dispatcher's listener map."
+                );
+                EventResult::ok()
+            }
+        }
     }
 }
 
@@ -318,5 +327,45 @@ mod tests {
             EventResult::Cancel(r) => assert_eq!(r, "nope"),
             _ => panic!("expected cancel"),
         }
+    }
+
+    #[derive(Debug, Clone)]
+    struct PostCreating;
+
+    impl Event for PostCreating {
+        fn event_name() -> &'static str {
+            "PostCreating"
+        }
+    }
+
+    struct NoopCancellable;
+
+    #[async_trait]
+    impl CancellableListener<PostCreating> for NoopCancellable {
+        async fn handle(&self, _event: &PostCreating) -> EventResult {
+            EventResult::ok()
+        }
+    }
+
+    #[tokio::test]
+    async fn erased_cancellable_listener_degrades_to_ok_on_type_mismatch() {
+        // If the dispatcher's TypeId keying ever routes a wrong-typed
+        // payload to a cancellable listener, the erased wrap must
+        // degrade to the safe non-cancelling result (operation proceeds)
+        // rather than panic — a stray panic here would veto a real
+        // write via the surrounding `dispatch_cancellable` call site.
+        let wrap: Box<dyn ErasedCancellableListener> = Box::new(CancellableListenerWrap::<
+            PostCreating,
+            _,
+        >::new(Arc::new(
+            NoopCancellable,
+        )));
+        let wrong_payload: i32 = 7;
+        let result = wrap.dispatch(&wrong_payload).await;
+        assert_eq!(
+            result,
+            EventResult::Ok,
+            "type-mismatch must degrade to Ok (non-cancel), got {result:?}"
+        );
     }
 }

@@ -322,20 +322,86 @@ impl CronExpression {
         &self.raw
     }
 
-    /// Set the time component (modifies hour and minute)
-    pub fn at(mut self, time: &str) -> Self {
+    /// Parse a `HH:MM` clock string into `(hour, minute)` `u32`s.
+    ///
+    /// Returns `Err` when `time` is not exactly two `:`-separated
+    /// segments or when either segment fails to parse as `u32`.
+    /// Shared by [`at`](Self::at) (infallible, warn-and-return-self
+    /// on parse failure) and [`try_at`](Self::try_at) (fallible).
+    ///
+    /// Range-checking (hour `0..=23`, minute `0..=59`) is intentionally
+    /// NOT performed here — the existing `at` surface accepts any `u32`
+    /// for compatibility, and tightening it would change the accepted
+    /// input set for the infallible form. Use
+    /// [`try_daily_at`](Self::try_daily_at) when range validation is
+    /// required.
+    fn parse_hh_mm(time: &str) -> Result<(u32, u32), String> {
         let parts: Vec<&str> = time.split(':').collect();
-        if parts.len() == 2
-            && let (Ok(hour), Ok(minute)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>())
-        {
-            self.hour = CronField::Value(hour);
-            self.minute = CronField::Value(minute);
-            self.raw = format!(
-                "{} {} {} {} {}",
-                minute, hour, self.day_of_month, self.month, self.day_of_week,
-            );
+        if parts.len() != 2 {
+            return Err(format!(
+                "at: expected `HH:MM` (two `:`-separated segments), got `{time}`"
+            ));
         }
-        self
+        let hour: u32 = parts[0]
+            .parse()
+            .map_err(|_| format!("at: hour segment `{}` is not numeric in `{time}`", parts[0]))?;
+        let minute: u32 = parts[1].parse().map_err(|_| {
+            format!(
+                "at: minute segment `{}` is not numeric in `{time}`",
+                parts[1]
+            )
+        })?;
+        Ok((hour, minute))
+    }
+
+    /// Set the time component (modifies hour and minute).
+    ///
+    /// `time` is a `HH:MM` 24-hour-clock string. On parse failure (wrong
+    /// segment count or non-numeric segment) the modifier logs at
+    /// `tracing::warn!` and returns `self` unchanged — this preserves the
+    /// existing builder ergonomics. Use [`try_at`](Self::try_at) when a
+    /// malformed time should surface as an error instead of being silently
+    /// swallowed.
+    pub fn at(mut self, time: &str) -> Self {
+        match Self::parse_hh_mm(time) {
+            Ok((hour, minute)) => {
+                self.hour = CronField::Value(hour);
+                self.minute = CronField::Value(minute);
+                self.raw = format!(
+                    "{} {} {} {} {}",
+                    minute, hour, self.day_of_month, self.month, self.day_of_week,
+                );
+                self
+            }
+            Err(e) => {
+                tracing::warn!(
+                    cron = self.raw.as_str(),
+                    "{e}; returning the expression unchanged. Use `try_at` \
+                     to surface the parse failure instead of swallowing it."
+                );
+                self
+            }
+        }
+    }
+
+    /// Fallible sibling of [`at`](Self::at): returns `Err` on a malformed
+    /// `HH:MM` string instead of warn-and-return-unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when `time` is not exactly two `:`-separated segments
+    /// or when either segment fails to parse as `u32`. Range-checking
+    /// (hour `0..=23`, minute `0..=59`) is intentionally not performed —
+    /// use [`try_daily_at`](Self::try_daily_at) for that.
+    pub fn try_at(mut self, time: &str) -> Result<Self, String> {
+        let (hour, minute) = Self::parse_hh_mm(time)?;
+        self.hour = CronField::Value(hour);
+        self.minute = CronField::Value(minute);
+        self.raw = format!(
+            "{} {} {} {} {}",
+            minute, hour, self.day_of_month, self.month, self.day_of_week,
+        );
+        Ok(self)
     }
 
     // =========================================================================
@@ -568,6 +634,49 @@ mod tests {
     fn test_at_modifier() {
         let expr = CronExpression::daily().at("14:30");
         assert_eq!(expr.expression(), "30 14 * * *");
+    }
+
+    #[test]
+    fn try_at_returns_err_on_wrong_segment_count() {
+        // Single segment ("14") and three segments ("14:30:00") were both
+        // silently swallowed by the infallible `at`; `try_at` must surface
+        // the parse failure.
+        assert!(CronExpression::daily().try_at("14").is_err());
+        let err = CronExpression::daily().try_at("14:30:00").unwrap_err();
+        assert!(
+            err.contains("HH:MM") && err.contains("14:30:00"),
+            "error should name the expected shape and the bad input: {err}"
+        );
+    }
+
+    #[test]
+    fn try_at_returns_err_on_non_numeric_segment() {
+        let err = CronExpression::daily().try_at("ab:30").unwrap_err();
+        assert!(
+            err.contains("hour") && err.contains("ab"),
+            "error should call out the non-numeric hour segment: {err}"
+        );
+        assert!(CronExpression::daily().try_at("14:cd").is_err());
+    }
+
+    #[test]
+    fn try_at_accepts_well_formed_time() {
+        let expr = CronExpression::daily().try_at("09:30").unwrap();
+        assert_eq!(expr.expression(), "30 9 * * *");
+    }
+
+    #[test]
+    fn at_returns_self_unchanged_on_malformed_time() {
+        // Behaviour preserved: malformed input no longer panics, no longer
+        // silently mutates state; it logs and returns self unchanged. The
+        // existing `at` accepted-input set is unchanged so callers don't
+        // regress, but `try_at` exists for callers who want the failure.
+        let baseline = CronExpression::daily();
+        let after = baseline.clone().at("not-a-time");
+        assert_eq!(after.expression(), baseline.expression());
+        // Three-segment input also returns unchanged.
+        let after2 = CronExpression::daily().at("14:30:00");
+        assert_eq!(after2.expression(), "0 0 * * *");
     }
 
     // ---- helpers validate ranges ----------------------------------------

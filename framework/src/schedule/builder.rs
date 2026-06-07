@@ -296,9 +296,12 @@ impl TaskBuilder {
         Ok(self)
     }
 
-    /// Set the time for the current schedule
+    /// Set the time for the current schedule.
     ///
     /// This can be chained with other methods to set a specific time.
+    /// A malformed `HH:MM` string is logged at `tracing::warn!` and the
+    /// schedule is left unchanged. Use [`try_at`](Self::try_at) when you
+    /// want the parse failure to surface as an error.
     ///
     /// # Example
     /// ```rust,ignore
@@ -308,6 +311,19 @@ impl TaskBuilder {
     pub fn at(mut self, time: &str) -> Self {
         self.expression = self.expression.at(time);
         self
+    }
+
+    /// Fallible sibling of [`at`](Self::at): returns `Err` on a malformed
+    /// `HH:MM` string instead of warn-and-return-unchanged. Mirrors
+    /// [`CronExpression::try_at`](crate::schedule::CronExpression::try_at).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when `time` is not exactly two `:`-separated segments
+    /// or when either segment fails to parse as `u32`.
+    pub fn try_at(mut self, time: &str) -> Result<Self, String> {
+        self.expression = self.expression.try_at(time)?;
+        Ok(self)
     }
 
     /// Run once weekly on Sunday at midnight
@@ -676,5 +692,32 @@ mod tests {
             result.is_err(),
             "infallible twice_daily must still panic on out-of-range hour",
         );
+    }
+
+    #[test]
+    fn try_at_surfaces_malformed_time_error() {
+        // The infallible `at` silently swallowed wrong-segment-count and
+        // non-numeric time strings, leaving the schedule unchanged and
+        // the operator with no signal that the modifier didn't apply.
+        // `try_at` surfaces the parse failure.
+        let ok = create_test_builder().daily().try_at("09:15").unwrap();
+        assert_eq!(ok.expression.expression(), "15 9 * * *");
+        assert!(create_test_builder().daily().try_at("nope").is_err());
+        assert!(create_test_builder().daily().try_at("09:15:00").is_err());
+        assert!(create_test_builder().daily().try_at("ab:cd").is_err());
+    }
+
+    #[test]
+    fn at_returns_self_unchanged_on_malformed_time() {
+        // `at` keeps its lenient contract — no panic, no silent partial
+        // mutation, no schedule change — but now logs at `warn!` so the
+        // failure is visible. Behaviour callers depend on is preserved.
+        let baseline_expr = create_test_builder()
+            .daily()
+            .expression
+            .expression()
+            .to_string();
+        let after = create_test_builder().daily().at("oops");
+        assert_eq!(after.expression.expression(), baseline_expr);
     }
 }

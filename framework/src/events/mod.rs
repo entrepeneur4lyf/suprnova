@@ -132,10 +132,19 @@ where
     L: Listener<E>,
 {
     async fn dispatch(&self, event: &(dyn Any + Send + Sync)) -> Result<(), FrameworkError> {
-        let typed = event
-            .downcast_ref::<E>()
-            .expect("dispatcher routed event to wrong listener type");
-        self.listener.handle(typed).await
+        match event.downcast_ref::<E>() {
+            Some(typed) => self.listener.handle(typed).await,
+            None => {
+                tracing::error!(
+                    event_type = std::any::type_name::<E>(),
+                    "event dispatcher routed an event to a listener whose typed \
+                     payload does not match; skipping invocation rather than \
+                     panicking. This indicates TypeId-keying corruption in the \
+                     dispatcher's listener map."
+                );
+                Ok(())
+            }
+        }
     }
 }
 
@@ -163,5 +172,30 @@ mod tests {
     #[test]
     fn event_default_queued_is_false() {
         assert!(!OrderPlaced::queued());
+    }
+
+    // A no-op listener used to construct an `ErasedListener` for the
+    // type-mismatch regression test below.
+    struct NoopListener;
+
+    #[async_trait]
+    impl Listener<OrderPlaced> for NoopListener {
+        async fn handle(&self, _event: &OrderPlaced) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn erased_listener_returns_ok_on_type_mismatch_instead_of_panicking() {
+        // If the dispatcher's TypeId keying ever routes a wrong-typed
+        // payload to a listener, the erased wrapper must log and degrade
+        // to a no-op rather than panic the dispatch task. Constructing
+        // the wrap directly + feeding it a non-OrderPlaced `&dyn Any`
+        // exercises the downcast-failure arm exactly.
+        let wrap: Box<dyn ErasedListener> =
+            Box::new(ListenerWrap::<OrderPlaced, _>::new(Arc::new(NoopListener)));
+        let wrong_payload: i32 = 42;
+        let result = wrap.dispatch(&wrong_payload).await;
+        assert!(result.is_ok(), "expected Ok on type mismatch, got {result:?}");
     }
 }
