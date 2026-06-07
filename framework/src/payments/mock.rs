@@ -167,7 +167,7 @@ impl CustomerStore for MockPaymentProvider {
         let id = self.next_id("cus").await;
         let cr = CustomerRef {
             provider_customer_id: id.clone(),
-            user_id: req.user_id,
+            user_id: Some(req.user_id),
             email: req.email,
             provider_metadata: req.metadata.unwrap_or(json!({})),
         };

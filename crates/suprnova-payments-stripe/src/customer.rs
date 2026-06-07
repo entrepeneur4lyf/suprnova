@@ -75,7 +75,11 @@ fn metadata_to_string_map(value: Option<&serde_json::Value>) -> Option<HashMap<S
 // Helper
 // ---------------------------------------------------------------------------
 
-fn customer_to_ref(c: Customer, user_id: String, metadata: serde_json::Value) -> CustomerRef {
+fn customer_to_ref(
+    c: Customer,
+    user_id: Option<String>,
+    metadata: serde_json::Value,
+) -> CustomerRef {
     CustomerRef {
         provider_customer_id: c.id.as_str().to_string(),
         user_id,
@@ -106,7 +110,7 @@ impl CustomerStore for StripeProvider {
 
         Ok(customer_to_ref(
             c,
-            req.user_id,
+            Some(req.user_id),
             req.metadata.unwrap_or(serde_json::json!({})),
         ))
     }
@@ -126,9 +130,13 @@ impl CustomerStore for StripeProvider {
             .await
             .map_err(|e| PaymentError::Provider(format!("stripe customers.update: {e}")))?;
 
+        // update_customer returns user_id: None because Stripe's
+        // Customer object doesn't carry the app's user identifier as a
+        // first-class field — callers that need the app-side id should
+        // read the DB mirror entity. See CustomerRef::user_id docs.
         Ok(customer_to_ref(
             c,
-            String::new(),
+            None,
             req.metadata.unwrap_or(serde_json::json!({})),
         ))
     }
@@ -141,7 +149,9 @@ impl CustomerStore for StripeProvider {
             .await
             .map_err(|e| PaymentError::Provider(format!("stripe customers.retrieve: {e}")))?;
 
-        Ok(customer_to_ref(c, String::new(), serde_json::json!({})))
+        // See update_customer above for why user_id is None on the
+        // get path.
+        Ok(customer_to_ref(c, None, serde_json::json!({})))
     }
 
     async fn delete_customer(&self, provider_customer_id: &str) -> PaymentResult<()> {

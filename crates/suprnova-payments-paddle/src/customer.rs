@@ -61,7 +61,7 @@ impl CustomerStore for PaddleProvider {
 
         Ok(CustomerRef {
             provider_customer_id: resp.data.id.to_string(),
-            user_id: req.user_id,
+            user_id: Some(req.user_id),
             email: req.email,
             provider_metadata: req.metadata.unwrap_or(serde_json::json!({})),
         })
@@ -88,7 +88,7 @@ impl CustomerStore for PaddleProvider {
 
         Ok(CustomerRef {
             provider_customer_id: resp.data.id.to_string(),
-            user_id: String::new(),
+            user_id: None,
             email: resp.data.email.clone(),
             provider_metadata: req.metadata.unwrap_or(serde_json::json!({})),
         })
@@ -104,7 +104,7 @@ impl CustomerStore for PaddleProvider {
 
         Ok(CustomerRef {
             provider_customer_id: resp.data.id.to_string(),
-            user_id: String::new(),
+            user_id: None,
             email: resp.data.email.clone(),
             provider_metadata: serde_json::json!({}),
         })

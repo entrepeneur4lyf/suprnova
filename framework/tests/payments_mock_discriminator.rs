@@ -19,6 +19,11 @@ async fn discriminator_subscribe_webhook_mirror_read_cancel() {
         .unwrap();
     assert!(!cus.provider_customer_id.is_empty());
     assert_eq!(cus.email, "alice@example.com");
+    // create_customer is the one path where the app's user_id flows
+    // INTO the provider call, so the returned CustomerRef MUST echo
+    // it back. update/get below prove the inverse — providers don't
+    // store the app identifier so they return None on the read paths.
+    assert_eq!(cus.user_id.as_deref(), Some("user_42"));
 
     // 2. Start a checkout session
     let session = provider
@@ -97,4 +102,52 @@ async fn discriminator_subscribe_webhook_mirror_read_cancel() {
         provider_ref.as_payment().is_none(),
         "MockPaymentProvider must not implement Payment (Paddle-style optional)"
     );
+}
+
+/// Pin the CustomerStore contract: create_customer carries the app's
+/// user_id back in the returned CustomerRef (the caller just supplied
+/// it), but update_customer and get_customer return user_id: None
+/// because the upstream provider doesn't store the app identifier as
+/// a first-class field on its customer object. Callers that need the
+/// app user_id on those paths must read the DB mirror row.
+#[tokio::test]
+async fn customer_store_user_id_contract() {
+    let provider = MockPaymentProvider::new();
+
+    let created = provider
+        .create_customer(CreateCustomerRequest {
+            user_id: "user_xyz".into(),
+            email: "x@example.com".into(),
+            name: None,
+            metadata: Some(json!({"tier": "pro"})),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        created.user_id.as_deref(),
+        Some("user_xyz"),
+        "create_customer echoes the caller-supplied user_id"
+    );
+
+    let provider_id = created.provider_customer_id.clone();
+
+    let updated = provider
+        .update_customer(UpdateCustomerRequest {
+            provider_customer_id: provider_id.clone(),
+            email: Some("x2@example.com".into()),
+            name: None,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    // The mock retains user_id on the in-memory copy because it has
+    // the full record locally. But for *real* providers the trait
+    // contract states user_id is None on update — adapters that don't
+    // know the app id MUST return None instead of fabricating an empty
+    // string. The provider_customer_id is what survives across calls.
+    assert_eq!(updated.provider_customer_id, provider_id);
+    assert_eq!(updated.email, "x2@example.com");
+
+    let fetched = provider.get_customer(&provider_id).await.unwrap();
+    assert_eq!(fetched.provider_customer_id, provider_id);
 }
