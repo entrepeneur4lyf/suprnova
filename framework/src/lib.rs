@@ -91,7 +91,10 @@ pub use authorization::{Authorizable, Gate};
 // Its Laravel-spelled home is `suprnova::authorization::Response`.
 pub use authorization::Response as GateResponse;
 pub use cache::{Cache, CacheConfig, CacheStore, InMemoryCache, LockGuard, RedisCache};
-pub use config::{AppConfig, Config, Environment, ServerConfig, env, env_optional, env_required};
+pub use config::{
+    AppConfig, AppConfigBuilder, Config, Environment, ServerConfig, ServerConfigBuilder, env,
+    env_optional, env_required,
+};
 pub use container::{App, Container};
 pub use context::{Context, ContextStore};
 pub use crypto::{Crypt, CryptPurpose, EncryptionKey};
@@ -142,6 +145,15 @@ pub use ::sea_orm;
 // documented escape hatch for anything we haven't aliased.
 pub use ::hyper;
 pub use ::hyper::{HeaderMap, Method, StatusCode, Uri, body::Incoming as RequestBodyStream};
+
+// opendal escape hatch — `Storage::disk(name)` returns `opendal::Operator`
+// and the `DiskExt` extension trait is implemented on `opendal::Operator`,
+// so consumers need to name `Operator` (and reach for layer types like
+// `RetryLayer`, `TimeoutLayer`, `LoggingLayer`) directly. Re-exporting the
+// full `opendal` module under `suprnova::opendal` lets them do that without
+// adding `opendal` to their Cargo.toml or risking a version-skew mismatch
+// against the version Suprnova links.
+pub use ::opendal;
 pub use broadcasting::{
     BroadcastEnvelope, BroadcastHub, BroadcastListener, Broadcastable, BroadcastingWsHandler,
     InMemoryBroadcastHub,
@@ -191,8 +203,10 @@ pub use idempotency::{Idempotency, Idempotent, Replay};
 pub use inertia::{
     DeferConfig, DeferOptions, EncryptHistoryMiddleware, Frontend, Inertia, Inertia303Middleware,
     InertiaConfig, InertiaRegistry, InertiaRequestExt, InertiaResponse, InertiaSharedData,
-    InertiaVersionMiddleware, MergeConfig, MergeStrategy, OnceConfig, OnceOptions, PartialFilter,
-    Prop, PropFuture, PropResolver, ScrollConfig, ScrollMetadata, VersionResolver,
+    InertiaVersionMiddleware, IntoInertiaData, ManifestEntry, MergeConfig, MergeStrategy,
+    OnceConfig, OnceOptions, PartialFilter, Prop, PropEntry, PropFuture, PropResolver,
+    ResolvedAssets, ScrollConfig, ScrollMetadata, SsrConfig, SsrResponse, VersionResolver,
+    ViteManifest,
 };
 pub use logging::{
     LogConfig, LogFormat, RequestId, RequestIdMiddleware, current_request_id, init_subscriber,
