@@ -537,6 +537,16 @@ impl Auth {
     /// }
     /// ```
     ///
+    /// # Performance — when to prefer the `Arc` sibling
+    ///
+    /// Each call clones the concrete `T`. Handlers that need the user
+    /// in multiple `tokio::spawn` arms — or look it up several times
+    /// per request — should reach for [`Auth::user_as_arc`] instead and
+    /// share the `Arc<T>`. The first call still pays the underlying
+    /// clone (the trait surface keeps `Arc<dyn Authenticatable>`
+    /// internally rather than `Arc<dyn Any>`); subsequent shares are
+    /// pointer copies.
+    ///
     /// # Type Parameters
     ///
     /// * `T` - The concrete user type that implements `Authenticatable` and `Clone`
@@ -544,6 +554,16 @@ impl Auth {
     -> Result<Option<T>, crate::error::FrameworkError> {
         let user = Self::user().await?;
         Ok(user.and_then(|u| u.as_any().downcast_ref::<T>().cloned()))
+    }
+
+    /// `Arc`-returning sibling of [`Auth::user_as`]. Use when the
+    /// handler needs to share the user value across multiple spawned
+    /// tasks or borrow it through multiple lookup sites without paying
+    /// repeated `T` clones — the first lookup builds the `Arc<T>`,
+    /// every subsequent share is a refcount bump.
+    pub async fn user_as_arc<T: Authenticatable + Clone>()
+    -> Result<Option<Arc<T>>, crate::error::FrameworkError> {
+        Ok(Self::user_as::<T>().await?.map(Arc::new))
     }
 
     // ── Named guards (AuthManager) ──────────────────────────────────────────────

@@ -29,7 +29,57 @@
 use crate::auth_flows::events::{AccountLocked, AccountUnlocked};
 use crate::error::FrameworkError;
 use crate::torii_integration::instance;
+use chrono::{DateTime, Utc};
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 use torii::LockoutStatus;
+
+/// Per-process AccountLocked event-deduplication map. Keyed by email
+/// → last-fired `locked_until` timestamp. The `is_locked` check and
+/// the `record_failed_attempt` mutation aren't atomic against
+/// concurrent failed logins (no torii API for the combined op), so
+/// two simultaneous threshold-crossing attempts on the same email
+/// would otherwise both fire `AccountLocked`. The dedup map collapses
+/// duplicate firings within a single process; multi-process deploys
+/// still race, but the listeners (audit log, ops alert) handle this
+/// idempotently in practice.
+fn locked_event_dedup() -> &'static Mutex<HashMap<String, DateTime<Utc>>> {
+    static MAP: OnceLock<Mutex<HashMap<String, DateTime<Utc>>>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Returns `true` exactly once per unlocked→locked transition for an
+/// email, `false` for every duplicate firing while the same lockout
+/// window is still active. Torii's `locked_until` is computed
+/// dynamically from the last failed attempt (each subsequent failure
+/// extends the window), so we can't dedupe on equality alone — we
+/// fire only when the previously-recorded lockout has lapsed (or no
+/// prior record exists). Lock-poisoning recovers in place via
+/// `into_inner` — a panicked listener has already left the dedup
+/// state healthy; we'd rather under-fire than abort the failed-login
+/// path.
+fn should_fire_locked_once(email: &str, locked_until: Option<DateTime<Utc>>) -> bool {
+    let Some(locked_until) = locked_until else {
+        return false;
+    };
+    let mut guard = locked_event_dedup()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let now = Utc::now();
+    let fire = match guard.get(email) {
+        // Previous lockout window is still in effect — additional
+        // failed attempts inside it must not re-fire AccountLocked.
+        Some(prev) if *prev > now => false,
+        // No prior fire, or the previous lockout has lapsed — this
+        // is a fresh unlocked→locked transition.
+        _ => true,
+    };
+    if fire {
+        guard.insert(email.to_string(), locked_until);
+    }
+    fire
+}
 
 /// Facade for brute-force-protection operations.
 ///
@@ -73,18 +123,21 @@ impl BruteForce {
         ip: Option<&str>,
     ) -> Result<LockoutStatus, FrameworkError> {
         let torii = instance()?;
-        let was_locked = torii
-            .brute_force()
-            .is_locked(email)
-            .await
-            .map_err(map_err)?;
         let status = torii
             .brute_force()
             .record_failed_attempt(email, ip)
             .await
             .map_err(map_err)?;
 
-        if !was_locked && status.is_locked {
+        // Edge case: dispatch AccountLocked exactly once per
+        // `(email, locked_until)` pair. The previous `is_locked` →
+        // `record_failed_attempt` two-step had a check-then-act race
+        // where two concurrent failed logins both observed `is_locked
+        // == false`, both performed the mutation, and both fired the
+        // event. Anchoring dedup on torii's post-state `locked_until`
+        // removes the second observation: only the caller whose call
+        // produced the *first* lockout in this window publishes.
+        if status.is_locked && should_fire_locked_once(email, status.locked_until) {
             let _ = crate::events::EventFacade::dispatch(AccountLocked {
                 email: email.to_string(),
                 failed_attempts: status.failed_attempts,
@@ -148,6 +201,16 @@ impl BruteForce {
             .map_err(map_err)?;
 
         if was_locked {
+            // Clear the AccountLocked dedup state so the NEXT lockout
+            // cycle (different `locked_until`) fires the event again.
+            // Without this, a quick lock → unlock → relock sequence
+            // would silently skip the second AccountLocked event when
+            // torii happens to produce a `locked_until` <= the prior
+            // window's expiry.
+            if let Ok(mut guard) = locked_event_dedup().lock() {
+                guard.remove(email);
+            }
+
             // Intentionally discard the dispatch error — the unlock has
             // already committed; a downstream listener failure must not
             // surface as an unlock failure to the caller. The dispatcher

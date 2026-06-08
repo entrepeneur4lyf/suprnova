@@ -76,6 +76,22 @@ pub(crate) fn app_name() -> String {
     std::env::var("APP_NAME").unwrap_or_else(|_| "Suprnova".into())
 }
 
+/// Append `token=<token>` to `base_url` as a query parameter, picking
+/// `?` or `&` depending on whether the base already carries a query
+/// string. `base_url` is trimmed of a trailing `/` first so
+/// `https://app.example/reset/` and `https://app.example/reset`
+/// produce the same URL.
+///
+/// `token` is treated as opaque here — torii's plaintext token is
+/// URL-safe (base64url), so we don't `percent_encode` it; if a future
+/// driver ships a token with reserved characters, that's where to
+/// reach for `urlencoding::encode`.
+pub(crate) fn append_token_query(base_url: &str, token: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    let sep = if base.contains('?') { '&' } else { '?' };
+    format!("{base}{sep}token={token}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,5 +160,38 @@ mod tests {
         // Either the test env set it, or the default kicked in. Both
         // are acceptable; the contract is just "non-empty".
         assert!(!name.is_empty());
+    }
+
+    #[test]
+    fn append_token_query_picks_question_mark_when_base_has_no_query() {
+        assert_eq!(
+            append_token_query("https://app.example/reset", "abc"),
+            "https://app.example/reset?token=abc"
+        );
+    }
+
+    #[test]
+    fn append_token_query_picks_ampersand_when_base_already_has_query() {
+        // Pre-fix: `format!("{}?token={}", ...)` produced
+        // `/reset?campaign=x?token=abc` — two `?`s, parsed as the
+        // literal token "x?token=abc" by most query parsers (the
+        // second `?` is treated as part of the value). The fix lets
+        // ops wire deep links through their tracking layer without
+        // mangling the verification token.
+        assert_eq!(
+            append_token_query("https://app.example/reset?campaign=spring", "abc"),
+            "https://app.example/reset?campaign=spring&token=abc"
+        );
+    }
+
+    #[test]
+    fn append_token_query_trims_trailing_slash_before_appending() {
+        // Trailing slash on the base path historically caused
+        // `/reset/?token=abc` which some routers normalise to
+        // `/reset/` (dropping the query). Trim first, then append.
+        assert_eq!(
+            append_token_query("https://app.example/reset/", "abc"),
+            "https://app.example/reset?token=abc"
+        );
     }
 }

@@ -247,7 +247,7 @@ impl PasswordReset {
             // Anti-enumeration: silently succeed when the email is absent.
             return Ok(());
         };
-        let url = format!("{}?token={}", base_url.trim_end_matches('/'), token);
+        let url = crate::auth_flows::append_token_query(base_url, &token);
 
         let to_address = user.email.clone();
         let mail = PasswordResetMail {

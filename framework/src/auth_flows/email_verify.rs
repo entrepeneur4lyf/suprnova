@@ -136,7 +136,7 @@ impl EmailVerification {
                 )
             })?
             .to_string();
-        let url = format!("{}?token={}", base_url.trim_end_matches('/'), token_str);
+        let url = crate::auth_flows::append_token_query(base_url, &token_str);
 
         let to_address = user.email.clone();
         let mail = EmailVerificationMail {

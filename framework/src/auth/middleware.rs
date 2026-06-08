@@ -318,9 +318,38 @@ impl BasicAuthMiddleware {
             .status(401)
             .header(
                 "WWW-Authenticate",
-                format!("Basic realm=\"{}\"", self.realm),
+                format!("Basic realm=\"{}\"", quote_realm(&self.realm)),
             )
     }
+}
+
+/// Escape the realm string for inclusion inside the `quoted-string`
+/// production of an HTTP `WWW-Authenticate` header (RFC 7230 §3.2.6 /
+/// RFC 7617 §2). The realm originates from the operator's `APP_NAME`
+/// env var, so we don't trust it to be `"`/`\`-clean — a hostname with
+/// a stray `"` would otherwise smuggle the closing delimiter and
+/// terminate the auth-scheme parameters early, which some user agents
+/// silently misinterpret as "no realm".
+///
+/// Strategy:
+/// - Backslash-escape `\` and `"` (the two reserved characters inside
+///   a quoted-string).
+/// - Drop control characters (< 0x20 except HTAB, plus DEL) entirely.
+///   They're not valid `qdtext`; rather than reject the request, drop
+///   them so the worst case is "realm renders with one fewer
+///   character" instead of "header is invalid".
+fn quote_realm(realm: &str) -> String {
+    let mut out = String::with_capacity(realm.len());
+    for ch in realm.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\t' => out.push(ch),
+            c if (c as u32) < 0x20 || (c as u32) == 0x7F => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 impl Default for BasicAuthMiddleware {
@@ -365,5 +394,39 @@ impl Middleware for BasicAuthMiddleware {
         } else {
             Err(self.challenge())
         }
+    }
+}
+
+#[cfg(test)]
+mod realm_quoting_tests {
+    use super::quote_realm;
+
+    #[test]
+    fn ascii_alnum_realm_passes_through() {
+        assert_eq!(quote_realm("My App"), "My App");
+    }
+
+    #[test]
+    fn embedded_double_quote_is_backslash_escaped() {
+        // Operator with a hostname like `Acme "Internal" Tools`.
+        // Without escaping, the inner `"` would terminate the
+        // quoted-string and confuse user agents that strictly parse
+        // RFC 7230 §3.2.6.
+        assert_eq!(quote_realm("Acme \"Internal\""), "Acme \\\"Internal\\\"");
+    }
+
+    #[test]
+    fn embedded_backslash_is_doubled() {
+        assert_eq!(quote_realm("path\\to"), "path\\\\to");
+    }
+
+    #[test]
+    fn control_characters_are_dropped() {
+        // CR/LF are the dangerous ones — a CRLF in the realm would
+        // smuggle a header injection if it survived to the wire.
+        assert_eq!(quote_realm("Bad\r\nRealm"), "BadRealm");
+        // TAB is preserved (it's the one allowed control character
+        // inside qdtext per RFC 7230 §3.2.6).
+        assert_eq!(quote_realm("Tab\there"), "Tab\there");
     }
 }
