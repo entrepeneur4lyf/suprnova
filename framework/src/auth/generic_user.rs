@@ -67,6 +67,10 @@ impl Authenticatable for GenericUser {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    fn into_arc_any(self: std::sync::Arc<Self>) -> std::sync::Arc<dyn Any + Send + Sync> {
+        self
+    }
 }
 
 #[cfg(test)]

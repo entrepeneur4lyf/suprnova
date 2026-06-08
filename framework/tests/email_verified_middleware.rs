@@ -65,6 +65,9 @@ impl Authenticatable for UserById {
     fn as_any(&self) -> &dyn Any {
         self
     }
+    fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+        self
+    }
 }
 
 /// Global middleware: installs a fixed user-id into request_state so

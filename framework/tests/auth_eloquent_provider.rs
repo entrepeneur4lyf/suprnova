@@ -30,6 +30,9 @@ impl Authenticatable for TestUser {
     fn as_any(&self) -> &dyn Any {
         self
     }
+    fn into_arc_any(self: std::sync::Arc<Self>) -> std::sync::Arc<dyn Any + Send + Sync> {
+        self
+    }
 }
 
 /// Fresh in-memory DB with a `users` table and one seeded user

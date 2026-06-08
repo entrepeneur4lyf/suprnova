@@ -129,13 +129,30 @@ pub trait BroadcastHub: Send + Sync + 'static {
     /// per-connection UUID assigned by the handler; `info` is the
     /// public payload returned by `PresenceChannel::member_info`.
     ///
-    /// Default: no-op, so future fanout implementations (T11) can
-    /// implement member tracking lazily.
-    async fn track_member(&self, _channel: &str, _member_id: &str, _info: Value) {}
+    /// `Ok(())` on success. `Err(_)` on a fanout-backend failure
+    /// (broker disconnect, stream closed) so the WS handler can
+    /// surface the loss to the client instead of silently joining a
+    /// presence channel that peer instances will never learn about.
+    /// In-process hubs always return `Ok(())`.
+    ///
+    /// Default: no-op, so future fanout implementations can implement
+    /// member tracking lazily.
+    async fn track_member(
+        &self,
+        _channel: &str,
+        _member_id: &str,
+        _info: Value,
+    ) -> Result<(), FrameworkError> {
+        Ok(())
+    }
 
     /// Remove a previously tracked member. Called on unsubscribe or
-    /// connection close. Default: no-op.
-    async fn untrack_member(&self, _channel: &str, _member_id: &str) {}
+    /// connection close. Same `Result` contract as
+    /// [`Self::track_member`]: in-process hubs always succeed, fanout
+    /// hubs surface backend failures.
+    async fn untrack_member(&self, _channel: &str, _member_id: &str) -> Result<(), FrameworkError> {
+        Ok(())
+    }
 
     /// Return the current member list for a channel — each element is
     /// the `info` value passed to [`Self::track_member`] for a live member.
@@ -263,18 +280,25 @@ impl BroadcastHub for InMemoryBroadcastHub {
             .unwrap_or(0)
     }
 
-    async fn track_member(&self, channel: &str, member_id: &str, info: Value) {
+    async fn track_member(
+        &self,
+        channel: &str,
+        member_id: &str,
+        info: Value,
+    ) -> Result<(), FrameworkError> {
         let mut map = self.members.write().await;
         map.entry(channel.to_string())
             .or_default()
             .insert(member_id.to_string(), info);
+        Ok(())
     }
 
-    async fn untrack_member(&self, channel: &str, member_id: &str) {
+    async fn untrack_member(&self, channel: &str, member_id: &str) -> Result<(), FrameworkError> {
         let mut map = self.members.write().await;
         if let Some(ch_members) = map.get_mut(channel) {
             ch_members.remove(member_id);
         }
+        Ok(())
     }
 
     async fn list_members(&self, channel: &str) -> Vec<Value> {

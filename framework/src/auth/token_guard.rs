@@ -110,6 +110,9 @@ mod tests {
         fn as_any(&self) -> &dyn Any {
             self
         }
+        fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+            self
+        }
     }
 
     struct FakeProvider;

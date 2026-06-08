@@ -332,7 +332,7 @@ impl GroupRouter {
     ///
     /// Panics if `methods` is empty or contains a verb other than
     /// GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS. Use
-    /// [`GroupBuilder::try_methods`] for a fallible sibling that
+    /// [`GroupRouter::try_methods`] for a fallible sibling that
     /// returns `Err(FrameworkError)` instead — the right choice when
     /// the method list comes from a config file or other runtime
     /// source you can't validate at compile time.
@@ -345,7 +345,7 @@ impl GroupRouter {
             .unwrap_or_else(|e| panic!("{e}"))
     }
 
-    /// Fallible sibling of [`GroupBuilder::methods`]: returns
+    /// Fallible sibling of [`GroupRouter::methods`]: returns
     /// `Err(FrameworkError)` on an empty method slice or unsupported
     /// verb instead of panicking. Preferred when the method list is
     /// dynamic (config-driven, OpenAPI-derived, etc.).

@@ -15,16 +15,22 @@ pub enum BackoffSchedule {
         secs: u64,
     },
     /// Exponential: `delay = min(base * 2^(attempts-1), cap)`, multiplied
-    /// by a random factor in `[1 - jitter_ratio, 1 + jitter_ratio]`.
+    /// by a random factor in `[1 - jitter_ratio, 1 + jitter_ratio]`,
+    /// then re-capped at `cap_secs`. `cap_secs` is a strict ceiling.
     Exponential {
         /// First-retry delay in seconds; doubles on each subsequent attempt.
         base_secs: u64,
-        /// Maximum delay in seconds; subsequent attempts cannot exceed this.
+        /// Strict maximum delay in seconds. The final delay (after
+        /// jitter) cannot exceed this value — jitter that lands above
+        /// the cap is pinned down to the cap.
         cap_secs: u64,
         /// Symmetric jitter applied to the computed delay. Clamped to
         /// `[0.0, 1.0]` at use; values outside that range are silently
-        /// pinned so they can't violate `cap_secs`. NaN collapses to
-        /// 0.0. `0.0` disables jitter.
+        /// pinned. NaN collapses to 0.0. `0.0` disables jitter. The
+        /// strict `cap_secs` ceiling means jitter effectively spreads
+        /// delays *downward* from `cap` once the exponential schedule
+        /// has saturated — this is how production retry libraries
+        /// (e.g. AWS SDK, GCP client) treat backoff caps.
         jitter_ratio: f32,
     },
     /// Explicit schedule, one entry per attempt. If more attempts than

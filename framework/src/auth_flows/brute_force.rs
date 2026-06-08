@@ -77,9 +77,25 @@ fn should_fire_locked_once(email: &str, locked_until: Option<DateTime<Utc>>) -> 
     };
     if fire {
         guard.insert(email.to_string(), locked_until);
+        // Bounded eviction: every fresh insert sweeps stale entries
+        // (those whose `locked_until` is already in the past) so the
+        // map can't grow unbounded across the lifetime of the
+        // process. The sweep is amortised — we only do it on the
+        // "fire" branch, which by construction is rare (one per
+        // lockout cycle per email).
+        if guard.len() >= DEDUP_SWEEP_THRESHOLD {
+            guard.retain(|_, expires_at| *expires_at > now);
+        }
     }
     fire
 }
+
+/// When the dedup map's size hits this threshold, a single sweep
+/// drops every entry whose `locked_until` is already in the past.
+/// Sized so steady-state ops doesn't sweep (typical lockout volume is
+/// a few-to-tens of events per process per day), but a sustained
+/// brute-force burst can't grow the map without bound.
+const DEDUP_SWEEP_THRESHOLD: usize = 1024;
 
 /// Facade for brute-force-protection operations.
 ///

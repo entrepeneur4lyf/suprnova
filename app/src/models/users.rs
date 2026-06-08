@@ -112,6 +112,10 @@ impl Authenticatable for User {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    fn into_arc_any(self: std::sync::Arc<Self>) -> std::sync::Arc<dyn Any + Send + Sync> {
+        self
+    }
 }
 
 // ---- Phase 10C T14 — local scope dogfood ---------------------------------

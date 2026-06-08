@@ -50,6 +50,9 @@ impl Authenticatable for TestUser {
     fn as_any(&self) -> &dyn Any {
         self
     }
+    fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+        self
+    }
 }
 
 fn the_user() -> Arc<dyn Authenticatable> {

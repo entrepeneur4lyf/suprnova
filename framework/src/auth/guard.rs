@@ -558,12 +558,24 @@ impl Auth {
 
     /// `Arc`-returning sibling of [`Auth::user_as`]. Use when the
     /// handler needs to share the user value across multiple spawned
-    /// tasks or borrow it through multiple lookup sites without paying
-    /// repeated `T` clones — the first lookup builds the `Arc<T>`,
-    /// every subsequent share is a refcount bump.
-    pub async fn user_as_arc<T: Authenticatable + Clone>()
+    /// tasks or borrow it through multiple lookup sites — the
+    /// returned `Arc<T>` is the same allocation the request-state
+    /// cache already holds, so neither the lookup nor downstream
+    /// shares perform a `T` clone.
+    ///
+    /// `Auth::user()` already returns `Arc<dyn Authenticatable>`;
+    /// `Authenticatable::into_arc_any` is the trait hook that turns
+    /// that into `Arc<dyn Any + Send + Sync>` so
+    /// `Arc::downcast::<T>` can succeed without copying the concrete
+    /// user value. Returns `None` when no user is authenticated **or**
+    /// when the resolved user is not a `T`.
+    pub async fn user_as_arc<T: Authenticatable>()
     -> Result<Option<Arc<T>>, crate::error::FrameworkError> {
-        Ok(Self::user_as::<T>().await?.map(Arc::new))
+        let Some(user) = Self::user().await? else {
+            return Ok(None);
+        };
+        let any_arc = user.into_arc_any();
+        Ok(any_arc.downcast::<T>().ok())
     }
 
     // ── Named guards (AuthManager) ──────────────────────────────────────────────
@@ -838,6 +850,9 @@ mod tests {
         fn as_any(&self) -> &dyn Any {
             self
         }
+        fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+            self
+        }
     }
 
     // Knows one user: id `"7"`, email `"a@b.com"`, password `"secret"`.
@@ -1065,5 +1080,60 @@ mod tests {
             msg.contains("login_id") && msg.contains("session"),
             "error must point at the underlying login_id cause; got: {msg}"
         );
+    }
+
+    // Pre-fix, `Auth::user_as_arc::<T>` delegated to
+    // `user_as::<T>().map(Arc::new)` — each call cloned the concrete
+    // user before wrapping in `Arc`. The trait-surgery fix wires
+    // `Authenticatable::into_arc_any` through `Arc::downcast::<T>` so
+    // the returned Arc IS the request-state cache entry, not a copy.
+    // `Arc::ptr_eq` is the load-bearing assertion: a clone path would
+    // fail this.
+    #[tokio::test]
+    async fn user_as_arc_reuses_request_state_allocation_without_cloning() {
+        crate::auth::request_state::scope(async {
+            let user_arc = Arc::new(TestUser);
+            let user_arc_clone = Arc::clone(&user_arc);
+            Auth::set_user(user_arc_clone as Arc<dyn Authenticatable>);
+
+            let resolved = Auth::user_as_arc::<TestUser>()
+                .await
+                .expect("user_as_arc must not error")
+                .expect("user_as_arc must find the cached user");
+
+            assert!(
+                Arc::ptr_eq(&user_arc, &resolved),
+                "user_as_arc must hand back the same Arc the cache holds, not a clone"
+            );
+        })
+        .await;
+    }
+
+    // Wrong-type downcast through `into_arc_any` → `Arc::downcast`
+    // must miss cleanly and return `None`, not panic.
+    #[tokio::test]
+    async fn user_as_arc_wrong_type_returns_none() {
+        #[derive(Clone)]
+        struct OtherUser;
+        impl Authenticatable for OtherUser {
+            fn get_auth_identifier(&self) -> String {
+                "other".to_string()
+            }
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+            fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+                self
+            }
+        }
+
+        crate::auth::request_state::scope(async {
+            Auth::set_user(Arc::new(OtherUser) as Arc<dyn Authenticatable>);
+            let resolved = Auth::user_as_arc::<TestUser>()
+                .await
+                .expect("call must not error");
+            assert!(resolved.is_none(), "wrong-type downcast returns None");
+        })
+        .await;
     }
 }

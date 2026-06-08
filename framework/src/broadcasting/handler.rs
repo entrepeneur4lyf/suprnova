@@ -291,7 +291,17 @@ impl WebSocketHandler for BroadcastingWsHandler {
         let mut map = forwarders.lock().await;
         for (channel, entry) in map.drain() {
             if let Some(ps) = entry.presence {
-                self.hub.untrack_member(&channel, &ps.member_id).await;
+                // Shutdown path: a presence-untrack failure here is
+                // informational — the WS session is already closing,
+                // so the only place to surface it is the log.
+                if let Err(e) = self.hub.untrack_member(&channel, &ps.member_id).await {
+                    tracing::warn!(
+                        error = %e,
+                        channel = %channel,
+                        member_id = %ps.member_id,
+                        "presence untrack failed during shutdown"
+                    );
+                }
                 if let Err(e) = self
                     .hub
                     .publish(BroadcastEnvelope::new(
@@ -469,7 +479,14 @@ async fn handle_subscribe(
         if let Some(old) = map.remove(channel) {
             // Existing subscription being replaced — clean up presence if needed.
             if let Some(ps) = old.presence {
-                hub.untrack_member(channel, &ps.member_id).await;
+                if let Err(e) = hub.untrack_member(channel, &ps.member_id).await {
+                    tracing::warn!(
+                        error = %e,
+                        channel = %channel,
+                        member_id = %ps.member_id,
+                        "presence untrack failed during re-subscribe cleanup"
+                    );
+                }
                 // Cleanup-path publish: log a hub failure but continue —
                 // the user just re-subscribed, we shouldn't fail the new
                 // sub because the prior presence.left couldn't be
@@ -523,8 +540,11 @@ async fn handle_subscribe(
         (presence_here_members, presence_member_id, presence_info)
     {
         // Track member AFTER taking the snapshot so self is absent from
-        // the presence.here payload (standard Pusher behaviour).
-        hub.track_member(channel, &mid, info.clone()).await;
+        // the presence.here payload (standard Pusher behaviour). A
+        // producer-down failure here surfaces to the WS handler so the
+        // client sees a real error instead of joining a presence
+        // channel that peer instances will never learn about.
+        hub.track_member(channel, &mid, info.clone()).await?;
 
         // presence.here — sent directly to this socket only (not via hub).
         let here = ServerFrame::Event {
@@ -577,7 +597,18 @@ async fn handle_unsubscribe(
 
     if let Some(e) = entry {
         if let Some(ps) = e.presence {
-            hub.untrack_member(channel, &ps.member_id).await;
+            // Unsubscribe path: a presence-untrack failure here is
+            // informational — we'd rather still send the
+            // Unsubscribed ack to the client than abort on a
+            // producer hiccup.
+            if let Err(err) = hub.untrack_member(channel, &ps.member_id).await {
+                tracing::warn!(
+                    error = %err,
+                    channel = %channel,
+                    member_id = %ps.member_id,
+                    "presence untrack failed during unsubscribe"
+                );
+            }
             // Cleanup-path publish: a hub failure here doesn't stop the
             // client from getting their Unsubscribed ack below.
             if let Err(err) = hub

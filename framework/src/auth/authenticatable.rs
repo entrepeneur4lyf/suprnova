@@ -95,4 +95,29 @@ pub trait Authenticatable: Send + Sync + 'static {
     /// This is used by `Auth::user_as::<T>()` to cast the trait object
     /// back to the concrete User type.
     fn as_any(&self) -> &dyn Any;
+
+    /// Allow downcasting an `Arc<dyn Authenticatable>` to `Arc<T>`
+    /// without cloning the concrete user value.
+    ///
+    /// Every impl writes the same one-line body:
+    ///
+    /// ```rust,ignore
+    /// fn into_arc_any(self: std::sync::Arc<Self>)
+    ///     -> std::sync::Arc<dyn std::any::Any + Send + Sync>
+    /// {
+    ///     self
+    /// }
+    /// ```
+    ///
+    /// The boilerplate is unavoidable: a default body would need
+    /// `Self: Sized` for the `Arc<Self> → Arc<dyn Any>` coercion, but
+    /// adding that bound makes the method non-dyn-safe, which would
+    /// break every `Arc<dyn Authenticatable>` site in the framework.
+    /// The trait keeps `into_arc_any` dyn-safe by requiring each impl
+    /// to supply the body in its own (sized) `impl` block.
+    ///
+    /// [`Auth::user_as_arc::<T>`](crate::Auth::user_as_arc) calls
+    /// this and then `Arc::downcast::<T>` on the returned handle, so
+    /// the user value never moves through a clone.
+    fn into_arc_any(self: std::sync::Arc<Self>) -> std::sync::Arc<dyn Any + Send + Sync>;
 }

@@ -97,12 +97,21 @@ impl BroadcastHub for RecordingBroadcastHub {
         self.inner.subscriber_count(channel)
     }
 
-    async fn track_member(&self, channel: &str, member_id: &str, info: Value) {
-        self.inner.track_member(channel, member_id, info).await;
+    async fn track_member(
+        &self,
+        channel: &str,
+        member_id: &str,
+        info: Value,
+    ) -> Result<(), crate::error::FrameworkError> {
+        self.inner.track_member(channel, member_id, info).await
     }
 
-    async fn untrack_member(&self, channel: &str, member_id: &str) {
-        self.inner.untrack_member(channel, member_id).await;
+    async fn untrack_member(
+        &self,
+        channel: &str,
+        member_id: &str,
+    ) -> Result<(), crate::error::FrameworkError> {
+        self.inner.untrack_member(channel, member_id).await
     }
 
     async fn list_members(&self, channel: &str) -> Vec<Value> {

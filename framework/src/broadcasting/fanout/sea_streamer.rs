@@ -431,14 +431,13 @@ impl SeaStreamerBroadcastHub {
     /// on all receiving instances (including this one in loopback / same-stream
     /// scenarios).
     ///
-    /// Errors are logged with the channel + member_id context so ops
-    /// can scope an alert to the affected presence channel rather than
-    /// the previous unattributed "presence producer send error" line.
-    /// The `track_member` / `untrack_member` trait surface is
-    /// fire-and-forget so we don't propagate the error to the caller —
-    /// the local state has already been updated and the cross-process
-    /// view will re-converge through the next heartbeat tick.
-    fn send_presence_event(&self, event: &PresenceEvent) {
+    /// Errors are logged with the channel + member_id context AND
+    /// returned to the caller so the `track_member` /
+    /// `untrack_member` trait surface can surface a producer-down
+    /// state to the WS handler. The handler can then refuse the
+    /// presence join cleanly rather than leaving peer views divergent
+    /// for the entire heartbeat-reconciliation window.
+    fn send_presence_event(&self, event: &PresenceEvent) -> Result<(), FrameworkError> {
         let (event_name, channel, member_id) = match event {
             PresenceEvent::MemberAdded {
                 channel, member_id, ..
@@ -450,20 +449,18 @@ impl SeaStreamerBroadcastHub {
                 channel, member_id, ..
             } => ("heartbeat", channel.as_str(), member_id.as_str()),
         };
-        let data = match serde_json::to_value(event) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    event = event_name,
-                    channel,
-                    member_id,
-                    "SeaStreamerBroadcastHub: failed to serialize PresenceEvent — peer views \
-                     of this channel will diverge until the next heartbeat reconciles"
-                );
-                return;
-            }
-        };
+        let data = serde_json::to_value(event).map_err(|e| {
+            tracing::error!(
+                error = %e,
+                event = event_name,
+                channel,
+                member_id,
+                "SeaStreamerBroadcastHub: failed to serialize PresenceEvent"
+            );
+            FrameworkError::internal(format!(
+                "SeaStreamerBroadcastHub: failed to serialize PresenceEvent ({event_name} on {channel}/{member_id}): {e}"
+            ))
+        })?;
         let tagged = TaggedEnvelope {
             instance_id: self.instance_id,
             envelope: BroadcastEnvelope::new(
@@ -472,30 +469,31 @@ impl SeaStreamerBroadcastHub {
                 data,
             ),
         };
-        match serde_json::to_vec(&tagged) {
-            Ok(bytes) => match self.producer.send(bytes.as_slice()) {
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        event = event_name,
-                        channel,
-                        member_id,
-                        "SeaStreamerBroadcastHub: presence producer send error — peer views \
-                         of this channel will diverge until the next heartbeat reconciles"
-                    );
-                }
-            },
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    event = event_name,
-                    channel,
-                    member_id,
-                    "SeaStreamerBroadcastHub: failed to serialize presence TaggedEnvelope"
-                );
-            }
-        }
+        let bytes = serde_json::to_vec(&tagged).map_err(|e| {
+            tracing::error!(
+                error = %e,
+                event = event_name,
+                channel,
+                member_id,
+                "SeaStreamerBroadcastHub: failed to serialize presence TaggedEnvelope"
+            );
+            FrameworkError::internal(format!(
+                "SeaStreamerBroadcastHub: failed to serialize presence TaggedEnvelope: {e}"
+            ))
+        })?;
+        self.producer.send(bytes.as_slice()).map_err(|e| {
+            tracing::error!(
+                error = %e,
+                event = event_name,
+                channel,
+                member_id,
+                "SeaStreamerBroadcastHub: presence producer send error"
+            );
+            FrameworkError::internal(format!(
+                "SeaStreamerBroadcastHub: presence producer send error ({event_name} on {channel}/{member_id}): {e}"
+            ))
+        })?;
+        Ok(())
     }
 }
 
@@ -862,7 +860,12 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
         self.local.subscriber_count(channel)
     }
 
-    async fn track_member(&self, channel: &str, member_id: &str, info: Value) {
+    async fn track_member(
+        &self,
+        channel: &str,
+        member_id: &str,
+        info: Value,
+    ) -> Result<(), FrameworkError> {
         // 1. Update the local replicated view immediately for write-after-read
         //    consistency — callers don't need to wait for the round-trip.
         {
@@ -885,21 +888,23 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
         // 3. Also update the local hub so existing in-process APIs still work.
         self.local
             .track_member(channel, member_id, info.clone())
-            .await;
+            .await?;
 
         // 4. Publish to the meta-channel so other processes update their views.
         //    In loopback/single-stream tests this round-trips back to us, but
         //    `apply_presence_event` is idempotent (upsert), so duplicates are harmless.
+        //    Producer failure surfaces to the caller so the WS handler can
+        //    refuse the join cleanly instead of leaving peer views divergent.
         self.send_presence_event(&PresenceEvent::MemberAdded {
             instance_id: self.instance_id.to_string(),
             channel: channel.to_string(),
             member_id: member_id.to_string(),
             info,
             timestamp_ms: now_ms(),
-        });
+        })
     }
 
-    async fn untrack_member(&self, channel: &str, member_id: &str) {
+    async fn untrack_member(&self, channel: &str, member_id: &str) -> Result<(), FrameworkError> {
         // 1. Remove from the replicated view immediately.
         {
             let mut map = self.cross_process_view.write().await;
@@ -915,7 +920,7 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
         }
 
         // 3. Remove from local hub.
-        self.local.untrack_member(channel, member_id).await;
+        self.local.untrack_member(channel, member_id).await?;
 
         // 4. Publish removal to the meta-channel for other processes.
         self.send_presence_event(&PresenceEvent::MemberRemoved {
@@ -923,7 +928,7 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
             channel: channel.to_string(),
             member_id: member_id.to_string(),
             timestamp_ms: now_ms(),
-        });
+        })
     }
 
     async fn list_members(&self, channel: &str) -> Vec<Value> {
