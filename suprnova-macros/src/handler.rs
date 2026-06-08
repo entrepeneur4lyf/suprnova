@@ -112,7 +112,7 @@ fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
     if params.is_empty() {
         return quote! {
             #(#fn_attrs)*
-            #fn_vis #async_token fn #fn_name #fn_generics(_: suprnova::Request) #fn_output {
+            #fn_vis #async_token fn #fn_name #fn_generics(_: ::suprnova::Request) #fn_output {
                 #fn_block
             }
         };
@@ -175,7 +175,7 @@ fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
 
     quote! {
         #(#fn_attrs)*
-        #fn_vis #async_token fn #fn_name #fn_generics(__suprnova_req: suprnova::Request) #fn_output {
+        #fn_vis #async_token fn #fn_name #fn_generics(__suprnova_req: ::suprnova::Request) #fn_output {
             let __suprnova_params = __suprnova_req.params().clone();
             #(#extractions)*
             #fn_block
@@ -266,8 +266,8 @@ fn generate_extraction(pat: &Pat, ty: &Type, param_name: &str, kind: &ParamKind)
             quote! {
                 let #pat: #ty = {
                     let __value = __suprnova_params.get(#param_name)
-                        .ok_or_else(|| suprnova::FrameworkError::param(#param_name))?;
-                    <#ty as suprnova::FromParam>::from_param(__value)?
+                        .ok_or_else(|| ::suprnova::FrameworkError::param(#param_name))?;
+                    <#ty as ::suprnova::FromParam>::from_param(__value)?
                 };
             }
         }
@@ -277,13 +277,13 @@ fn generate_extraction(pat: &Pat, ty: &Type, param_name: &str, kind: &ParamKind)
             quote! {
                 let #pat: #ty = {
                     let __value = __suprnova_params.get(#param_name)
-                        .ok_or_else(|| suprnova::FrameworkError::param(#param_name))?;
-                    <#ty as suprnova::AutoRouteBinding>::from_route_param(__value).await?
+                        .ok_or_else(|| ::suprnova::FrameworkError::param(#param_name))?;
+                    <#ty as ::suprnova::AutoRouteBinding>::from_route_param(__value).await?
                 };
             }
         }
         ParamKind::FormRequest => quote! {
-            let #pat: #ty = <#ty as suprnova::FromRequest>::from_request(__suprnova_req).await?;
+            let #pat: #ty = <#ty as ::suprnova::FromRequest>::from_request(__suprnova_req).await?;
         },
     }
 }

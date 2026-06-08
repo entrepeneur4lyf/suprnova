@@ -71,12 +71,12 @@ fn impl_body(max_body_bytes: Option<proc_macro2::TokenStream>) -> proc_macro2::T
 /// Implementation of the `#[derive(FormRequest)]` derive macro
 ///
 /// This macro generates the `FormRequest` trait implementation for a struct.
-/// The struct must also derive `serde::Deserialize` and `validator::Validate`.
+/// The struct must also derive `::suprnova::serde::Deserialize` and `::suprnova::validator::Validate`.
 ///
 /// For the best DX, use all three derives together:
 ///
 /// ```rust,ignore
-/// #[derive(serde::Deserialize, validator::Validate, FormRequest)]
+/// #[derive(::suprnova::serde::Deserialize, ::suprnova::validator::Validate, FormRequest)]
 /// pub struct CreateUserRequest {
 ///     #[validate(email)]
 ///     pub email: String,
@@ -130,7 +130,7 @@ pub fn derive_request_impl(input: TokenStream) -> TokenStream {
     let body = impl_body(attrs.max_body_bytes);
 
     let output = quote! {
-        impl #impl_generics suprnova::FormRequest for #name #ty_generics #where_clause {
+        impl #impl_generics ::suprnova::FormRequest for #name #ty_generics #where_clause {
             #body
         }
     };
@@ -159,7 +159,7 @@ pub fn derive_request_impl(input: TokenStream) -> TokenStream {
 /// This expands to:
 ///
 /// ```rust,ignore
-/// #[derive(serde::Deserialize, validator::Validate)]
+/// #[derive(::suprnova::serde::Deserialize, ::suprnova::validator::Validate)]
 /// pub struct CreateUserRequest {
 ///     #[validate(email)]
 ///     pub email: String,
@@ -168,7 +168,7 @@ pub fn derive_request_impl(input: TokenStream) -> TokenStream {
 ///     pub password: String,
 /// }
 ///
-/// impl suprnova::FormRequest for CreateUserRequest {}
+/// impl ::suprnova::FormRequest for CreateUserRequest {}
 /// ```
 ///
 /// ## Content Type Support
@@ -232,7 +232,7 @@ pub fn request_attr_impl(_attr: TokenStream, input: TokenStream) -> TokenStream 
     } else {
         let body = impl_body(parsed_attrs.max_body_bytes);
         quote! {
-            impl #impl_generics suprnova::FormRequest for #name #ty_generics #where_clause {
+            impl #impl_generics ::suprnova::FormRequest for #name #ty_generics #where_clause {
                 #body
             }
         }
@@ -240,7 +240,7 @@ pub fn request_attr_impl(_attr: TokenStream, input: TokenStream) -> TokenStream 
 
     let output = quote! {
         #(#attrs)*
-        #[derive(serde::Deserialize, validator::Validate)]
+        #[derive(::suprnova::serde::Deserialize, ::suprnova::validator::Validate)]
         #vis struct #name #generics #fields #semi
 
         #form_request_impl
