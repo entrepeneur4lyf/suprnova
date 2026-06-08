@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use sea_orm::entity::prelude::*;
+use sea_orm::sea_query::OnConflict;
 use sea_orm::{QueryFilter, Set};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -75,41 +76,40 @@ impl SessionStore for DatabaseSessionDriver {
 
         let now = chrono::Utc::now().naive_utc();
 
-        // Check if session exists
-        let existing = sessions::Entity::find_by_id(&session.id)
-            .one(db.inner())
+        // Atomic upsert: INSERT ... ON CONFLICT(id) DO UPDATE SET ...
+        // The previous check-then-insert/update was a read-modify-write
+        // race — two parallel writers persisting a fresh-but-shared
+        // session id (e.g. a SPA reconnecting after the DB row was
+        // gc'd while the cookie was still valid) could both see "no
+        // existing row" and both attempt INSERT; one would win, the
+        // other would fail the UNIQUE constraint, and the SessionMiddleware
+        // fail-closed branch would 500 the loser. ON CONFLICT collapses
+        // both branches into a single round-trip + skips the pre-read
+        // on the happy path. SeaORM 1.x routes the OnConflict::column
+        // setup to Postgres `ON CONFLICT DO UPDATE`, MySQL `ON
+        // DUPLICATE KEY UPDATE`, and SQLite `ON CONFLICT DO UPDATE`.
+        let model = sessions::ActiveModel {
+            id: Set(session.id.clone()),
+            user_id: Set(session.user_id.clone()),
+            payload: Set(payload),
+            csrf_token: Set(session.csrf_token.clone()),
+            last_activity: Set(now),
+        };
+
+        sessions::Entity::insert(model)
+            .on_conflict(
+                OnConflict::column(sessions::Column::Id)
+                    .update_columns([
+                        sessions::Column::UserId,
+                        sessions::Column::Payload,
+                        sessions::Column::CsrfToken,
+                        sessions::Column::LastActivity,
+                    ])
+                    .to_owned(),
+            )
+            .exec(db.inner())
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-
-        if existing.is_some() {
-            // Update existing session
-            let update = sessions::ActiveModel {
-                id: Set(session.id.clone()),
-                user_id: Set(session.user_id.clone()),
-                payload: Set(payload),
-                csrf_token: Set(session.csrf_token.clone()),
-                last_activity: Set(now),
-            };
-
-            sessions::Entity::update(update)
-                .exec(db.inner())
-                .await
-                .map_err(|e| FrameworkError::database(e.to_string()))?;
-        } else {
-            // Insert new session
-            let model = sessions::ActiveModel {
-                id: Set(session.id.clone()),
-                user_id: Set(session.user_id.clone()),
-                payload: Set(payload),
-                csrf_token: Set(session.csrf_token.clone()),
-                last_activity: Set(now),
-            };
-
-            sessions::Entity::insert(model)
-                .exec(db.inner())
-                .await
-                .map_err(|e| FrameworkError::database(e.to_string()))?;
-        }
 
         Ok(())
     }

@@ -11,7 +11,7 @@ use crate::crypto::Crypt;
 use crate::database::DB;
 use crate::error::FrameworkError;
 use rand::RngExt;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
 /// Locate the index (if any) of `code` inside `codes` without
@@ -71,39 +71,79 @@ pub fn generate(count: usize) -> Vec<String> {
 pub async fn consume(user_id: &str, code: &str) -> Result<bool, FrameworkError> {
     let db = DB::connection()?;
     let conn = db.inner();
-    let Some(row) = entity::Entity::find_by_id(user_id.to_string())
-        .one(conn)
-        .await
-        .map_err(|e| FrameworkError::internal(format!("two_factor find: {e}")))?
-    else {
-        return Ok(false);
-    };
-    let Some(encrypted) = row.recovery_codes.clone() else {
-        return Ok(false);
-    };
-    let plaintext =
-        Crypt::decrypt_string(crate::crypto::CryptPurpose::TwoFactorRecovery, &encrypted)?;
-    let mut codes: Vec<String> = plaintext.lines().map(String::from).collect();
-    let Some(idx) = find_constant_time(&codes, code) else {
-        return Ok(false);
-    };
-    codes.remove(idx);
-    let new_recovery = if codes.is_empty() {
-        None
-    } else {
-        Some(Crypt::encrypt_string(
-            crate::crypto::CryptPurpose::TwoFactorRecovery,
-            &codes.join("\n"),
-        )?)
-    };
-    let mut active: entity::ActiveModel = row.into();
-    active.recovery_codes = Set(new_recovery);
-    active.updated_at = Set(chrono::Utc::now());
-    active
-        .update(conn)
-        .await
-        .map_err(|e| FrameworkError::internal(format!("two_factor update: {e}")))?;
-    Ok(true)
+
+    // Optimistic-concurrency consume: load the row, decrypt + remove
+    // the matched code, then attempt a conditional UPDATE filtered on
+    // the *original* ciphertext. If another consume() raced ahead and
+    // already rewrote `recovery_codes`, rows_affected == 0 and we
+    // retry against the fresh blob. The retry cap defends against
+    // pathological contention without hanging — in practice two
+    // concurrent consume() calls for the same user_id are vanishingly
+    // rare (a user logging in twice within the same TOTP window with
+    // two recovery codes), so the bound is tight by design.
+    const MAX_RETRIES: u32 = 4;
+    let mut attempt = 0u32;
+    loop {
+        let Some(row) = entity::Entity::find_by_id(user_id.to_string())
+            .one(conn)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("two_factor find: {e}")))?
+        else {
+            return Ok(false);
+        };
+        let Some(encrypted) = row.recovery_codes.clone() else {
+            return Ok(false);
+        };
+        let plaintext =
+            Crypt::decrypt_string(crate::crypto::CryptPurpose::TwoFactorRecovery, &encrypted)?;
+        let mut codes: Vec<String> = plaintext.lines().map(String::from).collect();
+        let Some(idx) = find_constant_time(&codes, code) else {
+            return Ok(false);
+        };
+        codes.remove(idx);
+        let new_recovery = if codes.is_empty() {
+            None
+        } else {
+            Some(Crypt::encrypt_string(
+                crate::crypto::CryptPurpose::TwoFactorRecovery,
+                &codes.join("\n"),
+            )?)
+        };
+
+        // Conditional UPDATE: WHERE user_id = ? AND recovery_codes = <prior>.
+        // SeaORM's update_many returns the affected row count via
+        // `UpdateResult.rows_affected`. 0 affected = another consume()
+        // beat us to the write; reload and retry.
+        let res = entity::Entity::update_many()
+            .col_expr(
+                entity::Column::RecoveryCodes,
+                sea_orm::sea_query::Expr::value(new_recovery),
+            )
+            .col_expr(
+                entity::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(chrono::Utc::now()),
+            )
+            .filter(entity::Column::UserId.eq(user_id.to_string()))
+            .filter(entity::Column::RecoveryCodes.eq(encrypted.clone()))
+            .exec(conn)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("two_factor update: {e}")))?;
+
+        if res.rows_affected == 1 {
+            return Ok(true);
+        }
+
+        // 0 rows affected means the ciphertext changed under us —
+        // a concurrent consume() got there first. Retry the read.
+        attempt += 1;
+        if attempt >= MAX_RETRIES {
+            // Pathological contention. Surface as Err so the caller
+            // can log + propagate (vs. returning a false negative).
+            return Err(FrameworkError::internal(
+                "two_factor: recovery code consume hit max retries under concurrent contention",
+            ));
+        }
+    }
 }
 
 #[cfg(test)]
