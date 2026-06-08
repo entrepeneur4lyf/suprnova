@@ -161,10 +161,19 @@ async fn post_json(
 
     let parsed = hyper::Uri::try_from(url).map_err(|e| format!("invalid url: {e}"))?;
 
+    // Pick the default port from the URI scheme — defaulting to 80
+    // on every URL (including `https://...`) sent the wrong Host
+    // header for TLS-backed SSR endpoints, which some reverse
+    // proxies reject. When the URI carries an explicit port, use it;
+    // otherwise pick 443 for https and 80 for everything else.
+    let scheme_default_port = match parsed.scheme_str() {
+        Some("https") => 443,
+        _ => 80,
+    };
     let host_port = format!(
         "{}:{}",
         parsed.host().ok_or("missing host")?,
-        parsed.port_u16().unwrap_or(80)
+        parsed.port_u16().unwrap_or(scheme_default_port)
     );
 
     let req = Request::builder()

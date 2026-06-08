@@ -365,17 +365,55 @@ pub mod rules {
         }
     }
 
-    /// Laravel `required_with:other` — the field is required only
-    /// when sibling field `other` is present and non-blank.
+    /// Laravel `required_with:foo,bar,baz` — the field is required
+    /// when **any** of the listed sibling fields is present and
+    /// non-blank.
+    ///
+    /// The slice may carry a single name (the common case) or many.
+    /// Use [`RequiredWithAll`] for "required when ALL siblings present".
     pub struct RequiredWith {
-        /// Name of the sibling field whose presence triggers the requirement.
-        pub other: &'static str,
+        /// Names of the sibling fields whose presence triggers the
+        /// requirement. The rule fires when at least one of them is
+        /// present and non-blank.
+        pub others: &'static [&'static str],
     }
     impl ContextualRule for RequiredWith {
         fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String> {
-            let other_present = ctx.get(self.other).map(|v| !is_blank(v)).unwrap_or(false);
-            if other_present && is_blank(value) {
-                Err(format!("required when {} is present", self.other))
+            let any_present = self
+                .others
+                .iter()
+                .any(|name| ctx.get(*name).map(|v| !is_blank(v)).unwrap_or(false));
+            if any_present && is_blank(value) {
+                Err(format!(
+                    "required when {} is present",
+                    self.others.join(", ")
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Laravel `required_with_all:foo,bar,baz` — the field is required
+    /// only when **every** listed sibling is present and non-blank.
+    /// The complement of [`RequiredWith`].
+    pub struct RequiredWithAll {
+        /// Names of the sibling fields; every one of them must be
+        /// present and non-blank to trigger the requirement.
+        pub others: &'static [&'static str],
+    }
+    impl ContextualRule for RequiredWithAll {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), String> {
+            let all_present = !self.others.is_empty()
+                && self
+                    .others
+                    .iter()
+                    .all(|name| ctx.get(*name).map(|v| !is_blank(v)).unwrap_or(false));
+            if all_present && is_blank(value) {
+                Err(format!(
+                    "required when {} are all present",
+                    self.others.join(", ")
+                ))
             } else {
                 Ok(())
             }

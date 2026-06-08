@@ -71,7 +71,7 @@ fn required_if_triggers_when_other_field_matches() {
 #[test]
 fn required_with_triggers_when_other_field_present() {
     let rule = RequiredWith {
-        other: "address_line_1",
+        others: &["address_line_1"],
     };
     let c = ctx(&[("address_line_1", "1 Main St")]);
     assert!(rule.passes("12345", &c).is_ok());
@@ -79,6 +79,37 @@ fn required_with_triggers_when_other_field_present() {
 
     let c2 = ctx(&[]);
     assert!(rule.passes("", &c2).is_ok());
+}
+
+#[test]
+fn required_with_triggers_when_any_other_field_present() {
+    // Laravel `required_with:foo,bar` — at least one must be present.
+    use suprnova::ContextualRule;
+    let rule = RequiredWith {
+        others: &["address_line_1", "address_line_2"],
+    };
+    // Only the second sibling is present — still triggers.
+    let c = ctx(&[("address_line_2", "Apt 7")]);
+    assert!(rule.passes("", &c).is_err());
+    // Neither present — passes.
+    let c2 = ctx(&[]);
+    assert!(rule.passes("", &c2).is_ok());
+}
+
+#[test]
+fn required_with_all_only_triggers_when_every_sibling_present() {
+    use suprnova::ContextualRule;
+    use suprnova::RequiredWithAll;
+    let rule = RequiredWithAll {
+        others: &["address_line_1", "city"],
+    };
+    // Only one of the two — does NOT trigger.
+    let c = ctx(&[("address_line_1", "1 Main St")]);
+    assert!(rule.passes("", &c).is_ok());
+    // Both present — value is required.
+    let c2 = ctx(&[("address_line_1", "1 Main St"), ("city", "Springfield")]);
+    assert!(rule.passes("", &c2).is_err());
+    assert!(rule.passes("12345", &c2).is_ok());
 }
 
 #[test]

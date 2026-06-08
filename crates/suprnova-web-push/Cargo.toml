@@ -1,8 +1,8 @@
 [package]
 name = "suprnova-web-push"
-version = "0.1.0"
-edition = "2024"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Web Push (RFC 8030 + RFC 8291 + RFC 8292) for the Suprnova framework"
 
 [dependencies]

@@ -33,9 +33,22 @@ impl VectorItem {
 pub struct VectorMatch {
     /// Id of the matched item (the same id supplied at upsert time).
     pub id: String,
-    /// Driver-specific score — higher is "more similar" by
-    /// convention (cosine similarity in the canonical case;
-    /// Qdrant's COSINE distance returns the same shape).
+    /// Driver-specific similarity score. **Interpretation depends on
+    /// the backend's distance metric**:
+    ///
+    /// - **Cosine / dot-product** (canonical case, Pinecone / Qdrant
+    ///   Cosine / Memory) — higher is more similar (range usually
+    ///   `[-1, 1]` for cosine, unbounded for dot).
+    /// - **Qdrant Euclid / Manhattan / Chebyshev** — these are
+    ///   distance metrics; Qdrant returns the raw distance, so
+    ///   **lower is more similar**. `0.0` means identical.
+    ///
+    /// The driver's docstring lists the metric it ships with; if you
+    /// switch to a distance metric at index-creation time and rely on
+    /// `score` ordering downstream, flip the comparison accordingly.
+    /// `similar()` always sorts best-first per the driver's own
+    /// definition of "best", so for typical "find top-k similar"
+    /// usage the field's direction is transparent.
     pub score: f32,
     /// Metadata persisted alongside the vector at upsert time.
     #[serde(default)]

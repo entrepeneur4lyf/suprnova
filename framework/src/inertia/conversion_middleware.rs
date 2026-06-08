@@ -43,8 +43,20 @@ impl Middleware for Inertia303Middleware {
         let method = request.method().clone();
         let response = next(request).await;
 
-        // Only act when an Inertia non-GET produced a 302 redirect.
-        if !is_inertia || method == hyper::Method::GET {
+        // Only act when an Inertia PUT / PATCH / DELETE produced a 302
+        // redirect. Per the Inertia v3 protocol
+        // (`core-concepts/redirects.mdx`), the conversion is narrowed
+        // to the *unsafe idempotent verbs* — POST redirects keep the
+        // browser default of 302, mirroring Laravel's standard
+        // post-redirect-get pattern. The previous "any non-GET" gate
+        // accidentally swept POST too, breaking apps that rely on
+        // the 302 reload semantics on form submissions.
+        if !is_inertia
+            || !matches!(
+                method,
+                hyper::Method::PUT | hyper::Method::PATCH | hyper::Method::DELETE,
+            )
+        {
             return response;
         }
 
