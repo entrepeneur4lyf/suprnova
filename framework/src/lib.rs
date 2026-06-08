@@ -122,7 +122,7 @@ pub use authorization::Response as GateResponse;
 pub use cache::{Cache, CacheConfig, CacheStore, InMemoryCache, LockGuard, RedisCache};
 pub use config::{
     AppConfig, AppConfigBuilder, Config, Environment, ServerConfig, ServerConfigBuilder, env,
-    env_optional, env_required,
+    env_optional, env_required, try_env_required,
 };
 pub use container::{App, Container};
 pub use context::{Context, ContextStore};

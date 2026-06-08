@@ -161,7 +161,8 @@ impl Pipeline {
     ///
     /// Panics if the pipeline was constructed without a request (no
     /// [`Pipeline::send`] call). Use [`Pipeline::then_with`] to pass the
-    /// request inline as a single call.
+    /// request inline as a single call, or [`Pipeline::try_then`] for
+    /// a fallible variant that returns `Err` instead of panicking.
     pub async fn then<F, Fut>(mut self, destination: F) -> Response
     where
         F: Fn(Request) -> Fut + Send + Sync + 'static,
@@ -172,6 +173,30 @@ impl Pipeline {
             .take()
             .expect("Pipeline::then requires a request — call .send(request) first");
         self.then_with(request, destination).await
+    }
+
+    /// Fallible sibling of [`Self::then`] — returns
+    /// `Err(FrameworkError::internal(...))` instead of panicking when
+    /// the pipeline was assembled without a [`Pipeline::send`] call.
+    ///
+    /// Prefer this from queue-worker, scheduler, and middleware-builder
+    /// utility code where a panic would tear down the surrounding
+    /// task. The success path is otherwise identical to [`Self::then`].
+    pub async fn try_then<F, Fut>(
+        mut self,
+        destination: F,
+    ) -> Result<Response, crate::FrameworkError>
+    where
+        F: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        let request = self.passable.take().ok_or_else(|| {
+            crate::FrameworkError::internal(
+                "Pipeline::try_then requires a request — call .send(request) first, \
+                 or use Pipeline::then_with to pass the request inline",
+            )
+        })?;
+        Ok(self.then_with(request, destination).await)
     }
 
     /// Run the pipeline against an explicit request, ignoring any
@@ -307,5 +332,24 @@ mod tests {
         assert!(p.is_empty());
         assert_eq!(p.len(), 0);
         assert!(p.pipes().is_empty());
+    }
+
+    /// `try_then` returns `Err(FrameworkError::internal(...))` instead
+    /// of panicking when the pipeline was assembled without a
+    /// `send(request)` call. Mirrors the documented `then` panic shape
+    /// at the `Result` boundary for queue-worker / scheduler /
+    /// middleware-builder callers that can't afford a process panic.
+    #[tokio::test]
+    async fn try_then_returns_err_without_send() {
+        let p = Pipeline::new().pipe(NoopMw);
+        let result = p
+            .try_then(|_req| async { Ok(crate::http::HttpResponse::text("never reached")) })
+            .await;
+        assert!(result.is_err(), "missing send must surface as Err");
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("send"),
+            "diagnostic should mention `send`: {msg}"
+        );
     }
 }

@@ -828,8 +828,24 @@ impl App {
     /// response but cannot survive the redirect. Same-request flashes
     /// win over inherited session flashes on key collision.
     pub fn flash<V: serde::Serialize>(key: impl Into<String>, value: V) {
-        let v = serde_json::to_value(&value).expect("App::flash value must serialize cleanly");
-        crate::inertia::flash::push(key.into(), v);
+        let key = key.into();
+        // Soft-fail on serialise error to match the sibling
+        // `Redirect::with` path. A `HashMap<(i32, i32), &str>` or any
+        // type whose `Serialize` impl returns Err would otherwise
+        // abort the request via panic; instead we log + drop the
+        // entry so the rest of the response renders normally.
+        match serde_json::to_value(&value) {
+            Ok(v) => crate::inertia::flash::push(key, v),
+            Err(err) => {
+                tracing::warn!(
+                    flash_key = %key,
+                    error = %err,
+                    "App::flash value failed to serialise; dropping the entry. \
+                     This typically means a HashMap with non-string keys, or a \
+                     custom Serialize impl returned Err — both are caller bugs."
+                );
+            }
+        }
     }
 
     /// Disable Inertia SSR for the remainder of this request. Equivalent
@@ -1152,5 +1168,21 @@ mod lock_release_tests {
             saw_lock_free.load(Ordering::SeqCst),
             "trait factory closure must run AFTER the container read guard is released",
         );
+    }
+
+    /// `App::flash` must not panic when the value's `Serialize` impl
+    /// returns `Err`. Match the sibling `Redirect::with` shape:
+    /// log + drop the entry so the rest of the response renders
+    /// normally. `HashMap<(i32, i32), &str>` is the canonical
+    /// serde-rejected map shape (non-string keys).
+    #[test]
+    fn flash_does_not_panic_on_serialise_error() {
+        use std::collections::HashMap;
+        let mut bad: HashMap<(i32, i32), &str> = HashMap::new();
+        bad.insert((1, 2), "value");
+        // No assertion needed — the test's value is that this call
+        // returns normally instead of panicking. Pre-fix it would
+        // unwind with `expect("App::flash value must serialize cleanly")`.
+        super::App::flash("offending_key", bad);
     }
 }

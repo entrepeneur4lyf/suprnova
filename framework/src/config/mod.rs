@@ -29,7 +29,7 @@ pub mod typed;
 
 #[doc(hidden)]
 pub use env::__reset_loaded_keys_for_tests;
-pub use env::{Environment, env, env_optional, env_required, load_dotenv};
+pub use env::{Environment, env, env_optional, env_required, load_dotenv, try_env_required};
 pub use providers::{AppConfig, AppConfigBuilder, ServerConfig, ServerConfigBuilder};
 
 use std::path::Path;

@@ -300,10 +300,17 @@ pub fn env<T: std::str::FromStr>(key: &str, default: T) -> T {
     }
 }
 
-/// Get a required environment variable (panics if not set or invalid)
+/// Get a required environment variable (panics if not set or invalid).
+///
+/// Convenience for `main.rs` / `bootstrap.rs` where a missing variable
+/// is genuinely fatal and the panic message reads cleanly out of the
+/// process abort. For fallible call sites — queue workers, scheduler
+/// tasks, CLI subcommands — prefer [`try_env_required`], which returns
+/// the same diagnostic as a [`FrameworkError`] you can surface
+/// gracefully.
 ///
 /// # Panics
-/// Panics if the environment variable is not set or cannot be parsed
+/// Panics if the environment variable is not set or cannot be parsed.
 ///
 /// # Example
 /// ```no_run
@@ -321,6 +328,44 @@ pub fn env_required<T: std::str::FromStr>(key: &str) -> T {
                 key
             )
         })
+}
+
+/// Fallible sibling of [`env_required`] — returns a [`FrameworkError`]
+/// instead of panicking when the variable is missing or unparseable.
+///
+/// Use this from any context where an abort would lose work: queue
+/// workers (the panic kills the worker task, stranding the in-flight
+/// envelope's reservation), scheduler ticks, CLI subcommands, and
+/// `From` impls that may run before tokio is initialised.
+///
+/// The returned error carries the variable name and a short
+/// description of which branch (missing vs. unparseable) failed —
+/// matching the panic message [`env_required`] would have produced —
+/// so callers can log the cause without re-deriving it from the
+/// panic payload.
+///
+/// # Example
+/// ```no_run
+/// use suprnova::config::try_env_required;
+/// use suprnova::FrameworkError;
+///
+/// fn boot() -> Result<(), FrameworkError> {
+///     let secret: String = try_env_required("APP_SECRET")?;
+///     // ... use secret ...
+///     Ok(())
+/// }
+/// ```
+pub fn try_env_required<T: std::str::FromStr>(key: &str) -> Result<T, crate::FrameworkError> {
+    match std::env::var(key) {
+        Err(_) => Err(crate::FrameworkError::internal(format!(
+            "Required environment variable {key} is not set"
+        ))),
+        Ok(raw) => raw.parse().map_err(|_| {
+            crate::FrameworkError::internal(format!(
+                "Required environment variable {key} could not be parsed (raw value present but unparseable)"
+            ))
+        }),
+    }
 }
 
 /// Get an optional environment variable
@@ -528,5 +573,47 @@ mod tests {
                 );
             });
         }
+    }
+
+    // ---- try_env_required ---------------------------------------------------
+
+    #[test]
+    #[serial_test::serial(app_config_env)]
+    fn try_env_required_returns_err_when_missing() {
+        // Avoid name clashes by using a UUID-shaped unique-per-test
+        // variable name; clear it first to guarantee a fresh slate.
+        let key = "SUPRNOVA_TRY_ENV_REQUIRED_TEST_MISSING";
+        // SAFETY: tests are serialised on the app_config_env key.
+        unsafe { std::env::remove_var(key) };
+        let r: Result<String, _> = try_env_required(key);
+        assert!(r.is_err());
+        let msg = r.err().unwrap().to_string();
+        assert!(
+            msg.contains(key) && msg.contains("not set"),
+            "diagnostic should name the missing variable: {msg}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(app_config_env)]
+    fn try_env_required_returns_err_when_unparseable() {
+        let key = "SUPRNOVA_TRY_ENV_REQUIRED_TEST_BAD";
+        // SAFETY: tests serialised on the app_config_env key.
+        unsafe { std::env::set_var(key, "not-a-number") };
+        let r: Result<u32, _> = try_env_required(key);
+        assert!(r.is_err());
+        assert!(r.err().unwrap().to_string().contains(key));
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    #[serial_test::serial(app_config_env)]
+    fn try_env_required_returns_ok_on_valid_parse() {
+        let key = "SUPRNOVA_TRY_ENV_REQUIRED_TEST_OK";
+        // SAFETY: tests serialised on the app_config_env key.
+        unsafe { std::env::set_var(key, "42") };
+        let v: u32 = try_env_required(key).expect("parses");
+        assert_eq!(v, 42);
+        unsafe { std::env::remove_var(key) };
     }
 }
