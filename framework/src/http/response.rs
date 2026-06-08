@@ -1333,7 +1333,21 @@ impl From<crate::error::FrameworkError> for HttpResponse {
                 );
             }
         }
-        HttpResponse::json(body).status(status)
+        let mut response = HttpResponse::json(body).status(status);
+        // `FrameworkError::RateLimited` exists specifically to carry
+        // `retry_after` through `?` so handlers and integration
+        // boundaries (rate_limit middleware, web_push, downstream
+        // HTTP clients) don't strip the wire-level retry hint. Emit
+        // it as a `Retry-After` header in delta-seconds — the form
+        // every browser, proxy, and HTTP client library parses.
+        if let crate::error::FrameworkError::RateLimited {
+            retry_after: Some(d),
+            ..
+        } = &err
+        {
+            response = response.header("Retry-After", d.as_secs().to_string());
+        }
+        response
     }
 }
 
@@ -1652,5 +1666,60 @@ mod precognition_response_tests {
         // No Precognition-Success on failures.
         assert!(hyper.headers().get("Precognition-Success").is_none());
         assert_eq!(hyper.headers().get("Vary").unwrap(), "Precognition");
+    }
+}
+
+#[cfg(test)]
+mod rate_limited_retry_after_tests {
+    use super::*;
+    use crate::error::FrameworkError;
+    use std::time::Duration;
+
+    /// The canonical `From<FrameworkError> for HttpResponse` impl must
+    /// emit a `Retry-After` header in delta-seconds whenever the
+    /// `RateLimited` variant carries a `retry_after` hint. The variant
+    /// exists specifically to carry that hint through `?` so handlers
+    /// and integration boundaries (rate_limit middleware, web_push,
+    /// downstream HTTP clients) don't strip it on the way out.
+    #[test]
+    fn rate_limited_with_retry_after_emits_header_in_seconds() {
+        let err =
+            FrameworkError::rate_limited(Some(Duration::from_secs(60)), "downstream throttled");
+        let resp: HttpResponse = err.into();
+        assert_eq!(resp.status_code(), 429);
+        assert_eq!(resp.header_value("Retry-After"), Some("60"));
+    }
+
+    /// Sub-second durations are documented to render as their `as_secs()`
+    /// value (delta-seconds is the wire-level format every browser /
+    /// proxy / HTTP library parses) — a 500ms hint truncates to 0,
+    /// matching how the `http_client` retry path already coerces.
+    #[test]
+    fn rate_limited_sub_second_hint_truncates_to_seconds() {
+        let err = FrameworkError::rate_limited(Some(Duration::from_millis(500)), "throttled");
+        let resp: HttpResponse = err.into();
+        assert_eq!(resp.status_code(), 429);
+        assert_eq!(resp.header_value("Retry-After"), Some("0"));
+    }
+
+    /// When the variant omits the hint (`None`), no header is emitted —
+    /// callers downstream that key on `Retry-After.is_some()` to decide
+    /// "honour pacing vs back off with my own policy" must see absence,
+    /// not a stray `0`.
+    #[test]
+    fn rate_limited_without_retry_after_omits_header() {
+        let err = FrameworkError::rate_limited(None, "throttled, no hint");
+        let resp: HttpResponse = err.into();
+        assert_eq!(resp.status_code(), 429);
+        assert_eq!(resp.header_value("Retry-After"), None);
+    }
+
+    /// Non-rate-limit 429-shaped errors don't leak a stray Retry-After.
+    /// Sanity check that the header is RateLimited-specific.
+    #[test]
+    fn other_errors_do_not_emit_retry_after() {
+        let err = FrameworkError::param("user_id");
+        let resp: HttpResponse = err.into();
+        assert_eq!(resp.header_value("Retry-After"), None);
     }
 }
