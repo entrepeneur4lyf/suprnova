@@ -23,6 +23,10 @@
 
 use sea_orm_migration::prelude::*;
 
+/// Migration that creates the framework-owned `features` table.
+///
+/// Re-exported as `CreateFeaturesTable` from the parent migrations module
+/// so consumer apps can list it in their `Migrator::migrations()`.
 pub struct Migration;
 
 impl MigrationName for Migration {

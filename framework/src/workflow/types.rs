@@ -9,13 +9,18 @@ use std::time::Duration;
 /// Workflow execution status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowStatus {
+    /// Workflow is queued but not yet claimed by a worker.
     Pending,
+    /// A worker holds the lease and is currently executing the workflow.
     Running,
+    /// Workflow finished successfully and persisted its output.
     Succeeded,
+    /// Workflow exhausted its attempts and is recorded as failed.
     Failed,
 }
 
 impl WorkflowStatus {
+    /// Database string representation (`"pending"` / `"running"` / `"succeeded"` / `"failed"`).
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -25,6 +30,7 @@ impl WorkflowStatus {
         }
     }
 
+    /// Parse from the database string representation; returns `None` for unknown values.
     // Returns Option rather than Result, so implementing FromStr would change semantics.
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
@@ -41,12 +47,16 @@ impl WorkflowStatus {
 /// Step execution status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepStatus {
+    /// Step is currently executing on a worker.
     Running,
+    /// Step finished successfully and persisted its output.
     Succeeded,
+    /// Step exhausted its attempts and is recorded as failed.
     Failed,
 }
 
 impl StepStatus {
+    /// Database string representation (`"running"` / `"succeeded"` / `"failed"`).
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Running => "running",
@@ -55,6 +65,7 @@ impl StepStatus {
         }
     }
 
+    /// Parse from the database string representation; returns `None` for unknown values.
     // Returns Option rather than Result, so implementing FromStr would change semantics.
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
@@ -181,9 +192,14 @@ impl WorkflowHandle {
 /// Workflow record used by the worker
 #[derive(Debug, Clone)]
 pub struct ClaimedWorkflow {
+    /// Workflow row primary key.
     pub id: i64,
+    /// Registered workflow name (the `#[workflow]` ident).
     pub name: String,
+    /// Serialised workflow input (JSON).
     pub input: String,
+    /// Number of times this workflow has been attempted so far.
     pub attempts: i32,
+    /// Maximum number of attempts before the workflow is marked failed.
     pub max_attempts: i32,
 }

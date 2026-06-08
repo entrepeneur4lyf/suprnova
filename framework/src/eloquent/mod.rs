@@ -63,8 +63,11 @@ pub use unique_id::{HasUniqueId, UniqueIdKind};
 /// This trait grows across Phase 10A tasks (T3 / T4 / T6 / T7a / ...);
 /// the stable shape locks at T11 closeout.
 pub trait EloquentModel: Sized {
+    /// SeaORM entity backing this model (`<inner_mod>::Entity`).
     type Entity: crate::EntityTrait;
+    /// Column enum for this model (`<inner_mod>::Column`).
     type Column;
+    /// Database table name (`#[model(table = "...")]`).
     const TABLE: &'static str;
     /// Primary-key column name. The macro emits the value from the
     /// `primary_key = "..."` attribute (default `"id"`). Mirrors

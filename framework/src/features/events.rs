@@ -17,9 +17,13 @@ use crate::events::Event;
 /// migration seed). String-typed to carry torii's opaque user ids.
 #[derive(Debug, Clone)]
 pub struct FeatureUpdated {
+    /// Flag identifier (e.g. `"checkout.v2"`).
     pub name: String,
+    /// Scope discriminator; empty string for the global default.
     pub scope_key: String,
+    /// Resolved value the flag was set to.
     pub enabled: bool,
+    /// Opaque user id of the actor that performed the change; `None` for system-initiated changes.
     pub actor_id: Option<String>,
 }
 
@@ -37,8 +41,11 @@ impl Event for FeatureUpdated {
 /// upsert, the explicit-disabled state remains in storage.
 #[derive(Debug, Clone)]
 pub struct FeatureDeleted {
+    /// Flag identifier (e.g. `"checkout.v2"`).
     pub name: String,
+    /// Scope discriminator; empty string for the global default.
     pub scope_key: String,
+    /// Opaque user id of the actor that performed the delete; `None` for system-initiated changes.
     pub actor_id: Option<String>,
 }
 

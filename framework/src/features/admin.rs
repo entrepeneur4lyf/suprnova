@@ -27,13 +27,21 @@ use serde::Serialize;
 /// entity.
 #[derive(Debug, Clone, Serialize)]
 pub struct FeatureRow {
+    /// Primary key from the `features` table.
     pub id: i64,
+    /// Flag identifier (e.g. `"checkout.v2"`).
     pub name: String,
+    /// Scope discriminator; empty string for the global default, otherwise `kind:identifier`.
     pub scope_key: String,
+    /// Whether the flag resolves to enabled for this `(name, scope_key)` pair.
     pub enabled: bool,
+    /// Operator-facing description shown in the admin UI.
     pub description: Option<String>,
+    /// Opaque identifier of the user who last toggled the flag, or `None` for system changes.
     pub updated_by: Option<String>,
+    /// Timestamp at which the row was first inserted.
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Timestamp at which the row was last mutated.
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 

@@ -7,6 +7,7 @@
 
 use sea_orm_migration::prelude::*;
 
+/// Migration that creates the framework-owned `workflow_steps` table.
 pub struct Migration;
 
 impl MigrationName for Migration {

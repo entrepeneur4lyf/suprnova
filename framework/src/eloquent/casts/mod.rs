@@ -35,10 +35,14 @@ use crate::error::FrameworkError;
 /// trait's `apply_attrs_to_active_model` and `From<inner::Model>`
 /// emissions.
 pub trait Cast: Send + Sync {
+    /// The in-memory type a model field carries (e.g. `bool`, `chrono::DateTime`).
     type Runtime;
+    /// The on-disk type SeaORM materialises from the column (e.g. `i64`, `String`).
     type Storage;
 
+    /// Serialise an in-memory value into the column's storage shape.
     fn to_storage(value: &Self::Runtime) -> Result<Self::Storage, FrameworkError>;
+    /// Hydrate a column's storage value back into the in-memory type.
     fn from_storage(stored: &Self::Storage) -> Result<Self::Runtime, FrameworkError>;
 }
 
@@ -73,6 +77,7 @@ pub trait DynCast: Send + Sync {
 /// who want to pass a cast to `Builder::with_casts(...)` write
 /// `("col_name", <AsBool as IntoDynCast>::into_dyn())`.
 pub trait IntoDynCast {
+    /// Box this statically-typed [`Cast`] as a [`DynCast`] for runtime registration.
     fn into_dyn() -> Box<dyn DynCast>;
 }
 

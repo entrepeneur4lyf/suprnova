@@ -13,8 +13,11 @@ use crate::error::FrameworkError;
 /// having to construct a real `hyper::Request<hyper::body::Incoming>` —
 /// `Incoming` cannot be built outside hyper's connection internals.
 pub trait InertiaRequestExt: Send + Sync {
+    /// Path component of the request URI (no query string).
     fn path(&self) -> &str;
+    /// Look up an HTTP header value by name (case-insensitive per HTTP spec).
     fn header(&self, name: &str) -> Option<&str>;
+    /// Whether this request originated from the Inertia client (`X-Inertia: true`).
     fn is_inertia(&self) -> bool {
         self.header("X-Inertia")
             .map(|v| v == "true")
@@ -78,6 +81,7 @@ pub type PropResolver = Arc<dyn Fn() -> PropFuture + Send + Sync>;
 /// Configuration for a [`Prop::Defer`] entry.
 #[derive(Clone)]
 pub struct DeferConfig {
+    /// Closure invoked on the follow-up partial-reload XHR to produce the prop value.
     pub resolver: PropResolver,
     /// Logical group; clients fetch all keys in a group in one follow-up
     /// XHR. Defaults to `"default"`.
@@ -106,6 +110,7 @@ impl Default for DeferOptions {
 }
 
 impl DeferOptions {
+    /// Build a `DeferOptions` with defaults (group `"default"`, rescue disabled).
     pub fn new() -> Self {
         Self::default()
     }
@@ -131,18 +136,29 @@ impl DeferOptions {
 pub enum MergeStrategy {
     /// Append items to the array at the prop's root. Maps to
     /// `Inertia::merge(...)`.
-    Append { match_on: Option<String> },
+    Append {
+        /// Optional unique-key field name used to dedupe array elements; `None` appends without dedupe.
+        match_on: Option<String>,
+    },
     /// Prepend items to the array at the prop's root. Maps to
     /// `Inertia::merge(...)->prepend()`.
-    Prepend { match_on: Option<String> },
+    Prepend {
+        /// Optional unique-key field name used to dedupe array elements; `None` prepends without dedupe.
+        match_on: Option<String>,
+    },
     /// Deep-merge structures. Maps to `Inertia::deepMerge(...)`.
-    Deep { match_on: Option<String> },
+    Deep {
+        /// Optional unique-key field name used to dedupe arrays found inside the deep-merged structure.
+        match_on: Option<String>,
+    },
 }
 
 /// Configuration for a [`Prop::Merge`] entry.
 #[derive(Clone)]
 pub struct MergeConfig {
+    /// Closure invoked to produce the merge payload.
     pub resolver: PropResolver,
+    /// How the client should merge the produced value into existing state.
     pub strategy: MergeStrategy,
 }
 
@@ -202,13 +218,16 @@ impl ScrollMetadata {
 /// Configuration for a [`Prop::Scroll`] entry.
 #[derive(Clone)]
 pub struct ScrollConfig {
+    /// Closure invoked to produce the current page's chunk.
     pub resolver: PropResolver,
+    /// Pagination cursor metadata advertised to the client under `scrollProps`.
     pub metadata: ScrollMetadata,
 }
 
 /// Configuration for a [`Prop::Once`] entry.
 #[derive(Clone)]
 pub struct OnceConfig {
+    /// Closure invoked to produce the prop value when the client doesn't have it cached.
     pub resolver: PropResolver,
     /// Cache key the client uses to dedupe. Defaults to the prop's name;
     /// override with `OnceOptions::as_key` so multiple pages can share a
@@ -232,6 +251,7 @@ pub struct OnceOptions {
 }
 
 impl OnceOptions {
+    /// Build an `OnceOptions` with defaults (no override, no expiry, not fresh).
     pub fn new() -> Self {
         Self::default()
     }

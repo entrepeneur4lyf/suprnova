@@ -74,6 +74,8 @@ impl EventResult {
 /// Register via [`listen_cancellable`].
 #[async_trait]
 pub trait CancellableListener<E: Event>: Send + Sync + 'static {
+    /// Handle `event`, returning [`EventResult::Ok`] to allow the operation
+    /// or [`EventResult::Cancel`] to veto it with a reason.
     async fn handle(&self, event: &E) -> EventResult;
 }
 
@@ -282,32 +284,48 @@ pub fn clear_cancellable_listeners() {
 /// having to thread through the broader `Model` where-clause.
 #[async_trait]
 pub trait ModelEventHooks: Sized {
+    /// Cancellable: fires before a new row is inserted.
     async fn __dispatch_creating(
         attrs: Arc<tokio::sync::Mutex<Attrs>>,
     ) -> Result<(), FrameworkError>;
+    /// Cancellable: fires before any save (insert or update); `is_creating` distinguishes the two.
     async fn __dispatch_saving(
         attrs: Arc<tokio::sync::Mutex<Attrs>>,
         is_creating: bool,
     ) -> Result<(), FrameworkError>;
+    /// Non-cancellable: fires after a new row was successfully inserted.
     async fn __dispatch_created(model: &Self) -> Result<(), FrameworkError>;
+    /// Non-cancellable: fires after any successful save (insert or update).
     async fn __dispatch_saved(model: &Self) -> Result<(), FrameworkError>;
+    /// Cancellable: fires before an existing row is updated; `previous` is the pre-mutation snapshot.
     async fn __dispatch_updating(
         previous: &Self,
         attrs: Arc<tokio::sync::Mutex<Attrs>>,
     ) -> Result<(), FrameworkError>;
+    /// Non-cancellable: fires after an existing row was successfully updated.
     async fn __dispatch_updated(previous: &Self, current: &Self) -> Result<(), FrameworkError>;
+    /// Cancellable: fires before a row is deleted; `is_force` is true for `force_delete`.
     async fn __dispatch_deleting(model: &Self, is_force: bool) -> Result<(), FrameworkError>;
+    /// Non-cancellable: fires after a row was successfully deleted.
     async fn __dispatch_deleted(model: &Self, is_force: bool) -> Result<(), FrameworkError>;
+    /// Non-cancellable: fires when a soft-delete moves a row into the trashed state.
     async fn __dispatch_trashed(model: &Self) -> Result<(), FrameworkError>;
+    /// Cancellable: fires before a soft-deleted row is restored.
     async fn __dispatch_restoring(model: &Self) -> Result<(), FrameworkError>;
+    /// Non-cancellable: fires after a soft-deleted row was successfully restored.
     async fn __dispatch_restored(model: &Self) -> Result<(), FrameworkError>;
+    /// Non-cancellable: fires before a `force_delete` removes the row from storage.
     async fn __dispatch_force_deleting(model: &Self) -> Result<(), FrameworkError>;
+    /// Non-cancellable: fires after `force_delete` permanently removed the row.
     async fn __dispatch_force_deleted(model: &Self) -> Result<(), FrameworkError>;
+    /// Non-cancellable: fires while `replicate` is preparing a copy; listeners may mutate the replica.
     async fn __dispatch_replicating(
         source: &Self,
         replica: Arc<tokio::sync::Mutex<Self>>,
     ) -> Result<(), FrameworkError>;
+    /// Non-cancellable: fires before a row is hydrated from the database.
     async fn __dispatch_retrieving() -> Result<(), FrameworkError>;
+    /// Non-cancellable: fires after a row was successfully hydrated.
     async fn __dispatch_retrieved(model: &Self) -> Result<(), FrameworkError>;
 }
 

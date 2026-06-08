@@ -19,17 +19,36 @@
 //! call sites in `admin.rs` / `evaluators/database.rs` keep working
 //! unchanged.
 
+// The `#[suprnova::model]` macro emits an inner module (`feature::`) carrying
+// the SeaORM `Model` / `Column` / `Entity` / `ActiveModel` / `Relation` triple
+// without doc attributes. Those items are framework-internal plumbing reached
+// only through the `pub use feature::{...}` re-exports below; downstream
+// rustdoc readers see the documented `Feature` struct and the re-exports.
+#![allow(missing_docs)]
+
 use chrono::{DateTime, Utc};
 
+/// Row in the framework-owned `features` table.
+///
+/// `(name, scope_key)` is a UNIQUE composite key; `scope_key = ""` means a
+/// global flag, other values carry the scope inline as `kind:identifier`.
 #[suprnova::model(table = "features", timestamps)]
 pub struct Feature {
+    /// Primary key.
     pub id: i64,
+    /// Flag identifier (e.g. `"checkout.v2"`).
     pub name: String,
+    /// Scope discriminator; empty string for the global default, otherwise `kind:identifier`.
     pub scope_key: String,
+    /// Whether the flag resolves to enabled for this `(name, scope_key)` pair.
     pub enabled: bool,
+    /// Operator-facing description shown in the admin UI.
     pub description: Option<String>,
+    /// Opaque identifier of the user who last toggled the flag, or `NULL` for system changes.
     pub updated_by: Option<String>,
+    /// Timestamp at which the row was inserted.
     pub created_at: DateTime<Utc>,
+    /// Timestamp at which the row was last mutated.
     pub updated_at: DateTime<Utc>,
 }
 

@@ -17,9 +17,12 @@ use crate::http::{Request, Response};
 use crate::middleware::{Middleware, Next};
 use async_trait::async_trait;
 
+/// Middleware that rewrites `302 Found` redirects to `303 See Other` for
+/// Inertia-initiated requests so the client follows them with `GET`.
 pub struct Inertia303Middleware;
 
 impl Inertia303Middleware {
+    /// Build a new `Inertia303Middleware`. Stateless — no arguments needed.
     pub fn new() -> Self {
         Self
     }

@@ -49,9 +49,13 @@ impl Event for NotificationSending {
 /// Dispatched after a channel's `deliver` returned `Ok(())`.
 #[derive(Clone, Debug)]
 pub struct NotificationSent {
+    /// `Notification::notification_name()` of the notification that was delivered.
     pub notification: String,
+    /// Name of the channel that returned `Ok(())`.
     pub channel: String,
+    /// The route value returned by the recipient's `route_for(channel)`.
     pub route: String,
+    /// The notification's JSON payload (the same blob the channel saw).
     pub data: Value,
 }
 
@@ -67,9 +71,13 @@ impl Event for NotificationSent {
 /// dispatcher's first-failure-stops contract).
 #[derive(Clone, Debug)]
 pub struct NotificationFailed {
+    /// `Notification::notification_name()` of the notification that failed.
     pub notification: String,
+    /// Name of the channel whose `deliver` returned an error.
     pub channel: String,
+    /// The route value returned by the recipient's `route_for(channel)`.
     pub route: String,
+    /// The notification's JSON payload (the same blob the channel saw).
     pub data: Value,
     /// Stringified channel error. Captured at event time so listeners can
     /// log without needing the `FrameworkError`-to-`String` conversion

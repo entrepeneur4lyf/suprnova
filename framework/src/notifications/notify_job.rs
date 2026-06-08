@@ -16,12 +16,15 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Queue payload produced by `Notify::queue` and consumed by the worker.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SendNotificationJob {
     /// Map of channel name to route — pre-resolved at queue time so the
     /// worker does not need to re-acquire a `Notifiable` handle.
     pub notifiable_route_per_channel: HashMap<String, String>,
+    /// `Notification::notification_name()` of the queued notification (factory key).
     pub notification_name: String,
+    /// Serialised notification data; rehydrated via the factory registry at execute time.
     pub notification_payload: serde_json::Value,
     /// Channels the notification declared at queue time. Filtered against
     /// the dispatcher's registered channels on dispatch.

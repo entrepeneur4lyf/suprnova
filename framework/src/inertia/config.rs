@@ -74,8 +74,11 @@ impl std::fmt::Debug for VersionResolver {
 /// scaffolds this into `.env` when generating a new project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Frontend {
+    /// Svelte 5 (runes-on) starter — the default.
     Svelte,
+    /// React 19 starter.
     React,
+    /// Vue 3.5 starter.
     Vue,
 }
 
@@ -339,15 +342,19 @@ impl Default for InertiaConfig {
 }
 
 impl InertiaConfig {
+    /// Build an `InertiaConfig` with the framework defaults.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Set the Vite dev-server URL used during development (e.g. `"http://localhost:5173"`).
     pub fn vite_dev_server(mut self, url: impl Into<String>) -> Self {
         self.vite_dev_server = url.into();
         self
     }
 
+    /// Override the Vite entry point (defaults to the frontend's
+    /// canonical `resources/js/app.{js,ts}` path).
     pub fn entry_point(mut self, entry: impl Into<String>) -> Self {
         self.entry_point = entry.into();
         self
@@ -392,11 +399,14 @@ impl InertiaConfig {
         self
     }
 
+    /// Switch into production mode (disables the Vite dev-server fallback).
     pub fn production(mut self) -> Self {
         self.development = false;
         self
     }
 
+    /// Select the frontend framework and reset the entry point to its
+    /// canonical default (overwrites any prior [`entry_point`](Self::entry_point) call).
     pub fn frontend(mut self, frontend: Frontend) -> Self {
         self.frontend = frontend;
         // Update entry point default to match the new frontend unless the
@@ -405,11 +415,14 @@ impl InertiaConfig {
         self
     }
 
+    /// Set the default `<title>` used when a page doesn't supply one.
     pub fn default_title(mut self, title: impl Into<String>) -> Self {
         self.default_title = title.into();
         self
     }
 
+    /// Toggle the default `encryptHistory` flag emitted on every Inertia
+    /// response (per-response overrides take precedence).
     pub fn encrypt_history(mut self, on: bool) -> Self {
         self.encrypt_history_default = on;
         self

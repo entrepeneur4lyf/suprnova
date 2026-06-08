@@ -34,6 +34,7 @@ use std::sync::{Arc, RwLock};
 /// merges the result into the page's props.
 #[async_trait]
 pub trait InertiaSharedData: Send + Sync + 'static {
+    /// Produce the per-request shared props merged into every Inertia response.
     async fn share(
         &self,
         req: &dyn InertiaRequestExt,
@@ -59,6 +60,7 @@ pub struct InertiaRegistry {
 }
 
 impl InertiaRegistry {
+    /// Build an empty registry with no static shares and no async provider.
     pub fn new() -> Self {
         Self {
             shares: RwLock::new(Vec::new()),

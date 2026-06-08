@@ -90,16 +90,27 @@ use crate::error::FrameworkError;
 /// registered relation types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelationKind {
+    /// One-to-one where the parent owns the child (parent's PK is in the child's FK column).
     HasOne,
+    /// Child-side of a `HasOne`/`HasMany`: this row holds the FK pointing at the parent.
     BelongsTo,
+    /// One-to-many where the parent owns many children.
     HasMany,
+    /// Many-to-many through a pivot table holding the two FKs.
     BelongsToMany,
+    /// One-to-one across an intermediate table.
     HasOneThrough,
+    /// One-to-many across an intermediate table.
     HasManyThrough,
+    /// Inverse polymorphic relation: this row points at any one of several morph types.
     MorphTo,
+    /// Polymorphic `HasOne`: the parent owns at most one polymorphic child.
     MorphOne,
+    /// Polymorphic `HasMany`: the parent owns many polymorphic children.
     MorphMany,
+    /// Polymorphic many-to-many where this side owns the morph column.
     MorphToMany,
+    /// Inverse polymorphic many-to-many: the morph column lives on the other side of the pivot.
     MorphedByMany,
 }
 
@@ -109,9 +120,13 @@ pub enum RelationKind {
 /// aggregates without exploding into per-kind methods.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AggregateKind {
+    /// `SUM(...)` aggregate.
     Sum,
+    /// `AVG(...)` aggregate.
     Avg,
+    /// `MIN(...)` aggregate.
     Min,
+    /// `MAX(...)` aggregate.
     Max,
 }
 

@@ -1,3 +1,11 @@
+//! [Inertia.js](https://inertiajs.com/) server adapter.
+//!
+//! Lets controllers return a typed page payload — component name plus
+//! props — that Inertia turns into a full SPA page on initial load and a
+//! JSON visit on subsequent navigations. Handles props, partial reloads,
+//! deferred / lazy / encrypted history props, shared data, asset
+//! versioning, flash messages, and SSR.
+
 mod config;
 mod conversion_middleware;
 mod encrypt_middleware;

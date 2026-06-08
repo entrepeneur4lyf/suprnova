@@ -18,6 +18,8 @@ use suprnova_macros::Command;
 use crate::console::TypedCommand;
 use crate::error::FrameworkError;
 
+/// CLI args for `suprnova model:prune` — runs every registered
+/// `Prunable` / `MassPrunable` model's prune routine.
 #[derive(clap::Parser, Debug, Command)]
 #[console(
     name = "model:prune",

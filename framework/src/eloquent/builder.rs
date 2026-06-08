@@ -116,6 +116,7 @@ impl IntoColumn for &String {
 /// `serde_json::Value` itself), which covers every primitive the
 /// builder accepts.
 pub trait IntoVal {
+    /// Convert `self` into a [`serde_json::Value`] suitable for binding into a SQL query.
     fn into_val(self) -> Value;
 }
 
@@ -131,7 +132,9 @@ impl<T: Into<Value>> IntoVal for T {
 /// `order_by_desc` / `order_by_asc` shortcuts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
+    /// Ascending order (`ASC`).
     Asc,
+    /// Descending order (`DESC`).
     Desc,
 }
 

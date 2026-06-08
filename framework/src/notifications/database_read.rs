@@ -24,6 +24,7 @@ use sea_orm::{
 /// One persisted notification row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredNotification {
+    /// Row primary key (string-typed to carry UUID/ULID notification ids verbatim).
     pub id: String,
     /// Notification type — the `Notification::notification_name()` of the
     /// originating notification.
@@ -36,7 +37,9 @@ pub struct StoredNotification {
     pub data: serde_json::Value,
     /// `Some(t)` iff the recipient has marked the notification read.
     pub read_at: Option<chrono::NaiveDateTime>,
+    /// Timestamp at which the row was inserted.
     pub created_at: chrono::NaiveDateTime,
+    /// Timestamp at which the row was last mutated.
     pub updated_at: chrono::NaiveDateTime,
 }
 

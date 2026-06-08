@@ -40,6 +40,8 @@ pub struct WebPushChannel {
 }
 
 impl WebPushChannel {
+    /// Build a `WebPushChannel` sending via `client` with the given push
+    /// `ttl_secs` (seconds the push service will retry delivery).
     pub fn new(client: Arc<WebPushClient>, ttl_secs: u32) -> Self {
         Self { client, ttl_secs }
     }

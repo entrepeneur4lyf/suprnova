@@ -59,13 +59,21 @@ use std::sync::RwLock;
 /// breaking the `Default` impl is the only thing to avoid.
 #[derive(Default)]
 pub struct MailRendering {
+    /// Email subject line.
     pub subject: String,
+    /// Optional HTML body part.
     pub html: Option<String>,
+    /// Optional plain-text body part.
     pub text: Option<String>,
+    /// Override the configured default `From:` address.
     pub from: Option<Address>,
+    /// Carbon-copy recipients.
     pub cc: Vec<Address>,
+    /// Blind-carbon-copy recipients.
     pub bcc: Vec<Address>,
+    /// `Reply-To:` addresses.
     pub reply_to: Vec<Address>,
+    /// File attachments included with the message.
     pub attachments: Vec<Attachment>,
 }
 
@@ -83,6 +91,8 @@ pub struct MailRendering {
 /// [`register_mail_renderer::<N>()`]. The [`MailChannel`] then looks
 /// up the renderer by `N::notification_name()` at dispatch time.
 pub trait NotificationMailable: Notification {
+    /// Render this notification into a [`MailRendering`] (subject, HTML/text
+    /// body, addressing, attachments) ready for the mail transport.
     fn to_mail(&self) -> Result<MailRendering, FrameworkError>;
 }
 
@@ -141,6 +151,7 @@ fn renderer_for(name: &str) -> Result<MailRendererFn, FrameworkError> {
 pub struct MailChannel;
 
 impl MailChannel {
+    /// Build a new `MailChannel`. Stateless — no arguments needed.
     pub fn new() -> Self {
         Self
     }

@@ -33,20 +33,33 @@ type TaskFuture = Pin<Box<dyn Future<Output = Result<TaskOutcome, FrameworkError
 ///   tag is preserved for downstream protocol differentiation.
 #[derive(Debug)]
 pub enum PropEntry {
+    /// Already-serialized eager value to be inserted into the prop bag verbatim.
     Eager(serde_json::Value),
+    /// Lazy field gated by the `?include=` + per-DTO allowlist before resolution.
     LazyOwned {
+        /// Name of the owning DTO struct (used for allowlist lookup).
         owner: &'static str,
+        /// Name of the field within that DTO (used for include-set matching).
         field: &'static str,
+        /// The lazy [`Prop`] whose resolver fires when the field is requested.
         prop: Prop,
     },
+    /// Deferred field; resolved on a follow-up Inertia partial-reload XHR.
     DeferredOwned {
+        /// Name of the owning DTO struct.
         owner: &'static str,
+        /// Name of the field within that DTO.
         field: &'static str,
+        /// The deferred [`Prop`] resolved on the follow-up XHR.
         prop: Prop,
     },
+    /// Closure-resolved field. Same include-set gate as `LazyOwned` for v1.
     ClosureOwned {
+        /// Name of the owning DTO struct.
         owner: &'static str,
+        /// Name of the field within that DTO.
         field: &'static str,
+        /// The closure-backed [`Prop`].
         prop: Prop,
     },
 }
@@ -56,6 +69,8 @@ pub enum PropEntry {
 /// `__into_inertia_props` surface — users should not implement this
 /// manually.
 pub trait IntoInertiaData {
+    /// Drain `self` into the macro-emitted `(prop_name, entry)` pairs the
+    /// Inertia response merges into its prop bag.
     fn __into_inertia_props(self) -> Vec<(String, PropEntry)>;
 
     /// Fallible sibling of [`__into_inertia_props`](Self::__into_inertia_props):

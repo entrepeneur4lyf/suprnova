@@ -25,8 +25,10 @@ use crate::inertia::config::SsrConfig;
 /// app shell.
 #[derive(Deserialize, Debug, Clone, Default)]
 pub struct SsrResponse {
+    /// `<head>` fragments to inject into the rendered HTML (titles, meta tags, link tags).
     #[serde(default)]
     pub head: Vec<String>,
+    /// Prerendered application shell HTML to inject into the response body.
     #[serde(default)]
     pub body: String,
 }

@@ -10,6 +10,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Duration;
 
+/// Per-execution context handed to every `#[step]` inside a running workflow.
+///
+/// Carries the parent workflow's id, the lock-renewal deadline, and the
+/// monotonically-incrementing step index used to key durable step records.
 #[derive(Clone)]
 pub struct WorkflowContext {
     inner: Arc<WorkflowContextInner>,

@@ -28,6 +28,8 @@ pub struct DatabaseChannel {
 }
 
 impl DatabaseChannel {
+    /// Build a `DatabaseChannel` writing rows into `notifications` against
+    /// `db`, tagging each row with `notifiable_type` (the polymorphic recipient class).
     pub fn new(db: DatabaseConnection, notifiable_type: impl Into<String>) -> Self {
         Self {
             db,

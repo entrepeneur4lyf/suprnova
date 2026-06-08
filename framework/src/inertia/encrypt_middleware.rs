@@ -23,9 +23,12 @@ use crate::inertia::flash::ENCRYPT_HISTORY;
 use crate::middleware::{Middleware, Next};
 use async_trait::async_trait;
 
+/// Middleware that sets the per-request `encryptHistory` flag so the Inertia
+/// client encrypts its history snapshot for sensitive pages.
 pub struct EncryptHistoryMiddleware;
 
 impl EncryptHistoryMiddleware {
+    /// Build a new `EncryptHistoryMiddleware`. Stateless — no arguments needed.
     pub fn new() -> Self {
         Self
     }

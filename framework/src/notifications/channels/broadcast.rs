@@ -36,6 +36,7 @@ use async_trait::async_trait;
 pub struct BroadcastChannel;
 
 impl BroadcastChannel {
+    /// Build a new `BroadcastChannel`. Stateless — the bound `BroadcastHub` is resolved per-call.
     pub fn new() -> Self {
         Self
     }
