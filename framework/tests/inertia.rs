@@ -2724,9 +2724,16 @@ mod version_mw {
         version_header: Option<&str>,
         inertia: bool,
     ) -> hyper::Request<Empty<Bytes>> {
-        let mut b = hyper::Request::builder()
-            .method(method)
-            .uri("http://localhost/users");
+        request_with_uri(method, version_header, inertia, "http://localhost/users")
+    }
+
+    fn request_with_uri(
+        method: &str,
+        version_header: Option<&str>,
+        inertia: bool,
+        uri: &str,
+    ) -> hyper::Request<Empty<Bytes>> {
+        let mut b = hyper::Request::builder().method(method).uri(uri);
         if inertia {
             b = b.header("X-Inertia", "true");
         }
@@ -2797,6 +2804,32 @@ mod version_mw {
         let mw = InertiaVersionMiddleware::new("");
         let resp = drive(mw, request("GET", None, true)).await;
         assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn mismatched_version_preserves_query_string_in_location() {
+        // Asset-version 409 must redirect back to the SAME URL — the
+        // query string carries pagination cursors, search terms, and
+        // form-submitted GET params. Dropping it on every mismatch
+        // silently kicks users to page 1 / empty search after every
+        // deploy.
+        let mw = InertiaVersionMiddleware::new("v2");
+        let resp = drive(
+            mw,
+            request_with_uri(
+                "GET",
+                Some("v1"),
+                true,
+                "http://localhost/users?page=3&q=alice",
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), 409);
+        let location = resp
+            .headers()
+            .get("X-Inertia-Location")
+            .expect("X-Inertia-Location header");
+        assert_eq!(location, "/users?page=3&q=alice");
     }
 }
 

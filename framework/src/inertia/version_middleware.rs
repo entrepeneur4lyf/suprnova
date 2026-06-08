@@ -92,8 +92,16 @@ impl Middleware for InertiaVersionMiddleware {
         }
 
         // Mismatch — bounce the client to do a full-page visit at the
-        // same URL so it picks up the new assets.
-        let url = request.path().to_string();
+        // same URL so it picks up the new assets. Preserve the query
+        // string: a 409 on `/search?q=rust` must redirect back to the
+        // same search, not bare `/search` (which would silently drop
+        // pagination cursors, filter state, and form-submitted GET
+        // params on every asset-version mismatch).
+        let url = request
+            .uri()
+            .path_and_query()
+            .map(|pq| pq.as_str().to_string())
+            .unwrap_or_else(|| request.path().to_string());
         Err(HttpResponse::new()
             .status(409)
             .header("X-Inertia-Location", url))
