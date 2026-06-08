@@ -76,6 +76,8 @@ impl ContextStore {
 }
 
 tokio::task_local! {
+    /// Per-request task-local context store. Installed by the request
+    /// pipeline; readers reach it via [`Context`](crate::context::Context).
     pub static CONTEXT: ContextStore;
 }
 

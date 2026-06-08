@@ -1,3 +1,8 @@
+//! Process-wide typed config repository.
+//!
+//! Stores one instance per `TypeId`; readers reach configs via
+//! [`Config::get::<T>()`](crate::Config::get) and writers register them at boot.
+
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};

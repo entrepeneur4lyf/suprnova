@@ -1,3 +1,13 @@
+//! Policy-based authorization gates.
+//!
+//! Mirrors Laravel's `Gate` facade: register named abilities (or full
+//! `Policy` impls keyed by resource type) against the global gate, then
+//! call `Gate::allows("update", &user, &post)` from anywhere — controllers,
+//! middleware, Inertia view models.
+//!
+//! The [`Authorizable`] shim adds `user.can("update", &post)` directly on
+//! the user type for a more fluent call site.
+
 mod gate;
 mod registry;
 mod response;

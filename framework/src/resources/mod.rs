@@ -67,6 +67,9 @@ use trait_def::IncludeResolutionError as IRE;
 /// satisfy JSON:API's requirement that relationship objects carry `(type, id)`
 /// identifiers even when the related resource is not included.
 pub trait AsRelationshipValue {
+    /// Render `self` as a JSON:API relationship value — `Single`,
+    /// `Many`, or `Null` — or `None` if this type cannot supply a
+    /// relationship at all (e.g. an unloaded `Prop`).
     fn as_relationship_value(&self) -> Option<RelationshipValue>;
 }
 
@@ -109,6 +112,9 @@ impl<T: IntoJsonResource> AsRelationshipValue for Option<T> {
 /// the duplicates — peak memory and CPU stay proportional to the
 /// distinct included resources, not the relationship fan-in.
 pub trait PushIncluded {
+    /// Push the fully-resolved included resource(s) for `self` into
+    /// `sink`, recursively descending into `subtree` for nested
+    /// resources. `sink` deduplicates by `(type, id)`.
     fn push_included(&self, subtree: &IncludeTree, sink: &mut IncludedSink) -> Result<(), IRE>;
 }
 

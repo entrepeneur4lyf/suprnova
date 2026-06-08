@@ -227,14 +227,17 @@ impl Limit {
 pub struct GlobalLimit(pub Limit);
 
 impl GlobalLimit {
+    /// Construct from an attempts-count and decay duration.
     pub fn new(max_attempts: i64, decay: Duration) -> Self {
         Self(Limit::new(max_attempts, decay))
     }
 
+    /// Construct a per-minute limit (`decay = 60s`).
     pub fn per_minute(max_attempts: i64) -> Self {
         Self(Limit::per_minute(max_attempts))
     }
 
+    /// Construct a per-hour limit (`decay = 1h`).
     pub fn per_hour(max_attempts: i64) -> Self {
         Self(Limit::per_hour(max_attempts))
     }

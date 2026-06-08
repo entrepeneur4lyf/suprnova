@@ -111,11 +111,15 @@ impl Mailable for EmailVerificationMail {
 /// password-reset link from the forgot-password endpoint.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PasswordResetMail {
+    /// Recipient address — must be the user's on-file email.
     pub to_address: String,
+    /// Display name interpolated into the greeting; `None` falls back to the email local-part.
     pub user_name: Option<String>,
     /// Fully-qualified reset URL.
     pub reset_link: String,
+    /// Application name used in the subject + body.
     pub app_name: String,
+    /// Envelope-from address for the outgoing message.
     pub from_address: String,
 }
 
@@ -174,9 +178,13 @@ impl Mailable for PasswordResetMail {
 /// other lifecycle event that mutates the password hash).
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PasswordChangedMail {
+    /// Recipient address — the user's on-file email.
     pub to_address: String,
+    /// Display name interpolated into the greeting; `None` falls back to the email local-part.
     pub user_name: Option<String>,
+    /// Application name used in the subject + body.
     pub app_name: String,
+    /// Envelope-from address for the outgoing message.
     pub from_address: String,
 }
 

@@ -46,7 +46,9 @@ use serde_json::{Map, Value};
 /// reified as a single sum type with constructors.
 #[derive(Debug, Clone, Default)]
 pub enum Maybe<T> {
+    /// Field is present; the wrapped value is serialized as the attribute value.
     Present(T),
+    /// Field is missing — omitted from the rendered `attributes` object.
     #[default]
     Missing,
 }

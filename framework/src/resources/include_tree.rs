@@ -23,6 +23,8 @@ use std::collections::BTreeMap;
 /// and the spec assigns no semantic meaning to its member order.
 #[derive(Debug, Default, Clone)]
 pub struct IncludeTree {
+    /// Sub-includes keyed by their dotted segment. The leaf set is
+    /// the set of paths actually requested by the client.
     pub children: BTreeMap<String, IncludeTree>,
 }
 

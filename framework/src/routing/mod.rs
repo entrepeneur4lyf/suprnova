@@ -1,3 +1,10 @@
+//! Route registration and dispatch.
+//!
+//! Pairs the `routes!` and HTTP-verb macros (`get!`, `post!`, …) with the
+//! runtime [`Router`], plus the [`GroupBuilder`] for prefix / middleware
+//! scoping, resource controllers, signed URL generation, and URL
+//! lookup by named route.
+
 mod group;
 mod macros;
 mod resource;

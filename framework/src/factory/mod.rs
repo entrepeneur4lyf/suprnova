@@ -50,6 +50,7 @@ pub use sequence::Sequence;
 /// reach the factory by name (`UserFactory::new()`) without holding a
 /// handle.
 pub trait Factory {
+    /// The struct this factory builds.
     type Model;
 
     /// Build one instance with all default-randomized fields. The

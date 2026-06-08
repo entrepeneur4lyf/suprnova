@@ -153,6 +153,7 @@ pub struct InMemoryBroadcastHub {
 }
 
 impl InMemoryBroadcastHub {
+    /// Construct an empty in-process broadcast hub.
     pub fn new() -> Self {
         Self {
             channels: Arc::new(RwLock::new(HashMap::new())),

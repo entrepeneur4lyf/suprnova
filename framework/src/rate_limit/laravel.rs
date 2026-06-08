@@ -63,6 +63,7 @@ impl Default for NamedLimiterRegistry {
 }
 
 impl NamedLimiterRegistry {
+    /// Construct an empty named-limiter registry.
     pub fn new() -> Self {
         Self {
             inner: RwLock::new(HashMap::new()),

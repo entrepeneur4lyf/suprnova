@@ -142,20 +142,29 @@ pub mod kind {
 pub mod entity {
     use sea_orm::entity::prelude::*;
 
+    /// SeaORM model for a single row in `auth_ceremony_tokens`.
     #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
     #[sea_orm(table_name = "auth_ceremony_tokens")]
     pub struct Model {
+        /// Auto-increment primary key.
         #[sea_orm(primary_key)]
         pub id: i64,
+        /// URL-safe selector half of the ceremony token; used as the lookup key.
         #[sea_orm(unique)]
         pub selector: String,
+        /// Ceremony kind, e.g. `"passkey_register"` or `"passkey_authenticate"` (see [`super::kind`]).
         pub kind: String,
+        /// Serialized ceremony state opaque to the framework (e.g. WebAuthn challenge JSON).
         #[sea_orm(column_type = "Text")]
         pub payload: String,
+        /// TTL boundary; the row is rejected once `now > expires_at`.
         pub expires_at: chrono::NaiveDateTime,
+        /// Wall-clock time the ceremony was started.
         pub created_at: chrono::NaiveDateTime,
     }
 
+    /// SeaORM relation enum — `auth_ceremony_tokens` is a leaf table with no
+    /// declared foreign-key relations.
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {}
 

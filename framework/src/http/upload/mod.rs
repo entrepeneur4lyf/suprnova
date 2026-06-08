@@ -237,7 +237,9 @@ pub struct UploadedFile<V: UploadValidator = ()> {
     /// unknown; callers should fall back to `"bin"` — the
     /// [`UploadedFile::extension_from_magic`] helper does exactly that.
     inferred_extension: Option<&'static str>,
+    /// Original filename declared by the client, if any. Untrusted input — never use as a filesystem path.
     pub file_name: Option<String>,
+    /// `Content-Type` the client declared for this part, if any. Untrusted — verify against `inferred_extension` for security-sensitive paths.
     pub content_type: Option<String>,
     _v: std::marker::PhantomData<V>,
 }
@@ -404,6 +406,7 @@ impl<V: UploadValidator> UploadedFile<V> {
 /// names survive intact (for `photos[]`-style array uploads).
 #[derive(Default)]
 pub struct MultipartPayload {
+    /// Parsed multipart parts in submission order. Duplicate names are preserved for `name[]`-style array uploads.
     pub fields: Vec<(String, MultipartValue)>,
 }
 
@@ -420,13 +423,20 @@ pub enum MultipartValue {
     /// `validate_final` callers (the derive macro, primarily) can run
     /// content-aware checks without re-reading the spilled file.
     File {
+        /// Where the bytes live — in-memory `Bytes` or a disk-spilled temp file.
         backing: UploadedFileBacking,
+        /// Total size of the part in bytes.
         size: u64,
+        /// Client-declared filename, if any. Untrusted input — never use as a filesystem path.
         file_name: Option<String>,
+        /// Client-declared `Content-Type`, if any. Untrusted — cross-check with `inferred_extension`.
         content_type: Option<String>,
+        /// Extension inferred from the magic-byte sniff buffer; `None` when the format is unknown.
         inferred_extension: Option<&'static str>,
+        /// Bounded ≤16 KiB prefix captured during parse, for content-aware validators.
         sniff: Vec<u8>,
     },
+    /// Text part — a non-file field carrying its UTF-8 value.
     Text(String),
 }
 

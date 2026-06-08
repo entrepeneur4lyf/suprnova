@@ -21,9 +21,13 @@ use std::sync::Arc;
 /// and their bool-conditional variants ([`Self::include_when`], etc.).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RequestIncludeSet {
+    /// Field paths requested via `?include=`. Additive on top of the default set.
     pub include: Vec<String>,
+    /// Field paths to drop via `?exclude=`. Removed from the resolved set after `include` is applied.
     pub exclude: Vec<String>,
+    /// Field paths from `?only=` — when present, the resolved set is reduced to exactly this list.
     pub only: Option<Vec<String>>,
+    /// Field paths from `?except=` — removed from the resolved set, equivalent to `exclude` but distinct so query-string round-trips preserve operator intent.
     pub except: Vec<String>,
 }
 
@@ -73,6 +77,8 @@ impl RequestIncludeSet {
         s
     }
 
+    /// Returns `true` when none of the four lists carry any directive — i.e.
+    /// the request did not constrain the include set in any way.
     pub fn is_empty(&self) -> bool {
         self.include.is_empty()
             && self.exclude.is_empty()

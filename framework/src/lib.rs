@@ -1,3 +1,33 @@
+//! # Suprnova — a Laravel-inspired web framework for Rust
+//!
+//! Suprnova brings the productivity of Laravel to async Rust. It pairs a
+//! batteries-included stack — routing, middleware, sessions, Eloquent-style
+//! ORM, queues, broadcasting, mail, payments, scheduling — with the
+//! concurrency model Tokio gives you for free, so long-lived connections,
+//! background workers, and parallel IO are first-class rather than bolted on.
+//!
+//! ## Where to start
+//!
+//! * [`server`] — boot the HTTP server, wire global middleware, register routes.
+//! * [`routing`] — define typed routes, route groups, signed URLs, resource controllers.
+//! * [`http`] — request/response types, extractors, form validation, file uploads.
+//! * [`eloquent`] — Active-Record style models on top of SeaORM.
+//! * [`database`] — connection pools for SQLite, MySQL, and Postgres.
+//! * [`auth`] / [`auth_flows`] — authentication guards, password reset, 2FA, email verification.
+//! * [`queue`] / [`schedule`] — background jobs and cron-style scheduling.
+//! * [`broadcasting`] — WebSocket channels with presence and authorization.
+//! * [`payments`] — provider-neutral checkout, subscriptions, and webhooks.
+//! * [`testing`] — first-class harness for HTTP, database, and queue tests.
+//!
+//! ## Conventions
+//!
+//! Consumers depend on `suprnova::*`. Implementation crates (SeaORM, hyper,
+//! tokio, etc.) are re-exported where the surface meets the user and hidden
+//! where it doesn't, so application code never needs to reach for
+//! `use sea_orm::*` or `use tokio::*` directly.
+//!
+//! For task-driven docs, see the user manual in `docs/manual/`.
+
 // Rustdoc link hygiene — deny-level: every intra-doc link that
 // rustdoc can't resolve fails the build, and any pub item linking
 // to a private one is rejected at the same gate. The sweep that
@@ -5,9 +35,10 @@
 // ratchet that tracked it is gone, replaced by these two attrs.
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(rustdoc::private_intra_doc_links)]
-// `#![warn(missing_docs)]` is added incrementally — see the
-// per-module `#[allow(missing_docs)]` exemptions below for test
-// modules and the §3.4 closeout doc for the rollout plan.
+// Missing-doc surface — deny-level: every undocumented public item
+// fails the build. The §3.4 sweep brought the count to zero; the
+// deny attr keeps it there.
+#![deny(missing_docs)]
 
 pub mod app;
 pub mod auth;
@@ -496,6 +527,14 @@ pub use suprnova_macros::suprnova_test;
 pub use suprnova_macros::describe;
 pub use suprnova_macros::test;
 
+/// Build a JSON [`HttpResponse`] from a `serde_json::json!`-style literal.
+///
+/// Wraps the body in `Ok(...)` so the macro plugs directly into a handler
+/// returning `Result<HttpResponse, _>`.
+///
+/// ```ignore
+/// json_response!({ "ok": true, "user": { "id": id, "name": name } })
+/// ```
 #[macro_export]
 macro_rules! json_response {
     ($($json:tt)+) => {
@@ -503,6 +542,10 @@ macro_rules! json_response {
     };
 }
 
+/// Build a plain-text [`HttpResponse`] from any `Into<String>` expression.
+///
+/// Wraps the body in `Ok(...)` so the macro plugs directly into a handler
+/// returning `Result<HttpResponse, _>`.
 #[macro_export]
 macro_rules! text_response {
     ($text:expr) => {

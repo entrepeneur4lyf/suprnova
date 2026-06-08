@@ -50,12 +50,16 @@ impl RequestFieldsetSet {
             .map(|v| v.iter().map(String::as_str).collect())
     }
 
+    /// Returns `true` when the request did not request a sparse fieldset
+    /// for any type — meaning every type renders its full attribute set.
     pub fn is_empty(&self) -> bool {
         self.by_type.is_empty()
     }
 }
 
 tokio::task_local! {
+    /// Per-request task-local holding the parsed sparse-fieldset set.
+    /// Installed by `IncludeMiddleware`; queried via [`current_fieldset`].
     pub static REQUEST_FIELDSET: RequestFieldsetSet;
 }
 

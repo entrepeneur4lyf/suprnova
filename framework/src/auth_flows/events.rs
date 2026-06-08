@@ -35,6 +35,7 @@ use crate::events::Event;
 /// task / serialization boundaries.
 #[derive(Debug, Clone)]
 pub struct EmailVerified {
+    /// Stringified torii user id of the verified account.
     pub user_id: String,
 }
 
@@ -60,7 +61,9 @@ impl Event for EmailVerified {
 /// necessarily the raw request input, in case torii normalises).
 #[derive(Debug, Clone)]
 pub struct PasswordResetLinkSent {
+    /// Stringified torii user id the reset was issued for.
     pub user_id: String,
+    /// Address the reset link was dispatched to (the on-file address, post-normalisation).
     pub email: String,
 }
 
@@ -79,6 +82,7 @@ impl Event for PasswordResetLinkSent {
 /// [`crate::auth_flows::PasswordChangedMail`].
 #[derive(Debug, Clone)]
 pub struct PasswordResetCompleted {
+    /// Stringified torii user id whose password was reset.
     pub user_id: String,
 }
 
@@ -101,7 +105,9 @@ impl Event for PasswordResetCompleted {
 /// many attempts triggered this specific lock.
 #[derive(Debug, Clone)]
 pub struct AccountLocked {
+    /// Email of the locked account.
     pub email: String,
+    /// Failed-attempt count at the moment of lock.
     pub failed_attempts: u32,
 }
 
@@ -123,6 +129,7 @@ impl Event for AccountLocked {
 /// admin notification, etc.).
 #[derive(Debug, Clone)]
 pub struct AccountUnlocked {
+    /// Email of the previously-locked account.
     pub email: String,
 }
 
@@ -141,6 +148,7 @@ impl Event for AccountUnlocked {
 /// confirmation; re-enrolling and re-confirming fires a fresh event.
 #[derive(Debug, Clone)]
 pub struct TwoFactorEnrolled {
+    /// Stringified torii user id of the newly-enrolled user.
     pub user_id: String,
 }
 
@@ -162,6 +170,7 @@ impl Event for TwoFactorEnrolled {
 /// failed attempts (via `AccountLocked` / brute-force counters).
 #[derive(Debug, Clone)]
 pub struct TwoFactorChallenged {
+    /// Stringified torii user id that just passed 2FA challenge.
     pub user_id: String,
 }
 
@@ -186,6 +195,7 @@ impl Event for TwoFactorChallenged {
 /// rate logic from raw event streams.
 #[derive(Debug, Clone)]
 pub struct TwoFactorChallengeFailed {
+    /// Stringified torii user id whose 2FA challenge was rejected.
     pub user_id: String,
 }
 
@@ -205,6 +215,7 @@ impl Event for TwoFactorChallengeFailed {
 /// `TwoFactorDisabled` as a meaningful security event.
 #[derive(Debug, Clone)]
 pub struct TwoFactorDisabled {
+    /// Stringified torii user id whose 2FA credentials were removed.
     pub user_id: String,
 }
 

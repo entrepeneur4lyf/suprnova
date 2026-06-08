@@ -58,6 +58,9 @@ pub struct Request {
 }
 
 impl Request {
+    /// Wrap a hyper request, splitting off the streaming body. Used by
+    /// the server's request pipeline; in-process tests construct via
+    /// [`crate::testing`] helpers instead.
     pub fn new(inner: hyper::Request<hyper::body::Incoming>) -> Self {
         let (parts, body) = inner.into_parts();
         Self {
@@ -70,6 +73,8 @@ impl Request {
         }
     }
 
+    /// Attach route parameters extracted from the path (e.g. `{id}`).
+    /// Builder method called by the router after a successful match.
     pub fn with_params(mut self, params: HashMap<String, String>) -> Self {
         self.params = params;
         self
@@ -1041,7 +1046,9 @@ impl Request {
 /// Contains metadata needed for body parsing without the body itself.
 #[derive(Clone)]
 pub struct RequestParts {
+    /// Route parameters extracted from the matched pattern (e.g. `{id}`).
     pub params: HashMap<String, String>,
+    /// Value of the `Content-Type` header, if the request carried one.
     pub content_type: Option<String>,
 }
 

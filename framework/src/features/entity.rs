@@ -19,13 +19,6 @@
 //! call sites in `admin.rs` / `evaluators/database.rs` keep working
 //! unchanged.
 
-// The `#[suprnova::model]` macro emits an inner module (`feature::`) carrying
-// the SeaORM `Model` / `Column` / `Entity` / `ActiveModel` / `Relation` triple
-// without doc attributes. Those items are framework-internal plumbing reached
-// only through the `pub use feature::{...}` re-exports below; downstream
-// rustdoc readers see the documented `Feature` struct and the re-exports.
-#![allow(missing_docs)]
-
 use chrono::{DateTime, Utc};
 
 /// Row in the framework-owned `features` table.

@@ -25,8 +25,7 @@ use suprnova::{AppConfig, AppConfigBuilder, ServerConfig, ServerConfigBuilder};
 // (`Inertia::*`, the manifest pipeline, SSR, response/prop construction)
 // must be reachable at the crate root, not buried under `suprnova::inertia::*`.
 use suprnova::{
-    IntoInertiaData, ManifestEntry, PropEntry, ResolvedAssets, SsrConfig, SsrResponse,
-    ViteManifest,
+    IntoInertiaData, ManifestEntry, PropEntry, ResolvedAssets, SsrConfig, SsrResponse, ViteManifest,
 };
 
 #[test]

@@ -70,6 +70,8 @@ pub trait Event: Send + Sync + Clone + 'static + std::fmt::Debug {
 /// A listener that handles events of type `E`.
 #[async_trait]
 pub trait Listener<E: Event>: Send + Sync + 'static {
+    /// Handle one dispatch of `event`. Returning `Err` is logged but
+    /// does not unregister the listener.
     async fn handle(&self, event: &E) -> Result<(), FrameworkError>;
 }
 
@@ -196,6 +198,9 @@ mod tests {
             Box::new(ListenerWrap::<OrderPlaced, _>::new(Arc::new(NoopListener)));
         let wrong_payload: i32 = 42;
         let result = wrap.dispatch(&wrong_payload).await;
-        assert!(result.is_ok(), "expected Ok on type mismatch, got {result:?}");
+        assert!(
+            result.is_ok(),
+            "expected Ok on type mismatch, got {result:?}"
+        );
     }
 }

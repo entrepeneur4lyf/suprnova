@@ -15,8 +15,11 @@ use super::Event;
 /// which are emitted unconditionally on the same path.
 #[derive(Debug, Clone)]
 pub struct ErrorOccurred {
+    /// Sanitized error message (the same body the client received).
     pub error_message: String,
+    /// HTTP status code of the response (always 5xx in current usage).
     pub status_code: u16,
+    /// Request id of the failing request, when one was installed.
     pub request_id: Option<String>,
 }
 

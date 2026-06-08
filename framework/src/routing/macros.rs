@@ -111,12 +111,19 @@ pub(crate) fn convert_route_params(path: &str) -> String {
 /// [`Router::match_route`] per RFC 9110 §9.3.2.
 #[derive(Clone, Copy)]
 pub enum HttpMethod {
+    /// `GET` — safe, idempotent reads.
     Get,
+    /// `POST` — create / non-idempotent submissions.
     Post,
+    /// `PUT` — idempotent full replacement.
     Put,
+    /// `PATCH` — partial updates.
     Patch,
+    /// `DELETE` — resource removal.
     Delete,
+    /// `HEAD` — `GET` without a body. Falls back to the `GET` registry when no explicit `HEAD` route is registered.
     Head,
+    /// `OPTIONS` — capabilities discovery and CORS preflight.
     Options,
 }
 
@@ -770,6 +777,7 @@ pub enum GroupItem {
 
 /// Trait for types that can be converted into a GroupItem
 pub trait IntoGroupItem {
+    /// Convert `self` into a [`GroupItem`] suitable for collecting inside a route group.
     fn into_group_item(self) -> GroupItem;
 }
 

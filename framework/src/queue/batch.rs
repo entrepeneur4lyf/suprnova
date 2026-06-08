@@ -331,8 +331,8 @@ pub fn install_repository(repo: Arc<dyn BatchRepository>) {
 }
 
 /// Return the currently installed [`BatchRepository`], or `None` if no
-/// repository has been wired (callers should fall through to
-/// [`ensure_default_repository`] before dispatch).
+/// repository has been wired (the dispatch path installs the in-memory
+/// default before use).
 pub fn current_repository() -> Option<Arc<dyn BatchRepository>> {
     REPO.read().ok().and_then(|g| g.clone())
 }

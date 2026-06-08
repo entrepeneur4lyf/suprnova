@@ -40,7 +40,9 @@ static REGISTRY: Lazy<RwLock<HashMap<&'static str, Vec<&'static str>>>> =
 /// fields. The collection is drained into the runtime `REGISTRY` map by
 /// `ensure_initialized` on first lookup.
 pub struct AllowedIncludes {
+    /// Fully-qualified name of the deriving struct (`Module::Foo` form).
     pub struct_name: &'static str,
+    /// Field paths the struct opted into via `#[data(allow_include)]`.
     pub fields: &'static [&'static str],
 }
 

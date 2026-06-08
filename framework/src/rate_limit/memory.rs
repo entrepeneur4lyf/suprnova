@@ -34,6 +34,9 @@ use tokio::time::Instant;
 
 type BucketMap = Mutex<HashMap<String, Bucket>>;
 
+/// In-process sliding-window rate limiter. Default driver for
+/// single-process apps; use [`RedisRateLimiter`](crate::rate_limit::redis::RedisRateLimiter)
+/// for multi-instance deployments.
 pub struct InMemoryRateLimiter {
     buckets: Arc<BucketMap>,
     sweep_handle: Mutex<Option<JoinHandle<()>>>,

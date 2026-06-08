@@ -81,6 +81,11 @@ struct ForwarderEntry {
 /// to fill the per-connection forwarder map and tie up tasks.
 pub const DEFAULT_MAX_SUBSCRIPTIONS_PER_CONNECTION: usize = 100;
 
+/// WebSocket handler that bridges the JSON-envelope wire protocol
+/// (`ClientFrame` / `ServerFrame`) to a [`BroadcastHub`]. Subscribers
+/// connect, the handler authorizes channel joins via the
+/// [`ChannelRegistry`], forwards published frames, and applies the
+/// per-connection subscription cap.
 pub struct BroadcastingWsHandler {
     hub: Arc<dyn BroadcastHub>,
     registry: Arc<ChannelRegistry>,

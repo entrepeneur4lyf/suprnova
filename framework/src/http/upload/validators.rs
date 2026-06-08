@@ -131,9 +131,12 @@ impl UploadValidator for Image {
 
 /// `MimeType<L>` — accepts a fixed list provided by an allowlist type.
 pub trait MimeAllowlist: Send + Sync + Default {
+    /// The set of allowed MIME types.
     fn allowed() -> &'static [&'static str];
 }
 
+/// Upload validator that rejects parts whose sniffed MIME type is not in
+/// the allowlist `L::allowed()`.
 #[derive(Default)]
 pub struct MimeType<L: MimeAllowlist>(std::marker::PhantomData<L>);
 

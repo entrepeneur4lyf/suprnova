@@ -1,3 +1,14 @@
+//! Provider-trait surface for the payments subsystem.
+//!
+//! Each capability is its own trait — [`Checkout`] (start a session),
+//! [`CustomerStore`] (CRUD a provider-side customer), [`Payment`]
+//! (server-side capture), [`Subscription`] (manage recurring billing),
+//! and [`WebhookHandler`] (verify + parse provider webhooks) — so
+//! providers opt in only to the capabilities they actually support.
+//! The umbrella [`PaymentProvider`] trait wires the required four
+//! together; `Payment` is queried separately via
+//! [`PaymentProvider::as_payment`].
+
 pub mod checkout;
 pub mod customer;
 pub mod payment;

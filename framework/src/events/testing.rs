@@ -166,6 +166,9 @@ where
     MUTE_FLAG.scope((), callback).await
 }
 
+/// RAII guard returned from `Event::fake()` that holds the serial-test
+/// mutex for the duration of the fake mode. Drop the guard to leave
+/// fake mode and release the lock so the next test can enter.
 pub struct EventFakeGuard {
     _serial: MutexGuard<'static, ()>,
 }

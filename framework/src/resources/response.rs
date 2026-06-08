@@ -157,6 +157,8 @@ impl JsonApiResponse {
 pub struct Resource;
 
 impl Resource {
+    /// Render `dto` as a single JSON:API resource response, honoring the
+    /// current request's sparse-fieldset and include-tree.
     pub fn single<T: IntoJsonResource>(dto: T) -> JsonApiResponse {
         let fieldset = current_fieldset();
         let include_set = current_include_set();
@@ -175,6 +177,8 @@ impl Resource {
         JsonApiResponse::from_result(result)
     }
 
+    /// Render `dtos` as a JSON:API resource collection response, honoring
+    /// the current request's sparse-fieldset and include-tree.
     pub fn collection<T: IntoJsonResource>(dtos: Vec<T>) -> JsonApiResponse {
         let fieldset = current_fieldset();
         let include_set = current_include_set();
@@ -268,16 +272,19 @@ impl Resource {
 pub struct JsonApi;
 
 impl JsonApi {
+    /// Alias for [`Resource::single`].
     #[inline]
     pub fn single<T: IntoJsonResource>(dto: T) -> JsonApiResponse {
         Resource::single(dto)
     }
 
+    /// Alias for [`Resource::collection`].
     #[inline]
     pub fn collection<T: IntoJsonResource>(dtos: Vec<T>) -> JsonApiResponse {
         Resource::collection(dtos)
     }
 
+    /// Alias for [`Resource::paginated`].
     #[inline]
     pub fn paginated<T: IntoJsonResource, P: crate::pagination::Paginated<T>>(
         paginator: P,

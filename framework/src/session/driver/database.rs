@@ -157,18 +157,26 @@ impl SessionStore for DatabaseSessionDriver {
 pub mod sessions {
     use sea_orm::entity::prelude::*;
 
+    /// SeaORM model for a single row in `sessions`.
     #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
     #[sea_orm(table_name = "sessions")]
     pub struct Model {
+        /// Session id (the cookie value), kept as the primary key.
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: String,
+        /// Authenticated user id, if any; null for guest sessions.
         pub user_id: Option<String>,
+        /// Serialized session payload (encoded by the configured session encoder).
         #[sea_orm(column_type = "Text")]
         pub payload: String,
+        /// Per-session CSRF token rotated when the session id rotates.
         pub csrf_token: String,
+        /// Wall-clock time of the last activity on this session, used for sliding TTL.
         pub last_activity: chrono::NaiveDateTime,
     }
 
+    /// SeaORM relation enum — `sessions` is a leaf table with no declared
+    /// foreign-key relations.
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {}
 

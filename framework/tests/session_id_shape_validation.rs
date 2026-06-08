@@ -105,10 +105,9 @@ async fn get_request_with_session_cookie(
     use tokio::sync::oneshot;
 
     let cookie_header = format!("Cookie: {cookie_name}={cookie_value}\r\n");
-    let http_bytes = format!(
-        "GET / HTTP/1.1\r\nHost: localhost\r\n{cookie_header}Content-Length: 0\r\n\r\n"
-    )
-    .into_bytes();
+    let http_bytes =
+        format!("GET / HTTP/1.1\r\nHost: localhost\r\n{cookie_header}Content-Length: 0\r\n\r\n")
+            .into_bytes();
 
     let (req_tx, req_rx) = oneshot::channel::<Request>();
     let req_tx = std::sync::Mutex::new(Some(req_tx));

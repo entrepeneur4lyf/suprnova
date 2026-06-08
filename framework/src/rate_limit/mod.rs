@@ -46,9 +46,12 @@ use crate::error::FrameworkError;
 use async_trait::async_trait;
 use std::time::Duration;
 
+/// Configuration for the sliding-window rate-limit algorithm.
 #[derive(Debug, Clone)]
 pub struct SlidingWindowConfig {
+    /// Maximum number of requests allowed within the window.
     pub max_requests: u32,
+    /// Length of the sliding window.
     pub window: Duration,
 }
 

@@ -291,6 +291,10 @@ pub enum BackendErrorPolicy {
     FailClosed,
 }
 
+/// Middleware that throttles login attempts via the configured brute-force
+/// backend. Wraps the request, extracts the candidate email, and either
+/// short-circuits with a 429 (or 503 on backend error per
+/// [`BackendErrorPolicy`]) or runs the inner handler.
 pub struct LoginThrottleMiddleware {
     extract_email: Arc<EmailExtractor>,
     on_backend_error: BackendErrorPolicy,

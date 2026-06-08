@@ -21,7 +21,9 @@ use std::sync::{Arc, RwLock};
 /// `assert_dispatched` but the handler is not run.
 #[derive(Debug)]
 pub enum Dispatched<T> {
+    /// Real-mode result: the handler ran and produced `T`.
     Executed(T),
+    /// Fake-mode result: the dispatch was recorded for assertions but no handler ran.
     Captured,
 }
 

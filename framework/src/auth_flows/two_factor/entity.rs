@@ -9,6 +9,7 @@
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
+/// SeaORM model for a single row in `two_factor_credentials`.
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "two_factor_credentials")]
 pub struct Model {
@@ -37,10 +38,14 @@ pub struct Model {
     /// whose timestep equals this value prevents replay within the
     /// 30-second window where a TOTP remains valid.
     pub last_used_timestep: Option<i64>,
+    /// Row insert time.
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Row last-update time; refreshed by [`crate::auth_flows::TwoFactor::verify`] when it advances `last_used_timestep`.
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// SeaORM relation enum — `two_factor_credentials` is a leaf table with
+/// no declared foreign-key relations.
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 

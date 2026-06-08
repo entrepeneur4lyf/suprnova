@@ -875,10 +875,7 @@ mod tests {
     #[tokio::test]
     async fn guarded_iteration_swallows_str_panic() {
         let outcome = run_iteration_guarded("test", async { panic!("boom") }).await;
-        assert!(
-            outcome.is_err(),
-            "panicking body should be reported as Err"
-        );
+        assert!(outcome.is_err(), "panicking body should be reported as Err");
     }
 
     /// Same contract for a `String` panic payload (the other common shape).

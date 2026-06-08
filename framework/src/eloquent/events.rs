@@ -372,12 +372,10 @@ mod tests {
         // degrade to the safe non-cancelling result (operation proceeds)
         // rather than panic — a stray panic here would veto a real
         // write via the surrounding `dispatch_cancellable` call site.
-        let wrap: Box<dyn ErasedCancellableListener> = Box::new(CancellableListenerWrap::<
-            PostCreating,
-            _,
-        >::new(Arc::new(
-            NoopCancellable,
-        )));
+        let wrap: Box<dyn ErasedCancellableListener> =
+            Box::new(CancellableListenerWrap::<PostCreating, _>::new(Arc::new(
+                NoopCancellable,
+            )));
         let wrong_payload: i32 = 7;
         let result = wrap.dispatch(&wrong_payload).await;
         assert_eq!(

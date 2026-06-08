@@ -4,17 +4,21 @@ use std::collections::VecDeque;
 use std::time::Duration;
 use tokio::time::Instant;
 
+/// Per-key sliding-window hit counter shared by the in-memory and Redis
+/// rate-limit drivers.
 pub struct Bucket {
     hits: VecDeque<Instant>,
 }
 
 impl Bucket {
+    /// Construct an empty bucket.
     pub fn new() -> Self {
         Self {
             hits: VecDeque::new(),
         }
     }
 
+    /// Drop every hit older than `window` as of `now`.
     pub fn evict_old(&mut self, window: Duration, now: Instant) {
         while let Some(front) = self.hits.front() {
             if now.saturating_duration_since(*front) >= window {
@@ -25,6 +29,9 @@ impl Bucket {
         }
     }
 
+    /// Evict aged hits, then record a fresh hit at `now` if the bucket
+    /// is under `max`. Returns `true` when the hit was recorded,
+    /// `false` when the limit was hit.
     pub fn try_record(&mut self, max: u32, window: Duration, now: Instant) -> bool {
         self.evict_old(window, now);
         if self.hits.len() < max as usize {
@@ -35,6 +42,9 @@ impl Bucket {
         }
     }
 
+    /// Time until the oldest in-window hit ages out. Returns `None`
+    /// when the bucket is under the limit and a new hit would succeed
+    /// immediately.
     pub fn retry_after(&self, max: u32, window: Duration, now: Instant) -> Option<Duration> {
         if (self.hits.len() as u32) < max {
             return None;

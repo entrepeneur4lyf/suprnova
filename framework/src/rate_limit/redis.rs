@@ -9,12 +9,16 @@ use redis::aio::ConnectionManager;
 use std::time::Duration;
 use uuid::Uuid;
 
+/// Redis-backed sliding-window rate limiter. Stores hit timestamps in a
+/// ZSET per key and prunes them atomically via a single Lua eval.
 pub struct RedisRateLimiter {
     conn: ConnectionManager,
     prefix: String,
 }
 
 impl RedisRateLimiter {
+    /// Open a connection to `url` and return a limiter that scopes
+    /// every key under `prefix`.
     pub async fn connect(url: &str, prefix: &str) -> Result<Self, FrameworkError> {
         let client = redis::Client::open(url)
             .map_err(|e| FrameworkError::internal(format!("redis open: {e}")))?;

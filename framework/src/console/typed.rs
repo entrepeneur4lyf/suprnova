@@ -46,5 +46,7 @@ use async_trait::async_trait;
 /// long-lived reference to the parsed struct after `run` returns.
 #[async_trait]
 pub trait TypedCommand: Sized + Send {
+    /// Execute the subcommand. Consumes `self` so the parsed args can
+    /// move into spawned tasks freely.
     async fn run(self) -> Result<(), FrameworkError>;
 }

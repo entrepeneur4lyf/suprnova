@@ -124,14 +124,17 @@ mod stub {
     pub struct Metrics;
 
     impl Metrics {
+        /// Return a counter handle for the given metric name. No-op in the stub build.
         #[inline(always)]
         pub fn counter(_name: &'static str) -> CounterHandle {
             CounterHandle
         }
+        /// Return a histogram handle for the given metric name. No-op in the stub build.
         #[inline(always)]
         pub fn histogram(_name: &'static str) -> HistogramHandle {
             HistogramHandle
         }
+        /// Return a gauge handle for the given metric name. No-op in the stub build.
         #[inline(always)]
         pub fn gauge(_name: &'static str) -> GaugeHandle {
             GaugeHandle
@@ -143,10 +146,13 @@ mod stub {
     pub struct CounterHandle;
 
     impl CounterHandle {
+        /// Increment the counter by 1.
         #[inline(always)]
         pub fn inc(&self) {}
+        /// Increment the counter by `_n`.
         #[inline(always)]
         pub fn inc_by(&self, _n: u64) {}
+        /// Increment the counter by 1, attaching the supplied attribute set.
         #[inline(always)]
         pub fn inc_with(&self, _attrs: &[(&'static str, &str)]) {}
     }
@@ -156,8 +162,10 @@ mod stub {
     pub struct HistogramHandle;
 
     impl HistogramHandle {
+        /// Record an observation of `_value`.
         #[inline(always)]
         pub fn record(&self, _value: f64) {}
+        /// Record an observation of `_value`, attaching the supplied attribute set.
         #[inline(always)]
         pub fn record_with(&self, _value: f64, _attrs: &[(&'static str, &str)]) {}
     }
@@ -167,8 +175,10 @@ mod stub {
     pub struct GaugeHandle;
 
     impl GaugeHandle {
+        /// Set the gauge to `_value`.
         #[inline(always)]
         pub fn set(&self, _value: f64) {}
+        /// Set the gauge to `_value`, attaching the supplied attribute set.
         #[inline(always)]
         pub fn set_with(&self, _value: f64, _attrs: &[(&'static str, &str)]) {}
     }

@@ -96,6 +96,7 @@ pub struct BroadcastListener<E: Broadcastable> {
 }
 
 impl<E: Broadcastable> BroadcastListener<E> {
+    /// Construct a listener that publishes every `E` it receives to `hub`.
     pub fn new(hub: Arc<dyn BroadcastHub>) -> Self {
         Self {
             hub,

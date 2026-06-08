@@ -10,6 +10,8 @@
 
 use sea_orm_migration::prelude::*;
 
+/// Migration that adds the `last_used_timestep` column to
+/// `two_factor_credentials` for TOTP replay protection.
 pub struct Migration;
 
 impl MigrationName for Migration {

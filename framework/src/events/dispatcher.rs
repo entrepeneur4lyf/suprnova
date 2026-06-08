@@ -104,6 +104,10 @@ pub struct EventDispatcher {
 }
 
 impl EventDispatcher {
+    /// Construct a dispatcher whose queued-listener concurrency is read
+    /// from `EVENT_MAX_CONCURRENCY` (falling back to the framework
+    /// default). Use [`with_concurrency`](Self::with_concurrency) to set
+    /// the limit programmatically.
     pub fn new() -> Self {
         let concurrency = std::env::var("EVENT_MAX_CONCURRENCY")
             .ok()

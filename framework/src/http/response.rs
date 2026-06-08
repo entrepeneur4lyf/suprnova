@@ -48,6 +48,7 @@ pub struct HttpResponse {
 pub type Response = Result<HttpResponse, HttpResponse>;
 
 impl HttpResponse {
+    /// Construct an empty `200 OK` response with no body and no headers.
     pub fn new() -> Self {
         Self {
             status: 200,
@@ -367,7 +368,9 @@ impl Default for HttpResponse {
 
 /// Extension trait for Response to enable method chaining on macros
 pub trait ResponseExt {
+    /// Set the HTTP status code.
     fn status(self, code: u16) -> Self;
+    /// Append a single header.
     fn header(self, name: impl Into<String>, value: impl Into<String>) -> Self;
     /// Attach multiple headers from any `(K, V)` iterator. Mirrors
     /// Laravel's `Response::withHeaders([...])`.

@@ -47,9 +47,13 @@ pub type CommandHandler =
 /// description, a clap subcommand builder, and the boxed-future
 /// runner.
 pub struct CommandEntry {
+    /// Subcommand name as it appears in argv (e.g. `make:controller`).
     pub name: &'static str,
+    /// Human-readable description, shown under `--help`.
     pub description: &'static str,
+    /// Function that builds the clap subcommand definition.
     pub clap_builder: fn() -> clap::Command,
+    /// Boxed-future runner invoked when the subcommand is selected.
     pub handler: CommandHandler,
 }
 

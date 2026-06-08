@@ -103,7 +103,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     Ok(quote! {
         #struct_def
 
-        #[allow(non_snake_case, non_camel_case_types)]
+        #[allow(non_snake_case, non_camel_case_types, missing_docs)]
         pub mod #module_name {
             // SeaORM's `DeriveEntityModel` macro internally references
             // `EnumIter`, `DerivePrimaryKey`, `PrimaryKeyTrait` (and a

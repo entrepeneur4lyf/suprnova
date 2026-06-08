@@ -130,6 +130,7 @@ impl JsonApiBuilder {
         self
     }
 
+    /// Add a top-level link as a bare URL keyed by `rel`.
     pub fn with_link(mut self, rel: impl Into<String>, href: impl Into<String>) -> Self {
         self.links.insert(rel.into(), Value::String(href.into()));
         self
@@ -197,6 +198,7 @@ impl JsonApiBuilder {
         }
     }
 
+    /// Render the accumulated builder state to a final JSON:API document.
     pub fn build(self) -> Value {
         let mut doc = Map::new();
         match self.primary {

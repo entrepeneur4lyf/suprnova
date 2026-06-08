@@ -229,6 +229,9 @@ pub struct Argon2iHasher {
 }
 
 impl Argon2iHasher {
+    /// Construct an `Argon2i` hasher with the supplied parameters.
+    ///
+    /// Returns an error if `opts` falls below the OWASP safety floor.
     pub fn new(opts: Argon2Options) -> Result<Self, FrameworkError> {
         validate_argon_opts(&opts)?;
         Ok(Self {
@@ -237,6 +240,10 @@ impl Argon2iHasher {
         })
     }
 
+    /// Toggle algorithm-prefix verification on the verify path. With this
+    /// on, [`Hasher::verify`] rejects a hash whose stored algorithm
+    /// (`$argon2i$…` / `$argon2id$…`) doesn't match this hasher's
+    /// algorithm, instead of letting the underlying library accept it.
     pub fn with_verify_algorithm(mut self, verify: bool) -> Self {
         self.verify_algorithm = verify;
         self
@@ -283,6 +290,9 @@ pub struct Argon2idHasher {
 }
 
 impl Argon2idHasher {
+    /// Construct an `Argon2id` hasher with the supplied parameters.
+    ///
+    /// Returns an error if `opts` falls below the OWASP safety floor.
     pub fn new(opts: Argon2Options) -> Result<Self, FrameworkError> {
         validate_argon_opts(&opts)?;
         Ok(Self {
@@ -291,6 +301,9 @@ impl Argon2idHasher {
         })
     }
 
+    /// Toggle algorithm-prefix verification on the verify path. With this
+    /// on, [`Hasher::verify`] rejects a hash whose stored algorithm
+    /// doesn't match `Argon2id`.
     pub fn with_verify_algorithm(mut self, verify: bool) -> Self {
         self.verify_algorithm = verify;
         self

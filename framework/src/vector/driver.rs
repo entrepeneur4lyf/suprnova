@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 /// One row written to a vector store.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorItem {
+    /// Caller-chosen merge key. Upserts replace any existing row with the same id.
     pub id: String,
+    /// Vector embedding; length must match the store's configured dimension.
     pub embedding: Vec<f32>,
     /// Free-form JSON shipped alongside the vector. Drivers store
     /// it as `payload`/`metadata` depending on their nomenclature.
@@ -16,6 +18,7 @@ pub struct VectorItem {
 }
 
 impl VectorItem {
+    /// Construct a [`VectorItem`] from its three components.
     pub fn new(id: impl Into<String>, embedding: Vec<f32>, metadata: serde_json::Value) -> Self {
         Self {
             id: id.into(),
@@ -28,11 +31,13 @@ impl VectorItem {
 /// One result returned from a similarity search.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorMatch {
+    /// Id of the matched item (the same id supplied at upsert time).
     pub id: String,
     /// Driver-specific score — higher is "more similar" by
     /// convention (cosine similarity in the canonical case;
     /// Qdrant's COSINE distance returns the same shape).
     pub score: f32,
+    /// Metadata persisted alongside the vector at upsert time.
     #[serde(default)]
     pub metadata: serde_json::Value,
 }

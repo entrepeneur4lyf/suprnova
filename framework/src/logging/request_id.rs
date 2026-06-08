@@ -16,14 +16,18 @@ use uuid::Uuid;
 pub struct RequestId(String);
 
 impl RequestId {
+    /// Generate a fresh request id (UUID v4, lowercase hyphenated).
     pub fn new() -> Self {
         Self(Uuid::new_v4().to_string())
     }
 
+    /// Wrap an externally-supplied id (e.g. one read from an incoming
+    /// `X-Request-Id` header) without re-validating its shape.
     pub fn from_string(s: impl Into<String>) -> Self {
         Self(s.into())
     }
 
+    /// Borrow the id as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -42,6 +46,8 @@ impl fmt::Display for RequestId {
 }
 
 tokio::task_local! {
+    /// Task-local holding the current request's id. Installed by
+    /// `RequestIdMiddleware` for the duration of each request.
     pub static REQUEST_ID: RequestId;
 }
 

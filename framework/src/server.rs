@@ -1,3 +1,11 @@
+//! HTTP server boot and per-request pipeline.
+//!
+//! Wraps hyper with Suprnova's container, middleware chain, router,
+//! WebSocket upgrade path, request-id propagation, graceful shutdown,
+//! and telemetry init. The two entry points users care about are
+//! [`Server::from_config`] (read [`ServerConfig`] from env / typed
+//! config) and [`Server::new`] (programmatic, for tests).
+
 use crate::cache::Cache;
 use crate::config::{Config, ServerConfig};
 use crate::container::App;
@@ -41,6 +49,12 @@ type ServerBody = BoxBody<Bytes, Infallible>;
 /// know about this registry.
 static WS_TASKS: OnceLock<TokioMutex<JoinSet<()>>> = OnceLock::new();
 
+/// Builder + runtime for the HTTP server.
+///
+/// Wraps the router, the global middleware registry, and the listen
+/// address. Constructed via [`Server::new`] (programmatic) or
+/// [`Server::from_config`] (env-driven), then started with
+/// [`Server::run`].
 pub struct Server {
     router: Arc<Router>,
     middleware: MiddlewareRegistry,
@@ -229,11 +243,14 @@ impl Server {
         self
     }
 
+    /// Set the listen host. Accepts an IP literal (`127.0.0.1`, `::1`);
+    /// hostnames must be resolved by the caller before this call.
     pub fn host(mut self, host: &str) -> Self {
         self.host = host.to_string();
         self
     }
 
+    /// Set the listen port.
     pub fn port(mut self, port: u16) -> Self {
         self.port = port;
         self
@@ -262,6 +279,13 @@ impl Server {
         Ok(SocketAddr::new(ip, self.port))
     }
 
+    /// Bind the listen socket and serve requests until shutdown.
+    ///
+    /// Boots tracing + OTel, attaches the WebSocket task drain, installs
+    /// SIGINT/SIGTERM handlers (Unix), then drives hyper with
+    /// `.with_upgrades()` so WebSocket connections succeed in the same
+    /// listener loop. Returns when the shutdown signal arrives and all
+    /// in-flight HTTP + WS tasks have drained.
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Initialize the global tracing subscriber (and OTel pipelines
         // when the `otel` feature is enabled + an endpoint is set).

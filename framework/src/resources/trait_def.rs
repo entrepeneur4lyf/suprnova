@@ -90,11 +90,14 @@ pub enum RelationshipValue {
 /// inside `relationships.<name>.data`.
 #[derive(Debug, Clone)]
 pub struct ResourceIdentifier {
+    /// JSON:API `type` value identifying the resource kind.
     pub resource_type: String,
+    /// Resource id, stringified per the JSON:API spec.
     pub id: String,
 }
 
 impl ResourceIdentifier {
+    /// Construct an identifier from a type name and id.
     pub fn new(resource_type: impl Into<String>, id: impl Into<String>) -> Self {
         Self {
             resource_type: resource_type.into(),
@@ -102,6 +105,8 @@ impl ResourceIdentifier {
         }
     }
 
+    /// Render the identifier as the `{"type": …, "id": …}` JSON object the
+    /// JSON:API spec embeds in relationship data and the `included` array.
     pub fn to_value(&self) -> Value {
         serde_json::json!({
             "type": self.resource_type,
@@ -115,6 +120,8 @@ impl ResourceIdentifier {
 /// to a JSON:API 400 errors envelope.
 #[derive(Debug, Clone)]
 pub struct IncludeResolutionError {
+    /// Dotted include path that couldn't be resolved (e.g. `author.posts.comments`).
     pub path: String,
+    /// JSON:API `type` of the resource the unresolved segment was queried on.
     pub on_type: &'static str,
 }

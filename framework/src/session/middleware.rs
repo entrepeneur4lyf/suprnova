@@ -326,7 +326,9 @@ pub fn create_forget_remember_cookie(config: &SessionConfig) -> Cookie {
 /// then restarted with exponential backoff by the supervisor restart
 /// machinery.
 pub struct SessionGcSupervisor {
+    /// Session store on which to invoke `gc()` each tick.
     pub store: Arc<dyn SessionStore>,
+    /// Interval between sweeps.
     pub interval: std::time::Duration,
 }
 

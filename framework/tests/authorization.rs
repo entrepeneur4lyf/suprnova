@@ -613,7 +613,10 @@ async fn authorizable_authorize_async_maps_rich_denial_to_domain() {
         is_public: false,
     };
 
-    match alice.authorize_async("auth-trait-rich-deny-async", &post).await {
+    match alice
+        .authorize_async("auth-trait-rich-deny-async", &post)
+        .await
+    {
         Err(FrameworkError::Domain { status_code, .. }) => assert_eq!(status_code, 404),
         other => panic!("expected Domain 404 from rich denial, got {other:?}"),
     }

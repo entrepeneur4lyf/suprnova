@@ -622,12 +622,16 @@ pub enum BootKey {
 }
 
 impl BootKey {
+    /// Consume the boot wrapper and return the inner [`EncryptionKey`].
     pub fn into_key(self) -> EncryptionKey {
         match self {
             BootKey::Configured(k) | BootKey::GeneratedTransient(k) => k,
         }
     }
 
+    /// Returns `true` when the key was synthesized at boot (no `APP_KEY`
+    /// supplied) rather than read from the environment. Callers use this
+    /// to decide whether to log the dev-key warning.
     pub fn is_generated(&self) -> bool {
         matches!(self, BootKey::GeneratedTransient(_))
     }

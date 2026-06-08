@@ -51,20 +51,29 @@ const COOKIE_ENCODE: &AsciiSet = &CONTROLS
 /// SameSite cookie attribute
 #[derive(Clone, Debug, PartialEq, Default)]
 pub enum SameSite {
+    /// `Strict` — never sent on cross-site requests.
     Strict,
+    /// `Lax` — sent on top-level navigations but not on cross-site subresource requests. The default.
     #[default]
     Lax,
+    /// `None` — sent on every cross-site request. Browsers require `Secure` to be set when `None` is used.
     None,
 }
 
 /// Cookie options with secure defaults
 #[derive(Clone, Debug)]
 pub struct CookieOptions {
+    /// Forbids JavaScript access via `document.cookie`.
     pub http_only: bool,
+    /// Limits the cookie to HTTPS connections.
     pub secure: bool,
+    /// `SameSite` attribute controlling cross-site send behaviour.
     pub same_site: SameSite,
+    /// Path scope — the cookie is only sent for requests under this path prefix.
     pub path: String,
+    /// Domain scope — `None` defaults to the origin host.
     pub domain: Option<String>,
+    /// `Max-Age` lifetime — `None` makes the cookie a session cookie.
     pub max_age: Option<Duration>,
     /// Emit the `Partitioned` (CHIPS) attribute. Independent of
     /// `SameSite`; browsers that don't recognise it silently ignore

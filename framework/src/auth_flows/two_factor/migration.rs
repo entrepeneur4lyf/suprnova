@@ -7,6 +7,7 @@
 
 use sea_orm_migration::prelude::*;
 
+/// Migration that creates the `two_factor_credentials` table.
 pub struct Migration;
 
 impl MigrationName for Migration {

@@ -36,6 +36,9 @@
 /// }
 /// ```
 pub trait IsRelationLoaded {
+    /// Returns `true` when the named relation has been loaded onto
+    /// `self` — used by the [`when_loaded!`](crate::when_loaded) macro
+    /// to decide whether a `Prop` resolves to `Lazy` or `EagerNone`.
     fn is_relation_loaded(&self, relation_name: &str) -> bool;
 }
 

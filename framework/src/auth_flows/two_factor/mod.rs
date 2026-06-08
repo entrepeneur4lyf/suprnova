@@ -106,7 +106,10 @@ impl std::fmt::Debug for EnrollmentResponse {
 /// `otpauth://` `account_name` segment so authenticator apps render
 /// the row with a human-readable label.
 pub trait TwoFactorUser: Send + Sync {
+    /// Opaque storage key for this user (e.g. `torii::UserId.to_string()`).
     fn user_id(&self) -> &str;
+    /// Email folded into the `otpauth://` `account_name` segment so
+    /// authenticator apps render a human-readable label.
     fn email(&self) -> &str;
 }
 

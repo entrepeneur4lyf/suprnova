@@ -1,3 +1,10 @@
+//! HTTP request / response surface.
+//!
+//! Pulls together every type the user touches per request: typed
+//! [`Request`] extractors, the [`HttpResponse`] builder, cookies, file
+//! uploads, form parsing and validation, `abort!`-style early returns,
+//! and the trusted-proxy logic that drives client-IP resolution.
+
 pub mod abort;
 pub mod body;
 pub mod cookie;
@@ -23,6 +30,7 @@ pub use trusted_proxies::TrustedProxiesConfig;
 /// `FrameworkError::param()` instead.
 #[derive(Debug)]
 pub struct ParamError {
+    /// Name of the route parameter that was missing.
     pub param_name: String,
 }
 

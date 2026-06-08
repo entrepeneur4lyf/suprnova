@@ -1,3 +1,10 @@
+//! `.env` file loading and environment-detection helpers.
+//!
+//! Layered semantics: real OS env vars always win over file-loaded
+//! values; on repeat calls the loader removes stale file values before
+//! re-reading, so a test harness or hot-reload loop never promotes an
+//! older `.env` value back into the "real" tier.
+
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -23,11 +30,17 @@ static LOADED_KEYS: Mutex<Option<std::collections::HashMap<String, String>>> = M
 /// Environment type enumeration
 #[derive(Debug, Clone, PartialEq)]
 pub enum Environment {
+    /// Local developer machine (`APP_ENV=local`). The default when `APP_ENV` is unset.
     Local,
+    /// Development / staging-adjacent environment for the developer's own services (`APP_ENV=development|dev`).
     Development,
+    /// Pre-production staging environment (`APP_ENV=staging|stage`).
     Staging,
+    /// Live production environment (`APP_ENV=production|prod`). Enables the strictest safety defaults.
     Production,
+    /// Automated-test environment (`APP_ENV=testing|test`). Recognized by the test harness.
     Testing,
+    /// Any unrecognized `APP_ENV` value, preserved verbatim.
     Custom(String),
 }
 

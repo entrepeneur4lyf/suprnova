@@ -24,25 +24,32 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// signal directly.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum Field<T> {
+    /// Field was not present in the input at all (key absent on the wire).
     #[default]
     Absent,
+    /// Field was present in the input with an explicit `null` value.
     Null,
+    /// Field was present and carried a value.
     Value(T),
 }
 
 impl<T> Field<T> {
+    /// Returns `true` when the field was absent from the input.
     pub fn is_absent(&self) -> bool {
         matches!(self, Field::Absent)
     }
 
+    /// Returns `true` when the field was explicitly null.
     pub fn is_null(&self) -> bool {
         matches!(self, Field::Null)
     }
 
+    /// Returns `true` when the field carried a value.
     pub fn is_value(&self) -> bool {
         matches!(self, Field::Value(_))
     }
 
+    /// Borrow the inner value when present; `None` for `Absent` or `Null`.
     pub fn as_value(&self) -> Option<&T> {
         match self {
             Field::Value(v) => Some(v),
@@ -50,6 +57,7 @@ impl<T> Field<T> {
         }
     }
 
+    /// Consume the field and yield the inner value when present; `None` for `Absent` or `Null`.
     pub fn into_value(self) -> Option<T> {
         match self {
             Field::Value(v) => Some(v),

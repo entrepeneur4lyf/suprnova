@@ -198,12 +198,25 @@ pub enum MiddlewareResolveError {
     /// The group itself is not registered.
     UnknownGroup(String),
     /// The group exists but references an alias that wasn't registered.
-    UnknownAlias { group: String, missing: String },
+    UnknownAlias {
+        /// Name of the group whose definition references the missing alias.
+        group: String,
+        /// The alias name that couldn't be resolved.
+        missing: String,
+    },
     /// The group references another group that doesn't exist.
-    UnknownNestedGroup { group: String, missing: String },
+    UnknownNestedGroup {
+        /// Name of the outer group whose definition references the missing group.
+        group: String,
+        /// The nested group name that couldn't be resolved.
+        missing: String,
+    },
     /// A nested group references itself (direct or via a chain). Detected
     /// so we don't loop forever on a misconfigured group definition.
-    CycleDetected { group: String },
+    CycleDetected {
+        /// Name of the group at which the cycle was detected.
+        group: String,
+    },
 }
 
 impl std::fmt::Display for MiddlewareResolveError {

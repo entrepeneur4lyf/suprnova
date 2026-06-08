@@ -22,6 +22,8 @@ pub struct MemoryVectorDriver {
 }
 
 impl MemoryVectorDriver {
+    /// Construct an empty in-memory vector store. Equivalent to
+    /// [`MemoryVectorDriver::default`].
     pub fn new() -> Self {
         Self::default()
     }

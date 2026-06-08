@@ -988,10 +988,8 @@ mod context_tests {
 
     #[test]
     fn context_preserves_rate_limited_variant_and_retry_after() {
-        let err = FrameworkError::rate_limited(
-            Some(std::time::Duration::from_secs(12)),
-            "push service",
-        );
+        let err =
+            FrameworkError::rate_limited(Some(std::time::Duration::from_secs(12)), "push service");
         let wrapped = err.context("delivering notification");
         // Variant and the structured duration must survive the wrap —
         // otherwise upstream retry logic loses the hint.

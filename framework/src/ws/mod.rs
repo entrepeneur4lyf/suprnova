@@ -42,6 +42,9 @@ pub mod heartbeat;
 /// `Err(_)` logs the error and closes with code 1011 (internal error).
 #[async_trait]
 pub trait WebSocketHandler: Send + Sync + 'static {
+    /// Run the per-connection handler loop. Returning `Ok(())` triggers
+    /// a clean close (code 1000); returning `Err(_)` logs the error and
+    /// closes with code 1011 (internal error).
     async fn handle(&self, socket: WsSocket, request: Request) -> Result<(), FrameworkError>;
 }
 

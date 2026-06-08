@@ -28,19 +28,27 @@ pub enum ClientFrame {
     /// or other channel-binding info; the channel's `authorize`
     /// hook sees this payload.
     Subscribe {
+        /// Channel name to subscribe to.
         channel: String,
+        /// Auth / binding payload forwarded to the channel's `authorize` hook.
         #[serde(default)]
         data: Value,
     },
     /// Unsubscribe from a previously subscribed channel.
-    Unsubscribe { channel: String },
+    Unsubscribe {
+        /// Channel name to unsubscribe from.
+        channel: String,
+    },
     /// Client-published event. Rare in practice — most events
     /// come from server-side dispatch via `Broadcastable`. Allowed
     /// for symmetric apps; the channel's authorize gate still
     /// applies.
     Publish {
+        /// Channel to publish into.
         channel: String,
+        /// Event name carried in the published frame.
         event: String,
+        /// Event payload, forwarded verbatim to subscribers.
         #[serde(default)]
         data: Value,
     },
@@ -54,15 +62,27 @@ pub enum ServerFrame {
     /// `socket_id` the client echoes back as the `X-Socket-ID` header on HTTP
     /// requests so server-side `broadcast_to_others` can exclude it. Mirrors
     /// Pusher's `connection_established`.
-    Connected { socket_id: String },
+    Connected {
+        /// Per-connection socket id; echoed back via `X-Socket-ID` for self-exclusion.
+        socket_id: String,
+    },
     /// Acknowledges a `Subscribe` request.
-    Subscribed { channel: String },
+    Subscribed {
+        /// Channel the client is now subscribed to.
+        channel: String,
+    },
     /// Acknowledges an `Unsubscribe` request.
-    Unsubscribed { channel: String },
+    Unsubscribed {
+        /// Channel the client was unsubscribed from.
+        channel: String,
+    },
     /// A published event being pushed to the subscriber.
     Event {
+        /// Channel the event was published on.
         channel: String,
+        /// Event name.
         event: String,
+        /// Event payload, forwarded verbatim from the publisher.
         data: Value,
     },
     /// Subscriber lagged past the server's per-channel ring buffer and
@@ -71,12 +91,19 @@ pub enum ServerFrame {
     /// resync before processing further events. Sent immediately after
     /// the lag is detected; the forwarder continues delivering subsequent
     /// frames, but the gap is not recoverable from the server side.
-    Lagged { channel: String, skipped: u64 },
+    Lagged {
+        /// Channel whose ring buffer the subscriber fell behind on.
+        channel: String,
+        /// Number of envelopes dropped on this connection before the lag was reported.
+        skipped: u64,
+    },
     /// Error response — surfaces parse failures, auth rejections,
     /// channel-not-found, etc. `channel` is `None` for envelope-level
     /// errors that aren't tied to a specific channel.
     Error {
+        /// Channel the error applies to, or `None` for envelope-level errors.
         channel: Option<String>,
+        /// Human-readable error reason.
         reason: String,
     },
 }

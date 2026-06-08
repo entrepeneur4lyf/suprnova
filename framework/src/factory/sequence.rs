@@ -29,11 +29,15 @@
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
+/// Monotonically-increasing counter for generating unique ids in tests
+/// and factories. Thread-safe via an internal `AtomicI64`.
 pub struct Sequence {
     counter: AtomicI64,
 }
 
 impl Sequence {
+    /// Construct a fresh sequence whose first [`next`](Self::next) call
+    /// returns `1`. `const` so it can initialize a `static`.
     pub const fn new() -> Self {
         Self {
             counter: AtomicI64::new(0),

@@ -311,20 +311,30 @@ pub async fn prune_expired() -> Result<u64, FrameworkError> {
 pub mod entity {
     use sea_orm::entity::prelude::*;
 
+    /// SeaORM model for a single row in `remember_tokens`.
     #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
     #[sea_orm(table_name = "remember_tokens")]
     pub struct Model {
+        /// Auto-increment primary key.
         #[sea_orm(primary_key)]
         pub id: i64,
+        /// Opaque string id of the user the token authenticates.
         pub user_id: String,
+        /// 22-char URL-safe base64 lookup key (the public half of the token).
         #[sea_orm(unique)]
         pub selector: String,
+        /// Bcrypt hash of the verifier — the private half of the token.
         pub token_hash: String,
+        /// TTL boundary; the cookie is rejected once `now > expires_at`.
         pub expires_at: chrono::NaiveDateTime,
+        /// Wall-clock time the token row was created.
         pub created_at: chrono::NaiveDateTime,
+        /// Informational; current rotation strategy deletes the row instead of updating this.
         pub last_used_at: Option<chrono::NaiveDateTime>,
     }
 
+    /// SeaORM relation enum — `remember_tokens` is a leaf table with no
+    /// declared foreign-key relations.
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {}
 

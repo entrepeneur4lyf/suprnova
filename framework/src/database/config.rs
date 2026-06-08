@@ -6,9 +6,13 @@ use crate::config::{Environment, env, env_optional};
 /// Database type enumeration
 #[derive(Debug, Clone, PartialEq)]
 pub enum DatabaseType {
+    /// PostgreSQL — `postgres://` or `postgresql://` URL.
     Postgres,
+    /// MySQL or MariaDB — `mysql://` URL.
     Mysql,
+    /// SQLite — `sqlite://` URL, or an absolute file path.
     Sqlite,
+    /// Unrecognized scheme; the database layer will refuse to connect.
     Unknown,
 }
 

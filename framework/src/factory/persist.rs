@@ -47,6 +47,9 @@ use sea_orm::{
 /// defaulted columns resolved, etc.).
 #[async_trait]
 pub trait Persistable: Sized + Send {
+    /// Insert `self` against the default database connection and return
+    /// the canonicalized post-insert version with assigned id, default
+    /// columns resolved, and timestamps populated.
     async fn persist(self) -> Result<Self, FrameworkError>;
 }
 

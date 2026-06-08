@@ -346,7 +346,9 @@ pub mod rules {
     /// When `other` matches: empty/whitespace value fails.
     /// When `other` does not match (or is missing): always passes.
     pub struct RequiredIf {
+        /// Name of the sibling field whose value determines the requirement.
         pub other: &'static str,
+        /// When `ctx[other]` equals this string, the field becomes required.
         pub value: &'static str,
     }
     impl ContextualRule for RequiredIf {
@@ -366,6 +368,7 @@ pub mod rules {
     /// Laravel `required_with:other` — the field is required only
     /// when sibling field `other` is present and non-blank.
     pub struct RequiredWith {
+        /// Name of the sibling field whose presence triggers the requirement.
         pub other: &'static str,
     }
     impl ContextualRule for RequiredWith {
@@ -385,7 +388,9 @@ pub mod rules {
     /// When `other` matches `value`: always passes.
     /// Otherwise: empty/whitespace value fails.
     pub struct RequiredUnless {
+        /// Name of the sibling field whose value waives the requirement.
         pub other: &'static str,
+        /// When `ctx[other]` equals this string, the field is not required.
         pub value: &'static str,
     }
     impl ContextualRule for RequiredUnless {
@@ -408,6 +413,7 @@ pub mod rules {
     ///
     /// Missing `other` field is treated as a failure.
     pub struct Same {
+        /// Name of the sibling field whose value the input must equal.
         pub other: &'static str,
     }
     impl ContextualRule for Same {
@@ -423,6 +429,7 @@ pub mod rules {
     /// `ctx[other]`. If `other` is missing, the rule passes (there is
     /// nothing to be the same as).
     pub struct Different {
+        /// Name of the sibling field whose value the input must differ from.
         pub other: &'static str,
     }
     impl ContextualRule for Different {
