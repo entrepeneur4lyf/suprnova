@@ -853,6 +853,16 @@ async fn attach_one<C: ConnectionTrait>(
         if k == pivot_foreign_key || k == pivot_related_key {
             continue;
         }
+        // Validate every caller-supplied `extra` column name before
+        // interpolating it into the INSERT. The framework-managed
+        // FK columns (pivot_foreign_key, pivot_related_key) and the
+        // timestamps (created_at, updated_at) are framework
+        // literals; the `extra` keys come from `Attrs::insert` /
+        // `attrs!(...)` and may carry caller input through. Without
+        // this check a controller that builds `Attrs` from request
+        // input would expose a SQL-injection footgun. Matches
+        // `DbTableBuilder::insert`'s identifier validation.
+        crate::database::validate_identifier(k)?;
         columns.push(k.to_string());
         values.push(json_value_to_sea_value(v));
     }

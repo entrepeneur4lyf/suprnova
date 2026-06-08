@@ -147,7 +147,15 @@ impl StatefulGuard for SessionGuard {
             return Ok(None);
         }
 
-        // No user matched the supplied credentials.
+        // No user matched the supplied credentials. Drive a dummy
+        // password-verify so the unknown-identifier wall-clock
+        // matches the known-identifier-wrong-password wall-clock —
+        // otherwise the difference (cheap DB-miss vs full bcrypt
+        // cost) is a side-channel that lets an attacker probe the
+        // user database without ever triggering the brute-force
+        // lockout (which only counts attempts against KNOWN
+        // accounts).
+        let _ = self.provider.dummy_verify().await;
         EventFacade::dispatch(events::Failed {
             guard: self.name.clone(),
             user_id: None,
@@ -183,6 +191,10 @@ impl StatefulGuard for SessionGuard {
             return Ok(false);
         }
 
+        // No user matched — drive dummy_verify to equalise timing
+        // against the wrong-password branch above. See `attempt` for
+        // the full rationale.
+        let _ = self.provider.dummy_verify().await;
         EventFacade::dispatch(events::Failed {
             guard: self.name.clone(),
             user_id: None,

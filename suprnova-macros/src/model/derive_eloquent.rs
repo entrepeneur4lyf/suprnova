@@ -192,7 +192,14 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         .zip(field_strs.iter())
         .map(|(ident, name)| {
             let is_pk = name == pk_name;
-            if is_pk {
+            // Mirror Laravel's `replicate()` semantics: reset the PK
+            // AND the auto-timestamps so the next save fills them with
+            // NOW rather than carrying the source row's timing forward.
+            // Without this reset a replicated row claims to predate its
+            // actual existence.
+            let is_auto_timestamp =
+                input.timestamps && (name == &input.created_at || name == &input.updated_at);
+            if is_pk || is_auto_timestamp {
                 quote! { #ident: ::core::default::Default::default() }
             } else {
                 quote! {

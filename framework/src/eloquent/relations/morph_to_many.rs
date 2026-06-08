@@ -1194,6 +1194,12 @@ async fn morph_attach_one<C: ConnectionTrait>(
         if k == pivot_related_key || k == id_col.as_str() || k == type_col.as_str() {
             continue;
         }
+        // Validate caller-supplied column names before interpolating
+        // them into the INSERT — see `belongs_to_many.rs::attach_one`
+        // for the full rationale. Pivot writes share the
+        // identifier-injection footgun shape with the regular
+        // DbTableBuilder::insert path.
+        crate::database::validate_identifier(k)?;
         columns.push(k.to_string());
         values.push(json_value_to_sea_value(v));
     }

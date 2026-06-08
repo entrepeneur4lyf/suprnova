@@ -70,4 +70,33 @@ pub trait UserProvider: Send + Sync + 'static {
     ) -> Result<bool, FrameworkError> {
         Ok(false)
     }
+
+    /// Run a fixed-cost hash verification to absorb the timing signal
+    /// `validate_credentials` would emit on a matched user. The
+    /// [`StatefulGuard`](super::StatefulGuard) calls this on the
+    /// `retrieve_by_credentials` MISS branch so the wall-clock of
+    /// `attempt(...)` for an unknown identifier matches the wall-clock
+    /// for a known identifier with the wrong password — closing the
+    /// account-enumeration timing oracle that the natural
+    /// short-circuit-on-miss flow would otherwise create.
+    ///
+    /// Returns `Ok(false)` once the dummy verify completes; the
+    /// result is discarded by the caller. The default implementation
+    /// drives [`crate::hashing::verify_async`] against a precomputed
+    /// throwaway hash so providers using the framework's hashing
+    /// surface get equalisation for free. Providers whose
+    /// `validate_credentials` uses a different verifier (custom
+    /// JWT, external IDP) should override this to emit a
+    /// comparable-cost no-op against their own primitive.
+    async fn dummy_verify(&self) -> Result<bool, FrameworkError> {
+        // Precomputed bcrypt hash of the empty string at cost 12 —
+        // the framework's OWASP-floor default cost. The verify call
+        // runs the full bcrypt cost regardless of input (bcrypt verifies
+        // input-against-hash, not the other way around), so we get
+        // representative timing without computing the hash fresh per
+        // request. Any password input is rejected.
+        const DUMMY_HASH: &str = "$2b$12$WzkqK0YIMJW8a4hkOEX/cuFNNDU.lI5jvyiQekkLwnAi8sFxlnEv6";
+        let _ = crate::hashing::verify_async("dummy_password_never_matches", DUMMY_HASH).await;
+        Ok(false)
+    }
 }

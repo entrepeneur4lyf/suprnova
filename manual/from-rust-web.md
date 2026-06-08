@@ -91,7 +91,7 @@ layer. Suprnova ships that layer:
 | Validation + form requests | Use `validator` + custom extractor | `#[derive(Data, Validate)]` form requests, async validation |
 | JSON:API resources | Hand-format responses | `#[derive(Resource)]` |
 | Rate limiting with fail-open/closed policy | Build it | `RateLimiter` + `BackendErrorPolicy` |
-| Idempotency keys | Build it | `IdempotencyMiddleware` with Stripe-style replay |
+| Idempotency keys | Build it | `Idempotency::remember(key, ttl, body)` with Stripe-style replay |
 | CSRF (with Laravel-style glob exclusions) | Build it | `CsrfMiddleware` with `except` + `except_method` |
 | Structured errors with sanitised 5xx | Build it | `FrameworkError` / `HttpError` trait, panic recovery |
 | Container with task-local → thread-local → global scopes | Write your own | `App::bind` / `singleton` / `factory` with proper isolation |

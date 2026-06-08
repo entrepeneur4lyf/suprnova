@@ -178,6 +178,38 @@ impl Idempotency {
     /// - **`body` should be cancel-safe** if the caller may drop this future:
     ///   cancellation drops `body` mid-await like any other tokio future.
     ///
+    /// # Keyspace responsibility (cross-endpoint isolation)
+    ///
+    /// `remember` keys the lock + result cache on `hashed(key)` only —
+    /// the caller's `key` is the entire isolation surface. The caller
+    /// **MUST** namespace the key with the route + user / business
+    /// identity before passing it in; otherwise an attacker who
+    /// captures an idempotency key issued for endpoint A can present
+    /// the same key to endpoint B and receive A's recorded `T` as a
+    /// `Replay::Replayed(...)` (the function happily replays the
+    /// cached value regardless of which endpoint asks for it).
+    ///
+    /// The recommended shape:
+    ///
+    /// ```rust,ignore
+    /// // GOOD — endpoint + user namespace isolates the cache cell.
+    /// let cache_key = format!(
+    ///     "{}:{}:{}",
+    ///     request.method(),
+    ///     request.path(),
+    ///     idempotency_key_from_client,
+    /// );
+    /// Idempotency::remember(&cache_key, ttl, body).await?
+    ///
+    /// // BAD — bare client key leaks across endpoints.
+    /// Idempotency::remember(idempotency_key_from_client, ttl, body).await?
+    /// ```
+    ///
+    /// Mirrors Stripe's published contract: an idempotency key is
+    /// scoped to a single operation, and the server is expected to
+    /// detect mismatched request fingerprints. Suprnova provides the
+    /// replay primitive; you provide the scope.
+    ///
     /// # Errors
     ///
     /// Propagates any [`FrameworkError`] from the cache layer or from `body`.

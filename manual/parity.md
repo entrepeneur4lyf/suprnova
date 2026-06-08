@@ -103,7 +103,7 @@ gaps as of the shipped framework.
 | Search (Scout) | No first-party full-text search adapter | not yet | Vector search ships today via [Vector](vector.md); keyword-search Scout-equivalent is planned |
 | Strings (helpers) | `heck` crate (case conversions), `std::str`, `regex` | diverged | Same crates the rest of the Rust ecosystem uses; no `Str::camel($x)` global |
 | Task Scheduling | `Schedule::call/command/task` + `#[derive(Task)]` + cron syntax + `schedule:run` worker | shipped | [Scheduling](scheduling.md) |
-| Idempotency keys | `IdempotencyMiddleware` + `#[derive(Idempotent)]` on the request type | shipped | Stripe-style replay protection on POST/PUT. [Idempotency](idempotency.md) |
+| Idempotency keys | `Idempotency::remember(key, ttl, body)` — Stripe-style replay protection | shipped | Caller namespaces the key with the route + user / business identity. [Idempotency](idempotency.md) |
 | Request timeout | `TimeoutMiddleware` configurable per route | shipped | Rust-native — abort the in-flight future, free the worker. [Timeout](timeout.md) |
 | Feature Flags (Pennant) | `Feature` + `Evaluator` + `FeatureMiddleware` + admin CRUD | shipped | Sub-second propagation via `FeatureSync` trait. [Feature Flags](feature-flags.md) |
 | Observability (Pulse) | OpenTelemetry via `init_telemetry`, `Metrics`, `tracing` everywhere | diverged | OTel is the lingua franca for Rust observability — point your collector at the binary. [Observability](observability.md) |
