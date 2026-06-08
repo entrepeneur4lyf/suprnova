@@ -47,6 +47,14 @@ pub struct WsSocket {
     /// drop because the forwarder is detached and self-terminates when
     /// all `Sender<Outbound>` clones drop.
     forwarder_handle: Option<JoinHandle<()>>,
+    /// Cached bridge sender for [`Self::sender`]. The first call spawns
+    /// the bridge task and stores the `Sender<Message>`; subsequent
+    /// calls clone the cached handle so callers that legitimately
+    /// share the socket across multiple producers don't multiply the
+    /// `SEND_CHANNEL_CAPACITY` buffer (and the spawned task count).
+    /// `OnceLock` keeps `sender(&self)` non-`mut` so the broadcasting
+    /// hub can still use it through `&WsSocket`.
+    bridge_sender: std::sync::OnceLock<mpsc::Sender<Message>>,
 }
 
 /// What the forwarder task drains. `Close(_)` is special-cased so the
@@ -92,6 +100,7 @@ impl WsSocket {
         let forwarder_handle = tokio::spawn(forwarder_task(sink, rx));
         Self {
             sender: tx,
+            bridge_sender: std::sync::OnceLock::new(),
             receiver: Box::pin(stream),
             missed_pings,
             forwarder_handle: Some(forwarder_handle),
@@ -150,34 +159,44 @@ impl WsSocket {
     ///
     /// # Multiple callers
     ///
-    /// Each invocation spawns a fresh bridge task and adds an extra
-    /// `SEND_CHANNEL_CAPACITY`-deep buffer. Call once per connection.
+    /// Cached on first call — repeat invocations clone the same
+    /// `mpsc::Sender<Message>` so multiple producers share one
+    /// `SEND_CHANNEL_CAPACITY`-deep buffer and one bridge task. The
+    /// previous behaviour spawned a new bridge per call, which made
+    /// the doc invariant "call once per connection" load-bearing for
+    /// backpressure correctness — a doc invariant is not enough when
+    /// the broadcasting hub or a heartbeat helper might both reach
+    /// for `sender()` on the same socket. Caching makes it safe.
     pub(crate) fn sender(&self) -> mpsc::Sender<Message> {
-        let (bridge_tx, mut bridge_rx) = mpsc::channel::<Message>(SEND_CHANNEL_CAPACITY);
-        let internal = self.sender.clone();
-        tokio::spawn(async move {
-            while let Some(msg) = bridge_rx.recv().await {
-                let outbound = match msg {
-                    Message::Close(Some(frame)) => Outbound::Close(frame),
-                    Message::Close(None) => Outbound::Close(CloseFrame {
-                        code: CloseCode::Normal,
-                        reason: Default::default(),
-                    }),
-                    other => Outbound::Msg(other),
-                };
-                let was_close = matches!(outbound, Outbound::Close(_));
-                if internal.send(outbound).await.is_err() {
-                    return;
-                }
-                if was_close {
-                    // The forwarder finishes the sink on Outbound::Close.
-                    // Anything we forward after that hits a dropped receiver
-                    // (or, worse, races a half-closed sink). Stop the bridge.
-                    return;
-                }
-            }
-        });
-        bridge_tx
+        self.bridge_sender
+            .get_or_init(|| {
+                let (bridge_tx, mut bridge_rx) = mpsc::channel::<Message>(SEND_CHANNEL_CAPACITY);
+                let internal = self.sender.clone();
+                tokio::spawn(async move {
+                    while let Some(msg) = bridge_rx.recv().await {
+                        let outbound = match msg {
+                            Message::Close(Some(frame)) => Outbound::Close(frame),
+                            Message::Close(None) => Outbound::Close(CloseFrame {
+                                code: CloseCode::Normal,
+                                reason: Default::default(),
+                            }),
+                            other => Outbound::Msg(other),
+                        };
+                        let was_close = matches!(outbound, Outbound::Close(_));
+                        if internal.send(outbound).await.is_err() {
+                            return;
+                        }
+                        if was_close {
+                            // The forwarder finishes the sink on Outbound::Close.
+                            // Anything we forward after that hits a dropped receiver
+                            // (or, worse, races a half-closed sink). Stop the bridge.
+                            return;
+                        }
+                    }
+                });
+                bridge_tx
+            })
+            .clone()
     }
 
     /// Send a text frame.

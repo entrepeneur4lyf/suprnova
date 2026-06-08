@@ -430,21 +430,39 @@ impl SeaStreamerBroadcastHub {
     /// meta-channel. The consumer pump routes it to `apply_presence_event`
     /// on all receiving instances (including this one in loopback / same-stream
     /// scenarios).
+    ///
+    /// Errors are logged with the channel + member_id context so ops
+    /// can scope an alert to the affected presence channel rather than
+    /// the previous unattributed "presence producer send error" line.
+    /// The `track_member` / `untrack_member` trait surface is
+    /// fire-and-forget so we don't propagate the error to the caller —
+    /// the local state has already been updated and the cross-process
+    /// view will re-converge through the next heartbeat tick.
     fn send_presence_event(&self, event: &PresenceEvent) {
+        let (event_name, channel, member_id) = match event {
+            PresenceEvent::MemberAdded {
+                channel, member_id, ..
+            } => ("member_added", channel.as_str(), member_id.as_str()),
+            PresenceEvent::MemberRemoved {
+                channel, member_id, ..
+            } => ("member_removed", channel.as_str(), member_id.as_str()),
+            PresenceEvent::Heartbeat {
+                channel, member_id, ..
+            } => ("heartbeat", channel.as_str(), member_id.as_str()),
+        };
         let data = match serde_json::to_value(event) {
             Ok(v) => v,
             Err(e) => {
                 tracing::error!(
                     error = %e,
-                    "SeaStreamerBroadcastHub: failed to serialize PresenceEvent"
+                    event = event_name,
+                    channel,
+                    member_id,
+                    "SeaStreamerBroadcastHub: failed to serialize PresenceEvent — peer views \
+                     of this channel will diverge until the next heartbeat reconciles"
                 );
                 return;
             }
-        };
-        let event_name = match event {
-            PresenceEvent::MemberAdded { .. } => "member_added",
-            PresenceEvent::MemberRemoved { .. } => "member_removed",
-            PresenceEvent::Heartbeat { .. } => "heartbeat",
         };
         let tagged = TaggedEnvelope {
             instance_id: self.instance_id,
@@ -460,13 +478,20 @@ impl SeaStreamerBroadcastHub {
                 Err(e) => {
                     tracing::error!(
                         error = %e,
-                        "SeaStreamerBroadcastHub: presence producer send error"
+                        event = event_name,
+                        channel,
+                        member_id,
+                        "SeaStreamerBroadcastHub: presence producer send error — peer views \
+                         of this channel will diverge until the next heartbeat reconciles"
                     );
                 }
             },
             Err(e) => {
                 tracing::error!(
                     error = %e,
+                    event = event_name,
+                    channel,
+                    member_id,
                     "SeaStreamerBroadcastHub: failed to serialize presence TaggedEnvelope"
                 );
             }
@@ -521,7 +546,22 @@ async fn consumer_pump_task(
     own_id: Uuid,
     cross_view: CrossProcessView,
 ) {
+    // Receive-error backoff state. Pre-fix this was a fixed 1s sleep
+    // per error, which busy-spins log volume when the upstream is
+    // persistently down (Redis/Kafka offline for minutes). The
+    // exponential schedule caps at 30s so transient blips still
+    // recover within seconds while sustained outages don't drown the
+    // log pipeline.
+    //
+    // The body of `run_iteration_guarded` returns `()`, so we signal
+    // "receive error this round" through this atomic instead of
+    // restructuring the helper's signature.
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let receive_error_flag = Arc::new(AtomicBool::new(false));
+    let mut receive_error_streak: u32 = 0;
     loop {
+        receive_error_flag.store(false, Ordering::Relaxed);
+        let receive_error_flag_inner = Arc::clone(&receive_error_flag);
         let outcome = run_iteration_guarded("consumer_pump", async {
             match consumer.next().await {
                 Ok(msg) => {
@@ -569,13 +609,24 @@ async fn consumer_pump_task(
                 Err(e) => {
                     tracing::error!(
                         error = %e,
-                        "sea-streamer consumer: receive error; backing off 1s"
+                        "sea-streamer consumer: receive error; backing off (escalating)"
                     );
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    receive_error_flag_inner.store(true, Ordering::Relaxed);
                 }
             }
         })
         .await;
+
+        // Receive errors escalate: 1s, 2s, 4s, 8s, 16s, 30s (capped).
+        // Reset the streak as soon as a non-error iteration runs so
+        // a single transient blip doesn't slow recovery.
+        if receive_error_flag.load(Ordering::Relaxed) {
+            receive_error_streak = receive_error_streak.saturating_add(1);
+            let secs = (1u64 << receive_error_streak.saturating_sub(1).min(5)).min(30);
+            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+        } else {
+            receive_error_streak = 0;
+        }
 
         // If the iteration panicked, back off briefly before the next attempt
         // so a hot-loop panic source (e.g. consumer.next() itself) cannot
@@ -700,17 +751,29 @@ fn send_presence_via_producer(
     event: &PresenceEvent,
     instance_id_str: &str,
 ) {
+    let (event_name, channel, member_id) = match event {
+        PresenceEvent::MemberAdded {
+            channel, member_id, ..
+        } => ("member_added", channel.as_str(), member_id.as_str()),
+        PresenceEvent::MemberRemoved {
+            channel, member_id, ..
+        } => ("member_removed", channel.as_str(), member_id.as_str()),
+        PresenceEvent::Heartbeat {
+            channel, member_id, ..
+        } => ("heartbeat", channel.as_str(), member_id.as_str()),
+    };
     let data = match serde_json::to_value(event) {
         Ok(v) => v,
         Err(e) => {
-            tracing::error!(error = %e, "heartbeat task: failed to serialize PresenceEvent");
+            tracing::error!(
+                error = %e,
+                event = event_name,
+                channel,
+                member_id,
+                "heartbeat task: failed to serialize PresenceEvent"
+            );
             return;
         }
-    };
-    let event_name = match event {
-        PresenceEvent::MemberAdded { .. } => "member_added",
-        PresenceEvent::MemberRemoved { .. } => "member_removed",
-        PresenceEvent::Heartbeat { .. } => "heartbeat",
     };
     // Build a dummy Uuid from the string for the TaggedEnvelope.
     let uuid = Uuid::parse_str(instance_id_str).unwrap_or_else(|_| Uuid::nil());
@@ -725,11 +788,23 @@ fn send_presence_via_producer(
     match serde_json::to_vec(&tagged) {
         Ok(bytes) => {
             if let Err(e) = producer.send(bytes.as_slice()) {
-                tracing::error!(error = %e, "heartbeat task: producer send error");
+                tracing::error!(
+                    error = %e,
+                    event = event_name,
+                    channel,
+                    member_id,
+                    "heartbeat task: producer send error"
+                );
             }
         }
         Err(e) => {
-            tracing::error!(error = %e, "heartbeat task: failed to serialize TaggedEnvelope");
+            tracing::error!(
+                error = %e,
+                event = event_name,
+                channel,
+                member_id,
+                "heartbeat task: failed to serialize TaggedEnvelope"
+            );
         }
     }
 }

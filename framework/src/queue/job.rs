@@ -21,7 +21,10 @@ pub enum BackoffSchedule {
         base_secs: u64,
         /// Maximum delay in seconds; subsequent attempts cannot exceed this.
         cap_secs: u64,
-        /// Symmetric jitter applied to the computed delay (0.0 disables).
+        /// Symmetric jitter applied to the computed delay. Clamped to
+        /// `[0.0, 1.0]` at use; values outside that range are silently
+        /// pinned so they can't violate `cap_secs`. NaN collapses to
+        /// 0.0. `0.0` disables jitter.
         jitter_ratio: f32,
     },
     /// Explicit schedule, one entry per attempt. If more attempts than

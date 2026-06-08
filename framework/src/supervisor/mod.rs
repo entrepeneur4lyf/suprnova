@@ -80,8 +80,31 @@ use crate::error::FrameworkError;
 use async_trait::async_trait;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex as TokioMutex;
-use tokio::task::JoinSet;
+use tokio::task::{JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
+
+/// Recover the panic payload from a `JoinError` so the observed
+/// `panic: <msg>` log line carries the actual `panic!("...")` message
+/// instead of `JoinError::Panic { id: TaskId(N), .. }` — which loses
+/// every operator-readable signal about what crashed.
+///
+/// `panic_any` accepts arbitrary payloads, so we try `String` then
+/// `&'static str` (the two shapes the `panic!` macro produces) and
+/// fall back to the `JoinError`'s default display for anything else
+/// (custom panic types remain debuggable through their type name).
+fn panic_payload(join_err: JoinError) -> String {
+    let payload = join_err.into_panic();
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        return (*s).to_string();
+    }
+    format!(
+        "<non-string panic payload, type = {:?}>",
+        (*payload).type_id()
+    )
+}
 
 pub mod registry;
 pub use registry::SupervisorEntry;
@@ -314,8 +337,10 @@ async fn run_with_restart(supervisor: Arc<dyn Supervisor>, cancel: CancellationT
         let outcome: Result<(), String> = match handle.await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(format!("{e}")),
-            Err(join_err) if join_err.is_panic() => Err(format!("panic: {:?}", join_err)),
-            Err(join_err) => Err(format!("join error: {:?}", join_err)),
+            Err(join_err) if join_err.is_panic() => {
+                Err(format!("panic: {}", panic_payload(join_err)))
+            }
+            Err(join_err) => Err(format!("join error: {join_err}")),
         };
 
         // Decide whether to restart. Never / OnError+Ok return early here.
