@@ -544,6 +544,41 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         quote! {}
     };
 
+    // Trait-level `find` override for soft-delete models. The macro
+    // also emits an inherent `find` (for ergonomic concrete-receiver
+    // calls below), but Rust's method resolution picks the inherent
+    // only when the receiver is a concrete type — generic dispatch
+    // (`M::find(id)` with `M: Model`) walks the trait table and hits
+    // the unscoped default, exposing trashed rows. Pinning the trait
+    // method here closes that gap so route binding (`RouteParam<M>`),
+    // global scopes, and any other generic Eloquent caller all honour
+    // the soft-delete filter.
+    let find_trait_override = if soft_deletes_enabled {
+        quote! {
+            async fn find<K>(
+                id: K,
+            ) -> ::core::result::Result<::core::option::Option<Self>, ::suprnova::FrameworkError>
+            where
+                K: ::core::convert::Into<
+                    <<Self::Entity as ::suprnova::EntityTrait>::PrimaryKey
+                        as ::suprnova::PrimaryKeyTrait>::ValueType,
+                > + ::core::marker::Send,
+            {
+                let pk_value: <<Self::Entity as ::suprnova::EntityTrait>::PrimaryKey
+                    as ::suprnova::PrimaryKeyTrait>::ValueType = id.into();
+                <Self as ::suprnova::eloquent::Model>::query()
+                    .filter(
+                        <Self as ::suprnova::eloquent::Model>::primary_key_name(),
+                        pk_value,
+                    )
+                    .first()
+                    .await
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     // Phase 10C T4 — seed builder used by the global-scope opt-out
     // helpers. Soft-delete models include the `deleted_at IS NULL`
     // filter so opt-out doesn't accidentally surface trashed rows;
@@ -886,6 +921,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             #fillable_impl
 
             #query_override
+
+            #find_trait_override
 
             #field_value_method
 
