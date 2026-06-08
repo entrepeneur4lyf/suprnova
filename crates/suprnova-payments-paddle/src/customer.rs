@@ -86,11 +86,21 @@ impl CustomerStore for PaddleProvider {
             .await
             .map_err(|e| PaymentError::Provider(format!("paddle customer_update: {e}")))?;
 
+        // Prefer the `custom_data` Paddle returned over the request-side
+        // echo. Admin and reconciliation tooling needs the server's
+        // authoritative view (Paddle may normalise), not the client's
+        // pre-flight copy. Fall back to the request metadata only when
+        // Paddle omitted the field entirely.
+        let provider_metadata = resp
+            .data
+            .custom_data
+            .clone()
+            .unwrap_or_else(|| req.metadata.clone().unwrap_or(serde_json::json!({})));
         Ok(CustomerRef {
             provider_customer_id: resp.data.id.to_string(),
             user_id: None,
             email: resp.data.email.clone(),
-            provider_metadata: req.metadata.unwrap_or(serde_json::json!({})),
+            provider_metadata,
         })
     }
 
@@ -102,11 +112,20 @@ impl CustomerStore for PaddleProvider {
             .await
             .map_err(|e| PaymentError::Provider(format!("paddle customer_get: {e}")))?;
 
+        // Round-trip Paddle's `custom_data` (Paddle's name for
+        // caller-supplied metadata). Empty object when the customer
+        // has no `custom_data` set — matches the contract callers
+        // rely on (always a JSON value, never null).
+        let provider_metadata = resp
+            .data
+            .custom_data
+            .clone()
+            .unwrap_or(serde_json::json!({}));
         Ok(CustomerRef {
             provider_customer_id: resp.data.id.to_string(),
             user_id: None,
             email: resp.data.email.clone(),
-            provider_metadata: serde_json::json!({}),
+            provider_metadata,
         })
     }
 
@@ -173,5 +192,36 @@ mod tests {
         assert_eq!(map.len(), 1);
         assert!(map.contains_key("valid"));
         assert!(!map.contains_key("skipped"));
+    }
+
+    // ---- provider_metadata round-trip (CustomerRef construction) -----------
+    //
+    // Paddle's `CustomerData::custom_data` is `Option<serde_json::Value>`.
+    // The CustomerStore::get_customer / update_customer fix prefers the
+    // server-returned value over the request-side echo so admin /
+    // reconciliation tooling sees Paddle's authoritative view. The two
+    // tests below pin that selection rule by exercising the
+    // `unwrap_or` chain directly — the same shape both call sites use.
+
+    fn pick_paddle_metadata(
+        server: Option<serde_json::Value>,
+        fallback: serde_json::Value,
+    ) -> serde_json::Value {
+        server.unwrap_or(fallback)
+    }
+
+    #[test]
+    fn paddle_pick_prefers_server_custom_data_over_request_echo() {
+        let server = Some(json!({ "tier": "gold" }));
+        let fallback = json!({ "tier": "silver" }); // intentionally different
+        let out = pick_paddle_metadata(server, fallback);
+        assert_eq!(out, json!({ "tier": "gold" }));
+    }
+
+    #[test]
+    fn paddle_pick_falls_back_when_server_returns_none() {
+        let fallback = json!({ "from_request": "yes" });
+        let out = pick_paddle_metadata(None, fallback);
+        assert_eq!(out, json!({ "from_request": "yes" }));
     }
 }

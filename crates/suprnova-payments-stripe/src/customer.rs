@@ -78,13 +78,35 @@ fn metadata_to_string_map(value: Option<&serde_json::Value>) -> Option<HashMap<S
 fn customer_to_ref(
     c: Customer,
     user_id: Option<String>,
-    metadata: serde_json::Value,
+    metadata_fallback: serde_json::Value,
 ) -> CustomerRef {
+    let provider_metadata = pick_provider_metadata(c.metadata.as_ref(), metadata_fallback);
     CustomerRef {
         provider_customer_id: c.id.as_str().to_string(),
         user_id,
         email: c.email.unwrap_or_default(),
-        provider_metadata: metadata,
+        provider_metadata,
+    }
+}
+
+/// Resolve `CustomerRef::provider_metadata` for a CustomerStore read /
+/// update response. Prefers the metadata Stripe returned over the
+/// request-side echo — Stripe normalises (drops nulls, truncates long
+/// values) and admin / reconciliation tooling needs the server's
+/// authoritative view, not the client's pre-flight copy. Falls back to
+/// the request-side metadata only when Stripe returned no metadata or
+/// returned an empty object.
+fn pick_provider_metadata(
+    server: Option<&HashMap<String, String>>,
+    fallback: serde_json::Value,
+) -> serde_json::Value {
+    match server {
+        Some(m) if !m.is_empty() => serde_json::Value::Object(
+            m.iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect(),
+        ),
+        _ => fallback,
     }
 }
 
@@ -150,7 +172,10 @@ impl CustomerStore for StripeProvider {
             .map_err(|e| PaymentError::Provider(format!("stripe customers.retrieve: {e}")))?;
 
         // See update_customer above for why user_id is None on the
-        // get path.
+        // get path. customer_to_ref reads `c.metadata` and only falls
+        // back to the placeholder argument if Stripe omitted metadata
+        // entirely — so admin / reconciliation tooling reading
+        // CustomerStore::get_customer always sees the server's view.
         Ok(customer_to_ref(c, None, serde_json::json!({})))
     }
 
@@ -221,5 +246,42 @@ mod tests {
         assert_eq!(map.len(), 1);
         assert!(map.contains_key("valid"));
         assert!(!map.contains_key("skipped"));
+    }
+
+    // ---- pick_provider_metadata --------------------------------------------
+    //
+    // `customer_to_ref` is impossible to unit-test directly:
+    // `stripe_shared::Customer` is non-exhaustive AND uses miniserde
+    // (not regular serde::Deserialize), so neither struct-literal nor
+    // serde_json::from_value can build a fixture. The helper extracted
+    // below is where the metadata-selection logic actually lives.
+
+    #[test]
+    fn pick_metadata_prefers_server_returned_over_fallback() {
+        let mut server = HashMap::new();
+        server.insert("plan".into(), "pro".into());
+        server.insert("tier".into(), "gold".into());
+        let fallback = json!({ "plan": "free" }); // intentionally different
+        let out = pick_provider_metadata(Some(&server), fallback);
+        let obj = out.as_object().expect("object");
+        assert_eq!(obj.get("plan").unwrap(), &json!("pro"));
+        assert_eq!(obj.get("tier").unwrap(), &json!("gold"));
+    }
+
+    #[test]
+    fn pick_metadata_falls_back_when_server_returns_none() {
+        let fallback = json!({ "from_request": "yes" });
+        let out = pick_provider_metadata(None, fallback);
+        let obj = out.as_object().expect("object");
+        assert_eq!(obj.get("from_request").unwrap(), &json!("yes"));
+    }
+
+    #[test]
+    fn pick_metadata_falls_back_when_server_returns_empty() {
+        let empty = HashMap::new();
+        let fallback = json!({ "from_request": "yes" });
+        let out = pick_provider_metadata(Some(&empty), fallback);
+        let obj = out.as_object().expect("object");
+        assert_eq!(obj.get("from_request").unwrap(), &json!("yes"));
     }
 }
