@@ -1599,11 +1599,10 @@ fn build_html_response(
 }
 
 fn render_dev_head(config: &InertiaConfig) -> String {
-    // Domain 20 audit D20-G / ChatGPT MODULE_REVIEW_NOTES ## inertia
-    // LOW #1: HTML-escape vite_dev_server + entry_point before
-    // interpolation. These are normally trusted config values, but a
-    // misconfigured env / config file could otherwise break the shell
-    // or inject markup into the dev-time HTML.
+    // HTML-escape vite_dev_server + entry_point before interpolation.
+    // These are normally trusted config values, but a misconfigured
+    // env / config file could otherwise break the shell or inject
+    // markup into the dev-time HTML.
     //
     // For the React preamble, the same `vite_dev_server` value is used
     // inside a JS single-quoted string. We use `serde_json::to_string`

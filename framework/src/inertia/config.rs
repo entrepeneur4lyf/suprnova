@@ -224,9 +224,7 @@ pub struct SsrConfig {
     /// abort the read and the request falls back to CSR (or 500 if
     /// `throw_on_error` is set). Default: 8 MiB — comfortably larger
     /// than any realistic SSR-rendered page but small enough to bound
-    /// damage from a misconfigured or compromised loopback worker
-    /// (Domain 20 audit D20-D / ChatGPT MODULE_REVIEW_NOTES ## inertia
-    /// MEDIUM #3).
+    /// damage from a misconfigured or compromised loopback worker.
     pub max_response_bytes: usize,
 }
 

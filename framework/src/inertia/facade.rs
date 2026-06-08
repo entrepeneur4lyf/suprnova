@@ -82,10 +82,9 @@ impl Inertia {
     ///    target — silently breaking form-create-then-redirect flows.
     ///
     /// Both middlewares were previously opt-in via the `global_middleware!`
-    /// macro. Closes ChatGPT MODULE_REVIEW_NOTES ## inertia MEDIUM #1
-    /// (Domain 20 audit D20-F): generated apps that forgot either
-    /// middleware quietly got stale-asset behaviour or method-preserving
-    /// redirects in production.
+    /// macro, which meant generated apps that forgot either one quietly
+    /// got stale-asset behaviour or method-preserving redirects in
+    /// production. Calling this helper at boot guarantees both are wired.
     ///
     /// Call once at boot. The `config.version` value is cloned out of
     /// the supplied `InertiaConfig` so callers can keep ownership of
