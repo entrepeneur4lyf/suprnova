@@ -240,18 +240,46 @@ impl MailTransport for SesMailTransport {
             SesContent::Raw(SesRaw { data: encoded })
         };
 
-        // SES tag rule: Name/Value chars are restricted (alphanumeric +
-        // `_`, `-`). We pass `tag` values raw and prefix synthetic keys
-        // with `tag_` so callers using SES-restricted character sets
-        // don't surprise the JSON API. Metadata flows through as-is.
+        // SES tag rule: Name and Value chars are restricted to
+        // `[A-Za-z0-9_-]`. Drop entries that violate the rule rather
+        // than ship malformed JSON to AWS (which would reject the
+        // whole send call). Log the drop so misconfigured caller code
+        // is observable rather than mysteriously losing tags.
+        //
+        // The synthetic `tag_<i>` keys we generate are by construction
+        // valid; only caller-supplied tag VALUES and the full
+        // metadata KEY/VALUE pair can violate the allowlist.
+        fn ses_tag_valid(s: &str) -> bool {
+            !s.is_empty()
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        }
         let mut email_tags: Vec<SesTag> = Vec::new();
         for (i, t) in msg.tags.iter().enumerate() {
+            if !ses_tag_valid(t) {
+                tracing::warn!(
+                    tag_index = i,
+                    tag_value = %t,
+                    "SES: dropping msg.tag at index {i} — value contains chars outside \
+                     [A-Za-z0-9_-]; AWS would reject the entire send call"
+                );
+                continue;
+            }
             email_tags.push(SesTag {
                 name: format!("tag_{i}"),
                 value: t.clone(),
             });
         }
         for (k, v) in &msg.metadata {
+            if !ses_tag_valid(k) || !ses_tag_valid(v) {
+                tracing::warn!(
+                    metadata_key = %k,
+                    metadata_value = %v,
+                    "SES: dropping msg.metadata entry — key or value contains chars outside \
+                     [A-Za-z0-9_-]; AWS would reject the entire send call"
+                );
+                continue;
+            }
             email_tags.push(SesTag {
                 name: k.clone(),
                 value: v.clone(),

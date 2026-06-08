@@ -769,12 +769,35 @@ async fn update_passkey_credential_blob(
     // not depend on torii-storage-seaorm's `passkey::Entity`
     // privately, and re-deriving the entity here would couple the
     // framework to torii's migration shape twice.
+    //
+    // Backend-aware identifier quoting + placeholder rendering — the
+    // raw SQL must work on MySQL too (default `sql_mode` reads `"…"`
+    // as a string literal, not an identifier, and rejects `$N`-style
+    // placeholders as a syntax error). MariaDB / MySQL get backticks
+    // + `?`; Postgres + SQLite get ANSI double-quotes + `$N`.
     let backend = conn.inner().get_database_backend();
-    let select_stmt = Statement::from_sql_and_values(
-        backend,
-        r#"SELECT "data_json" FROM "passkeys" WHERE "credential_id" = $1"#,
-        [credential_id_b64.clone().into()],
+    let qid = |id: &str| -> String {
+        match backend {
+            sea_orm::DatabaseBackend::MySql => format!("`{id}`"),
+            _ => format!("\"{id}\""),
+        }
+    };
+    let ph = |n: usize| -> String {
+        match backend {
+            sea_orm::DatabaseBackend::Postgres => format!("${n}"),
+            _ => "?".into(),
+        }
+    };
+
+    let select_sql = format!(
+        "SELECT {data_json} FROM {passkeys} WHERE {credential_id} = {ph1}",
+        data_json = qid("data_json"),
+        passkeys = qid("passkeys"),
+        credential_id = qid("credential_id"),
+        ph1 = ph(1),
     );
+    let select_stmt =
+        Statement::from_sql_and_values(backend, select_sql, [credential_id_b64.clone().into()]);
     let current_row = conn
         .inner()
         .query_one(select_stmt)
@@ -800,9 +823,19 @@ async fn update_passkey_credential_blob(
 
     let new_data = json.to_string();
 
+    let update_sql = format!(
+        "UPDATE {passkeys} SET {data_json} = {ph1}, {updated_at} = {ph2} WHERE {credential_id} = {ph3}",
+        passkeys = qid("passkeys"),
+        data_json = qid("data_json"),
+        updated_at = qid("updated_at"),
+        credential_id = qid("credential_id"),
+        ph1 = ph(1),
+        ph2 = ph(2),
+        ph3 = ph(3),
+    );
     let update_stmt = Statement::from_sql_and_values(
         backend,
-        r#"UPDATE "passkeys" SET "data_json" = $1, "updated_at" = $2 WHERE "credential_id" = $3"#,
+        update_sql,
         [
             new_data.into(),
             chrono::Utc::now().into(),

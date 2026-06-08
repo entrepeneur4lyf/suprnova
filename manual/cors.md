@@ -123,17 +123,27 @@ Laravel-named aliases (so `cors.php` users find what they expect):
 ## Credentials and `*`
 
 Per the Fetch spec, `Access-Control-Allow-Origin: *` is invalid together
-with credentials — the browser rejects the response. When
-`allow_credentials(true)` is set, the middleware always echoes the
-specific request `Origin` instead of `*` (and likewise reflects requested
-headers verbatim rather than emitting `*`), so the invalid combination
-can never be emitted.
+with credentials — the browser rejects the response. With an explicit
+origin list (`allow_origins([...])`) plus `allow_credentials(true)`,
+the middleware echoes the specific request `Origin` rather than `*`,
+and the policy works as expected.
+
+**`any_origin() + allow_credentials(true)` panics at build time.** The
+combination is a complete bypass of origin allowlisting: any attacker
+page can make credentialed cross-origin requests and read responses.
+Rather than emit the wrong header at runtime, the policy constructor
+fails loud so the misconfiguration never reaches a running deployment.
+Use an explicit allowlist instead:
 
 ```rust,ignore
-CorsConfig::any_origin().allow_credentials(true)
+// CORRECT — explicit allowlist with credentials.
+CorsConfig::allow_origins(["https://app.example"]).allow_credentials(true)
 // → on request with Origin: https://app.example
-// → response: Access-Control-Allow-Origin: https://app.example  (not *)
+// → response: Access-Control-Allow-Origin: https://app.example
 //             Access-Control-Allow-Credentials: true
+
+// REJECTED at build time — panics with a remediation message.
+// CorsConfig::any_origin().allow_credentials(true)
 ```
 
 ## Max-age

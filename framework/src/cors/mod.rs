@@ -405,13 +405,37 @@ impl CorsConfig {
 
     /// Allow credentials (cookies, `Authorization`) on cross-origin
     /// requests. Forces origin/header echoing instead of `*`.
+    ///
+    /// # Panics
+    ///
+    /// Panics at build time when the policy combines `any_origin()`
+    /// with `allow_credentials(true)`. The combination is a complete
+    /// bypass of origin allowlisting — any attacker page can make
+    /// credentialed cross-origin requests and read responses — and
+    /// rejecting it loudly at policy construction prevents the
+    /// misconfiguration from reaching production. Use an explicit
+    /// origin list (`from_origins(["https://app.example"])`) when
+    /// you need credentials.
     pub fn allow_credentials(mut self, allow: bool) -> Self {
+        if allow && matches!(self.origins, AllowedOrigins::Any) {
+            panic!(
+                "CORS misconfiguration: any_origin() + allow_credentials(true) lets any \
+                 attacker page make credentialed cross-origin requests against this server. \
+                 Restrict origins to an explicit allowlist via `CorsConfig::from_origins(...)` \
+                 (or `from_origin_patterns(...)` for regex matching) before enabling \
+                 credentials."
+            );
+        }
         self.allow_credentials = allow;
         self
     }
 
     /// Laravel-named alias for [`Self::allow_credentials`]; matches the
     /// `supports_credentials` key in Laravel's `cors.php` config.
+    ///
+    /// # Panics
+    ///
+    /// Same conditions as [`Self::allow_credentials`].
     pub fn supports_credentials(self, allow: bool) -> Self {
         self.allow_credentials(allow)
     }
@@ -677,13 +701,34 @@ mod tests {
 
     #[test]
     fn credentials_force_specific_origin_never_wildcard() {
-        // The `*` + credentials combination is invalid per the Fetch spec.
-        let cfg = CorsConfig::any_origin().allow_credentials(true);
+        // With an explicit origin list + credentials, the policy echoes
+        // the specific origin (the `*` + credentials combination is
+        // invalid per the Fetch spec). The `any_origin() + credentials`
+        // combination is now rejected at build time — see
+        // `any_origin_with_credentials_panics_on_build`.
+        let cfg = CorsConfig::allow_origins(["https://app.example"]).allow_credentials(true);
         assert_eq!(
             cfg.resolve_acao("https://app.example"),
             Some("https://app.example".to_string()),
             "credentials must echo the specific origin, never `*`"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "any_origin() + allow_credentials(true)")]
+    fn any_origin_with_credentials_panics_on_build() {
+        // The combination would let any attacker page make credentialed
+        // cross-origin requests against this server. Reject loudly at
+        // policy construction so the misconfiguration never reaches a
+        // running deployment.
+        let _ = CorsConfig::any_origin().allow_credentials(true);
+    }
+
+    #[test]
+    #[should_panic(expected = "any_origin() + allow_credentials(true)")]
+    fn any_origin_with_supports_credentials_panics_on_build() {
+        // Same as above through the Laravel-named alias.
+        let _ = CorsConfig::any_origin().supports_credentials(true);
     }
 
     #[test]
