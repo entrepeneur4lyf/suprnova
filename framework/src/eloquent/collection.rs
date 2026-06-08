@@ -858,8 +858,26 @@ where
     /// Serialise the whole collection to a JSON string. Built on top
     /// of [`Self::to_array`] so the per-model filter pipeline applies
     /// to every row in the output.
+    ///
+    /// `to_array` produces a `serde_json::Value::Array(...)` whose
+    /// elements are pure JSON values, and `serde_json::to_string` only
+    /// fails on map keys that aren't strings — which `Value` cannot
+    /// represent — so the serialisation step is effectively
+    /// infallible. We still fall back to `"[]"` (the canonical
+    /// empty-collection JSON) instead of `""` on any future surface
+    /// change, so consumers always parse a syntactically valid array.
+    /// Callers that want to surface serialisation failures should use
+    /// [`Self::try_to_json`].
     pub fn to_json(&self) -> String {
-        serde_json::to_string(&self.to_array()).unwrap_or_default()
+        self.try_to_json().unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Fallible sibling of [`Self::to_json`]: returns the
+    /// `serde_json::Error` raised by `to_string` instead of swapping
+    /// it for an empty-array fallback. Useful when downstream code
+    /// must distinguish "no rows" from "serialisation failed".
+    pub fn try_to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(&self.to_array())
     }
 }
 

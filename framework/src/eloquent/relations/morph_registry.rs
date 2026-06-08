@@ -13,6 +13,8 @@
 //! `morph_type_not_registered_for_non_morph_models` test pins this).
 
 use std::any::TypeId;
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
 /// One entry per `#[suprnova::model(morph_type = "...")]`-annotated
 /// struct, emitted at compile time.
@@ -47,16 +49,37 @@ pub fn morph_types() -> impl Iterator<Item = &'static MorphTypeEntry> {
     inventory::iter::<MorphTypeEntry>()
 }
 
+/// Morph-string index built once on first lookup. Inventory is static
+/// over the lifetime of the binary so the index never needs to grow;
+/// `OnceLock` gives us a free single-init slot without dragging in
+/// `once_cell` for this one site.
+fn morph_by_name() -> &'static HashMap<&'static str, &'static MorphTypeEntry> {
+    static IDX: OnceLock<HashMap<&'static str, &'static MorphTypeEntry>> = OnceLock::new();
+    IDX.get_or_init(|| morph_types().map(|e| (e.morph_type, e)).collect())
+}
+
+/// Morph-TypeId index (reverse lookup). Same shape as `morph_by_name`;
+/// we materialise the `TypeId` values during init so the lookup itself
+/// doesn't call the per-entry thunk.
+fn morph_by_type_id() -> &'static HashMap<TypeId, &'static MorphTypeEntry> {
+    static IDX: OnceLock<HashMap<TypeId, &'static MorphTypeEntry>> = OnceLock::new();
+    IDX.get_or_init(|| morph_types().map(|e| ((e.type_id)(), e)).collect())
+}
+
 /// Find a morph type by its stored `*_type` string. `None` if no model
 /// registers that string — distinguishes "registered but not in this
-/// MorphTo's target list" from "completely unknown" at runtime.
+/// MorphTo's target list" from "completely unknown" at runtime. O(1)
+/// after the first lookup builds the index; linear scans previously
+/// scaled with the number of `#[suprnova::model(morph_type)]` decls,
+/// which matters once a polymorphic table fans out across many target
+/// types and the loader runs per-row.
 pub fn find_morph_type(name: &str) -> Option<&'static MorphTypeEntry> {
-    morph_types().find(|e| e.morph_type == name)
+    morph_by_name().get(name).copied()
 }
 
 /// Reverse lookup: find the registered morph type for a Rust `TypeId`.
 /// Useful for debug / admin tooling that wants to render the morph_type
-/// string for a known concrete type.
+/// string for a known concrete type. O(1) after first init.
 pub fn find_morph_type_by_id(id: TypeId) -> Option<&'static MorphTypeEntry> {
-    morph_types().find(|e| (e.type_id)() == id)
+    morph_by_type_id().get(&id).copied()
 }

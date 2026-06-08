@@ -237,6 +237,21 @@ async fn to_json_returns_serialized_string() {
 }
 
 #[tokio::test]
+async fn collection_to_json_empty_returns_valid_array() {
+    // Pre-fix `Collection::to_json` returned `""` on a serialise
+    // failure. `[]` is the canonical empty-collection JSON; this also
+    // guards against the empty-vs-failure path producing different
+    // strings for consumers that parse the result downstream.
+    let _db = basic_fixture().await;
+    let empty = T6Basic::query().get().await.unwrap();
+    assert_eq!(empty.to_json(), "[]");
+    // try_to_json mirrors the success path; on the (currently
+    // impossible) failure path the caller gets the error directly
+    // instead of a silent fallback.
+    assert_eq!(empty.try_to_json().unwrap(), "[]");
+}
+
+#[tokio::test]
 async fn hidden_fields_are_removed_from_to_array() {
     let _db = hidden_fixture().await;
     let u = T6HiddenUser::create(attrs! {
