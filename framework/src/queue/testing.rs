@@ -71,6 +71,8 @@ pub fn install_fake() -> QueueFakeGuard {
     QueueFakeGuard { _serial: serial }
 }
 
+/// RAII guard returned by [`install_fake`]. Holds the process-wide
+/// serialization lock and clears the fake store on drop.
 pub struct QueueFakeGuard {
     _serial: MutexGuard<'static, ()>,
 }
@@ -83,6 +85,8 @@ impl Drop for QueueFakeGuard {
     }
 }
 
+/// Assert at least one captured push of `J` satisfies `pred`. Panics
+/// when no match is found.
 pub fn assert_pushed<J: Job>(pred: impl Fn(&J) -> bool) {
     let g = lock_fake();
     let store = g.as_ref().expect("Queue::fake() must be active");
@@ -145,6 +149,7 @@ pub fn assert_pushed_later<J: Job>(pred: impl Fn(&J, DateTime<Utc>) -> bool) {
     );
 }
 
+/// All captured pushes of `J` deserialized back into the typed payload.
 pub fn pushed<J: Job>() -> Vec<J> {
     let g = lock_fake();
     let store = g.as_ref().expect("Queue::fake() must be active");

@@ -5,10 +5,14 @@ use crate::error::FrameworkError;
 use crate::mail::transport::{MailTransport, OutgoingMessage};
 use async_trait::async_trait;
 
+/// Dev-time transport that emits a `tracing::info!` line per dispatch
+/// and discards the message. Useful for inspecting what mail *would*
+/// send without contacting an upstream provider.
 #[derive(Default)]
 pub struct LogMailTransport;
 
 impl LogMailTransport {
+    /// Construct a fresh log transport.
     pub fn new() -> Self {
         Self
     }

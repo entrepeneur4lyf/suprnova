@@ -10,12 +10,15 @@ use std::collections::BTreeMap;
 
 const DEFAULT_ENDPOINT: &str = "https://api.sendgrid.com/v3/mail/send";
 
+/// SendGrid v3 HTTP transport. Authenticates via a bearer API key and
+/// POSTs JSON to the SendGrid `/v3/mail/send` endpoint.
 pub struct SendGridMailTransport {
     api_key: String,
     endpoint: String,
 }
 
 impl SendGridMailTransport {
+    /// Build a transport pointing at SendGrid's production endpoint.
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
@@ -23,6 +26,9 @@ impl SendGridMailTransport {
         }
     }
 
+    /// Build a transport pointing at a custom endpoint (test/staging
+    /// or regional mirror). The endpoint is normalized to include the
+    /// trailing `/v3/mail/send` path component.
     pub fn with_endpoint(api_key: impl Into<String>, endpoint: impl AsRef<str>) -> Self {
         // Trim trailing slash first so `https://x.example/v3/mail/send/` is
         // detected as already-terminated and we don't double-append.

@@ -5,12 +5,15 @@ use crate::mail::transport::{MailTransport, OutgoingMessage};
 use async_trait::async_trait;
 use std::sync::Mutex;
 
+/// Test-only [`MailTransport`] that retains every dispatched message
+/// in-process. Backs [`MailFake`](crate::mail::MailFake).
 #[derive(Default)]
 pub struct InMemoryMailTransport {
     sent: Mutex<Vec<OutgoingMessage>>,
 }
 
 impl InMemoryMailTransport {
+    /// Construct a fresh, empty in-memory transport.
     pub fn new() -> Self {
         Self::default()
     }

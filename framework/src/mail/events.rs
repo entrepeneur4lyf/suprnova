@@ -19,15 +19,25 @@ use crate::mail::transport::OutgoingMessage;
 /// logging, sampled tracing) and best-effort metrics.
 #[derive(Debug, Clone)]
 pub struct MessageSending {
+    /// Sender envelope-from address.
     pub from: Address,
+    /// Primary recipients.
     pub to: Vec<Address>,
+    /// CC recipients.
     pub cc: Vec<Address>,
+    /// BCC recipients.
     pub bcc: Vec<Address>,
+    /// Reply-To addresses.
     pub reply_to: Vec<Address>,
+    /// Rendered subject line.
     pub subject: String,
+    /// `true` when an HTML body part was rendered.
     pub has_html: bool,
+    /// `true` when a text body part was rendered.
     pub has_text: bool,
+    /// Number of attachments included in the send.
     pub attachment_count: usize,
+    /// Provider-side tags applied to the message (for grouping/analytics).
     pub tags: Vec<String>,
 }
 
@@ -43,15 +53,25 @@ impl Event for MessageSending {
 /// span is the failure-side record).
 #[derive(Debug, Clone)]
 pub struct MessageSent {
+    /// Sender envelope-from address.
     pub from: Address,
+    /// Primary recipients.
     pub to: Vec<Address>,
+    /// CC recipients.
     pub cc: Vec<Address>,
+    /// BCC recipients.
     pub bcc: Vec<Address>,
+    /// Reply-To addresses.
     pub reply_to: Vec<Address>,
+    /// Rendered subject line.
     pub subject: String,
+    /// `true` when an HTML body part was rendered.
     pub has_html: bool,
+    /// `true` when a text body part was rendered.
     pub has_text: bool,
+    /// Number of attachments included in the send.
     pub attachment_count: usize,
+    /// Provider-side tags applied to the message (for grouping/analytics).
     pub tags: Vec<String>,
 }
 

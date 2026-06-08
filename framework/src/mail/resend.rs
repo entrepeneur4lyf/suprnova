@@ -11,12 +11,15 @@ use std::collections::BTreeMap;
 
 const DEFAULT_ENDPOINT: &str = "https://api.resend.com/emails";
 
+/// Resend HTTP transport. Authenticates via a bearer API key and POSTs
+/// JSON to the Resend `/emails` endpoint.
 pub struct ResendMailTransport {
     api_key: String,
     endpoint: String,
 }
 
 impl ResendMailTransport {
+    /// Build a transport pointing at Resend's production endpoint.
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
@@ -24,6 +27,9 @@ impl ResendMailTransport {
         }
     }
 
+    /// Build a transport pointing at a custom endpoint (test/staging
+    /// or regional mirror). The endpoint is normalized to include the
+    /// trailing `/emails` path component.
     pub fn with_endpoint(api_key: impl Into<String>, endpoint: impl AsRef<str>) -> Self {
         // Trim trailing slash first so `https://x.example/emails/` is detected
         // as already-terminated and we don't double-append.

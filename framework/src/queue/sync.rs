@@ -18,10 +18,14 @@ use crate::queue::worker::dispatch_by_name;
 use async_trait::async_trait;
 use std::time::Duration;
 
+/// [`QueueDriver`] that runs each pushed job inline on the calling
+/// task. Mirrors Laravel's `sync` driver — useful in tests and in
+/// configurations where no background worker is desired.
 #[derive(Default)]
 pub struct SyncQueueDriver;
 
 impl SyncQueueDriver {
+    /// Construct a fresh sync driver.
     pub fn new() -> Self {
         Self
     }

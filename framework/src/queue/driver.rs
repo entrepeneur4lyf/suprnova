@@ -14,10 +14,16 @@ pub struct ReservationToken(pub Uuid);
 /// One popped message + its reservation token.
 #[derive(Debug, Clone)]
 pub struct Reservation {
+    /// The popped envelope; held until `ack` or `nack` settles the
+    /// reservation.
     pub envelope: Envelope,
+    /// Driver-issued token the worker presents to settle the message.
     pub token: ReservationToken,
 }
 
+/// Backend contract every queue driver (sync, memory, database, redis,
+/// SQS, beanstalk, …) implements. The worker speaks to drivers
+/// exclusively through this trait.
 #[async_trait]
 pub trait QueueDriver: Send + Sync {
     /// Enqueue a fully-formed envelope. Drivers MUST NOT mutate it.

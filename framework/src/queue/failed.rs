@@ -31,15 +31,24 @@ use uuid::Uuid;
 /// payload that originally failed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FailedJob {
+    /// Record id assigned by the store on insert.
     pub id: Uuid,
+    /// Driver connection name the job ran on (e.g. `"sqs"`, `"database"`).
     pub connection: String,
+    /// Queue name the job ran on (e.g. `"default"`, `"high"`).
     pub queue: String,
+    /// Fully-qualified job type name (matches `Envelope::job_name`).
     pub job_name: String,
+    /// Verbatim serialized envelope, suitable for re-enqueue via `queue:retry`.
     pub envelope_json: String,
+    /// Formatted display of the final failure cause.
     pub exception: String,
+    /// When the record was logged.
     pub failed_at: DateTime<Utc>,
 }
 
+/// Storage backend for dead-lettered jobs. Drivers (memory, database,
+/// null) implement this so the worker can log failures uniformly.
 #[async_trait]
 pub trait FailedJobStore: Send + Sync {
     /// Persist a new failed-job record. Returns the record's id.
@@ -75,12 +84,15 @@ pub trait FailedJobStore: Send + Sync {
 // Memory backend
 // ---------------------------------------------------------------------------
 
+/// In-process [`FailedJobStore`] backed by a `Mutex<Vec>`. Lost on
+/// process restart; use [`DatabaseFailedJobStore`] for persistence.
 #[derive(Default)]
 pub struct MemoryFailedJobStore {
     rows: Mutex<Vec<FailedJob>>,
 }
 
 impl MemoryFailedJobStore {
+    /// Construct a fresh, empty in-memory store.
     pub fn new() -> Self {
         Self::default()
     }
@@ -174,10 +186,14 @@ impl FailedJobStore for MemoryFailedJobStore {
 // Null backend
 // ---------------------------------------------------------------------------
 
+/// [`FailedJobStore`] that discards every record. Mirrors Laravel's
+/// `NullFailedJobProvider` — use it to disable failed-job retention
+/// without removing the worker's logging path.
 #[derive(Default)]
 pub struct NullFailedJobStore;
 
 impl NullFailedJobStore {
+    /// Construct a fresh null store.
     pub fn new() -> Self {
         Self
     }
@@ -241,6 +257,9 @@ pub struct DatabaseFailedJobStore {
 }
 
 impl DatabaseFailedJobStore {
+    /// Open a database-backed store against `table`. The table name is
+    /// validated as a SQL identifier — invalid input returns
+    /// [`FrameworkError`] rather than reaching the database.
     pub fn new(db: DatabaseConnection, table: String) -> Result<Self, FrameworkError> {
         validate_identifier(&table)?;
         Ok(Self { db, table })

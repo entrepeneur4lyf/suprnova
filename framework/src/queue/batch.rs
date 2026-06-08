@@ -30,15 +30,25 @@ use uuid::Uuid;
 /// Snapshot of one batch's state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Batch {
+    /// Batch identifier (UUID v4 as string).
     pub id: String,
+    /// Human-readable batch name set at dispatch.
     pub name: String,
+    /// Total jobs ever added to the batch.
     pub total_jobs: u64,
+    /// Outstanding jobs awaiting settlement; callbacks fire when this hits 0.
     pub pending_jobs: u64,
+    /// Count of jobs that failed terminally.
     pub failed_jobs: u64,
+    /// Envelope ids of jobs that failed terminally.
     pub failed_job_ids: Vec<Uuid>,
+    /// Per-batch behavior switches (callbacks, fail policy).
     pub options: BatchOptions,
+    /// When the batch was first persisted.
     pub created_at: DateTime<Utc>,
+    /// When the batch was cancelled, if ever.
     pub cancelled_at: Option<DateTime<Utc>>,
+    /// When the batch finalized (`pending_jobs` reached 0), if ever.
     pub finished_at: Option<DateTime<Utc>>,
 }
 
@@ -89,32 +99,52 @@ pub struct BatchOptions {
 /// worker uses to decide if callbacks should fire.
 #[derive(Debug, Clone, Copy)]
 pub struct UpdatedBatchJobCounts {
+    /// Outstanding jobs after the update (callbacks fire when this hits 0).
     pub pending_jobs: u64,
+    /// Total failed jobs after the update.
     pub failed_jobs: u64,
 }
 
+/// Persistence backend for queued-batch metadata. Drivers (memory,
+/// database) implement this so workers can update per-job progress
+/// atomically and decide when to fire callbacks.
 #[async_trait]
 pub trait BatchRepository: Send + Sync {
+    /// Persist a fresh [`Batch`] row.
     async fn store(&self, batch: Batch) -> Result<(), FrameworkError>;
+    /// Look up a batch by id; returns `Ok(None)` if no such batch exists.
     async fn find(&self, id: &str) -> Result<Option<Batch>, FrameworkError>;
+    /// Atomically add `delta` jobs to the batch's `total_jobs` and
+    /// `pending_jobs` counters, returning the post-update snapshot.
     async fn increment_total_jobs(
         &self,
         id: &str,
         delta: u64,
     ) -> Result<UpdatedBatchJobCounts, FrameworkError>;
+    /// Atomically decrement `pending_jobs` for a successful settlement,
+    /// returning the post-update counts the worker uses for callback gating.
     async fn record_successful_job(
         &self,
         id: &str,
         job_id: Uuid,
     ) -> Result<UpdatedBatchJobCounts, FrameworkError>;
+    /// Atomically decrement `pending_jobs` and increment `failed_jobs`,
+    /// recording `job_id` in `failed_job_ids` and returning the post-update
+    /// counts.
     async fn record_failed_job(
         &self,
         id: &str,
         job_id: Uuid,
     ) -> Result<UpdatedBatchJobCounts, FrameworkError>;
+    /// Mark the batch cancelled. Workers honor the flag via
+    /// `SkipIfBatchCancelled` middleware on the next attempt.
     async fn cancel(&self, id: &str) -> Result<(), FrameworkError>;
+    /// `Ok(true)` if the batch has been cancelled.
     async fn is_cancelled(&self, id: &str) -> Result<bool, FrameworkError>;
+    /// Stamp `finished_at` once `pending_jobs` reaches zero.
     async fn mark_finished(&self, id: &str) -> Result<(), FrameworkError>;
+    /// Permanently delete the batch row. Returns `Ok(true)` if a row was
+    /// removed.
     async fn delete(&self, id: &str) -> Result<bool, FrameworkError>;
 }
 
@@ -122,12 +152,15 @@ pub trait BatchRepository: Send + Sync {
 // Memory repository
 // ---------------------------------------------------------------------------
 
+/// In-process [`BatchRepository`] backed by a `Mutex<HashMap>`. Used as the
+/// default when no other repository is installed; lost on process restart.
 #[derive(Default)]
 pub struct MemoryBatchRepository {
     inner: Mutex<HashMap<String, Batch>>,
 }
 
 impl MemoryBatchRepository {
+    /// Construct a fresh, empty in-memory batch repository.
     pub fn new() -> Self {
         Self::default()
     }
@@ -288,12 +321,18 @@ pub(crate) fn resolve_callback(name: &str) -> Option<Arc<dyn BatchCallback>> {
 
 static REPO: RwLock<Option<Arc<dyn BatchRepository>>> = RwLock::new(None);
 
+/// Install the process-wide [`BatchRepository`]. Subsequent calls replace
+/// the previous installation; integration tests typically install a fresh
+/// [`MemoryBatchRepository`] per case.
 pub fn install_repository(repo: Arc<dyn BatchRepository>) {
     if let Ok(mut g) = REPO.write() {
         *g = Some(repo);
     }
 }
 
+/// Return the currently installed [`BatchRepository`], or `None` if no
+/// repository has been wired (callers should fall through to
+/// [`ensure_default_repository`] before dispatch).
 pub fn current_repository() -> Option<Arc<dyn BatchRepository>> {
     REPO.read().ok().and_then(|g| g.clone())
 }
@@ -322,7 +361,9 @@ pub(crate) fn ensure_default_repository() {
 ///     .await?;
 /// ```
 pub struct PendingBatch {
+    /// Human-readable batch name (surfaced in events and dashboards).
     pub name: String,
+    /// Per-batch behavior switches (callbacks, fail policy).
     pub options: BatchOptions,
     envelopes: Vec<Envelope>,
 }
@@ -334,6 +375,7 @@ impl Default for PendingBatch {
 }
 
 impl PendingBatch {
+    /// Construct an empty pending batch with no name and no jobs.
     pub fn new() -> Self {
         Self {
             name: String::new(),
@@ -342,6 +384,7 @@ impl PendingBatch {
         }
     }
 
+    /// Set the human-readable batch name (surfaced in events and dashboards).
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
         self

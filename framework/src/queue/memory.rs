@@ -41,6 +41,9 @@ struct Inner {
     reserved: HashMap<ReservationToken, Envelope>,
 }
 
+/// In-process [`QueueDriver`] backed by a FIFO `VecDeque` plus
+/// `DelayQueue`s for visibility timeouts and delayed dispatches.
+/// Lost on process restart.
 pub struct MemoryQueueDriver {
     inner: Arc<Mutex<Inner>>,
     /// Async mutex guards the visibility DelayQueue so both `pop` and the reaper
@@ -109,6 +112,9 @@ fn drain_delayed(
 }
 
 impl MemoryQueueDriver {
+    /// Construct a fresh in-process queue driver. Spawns a Tokio reaper
+    /// task that reclaims expired visibility reservations; the task is
+    /// aborted when the driver is dropped.
     pub fn new() -> Self {
         let inner = Arc::new(Mutex::new(Inner::default()));
         let visibility = Arc::new(AsyncMutex::new(DelayQueue::new()));

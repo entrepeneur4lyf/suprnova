@@ -5,21 +5,31 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::time::Duration;
 
+/// Policy controlling the delay between a job's retry attempts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackoffSchedule {
     /// Fixed delay between every retry. `secs` is the per-attempt delay.
-    Fixed { secs: u64 },
+    Fixed {
+        /// Per-attempt delay, in seconds.
+        secs: u64,
+    },
     /// Exponential: `delay = min(base * 2^(attempts-1), cap)`, multiplied
     /// by a random factor in `[1 - jitter_ratio, 1 + jitter_ratio]`.
     Exponential {
+        /// First-retry delay in seconds; doubles on each subsequent attempt.
         base_secs: u64,
+        /// Maximum delay in seconds; subsequent attempts cannot exceed this.
         cap_secs: u64,
+        /// Symmetric jitter applied to the computed delay (0.0 disables).
         jitter_ratio: f32,
     },
     /// Explicit schedule, one entry per attempt. If more attempts than
     /// entries, the last entry is reused.
-    Sequence { secs: Vec<u64> },
+    Sequence {
+        /// Ordered per-attempt delays in seconds; the last entry repeats.
+        secs: Vec<u64>,
+    },
 }
 
 impl Default for BackoffSchedule {
@@ -33,6 +43,9 @@ impl Default for BackoffSchedule {
     }
 }
 
+/// Background job contract: a serializable type with an async `handle`
+/// the worker dispatches after deserialization. Mirrors Laravel's
+/// `ShouldQueue` interface.
 #[async_trait]
 pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// Stable string used in the envelope's `job_name`. Must be unique

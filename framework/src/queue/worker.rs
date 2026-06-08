@@ -76,6 +76,9 @@ struct Registration {
 
 static REGISTRY: RwLock<Option<HashMap<String, Registration>>> = RwLock::new(None);
 
+/// Register `J` so the worker can dispatch envelopes carrying its
+/// `job_name`. Last-write-wins; re-registering the same name replaces
+/// the prior dispatcher and emits a `warn` trace event.
 pub fn register_job<J: Job>() {
     let dispatcher: Dispatcher = Arc::new(|payload: serde_json::Value| {
         Box::pin(async move {
@@ -111,6 +114,8 @@ pub fn register_job<J: Job>() {
     }
 }
 
+/// Look up the dispatcher registered under `name` and run it against
+/// `payload`. Returns `Err` if no job is registered under that name.
 pub async fn dispatch_by_name(
     name: &str,
     payload: serde_json::Value,
@@ -192,9 +197,13 @@ pub fn registered_job_names() -> Vec<String> {
 // Worker loop (Task 8)
 // ============================================================================
 
+/// Runtime tuning for [`run_worker`].
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
+    /// How long a reservation stays held before another worker may re-claim
+    /// the envelope. Drivers that lack lease semantics ignore this.
     pub visibility_timeout: Duration,
+    /// Sleep duration when the driver returns no envelope on a poll.
     pub poll_interval: Duration,
     /// Optional hard cap on jobs processed by this worker before it exits
     /// cleanly. `None` runs until cancelled. Used by `queue:work --max-jobs N`

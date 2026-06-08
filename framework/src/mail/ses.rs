@@ -18,6 +18,9 @@ use lettre::message::{
 use serde::Serialize;
 use std::time::SystemTime;
 
+/// AWS SES v2 (`SendEmail`) transport. Builds sigv4-signed JSON
+/// requests; messages with attachments are rendered to RFC 5322 MIME
+/// and sent as `Content.Raw.Data`.
 pub struct SesMailTransport {
     access_key: String,
     secret_key: String,
@@ -26,6 +29,8 @@ pub struct SesMailTransport {
 }
 
 impl SesMailTransport {
+    /// Build a transport using the region's default outbound endpoint
+    /// (`https://email.<region>.amazonaws.com/v2/email/outbound-emails`).
     pub fn new(
         access_key: impl Into<String>,
         secret_key: impl Into<String>,
@@ -41,6 +46,9 @@ impl SesMailTransport {
         }
     }
 
+    /// Build a transport pointing at a custom endpoint (LocalStack,
+    /// VPC endpoint, or regional override). The URL is normalized to
+    /// include the trailing `/v2/email/outbound-emails` path.
     pub fn with_endpoint(
         access_key: impl Into<String>,
         secret_key: impl Into<String>,

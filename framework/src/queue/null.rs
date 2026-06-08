@@ -11,10 +11,14 @@ use crate::queue::envelope::Envelope;
 use async_trait::async_trait;
 use std::time::Duration;
 
+/// [`QueueDriver`] that drops every push and never returns a
+/// reservation. Mirrors Laravel's `NullQueue` — useful for CI runs
+/// where the queueing side-effect is not under test.
 #[derive(Default)]
 pub struct NullQueueDriver;
 
 impl NullQueueDriver {
+    /// Construct a fresh null driver.
     pub fn new() -> Self {
         Self
     }

@@ -13,6 +13,10 @@ use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, T
 use std::time::Duration;
 use uuid::Uuid;
 
+/// SeaORM-backed [`QueueDriver`] that stores envelopes in a SQL `jobs`
+/// table. Push, pop, ack, and nack are all transactional; visibility is
+/// enforced via a `reserved_at` column the pop path conditionally
+/// updates.
 pub struct DatabaseQueueDriver {
     db: DatabaseConnection,
     table: String,

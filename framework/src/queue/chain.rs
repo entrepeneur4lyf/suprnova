@@ -20,10 +20,15 @@ use serde::{Deserialize, Serialize};
 /// envelope's `chain_remaining` field.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainLink {
+    /// Fully-qualified job type name (matches `Job::job_name()`).
     pub job_name: String,
+    /// Serialized job payload, captured at chain-build time.
     pub payload: serde_json::Value,
+    /// Maximum dispatch attempts for this link.
     pub max_tries: u32,
+    /// Per-attempt timeout budget in seconds; `None` disables.
     pub timeout_secs: Option<u64>,
+    /// When `true`, a timeout consumes the attempt as a permanent failure.
     pub fail_on_timeout: bool,
     /// Job-side backoff schedule captured at chain-build time. `#[serde(default)]`
     /// keeps schema-v2 chain payloads (which omitted this field) decoding —
@@ -83,6 +88,7 @@ impl Default for PendingChain {
 }
 
 impl PendingChain {
+    /// Construct an empty pending chain with no links.
     pub fn new() -> Self {
         Self { links: Vec::new() }
     }
@@ -98,6 +104,7 @@ impl PendingChain {
     pub fn len(&self) -> usize {
         self.links.len()
     }
+    /// `true` when the chain has no links queued yet.
     pub fn is_empty(&self) -> bool {
         self.links.is_empty()
     }

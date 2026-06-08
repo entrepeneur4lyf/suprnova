@@ -14,6 +14,9 @@ use async_trait::async_trait;
 
 const DEFAULT_ENDPOINT: &str = "https://api.mailgun.net";
 
+/// Mailgun HTTP transport. Authenticates via HTTP-basic with the
+/// account API key and POSTs form data to
+/// `<endpoint>/v3/<domain>/messages`.
 pub struct MailgunMailTransport {
     api_key: String,
     domain: String,

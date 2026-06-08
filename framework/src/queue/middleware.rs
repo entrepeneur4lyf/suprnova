@@ -43,6 +43,9 @@ pub type Next = Box<
 /// returns them (outermost first), wrapping the handler call.
 #[async_trait]
 pub trait JobMiddleware: Send + Sync + 'static {
+    /// Wrap the next layer of the pipeline. Return `Ok(JobOutcome::*)` to
+    /// settle the attempt without forwarding, or call `next(env).await` to
+    /// continue toward the typed handler.
     async fn handle(&self, env: Envelope, next: Next) -> Result<JobOutcome, FrameworkError>;
 }
 
@@ -57,10 +60,16 @@ pub trait JobMiddleware: Send + Sync + 'static {
 /// `"laravel-queue-overlap:{job_name}:{key}"` (matching Laravel's prefix),
 /// or `"laravel-queue-overlap:{key}"` when [`Self::shared`] is enabled.
 pub struct WithoutOverlapping {
+    /// User-supplied lock key tail (job-name-scoped unless [`Self::shared`]).
     pub key: String,
+    /// Delay before re-enqueue on lock contention; `None` drops the job.
     pub release_after: Option<Duration>,
+    /// Maximum time the cache lock may be held while the handler runs.
     pub expires_after: Duration,
+    /// Cache-key prefix; defaults to `"laravel-queue-overlap:"`.
     pub prefix: String,
+    /// When `true`, the bare `key` is used (no job-name segment) so
+    /// different `Job` types can share the same overlap lock.
     pub share_key: bool,
 }
 
@@ -148,13 +157,18 @@ impl JobMiddleware for WithoutOverlapping {
 /// cache). The middleware keys the limit per-job-name by default; use
 /// [`Self::by`] to override.
 pub struct RateLimited {
+    /// Max attempts permitted per `decay` window before releasing.
     pub max_attempts: i64,
+    /// Sliding-window length used by the underlying [`RateLimiter`].
     pub decay: Duration,
+    /// Override key for the limiter; defaults to `"job-rate:{job_name}"`.
     pub key: Option<String>,
+    /// Override release delay; default uses `RateLimiter::available_in`.
     pub release_after: Option<Duration>,
 }
 
 impl RateLimited {
+    /// New middleware allowing `max_attempts` runs per `decay` window.
     pub fn new(max_attempts: i64, decay: Duration) -> Self {
         Self {
             max_attempts,
@@ -208,13 +222,19 @@ impl JobMiddleware for RateLimited {
 /// burning normal retries. Mirrors
 /// `Illuminate\Queue\Middleware\ThrottlesExceptions`.
 pub struct ThrottlesExceptions {
+    /// Max consecutive failures permitted within `decay` before throttling.
     pub max_attempts: i64,
+    /// Sliding-window length used to count failures.
     pub decay: Duration,
+    /// Delay between retries while still under the failure budget.
     pub backoff: Duration,
+    /// Override key for the throttle counter; defaults to `"job-throttle:{job_name}"`.
     pub key: Option<String>,
 }
 
 impl ThrottlesExceptions {
+    /// New middleware that tolerates `max_attempts` failures within `decay`
+    /// before releasing the job for the cool-off period.
     pub fn new(max_attempts: i64, decay: Duration) -> Self {
         Self {
             max_attempts,
@@ -231,6 +251,7 @@ impl ThrottlesExceptions {
         self
     }
 
+    /// Override the throttle key. Defaults to `"job-throttle:{job_name}"`.
     pub fn by(mut self, key: impl Into<String>) -> Self {
         self.key = Some(key.into());
         self
@@ -320,6 +341,8 @@ pub struct FailOnException {
 }
 
 impl FailOnException {
+    /// New middleware that dead-letters whenever `matcher` returns `true`
+    /// for the raised error.
     pub fn new<F>(matcher: F) -> Self
     where
         F: Fn(&FrameworkError) -> bool + Send + Sync + 'static,

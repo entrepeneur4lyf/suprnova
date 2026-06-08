@@ -99,13 +99,20 @@ fn clear_queue_capture() {
         .clear();
 }
 
+/// Facade entry point for the mail subsystem. Mirrors Laravel's `Mail`
+/// facade: `Mail::to(...)`, `Mail::raw(...)`, `Mail::fake()`, and the
+/// `always_*` defaults.
 pub struct Mail;
 
 impl Mail {
+    /// Install `transport` as the process-wide mail backend. Replaces any
+    /// previously-installed transport.
     pub fn set_transport(transport: Arc<dyn MailTransport>) -> Result<(), FrameworkError> {
         *lock::write(&TRANSPORT, "mail transport")? = Some(transport);
         Ok(())
     }
+    /// Drop the currently installed transport. Subsequent dispatches
+    /// fail with a "no mail transport configured" error.
     pub fn clear_transport() -> Result<(), FrameworkError> {
         *lock::write(&TRANSPORT, "mail transport")? = None;
         Ok(())
@@ -288,26 +295,33 @@ pub struct MailBuilder {
 }
 
 impl MailBuilder {
+    /// Append a `to` recipient.
     pub fn to(mut self, addr: impl Into<Address>) -> Self {
         self.to.push(addr.into());
         self
     }
+    /// Append a `cc` recipient.
     pub fn cc(mut self, addr: impl Into<Address>) -> Self {
         self.cc.push(addr.into());
         self
     }
+    /// Append a `bcc` recipient (suppressed from header rendering).
     pub fn bcc(mut self, addr: impl Into<Address>) -> Self {
         self.bcc.push(addr.into());
         self
     }
+    /// Append a `reply_to` address.
     pub fn reply_to(mut self, addr: impl Into<Address>) -> Self {
         self.reply_to.push(addr.into());
         self
     }
+    /// Override the envelope-from address (defaults to the mailable's
+    /// `from()` or the `Mail::always_from` default).
     pub fn from(mut self, addr: impl Into<Address>) -> Self {
         self.from_override = Some(addr.into());
         self
     }
+    /// Set the Return-Path / bounce-to address for this message.
     pub fn return_path(mut self, addr: impl Into<Address>) -> Self {
         self.return_path = Some(addr.into());
         self
@@ -858,11 +872,18 @@ impl Drop for MailFake {
 /// after deserialization.
 #[derive(Debug, Clone)]
 pub struct QueuedSnapshot {
+    /// Stable `Mailable::mailable_name()` of the queued type.
     pub mailable_name: String,
+    /// Serialized mailable payload as it was pushed onto the queue.
     pub payload: serde_json::Value,
+    /// `to` addresses routed by the builder at queue time.
     pub to: Vec<Address>,
+    /// `cc` addresses routed by the builder at queue time.
     pub cc: Vec<Address>,
+    /// `bcc` addresses routed by the builder at queue time.
     pub bcc: Vec<Address>,
+    /// Delay specified via `Mail::later(...)`; `None` for an immediate
+    /// `Mail::queue(...)`.
     pub delay: Option<std::time::Duration>,
 }
 

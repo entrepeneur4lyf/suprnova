@@ -9,6 +9,10 @@ use crate::queue::BackoffSchedule;
 use rand::RngExt;
 use std::time::Duration;
 
+/// Compute the next retry delay for `attempts` (1-indexed) under the
+/// supplied [`BackoffSchedule`]. When `deterministic_jitter` is
+/// `Some(x)` the value is used in place of an RNG draw — tests use
+/// this to assert exact delays.
 pub fn next_delay(
     schedule: &BackoffSchedule,
     attempts: u32,

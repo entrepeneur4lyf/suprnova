@@ -10,12 +10,15 @@ use std::collections::BTreeMap;
 
 const DEFAULT_ENDPOINT: &str = "https://api.postmarkapp.com/email";
 
+/// Postmark HTTP transport. Authenticates via a server token and POSTs
+/// JSON to the Postmark `/email` endpoint.
 pub struct PostmarkMailTransport {
     token: String,
     endpoint: String,
 }
 
 impl PostmarkMailTransport {
+    /// Build a transport pointing at Postmark's production endpoint.
     pub fn new(token: impl Into<String>) -> Self {
         Self {
             token: token.into(),
@@ -23,6 +26,9 @@ impl PostmarkMailTransport {
         }
     }
 
+    /// Build a transport pointing at a custom endpoint (test/staging or
+    /// regional mirror). The endpoint is normalized to include the
+    /// trailing `/email` path component.
     pub fn with_endpoint(token: impl Into<String>, endpoint: impl AsRef<str>) -> Self {
         let endpoint = endpoint.as_ref().trim_end_matches('/');
         let url = if endpoint.ends_with("/email") {

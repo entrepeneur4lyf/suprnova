@@ -24,6 +24,11 @@ use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeMap;
 
+/// User-defined outgoing message. Implementations declare a stable
+/// `mailable_name`, a subject + optional Tera-templated bodies, and
+/// optional per-provider hints (tags, metadata, attachments, …). The
+/// dispatcher renders the body, applies global defaults, and ships to
+/// the bound [`MailTransport`](crate::mail::transport::MailTransport).
 #[async_trait]
 pub trait Mailable: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// Stable name used in the queue envelope. Renaming breaks in-flight messages.
@@ -68,6 +73,7 @@ pub trait Mailable: Serialize + DeserializeOwned + Send + Sync + 'static {
         None
     }
 
+    /// Attachments to include with every dispatch. Default empty.
     fn attachments(&self) -> Vec<Attachment> {
         Vec::new()
     }

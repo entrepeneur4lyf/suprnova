@@ -15,8 +15,11 @@ use thiserror::Error;
 #[derive(Debug, Clone, Error)]
 #[error("queue job '{job_name}' exhausted max_tries after {attempts} attempts: {reason}")]
 pub struct MaxAttemptsExceeded {
+    /// Fully-qualified job type name.
     pub job_name: String,
+    /// Total dispatch attempts the worker exhausted.
     pub attempts: u32,
+    /// Formatted display of the final failure cause.
     pub reason: String,
 }
 
@@ -25,7 +28,9 @@ pub struct MaxAttemptsExceeded {
 #[derive(Debug, Clone, Error)]
 #[error("queue job '{job_name}' exceeded its per-attempt timeout of {timeout:?}")]
 pub struct TimeoutExceeded {
+    /// Fully-qualified job type name.
     pub job_name: String,
+    /// Timeout budget the attempt blew past.
     pub timeout: Duration,
 }
 
@@ -35,6 +40,8 @@ pub struct TimeoutExceeded {
 #[derive(Debug, Clone, Error)]
 #[error("queue job '{job_name}' was manually failed: {reason}")]
 pub struct ManuallyFailed {
+    /// Fully-qualified job type name.
     pub job_name: String,
+    /// Operator-supplied failure reason.
     pub reason: String,
 }

@@ -11,6 +11,8 @@ use lettre::message::{
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 
+/// SMTP transport built on `lettre`'s async submission client. Supports
+/// STARTTLS and implicit-TLS submission ports.
 pub struct SmtpMailTransport {
     inner: AsyncSmtpTransport<Tokio1Executor>,
 }

@@ -27,13 +27,19 @@ pub enum JobOutcome {
     /// again later). The worker emits a `JobReleasedAfterException`-free
     /// re-enqueue path; the envelope's `attempts` counter is held at its
     /// pre-dispatch value, not bumped.
-    Released { delay: Duration },
+    Released {
+        /// How long the worker should wait before re-claiming the envelope.
+        delay: Duration,
+    },
 
     /// Dead-letter the job now without retry. Worker `ack`s the reservation
     /// AND writes a failed-jobs record carrying `reason`. Used by
     /// `FailOnException` and by handlers that decide a failure is
     /// permanent.
-    Failed { reason: String },
+    Failed {
+        /// Operator-facing reason captured on the failed-job record.
+        reason: String,
+    },
 
     /// Drop the job entirely without retry and without a failed-job
     /// record. Worker `ack`s the reservation only. Used by `Skip` (the

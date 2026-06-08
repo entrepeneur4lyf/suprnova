@@ -21,22 +21,35 @@ use tracing::Instrument;
 /// `X-Priority`/`Importance` headers, and HTTP providers that surface
 /// priority through their own field set it accordingly.
 pub const PRIORITY_HIGHEST: u8 = 1;
+/// `X-Priority: 2` — high priority.
 pub const PRIORITY_HIGH: u8 = 2;
+/// `X-Priority: 3` — normal priority (most user mail).
 pub const PRIORITY_NORMAL: u8 = 3;
+/// `X-Priority: 4` — low priority.
 pub const PRIORITY_LOW: u8 = 4;
+/// `X-Priority: 5` — lowest priority.
 pub const PRIORITY_LOWEST: u8 = 5;
 
 /// A fully-rendered outgoing message — what transports receive.
 #[derive(Debug, Clone)]
 pub struct OutgoingMessage {
+    /// Sender envelope-from address.
     pub from: Address,
+    /// Primary recipients.
     pub to: Vec<Address>,
+    /// CC recipients.
     pub cc: Vec<Address>,
+    /// BCC recipients (suppressed from header rendering).
     pub bcc: Vec<Address>,
+    /// Reply-To addresses.
     pub reply_to: Vec<Address>,
+    /// Rendered subject line.
     pub subject: String,
+    /// Rendered HTML body, if produced by the Mailable.
     pub html: Option<String>,
+    /// Rendered plain-text body, if produced by the Mailable.
     pub text: Option<String>,
+    /// MIME attachments inlined into the message.
     pub attachments: Vec<Attachment>,
     /// Provider tags (Postmark `Tag`, SES `Tags`, SendGrid `categories`,
     /// Mailgun `o:tag`, Resend `tags`). Free-form strings; semantics
@@ -146,9 +159,17 @@ fn has_email(list: &[Address], email: &str) -> bool {
     list.iter().any(|a| a.email.eq_ignore_ascii_case(email))
 }
 
+/// Outgoing-mail backend (SMTP, Postmark, SendGrid, SES, …). Every
+/// configured transport receives a fully-rendered [`OutgoingMessage`].
 #[async_trait]
 pub trait MailTransport: Send + Sync {
+    /// Deliver `msg` through this transport. Returns `Ok(())` only when
+    /// the upstream provider accepted the message; transport-level
+    /// failures (auth, connect, 4xx/5xx) become `Err(FrameworkError)`.
     async fn send(&self, msg: &OutgoingMessage) -> Result<(), FrameworkError>;
+    /// Stable transport label used in span fields. Default is the Rust
+    /// type name; concrete transports override with their driver key
+    /// (`"smtp"`, `"postmark"`, …).
     fn name(&self) -> &'static str {
         std::any::type_name::<Self>()
     }

@@ -17,23 +17,42 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Worker-side payload that `Mail::queue` and `Mail::later` push onto the
+/// queue. Carries the routed recipients plus the mailable's
+/// `(name, payload)` pair so the worker can rebuild the typed mailable
+/// via [`mailable_registry`] and render through the same path as
+/// `Mail::send`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SendMailJob {
+    /// Primary recipients (mirrors `MailBuilder::to`).
     pub to: Vec<Address>,
+    /// CC recipients.
     pub cc: Vec<Address>,
+    /// BCC recipients.
     pub bcc: Vec<Address>,
+    /// Reply-To addresses.
     pub reply_to: Vec<Address>,
+    /// Builder-side `from` override; defaults to the mailable's `from()`
+    /// when `None`.
     pub from_override: Option<Address>,
+    /// Stable `Mailable::mailable_name()` used to look up the registered
+    /// factory on the worker side.
     pub mailable_name: String,
+    /// Serialized mailable payload (deserialized back into `M` on dispatch).
     pub mailable_payload: serde_json::Value,
+    /// Provider tags layered on by the builder.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Provider metadata layered on by the builder.
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
+    /// Message priority (1 = highest, 5 = lowest).
     #[serde(default)]
     pub priority: Option<u8>,
+    /// Custom MIME headers layered on by the builder.
     #[serde(default)]
     pub headers: Vec<(String, String)>,
+    /// Builder-side Return-Path override; falls back to the mailable.
     #[serde(default)]
     pub return_path: Option<Address>,
     /// Builder-side subject override. When `Some`, replaces the mailable's

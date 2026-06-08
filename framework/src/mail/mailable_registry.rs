@@ -37,15 +37,25 @@ pub(crate) type Factory = fn(serde_json::Value) -> Result<Box<dyn AnyMailable>, 
 /// `render_text` / `render_subject` defaults — so the queued path never
 /// sees raw template source, only rendered output.
 pub trait AnyMailable: Send + Sync {
+    /// Render the message subject through the Mailable's Tera context.
     fn render_subject(&self) -> Result<String, FrameworkError>;
+    /// Render the HTML body, if the Mailable defines one.
     fn render_html(&self) -> Result<Option<String>, FrameworkError>;
+    /// Render the plain-text body, if the Mailable defines one.
     fn render_text(&self) -> Result<Option<String>, FrameworkError>;
+    /// Mailable-supplied envelope-from address, if any.
     fn from(&self) -> Option<Address>;
+    /// Attachments contributed by the Mailable's `attachments()` impl.
     fn attachments(&self) -> Vec<Attachment>;
+    /// Provider tags contributed by the Mailable.
     fn tags(&self) -> Vec<String>;
+    /// Provider metadata contributed by the Mailable.
     fn metadata(&self) -> BTreeMap<String, String>;
+    /// Mailable-supplied message priority (1 = highest, 5 = lowest).
     fn priority(&self) -> Option<u8>;
+    /// Custom MIME headers contributed by the Mailable.
     fn headers(&self) -> Vec<(String, String)>;
+    /// Mailable-supplied Return-Path / bounce-to address.
     fn return_path(&self) -> Option<Address>;
 }
 

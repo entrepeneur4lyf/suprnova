@@ -23,10 +23,15 @@ use uuid::Uuid;
 /// Snapshot of the envelope's identity, carried by every queue event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobIdentity {
+    /// Unique envelope identifier assigned by the driver.
     pub id: Uuid,
+    /// Fully-qualified job type name (e.g. `"App\\Jobs\\SendInvoice"`).
     pub job_name: String,
+    /// Number of times the worker has dispatched this job, including the current attempt.
     pub attempts: u32,
+    /// Maximum dispatch attempts before the worker dead-letters the job.
     pub max_tries: u32,
+    /// Driver connection name the envelope lives on.
     pub connection: String,
 }
 
@@ -46,7 +51,9 @@ impl JobIdentity {
 /// `Queue::push`). Mirrors `Illuminate\Queue\Events\JobQueueing`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobQueueing {
+    /// Fully-qualified job type name (e.g. `"App\\Jobs\\SendInvoice"`).
     pub job_name: String,
+    /// Driver connection name the envelope is bound for.
     pub connection: String,
 }
 
@@ -60,8 +67,11 @@ impl Event for JobQueueing {
 /// Mirrors `Illuminate\Queue\Events\JobQueued`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobQueued {
+    /// Unique envelope identifier assigned by the driver.
     pub id: Uuid,
+    /// Fully-qualified job type name (e.g. `"App\\Jobs\\SendInvoice"`).
     pub job_name: String,
+    /// Driver connection name the envelope was committed to.
     pub connection: String,
 }
 
@@ -75,6 +85,7 @@ impl Event for JobQueued {
 /// Mirrors `Illuminate\Queue\Events\JobProcessing`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobProcessing {
+    /// Identity of the job about to be dispatched.
     pub job: JobIdentity,
 }
 
@@ -88,6 +99,7 @@ impl Event for JobProcessing {
 /// `Illuminate\Queue\Events\JobProcessed`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobProcessed {
+    /// Identity of the job that completed successfully.
     pub job: JobIdentity,
 }
 
@@ -104,6 +116,7 @@ impl Event for JobProcessed {
 /// `JobProcessed` only fires on a clean success.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobAttempted {
+    /// Identity of the job whose attempt just settled.
     pub job: JobIdentity,
 }
 
@@ -117,7 +130,9 @@ impl Event for JobAttempted {
 /// dead-letter. Mirrors `Illuminate\Queue\Events\JobExceptionOccurred`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobExceptionOccurred {
+    /// Identity of the job that threw.
     pub job: JobIdentity,
+    /// Formatted display of the error that was raised.
     pub exception: String,
 }
 
@@ -131,7 +146,9 @@ impl Event for JobExceptionOccurred {
 /// timeout, manual fail). Mirrors `Illuminate\Queue\Events\JobFailed`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobFailed {
+    /// Identity of the job that was dead-lettered.
     pub job: JobIdentity,
+    /// Formatted display of the final error that caused the failure.
     pub exception: String,
 }
 
@@ -146,8 +163,11 @@ impl Event for JobFailed {
 /// `Illuminate\Queue\Events\JobReleasedAfterException`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobReleasedAfterException {
+    /// Identity of the job being retried.
     pub job: JobIdentity,
+    /// Formatted display of the error that triggered the back-off.
     pub exception: String,
+    /// Computed back-off in seconds before the next attempt.
     pub delay_secs: u64,
 }
 
@@ -164,8 +184,11 @@ impl Event for JobReleasedAfterException {
 /// because lock/throttle was busy".
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobReleased {
+    /// Identity of the job that was released back to the queue.
     pub job: JobIdentity,
+    /// Delay in seconds before the job becomes eligible for re-claim.
     pub delay_secs: u64,
+    /// Reason supplied by the middleware (e.g. `"rate_limited"`, `"locked"`).
     pub reason: String,
 }
 
@@ -179,7 +202,9 @@ impl Event for JobReleased {
 /// `Illuminate\Queue\Events\JobTimedOut`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobTimedOut {
+    /// Identity of the job that exceeded its timeout.
     pub job: JobIdentity,
+    /// Timeout budget the job blew past.
     pub timeout: Duration,
 }
 
@@ -193,6 +218,7 @@ impl Event for JobTimedOut {
 /// Mirrors `Illuminate\Queue\Events\Looping`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Looping {
+    /// Driver connection name the worker just polled.
     pub connection: String,
 }
 
@@ -205,6 +231,7 @@ impl Event for Looping {
 /// Fired once when [`run_worker`](crate::queue::worker::run_worker) starts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerStarting {
+    /// Driver connection name the worker is starting on.
     pub connection: String,
 }
 
@@ -217,7 +244,9 @@ impl Event for WorkerStarting {
 /// Fired once when [`run_worker`](crate::queue::worker::run_worker) exits.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerStopping {
+    /// Driver connection name the worker was draining.
     pub connection: String,
+    /// Total jobs the worker settled before exiting.
     pub processed: u64,
 }
 
@@ -231,7 +260,9 @@ impl Event for WorkerStopping {
 /// cleanly without claiming additional work.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerInterrupted {
+    /// Driver connection name the worker was draining.
     pub connection: String,
+    /// Total jobs the worker settled before honoring the restart signal.
     pub processed: u64,
 }
 
