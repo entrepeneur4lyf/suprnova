@@ -394,8 +394,12 @@ impl Queue {
     /// Replace the registered driver. Primarily for boot-time wiring;
     /// in tests prefer `testing::install_fake()`.
     pub fn set_driver(driver: Arc<dyn QueueDriver>) {
-        *lock::write(&DRIVER, "queue driver registry").unwrap_or_else(|e| panic!("{e}")) =
-            Some(driver);
+        // The driver registry is a single-slot `Option<Arc<dyn QueueDriver>>`;
+        // the critical section is a single assignment. Recover in place
+        // on poison so a panic in some other registry user doesn't kill
+        // the boot path for every future caller — matches the framework's
+        // hot-registry convention (data::registry, payments registry).
+        *DRIVER.write().unwrap_or_else(|e| e.into_inner()) = Some(driver);
     }
 
     /// Return the registered driver's `name()` for observability (admin,

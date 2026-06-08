@@ -76,20 +76,26 @@ impl NamedLimiterRegistry {
     where
         F: Fn(&Request) -> LimitResult + Send + Sync + 'static,
     {
-        let mut g = self.inner.write().expect("named limiter registry poisoned");
+        // Hot-path registry: must stay up even after a poisoned lock.
+        // The guarded critical section is a single `HashMap::insert` —
+        // poison is essentially unreachable, so recovering in place
+        // matches the framework's hot-registry pattern (data::registry,
+        // payments registry, etc.) per CLAUDE.md's "poisoned locks
+        // never abort the process" rule.
+        let mut g = self.inner.write().unwrap_or_else(|e| e.into_inner());
         g.insert(name.into(), Arc::new(callback));
     }
 
     /// Look up a callback by name. Returns `None` when no limiter under
     /// that name has been defined.
     pub fn get(&self, name: &str) -> Option<Arc<NamedLimiterFn>> {
-        let g = self.inner.read().expect("named limiter registry poisoned");
+        let g = self.inner.read().unwrap_or_else(|e| e.into_inner());
         g.get(name).cloned()
     }
 
     /// Whether a limiter with this name exists.
     pub fn has(&self, name: &str) -> bool {
-        let g = self.inner.read().expect("named limiter registry poisoned");
+        let g = self.inner.read().unwrap_or_else(|e| e.into_inner());
         g.contains_key(name)
     }
 }

@@ -128,18 +128,29 @@ impl MemoryQueueDriver {
         let reaper = tokio::spawn(async move {
             loop {
                 // Promote expired delayed jobs into the visible queue.
+                // Log poison/internal errors but DO NOT abort the reaper —
+                // a single panicking producer must not strand every
+                // delayed job in the queue. The reaper backs off via the
+                // normal 50ms sleep below before the next attempt.
                 {
                     let mut dq = delayed2.lock().await;
-                    drain_delayed(&inner2, &mut dq).expect("memory queue poisoned in reaper");
-                    // Lock released here — before the sleep await.
+                    if let Err(e) = drain_delayed(&inner2, &mut dq) {
+                        tracing::error!(
+                            error = %e,
+                            "memory queue reaper: drain_delayed failed; continuing"
+                        );
+                    }
                 }
 
-                // Reclaim expired visibility reservations. Acquire the async
-                // mutex, then poll synchronously (no await while lock held).
+                // Reclaim expired visibility reservations.
                 {
                     let mut dq = visibility2.lock().await;
-                    drain_expired(&inner2, &mut dq).expect("memory queue poisoned in reaper");
-                    // Lock released here — before the sleep await.
+                    if let Err(e) = drain_expired(&inner2, &mut dq) {
+                        tracing::error!(
+                            error = %e,
+                            "memory queue reaper: drain_expired failed; continuing"
+                        );
+                    }
                 }
 
                 tokio::time::sleep(Duration::from_millis(50)).await;

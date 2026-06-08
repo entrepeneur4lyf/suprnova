@@ -91,10 +91,16 @@ impl InMemoryRateLimiter {
                 }
             }
         });
+        // Construction-time set on a freshly-created Mutex — poison is
+        // unreachable here unless something panicked while holding the
+        // guard at a previous point in `with_periodic_sweep`, which is
+        // structurally impossible. Recover in place anyway for
+        // hot-registry consistency with the rest of the rate_limit
+        // surface (see laravel.rs::NamedLimiterRegistry).
         *limiter
             .sweep_handle
             .lock()
-            .expect("rate limiter sweep handle poisoned at construction") = Some(handle);
+            .unwrap_or_else(|e| e.into_inner()) = Some(handle);
         limiter
     }
 

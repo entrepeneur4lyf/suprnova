@@ -76,14 +76,20 @@ pub(crate) async fn scope<F: std::future::Future>(fut: F) -> F::Output {
 /// helpers.
 pub(crate) fn set_current_user(user: Arc<dyn Authenticatable>) {
     let _ = AUTH_STATE.try_with(|state| {
-        state.lock().unwrap().current_user = Some(user);
+        state.lock().unwrap_or_else(|e| e.into_inner()).current_user = Some(user);
     });
 }
 
 /// The user resolved for this request, if any.
 pub(crate) fn current_user() -> Option<Arc<dyn Authenticatable>> {
     AUTH_STATE
-        .try_with(|state| state.lock().unwrap().current_user.clone())
+        .try_with(|state| {
+            state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .current_user
+                .clone()
+        })
         .ok()
         .flatten()
 }
@@ -99,7 +105,7 @@ pub(crate) fn current_user_id() -> Option<String> {
 /// Clear the resolved request user (used by `logout`).
 pub(crate) fn clear_current_user() {
     let _ = AUTH_STATE.try_with(|state| {
-        state.lock().unwrap().current_user = None;
+        state.lock().unwrap_or_else(|e| e.into_inner()).current_user = None;
     });
 }
 
@@ -107,7 +113,13 @@ pub(crate) fn clear_current_user() {
 /// triggering provider resolution. Backs [`Guard::has_user`](super::Guard::has_user).
 pub(crate) fn has_current_user() -> bool {
     AUTH_STATE
-        .try_with(|state| state.lock().unwrap().current_user.is_some())
+        .try_with(|state| {
+            state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .current_user
+                .is_some()
+        })
         .unwrap_or(false)
 }
 
@@ -115,7 +127,7 @@ pub(crate) fn has_current_user() -> bool {
 /// cookie this request. Set by `SessionMiddleware`'s hydration path.
 pub(crate) fn set_via_remember(value: bool) {
     let _ = AUTH_STATE.try_with(|state| {
-        state.lock().unwrap().via_remember = value;
+        state.lock().unwrap_or_else(|e| e.into_inner()).via_remember = value;
     });
 }
 
@@ -123,7 +135,7 @@ pub(crate) fn set_via_remember(value: bool) {
 /// Backs [`StatefulGuard::via_remember`](super::StatefulGuard::via_remember).
 pub(crate) fn via_remember() -> bool {
     AUTH_STATE
-        .try_with(|state| state.lock().unwrap().via_remember)
+        .try_with(|state| state.lock().unwrap_or_else(|e| e.into_inner()).via_remember)
         .unwrap_or(false)
 }
 

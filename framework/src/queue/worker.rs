@@ -88,7 +88,10 @@ pub fn register_job<J: Job>() {
         })
     });
     let middleware: MiddlewareFactory = Arc::new(|| J::middleware());
-    let mut g = lock::write(&REGISTRY, "queue job registry").expect("queue registry poisoned");
+    // Hot-path registry: recover in place on poison so a panic in any
+    // other job's registration doesn't kill the inventory-drain at
+    // process boot. The critical section is a single HashMap insert.
+    let mut g = REGISTRY.write().unwrap_or_else(|e| e.into_inner());
     let name = J::job_name();
     let map = g.get_or_insert_with(HashMap::new);
     if map
@@ -182,8 +185,9 @@ pub async fn run_through_middleware(env: Envelope) -> Result<JobOutcome, Framewo
 /// Return all registered job names. Used by admin inspectors and
 /// `cargo run --bin app -- jobs:list` (Phase 6B).
 pub fn registered_job_names() -> Vec<String> {
-    lock::read(&REGISTRY, "queue job registry")
-        .expect("queue registry poisoned")
+    REGISTRY
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
         .as_ref()
         .map(|m| {
             let mut v: Vec<_> = m.keys().cloned().collect();
