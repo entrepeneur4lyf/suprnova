@@ -28,8 +28,19 @@ docs/superpowers/
 # Local-only AI review notes (Grok, Opus, etc.) — working artifacts, not source
 /GROK-*.md
 /grok-*.md
-/opus-*.md
+/opus*.md
 /*-grok.md
 /*-review.md
 /*-REVIEW.md
 /remediate-*.md
+
+# Planning + audit artifacts — local working notes, not source
+/.planning/
+/release-prep.md
+**/MODULE_REVIEW_NOTES.md
+**/REVIEW_DEEP_DIVE_*.md
+
+# Per-directory CLAUDE/AGENTS guidance — AI assistant scope notes,
+# not part of the published framework surface
+CLAUDE.md
+AGENTS.md
