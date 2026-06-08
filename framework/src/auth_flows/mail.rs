@@ -1,4 +1,4 @@
-//! Transactional [`Mailable`](crate::mail::Mailable) types for the auth flows.
+//! Transactional [`Mailable`] types for the auth flows.
 //!
 //! These three mailables back the email-verification, password-reset, and
 //! password-changed lifecycle that torii drives. They are dispatched via the

@@ -34,7 +34,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 /// A [`Listener`] that turns event `E` into durable job `J` and enqueues it via
-/// [`Queue::push`]. See the [module docs](self) for when to use this versus an
+/// [`Queue::push`]. See the module docs for when to use this versus an
 /// in-process queued listener.
 pub struct QueuedListener<E, J> {
     build: Arc<dyn Fn(&E) -> J + Send + Sync>,

@@ -22,8 +22,8 @@ pub enum WebPushError {
     ///
     /// `body` is bounded to at most a few KiB so a hostile push service
     /// can't drive unbounded memory growth by streaming a huge error body.
-    /// See [`PushServiceRejected::is_retryable`] for whether a caller
-    /// should retry vs. drop.
+    /// See [`WebPushError::is_retryable`] for whether a caller should
+    /// retry vs. drop.
     #[error(
         "push service rejected: status {status}{retry_hint}, body: {body}",
         retry_hint = retry_after

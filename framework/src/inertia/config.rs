@@ -30,7 +30,7 @@ impl VersionResolver {
     }
 
     /// Build a dynamic resolver from a closure. The closure runs on
-    /// every call to [`resolve`]; cache inside the closure if needed.
+    /// every call to [`resolve`](Self::resolve); cache inside the closure if needed.
     pub fn with<F>(f: F) -> Self
     where
         F: Fn() -> String + Send + Sync + 'static,
@@ -153,14 +153,12 @@ pub struct InertiaConfig {
     /// `public/assets/.vite/manifest.json`, matching the framework's
     /// scaffolded `vite.config.ts` (`outDir: '../public/assets'`).
     ///
-    /// When the file exists, [`render_prod_head`] resolves the entry
+    /// When the file exists, `render_prod_head` resolves the entry
     /// point to its hashed output + CSS + transitively-imported
     /// chunks (for `modulepreload`). When it's missing the framework
     /// falls back to the legacy hardcoded `/{assets_base_url}/main.js`
     /// path and emits a `tracing::warn!` so the gap is visible in
     /// production logs.
-    ///
-    /// [`render_prod_head`]: super::response
     pub manifest_path: PathBuf,
     /// URL prefix under which the Vite build assets are served (e.g.
     /// `/assets`). Combined with the manifest entry's `file` field to
@@ -356,7 +354,7 @@ impl InertiaConfig {
     }
 
     /// Set a static asset version string. For dynamic versions
-    /// (e.g. read from a manifest at runtime) use [`version_with`].
+    /// (e.g. read from a manifest at runtime) use [`version_with`](Self::version_with).
     pub fn version(mut self, version: impl Into<String>) -> Self {
         self.version = VersionResolver::Static(version.into());
         self

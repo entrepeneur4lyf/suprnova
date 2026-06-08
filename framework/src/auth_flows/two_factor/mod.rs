@@ -305,8 +305,8 @@ impl TwoFactor {
     ///
     /// On a successful verify the row is stamped with `claim_to`,
     /// computed as `current_timestep + TOTP_SKEW_STEPS` (= `current + 1`,
-    /// matching the `skew=1` the [`check_code`] TOTP construction
-    /// accepts). Subsequent verifications where
+    /// matching the `skew=1` the underlying `check_code` TOTP
+    /// construction accepts). Subsequent verifications where
     /// `current_timestep <= last_used_timestep` are rejected even when
     /// the code itself is structurally valid.
     ///
@@ -590,7 +590,7 @@ impl TwoFactor {
     ///
     /// We save `Auth::id()` to a local, **then** clear the session
     /// auth slot, **then** revoke remember-me against the saved id
-    /// via [`Auth::revoke_remember_tokens_for_user`]. The reordering
+    /// via the auth guard's remember-token revoke API. The reordering
     /// matters: if the revoke errors (DB transient failure, lock
     /// timeout), `start_challenge` returns `Err` — but the session
     /// is already in a safe state (`auth_user_id` cleared, pending
@@ -708,9 +708,9 @@ impl TwoFactor {
     /// also fine — both gates are idempotent.) Failed submissions
     /// increment the counter exactly once even though both the TOTP
     /// and recovery-code paths are tried — the silent
-    /// [`Self::verify_internal`] / [`Self::consume_recovery_internal`]
-    /// cores skip BF interaction so this method can record the
-    /// single canonical attempt itself.
+    /// `verify_internal` / `consume_recovery_internal` cores skip BF
+    /// interaction so this method can record the single canonical
+    /// attempt itself.
     ///
     /// # Promotion contract
     ///

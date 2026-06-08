@@ -300,7 +300,7 @@ pub fn dispatched_events() -> HashMap<&'static str, usize> {
 /// Assert that a listener of type `L` has been registered for event type `E`
 /// while the fake was active. Mirrors Laravel's `assertListening`.
 ///
-/// The fake observes registrations via [`record_listener`], which the
+/// The fake observes registrations via `record_listener`, which the
 /// dispatcher's `listen` method calls when a fake is active. This means the
 /// listener registration must happen INSIDE the `Event::fake()` scope; tests
 /// that register at module load (before the fake) will not be observed.

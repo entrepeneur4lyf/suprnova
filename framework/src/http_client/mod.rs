@@ -193,7 +193,7 @@ impl Http {
 
     /// The effective process-global response-body cap — the value set by
     /// [`Self::set_max_response_bytes`], or
-    /// [`DEFAULT_MAX_RESPONSE_BODY_BYTES`] (25 MiB) if unset.
+    /// `DEFAULT_MAX_RESPONSE_BODY_BYTES` (25 MiB) if unset.
     pub fn max_response_bytes() -> usize {
         match MAX_RESPONSE_BODY_BYTES.load(Ordering::SeqCst) {
             0 => DEFAULT_MAX_RESPONSE_BODY_BYTES,

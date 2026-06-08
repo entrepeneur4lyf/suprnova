@@ -179,12 +179,12 @@ impl NotificationDispatcher {
     /// succeeded.
     ///
     /// Lifecycle events:
-    /// - [`NotificationSending`](events::NotificationSending) fires immediately before each channel's
+    /// - [`events::NotificationSending`] fires immediately before each channel's
     ///   `deliver` runs. A listener that returns an error is treated as a
     ///   per-channel veto — the channel is skipped, remaining channels
     ///   continue.
-    /// - [`NotificationSent`](events::NotificationSent) fires after a successful delivery.
-    /// - [`NotificationFailed`](events::NotificationFailed) fires when delivery returned an error; the
+    /// - [`events::NotificationSent`] fires after a successful delivery.
+    /// - [`events::NotificationFailed`] fires when delivery returned an error; the
     ///   underlying error then propagates per the first-failure-stops
     ///   contract.
     ///
@@ -324,7 +324,7 @@ static FACTORIES: RwLock<Option<HashMap<String, NotificationFactory>>> = RwLock:
 ///
 /// Returns [`FrameworkError::internal`] if the dispatcher registry lock is
 /// poisoned (a prior writer panicked) rather than panicking — the crate-wide
-/// write-poison policy lives in [`crate::lock`].
+/// write-poison policy lives in `crate::lock`.
 pub fn set_dispatcher(d: Arc<NotificationDispatcher>) -> Result<(), FrameworkError> {
     *lock::write(&DISPATCHER, "notifications dispatcher")? = Some(d);
     Ok(())

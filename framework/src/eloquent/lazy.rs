@@ -1,8 +1,9 @@
 //! Phase 10C T8 — `LazyCollection<M>` stream wrapper.
 //!
 //! Stream-based row-by-row iteration over a `Builder<M>` query result.
-//! Returned by [`Builder::lazy`], [`Builder::lazy_by_id`], and
-//! [`Builder::cursor`] (Laravel alias for `lazy`).
+//! Returned by [`Builder::lazy`](crate::eloquent::Builder::lazy),
+//! [`Builder::lazy_by_id`](crate::eloquent::Builder::lazy_by_id), and
+//! [`Builder::cursor`](crate::eloquent::Builder::cursor) (Laravel alias for `lazy`).
 //!
 //! Internally batches via PK-cursor pagination (`id > last_id`) so the
 //! stream stays memory-bounded by the batch size — never the full

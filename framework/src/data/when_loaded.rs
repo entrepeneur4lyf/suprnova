@@ -15,7 +15,8 @@
 //! and delegate to presence checks there.
 
 /// Implemented by any type that can report whether a named relation has been
-/// preloaded. Used by the [`when_loaded!`] macro.
+/// preloaded. Used by the `when_loaded!` macro (re-exported as
+/// `suprnova::when_loaded!`).
 ///
 /// # Example
 ///

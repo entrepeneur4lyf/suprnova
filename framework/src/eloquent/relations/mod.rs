@@ -27,7 +27,7 @@
 //! - The [`RelationEntry`] inventory type + helpers
 //!   ([`relations`], [`relations_of`], [`find_relation`]).
 //! - The [`EagerLoadCache`] storage type (in
-//!   [`eager_cache`][crate::eloquent::relations::eager_cache]).
+//!   [`eager_cache`]).
 //! - The macro-emitted `__eager` / `__pivot` field auto-injection, the
 //!   four dispatcher skeletons (`__eager_load`, `__recurse_eager_load`,
 //!   `__count_relation`, `__aggregate_relation`), and the

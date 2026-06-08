@@ -583,7 +583,7 @@ pub mod async_rules {
     /// [`where_eq`](Self::where_eq) scope column are `&'static str`
     /// slices from source. SQL has no placeholder for identifiers, so
     /// they are interpolated into the query — but every one is first run
-    /// through [`validate_identifier`](crate::database::validate_identifier),
+    /// through [`crate::database::validate_identifier`],
     /// the same allowlist the model-less query builder uses, so a typo or
     /// hostile literal errors instead of shaping an injection. The value
     /// under test, the excluded id, and scope values are all bound

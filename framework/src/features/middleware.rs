@@ -1,9 +1,9 @@
 //! [`FeatureMiddleware`] — opens a per-request feature-flag
-//! [`Context`](featureflag::context::Context) populated by user-
+//! [`featureflag::context::Context`] populated by user-
 //! defined extractors, then runs the downstream handler inside that
 //! context.
 //!
-//! Without this middleware in the chain, [`is_enabled!`] calls fall
+//! Without this middleware in the chain, `is_enabled!` calls fall
 //! back to the [`Context::root`](featureflag::context::Context::root)
 //! context with no user / team scope — only global flags resolve.
 //! With it installed, user- and team-scoped flags light up
@@ -27,7 +27,7 @@
 //! featureflag's context stack is thread-local. A naive
 //! `ctx.in_scope(|| next(request).await)` would lose the context when
 //! the future suspends + resumes on another tokio worker. We use a
-//! local combinator ([`InContext`]) that re-enters the scope on each
+//! local combinator (`InContext`) that re-enters the scope on each
 //! poll, mirroring the internal behaviour of featureflag's
 //! `WrapContext` adapter (which we can't use directly because
 //! `featureflag::utils::AnyExt` lacks a blanket impl and the orphan

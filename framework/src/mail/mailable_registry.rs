@@ -12,7 +12,7 @@
 //!
 //! # v1 simplification: function pointers, not boxed `Fn`
 //!
-//! [`Factory`] is a `fn(...)` function pointer, not `Box<dyn Fn>`. This
+//! `Factory` is a `fn(...)` function pointer, not `Box<dyn Fn>`. This
 //! covers every callsite today (the registered factories never capture
 //! state). If a future caller needs to capture (e.g. a per-app context
 //! handle), bump this to `Arc<dyn Fn>` — that change is local to this

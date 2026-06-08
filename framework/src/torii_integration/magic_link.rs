@@ -45,7 +45,7 @@ impl MagicLinkAuth {
     /// Returns the plaintext token — the caller assembles the URL
     /// (`{callback_url}?token={token}`) and emails it. Suprnova does not
     /// dispatch the magic-link email automatically; build a [`crate::mail::Mailable`]
-    /// and call [`crate::Mail::send`].
+    /// and call [`MailBuilder::send`](crate::mail::MailBuilder::send).
     ///
     /// The user account is created on first use (torii's `get_or_create_user`
     /// semantics), so callers do not need to pre-register a user.

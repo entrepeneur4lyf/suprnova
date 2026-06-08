@@ -19,8 +19,8 @@
 //!    request. Set by `once`/`once_using_id`/`set_user`, and by a guard's
 //!    first `user()` resolution (a per-request cache so repeated lookups
 //!    don't re-query the provider — closing a divergence where the old
-//!    `Auth::user()` re-queried on every call). [`current_user_id`]
-//!    feeds `Auth::id()` so the static facade sees `once`/`set_user`.
+//!    `Auth::user()` re-queried on every call). `current_user_id` feeds
+//!    `Auth::id()` so the static facade sees `once`/`set_user`.
 //! 2. **Via-remember flag** — whether the current user was
 //!    re-authenticated from a remember-me cookie *this request* (set by
 //!    `SessionMiddleware`'s hydration path) rather than from an active

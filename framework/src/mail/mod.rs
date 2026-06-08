@@ -448,7 +448,7 @@ impl MailBuilder {
 
     /// Build a [`SendMailJob`] and push it onto the queue. The mailable's
     /// concrete type must be registered via
-    /// [`register_mailable_factory`](crate::mail::register_mailable_factory)
+    /// [`register_mailable_factory`]
     /// before the worker dispatches the job.
     ///
     /// Fails fast (push-time, before any envelope is created) if the

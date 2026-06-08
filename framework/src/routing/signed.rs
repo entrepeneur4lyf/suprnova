@@ -173,7 +173,7 @@ fn canonicalize(path: &str, pairs: &BTreeMap<String, String>) -> String {
 /// # Errors
 ///
 /// Returns `FrameworkError` when the encryption key is not installed
-/// (see [`signed_url_key`]).
+/// (see `signed_url_key`).
 pub fn sign_url(
     url: &str,
     expires_at_epoch_seconds: Option<i64>,

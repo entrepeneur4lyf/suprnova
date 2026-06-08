@@ -702,7 +702,7 @@ where
     /// Create a row through `tx`. Phase 10C audit-fix AF5 closes the
     /// manual-transaction shim inventory — every CRUD entry point on
     /// [`Self`] except `create` previously had a `*_with_tx`
-    /// counterpart, so a user inside [`DB::begin_transaction`] who
+    /// counterpart, so a user inside [`DB::begin_transaction`](crate::database::DB::begin_transaction) who
     /// wanted to `create` had to fall back to building an
     /// `ActiveModel` by hand and reaching for raw SeaORM. This shim
     /// mirrors [`Self::create`] event-for-event (`Creating` → `Saving`
@@ -778,7 +778,7 @@ where
     /// Eager-loaded relations and pivot context are preserved on the
     /// replica (Laravel parity: `clone $user` retains `$user->posts`).
     /// The macro-emitted `replicate_with` clones the source's
-    /// `__eager` cache via [`EagerLoadCache::clone`] — each cell
+    /// `__eager` cache via `EagerLoadCache::clone` — each cell
     /// carries a clone trampoline so the replica's loaded rows are
     /// independent of the source's — and `Arc`-clones the pivot slot.
     /// Use [`Self::replicate_except`] if a specific relation should

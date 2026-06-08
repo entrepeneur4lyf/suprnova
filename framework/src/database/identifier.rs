@@ -48,8 +48,9 @@ const MAX_IDENT_LEN: usize = 128;
 /// - Schema-qualified: `public.users`, `analytics.events`
 ///
 /// Each segment must match `[A-Za-z_][A-Za-z0-9_]*`. Length capped at
-/// [`MAX_IDENT_LEN`]. Returns the input borrow on success so callers
-/// can chain into a `format!()`.
+/// 64 chars per the SQL-92 minimum (`MAX_IDENT_LEN` constant in this
+/// module). Returns the input borrow on success so callers can chain
+/// into a `format!()`.
 ///
 /// # Errors
 ///

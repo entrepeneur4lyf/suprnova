@@ -10,7 +10,7 @@
 //!
 //! # When to use this
 //!
-//! [`DatabaseEvaluator`] already snapshots flags into an in-memory
+//! [`DatabaseEvaluator`](super::database::DatabaseEvaluator) already snapshots flags into an in-memory
 //! `HashMap` on construction and reload, so per-request DB queries
 //! aren't a concern. `CachedEvaluator` exists to memoize the result
 //! of the **scope-resolution walk** (build candidate keys, look each
@@ -89,7 +89,7 @@ impl CachedEvaluator {
     }
 
     /// Drop every cached entry for a specific feature name. Intended
-    /// for the admin-CRUD path: after [`DatabaseEvaluator::set_flag`]
+    /// for the admin-CRUD path: after [`DatabaseEvaluator::set_flag`](super::database::DatabaseEvaluator::set_flag)
     /// mutates a flag, callers invalidate the corresponding cached
     /// entries so the next `is_enabled` re-reads the snapshot.
     pub fn invalidate(&self, feature: &str) {

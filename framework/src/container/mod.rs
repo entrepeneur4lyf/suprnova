@@ -37,7 +37,9 @@
 //! be silently dropped if some unrelated subsystem panicked mid-write.
 //! Reads recover the same way, so a poisoned container still resolves
 //! whatever was registered before the poison. This matches the
-//! recover-in-place pattern documented in [`crate::lock`].
+//! recover-in-place pattern used elsewhere in the framework for
+//! hot-path registries (see the `lock` module's `read`/`write`/`lock`
+//! helpers — `pub(crate)`, not part of the consumer surface).
 //!
 //! # Example
 //!
@@ -143,7 +145,7 @@ impl Binding {
 /// The main service container
 ///
 /// Stores type-erased bindings keyed by TypeId. Supports both concrete types
-/// and trait objects (via Arc<dyn Trait>).
+/// and trait objects (via `Arc<dyn Trait>`).
 pub struct Container {
     /// Type bindings: TypeId -> Binding
     bindings: HashMap<TypeId, Binding>,
@@ -284,7 +286,7 @@ impl Container {
         self.binding(TypeId::of::<T>())?.resolve_concrete::<T>()
     }
 
-    /// Resolve a trait binding - returns Arc<T>
+    /// Resolve a trait binding — returns `Arc<T>`.
     ///
     /// # Example
     /// ```rust,ignore
@@ -525,7 +527,7 @@ impl App {
         binding.resolve_concrete::<T>()
     }
 
-    /// Resolve a trait binding - returns Arc<T>.
+    /// Resolve a trait binding — returns `Arc<T>`.
     ///
     /// Lookup order:
     /// 1. Task-local test override ([`testing::TestContainer::scope`]) —

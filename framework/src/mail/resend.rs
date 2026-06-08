@@ -1,4 +1,4 @@
-//! Resend HTTP transport. POSTs JSON to https://api.resend.com/emails with
+//! Resend HTTP transport. POSTs JSON to <https://api.resend.com/emails> with
 //! `Authorization: Bearer <api-key>`.
 
 use crate::error::FrameworkError;

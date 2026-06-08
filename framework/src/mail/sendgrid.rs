@@ -1,4 +1,4 @@
-//! SendGrid v3 HTTP transport. POSTs JSON to https://api.sendgrid.com/v3/mail/send.
+//! SendGrid v3 HTTP transport. POSTs JSON to <https://api.sendgrid.com/v3/mail/send>.
 
 use crate::error::FrameworkError;
 use crate::mail::address::Address;

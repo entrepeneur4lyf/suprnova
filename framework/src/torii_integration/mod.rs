@@ -81,7 +81,7 @@ pub(crate) async fn find_or_create_user_by_email(email: &str) -> Result<User, Fr
 /// Use this for authentication / login flows and for anti-enumeration
 /// surfaces (e.g. "resend verification email" / "send password reset link"
 /// endpoints) that must respond identically whether or not the email is
-/// on file. **Never** use [`find_or_create_user_by_email`] in login or
+/// on file. **Never** use `find_or_create_user_by_email` in login or
 /// resend paths: it would silently create accounts from failed login
 /// attempts (account-enumeration / probing footgun).
 pub async fn find_user_by_email_lookup_only(email: &str) -> Result<Option<User>, FrameworkError> {

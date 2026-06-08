@@ -70,7 +70,7 @@ impl Server {
     ///
     /// # Errors
     ///
-    /// Returns a [`FrameworkError`] if the encryption key cannot be
+    /// Returns a [`FrameworkError`](crate::FrameworkError) if the encryption key cannot be
     /// installed. Specifically:
     ///
     /// - `APP_ENV` resolves to a non-development environment (anything

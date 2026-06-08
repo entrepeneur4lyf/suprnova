@@ -79,7 +79,7 @@ async fn current_torii_user() -> Result<ToriiUser, FrameworkError> {
 ///   to the user exactly once** — there is no later retrieval API.
 ///
 /// Until the user submits a valid code through
-/// [`confirm`](self::confirm), 2FA is **not** enforced on the
+/// [`confirm`], 2FA is **not** enforced on the
 /// account (`TwoFactor::is_enabled` returns `false`, `verify`
 /// short-circuits to `false`).
 pub async fn enroll(_req: Request) -> Response {

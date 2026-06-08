@@ -17,7 +17,7 @@
 //!
 //! All three keep the lock's lease alive for the duration of `body`: a body
 //! that runs longer than `ttl` cannot let the lock expire and a second caller
-//! execute concurrently. See [`run_under_lease`].
+//! execute concurrently. See `run_under_lease`.
 //!
 //! ## Key material
 //!
@@ -76,7 +76,7 @@ impl Idempotency {
     ///
     /// The lock is intentionally NOT released on success — the TTL IS the
     /// dedupe window. The lock's lease is refreshed in the background for the
-    /// body's duration (see [`run_under_lease`]), so a body that runs longer
+    /// body's duration (see `run_under_lease`), so a body that runs longer
     /// than `ttl` does not collapse the window or allow concurrent execution;
     /// the effective window is "body duration + up to `ttl` after the last
     /// refresh".

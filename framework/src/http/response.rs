@@ -97,7 +97,7 @@ impl HttpResponse {
     ///   buffering so events flush to the client immediately. Harmless
     ///   on non-nginx; nginx defaults break SSE without it.
     ///
-    /// Each `SseEvent` is serialized via [`SseEvent::to_wire`] and
+    /// Each `SseEvent` is serialized via [`SseEvent::to_wire`](crate::sse::SseEvent::to_wire) and
     /// pushed through the streaming body. The connection stays open
     /// until the producing stream ends or the client disconnects.
     pub fn sse<S>(stream: S) -> Self
@@ -123,7 +123,7 @@ impl HttpResponse {
     /// response surface.
     ///
     /// The stream's error type is `Infallible` by design — see
-    /// [`Body::Stream`] for rationale.
+    /// `Body::Stream` for rationale.
     ///
     /// `Sync` is required because `BoxBody` is a shared trait object;
     /// every tokio channel adapter (`ReceiverStream`,
@@ -697,7 +697,7 @@ impl Redirect {
         self.with_errors_bag("default", errors)
     }
 
-    /// Same as [`with_errors`] but writes into a NAMED bag. Mirrors
+    /// Same as [`with_errors`](Self::with_errors) but writes into a NAMED bag. Mirrors
     /// Laravel's `RedirectResponse::withErrors($errors, $bag)`.
     pub fn with_errors_bag<I, K, V>(mut self, bag: impl Into<String>, errors: I) -> Self
     where
@@ -987,7 +987,7 @@ impl RedirectRouteBuilder {
 
     /// Flash a single key/value into the session for one more request.
     /// Mirrors Laravel's `RedirectResponse::with`. Distinct from
-    /// [`with`] (the route-param builder), which lives at the
+    /// `with` (the route-param builder), which lives at the
     /// route-parameter level — use `flash` here for session flashes.
     pub fn flash(mut self, key: impl Into<String>, value: impl serde::Serialize) -> Self {
         let value = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);

@@ -74,8 +74,8 @@ impl Auth {
     ///
     /// # Errors
     ///
-    /// Returns [`FrameworkError::internal`] when called outside a request
-    /// scope (no [`SessionMiddleware`](crate::SessionMiddleware) installed,
+    /// Returns [`crate::FrameworkError::internal`] when called outside a
+    /// request scope (no [`SessionMiddleware`](crate::SessionMiddleware) installed,
     /// or a unit test that forgot to wrap the call in
     /// [`crate::session::session_scope_for_test`]). The previous infallible
     /// signature silently dropped the write — a "successful login" that
@@ -147,7 +147,7 @@ impl Auth {
     /// outgoing response, **without** touching the session id, CSRF
     /// token, or session user slot.
     ///
-    /// The remember-me half of [`login_remember`], factored out so
+    /// The remember-me half of [`Auth::login_remember`], factored out so
     /// callers that have already rotated the session id and set the
     /// auth user themselves can opt in without redoing the session
     /// dance. The principal user today is
@@ -497,7 +497,7 @@ impl Auth {
     ///
     /// # Errors
     ///
-    /// - [`FrameworkError::Unauthorized`] when no user is currently
+    /// - [`crate::FrameworkError::Unauthorized`] when no user is currently
     ///   authenticated (i.e. [`Auth::user`](Self::user) returns
     ///   `Ok(None)`).
     /// - Whatever error [`Auth::user`](Self::user) returns when the

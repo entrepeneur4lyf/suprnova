@@ -547,7 +547,8 @@ pub fn resolve_boot_keyring(
 /// A realistic rotation chain is 1-3 entries (one in-flight roll, maybe
 /// one stalled prior roll the operator hasn't cleaned up). 8 leaves
 /// generous headroom — nobody is running 8 simultaneous rotations — and
-/// gives the trial-decrypt loop in [`decrypt_with_ring`] a known upper
+/// gives the trial-decrypt loop in `decrypt_with_ring` (the internal
+/// helper that walks the key ring on a decrypt miss) a known upper
 /// bound on work per failed decrypt.
 ///
 /// Exceeding the cap is a hard boot error, not silent truncation: a

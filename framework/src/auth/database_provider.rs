@@ -117,8 +117,11 @@ impl DatabaseUserProvider {
         self
     }
 
-    /// Override how a string id is bound into the SQL lookup. See
-    /// [`default_id_parser`] for the default and its zero-padded-id caveat.
+    /// Override how a string id is bound into the SQL lookup. The
+    /// default parses numeric ids as integers and treats anything else
+    /// (UUIDs, ULIDs, zero-padded codes) as a string — pass a custom
+    /// parser when a string PK happens to look numeric (e.g. zero-padded
+    /// `"007"`) so it doesn't bind as `7`.
     pub fn with_id_parser(mut self, parser: fn(&str) -> SeaValue) -> Self {
         self.id_parser = parser;
         self

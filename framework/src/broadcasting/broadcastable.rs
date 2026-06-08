@@ -37,13 +37,13 @@ use std::sync::Arc;
 ///
 /// # Dispatch ordering with sibling listeners
 ///
-/// The dispatcher used by [`crate::events::Event::dispatch`] is **fail-fast**:
+/// The dispatcher used by `Event::dispatch` is **fail-fast**:
 /// if a hub publish fails (e.g. broker disconnect on a multi-process backend),
 /// the [`BroadcastListener`] returns `Err` and sibling listeners that come
 /// after it in the registration order do **not** run. Register the
 /// [`BroadcastListener`] **after** in-process listeners whose side effects
 /// (DB writes, log emission) must run regardless of broadcast outcome, or
-/// switch to [`crate::events::Event::dispatch_best_effort`] when you need all
+/// switch to `Event::dispatch_best_effort` when you need all
 /// listeners to run even if one returns `Err`.
 pub trait Broadcastable: Event + Serialize {
     /// Channel names this event broadcasts on when dispatched.

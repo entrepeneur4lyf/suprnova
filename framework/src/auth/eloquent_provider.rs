@@ -1,6 +1,6 @@
 //! Model-backed user provider — Laravel's `EloquentUserProvider`.
 //!
-//! Resolves users through a typed [`Model`](crate::eloquent::Model) that
+//! Resolves users through a typed [`Model`] that
 //! also implements [`Authenticatable`]. The typed half of the
 //! transparency lever: an app whose `User` is a `#[suprnova::model]`
 //! registers `EloquentUserProvider::<User>::new()` and needs no
@@ -43,7 +43,7 @@ fn default_id_parser(id: &str) -> Value {
 
 /// A [`UserProvider`] that resolves users from a typed model `M`.
 ///
-/// `M` must be both a [`Model`](crate::eloquent::Model) (for querying)
+/// `M` must be both a [`Model`] (for querying)
 /// and [`Authenticatable`] (for the id / password contract).
 pub struct EloquentUserProvider<M> {
     /// The lookup column for `retrieve_by_id`. `None` uses the model's

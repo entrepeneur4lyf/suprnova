@@ -2,7 +2,7 @@
 //!
 //! [`MockPaymentProvider`] implements all four universal traits — [`Checkout`],
 //! [`Subscription`], [`CustomerStore`], and [`WebhookHandler`] — entirely in memory,
-//! with no external dependencies. It deliberately does NOT implement [`Payment`]
+//! with no external dependencies. It deliberately does NOT implement [`Payment`](super::traits::Payment)
 //! (server-capture) to exercise the Paddle-style "optional Payment" invariant: callers
 //! that query `provider.as_payment()` will receive `None`.
 //!

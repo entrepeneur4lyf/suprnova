@@ -406,7 +406,7 @@ impl SseEvent {
     /// `\r\n` and bare `\r` are normalized to `\n` before splitting so
     /// the wire reflects exactly the lines the producer's string spelled
     /// out, regardless of which terminator the producer used — see
-    /// [`normalize_data_line_endings`] for the why. NUL bytes in comment
+    /// `normalize_data_line_endings` for the why. NUL bytes in comment
     /// text are stripped on the same grounds as `event` / `id`.
     pub fn to_wire(&self) -> Bytes {
         match &self.kind {

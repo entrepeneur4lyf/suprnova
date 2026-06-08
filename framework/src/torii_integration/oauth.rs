@@ -164,7 +164,7 @@ fn provider_endpoints(provider: &str) -> Option<ProviderEndpoints> {
 
 /// Result of initiating an OAuth flow.
 ///
-/// Redirect the user to [`authorization_url`] and store [`state`] in their
+/// Redirect the user to [`authorization_url`](Self::authorization_url) and store [`state`](Self::state) in their
 /// session so it can be verified on the callback.
 #[derive(Debug)]
 pub struct OAuthKickoff {
@@ -179,7 +179,7 @@ pub struct OAuthKickoff {
 
 /// Facade for OAuth-based authentication operations.
 ///
-/// Obtained via [`crate::Auth::oauth(provider)`].
+/// Obtained via `crate::Auth::oauth(provider)`.
 ///
 /// # Example
 ///

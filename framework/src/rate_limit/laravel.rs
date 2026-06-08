@@ -2,7 +2,7 @@
 //! `Illuminate\Cache\RateLimiter`.
 //!
 //! Implements Laravel's fixed-window counter on top of Suprnova's
-//! [`Cache`](crate::cache::Cache) store. The window is anchored by a
+//! [`crate::cache::Cache`] store. The window is anchored by a
 //! `:timer` cache key that holds the available-at timestamp; the counter
 //! itself accumulates hits under the bare `key`. When the timer is
 //! missing or has expired, [`RateLimiter::too_many_attempts`] resets the
@@ -44,7 +44,7 @@ use super::limit::LimitResult;
 /// `Illuminate\Cache\RateLimiter`. The callback receives the [`Request`]
 /// so it can derive a per-user / per-IP key, gate the limit on user
 /// attributes (admins → unlimited), or return a fully-formed
-/// [`HttpResponse`] (short-circuit).
+/// [`HttpResponse`](crate::http::HttpResponse) (short-circuit).
 ///
 /// The registry is process-global by design — Laravel apps register
 /// limiters at boot (`AppServiceProvider::boot`) and never mutate them
@@ -159,16 +159,16 @@ impl RateLimiter {
     /// Register a named rate limiter. Mirrors `RateLimiter::for($name,
     /// $callback)`. The callback runs once per request and can return:
     ///
-    /// - a [`Limit`] (`Limit::per_minute(5).by(req.ip())`),
+    /// - a [`Limit`](super::Limit) (`Limit::per_minute(5).by(req.ip())`),
     /// - a `Vec<Limit>` (apply every limit; first to trip wins), or
-    /// - an [`HttpResponse`] (short-circuit; the request returns this
+    /// - an [`HttpResponse`](crate::http::HttpResponse) (short-circuit; the request returns this
     ///   response immediately — used by Laravel's "admin gets
     ///   unlimited" pattern via `Limit::none()`, but the response form
     ///   also lets you refuse outright).
     ///
     /// `define` is the primary Rust-side name (`for` is a reserved
     /// keyword in Rust). The literal Laravel alias is exposed as
-    /// [`RateLimiter::r#for`].
+    /// `RateLimiter::r#for`.
     pub fn define<F>(name: impl Into<String>, callback: F)
     where
         F: Fn(&Request) -> LimitResult + Send + Sync + 'static,

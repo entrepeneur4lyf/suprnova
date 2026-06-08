@@ -8,7 +8,7 @@ use crate::inertia::ScrollMetadata;
 use super::{CursorPaginator, LengthAwarePaginator};
 
 /// Convert a paginator into an Inertia scroll prop: the metadata + the
-/// row vec, which the caller wires onto an [`InertiaResponse`] under a
+/// row vec, which the caller wires onto an [`InertiaResponse`](crate::inertia::InertiaResponse) under a
 /// chosen key.
 pub trait IntoInertiaScroll<T> {
     /// Split this paginator into its Inertia scroll metadata and the

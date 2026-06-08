@@ -646,7 +646,7 @@ where
     }
 
     /// Bucket rows by `field` into `HashMap<String, Collection<M>>`.
-    /// Keys are derived via [`json_to_string_key`], which mirrors
+    /// Keys are derived via `json_to_string_key`, which mirrors
     /// Laravel's `groupBy('team_id')` contract of string-keyed output
     /// regardless of the column's native type.
     pub fn group_by(&self, field: &str) -> HashMap<String, Collection<M>>
@@ -666,7 +666,7 @@ where
 
     /// Index rows by `field` into `HashMap<String, M>`. Later
     /// duplicates overwrite earlier ones (matches Laravel's `keyBy`).
-    /// Keys are stringified via [`json_to_string_key`].
+    /// Keys are stringified via `json_to_string_key`.
     pub fn key_by(&self, field: &str) -> HashMap<String, M>
     where
         M: Clone,
@@ -683,7 +683,7 @@ where
     }
 
     /// Sort rows ascending by `field`. Ordering is best-effort across
-    /// JSON value shapes (see [`compare_json`]) — numeric, string,
+    /// JSON value shapes (see `compare_json`) — numeric, string,
     /// and boolean columns each sort cleanly within their own shape;
     /// heterogeneous mixes fall back to `Ordering::Equal`.
     ///

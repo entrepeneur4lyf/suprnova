@@ -7,10 +7,10 @@
 //! is the modern surface and reserves the bare `Model` name.
 //!
 //! All terminal methods route through
-//! [`ExecutorChoice`](crate::database::transaction::ExecutorChoice), so
+//! [`ExecutorChoice`], so
 //! they observe the same precedence chain as
 //! [`Builder<M>`](crate::eloquent::Builder): the ambient
-//! [`CURRENT_TX`](crate::database::transaction::CURRENT_TX) installed by
+//! task-local `CURRENT_TX` slot installed by
 //! [`DB::transaction`](crate::DB::transaction), then per-call routing,
 //! then `__read_replica__` for reads, then the primary pool. Crucially,
 //! writes inside a `DB::transaction` closure are now part of the

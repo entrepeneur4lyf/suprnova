@@ -66,7 +66,7 @@ pub trait QueueDriver: Send + Sync {
 
     /// Count of envelopes whose `available_at <= now` and which are not
     /// currently reserved. Mirrors Laravel's `pendingSize($queue)`.
-    /// Defaults to [`size`] minus the reserved/delayed counts.
+    /// Defaults to [`size`](Self::size) minus the reserved/delayed counts.
     async fn pending_size(&self) -> Result<u64, FrameworkError> {
         let total = self.size().await?;
         let reserved = self.reserved_size().await.unwrap_or(0);

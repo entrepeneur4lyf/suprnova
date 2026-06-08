@@ -84,7 +84,7 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// Default: `None` (no uniqueness; equivalent to a non-unique job).
     ///
     /// Idempotent jobs that always run can leave this as `None` and use
-    /// [`Idempotency`](crate::idempotency::Idempotency) inside [`handle`]
+    /// [`Idempotency`](crate::idempotency::Idempotency) inside [`handle`](Self::handle)
     /// instead.
     fn unique_id(&self) -> Option<String>
     where

@@ -62,7 +62,7 @@ use std::time::Duration;
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
 /// Manually mark the evaluator as "installed" for the purposes of the
-/// [`FeatureMiddleware`] startup check. Use this when bypassing
+/// [`FeatureMiddleware`](crate::features::middleware::FeatureMiddleware) startup check. Use this when bypassing
 /// [`install_evaluator`] (e.g. testing with a `with_default` scope, or
 /// wiring a non-`bootstrap_database_cached` topology).
 pub fn mark_installed() {
@@ -70,7 +70,7 @@ pub fn mark_installed() {
 }
 
 /// Query the installation tracker. `false` means no evaluator was
-/// registered via the framework's helpers — [`FeatureMiddleware`]
+/// registered via the framework's helpers — [`FeatureMiddleware`](crate::features::middleware::FeatureMiddleware)
 /// uses this to gate its one-shot warning.
 pub fn is_installed() -> bool {
     INSTALLED.load(Ordering::Acquire)

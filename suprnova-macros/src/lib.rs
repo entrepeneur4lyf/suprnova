@@ -621,7 +621,7 @@ pub fn multipart_request(input: TokenStream) -> TokenStream {
 /// The struct must also derive `Serialize` (used as the Tera template
 /// context) and `Deserialize` (so the queued path can rebuild the
 /// notification from the envelope payload), and must already implement
-/// [`Notification`](::suprnova::notifications::Notification).
+/// `Notification` (from `::suprnova::notifications::Notification`).
 ///
 /// # Attributes
 ///
@@ -907,7 +907,7 @@ pub fn prunable(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// # Idempotency
 ///
 /// The generated install fn is gated by a per-observer `AtomicBool`,
-/// so calling [`bootstrap_observers`](::suprnova::bootstrap_observers)
+/// so calling `bootstrap_observers` (from `::suprnova::bootstrap_observers`)
 /// twice does not register the listeners twice. T2a's docs delegate
 /// this contract to T2b explicitly.
 ///

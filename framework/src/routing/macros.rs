@@ -747,7 +747,7 @@ pub struct GroupRoute {
 
 /// A multi-method route (`any!`) stored within a group. Holds a
 /// pre-boxed handler shared across every verb plus the name +
-/// middleware list. Registered by [`GroupDef::register_with_inherited`]
+/// middleware list. Registered by `GroupDef::register_with_inherited`
 /// by fanning the handler into every per-method matchit slot and
 /// fanning the middleware list across every `(method, path)` key.
 pub struct GroupAnyRoute {
@@ -1063,7 +1063,7 @@ where
 {
     /// Convert this `any!()` definition to a type-erased `GroupAnyRoute`
     /// for use inside `group!{}`. Boxes the handler once; the seven-method
-    /// fan-out happens inside [`GroupDef::register_with_inherited`].
+    /// fan-out happens inside `GroupDef::register_with_inherited`.
     pub fn into_group_any_route(self) -> GroupAnyRoute {
         let handler = self.handler;
         let boxed: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));

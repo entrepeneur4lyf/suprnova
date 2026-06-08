@@ -1,4 +1,4 @@
-//! Postmark HTTP transport. POSTs JSON to https://api.postmarkapp.com/email.
+//! Postmark HTTP transport. POSTs JSON to <https://api.postmarkapp.com/email>.
 
 use crate::error::FrameworkError;
 use crate::mail::address::Address;

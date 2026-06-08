@@ -1,7 +1,7 @@
 //! Queue lifecycle events.
 //!
 //! Mirrors Laravel 13's `Illuminate\Queue\Events\*`. The worker emits these
-//! through the standard [`Event`](crate::events::Event) facade so
+//! through the standard [`crate::events::Event`] facade so
 //! observers (admin dashboards, custom listeners) can hook in via
 //! `Event::listen`. Events carry envelope metadata (not the typed job
 //! instance) because the worker is type-erased over JSON payloads.

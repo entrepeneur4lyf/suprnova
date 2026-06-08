@@ -111,7 +111,7 @@ impl RequestIdMiddleware {
         Self { id: None }
     }
 
-    /// Install with an id already resolved via [`resolve_request_id`].
+    /// Install with an id already resolved via `resolve_request_id`.
     ///
     /// The server resolves the request id ONCE and shares it here so the
     /// panic boundary (`execute_chain_safely`) can echo the SAME id on a

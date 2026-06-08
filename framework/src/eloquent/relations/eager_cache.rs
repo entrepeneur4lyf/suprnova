@@ -16,7 +16,7 @@
 //! ## Clone semantics
 //!
 //! `EagerLoadCache` deep-clones — every cell carries a clone trampoline
-//! (the [`ClonedBox`] struct) so cloning a model also clones any rows
+//! (the `ClonedBox` struct) so cloning a model also clones any rows
 //! the eager loader had attached. This matches Laravel's behaviour:
 //! `clone $user` preserves `$user->posts`.
 

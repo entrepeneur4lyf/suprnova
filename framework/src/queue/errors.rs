@@ -30,7 +30,7 @@ pub struct TimeoutExceeded {
 }
 
 /// Thrown when a job middleware (or the handler itself) manually marked the
-/// job as failed via [`JobContext::fail`](super::JobContext::fail). Mirrors
+/// job as failed via `JobContext::fail`. Mirrors
 /// `Illuminate\Queue\ManuallyFailedException`.
 #[derive(Debug, Clone, Error)]
 #[error("queue job '{job_name}' was manually failed: {reason}")]

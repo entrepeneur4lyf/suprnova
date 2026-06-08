@@ -5,7 +5,7 @@
 //! notification's `(name, payload)` pair. On `handle`, the worker
 //! reconstructs the notification via the factory registry and fans it
 //! out across the channels declared at queue time, using the bound
-//! [`NotificationDispatcher`]. Channels declared at queue time but not
+//! [`NotificationDispatcher`](crate::notifications::NotificationDispatcher). Channels declared at queue time but not
 //! present on the dispatcher at execute time are logged at WARN level
 //! and skipped, matching the sync dispatch path's contract.
 

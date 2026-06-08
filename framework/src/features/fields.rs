@@ -38,7 +38,7 @@
 //! `context! { user_id = 42_i64 }` thanks to the
 //! [`Evaluator::on_new_context`](featureflag::evaluator::Evaluator::on_new_context)
 //! coercion in [`DatabaseEvaluator::on_new_context`](crate::features::DatabaseEvaluator),
-//! and the [`Self::as_i64`] helper round-trips back to `i64` for callers
+//! and the [`UserIdField::as_i64`] helper round-trips back to `i64` for callers
 //! that genuinely need the numeric form.
 //!
 //! # Naming

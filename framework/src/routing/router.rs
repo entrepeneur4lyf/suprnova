@@ -57,7 +57,7 @@ static ROUTE_REGISTRY: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new
 /// Public test utility for tests that register named routes against
 /// the process-global table and want a clean slate between cases.
 /// Mirrors the [`crate::events::EventDispatcher::clear`] and
-/// [`crate::eloquent::scope::ScopeRegistry::clear`] precedent for
+/// [`crate::eloquent::scopes::ScopeRegistry::clear`] precedent for
 /// process-global state that other tests rely on across the
 /// framework.
 ///
@@ -767,7 +767,7 @@ impl Router {
     /// # Panics
     ///
     /// Panics on duplicate route registration (two handlers on the same
-    /// pattern) or any matchit insert error. See [`Router::insert_get`].
+    /// pattern) or any matchit insert error. See `Router::insert_get`.
     /// Use [`Router::try_get`] to get an `Err(FrameworkError)` instead of a
     /// panic when registering routes from a fallible source.
     pub fn get<H, Fut>(self, path: &str, handler: H) -> RouteBuilder
@@ -1304,7 +1304,7 @@ impl Router {
     }
 
     /// Register a WebSocket route with both a middleware list and a per-route
-    /// [`WsConfig`] override.
+    /// [`WsConfig`](crate::ws::WsConfig) override.
     pub fn ws_with_middleware_and_config<H>(
         self,
         path: &str,

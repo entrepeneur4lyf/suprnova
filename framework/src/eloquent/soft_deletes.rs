@@ -83,7 +83,7 @@ where
 /// `Self::query()` as a direct `filter_null(deleted_at)` call (see
 /// the macro emission in
 /// `suprnova-macros/src/model/derive_eloquent.rs` for the
-/// `query_override`). The Vec<WhereTerm> is the canonical storage,
+/// `query_override`). The `Vec<WhereTerm>` is the canonical storage,
 /// so `with_trashed` retains every term that isn't the tombstone
 /// null-check; `only_trashed` swaps it for `NotNull(deleted_at)`.
 /// Both append the `"soft_deletes"` tag via the framework-internal

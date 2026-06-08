@@ -352,7 +352,7 @@ impl PasskeyAuth {
     /// should be sent as JSON to the browser for `navigator.credentials.create()`.
     ///
     /// The in-flight registration state is stored server-side keyed by `email`;
-    /// call [`finish_registration`] with the same email to complete the flow.
+    /// call [`finish_registration`](Self::finish_registration) with the same email to complete the flow.
     ///
     /// # Errors
     ///

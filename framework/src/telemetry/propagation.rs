@@ -6,8 +6,8 @@
 //! halves of joining a distributed trace.
 //!
 //! - Outbound: `http_client::inject_w3c_trace_context` injects the active
-//!   context into request headers via [`HeaderInjector`].
-//! - Inbound: [`extract_w3c_trace_context`] reads `traceparent`/`tracestate`
+//!   context into request headers via `HeaderInjector`.
+//! - Inbound: `extract_w3c_trace_context` reads `traceparent`/`tracestate`
 //!   off the incoming request, and [`join_upstream_trace`] reparents the
 //!   per-request tracing span onto the extracted upstream span so server
 //!   spans appear as children of the caller's span instead of starting a

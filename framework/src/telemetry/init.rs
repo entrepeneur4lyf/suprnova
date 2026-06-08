@@ -227,7 +227,7 @@ fn empty_guard() -> TelemetryGuard {
 ///      resource;
 ///    - installs the providers globally so any code can call
 ///      `opentelemetry::global::tracer(...)` / `meter(...)`;
-///    - installs a [`TraceContextPropagator`](opentelemetry_sdk::propagation::TraceContextPropagator)
+///    - installs a `TraceContextPropagator` (from `opentelemetry_sdk::propagation`)
 ///      for W3C trace-context propagation;
 ///    - registers a `tracing-opentelemetry` layer so every `tracing::span`
 ///      becomes an OTel span automatically;

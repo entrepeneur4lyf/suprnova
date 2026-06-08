@@ -656,12 +656,12 @@ impl EventDispatcher {
         Ok((value, first_err))
     }
 
-    /// Register a [`Subscriber`] — a single struct that bundles a related set
+    /// Register a [`Subscriber`](super::Subscriber) — a single struct that bundles a related set
     /// of listener registrations behind one bootstrap call. Mirrors Laravel's
     /// `Dispatcher::subscribe($subscriber)`.
     ///
     /// Each subscriber owns its own state (database handle, config, ...) and
-    /// chooses which events to attach in [`Subscriber::subscribe`]. The
+    /// chooses which events to attach in [`Subscriber::subscribe`](super::Subscriber::subscribe). The
     /// dispatcher passes itself to the subscribe method so the subscriber can
     /// call back into [`listen`](Self::listen).
     pub async fn subscribe<S: super::Subscriber>(&self, subscriber: Arc<S>) {

@@ -973,8 +973,8 @@ impl DB {
     ///   `Deadlock found when trying to get lock` and any user-
     ///   surfaced deadlock string)
     ///
-    /// Between attempts a jittered backoff sleeps for
-    /// [`deadlock_retry_backoff`]'s computed duration — exponential
+    /// Between attempts a jittered backoff sleeps for the internal
+    /// `deadlock_retry_backoff` helper's computed duration — exponential
     /// with full jitter, capped at 500ms — so contending writers don't
     /// thrash the database after a deadlock victim is chosen. On the
     /// final attempt the error propagates unchanged with no sleep.

@@ -27,7 +27,7 @@
 //!     .make();
 //! ```
 //!
-//! `create` / `create_many` (in [`persist`]) extend the builder with
+//! `create` / `create_many` (in `persist`) extend the builder with
 //! SeaORM persistence. The fluent surface is intentionally close to
 //! Laravel's `User::factory()->count(10)->create()` so the mental model
 //! ports without translation.
@@ -159,7 +159,7 @@ impl<M> FactoryBuilder<M> {
 
     /// Build a single in-memory instance. Runs every registered
     /// override against the produced value. Does NOT persist —
-    /// see [`persist::FactoryBuilder::create`] for the persisted
+    /// see `persist::FactoryBuilder::create` for the persisted
     /// variant.
     pub fn make(self) -> M {
         let mut model = (self.factory_fn)();
@@ -202,7 +202,7 @@ impl<M> FactoryBuilder<M> {
 
 /// Persistence-aware builder methods. Available whenever `M:
 /// Persistable` — which, thanks to the blanket impl in
-/// [`persist`], every SeaORM `Model` satisfies for free.
+/// `persist`, every SeaORM `Model` satisfies for free.
 impl<M> FactoryBuilder<M>
 where
     M: Persistable + 'static,

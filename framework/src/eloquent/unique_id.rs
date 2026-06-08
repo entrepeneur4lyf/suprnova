@@ -21,8 +21,8 @@
 //! Laravel's `HasUuids` is a trait that overrides several model
 //! lifecycle hooks (`creating`, `getKeyType`, `getIncrementing`). In
 //! Rust the equivalent surface is the macro attribute + the
-//! [`UniqueIdGenerator`] trait below: the macro generates the
-//! lifecycle wiring; the trait carries the runtime "what string do I
+//! [`UniqueIdKind`] enum below: the macro generates the
+//! lifecycle wiring; the enum carries the runtime "what string do I
 //! emit" choice.
 
 use uuid::Uuid;

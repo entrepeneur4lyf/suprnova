@@ -9,7 +9,7 @@
 //! and our backing databases (Postgres / MySQL / SQLite via SQLx) are
 //! async-only. We bridge the two by holding an in-memory snapshot of
 //! the table, refreshed asynchronously via [`DatabaseEvaluator::reload`] and
-//! [`Self::set_flag`]. Reads go through an `RwLock` over a
+//! [`DatabaseEvaluator::set_flag`]. Reads go through an `RwLock` over a
 //! `HashMap<(name, scope_key), enabled>` — lock-free under contention,
 //! zero allocation on the hot path beyond the lookup key.
 //!
@@ -17,7 +17,7 @@
 //!
 //! Most-specific scope first, falling back to the global `""` scope.
 //! `None` is returned only when no scope match exists, leaving the
-//! [`Feature`]'s declared default to take over (see
+//! [`Feature`](featureflag::feature::Feature)'s declared default to take over (see
 //! [`Feature::is_enabled_in`](featureflag::feature::Feature::is_enabled_in)).
 //!
 //! 1. `user:{user_id}` — when the context carries a [`UserIdField`]
@@ -45,9 +45,9 @@
 //!
 //! # Connection ownership
 //!
-//! [`Self::new`] sources the connection from [`DB::get`] (the
+//! [`DatabaseEvaluator::new`] sources the connection from [`DB::get`](crate::database::DB::get) (the
 //! framework's primary pool, registered via the App container).
-//! [`Self::new_in_memory`] builds its own in-memory SQLite
+//! [`DatabaseEvaluator::new_in_memory`] builds its own in-memory SQLite
 //! connection so integration tests stay hermetic without touching the
 //! container singleton. Both paths produce a `DatabaseEvaluator` of
 //! identical shape; the difference is purely how the connection is

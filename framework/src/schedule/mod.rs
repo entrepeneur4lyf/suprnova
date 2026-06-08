@@ -217,7 +217,7 @@ impl Schedule {
     /// result, regardless of how it was executed.
     ///
     /// Callers that need to keep background tasks running past a tick (the
-    /// `schedule:work` daemon) should drive [`run_due_tasks_into`] with a
+    /// `schedule:work` daemon) should drive [`run_due_tasks_into`](Self::run_due_tasks_into) with a
     /// long-lived [`JoinSet`] instead.
     pub async fn run_due_tasks(&self) -> Vec<ScheduledTaskJoin> {
         let mut joinset: JoinSet<ScheduledTaskJoin> = JoinSet::new();
@@ -226,7 +226,7 @@ impl Schedule {
         results
     }
 
-    /// Same as [`run_due_tasks`] but routes background tasks into the supplied
+    /// Same as [`run_due_tasks`](Self::run_due_tasks) but routes background tasks into the supplied
     /// `joinset` instead of awaiting them locally.
     ///
     /// Returns only the inline (non-background) results — caller is
@@ -253,7 +253,7 @@ impl Schedule {
 
     /// `run_all_tasks` variant that pushes background tasks into the caller's
     /// `joinset` instead of awaiting them locally. Symmetric with
-    /// [`run_due_tasks_into`].
+    /// [`run_due_tasks_into`](Self::run_due_tasks_into).
     pub async fn run_all_tasks_into(
         &self,
         joinset: &mut JoinSet<ScheduledTaskJoin>,

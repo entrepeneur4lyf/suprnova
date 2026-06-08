@@ -11,8 +11,13 @@ categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
 
 [[bin]]
-    name = "suprnova"
+name = "suprnova"
 path = "src/main.rs"
+# Skip rustdoc for the bin — the lib at `framework/suprnova` already
+# emits docs at `target/doc/suprnova/`, and rustdoc tries to write
+# this bin's doc to the same path (cargo issue #6313). The CLI's
+# user-facing reference is `suprnova --help`, not docs.rs.
+doc = false
 
 [lib]
 name = "suprnova_cli"

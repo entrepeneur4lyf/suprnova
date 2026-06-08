@@ -113,7 +113,7 @@ pub trait BroadcastHub: Send + Sync + 'static {
     /// be reliably delivered: for in-process hubs that's effectively never
     /// (`Ok(())` always), but for cross-process implementations it covers
     /// fanout backend failures (broker disconnect, stream closed) so the
-    /// caller — typically [`crate::events::Event::dispatch`] via
+    /// caller — typically `Event::dispatch` via
     /// [`BroadcastListener`](crate::broadcasting::BroadcastListener) — can
     /// surface the loss instead of swallowing it. Local fanout, when it
     /// happens, runs before the error is returned and is unaffected.
@@ -127,7 +127,7 @@ pub trait BroadcastHub: Send + Sync + 'static {
 
     /// Track a presence member on a channel. The `member_id` is a
     /// per-connection UUID assigned by the handler; `info` is the
-    /// public payload returned by [`PresenceChannel::member_info`].
+    /// public payload returned by `PresenceChannel::member_info`.
     ///
     /// Default: no-op, so future fanout implementations (T11) can
     /// implement member tracking lazily.
@@ -138,7 +138,7 @@ pub trait BroadcastHub: Send + Sync + 'static {
     async fn untrack_member(&self, _channel: &str, _member_id: &str) {}
 
     /// Return the current member list for a channel — each element is
-    /// the `info` value passed to [`track_member`] for a live member.
+    /// the `info` value passed to [`Self::track_member`] for a live member.
     /// Default: empty vec.
     async fn list_members(&self, _channel: &str) -> Vec<Value> {
         Vec::new()
