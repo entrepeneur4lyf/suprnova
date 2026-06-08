@@ -643,7 +643,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     let exec = ::suprnova::database::transaction::ExecutorChoice::resolve_write(
                         ::core::option::Option::None,
                         ::core::option::Option::None,
-                        <Self as ::suprnova::eloquent::Model>::default_connection_name(),
+                        <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     )
                     .await?;
                     let backend = exec.backend();
@@ -828,6 +828,14 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             // model's PK and soft-delete column are baked into each
             // relation's inventory entry at link time.
             const SOFT_DELETES_COLUMN: &'static str = #soft_deletes_column_const;
+
+            // Per-model default connection override. Lives on
+            // `EloquentModel` (not the heavier `Model` trait) so
+            // generic relation impls that only carry the lightweight
+            // marker bound can still consult it without dragging in
+            // the full CRUD bound chain. Empty when the model didn't
+            // declare `#[model(connection = "...")]`.
+            #default_connection_impl
         }
 
         // Bridge the user struct <-> SeaORM Model row. The inner
@@ -867,7 +875,6 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         impl ::suprnova::eloquent::Model for #struct_ident {
             fn primary_key_name() -> &'static str { #pk_name }
 
-            #default_connection_impl
 
             #fillable_impl
 

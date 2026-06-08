@@ -406,3 +406,63 @@ async fn has_many_through_inside_tx_sees_in_tx_inserts() {
         .unwrap();
     assert_eq!(row.posts_loaded().len(), 1);
 }
+
+#[tokio::test]
+async fn has_many_through_terminal_get_inside_tx_sees_in_tx_inserts() {
+    // The eager `with(["..."])` path above exercised the macro-emitted
+    // arm; this test pins the user-facing terminal `country.posts().get()`
+    // path. Before A2-H-002 the terminal called `DB::connection()?`
+    // directly, bypassing CURRENT_TX — the in-tx insert below would not
+    // appear in the result.
+    let (conn, _guard, _tmp) = fresh_multiconn_sqlite().await;
+    migrate_through(&conn).await;
+
+    let c = Af1Country::create(attrs! { name: "Chile" }).await.unwrap();
+    let a = Af1Author::create(attrs! { af1_country_id: c.id, name: "Bolaño" })
+        .await
+        .unwrap();
+    let _ = Af1Article::create(attrs! { af1_author_id: a.id, title: "pre-tx" })
+        .await
+        .unwrap();
+
+    let country_id = c.id;
+    let author_id = a.id;
+    let result: Result<(), FrameworkError> = DB::transaction(move |_tx| {
+        Box::pin(async move {
+            let _ = Af1Article::create(attrs! { af1_author_id: author_id, title: "in-tx" }).await?;
+            let country = Af1Country::find(country_id).await?.unwrap();
+            let posts = country.posts().get().await?;
+            assert_eq!(
+                posts.into_vec().len(),
+                2,
+                "HasManyThrough::get() must route through ExecutorChoice so an in-tx \
+                 insert is visible; the pre-fix raw `DB::connection()?` path returned 1"
+            );
+
+            let count = Af1Country::find(country_id)
+                .await?
+                .unwrap()
+                .posts()
+                .count()
+                .await?;
+            assert_eq!(
+                count, 2,
+                "HasManyThrough::count() must route through ExecutorChoice too"
+            );
+
+            Err(FrameworkError::internal("rollback"))
+        })
+    })
+    .await;
+    assert!(result.is_err());
+
+    let outside = Af1Country::find(country_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .posts()
+        .get()
+        .await
+        .unwrap();
+    assert_eq!(outside.into_vec().len(), 1);
+}

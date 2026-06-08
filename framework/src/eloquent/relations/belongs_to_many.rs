@@ -308,11 +308,12 @@ where
         related_id: impl Into<serde_json::Value>,
         extra: Attrs,
     ) -> Result<(), FrameworkError> {
-        // Phase 10C audit-fix AF2 — resolve through ExecutorChoice so the
-        // pivot INSERT lands on the ambient transaction connection when
-        // CURRENT_TX is active. The pre-fix path called DB::connection()
-        // directly and silently auto-committed on the pool.
-        let exec = ExecutorChoice::resolve_write(None, None, None).await?;
+        // Resolve through ExecutorChoice so the pivot INSERT lands on
+        // the ambient transaction connection when CURRENT_TX is active,
+        // and so the parent model's `#[model(connection = "...")]`
+        // default routes correctly outside a tx — pivot tables
+        // conventionally live on the parent's database.
+        let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
         let id = related_id.into();
         match &exec {
@@ -353,10 +354,11 @@ where
         self,
         related_id: impl Into<serde_json::Value>,
     ) -> Result<(), FrameworkError> {
-        // Phase 10C audit-fix AF2 — resolve through ExecutorChoice so the
-        // pivot DELETE lands on the ambient transaction connection when
-        // CURRENT_TX is active.
-        let exec = ExecutorChoice::resolve_write(None, None, None).await?;
+        // Resolve through ExecutorChoice so the pivot DELETE lands on
+        // the ambient transaction connection when CURRENT_TX is active,
+        // and honours the parent model's `#[model(connection = "...")]`
+        // default outside a tx.
+        let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
         let id = related_id.into();
         match &exec {
@@ -406,13 +408,15 @@ where
     {
         use std::collections::{HashMap, HashSet};
 
-        // Phase 10C audit-fix AF2 — resolve through ExecutorChoice so the
-        // SELECT + INSERTs + DELETEs all run on the ambient transaction
-        // connection when CURRENT_TX is active. Outside a tx we still
-        // open an inner SeaORM transaction (below) for atomicity of the
-        // attach/detach loop; that inner tx is unnecessary when we
-        // already inherit one from the closure form.
-        let exec = ExecutorChoice::resolve_write(None, None, None).await?;
+        // Resolve through ExecutorChoice so the SELECT + INSERTs +
+        // DELETEs all run on the ambient transaction connection when
+        // CURRENT_TX is active, and honour the parent model's
+        // `#[model(connection = "...")]` default outside a tx. Outside
+        // a tx we still open an inner SeaORM transaction (below) for
+        // atomicity of the attach/detach loop; that inner tx is
+        // unnecessary when we already inherit one from the closure
+        // form.
+        let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
 
         // De-duplicate target IDs by JSON-string canonicalisation.
@@ -581,12 +585,13 @@ where
     /// `FromQueryResult` derive. Two homogeneous queries each round-
     /// trip the rows cleanly through each model's own deserialiser.
     pub async fn get(self) -> Result<Collection<R>, FrameworkError> {
-        // Phase 10C audit-fix AF2 — the pivot-id SELECT used to read
-        // against the pool; route it through ExecutorChoice so it
-        // honors CURRENT_TX. The downstream `Model::query()` calls for
-        // the related and pivot rows already consult CURRENT_TX
-        // through Builder::get's own ExecutorChoice resolution.
-        let exec = ExecutorChoice::resolve_read(None, None, None).await?;
+        // Route the pivot-id SELECT through ExecutorChoice so it
+        // honours CURRENT_TX and the parent model's
+        // `#[model(connection = "...")]` default. The downstream
+        // `R::query()` / `P::query()` calls for the related and pivot
+        // rows already consult ExecutorChoice through their own
+        // `Builder::get` resolution with each model's own default.
+        let exec = ExecutorChoice::resolve_read(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
 
         // Fetch the set of related IDs attached to this parent.
@@ -687,10 +692,11 @@ where
     /// Returns `i64` to match the [`crate::eloquent::HasMany::count`]
     /// surface.
     pub async fn count(self) -> Result<i64, FrameworkError> {
-        // Phase 10C audit-fix AF2 — read via ExecutorChoice so a count
-        // taken inside `DB::transaction { ... }` sees in-tx pivot
-        // attaches/detaches.
-        let exec = ExecutorChoice::resolve_read(None, None, None).await?;
+        // Read via ExecutorChoice so a count taken inside
+        // `DB::transaction { ... }` sees in-tx pivot
+        // attaches/detaches, and honour the parent model's
+        // `#[model(connection = "...")]` default outside a tx.
+        let exec = ExecutorChoice::resolve_read(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
         let ph = match backend {
             DatabaseBackend::Postgres => "$1".to_string(),

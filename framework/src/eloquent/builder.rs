@@ -1483,6 +1483,16 @@ impl<M> Builder<M> {
         self
     }
 
+    /// Whether this builder will emit a locked SELECT (`FOR UPDATE` /
+    /// `FOR SHARE`). Defense-in-depth signal for the read terminals:
+    /// when set, the executor resolver must skip the `__read_replica__`
+    /// step — Postgres hot-standbys reject locked SELECTs outright,
+    /// and MySQL replicas accept them but the lock is local to the
+    /// replica and useless.
+    fn wants_primary_pool(&self) -> bool {
+        !matches!(self.lock_mode, LockMode::None)
+    }
+
     /// Override the model's static cast pipeline for this query. T7b
     /// consumes this; T5 just plumbs it through.
     pub fn with_casts(
@@ -2959,6 +2969,33 @@ where
     <<M::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
         Send + Into<sea_orm::Value>,
 {
+    /// Centralised read-side executor resolution. Routes through
+    /// [`ExecutorChoice::resolve_read_avoid_replica`](crate::database::transaction::ExecutorChoice::resolve_read_avoid_replica)
+    /// when the builder carries a lock mode and through the standard
+    /// [`ExecutorChoice::resolve_read`](crate::database::transaction::ExecutorChoice::resolve_read)
+    /// otherwise — every read terminal that emits SQL routes through
+    /// this single point so the lock-vs-replica policy stays in one
+    /// place.
+    async fn resolve_read_executor(
+        &self,
+    ) -> Result<crate::database::transaction::ExecutorChoice, FrameworkError> {
+        if self.wants_primary_pool() {
+            crate::database::transaction::ExecutorChoice::resolve_read_avoid_replica(
+                self.tx_override.as_ref(),
+                self.connection_override.as_deref(),
+                M::default_connection_name(),
+            )
+            .await
+        } else {
+            crate::database::transaction::ExecutorChoice::resolve_read(
+                self.tx_override.as_ref(),
+                self.connection_override.as_deref(),
+                M::default_connection_name(),
+            )
+            .await
+        }
+    }
+
     /// Execute the SELECT and return every row.
     ///
     /// ## Fast path vs slow path
@@ -3015,12 +3052,7 @@ where
         // explicit `with_tx` override > ambient `CURRENT_TX` >
         // builder `on(name)` > per-model default conn >
         // `__read_replica__` auto-routing > default pool.
-        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
-            self.tx_override.as_ref(),
-            self.connection_override.as_deref(),
-            M::default_connection_name(),
-        )
-        .await?;
+        let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
         let runtime_casts = self.runtime_casts.clone();
         // Move the eager plan out of `self` — `EagerSpec::WithWhere`
@@ -3194,12 +3226,7 @@ where
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
         self.limit = Some(2);
-        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
-            self.tx_override.as_ref(),
-            self.connection_override.as_deref(),
-            M::default_connection_name(),
-        )
-        .await?;
+        let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
         let col_name = col.col_name();
         let (sql, vals) = self.render_select_for(backend, M::TABLE, &col_name)?;
@@ -3313,12 +3340,7 @@ where
         // T11/T12: route through ExecutorChoice (with tx override +
         // connection override) so the COUNT runs against the same
         // executor as the page query.
-        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
-            self.tx_override.as_ref(),
-            self.connection_override.as_deref(),
-            M::default_connection_name(),
-        )
-        .await?;
+        let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
         let (count_sql, count_vals) = self.render_count_select_for(backend, M::TABLE)?;
         let count_stmt = Statement::from_sql_and_values(backend, &count_sql, count_vals);
@@ -3893,12 +3915,7 @@ where
     ) -> Result<Option<T>, FrameworkError> {
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
-        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
-            self.tx_override.as_ref(),
-            self.connection_override.as_deref(),
-            M::default_connection_name(),
-        )
-        .await?;
+        let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
         let mut s = self;
         s.limit = Some(1);
@@ -3919,12 +3936,7 @@ where
     ) -> Result<Vec<T>, FrameworkError> {
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
-        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
-            self.tx_override.as_ref(),
-            self.connection_override.as_deref(),
-            M::default_connection_name(),
-        )
-        .await?;
+        let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
         let col_name = col.col_name();
         let (sql, vals) = self.render_select_for(backend, M::TABLE, &col_name)?;
@@ -3947,12 +3959,7 @@ where
     ) -> Result<HashMap<K, V>, FrameworkError> {
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
-        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
-            self.tx_override.as_ref(),
-            self.connection_override.as_deref(),
-            M::default_connection_name(),
-        )
-        .await?;
+        let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
         let kn = key_col.col_name();
         let vn = val_col.col_name();
@@ -3977,12 +3984,7 @@ where
     ) -> Result<T, FrameworkError> {
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
-        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
-            self.tx_override.as_ref(),
-            self.connection_override.as_deref(),
-            M::default_connection_name(),
-        )
-        .await?;
+        let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
         let (sql, vals) = self.render_select_for(backend, M::TABLE, expr)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
@@ -4001,12 +4003,7 @@ where
     ) -> Result<Option<T>, FrameworkError> {
         // T11/T12: respect `with_tx` + ambient CURRENT_TX + `on(name)`
         // + per-model default + `__read_replica__`.
-        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
-            self.tx_override.as_ref(),
-            self.connection_override.as_deref(),
-            M::default_connection_name(),
-        )
-        .await?;
+        let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
         let (sql, vals) = self.render_select_for(backend, M::TABLE, expr)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);

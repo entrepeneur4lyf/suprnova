@@ -7,29 +7,27 @@
 //! model whose FK column points at `A`, and `C` is the final target
 //! whose FK column points at `B`.
 //!
-//! ## Soft-delete interaction (v1)
+//! ## Soft-delete interaction
 //!
 //! Through relations use raw `INNER JOIN` SQL rather than the
-//! `Builder<C>` pipeline, so the global soft-delete scope that
-//! `C::query()` would install (`WHERE c.deleted_at IS NULL`) is
-//! **not** applied. Likewise for the intermediate `B`. This means:
+//! `Builder<C>` pipeline, so the global scope `Builder<C>` would
+//! install isn't reachable through that path. The JOIN renderer
+//! still stitches in the per-model soft-delete filter directly,
+//! reading [`EloquentModel::SOFT_DELETES_COLUMN`] for both `B` and
+//! `C`:
 //!
-//! - A `HasManyThrough<Country, User, Post>` where `Post` is
-//!   soft-deletable will return trashed posts alongside alive ones.
-//! - If `User` (the intermediate) is soft-deletable, trashed users
-//!   still participate in the JOIN.
+//! - Empty `SOFT_DELETES_COLUMN` (the trait default for models that
+//!   don't opt into `#[model(soft_deletes)]`) emits no clause.
+//! - Non-empty column appends `AND <table>.<col> IS NULL` to the
+//!   `WHERE` clause.
 //!
-//! This diverges from Laravel's `hasManyThrough` (which DOES filter
-//! the intermediate and the target by `deleted_at IS NULL` when those
-//! models declare `SoftDeletes`). Pinning the current behaviour in
-//! `eloquent_soft_deletes_relations.rs` keeps a regression-tracker on
-//! the gap; the proper fix lives in P12 (Through SQL stitches in the
-//! deleted_at filters when both `B` and `C` carry the trait bound, via
-//! a sealed `MaybeSoftDelete` blanket trait the macro implements for
-//! every model).
+//! This matches Laravel's `hasManyThrough` behaviour, which filters
+//! both the intermediate `B` and the target `C` by `deleted_at IS
+//! NULL` when those models declare `SoftDeletes`.
 //!
-//! Until then, callers needing scoped Through reads should fall back
-//! to chaining the two relations explicitly:
+//! Callers that need to *include* trashed rows in a Through traversal
+//! (the inverse of the default — Laravel's `->withTrashed()`) fall
+//! back to chaining the two relations explicitly:
 //!
 //! ```ignore
 //! // Instead of `country.posts().get()`, do:
@@ -68,7 +66,7 @@ use std::marker::PhantomData;
 
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 
-use crate::database::DB;
+use crate::database::transaction::ExecutorChoice;
 use crate::eloquent::EloquentModel;
 use crate::eloquent::collection::Collection;
 use crate::eloquent::model::{Model, json_value_to_sea_value};
@@ -210,40 +208,37 @@ where
     ///  INNER JOIN <B> b
     ///     ON c.<second_key> = b.<second_local_key>
     ///  WHERE b.<first_key> = ?
+    ///    AND b.<B::SOFT_DELETES_COLUMN> IS NULL  -- if B opts in
+    ///    AND c.<C::SOFT_DELETES_COLUMN> IS NULL  -- if C opts in
     /// ```
     ///
     /// Backend-aware placeholders (`?` for sqlite / mysql, `$1` for
     /// postgres) match the rest of the framework's raw-SQL paths.
+    /// Routes through
+    /// [`ExecutorChoice::resolve_read`](crate::database::transaction::ExecutorChoice::resolve_read)
+    /// so the query honours an ambient `CURRENT_TX`, the final
+    /// target's `#[model(connection = "...")]` default, and the
+    /// read-replica auto-routing chain.
     pub async fn get(self) -> Result<Collection<C>, FrameworkError> {
-        let conn = DB::connection()?;
-        let backend = conn.inner().get_database_backend();
-        let ph = match backend {
-            DatabaseBackend::Postgres => "$1".to_string(),
-            _ => "?".to_string(),
-        };
-        let b_table = <B as EloquentModel>::TABLE;
-        let c_table = <C as EloquentModel>::TABLE;
-        let sql = format!(
-            "SELECT {c}.* FROM {c} INNER JOIN {b} ON {c}.{second_key} = {b}.{second_local_key} \
-             WHERE {b}.{first_key} = {ph}",
-            c = c_table,
-            b = b_table,
-            second_key = self.second_key,
-            second_local_key = self.second_local_key,
-            first_key = self.first_key,
-            ph = ph,
-        );
+        let exec = ExecutorChoice::resolve_read(
+            None,
+            None,
+            <C as EloquentModel>::default_connection_name(),
+        )
+        .await?;
+        let backend = exec.backend();
         let stmt = Statement::from_sql_and_values(
             backend,
-            &sql,
+            self.render_select_sql(backend),
             vec![json_value_to_sea_value(&self.parent_key_value)],
         );
         use sea_orm::EntityTrait;
-        let rows = <C as EloquentModel>::Entity::find()
-            .from_raw_sql(stmt)
-            .all(conn.inner())
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let find = <C as EloquentModel>::Entity::find().from_raw_sql(stmt);
+        let rows = match &exec {
+            ExecutorChoice::Tx(t, _) => find.all(t.as_ref()).await,
+            ExecutorChoice::Pool(c, _) => find.all(c.inner()).await,
+        }
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
         Ok(Collection::from_vec(
             rows.into_iter().map(C::from).collect(),
         ))
@@ -256,17 +251,80 @@ where
 
     /// `SELECT COUNT(*) FROM <C> INNER JOIN <B> ... WHERE B.<first_key> = ?`.
     /// Returns `i64` to match [`crate::eloquent::HasMany::count`] and
-    /// [`crate::eloquent::BelongsToMany::count`].
+    /// [`crate::eloquent::BelongsToMany::count`]. Routes through
+    /// [`ExecutorChoice::resolve_read`](crate::database::transaction::ExecutorChoice::resolve_read)
+    /// on the same terms as [`Self::get`], including the same
+    /// soft-delete filtering for `B` and `C`.
     pub async fn count(self) -> Result<i64, FrameworkError> {
-        let conn = DB::connection()?;
-        let backend = conn.inner().get_database_backend();
+        let exec = ExecutorChoice::resolve_read(
+            None,
+            None,
+            <C as EloquentModel>::default_connection_name(),
+        )
+        .await?;
+        let backend = exec.backend();
+        let stmt = Statement::from_sql_and_values(
+            backend,
+            self.render_count_sql(backend),
+            vec![json_value_to_sea_value(&self.parent_key_value)],
+        );
+        let row = match &exec {
+            ExecutorChoice::Tx(t, _) => t.query_one(stmt).await,
+            ExecutorChoice::Pool(c, _) => c.inner().query_one(stmt).await,
+        }
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
+        Ok(row
+            .and_then(|r| r.try_get::<i64>("", "__sn_count").ok())
+            .unwrap_or(0))
+    }
+
+    /// Render the SELECT JOIN SQL with backend-aware placeholder and
+    /// auto-applied soft-delete filters for `B` and `C`. Extracted
+    /// from `get` / `count` so both terminals share the soft-delete
+    /// stitching — appending `AND <tbl>.<col> IS NULL` whenever the
+    /// model's `EloquentModel::SOFT_DELETES_COLUMN` is non-empty.
+    fn render_select_sql(&self, backend: DatabaseBackend) -> String {
         let ph = match backend {
-            DatabaseBackend::Postgres => "$1".to_string(),
-            _ => "?".to_string(),
+            DatabaseBackend::Postgres => "$1",
+            _ => "?",
         };
         let b_table = <B as EloquentModel>::TABLE;
         let c_table = <C as EloquentModel>::TABLE;
-        let sql = format!(
+        let b_soft = <B as EloquentModel>::SOFT_DELETES_COLUMN;
+        let c_soft = <C as EloquentModel>::SOFT_DELETES_COLUMN;
+        let mut sql = format!(
+            "SELECT {c}.* FROM {c} INNER JOIN {b} \
+             ON {c}.{second_key} = {b}.{second_local_key} \
+             WHERE {b}.{first_key} = {ph}",
+            c = c_table,
+            b = b_table,
+            second_key = self.second_key,
+            second_local_key = self.second_local_key,
+            first_key = self.first_key,
+            ph = ph,
+        );
+        if !b_soft.is_empty() {
+            sql.push_str(&format!(" AND {b_table}.{b_soft} IS NULL"));
+        }
+        if !c_soft.is_empty() {
+            sql.push_str(&format!(" AND {c_table}.{c_soft} IS NULL"));
+        }
+        sql
+    }
+
+    /// Same shape as [`Self::render_select_sql`] but `SELECT COUNT(*)`
+    /// — split so both terminals can append the soft-delete clauses
+    /// from one place.
+    fn render_count_sql(&self, backend: DatabaseBackend) -> String {
+        let ph = match backend {
+            DatabaseBackend::Postgres => "$1",
+            _ => "?",
+        };
+        let b_table = <B as EloquentModel>::TABLE;
+        let c_table = <C as EloquentModel>::TABLE;
+        let b_soft = <B as EloquentModel>::SOFT_DELETES_COLUMN;
+        let c_soft = <C as EloquentModel>::SOFT_DELETES_COLUMN;
+        let mut sql = format!(
             "SELECT COUNT(*) AS __sn_count FROM {c} INNER JOIN {b} \
              ON {c}.{second_key} = {b}.{second_local_key} \
              WHERE {b}.{first_key} = {ph}",
@@ -277,19 +335,13 @@ where
             first_key = self.first_key,
             ph = ph,
         );
-        let stmt = Statement::from_sql_and_values(
-            backend,
-            &sql,
-            vec![json_value_to_sea_value(&self.parent_key_value)],
-        );
-        let row = conn
-            .inner()
-            .query_one(stmt)
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        Ok(row
-            .and_then(|r| r.try_get::<i64>("", "__sn_count").ok())
-            .unwrap_or(0))
+        if !b_soft.is_empty() {
+            sql.push_str(&format!(" AND {b_table}.{b_soft} IS NULL"));
+        }
+        if !c_soft.is_empty() {
+            sql.push_str(&format!(" AND {c_table}.{c_soft} IS NULL"));
+        }
+        sql
     }
 }
 

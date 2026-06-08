@@ -301,7 +301,7 @@ where
         // Phase 10C audit-fix AF2 — resolve through ExecutorChoice so the
         // pivot INSERT lands on the ambient transaction when CURRENT_TX
         // is active.
-        let exec = ExecutorChoice::resolve_write(None, None, None).await?;
+        let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
         let id = related_id.into();
         match &exec {
@@ -344,7 +344,7 @@ where
         related_id: impl Into<serde_json::Value>,
     ) -> Result<(), FrameworkError> {
         // Phase 10C audit-fix AF2 — see attach_with above.
-        let exec = ExecutorChoice::resolve_write(None, None, None).await?;
+        let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
         let id = related_id.into();
         match &exec {
@@ -389,7 +389,7 @@ where
         // Phase 10C audit-fix AF2 — same shape as BelongsToMany::sync —
         // route through ExecutorChoice so the SELECT + inner writes
         // honor CURRENT_TX.
-        let exec = ExecutorChoice::resolve_write(None, None, None).await?;
+        let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
 
         let mut seen_target: HashSet<String> = HashSet::new();
@@ -545,7 +545,7 @@ where
         // Phase 10C audit-fix AF2 — route the pivot-id SELECT through
         // ExecutorChoice so it honors CURRENT_TX. Downstream
         // Model::query() calls already do so via Builder::get.
-        let exec = ExecutorChoice::resolve_read(None, None, None).await?;
+        let exec = ExecutorChoice::resolve_read(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
 
         let id_col = format!("{}_id", self.morph_name);
@@ -655,7 +655,7 @@ where
     /// Returns `i64` to match [`BelongsToMany::count`](super::BelongsToMany::count).
     pub async fn count(self) -> Result<i64, FrameworkError> {
         // Phase 10C audit-fix AF2 — see attach_with above.
-        let exec = ExecutorChoice::resolve_read(None, None, None).await?;
+        let exec = ExecutorChoice::resolve_read(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
         let (id_ph, type_ph) = match backend {
             DatabaseBackend::Postgres => ("$1".to_string(), "$2".to_string()),
@@ -1027,7 +1027,7 @@ where
     pub async fn count(self) -> Result<i64, FrameworkError> {
         // Phase 10C audit-fix AF2 — route the count through
         // ExecutorChoice so it honors CURRENT_TX.
-        let exec = ExecutorChoice::resolve_read(None, None, None).await?;
+        let exec = ExecutorChoice::resolve_read(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
         let (id_ph, type_ph) = match backend {
             DatabaseBackend::Postgres => ("$1".to_string(), "$2".to_string()),

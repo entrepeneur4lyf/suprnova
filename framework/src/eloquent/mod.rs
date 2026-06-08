@@ -83,4 +83,27 @@ pub trait EloquentModel: Sized {
     /// EXISTS subqueries (a parent with only soft-deleted children
     /// must NOT match `has("children")`).
     const SOFT_DELETES_COLUMN: &'static str = "";
+
+    /// The per-model default connection name. Returns `None` for
+    /// models that don't declare `#[model(connection = "...")]`; the
+    /// macro overrides this when the attribute is set, returning
+    /// `Some(<literal>)`.
+    ///
+    /// Consulted by
+    /// [`crate::database::transaction::ExecutorChoice::resolve_read`]
+    /// / [`resolve_write`](crate::database::transaction::ExecutorChoice::resolve_write)
+    /// as step 4 of the routing chain — after the per-builder
+    /// `on(name)` override but before `__read_replica__` auto-routing.
+    /// `Some("__primary__")` short-circuits to
+    /// [`crate::DB::connection`] without consulting the registry; any
+    /// other name routes through
+    /// [`crate::database::ConnectionRegistry::get`].
+    ///
+    /// Lives on `EloquentModel` (not the heavier
+    /// [`crate::eloquent::Model`] trait) so generic relation impls
+    /// that only need the lightweight marker bound can still consult
+    /// it without dragging in the full CRUD bound chain.
+    fn default_connection_name() -> ::core::option::Option<&'static str> {
+        ::core::option::Option::None
+    }
 }

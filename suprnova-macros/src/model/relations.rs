@@ -2626,7 +2626,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
                         ::core::option::Option::None,
                         ::core::option::Option::None,
-                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                        <#target_ty as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     ).await?;
                     let db_backend = __sn_exec.backend();
 
@@ -3409,7 +3409,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
                         ::core::option::Option::None,
                         ::core::option::Option::None,
-                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                        <#target_ty as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     ).await?;
                     let db_backend = __sn_exec.backend();
 
@@ -3546,7 +3546,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
                         ::core::option::Option::None,
                         ::core::option::Option::None,
-                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                        <#target_ty as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     ).await?;
                     let db_backend = __sn_exec.backend();
 
@@ -3686,7 +3686,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
                         ::core::option::Option::None,
                         ::core::option::Option::None,
-                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                        <#target_ty as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     ).await?;
                     let db_backend = __sn_exec.backend();
 
@@ -3814,7 +3814,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
                         ::core::option::Option::None,
                         ::core::option::Option::None,
-                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                        <#target_ty as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     ).await?;
                     let db_backend = __sn_exec.backend();
 
@@ -3955,7 +3955,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
                         ::core::option::Option::None,
                         ::core::option::Option::None,
-                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                        <#target_ty as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     ).await?;
                     let db_backend = __sn_exec.backend();
 
@@ -4098,7 +4098,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
                         ::core::option::Option::None,
                         ::core::option::Option::None,
-                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                        <#target_ty as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     ).await?;
                     let db_backend = __sn_exec.backend();
 
@@ -4460,7 +4460,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                     let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
                         ::core::option::Option::None,
                         ::core::option::Option::None,
-                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                        <#target_ty as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     ).await?;
                     let db_backend = __sn_exec.backend();
 
@@ -4686,7 +4686,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                     let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
                         ::core::option::Option::None,
                         ::core::option::Option::None,
-                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                        <#target_ty as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     ).await?;
                     let db_backend = __sn_exec.backend();
 
@@ -4884,7 +4884,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                     let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
                         ::core::option::Option::None,
                         ::core::option::Option::None,
-                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                        <#target_ty as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     ).await?;
                     let db_backend = __sn_exec.backend();
 
@@ -5068,7 +5068,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                     let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
                         ::core::option::Option::None,
                         ::core::option::Option::None,
-                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                        <#target_ty as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     ).await?;
                     let db_backend = __sn_exec.backend();
 
@@ -5271,7 +5271,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                     let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
                         ::core::option::Option::None,
                         ::core::option::Option::None,
-                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                        <#target_ty as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     ).await?;
                     let db_backend = __sn_exec.backend();
 
@@ -5482,7 +5482,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                     let __sn_exec = ::suprnova::database::transaction::ExecutorChoice::resolve_read(
                         ::core::option::Option::None,
                         ::core::option::Option::None,
-                        <#target_ty as ::suprnova::eloquent::Model>::default_connection_name(),
+                        <#target_ty as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                     ).await?;
                     let db_backend = __sn_exec.backend();
 

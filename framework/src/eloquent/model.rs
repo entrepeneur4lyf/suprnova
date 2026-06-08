@@ -81,23 +81,6 @@ where
         "id"
     }
 
-    /// Phase 10C T12 — the per-model default connection name. Returns
-    /// `None` for models that don't declare `#[model(connection =
-    /// "...")]`; the macro overrides this when the attribute is set,
-    /// returning `Some(<literal>)`.
-    ///
-    /// Consulted by [`crate::database::transaction::ExecutorChoice::resolve_read`]
-    /// / [`resolve_write`](crate::database::transaction::ExecutorChoice::resolve_write)
-    /// as step 4 of the routing chain — after the per-builder
-    /// `on(name)` override but before `__read_replica__` auto-routing.
-    /// `Some("__primary__")` short-circuits to
-    /// [`crate::DB::connection`] without consulting the registry; any
-    /// other name routes through
-    /// [`crate::database::ConnectionRegistry::get`].
-    fn default_connection_name() -> ::core::option::Option<&'static str> {
-        ::core::option::Option::None
-    }
-
     /// Per-model mass-assignment guard. The macro's Task 4 emission
     /// returns `Fillable::guarded(vec![PRIMARY_KEY])`; Task 6 wires
     /// `fillable = [...]` / `guarded = [...]` attributes.

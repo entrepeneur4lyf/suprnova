@@ -171,7 +171,8 @@ where
     /// let todos = Todo::query().all().await?;
     /// ```
     pub async fn all(self) -> Result<Vec<E::Model>, FrameworkError> {
-        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        let exec =
+            crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?;
         exec.select_all(self.select)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))
@@ -190,7 +191,8 @@ where
     ///     .await?;
     /// ```
     pub async fn first(self) -> Result<Option<E::Model>, FrameworkError> {
-        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        let exec =
+            crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?;
         exec.select_one(self.select)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))
@@ -225,7 +227,8 @@ where
     ///     .await?;
     /// ```
     pub async fn count(self) -> Result<u64, FrameworkError> {
-        let exec = crate::database::transaction::ExecutorChoice::resolve()?;
+        let exec =
+            crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?;
         exec.select_count(self.select)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))

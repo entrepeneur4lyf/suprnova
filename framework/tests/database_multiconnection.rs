@@ -212,6 +212,90 @@ async fn writes_always_go_to_primary() {
     assert_eq!(on_replica.len(), 0, "write did not leak to replica");
 }
 
+/// Locked SELECTs (`FOR UPDATE` / `FOR SHARE`) must skip the
+/// `__read_replica__` step even outside a transaction — Postgres
+/// hot-standbys reject locked reads outright, and MySQL replicas
+/// accept them but the lock is local to the replica and useless.
+/// Pre-A2-M-001 the lock setter only flipped `Builder::lock_mode`;
+/// the read terminal still routed through the standard
+/// `resolve_read` chain which auto-picked `__read_replica__`. The
+/// fix consults `wants_primary_pool()` and dispatches to
+/// `resolve_read_avoid_replica` so the SELECT lands on the primary.
+#[tokio::test]
+#[serial]
+async fn locked_read_outside_tx_avoids_read_replica() {
+    let primary = TestDatabase::sqlite_memory().await.unwrap();
+    fresh_users_table(&primary).await;
+    primary
+        .execute_unprepared(
+            "INSERT INTO t12_users (email, created_at, updated_at) \
+             VALUES ('primary@x.com', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+        )
+        .await
+        .unwrap();
+
+    let replica_conn = sea_orm::Database::connect("sqlite::memory:?mode=rwc")
+        .await
+        .expect("replica in-memory connection");
+    let replica = suprnova::DbConnection::from_raw(replica_conn);
+    use sea_orm::ConnectionTrait;
+    replica
+        .inner()
+        .execute_unprepared(
+            "CREATE TABLE t12_users (\
+                id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                email TEXT NOT NULL, \
+                created_at TEXT NOT NULL, \
+                updated_at TEXT NOT NULL\
+             )",
+        )
+        .await
+        .unwrap();
+    replica
+        .inner()
+        .execute_unprepared(
+            "INSERT INTO t12_users (email, created_at, updated_at) \
+             VALUES ('replica@x.com', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+        )
+        .await
+        .unwrap();
+    ConnectionRegistry::register_existing("__read_replica__", replica.clone())
+        .await
+        .unwrap();
+
+    // Without a lock, the default-policy read lands on the replica
+    // and sees `replica@x.com`. SQLite ignores the FOR UPDATE clause
+    // semantically, but the executor-routing layer still applies —
+    // and that's the layer this test pins.
+    let plain_read = T12User::query().first().await.unwrap().unwrap();
+    assert_eq!(
+        plain_read.email, "replica@x.com",
+        "unlocked read should route to replica"
+    );
+
+    let locked_read = T12User::query()
+        .lock_for_update()
+        .first()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        locked_read.email, "primary@x.com",
+        "locked SELECT must bypass the read replica and route to primary"
+    );
+
+    let shared_locked_read = T12User::query()
+        .shared_lock()
+        .first()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        shared_locked_read.email, "primary@x.com",
+        "shared-lock SELECT must also bypass the read replica"
+    );
+}
+
 /// Step 4 — `#[model(connection = "warehouse")]` routes the model's
 /// default reads + writes through the named connection without any
 /// per-query `on(...)`.

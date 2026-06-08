@@ -364,3 +364,123 @@ async fn builder_with_trashed_preserves_other_filters() {
     assert_eq!(widened.len(), 1);
     assert_eq!(widened[0].name, "Alice");
 }
+
+// ---- 12: HasManyThrough auto-applies soft-delete filter ----------------
+
+#[model(table = "sdrel_th_countries", relations = {
+    articles: HasManyThrough<SdRelThAuthor, SdRelThArticle>,
+})]
+pub struct SdRelThCountry {
+    pub id: i64,
+    pub name: String,
+}
+
+// Intermediate `B` opts into soft deletes.
+#[model(table = "sdrel_th_authors", soft_deletes, fillable = ["sd_rel_th_country_id", "name"])]
+pub struct SdRelThAuthor {
+    pub id: i64,
+    pub sd_rel_th_country_id: i64,
+    pub name: String,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+// Final target `C` also opts into soft deletes.
+#[model(table = "sdrel_th_articles", soft_deletes, fillable = ["sd_rel_th_author_id", "title"])]
+pub struct SdRelThArticle {
+    pub id: i64,
+    pub sd_rel_th_author_id: i64,
+    pub title: String,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+async fn migrate_through(db: &TestDatabase) {
+    db.execute_unprepared(
+        "CREATE TABLE sdrel_th_countries (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            name TEXT NOT NULL\
+         )",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE sdrel_th_authors (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            sd_rel_th_country_id INTEGER NOT NULL, \
+            name TEXT NOT NULL, \
+            deleted_at TEXT\
+         )",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE sdrel_th_articles (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            sd_rel_th_author_id INTEGER NOT NULL, \
+            title TEXT NOT NULL, \
+            deleted_at TEXT\
+         )",
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn has_many_through_filters_out_trashed_intermediate_and_target() {
+    // Mirrors Laravel's `hasManyThrough` — the JOIN renderer auto-
+    // appends `AND <table>.<col> IS NULL` for every model on the
+    // chain that opts into soft deletes. Pre-A2-M-004 the relation
+    // returned trashed B and C rows alongside alive ones.
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate_through(&db).await;
+
+    let country = SdRelThCountry::create(attrs! { name: "Argentina" })
+        .await
+        .unwrap();
+    let alive_author =
+        SdRelThAuthor::create(attrs! { sd_rel_th_country_id: country.id, name: "Borges" })
+            .await
+            .unwrap();
+    let trashed_author =
+        SdRelThAuthor::create(attrs! { sd_rel_th_country_id: country.id, name: "Cortázar" })
+            .await
+            .unwrap();
+    let _alive_article =
+        SdRelThArticle::create(attrs! { sd_rel_th_author_id: alive_author.id, title: "Ficciones" })
+            .await
+            .unwrap();
+    let trashed_article =
+        SdRelThArticle::create(attrs! { sd_rel_th_author_id: alive_author.id, title: "old draft" })
+            .await
+            .unwrap();
+    let _orphan_article = SdRelThArticle::create(
+        attrs! { sd_rel_th_author_id: trashed_author.id, title: "by trashed author" },
+    )
+    .await
+    .unwrap();
+
+    trashed_author.delete().await.unwrap();
+    trashed_article.delete().await.unwrap();
+
+    let articles = country.articles().get().await.unwrap();
+    let titles: Vec<&str> = articles.iter().map(|a| a.title.as_str()).collect();
+    assert_eq!(
+        titles,
+        vec!["Ficciones"],
+        "trashed C (`old draft`) AND article-via-trashed-B (`by trashed author`) \
+         must both be filtered; result should hold ONLY the alive article whose \
+         author is also alive"
+    );
+
+    let count = SdRelThCountry::find(country.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .articles()
+        .count()
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "count() applies the same soft-delete filter as get()"
+    );
+}

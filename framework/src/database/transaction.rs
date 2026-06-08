@@ -286,6 +286,59 @@ impl ExecutorChoice {
         ))
     }
 
+    /// Like [`Self::resolve_read`] but skips the auto-routed
+    /// `__read_replica__` step. Read terminals that emit
+    /// `SELECT ... FOR UPDATE` / `FOR SHARE` route through this so the
+    /// lock lands on a primary-capable pool — Postgres hot-standbys
+    /// reject locked reads outright, and MySQL replicas accept them
+    /// but the lock is local to the replica and useless.
+    ///
+    /// Precedence is unchanged for steps 1-4 (tx override > ambient
+    /// `CURRENT_TX` > builder `on(name)` > per-model default). When
+    /// none of those resolve, falls through to the primary pool
+    /// directly without consulting `__read_replica__`.
+    #[doc(hidden)]
+    pub async fn resolve_read_avoid_replica(
+        tx_override: Option<&TxHandle>,
+        connection_override: Option<&str>,
+        model_default_conn: Option<&'static str>,
+    ) -> Result<Self, FrameworkError> {
+        if let Some(h) = tx_override {
+            return Ok(ExecutorChoice::Tx(
+                h.inner.clone(),
+                h.connection_name.clone(),
+            ));
+        }
+        if let Ok(Some(state)) = CURRENT_TX.try_with(|t| t.clone()) {
+            return Ok(ExecutorChoice::Tx(
+                state.tx.clone(),
+                state.connection_name.clone(),
+            ));
+        }
+        if let Some(name) = connection_override {
+            if name == crate::database::PRIMARY_CONNECTION_NAME {
+                return Ok(ExecutorChoice::Pool(
+                    DB::connection()?,
+                    crate::database::PRIMARY_CONNECTION_NAME.into(),
+                ));
+            }
+            return Ok(ExecutorChoice::Pool(DB::named(name).await?, name.into()));
+        }
+        if let Some(name) = model_default_conn {
+            if name == crate::database::PRIMARY_CONNECTION_NAME {
+                return Ok(ExecutorChoice::Pool(
+                    DB::connection()?,
+                    crate::database::PRIMARY_CONNECTION_NAME.into(),
+                ));
+            }
+            return Ok(ExecutorChoice::Pool(DB::named(name).await?, name.into()));
+        }
+        Ok(ExecutorChoice::Pool(
+            DB::connection()?,
+            crate::database::PRIMARY_CONNECTION_NAME.into(),
+        ))
+    }
+
     /// Phase 10C T12 — pick the executor for a WRITE-shape operation
     /// (`Model::create`, `Model::save`, `Model::update`, `Model::delete`,
     /// `DbTableBuilder::insert/update/delete`).
