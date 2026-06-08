@@ -78,13 +78,16 @@ pub(crate) fn convert_route_params(path: &str) -> String {
         if b == b':' && at_segment_start {
             result.push('{');
             i += 1;
+            // Walk by UTF-8 code points, not raw bytes — `bytes[i] as char`
+            // truncates each continuation byte into a stray Latin-1
+            // codepoint, mojibaking any multi-byte param name (`/:café`
+            // → `/{cafÃ©}`). Find the end of the segment, then slice the
+            // original `&str` so multi-byte sequences survive intact.
+            let seg_start = i;
             while i < bytes.len() && bytes[i] != b'/' {
-                // Safe to push raw bytes: input is &str, segment chars
-                // between the leading `:` and the next `/` are valid UTF-8
-                // and we copy them verbatim.
-                result.push(bytes[i] as char);
                 i += 1;
             }
+            result.push_str(&path[seg_start..i]);
             result.push('}');
         } else {
             // Single-byte ASCII or the leading byte of a multi-byte UTF-8
@@ -1223,6 +1226,18 @@ mod tests {
         assert_eq!(
             convert_route_params("/api/:version/files/note:draft"),
             "/api/{version}/files/note:draft"
+        );
+
+        // Multi-byte UTF-8 param names survive the conversion intact.
+        // Pre-fix, the inner loop pushed `bytes[i] as char` per byte,
+        // turning continuation bytes into stray Latin-1 codepoints
+        // (`/:café` → `/{cafÃ©}`). Pin the correct behaviour so the
+        // regression doesn't sneak back via a future "optimisation"
+        // that swaps the str slice for a byte-by-byte copy again.
+        assert_eq!(convert_route_params("/:café"), "/{café}");
+        assert_eq!(
+            convert_route_params("/users/:naïve/posts/:slug"),
+            "/users/{naïve}/posts/{slug}"
         );
     }
 

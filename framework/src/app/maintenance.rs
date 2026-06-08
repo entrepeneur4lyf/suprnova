@@ -30,6 +30,7 @@ use crate::cache::Cache;
 use crate::error::FrameworkError;
 use crate::http::{Cookie, HttpResponse, Request, Response, SameSite};
 use crate::middleware::{Middleware, Next};
+use subtle::ConstantTimeEq;
 
 /// Bypass cookie name (Laravel uses `laravel_maintenance`).
 const BYPASS_COOKIE: &str = "suprnova_maintenance";
@@ -451,11 +452,18 @@ fn bypass_response(secret: &str) -> Response {
 }
 
 /// Whether the request carries a bypass cookie that decrypts to `secret`.
+///
+/// Defence-in-depth: the cookie ciphertext is already AEAD-authenticated
+/// by [`Cookie::read_encrypted`], so a successful decrypt means an
+/// attacker can't *forge* the plaintext. We still compare the recovered
+/// plaintext in constant time so a downstream change to the cookie
+/// envelope (or a hand-crafted variant) can't accidentally turn the
+/// compare into a timing-side-channel oracle for the bypass secret.
 fn has_valid_bypass_cookie(request: &Request, secret: &str) -> bool {
     request
         .cookie(BYPASS_COOKIE)
         .and_then(|wire| Cookie::read_encrypted(&wire).ok())
-        .is_some_and(|plain| plain == secret)
+        .is_some_and(|plain| plain.as_bytes().ct_eq(secret.as_bytes()).into())
 }
 
 /// Match a normalized request path (no leading `/`) against an `except`

@@ -465,9 +465,14 @@ where
 
         // Initialize framework configuration (loads .env files). Boot
         // fails loudly here — a malformed `.env` or an unparseable
-        // typed env var (`SERVER_PORT=abc`) aborts before the worker
-        // tasks spin up, so the operator sees the typo at startup.
-        Config::init(Path::new(".")).expect("framework configuration init failed");
+        // typed env var (`SERVER_PORT=abc`) surfaces with a clean
+        // operator-readable message and a non-zero exit instead of a
+        // confusing panic backtrace. Mirrors the boot-error pattern
+        // used downstream for migration / cache-driver failures.
+        if let Err(e) = Config::init(Path::new(".")) {
+            eprintln!("framework configuration init failed: {e}");
+            std::process::exit(1);
+        }
 
         // Register all #[policy] gates collected via inventory::submit!.
         // Called here (before the subcommand match) so background workers,

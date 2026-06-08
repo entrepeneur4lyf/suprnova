@@ -331,15 +331,42 @@ impl GroupRouter {
     /// # Panics
     ///
     /// Panics if `methods` is empty or contains a verb other than
-    /// GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS.
+    /// GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS. Use
+    /// [`GroupBuilder::try_methods`] for a fallible sibling that
+    /// returns `Err(FrameworkError)` instead — the right choice when
+    /// the method list comes from a config file or other runtime
+    /// source you can't validate at compile time.
     pub fn methods<H, Fut>(self, methods: &[Method], path: &str, handler: H) -> Self
     where
         H: Fn(Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response> + Send + 'static,
     {
-        let group_methods = methods
-            .iter()
-            .map(|m| match *m {
+        self.try_methods(methods, path, handler)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`GroupBuilder::methods`]: returns
+    /// `Err(FrameworkError)` on an empty method slice or unsupported
+    /// verb instead of panicking. Preferred when the method list is
+    /// dynamic (config-driven, OpenAPI-derived, etc.).
+    pub fn try_methods<H, Fut>(
+        self,
+        methods: &[Method],
+        path: &str,
+        handler: H,
+    ) -> Result<Self, FrameworkError>
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        if methods.is_empty() {
+            return Err(FrameworkError::internal(
+                "GroupBuilder::methods() requires at least one HTTP method",
+            ));
+        }
+        let mut group_methods = Vec::with_capacity(methods.len());
+        for m in methods {
+            let gm = match *m {
                 Method::GET => GroupMethod::Get,
                 Method::POST => GroupMethod::Post,
                 Method::PUT => GroupMethod::Put,
@@ -347,18 +374,18 @@ impl GroupRouter {
                 Method::DELETE => GroupMethod::Delete,
                 Method::HEAD => GroupMethod::Head,
                 Method::OPTIONS => GroupMethod::Options,
-                ref other => panic!(
-                    "GroupRouter::methods() got unsupported HTTP method '{other}'; only \
-                     GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS are accepted",
-                ),
-            })
-            .collect::<Vec<_>>();
-        if group_methods.is_empty() {
-            panic!("GroupRouter::methods() requires at least one HTTP method");
+                ref other => {
+                    return Err(FrameworkError::internal(format!(
+                        "GroupBuilder::methods() got unsupported HTTP method '{other}'; only \
+                         GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS are accepted",
+                    )));
+                }
+            };
+            group_methods.push(gm);
         }
         let boxed: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
         let arc = Arc::new(boxed);
-        self.push_routes_for_methods(path, group_methods, arc)
+        Ok(self.push_routes_for_methods(path, group_methods, arc))
     }
 
     /// Internal helper used by [`GroupRouter::any`] and
