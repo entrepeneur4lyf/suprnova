@@ -63,7 +63,7 @@ pub use events::{
 pub use identifier::{validate_identifier, validate_sql_operator};
 pub use model::{EntityExt, EntityExtMut};
 pub use query_builder::QueryBuilder;
-pub use route_binding::{AutoRouteBinding, RouteBinding};
+pub use route_binding::{AutoRouteBinding, RouteBinding, RouteParam};
 pub use testing::TestDatabase;
 pub use transaction::{Transaction, TxHandle};
 

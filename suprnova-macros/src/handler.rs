@@ -217,10 +217,22 @@ fn classify_param_type(ty: &Type) -> ParamKind {
                 }
             }
 
-            // Check for Model type (path ends with ::Model)
+            // Check for Model type (path ends with ::Model) — the
+            // unscoped escape hatch. See `RouteParam<M>` below for
+            // the scoped default.
             if let Some(last_segment) = segments.last()
                 && last_segment.ident == "Model"
                 && segments.len() >= 2
+            {
+                return ParamKind::Model;
+            }
+
+            // Check for RouteParam<M> — the scoped binding wrapper.
+            // Routes through M::find (Eloquent's CRUD entrypoint) so
+            // global scopes, soft-delete filter, and per-model
+            // connection apply. See `suprnova::RouteParam` rustdoc.
+            if let Some(last_segment) = segments.last()
+                && last_segment.ident == "RouteParam"
             {
                 return ParamKind::Model;
             }

@@ -72,6 +72,67 @@
 use crate::error::FrameworkError;
 use async_trait::async_trait;
 use sea_orm::{EntityTrait, ModelTrait as SeaModelTrait, PrimaryKeyTrait};
+use std::ops::{Deref, DerefMut};
+
+/// Newtype wrapper that opts a route-bound model into Eloquent's
+/// SCOPED `find` path — global scopes, soft-delete filter, and
+/// per-model `#[model(connection = "...")]` routing all apply.
+///
+/// Wrap your Eloquent model struct in `RouteParam<M>` in the
+/// `#[handler]` signature:
+///
+/// ```rust,ignore
+/// use suprnova::{handler, json_response, RouteParam, Response};
+/// use crate::models::User;
+///
+/// #[handler]
+/// pub async fn show(RouteParam(user): RouteParam<User>) -> Response {
+///     // `user` is a fully-hydrated User; soft-deleted rows are
+///     // filtered, global scopes applied, and the read routes
+///     // through the user's `#[model(connection = "...")]` default.
+///     json_response!({ "name": user.name })
+/// }
+/// ```
+///
+/// # Two binding paths, two contracts
+///
+/// The framework ships two route-binding shapes with different scope
+/// policies — mirroring Laravel's `Route::model(...)->withTrashed()`
+/// opt-in. Pick by intent:
+///
+/// | Handler signature                | Scope policy |
+/// |----------------------------------|--------------|
+/// | `user: user::Model`              | **Unscoped** — bypasses Eloquent scopes; soft-deleted rows are exposed. The explicit raw escape hatch (mirrors Laravel's `->withTrashed()`). |
+/// | `RouteParam(user): RouteParam<User>` | **Scoped** — applies global scopes + soft-delete filter; the safe default. |
+///
+/// New code should prefer `RouteParam<User>`. The bare `user::Model`
+/// path remains supported as the explicit escape hatch for admin
+/// tooling that must reach trashed rows by id.
+///
+/// `Deref<Target = M>` lets handlers read fields directly through the
+/// wrapper (`route_param.name`) when destructuring isn't convenient.
+#[derive(Debug, Clone)]
+pub struct RouteParam<M>(pub M);
+
+impl<M> RouteParam<M> {
+    /// Move the inner model out of the wrapper.
+    pub fn into_inner(self) -> M {
+        self.0
+    }
+}
+
+impl<M> Deref for RouteParam<M> {
+    type Target = M;
+    fn deref(&self) -> &M {
+        &self.0
+    }
+}
+
+impl<M> DerefMut for RouteParam<M> {
+    fn deref_mut(&mut self) -> &mut M {
+        &mut self.0
+    }
+}
 
 /// Trait for models that can be automatically resolved from route parameters
 ///
@@ -247,4 +308,48 @@ macro_rules! route_binding {
             }
         }
     };
+}
+
+/// Scoped route-model binding for Eloquent user structs.
+///
+/// Routes through `M::find(id)` (the Eloquent CRUD entrypoint) so the
+/// hydrated row applies the model's global scopes, soft-delete
+/// filter, and per-model connection — see [`RouteParam`] for the full
+/// rationale. The bounds mirror the [`crate::eloquent::Model`] trait
+/// surface so any `#[suprnova::model]`-generated struct fits.
+#[async_trait]
+impl<M> AutoRouteBinding for RouteParam<M>
+where
+    M: crate::eloquent::Model + Send + Sync,
+    M: From<<<M as crate::eloquent::EloquentModel>::Entity as EntityTrait>::Model>,
+    <<M as crate::eloquent::EloquentModel>::Entity as EntityTrait>::Model: From<M>
+        + sea_orm::IntoActiveModel<
+            <<M as crate::eloquent::EloquentModel>::Entity as EntityTrait>::ActiveModel,
+        > + serde::Serialize
+        + Send
+        + Sync,
+    <<M as crate::eloquent::EloquentModel>::Entity as EntityTrait>::ActiveModel: Send,
+    <<<M as crate::eloquent::EloquentModel>::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        std::str::FromStr + Send + Into<sea_orm::Value>,
+{
+    async fn from_route_param(value: &str) -> Result<Self, FrameworkError> {
+        let id: <<<M as crate::eloquent::EloquentModel>::Entity as EntityTrait>::PrimaryKey
+            as PrimaryKeyTrait>::ValueType = value.parse().map_err(|_| {
+            FrameworkError::param_parse(
+                value,
+                std::any::type_name::<
+                    <<<M as crate::eloquent::EloquentModel>::Entity as EntityTrait>::PrimaryKey
+                        as PrimaryKeyTrait>::ValueType,
+                >(),
+            )
+        })?;
+        let row = M::find(id).await?.ok_or_else(|| {
+            let full = std::any::type_name::<M>();
+            // Strip leading module path so the error reads `User`
+            // rather than `app::models::user::User`.
+            let model_name = full.rsplit("::").next().unwrap_or(full);
+            FrameworkError::model_not_found(model_name)
+        })?;
+        Ok(RouteParam(row))
+    }
 }

@@ -136,8 +136,8 @@ pub use database::{
     AutoRouteBinding, ConnectionEstablished, ConnectionRegistry, DB, Database, DatabaseBusy,
     DatabaseConfig, DatabaseType, DbConnection, DbTableBuilder, DynamicRow, EntityExt,
     EntityExtMut, PRIMARY_CONNECTION_NAME, QueryExecuted, QueryListener,
-    READ_REPLICA_CONNECTION_NAME, ReadWriteType, RouteBinding, Transaction, TransactionBeginning,
-    TransactionCommitted, TransactionRolledBack, TxHandle, UrlSource,
+    READ_REPLICA_CONNECTION_NAME, ReadWriteType, RouteBinding, RouteParam, Transaction,
+    TransactionBeginning, TransactionCommitted, TransactionRolledBack, TxHandle, UrlSource,
 };
 pub use torii_integration::{
     LockoutStatus, Session, SessionToken, ToriiConfig, User, UserId, init_torii,
