@@ -1,8 +1,18 @@
+//! [`Money`] and [`Currency`] — the fixed-precision amount + ISO-4217
+//! currency code pair used everywhere a payment value crosses the
+//! framework boundary.
+//!
+//! Amounts are stored as `i64` minor units (cents, satang, kobo, etc.) so
+//! framework code never round-trips through floating point. The optional
+//! decimal constructor / accessor uses [`rust_decimal::Decimal`] for the
+//! conversion.
+
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 
+/// Re-export of [`iso_currency::Currency`] — ISO 4217 currency codes.
 pub use iso_currency::Currency;
 
 /// A monetary amount stored as i64 minor units (cents/pence/yen/etc.) plus a `Currency`.

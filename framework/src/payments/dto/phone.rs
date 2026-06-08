@@ -1,3 +1,8 @@
+//! [`PhoneNumber`] — E.164-style phone number, validated on construction.
+//!
+//! Used by Mobile Money flows that identify the payer by phone rather
+//! than email.
+
 use crate::payments::PaymentError;
 use serde::{Deserialize, Serialize};
 

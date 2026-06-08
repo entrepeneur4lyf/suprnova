@@ -1,3 +1,5 @@
+//! [`CountryCode`] — ISO 3166-1 alpha-2 country code, validated on construction.
+
 use crate::payments::PaymentError;
 use serde::{Deserialize, Serialize};
 

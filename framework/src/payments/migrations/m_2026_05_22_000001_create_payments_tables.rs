@@ -15,6 +15,10 @@
 
 use sea_orm_migration::prelude::*;
 
+/// SeaORM migration that creates every `payments_*` mirror table.
+///
+/// Apps include this in their `Migrator::migrations()` list — see the module
+/// docs for the full table inventory.
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 
