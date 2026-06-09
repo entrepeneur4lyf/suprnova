@@ -55,6 +55,9 @@ async fn log_transport_emits_event_with_message_fields() {
     assert!(logs_contain("alice@example.org"));
     assert!(logs_contain("noreply@suprnova.dev"));
     assert!(logs_contain("ping"));
+    // The rendered text body is part of the log line — in dev it is the only
+    // place links (email verification, password reset) surface.
+    assert!(logs_contain("pong"));
 }
 
 #[tokio::test]

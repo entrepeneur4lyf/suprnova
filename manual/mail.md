@@ -41,7 +41,7 @@ The Mailable serializes to JSON, which becomes the Tera context for the template
 
 | `MAIL_DRIVER` | Behavior |
 |---------------|----------|
-| `log`         | Emit a `tracing::info!` per send and discard. Default. |
+| `log`         | Emit a `tracing::info!` per send (envelope + rendered text body, so links in verification/reset mail land in the console) and discard. Default. |
 | `memory`      | Capture every message in-process. See `suprnova::mail::boot::captured_in_memory()`. |
 | `smtp`        | Connect to an SMTP server (STARTTLS when credentials are set, plain TCP otherwise). |
 | `postmark`    | POST JSON to Postmark's `/email` endpoint. |
