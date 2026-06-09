@@ -219,6 +219,40 @@ fn make_task_generates_clean_code() {
 }
 
 // ---------------------------------------------------------------------------
+// --with-portless contract: portless.json present with the flag, absent without.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn with_portless_emits_portless_json() {
+    let tmp = TempDir::new().unwrap();
+    scaffold(&tmp, "portless_app", &["--frontend", "svelte", "--with-portless"]);
+    let pj = tmp.path().join("portless_app").join("portless.json");
+    assert!(
+        pj.is_file(),
+        "portless.json should be present when --with-portless is passed"
+    );
+    let body = std::fs::read_to_string(&pj).unwrap();
+    assert!(
+        body.contains("\"name\": \"portless_app\""),
+        "portless.json name field wrong:\n{body}"
+    );
+    assert!(
+        body.contains("\"appPort\": 8765"),
+        "portless.json appPort field wrong:\n{body}"
+    );
+}
+
+#[test]
+fn without_portless_omits_portless_json() {
+    let tmp = TempDir::new().unwrap();
+    scaffold(&tmp, "plain_app", &["--frontend", "svelte"]);
+    assert!(
+        !tmp.path().join("plain_app").join("portless.json").exists(),
+        "portless.json must be absent without --with-portless"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Compile checks — slow (full transitive build); ignored by default.
 // ---------------------------------------------------------------------------
 
