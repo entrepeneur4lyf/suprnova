@@ -1,5 +1,6 @@
 pub mod cargo_meta;
 pub mod db_sync;
+pub mod dev_tls;
 pub mod docker_compose;
 pub mod docker_init;
 pub mod generate_routes;
