@@ -103,6 +103,10 @@ impl PasswordReset {
             return Ok(());
         };
 
+        // Validate the fail-closed `MAIL_FROM` read before issuing a token, so a
+        // misconfigured sender fails fast without leaving an orphan token row.
+        let from_address = crate::auth_flows::require_mail_from()?;
+
         let token = TokenStore::issue(
             &user.id,
             TokenPurpose::PasswordReset,
@@ -117,7 +121,7 @@ impl PasswordReset {
             user_name: user.name,
             reset_link: url,
             app_name: crate::auth_flows::app_name(),
-            from_address: crate::auth_flows::require_mail_from()?,
+            from_address,
         };
 
         // The reset link is the primary action — propagate a transport failure

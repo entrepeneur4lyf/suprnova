@@ -103,6 +103,10 @@ impl EmailVerification {
         name: Option<String>,
         base_url: &str,
     ) -> Result<(), FrameworkError> {
+        // Validate the fail-closed `MAIL_FROM` read before issuing a token, so a
+        // misconfigured sender fails fast without leaving an orphan token row.
+        let from_address = crate::auth_flows::require_mail_from()?;
+
         let token = TokenStore::issue(
             id,
             TokenPurpose::EmailVerification,
@@ -116,7 +120,7 @@ impl EmailVerification {
             user_name: name,
             verification_link: url,
             app_name: crate::auth_flows::app_name(),
-            from_address: crate::auth_flows::require_mail_from()?,
+            from_address,
         };
 
         Mail::to(email).send(mail).await
