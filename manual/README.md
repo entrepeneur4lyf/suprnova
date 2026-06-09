@@ -22,6 +22,7 @@ those, you'll feel at home.
 | **Find an API I remember from Laravel** | [Laravel Parity Map](parity.md) |
 | **Look up an env var** | [Environment Variables](env-vars.md) |
 | **Deploy to production** | [Deployment](deployment.md) |
+| **Use named HTTPS dev URLs (passkeys, secure cookies)** | [HTTPS Dev URLs](dev-tls.md) |
 
 ## Two reading paths
 

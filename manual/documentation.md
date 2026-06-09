@@ -101,6 +101,7 @@
     - [Overview](cli.md)
     - [`suprnova new`](cli-new.md)
     - [`suprnova serve`](cli-serve.md)
+    - [HTTPS Dev URLs (`dev:tls`)](dev-tls.md)
     - [Generators (`make:*`)](cli-generators.md)
     - [Migrations](cli-migrations.md)
     - [Scheduling](cli-scheduling.md)
