@@ -55,7 +55,7 @@ pub fn run(
             ],
         );
         ui::br();
-        ui::label_value("API", "http://localhost:8080/api");
+        ui::label_value("API", "http://localhost:8765/api");
         ui::br();
         return;
     }
@@ -98,8 +98,8 @@ pub fn run(
         &[&format!("cd {}", project_name), "suprnova serve"],
     );
     ui::br();
-    ui::label_value("Backend", "http://localhost:8000");
-    ui::label_value("Frontend", "http://localhost:5173");
+    ui::label_value("Backend", "http://localhost:8765");
+    ui::label_value("Frontend", "http://localhost:5765");
     ui::br();
 }
 
