@@ -1,8 +1,9 @@
-//! Provider-agnostic single-use token store for email verification and
-//! password reset. SeaORM-backed over `DB::connection()`, modeled on
-//! `auth::remember` and `torii_integration::ceremony`. Tokens are stored
-//! as a SHA-256 hash of a high-entropy plaintext; single-use is enforced
-//! by an atomic `used_at` update.
+//! Provider-agnostic single-use token store foundation:
+//! `TokenPurpose` enum, the `auth_flow_tokens` SeaORM entity, and
+//! the `create_auth_flow_tokens_table()` schema builder. Tokens are
+//! stored as a SHA-256 hash of a high-entropy plaintext, single-use
+//! enforced by an atomic `used_at` update. Store operations
+//! (issue / check / consume / prune) are added in the companion change.
 
 use chrono::Duration;
 
@@ -44,7 +45,9 @@ impl TokenPurpose {
 ///
 /// - `id`         BIGINT PK auto-increment — matches `Model::id: i64`
 /// - `user_id`    TEXT not null — opaque string id (String-everywhere)
-/// - `token_hash` TEXT not null — SHA-256 hash of the plaintext token
+/// - `token_hash` TEXT not null UNIQUE — SHA-256 hash of the plaintext
+///   token; the UNIQUE constraint gives `check`/`consume` an indexed
+///   equality lookup and backs the single-use guarantee at the DB level
 /// - `purpose`    TEXT not null — [`TokenPurpose::as_str`] discriminator
 /// - `expires_at` TIMESTAMP not null — token TTL boundary
 /// - `used_at`    TIMESTAMP null — set atomically on single-use consume
@@ -68,7 +71,12 @@ pub fn create_auth_flow_tokens_table() -> sea_orm::sea_query::TableCreateStateme
                 .primary_key(),
         )
         .col(ColumnDef::new(AuthFlowTokens::UserId).text().not_null())
-        .col(ColumnDef::new(AuthFlowTokens::TokenHash).text().not_null())
+        .col(
+            ColumnDef::new(AuthFlowTokens::TokenHash)
+                .text()
+                .not_null()
+                .unique_key(),
+        )
         .col(ColumnDef::new(AuthFlowTokens::Purpose).text().not_null())
         .col(
             ColumnDef::new(AuthFlowTokens::ExpiresAt)
@@ -104,7 +112,7 @@ enum AuthFlowTokens {
 ///
 /// - `id`         BIGINT PK auto-increment
 /// - `user_id`    TEXT not null — opaque string id
-/// - `token_hash` TEXT not null — SHA-256 hash of the plaintext token
+/// - `token_hash` TEXT not null UNIQUE — SHA-256 hash of the plaintext token
 /// - `purpose`    TEXT not null — [`TokenPurpose::as_str`] discriminator
 /// - `expires_at` TIMESTAMP not null — token TTL boundary
 /// - `used_at`    TIMESTAMP null — set on single-use consume (Task 2)
@@ -122,6 +130,7 @@ pub mod entity {
         /// Opaque string id of the user the token authorizes.
         pub user_id: String,
         /// SHA-256 hash of the high-entropy plaintext token.
+        #[sea_orm(unique)]
         pub token_hash: String,
         /// What the row authorizes; the stable string from [`super::TokenPurpose::as_str`].
         pub purpose: String,
