@@ -40,6 +40,9 @@ impl Factory for UserFactory {
             email: format!("factory-{seq}@example.suprnova.app"),
             password: "factory-placeholder".into(),
             remember_token: None,
+            // Factory users start unverified; the AsOptionalDateTime cast
+            // routes `None` → NULL at storage time.
+            email_verified_at: None,
             // AsBool cast handles `bool` → INTEGER at storage time.
             active: true,
             created_at: now,

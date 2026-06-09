@@ -27,6 +27,11 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(Users::Password).string().not_null())
                     .col(ColumnDef::new(Users::RememberToken).string().null())
+                    // Nullable verification timestamp. `NULL` = unverified;
+                    // `EmailVerification::verify` stamps it on consume. Paired
+                    // with the `email_verified_at: Option<DateTime<Utc>>` field
+                    // on the `User` model (AsOptionalDateTime cast).
+                    .col(ColumnDef::new(Users::EmailVerifiedAt).timestamp().null())
                     .col(
                         ColumnDef::new(Users::CreatedAt)
                             .timestamp()
@@ -59,6 +64,7 @@ enum Users {
     Email,
     Password,
     RememberToken,
+    EmailVerifiedAt,
     CreatedAt,
     UpdatedAt,
 }

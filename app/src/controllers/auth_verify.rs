@@ -45,7 +45,7 @@ async fn resend_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
 
     let base = format!(
         "{}/auth/verify",
-        std::env::var("APP_URL").unwrap_or_else(|_| "http://localhost:8000".into())
+        std::env::var("APP_URL").unwrap_or_else(|_| "http://localhost:8765".into())
     );
     // `resend` is anti-enumeration: it sends only when the email is on
     // file and returns `Ok(())` either way, so both branches respond

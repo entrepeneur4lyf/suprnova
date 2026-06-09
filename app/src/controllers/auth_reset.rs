@@ -47,7 +47,7 @@ async fn request_reset_inner(req: Request) -> Result<HttpResponse, FrameworkErro
 
     let base = format!(
         "{}/auth/password/reset",
-        std::env::var("APP_URL").unwrap_or_else(|_| "http://localhost:8000".into())
+        std::env::var("APP_URL").unwrap_or_else(|_| "http://localhost:8765".into())
     );
     PasswordReset::send_link(&form.email, &base).await?;
 

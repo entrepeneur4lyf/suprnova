@@ -10,6 +10,8 @@ mod m_2026_05_19_phase_10a_user_columns;
 mod m_2026_05_19_phase_10b_relations_schema;
 mod m_2026_05_20_phase_10b_profiles;
 mod m_2026_05_21_phase_10c_audit_log;
+mod m_2026_06_08_auth_flow_tokens;
+mod m_2026_06_08_auth_flows_user_columns;
 
 pub struct Migrator;
 
@@ -59,6 +61,15 @@ impl MigratorTrait for Migrator {
             // creation alongside an audit row in a single
             // `DB::transaction` block to pin the rollback contract.
             Box::new(m_2026_05_21_phase_10c_audit_log::Migration),
+            // Auth-flows dogfood — `email_verified_at` column on `users` so
+            // the `EloquentUserProvider<User>` registered in bootstrap can
+            // drive the email-verification flow against this model. Listed
+            // last so re-runs pick it up as a new pending migration.
+            Box::new(m_2026_06_08_auth_flows_user_columns::Migration),
+            // Auth-flows dogfood — `auth_flow_tokens` single-use token table
+            // (framework-owned schema, app-owned application). Backs the
+            // verification + reset links.
+            Box::new(m_2026_06_08_auth_flow_tokens::Migration),
             // Auth ceremony tokens — single-use OAuth state + Passkey
             // challenge storage (ChatGPT audit `torii_integration`
             // HIGH #3). Externalises the single-use authority from the

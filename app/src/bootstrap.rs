@@ -31,16 +31,17 @@ use suprnova::features::{FeatureMiddleware, bootstrap_database_cached};
 use suprnova::queue::worker::register_job;
 #[allow(unused_imports)]
 use suprnova::{
-    App, DB, EventFacade, FrameworkError, IncludeMiddleware, Inertia, InertiaConfig,
-    InertiaRequestExt, InertiaSharedData, Prop, S3Config, SessionConfig, SessionMiddleware,
-    Storage, SupervisorRegistry, UserProvider, bind, global_middleware, singleton,
+    App, DB, EloquentUserProvider, EventFacade, FrameworkError, IncludeMiddleware, Inertia,
+    InertiaConfig, InertiaRequestExt, InertiaSharedData, Prop, S3Config, SessionConfig,
+    SessionMiddleware, Storage, SupervisorRegistry, UserProvider, bind, global_middleware,
+    singleton,
 };
 
 use crate::broadcasting::{ChatChannel, UserRegisteredChannel};
 use crate::events::UserRegistered;
 use crate::listeners::SendWelcomeEmailListener;
 use crate::middleware;
-use crate::providers::DatabaseUserProvider;
+use crate::models::users::User;
 
 /// Register global middleware and services
 ///
@@ -76,8 +77,17 @@ pub async fn register() {
     // we'll pass it through env or a build-script-generated const.
     Inertia::install(&InertiaConfig::new().version("1.0"));
 
-    // Register the user provider for Auth::user()
-    bind!(dyn UserProvider, DatabaseUserProvider);
+    // Register the user provider for Auth::user() and the auth-flow facades.
+    //
+    // `EloquentUserProvider<User>` queries the typed `#[suprnova::model]` User
+    // by primary key for session lookups (`Auth::user_as::<User>()`), exactly
+    // like the previous `DatabaseUserProvider` did. Because `User` now impls
+    // `MustVerifyEmail` + `CanResetPassword`, this provider ALSO implements the
+    // auth-flow surface (`retrieve_by_email` / `mark_email_verified` /
+    // `set_password` / `is_email_verified`), so `EmailVerification` and
+    // `PasswordReset` — which resolve `active_user_provider()` → this binding —
+    // are runtime-functional rather than erroring on the unsupported defaults.
+    bind!(dyn UserProvider, EloquentUserProvider::<User>::new());
 
     // Inertia shared data — visible on every Inertia response.
     //

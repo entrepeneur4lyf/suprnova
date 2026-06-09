@@ -606,6 +606,17 @@ fn create_project(
         )
     })?;
 
+    fs::write(
+        project_path.join("src/migrations/m20240101_000004_create_auth_flow_tokens_table.rs"),
+        templates::create_auth_flow_tokens_migration(),
+    )
+    .map_err(|e| {
+        format!(
+            "Failed to write create_auth_flow_tokens_table migration: {}",
+            e
+        )
+    })?;
+
     // Note: migrations are now integrated into the main binary
     // Run with: ./app migrate
 
