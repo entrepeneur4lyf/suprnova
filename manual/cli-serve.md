@@ -43,13 +43,13 @@ suprnova serve
 Output:
 
 ```
-Backend  http://127.0.0.1:8080
-Frontend http://127.0.0.1:5173
+Backend  http://127.0.0.1:8765
+Frontend http://127.0.0.1:5765
 [backend] Compiling my-app v0.1.0 ...
 [frontend] VITE v6.3.0  ready in 312 ms
 ```
 
-Hit `http://127.0.0.1:8080` in your browser. The backend serves the Inertia
+Hit `http://127.0.0.1:8765` in your browser. The backend serves the Inertia
 HTML shell and proxies asset requests through to Vite, so you don't need to
 visit the Vite URL directly.
 
@@ -162,7 +162,7 @@ triggers Vite's HMR for the component that imports them.
 Find and kill the process, or pick another port:
 
 ```bash
-lsof -i :8080
+lsof -i :8765
 kill -9 <pid>
 
 # or

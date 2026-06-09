@@ -25,6 +25,7 @@ separators or `..`, and be 64 characters or fewer.
 | `--api` | Scaffold a JSON:API-only project (no Inertia, no SPA, token auth instead of sessions). |
 | `--no-interaction` | Skip all prompts and use defaults (name `my-suprnova-app`, frontend `svelte`, empty author/description). |
 | `--no-git` | Skip `git init` in the new project. |
+| `--with-portless` | Emit a `portless.json` so [`suprnova dev:tls`](dev-tls.md) can serve the app at `https://<name>.localhost`. Opt-in; changes nothing else. |
 
 ## Interactive mode
 
@@ -44,8 +45,8 @@ After confirming, the scaffolder writes the project, runs `git init`
 (unless `--no-git`), and prints the next steps:
 
 ```
-Backend  http://localhost:8000
-Frontend http://localhost:5173
+Backend  http://localhost:8765
+Frontend http://localhost:5765
 ```
 
 ## Non-interactive mode
@@ -79,7 +80,7 @@ The API starter is significantly smaller: no `frontend/` directory, no
 Inertia, no auth views, single-crate `src/main.rs` layout (instead of
 the SPA starter's `cmd/main.rs` workspace), token-based auth, and a
 sample `users` controller plus `UserResource` JSON serializer. The API
-starter binds to port 8080 in its `.env`.
+starter binds to port 8765 in its `.env`.
 
 `--api` is mutually exclusive with `--frontend`; passing both errors.
 Under `--api`, only the project name is prompted — the

@@ -66,6 +66,7 @@ The same list `suprnova --help` prints, grouped the same way.
 |---|---|
 | `suprnova new [name]` | Scaffold a new project. See [`suprnova new`](cli-new.md). |
 | `suprnova serve` | Boot backend + Vite together with hot reload. See [`suprnova serve`](cli-serve.md). |
+| `suprnova dev:tls` | Trust portless's CA and register a `https://<name>.localhost` dev URL. See [HTTPS Dev URLs](dev-tls.md). |
 | `suprnova web:run` | Run the app binary directly (no Vite, no rebuild loop). Production-shaped local run. |
 
 ### Generate
