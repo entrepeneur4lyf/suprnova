@@ -70,10 +70,16 @@ async fn initial_html_visit_returns_shell_with_embedded_page_object() {
     let body = body_to_string(hyper_resp.into_body());
     assert!(body.contains("<!DOCTYPE html>"));
     assert!(body.contains("<title>Suprnova</title>"));
-    assert!(body.contains(r#"<div id="app" data-page="#));
-    // The embedded page object should reference the URL and component.
-    assert!(body.contains("&quot;component&quot;:&quot;Home&quot;"));
-    assert!(body.contains("&quot;url&quot;:&quot;/home&quot;"));
+    // Inertia 3 contract: the initial page lives in a sibling
+    // <script type="application/json" data-page="app"> alongside an empty
+    // <div id="app"></div> mount node — read by getInitialPageFromDOM.
+    assert!(body.contains(r#"<script type="application/json" data-page="app">"#));
+    assert!(body.contains(r#"<div id="app"></div>"#));
+    // The script textContent is raw JSON (not HTML-attribute-escaped) with
+    // every `/` backslash-escaped to defang any `</script>` inside string
+    // values — matches @inertiajs/core::buildSSRBody.
+    assert!(body.contains(r#""component":"Home""#));
+    assert!(body.contains(r#""url":"\/home""#));
 }
 
 #[tokio::test]
@@ -1787,7 +1793,8 @@ async fn inertia_redirect_distinct_from_location() {
 #[tokio::test]
 async fn preserve_fragment_flows_through_html_shell_data_page() {
     // Initial (non-XHR) visit returns the HTML shell with the page object
-    // embedded in the `data-page` attribute on `<div id="app">`. Verify
+    // embedded as the textContent of the Inertia 3 sibling
+    // `<script type="application/json" data-page="app">` tag. Verify
     // `preserveFragment: true` survives that path the same as the XHR path.
     let req = MockReq::new("/article/new"); // no X-Inertia → HTML response
     let resp = InertiaResponse::new("Article/Show")
@@ -1797,11 +1804,11 @@ async fn preserve_fragment_flows_through_html_shell_data_page() {
         .unwrap();
     let body = body_to_string(resp.into_hyper().into_body());
 
-    // The HTML shell HTML-escapes the JSON page object inside `data-page`.
-    // `"preserveFragment":true` becomes `&quot;preserveFragment&quot;:true`.
+    // The script tag's textContent is raw JSON (no HTML attribute encoding),
+    // so `"preserveFragment":true` appears verbatim.
     assert!(
-        body.contains("&quot;preserveFragment&quot;:true"),
-        "expected escaped preserveFragment:true in data-page; body was:\n{}",
+        body.contains(r#""preserveFragment":true"#),
+        "expected raw preserveFragment:true in <script data-page>; body was:\n{}",
         body
     );
 }
@@ -1852,8 +1859,12 @@ mod ssr_tests {
     use suprnova::{InertiaConfig, InertiaResponse};
 
     /// Spawn a one-shot SSR worker bound to 127.0.0.1:0. The worker
-    /// always returns `head: [<title>SSR</title>]` and `body: <pre-rendered/>`.
-    /// Returns the socket address it's listening on.
+    /// returns a `body` matching the real Inertia 3 contract — what
+    /// `@inertiajs/core::buildSSRBody` produces: a `<script
+    /// type="application/json" data-page="app">` element holding the
+    /// page JSON, followed by `<div data-server-rendered="true"
+    /// id="app">…prerendered…</div>`. The framework injects this raw
+    /// (no wrapping div of its own). Returns the listening address.
     async fn spawn_mock_ssr() -> SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1869,7 +1880,7 @@ mod ssr_tests {
                         |_req: hyper::Request<hyper::body::Incoming>| async move {
                             let body = serde_json::json!({
                                 "head": ["<title>SSR Title</title>", "<meta name=\"ssr\" content=\"yes\">"],
-                                "body": "<main id=\"ssr\">SSR rendered content</main>",
+                                "body": "<script type=\"application/json\" data-page=\"app\">{\"component\":\"Home\"}</script><div data-server-rendered=\"true\" id=\"app\"><main id=\"ssr\">SSR rendered content</main></div>",
                             });
                             let payload = serde_json::to_vec(&body).unwrap();
                             Ok::<_, Infallible>(
@@ -1922,6 +1933,15 @@ mod ssr_tests {
         assert!(body.contains("<title>SSR Title</title>"));
         assert!(body.contains("<meta name=\"ssr\" content=\"yes\">"));
         assert!(body.contains("<main id=\"ssr\">SSR rendered content</main>"));
+        // Inject the worker's body verbatim; don't double-wrap. Two
+        // `<div ... id="app">` would produce duplicate IDs and break
+        // `document.getElementById('app')` in the client hydration.
+        assert_eq!(
+            body.matches("id=\"app\"").count(),
+            1,
+            "framework must not wrap the SSR body in a second mount div; body:\n{}",
+            body
+        );
     }
 
     #[tokio::test]

@@ -633,7 +633,10 @@ impl InertiaResponse {
     ///   object response (filtered for partial reloads, with all the
     ///   Tier 2 protocol fields populated).
     /// - Otherwise returns the HTML shell with the JSON page object
-    ///   embedded in the mount node's `data-page` attribute.
+    ///   embedded in a sibling `<script type="application/json"
+    ///   data-page="app">` element next to the empty `<div id="app">`
+    ///   mount node — the Inertia 3 contract that `getInitialPageFromDOM`
+    ///   reads.
     pub async fn resolve<R: InertiaRequestExt>(
         self,
         req: &R,
@@ -1547,8 +1550,6 @@ fn build_html_response(
     ssr: Option<&super::ssr::SsrResponse>,
 ) -> HttpResponse {
     let title = title_override.unwrap_or(&config.default_title);
-    let page_json = serde_json::to_string(page).unwrap_or_else(|_| "{}".to_string());
-    let page_attr = escape_html_attr(&page_json);
     let csrf = csrf_token().unwrap_or_default();
     let csrf_attr = escape_html_attr(&csrf);
     let title_html = escape_html_text(title);
@@ -1559,16 +1560,30 @@ fn build_html_response(
         render_prod_head(config)
     };
 
-    // SSR injection. The worker returns `head` as a list of HTML
-    // snippets (title, meta, etc.) and `body` as the prerendered app
-    // shell. When present we add `data-server-rendered="true"` so the
-    // client hydrates instead of re-rendering.
+    // Inertia 3 reads the initial page from a sibling
+    // `<script type="application/json" data-page="app">` whose textContent
+    // is the JSON envelope (see `@inertiajs/core` `getInitialPageFromDOM`).
+    //
+    // - SSR path: the worker's `body` is already wrapped by
+    //   `buildSSRBody`, which emits the `<script>` + `<div
+    //   data-server-rendered="true" id="app">` pair as one string. We
+    //   inject it raw — wrapping it in another `<div id="app">` would
+    //   produce duplicate IDs and break hydration.
+    // - Non-SSR path: we emit the same shape ourselves with an empty
+    //   mount div. Inside the script tag the JSON is raw (NOT
+    //   HTML-attribute-encoded) and every `/` is backslash-escaped so a
+    //   literal `</script>` substring inside a string field can't
+    //   terminate the tag — this matches `buildSSRBody`'s escape.
     let ssr_head = ssr.map(|s| s.head.join("\n")).unwrap_or_default();
-    let ssr_body = ssr.map(|s| s.body.as_str()).unwrap_or("");
-    let ssr_attr = if ssr.is_some() {
-        " data-server-rendered=\"true\""
+    let mount_block = if let Some(ssr) = ssr {
+        ssr.body.clone()
     } else {
-        ""
+        let page_json = serde_json::to_string(page).unwrap_or_else(|_| "{}".to_string());
+        let page_script = page_json.replace('/', "\\/");
+        format!(
+            "<script type=\"application/json\" data-page=\"app\">{page_script}</script>\n\
+             <div id=\"app\"></div>",
+        )
     };
 
     let html = format!(
@@ -1583,16 +1598,14 @@ fn build_html_response(
          {head}\
          </head>\n\
          <body>\n\
-         <div id=\"app\"{ssr_attr} data-page=\"{page}\">{ssr_body}</div>\n\
+         {mount_block}\n\
          </body>\n\
          </html>",
         csrf = csrf_attr,
         title = title_html,
         ssr_head = ssr_head,
         head = head_extras,
-        page = page_attr,
-        ssr_attr = ssr_attr,
-        ssr_body = ssr_body,
+        mount_block = mount_block,
     );
 
     HttpResponse::html(html).header("Vary", "X-Inertia")
