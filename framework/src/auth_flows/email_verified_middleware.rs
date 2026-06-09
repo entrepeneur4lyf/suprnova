@@ -1,20 +1,24 @@
 //! [`EnsureEmailVerifiedMiddleware`] — gate routes on the authenticated
-//! user's `email_verified_at` timestamp.
+//! user's email-verification state.
 //!
 //! Mirrors Laravel's `Illuminate\Auth\Middleware\EnsureEmailIsVerified`
 //! (the `verified` route alias). Composes naturally after
 //! [`crate::AuthMiddleware`]: this middleware does not authenticate, it
 //! only checks the verification flag on the user that auth already
-//! resolved. If no user is currently authenticated, it falls into the
-//! same response branch as "user authed but not verified" — matching
-//! Laravel's `! $request->user() || ! hasVerifiedEmail()` shape.
+//! resolved. The check goes through the application's configured
+//! [`UserProvider`](crate::auth::UserProvider) — the same provider
+//! [`Auth::user`](crate::auth::Auth::user) resolves against — so it is
+//! backend-agnostic (Eloquent today; any registered provider tomorrow)
+//! and carries no coupling to a specific auth store. If no user is
+//! currently authenticated, it falls into the same response branch as
+//! "user authed but not verified" — matching Laravel's
+//! `! $request->user() || ! hasVerifiedEmail()` shape.
 
 use async_trait::async_trait;
 
-use crate::auth::Auth;
+use crate::auth::{Auth, active_user_provider};
 use crate::http::{HttpResponse, Request, Response};
 use crate::middleware::{Middleware, Next};
-use crate::torii_integration::find_user_by_id;
 
 /// Middleware that 403s (or redirects) any request whose authenticated
 /// user has not verified their email.
@@ -117,19 +121,23 @@ impl Middleware for EnsureEmailVerifiedMiddleware {
             return Err(self.unverified_response(&request));
         };
 
-        // 2. Look up the torii::User to read `email_verified_at`. A `?`
-        //    here propagates a `FrameworkError` (e.g. DB down) as the
-        //    framework's usual 500 — that's the correct behaviour when
-        //    the storage layer can't answer the question we were
-        //    composed to ask. Verification gating must not silently
-        //    pass under outage.
-        let Some(user) = find_user_by_id(&user_id).await? else {
-            // Auth id resolved but the user has since been deleted.
-            // Treat as unverified — fall through the same branch.
-            return Err(self.unverified_response(&request));
-        };
+        // 2. Ask the application's configured `UserProvider` whether this
+        //    user has verified their email. A `?` here propagates a
+        //    `FrameworkError` — e.g. the storage layer is down, or the
+        //    active provider is token-only and doesn't support the check
+        //    (its default impl returns an unsupported error) — as the
+        //    framework's usual 500. That's the correct behaviour when the
+        //    provider can't answer the question we were composed to ask:
+        //    verification gating must not silently pass under outage or
+        //    misconfiguration.
+        //
+        //    The Eloquent provider returns `Ok(false)` for an absent id
+        //    (the user was deleted after auth resolved it), so a missing
+        //    user collapses into the unverified branch below — preserving
+        //    the prior "user since deleted → unverified" behaviour.
+        let verified = active_user_provider()?.is_email_verified(&user_id).await?;
 
-        if user.is_email_verified() {
+        if verified {
             next(request).await
         } else {
             Err(self.unverified_response(&request))
