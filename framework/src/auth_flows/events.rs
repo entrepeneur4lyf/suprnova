@@ -31,11 +31,13 @@ use crate::events::Event;
 /// Fires when a user successfully verifies their email address via
 /// [`crate::auth_flows::EmailVerification::verify`].
 ///
-/// `user_id` is the stringified torii `UserId`, suitable for crossing
+/// `user_id` is the user's stable identifier as the configured
+/// [`UserProvider`](crate::auth::UserProvider) reports it (a `String`,
+/// like the rest of the auth surface), suitable for crossing
 /// task / serialization boundaries.
 #[derive(Debug, Clone)]
 pub struct EmailVerified {
-    /// Stringified torii user id of the verified account.
+    /// Provider-reported user id of the verified account.
     pub user_id: String,
 }
 
@@ -61,7 +63,7 @@ impl Event for EmailVerified {
 /// configured `UserProvider`).
 #[derive(Debug, Clone)]
 pub struct PasswordResetLinkSent {
-    /// Stringified torii user id the reset was issued for.
+    /// Provider-reported user id the reset was issued for.
     pub user_id: String,
     /// Address the reset link was dispatched to (the on-file address, post-normalisation).
     pub email: String,
@@ -82,7 +84,7 @@ impl Event for PasswordResetLinkSent {
 /// [`crate::auth_flows::PasswordChangedMail`].
 #[derive(Debug, Clone)]
 pub struct PasswordResetCompleted {
-    /// Stringified torii user id whose password was reset.
+    /// Provider-reported user id whose password was reset.
     pub user_id: String,
 }
 

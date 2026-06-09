@@ -1,8 +1,9 @@
 //! Transactional [`Mailable`] types for the auth flows.
 //!
 //! These three mailables back the email-verification, password-reset, and
-//! password-changed lifecycle that torii drives. They are dispatched via the
-//! ordinary [`Mail`](crate::Mail) facade:
+//! password-changed lifecycle the [`EmailVerification`](crate::auth_flows::EmailVerification)
+//! / [`PasswordReset`](crate::auth_flows::PasswordReset) facades drive. They
+//! are dispatched via the ordinary [`Mail`](crate::Mail) facade:
 //!
 //! ```ignore
 //! Mail::to(&mail.to_address).send(mail).await?;
@@ -33,9 +34,10 @@ use serde::{Deserialize, Serialize};
 
 /// "Verify your email" message dispatched after signup (and on resend).
 ///
-/// The `verification_link` is the fully-qualified URL torii hands back from
-/// the verification-token issuer — the mailable does not construct or sign
-/// the token itself.
+/// The `verification_link` is the fully-qualified URL the
+/// [`EmailVerification`](crate::auth_flows::EmailVerification) facade builds
+/// (base URL + the issued token as a query parameter) — the mailable does not
+/// construct or sign the token itself.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct EmailVerificationMail {
     /// Recipient. Used both as the Tera context and on the call site
@@ -67,7 +69,7 @@ impl Mailable for EmailVerificationMail {
     fn html_template_source(&self) -> Option<String> {
         // Autoescape is OFF — pipe user-controllable fields through `escape`
         // explicitly. `app_name` and `verification_link` originate from
-        // framework-controlled config / torii, but we still escape them so a
+        // framework-controlled config, but we still escape them so a
         // future config typo (`<` in the brand string) can't break rendering.
         Some(
             r#"<!doctype html>

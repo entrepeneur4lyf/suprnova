@@ -225,8 +225,12 @@ Auth::logout().await?;
 
 Guards, providers, sessions, remember-me, email verification, password
 reset, brute-force throttling, TOTP 2FA, and OAuth are all here. The
-auth-flows surface mirrors Laravel Fortify. See
-[Authentication](authentication.md) and [Auth Flows](auth-flows.md).
+auth-flows surface mirrors Laravel Fortify. Email verification and
+password reset are provider-backed (no torii required): your user model
+implements `MustVerifyEmail` / `CanResetPassword` — the Suprnova
+analogues of Laravel's contracts of the same names — and the configured
+`UserProvider` drives the flows. See [Authentication](authentication.md)
+and [Auth Flows](auth-flows.md).
 
 ### Migrations
 

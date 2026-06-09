@@ -834,11 +834,14 @@ inventory at compile time. See [Console](console.md).
 
 ### `UserId`
 
-The opaque string identifier returned by `Auth::id()` — a
-torii-issued user id, not the database primary key. Sessions store
-the `UserId`; user-provider lookups translate it to the concrete user
-struct. The intentional indirection lets you swap user backends
-without rewriting handler code. See [Authentication](authentication.md).
+The opaque string identifier returned by `Auth::id()` — whatever stable
+key the configured user provider keys on, carried as a `String`
+end-to-end. With `EloquentUserProvider<User>` it is the stringified
+primary key; with a torii-backed provider it is the torii-issued user
+id. Sessions store the `UserId`; user-provider lookups translate it to
+the concrete user struct. The intentional indirection (string, not a
+fixed type) lets you swap user backends without rewriting handler code.
+See [Authentication](authentication.md).
 
 ## V
 

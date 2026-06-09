@@ -29,7 +29,7 @@ You now have:
 - A hyper server with HTTP/1.1 and HTTP/2, WebSocket upgrade, graceful shutdown
 - A SeaORM-backed Eloquent layer with relations, eager loading, soft deletes
 - Inertia.js bridging Rust → Svelte 5 with typed `#[derive(InertiaProps)]`
-- Auth (sessions, password hashing, email verification, 2FA, OAuth via torii)
+- Auth (sessions, password hashing, provider-backed email verification + password reset, plus 2FA and OAuth via torii)
 - A queue with memory/sync/redis/database/null drivers
 - A cron scheduler driven by the `Task` trait
 - A console binary per project for `cargo run --bin console <cmd>`

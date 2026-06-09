@@ -130,8 +130,8 @@ gaps as of the shipped framework.
 | Authentication | `Auth::user/check/login/logout/attempt`, `Authenticatable` trait, `Guard` per name | shipped | [Authentication](authentication.md) |
 | Multiple guards | `Guard` registered by name (`web`, `api`, …) via `AuthManager` | shipped | `SessionGuard`, `TokenGuard`, custom impls |
 | User providers | `EloquentUserProvider<U>`, `DatabaseUserProvider`, custom via `UserProvider` trait | shipped | [Auth Flows](auth-flows.md) |
-| Email Verification | `EmailVerification` + `EnsureEmailVerifiedMiddleware` + `EmailVerificationMail` | shipped | [Auth Flows](auth-flows.md) |
-| Password Reset | `PasswordReset` + `PasswordResetMail` + `PasswordChangedMail` | shipped | [Auth Flows](auth-flows.md) |
+| Email Verification | `EmailVerification` + `EnsureEmailVerifiedMiddleware` + `EmailVerificationMail`; `MustVerifyEmail` contract on the user model | shipped | Provider-backed (no torii) — [Auth Flows](auth-flows.md) |
+| Password Reset | `PasswordReset` + `PasswordResetMail` + `PasswordChangedMail`; `CanResetPassword` contract on the user model | shipped | Provider-backed (no torii) — [Auth Flows](auth-flows.md) |
 | Brute-force throttling | `BruteForce` + `LoginThrottleMiddleware` | shipped | Per-IP + per-user accounting |
 | Two-Factor (TOTP) | `TwoFactor` + `TwoFactorChallengeMiddleware` + `TwoFactorUser` trait | shipped | Recovery codes + replay protection |
 | Remember-me | Long-lived signed cookie via `SessionGuard` | shipped | Re-exported from torii |

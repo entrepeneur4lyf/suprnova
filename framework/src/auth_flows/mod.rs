@@ -2,10 +2,14 @@
 //!
 //! Five auth-flow features behind one cohesive module:
 //!
-//! - [`EmailVerification`] — torii-backed verification tokens, mail
-//!   dispatched via Suprnova's [`crate::Mail`] facade.
-//! - [`PasswordReset`] — torii-backed reset tokens with anti-enumeration
-//!   `send_link`, fire-and-forget [`PasswordChangedMail`] notification.
+//! - [`EmailVerification`] — single-use verification tokens in the
+//!   framework's own `auth_flow_tokens` table, the user marked verified
+//!   through the configured [`UserProvider`](crate::auth::UserProvider),
+//!   mail dispatched via Suprnova's [`crate::Mail`] facade.
+//! - [`PasswordReset`] — single-use reset tokens in the same
+//!   `auth_flow_tokens` table, the password rotated through the configured
+//!   [`UserProvider`](crate::auth::UserProvider), with anti-enumeration
+//!   `send_link` and a fire-and-forget [`PasswordChangedMail`] notification.
 //! - [`BruteForce`] + [`LoginThrottleMiddleware`] — torii-backed lockout
 //!   plus an HTTP middleware that 429s pre-handler when the targeted
 //!   account is locked.

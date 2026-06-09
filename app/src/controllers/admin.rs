@@ -11,7 +11,8 @@
 //!
 //! * `DELETE /api/posts/{id}` — demonstrates `Gate::authorize` with the
 //!   `PostPolicy`. The current user is loaded via `Auth::user_as::<User>()`,
-//!   which resolves the session's string `user_id` through `DatabaseUserProvider`.
+//!   which resolves the session's string `user_id` through the registered
+//!   `EloquentUserProvider<User>`.
 
 use crate::models::{posts::Post, users::User};
 use crate::resources::user_resource::UserResource;
