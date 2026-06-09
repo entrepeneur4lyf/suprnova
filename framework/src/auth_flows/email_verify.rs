@@ -79,24 +79,47 @@ impl EmailVerification {
         user: &U,
         base_url: &str,
     ) -> Result<(), FrameworkError> {
-        let token = TokenStore::issue(
+        Self::issue_and_mail(
             &user.get_auth_identifier(),
+            user.email(),
+            user.name().map(str::to_string),
+            base_url,
+        )
+        .await
+    }
+
+    /// Issue an email-verification token for `id`, append it to `base_url`, and
+    /// send the verification mail to `email` (greeting `name` if present).
+    ///
+    /// Shared pipeline for [`send_link`](Self::send_link) and
+    /// [`resend`](Self::resend): mint with [`TokenPurpose::EmailVerification`]'s
+    /// default TTL, build the `{base_url}?token=…` URL via
+    /// [`append_token_query`](crate::auth_flows::append_token_query), read
+    /// `APP_NAME` / `MAIL_FROM` (fail-closed), and dispatch through the
+    /// [`crate::Mail`] facade.
+    async fn issue_and_mail(
+        id: &str,
+        email: &str,
+        name: Option<String>,
+        base_url: &str,
+    ) -> Result<(), FrameworkError> {
+        let token = TokenStore::issue(
+            id,
             TokenPurpose::EmailVerification,
             TokenPurpose::EmailVerification.default_ttl(),
         )
         .await?;
         let url = crate::auth_flows::append_token_query(base_url, &token);
 
-        let to_address = user.email().to_string();
         let mail = EmailVerificationMail {
-            to_address: to_address.clone(),
-            user_name: user.name().map(str::to_string),
+            to_address: email.to_string(),
+            user_name: name,
             verification_link: url,
             app_name: crate::auth_flows::app_name(),
             from_address: crate::auth_flows::require_mail_from()?,
         };
 
-        Mail::to(to_address.as_str()).send(mail).await
+        Mail::to(email).send(mail).await
     }
 
     /// Resend a verification link by email — the anti-enumeration entry point.
@@ -117,23 +140,8 @@ impl EmailVerification {
             return Ok(());
         };
 
-        let token = TokenStore::issue(
-            &user.id,
-            TokenPurpose::EmailVerification,
-            TokenPurpose::EmailVerification.default_ttl(),
-        )
-        .await?;
-        let url = crate::auth_flows::append_token_query(base_url, &token);
-
-        let mail = EmailVerificationMail {
-            to_address: user.email.clone(),
-            user_name: user.name.clone(),
-            verification_link: url,
-            app_name: crate::auth_flows::app_name(),
-            from_address: crate::auth_flows::require_mail_from()?,
-        };
-
-        Mail::to(user.email.as_str()).send(mail).await
+        Self::issue_and_mail(&user.id, &user.email, user.name, base_url).await?;
+        Ok(())
     }
 
     /// Check whether `token` is a live, unused verification token without
@@ -158,6 +166,11 @@ impl EmailVerification {
     /// event dispatch is best-effort: a listener panic or transient dispatcher
     /// error does **not** roll back the verification. (See the module-level
     /// docs for rationale.)
+    ///
+    /// Note: the token is consumed (single-use) before the provider marks the
+    /// user verified; if the mark step errors, the token is already spent and a
+    /// fresh verification link is required. The ordering is deliberate —
+    /// reversing it would leave a reusable token behind a failed mark.
     ///
     /// # Errors
     ///
