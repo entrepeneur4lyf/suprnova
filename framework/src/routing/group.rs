@@ -1,6 +1,6 @@
 //! Route grouping with shared prefix and middleware
 
-use super::macros::convert_route_params;
+use super::macros::{convert_route_params, join_paths};
 use super::{BoxedHandler, RouteBuilder, Router};
 use crate::FrameworkError;
 use crate::http::{Request, Response};
@@ -90,7 +90,9 @@ impl GroupBuilder {
     /// it when group prefixes or inner paths come from a source you don't
     /// control at compile time.
     ///
-    /// Path normalisation: prefix + inner path are concatenated and then
+    /// Path normalisation: prefix + inner path are joined on a single
+    /// canonical `/` boundary (`join_paths` — a child of `/` resolves to
+    /// the prefix itself, a root `/` prefix contributes nothing) and then
     /// run through `convert_route_params` so Express-style `:id` segments
     /// are translated to matchit-style `{id}`. The same canonical pattern
     /// is used both for the matchit insert and for the middleware lookup
@@ -100,16 +102,7 @@ impl GroupBuilder {
     pub fn try_finalize(mut self) -> Result<Router, FrameworkError> {
         // Insert all group routes into the outer router with the prefix
         for route in self.group_routes {
-            // Match the macro-group special-case: a child path of `/`
-            // means "the group root itself", so `group("/api", |r|
-            // r.get("/", ...))` registers `/api`, not `/api/`. Without
-            // this branch the fluent and macro surfaces would produce
-            // visibly different route tables for the same intent.
-            let raw_full = if route.path == "/" {
-                self.prefix.clone()
-            } else {
-                format!("{}{}", self.prefix, route.path)
-            };
+            let raw_full = join_paths(&self.prefix, &route.path);
             let full_path = convert_route_params(&raw_full);
 
             // Insert into the appropriate method router using pub(crate)
@@ -625,5 +618,49 @@ mod tests {
         let router: Router = Router::new().group("/api", |r| r.get("/users", h)).into();
         assert!(router.match_route(&Method::GET, "/api/users").is_some());
         assert!(router.match_route(&Method::GET, "/api").is_none());
+    }
+
+    /// A root-prefix fluent group (`.group("/", …)`) registers child
+    /// paths verbatim — never `//login`-style unmatchable patterns.
+    /// Mirrors the macro-group regression found by the Nebula kit.
+    #[test]
+    fn fluent_root_prefix_group_routes_match() {
+        let router: Router = Router::new().group("/", |r| r.get("/login", h)).into();
+        assert!(router.match_route(&Method::GET, "/login").is_some());
+        assert!(router.match_route(&Method::GET, "//login").is_none());
+    }
+
+    /// Group middleware on a root-prefix group is keyed by the same
+    /// canonical path the route was inserted under, so it actually
+    /// fires for `/login`.
+    #[test]
+    fn fluent_root_prefix_group_middleware_reaches_routes() {
+        use crate::middleware::{Middleware, Next};
+        use async_trait::async_trait;
+
+        #[derive(Clone)]
+        struct NoopMw;
+        #[async_trait]
+        impl Middleware for NoopMw {
+            async fn handle(&self, request: Request, next: Next) -> Response {
+                next(request).await
+            }
+        }
+
+        let router: Router = Router::new()
+            .group("/", |r| r.get("/login", h))
+            .middleware(NoopMw)
+            .into();
+        assert_eq!(
+            router.get_route_middleware(&Method::GET, "/login").len(),
+            1,
+        );
+    }
+
+    /// Trailing-slash prefixes join cleanly on the fluent surface too.
+    #[test]
+    fn fluent_trailing_slash_prefix_joins_cleanly() {
+        let router: Router = Router::new().group("/api/", |r| r.get("/users", h)).into();
+        assert!(router.match_route(&Method::GET, "/api/users").is_some());
     }
 }

@@ -20,10 +20,26 @@ impl Parse for RedirectInput {
 }
 
 /// Implementation for the redirect! macro
+///
+/// Dispatches on the literal's shape, mirroring Laravel's redirector:
+/// a leading `/` or an explicit scheme (`https://…`) is a location
+/// (`redirect('/home')` → [`Redirect::to`]), anything else is a route
+/// name (`redirect()->route('users.index')` → [`Redirect::route`]).
+/// Route names never start with `/` and never contain `://`, so the
+/// dispatch is unambiguous. Only the name arm gets compile-time
+/// route-existence validation — a literal path can point anywhere,
+/// including routes another service owns.
 pub fn redirect_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as RedirectInput);
     let route_name = input.route_name.value();
     let route_lit = &input.route_name;
+
+    if route_name.starts_with('/') || route_name.contains("://") {
+        let expanded = quote! {
+            ::suprnova::Redirect::to(#route_lit)
+        };
+        return expanded.into();
+    }
 
     // Validate the route exists at compile time
     if let Err(err) = validate_route_exists(&route_name, route_lit.span()) {

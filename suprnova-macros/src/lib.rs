@@ -2,7 +2,7 @@
 //!
 //! This crate provides compile-time validated macros for:
 //! - Inertia.js responses with component validation
-//! - Named route redirects with route validation
+//! - Redirects to literal paths or named routes (names validated at compile time)
 //! - Service auto-registration
 //! - Handler attribute for controller methods
 //! - FormRequest for validated request data
@@ -119,23 +119,40 @@ pub fn inertia_response(input: TokenStream) -> TokenStream {
     inertia::inertia_response_impl(input)
 }
 
-/// Create a redirect to a named route with compile-time validation
+/// Create a redirect to a named route or a literal path/URL
+///
+/// Mirrors Laravel's redirector: a literal starting with `/` (or
+/// carrying an explicit scheme like `https://`) redirects to that
+/// location; anything else is treated as a route name and resolved
+/// through the named-route table.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// // Simple redirect
+/// // Redirect to a literal path (Laravel's `redirect('/dashboard')`)
+/// redirect!("/dashboard").into()
+///
+/// // Path redirects flash session data via `.with(...)`
+/// redirect!("/login").with("status", "Logged out.").into()
+///
+/// // Redirect to a named route
 /// redirect!("users.index").into()
 ///
-/// // Redirect with route parameters
+/// // Named-route redirect with route parameters
 /// redirect!("users.show").with("id", "42").into()
 ///
-/// // Redirect with query parameters
+/// // Redirect with query parameters (both forms)
 /// redirect!("users.index").query("page", "1").into()
 /// ```
 ///
-/// This macro validates that the route name exists at compile time.
-/// If the route doesn't exist, you'll get a compile error with suggestions.
+/// Note the `.with(...)` asymmetry, inherited from Laravel: on a
+/// path redirect it flashes session data; on a named-route redirect
+/// it binds route parameters.
+///
+/// The named-route form validates that the route name exists at compile
+/// time. If the route doesn't exist, you'll get a compile error with
+/// suggestions. Literal paths skip that validation — they may point at
+/// routes another service owns.
 #[proc_macro]
 pub fn redirect(input: TokenStream) -> TokenStream {
     redirect::redirect_impl(input)

@@ -106,6 +106,36 @@ pub(crate) fn convert_route_params(path: &str) -> String {
     result
 }
 
+/// Join a group prefix and a child path into one canonical route pattern.
+///
+/// Plain concatenation is wrong at the `/` boundary: a root group
+/// (`group!("/", { get!("/login", …) })`) would register `//login`, which
+/// matchit treats as containing an empty segment — no real request path
+/// ever matches it, so every route in the group silently 404s. A
+/// trailing-slash prefix (`/api/` + `/users`) has the same problem.
+///
+/// Rules:
+/// - trailing `/`s are trimmed from the prefix, leading `/`s from the
+///   child, and the two are joined with exactly one `/`
+/// - a child of `/` (or empty) resolves to the prefix itself, so
+///   `group!("/api", { get!("/", …) })` registers `/api`, not `/api/`
+/// - a root prefix (`/` or empty) contributes nothing: `/` + `/login`
+///   is `/login`
+/// - both root resolves to `/`
+///
+/// The result always starts with `/`, so a child given without a leading
+/// slash still produces a valid matchit pattern. Param conversion
+/// (`:id` → `{id}`) runs on the joined result, never here.
+pub(crate) fn join_paths(prefix: &str, child: &str) -> String {
+    let prefix = prefix.trim_end_matches('/');
+    let child = child.trim_start_matches('/');
+    match (prefix.is_empty(), child.is_empty()) {
+        (true, true) => "/".to_string(),
+        (false, true) => prefix.to_string(),
+        (_, false) => format!("{prefix}/{child}"),
+    }
+}
+
 /// HTTP method for route definitions.
 ///
 /// Mirrors the verbs the `Router` accepts. PATCH / HEAD / OPTIONS were
@@ -867,8 +897,11 @@ impl GroupDef {
     ///
     /// # Path Combination
     ///
-    /// - If route path is "/" (root), the full path is just the group prefix
-    /// - Otherwise, prefix and route path are concatenated
+    /// Prefix and route path are joined with a single canonical `/`
+    /// boundary (see `join_paths`): a route path of `/` resolves to the
+    /// group prefix itself, and a root prefix (`/`) contributes nothing,
+    /// so `group!("/", { get!("/login", …) })` registers `/login` — never
+    /// `//login`.
     ///
     /// # Middleware Inheritance
     ///
@@ -886,12 +919,12 @@ impl GroupDef {
         parent_prefix: &str,
         inherited_middleware: &[BoxedMiddleware],
     ) {
-        // Build the full prefix for this group
-        let full_prefix = if parent_prefix.is_empty() {
-            self.prefix.to_string()
-        } else {
-            format!("{}{}", parent_prefix, self.prefix)
-        };
+        // Build the full prefix for this group. join_paths keeps the
+        // `/` boundary canonical so a root parent (`group!("/")`) or a
+        // trailing-slash prefix can't smuggle `//` into child routes.
+        // The recursion seeds parent_prefix with "" — join_paths treats
+        // that the same as a root `/` prefix.
+        let full_prefix = join_paths(parent_prefix, self.prefix);
 
         // Combine inherited middleware with this group's middleware
         // Parent middleware runs first (outer), then this group's middleware
@@ -906,16 +939,12 @@ impl GroupDef {
                 GroupItem::Route(route) => {
                     // Build full path with prefix, then convert :param to
                     // {param} for matchit compatibility. Conversion runs
-                    // AFTER concatenation so a group prefix containing
+                    // AFTER joining so a group prefix containing
                     // `:param` (e.g. `group!("/api/:version", { ... })`)
                     // gets normalised the same way the route segment does
                     // — without that, `:version` would reach matchit as a
                     // literal segment instead of a parameter.
-                    let raw_full = if route.path == "/" {
-                        full_prefix.clone()
-                    } else {
-                        format!("{}{}", full_prefix, route.path)
-                    };
+                    let raw_full = join_paths(&full_prefix, route.path);
                     let full_path = convert_route_params(&raw_full);
                     // We need to leak the string to get a 'static str for the router
                     let full_path: &'static str = Box::leak(full_path.into_boxed_str());
@@ -963,14 +992,10 @@ impl GroupDef {
                     }
                 }
                 GroupItem::AnyRoute(any_route) => {
-                    // Prefix + matchit normalisation, mirroring the
+                    // Prefix join + matchit normalisation, mirroring the
                     // single-method arm above so a group prefix
                     // containing `:param` gets converted the same way.
-                    let raw_full = if any_route.path == "/" {
-                        full_prefix.clone()
-                    } else {
-                        format!("{}{}", full_prefix, any_route.path)
-                    };
+                    let raw_full = join_paths(&full_prefix, any_route.path);
                     let full_path = convert_route_params(&raw_full);
                     let full_path: &'static str = Box::leak(full_path.into_boxed_str());
 
@@ -1431,5 +1456,65 @@ mod tests {
                 .match_route(&Method::OPTIONS, "/api/discover")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn join_paths_canonical_boundaries() {
+        assert_eq!(join_paths("/", "/login"), "/login");
+        assert_eq!(join_paths("", "/login"), "/login");
+        assert_eq!(join_paths("/api", "/users"), "/api/users");
+        assert_eq!(join_paths("/api/", "/users"), "/api/users");
+        assert_eq!(join_paths("/api", "users"), "/api/users");
+        assert_eq!(join_paths("/api", "/"), "/api");
+        assert_eq!(join_paths("/api", ""), "/api");
+        assert_eq!(join_paths("/", "/"), "/");
+        assert_eq!(join_paths("", ""), "/");
+        // Params pass through untouched — conversion runs on the result.
+        assert_eq!(join_paths("/api/:version", "/users/:id"), "/api/:version/users/:id");
+    }
+
+    /// Root-prefix group — the scaffold's `group!("/", { ... })` shape.
+    /// Raw concatenation registered `//login`, which matchit treats as
+    /// an empty segment: every route in the group 404'd over real HTTP.
+    #[test]
+    fn root_prefix_group_routes_match() {
+        let group = GroupDef::__new_unchecked("/").add(RouteDefBuilder::new(
+            HttpMethod::Get,
+            "/login",
+            test_handler,
+        ));
+        let router = group.register(Router::new());
+        assert!(router.match_route(&Method::GET, "/login").is_some());
+        assert!(router.match_route(&Method::GET, "//login").is_none());
+    }
+
+    /// Nested group under a root-prefix parent stays canonical at both
+    /// join levels (`/` + `/admin` + `/settings` → `/admin/settings`).
+    #[test]
+    fn root_prefix_nested_group_routes_match() {
+        let nested = GroupDef::__new_unchecked("/admin").add(RouteDefBuilder::new(
+            HttpMethod::Get,
+            "/settings",
+            test_handler,
+        ));
+        let group = GroupDef::__new_unchecked("/").add(nested);
+        let router = group.register(Router::new());
+        assert!(
+            router
+                .match_route(&Method::GET, "/admin/settings")
+                .is_some()
+        );
+    }
+
+    /// Trailing-slash prefixes don't produce `//` either.
+    #[test]
+    fn trailing_slash_prefix_group_routes_match() {
+        let group = GroupDef::__new_unchecked("/api/").add(RouteDefBuilder::new(
+            HttpMethod::Get,
+            "/users",
+            test_handler,
+        ));
+        let router = group.register(Router::new());
+        assert!(router.match_route(&Method::GET, "/api/users").is_some());
     }
 }
