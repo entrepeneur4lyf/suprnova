@@ -348,14 +348,7 @@ async fn release_and_log(guard: crate::cache::LockGuard, hashed_key: &str) {
 /// identifiers (which may be PII or client-controlled) out of cache tooling,
 /// and strips any characters that could collide with backend key conventions.
 fn hashed(key: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(key.as_bytes());
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
+    crate::hashing::sha256_hex(key)
 }
 
 #[cfg(test)]

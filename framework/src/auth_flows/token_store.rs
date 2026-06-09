@@ -138,17 +138,11 @@ fn generate_plaintext() -> Result<String, FrameworkError> {
 ///
 /// These tokens carry 256 bits of OS entropy, so a fast cryptographic
 /// hash is the correct choice (unlike low-entropy passwords, which want
-/// a slow KDF). Reuses the framework's existing `sha2` digest + manual
-/// hex idiom (`idempotency::hashed`); no new dependency.
+/// a slow KDF). Delegates to the shared [`crate::hashing::sha256_hex`]
+/// helper — the single SHA-256-hex implementation `idempotency` also
+/// uses; no new dependency.
 fn hash_token(plaintext: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(plaintext.as_bytes());
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
+    crate::hashing::sha256_hex(plaintext)
 }
 
 /// Provider-agnostic single-use token store over the `auth_flow_tokens`
@@ -304,7 +298,7 @@ impl TokenStore {
 /// - `token_hash` TEXT not null UNIQUE — SHA-256 hash of the plaintext token
 /// - `purpose`    TEXT not null — [`TokenPurpose::as_str`] discriminator
 /// - `expires_at` TIMESTAMP not null — token TTL boundary
-/// - `used_at`    TIMESTAMP null — set on single-use consume (Task 2)
+/// - `used_at`    TIMESTAMP null — set on single-use consume
 /// - `created_at` TIMESTAMP not null
 pub mod entity {
     use sea_orm::entity::prelude::*;
@@ -325,7 +319,7 @@ pub mod entity {
         pub purpose: String,
         /// TTL boundary; the token is rejected once `now > expires_at`.
         pub expires_at: chrono::NaiveDateTime,
-        /// Set atomically when the token is consumed; single-use is enforced by this column (Task 2).
+        /// Set atomically when the token is consumed; single-use is enforced by this column.
         pub used_at: Option<chrono::NaiveDateTime>,
         /// Wall-clock time the token row was created.
         pub created_at: chrono::NaiveDateTime,
@@ -400,8 +394,13 @@ mod tests {
                 .unwrap(),
             Some("42".to_string())
         );
-        // After consume, the token is spent: check is false and a second
-        // consume returns None (single-use enforced by the DB).
+        // After consume the token is spent: check is false and a second
+        // consume returns None. That second None comes from the SELECT's
+        // `used_at IS NULL` filter already excluding the spent row, proving
+        // single-use via the read path. The UPDATE `rows_affected` branch
+        // (the race-safe authority for two concurrent consumers) mirrors
+        // auth::remember's proven rotate idiom and would need a concurrent
+        // harness to exercise directly.
         assert!(
             !TokenStore::check(&plaintext, TokenPurpose::EmailVerification)
                 .await

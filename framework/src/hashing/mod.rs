@@ -387,6 +387,25 @@ pub fn info(hash: &str) -> HashInfo {
     info::parse(hash)
 }
 
+/// SHA-256 of `input`, lowercase hex-encoded (64 chars).
+///
+/// This is a fast cryptographic digest, **not** a password hash — it has
+/// no salt and no work factor. Use it only for high-entropy material where
+/// pre-image/brute-force resistance comes from the input's own entropy
+/// (single-use auth-flow tokens, idempotency keys), never for passwords.
+/// For passwords use [`hash`] / [`verify`], which run a deliberately slow
+/// KDF (bcrypt / Argon2).
+pub(crate) fn sha256_hex(input: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(input.as_bytes());
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
