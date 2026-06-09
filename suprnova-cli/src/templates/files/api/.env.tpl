@@ -1,7 +1,7 @@
 APP_NAME="{project_name}"
 APP_ENV=local
 APP_DEBUG=true
-APP_URL=http://localhost:8080
+APP_URL=http://localhost:8765
 
 # 32-byte AES-256 key (URL-safe base64, no padding) used to encrypt
 # session cookies, pagination cursors, and anything that goes through
@@ -11,8 +11,10 @@ APP_URL=http://localhost:8080
 # and APP_KEY is unset.
 APP_KEY={app_key}
 
+# Distinctive default to dodge the universally squatted 8080; set
+# explicitly (or rely on $PORT in production) to pin the port.
 SERVER_HOST=127.0.0.1
-SERVER_PORT=8080
+SERVER_PORT=8765
 
 # SQLite (default — zero config)
 DATABASE_URL=sqlite://database.sqlite?mode=rwc

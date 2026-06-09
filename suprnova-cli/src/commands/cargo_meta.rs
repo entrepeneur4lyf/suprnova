@@ -87,9 +87,6 @@ tokio = { version = "1", features = ["full"] }
 
     #[test]
     fn returns_none_when_package_name_empty() {
-        assert_eq!(
-            package_name_from_content("[package]\nname = \"\"\n"),
-            None
-        );
+        assert_eq!(package_name_from_content("[package]\nname = \"\"\n"), None);
     }
 }

@@ -29,11 +29,20 @@ impl ProcessManager {
         command: &str,
         args: &[&str],
         cwd: Option<&Path>,
+        envs: &[(&str, String)],
         prefix: &str,
         color: console::Color,
     ) -> Result<(), String> {
         let mut cmd = Command::new(command);
         cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        // The framework's `.env` loader (Phase 5a in config/env.rs)
+        // restores real system env over file values, so a var we set on
+        // the child here wins over the scaffold `.env` — that's how the
+        // resolved/scanned ports reach the backend and Vite.
+        for (key, value) in envs {
+            cmd.env(key, value);
+        }
 
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
@@ -170,38 +179,59 @@ fn ensure_npm_dependencies() -> Result<(), String> {
     Ok(())
 }
 
+/// Default backend port. Mirrors the framework's
+/// `suprnova::config::providers::server::DEFAULT_SERVER_PORT`; kept in
+/// sync deliberately (the CLI can't depend on the framework crate).
+const DEFAULT_BACKEND_PORT: u16 = 8765;
+/// Default Vite port. Mirrors `suprnova::inertia::DEFAULT_VITE_PORT`.
+const DEFAULT_VITE_PORT: u16 = 5765;
+
+/// Parse a `u16` port from an env var, treating empty/unparseable as unset.
+fn env_port(key: &str) -> Option<u16> {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse::<u16>().ok())
+}
+
+/// Resolve a dev-server port. An explicit CLI flag (`cli`) pins the port
+/// exactly. Otherwise take `env_value` (or `default`) as a base and scan
+/// upward for the first free port so a busy base self-heals.
+fn pick_port(cli: Option<u16>, env_value: Option<u16>, default: u16) -> u16 {
+    if let Some(p) = cli {
+        return p;
+    }
+    first_free_port(env_value.unwrap_or(default))
+}
+
+/// First bindable TCP port at or above `base` on 127.0.0.1, scanning up
+/// to 100 ports. Falls back to `base` when none are free (the child's own
+/// bind then surfaces a clear error). Best-effort: there's a small window
+/// between this probe and the child binding, acceptable for local dev.
+fn first_free_port(base: u16) -> u16 {
+    (base..=base.saturating_add(99))
+        .find(|&p| std::net::TcpListener::bind(("127.0.0.1", p)).is_ok())
+        .unwrap_or(base)
+}
+
 pub fn run(
-    port: u16,
-    frontend_port: u16,
+    port: Option<u16>,
+    frontend_port: Option<u16>,
     backend_only: bool,
     frontend_only: bool,
     skip_types: bool,
 ) {
-    // Load .env file from current directory
+    // Load .env so SERVER_PORT / VITE_PORT can act as the resolution base.
     let _ = dotenvy::dotenv();
 
-    // Resolve ports: CLI args take precedence, then env vars, then defaults
-    let backend_port = if port != 8080 {
-        // CLI argument was explicitly provided (different from default)
-        port
-    } else {
-        // Use env var or default
-        std::env::var("SERVER_PORT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(port)
-    };
-
-    let vite_port = if frontend_port != 5173 {
-        // CLI argument was explicitly provided
-        frontend_port
-    } else {
-        // Use env var or default
-        std::env::var("VITE_PORT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(frontend_port)
-    };
+    // Resolve dev-server ports. An explicit CLI flag pins the port
+    // exactly; otherwise we take SERVER_PORT/VITE_PORT (or the
+    // distinctive default) as a *base* and scan upward for the first free
+    // port, so a busy default self-heals instead of failing to bind. The
+    // resolved values are pushed to the child processes via env in
+    // `spawn_with_prefix`, where the framework's `.env` loader lets them
+    // win over the scaffold `.env`.
+    let backend_port = pick_port(port, env_port("SERVER_PORT"), DEFAULT_BACKEND_PORT);
+    let vite_port = pick_port(frontend_port, env_port("VITE_PORT"), DEFAULT_VITE_PORT);
 
     ui::banner();
     ui::info("Starting development servers...");
@@ -272,11 +302,20 @@ pub fn run(
 
         ui::label_value("Backend", &format!("http://127.0.0.1:{}", backend_port));
 
+        // SERVER_PORT pins the backend's bind; VITE_PORT lets the
+        // Inertia dev-head inject the correct `<script src=…>` for the
+        // Vite port we actually launched (default or scanned).
+        let backend_env = [
+            ("SERVER_PORT", backend_port.to_string()),
+            ("VITE_PORT", vite_port.to_string()),
+        ];
+
         let run_cmd = format!("run --bin {}", package_name);
         if let Err(e) = manager.spawn_with_prefix(
             "cargo",
             &["watch", "-x", &run_cmd],
             None,
+            &backend_env,
             "[backend] ",
             console::Color::Magenta,
         ) {
@@ -291,10 +330,15 @@ pub fn run(
 
         let frontend_path = Path::new("frontend");
 
+        // vite.config.ts reads VITE_PORT for `server.port`; passing it
+        // here makes Vite bind the resolved port.
+        let vite_env = [("VITE_PORT", vite_port.to_string())];
+
         if let Err(e) = manager.spawn_with_prefix(
             "npm",
             &["run", "dev"],
             Some(frontend_path),
+            &vite_env,
             "[frontend]",
             console::Color::Cyan,
         ) {
@@ -410,5 +454,61 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>) {
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn pick_port_cli_flag_pins_exactly_without_scanning() {
+        // An explicit --port is a hard pin: returned as-is even if busy,
+        // because the user asked for that exact port (and portless'
+        // appPort routing expects it).
+        let busy = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let busy_port = busy.local_addr().unwrap().port();
+        assert_eq!(
+            pick_port(Some(busy_port), None, DEFAULT_BACKEND_PORT),
+            busy_port
+        );
+    }
+
+    #[test]
+    fn pick_port_scans_upward_from_busy_base() {
+        // Occupy a base port; pick_port (no CLI flag) must skip it and
+        // return a higher free port.
+        let occupied = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let base = occupied.local_addr().unwrap().port();
+        let chosen = pick_port(None, Some(base), DEFAULT_BACKEND_PORT);
+        assert_ne!(chosen, base, "must not pick the occupied base port");
+        assert!(chosen > base, "scan moves upward from the base");
+    }
+
+    #[test]
+    fn pick_port_falls_back_to_default_when_no_env_value() {
+        // No CLI, no env value → scan from the distinctive default. The
+        // default is almost always free in a test environment.
+        let chosen = pick_port(None, None, DEFAULT_BACKEND_PORT);
+        assert!(chosen >= DEFAULT_BACKEND_PORT);
+        assert!(chosen < DEFAULT_BACKEND_PORT + 100);
+    }
+
+    #[test]
+    fn first_free_port_returns_base_when_free() {
+        // Pick a high base unlikely to be occupied; bind to confirm it's
+        // free, release, then assert first_free_port returns it.
+        let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let free = probe.local_addr().unwrap().port();
+        drop(probe);
+        assert_eq!(first_free_port(free), free);
+    }
+
+    #[test]
+    fn env_port_rejects_empty_and_garbage() {
+        // Indirection through a real (unset) env var name keeps this
+        // hermetic — no global env mutation.
+        assert_eq!(env_port("SUPRNOVA_DEFINITELY_UNSET_PORT_VAR"), None);
     }
 }

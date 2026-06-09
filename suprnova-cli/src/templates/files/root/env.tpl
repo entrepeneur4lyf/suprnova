@@ -1,7 +1,7 @@
 APP_NAME="{project_name}"
 APP_ENV=local
 APP_DEBUG=true
-APP_URL=http://localhost:8080
+APP_URL=http://localhost:8765
 
 # 32-byte AES-256 key (URL-safe base64, no padding) used to encrypt
 # session cookies, pagination cursors, and anything that goes through
@@ -11,10 +11,15 @@ APP_URL=http://localhost:8080
 # and APP_KEY is unset.
 APP_KEY={app_key}
 
+# Backend + Vite ports. Distinctive defaults to dodge the universally
+# squatted 8080/5173. `suprnova serve` treats these as a base and scans
+# upward if they're busy, so two Suprnova apps can run at once without a
+# clash. Set SERVER_PORT explicitly (or rely on $PORT in production) to
+# pin the backend port.
 SERVER_HOST=127.0.0.1
-SERVER_PORT=8080
+SERVER_PORT=8765
 
-VITE_PORT=5173
+VITE_PORT=5765
 
 # Database (SQLite by default, change to postgres://user:pass@localhost:5432/dbname for PostgreSQL)
 DATABASE_URL=sqlite://./database.db

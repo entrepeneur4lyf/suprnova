@@ -44,13 +44,17 @@ enum Commands {
     },
     /// Start the development servers (backend + frontend)
     Serve {
-        /// Backend port (default: 8000)
-        #[arg(long, short = 'p', default_value = "8000")]
-        port: u16,
+        /// Backend port. Overrides SERVER_PORT/.env and pins the port
+        /// exactly (no free-port scan). Defaults to SERVER_PORT, else
+        /// 8765, scanning upward if that port is busy.
+        #[arg(long, short = 'p')]
+        port: Option<u16>,
 
-        /// Frontend port (default: 5173)
-        #[arg(long, default_value = "5173")]
-        frontend_port: u16,
+        /// Frontend (Vite) port. Overrides VITE_PORT/.env and pins the
+        /// port exactly. Defaults to VITE_PORT, else 5765, scanning
+        /// upward if that port is busy.
+        #[arg(long)]
+        frontend_port: Option<u16>,
 
         /// Only start backend server
         #[arg(long)]

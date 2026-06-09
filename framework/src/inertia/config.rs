@@ -319,11 +319,39 @@ fn glob_match_inner(pat: &[u8], path: &[u8]) -> bool {
     pi == pat.len()
 }
 
+/// Default Vite dev-server port when `VITE_PORT` is unset.
+///
+/// Distinctive to avoid the universally-squatted `5173` (every Vite
+/// project on the machine fights for it). Pairs with the backend default
+/// [`crate::config::providers::server::DEFAULT_SERVER_PORT`] (`8765`).
+pub const DEFAULT_VITE_PORT: u16 = 5765;
+
+/// Resolve the Vite dev-server URL referenced by the dev-mode HTML shell.
+///
+/// Precedence: `INERTIA_VITE_DEV_SERVER` (full URL override) >
+/// `http://localhost:{VITE_PORT}` > `http://localhost:5765`. `suprnova
+/// serve` sets `VITE_PORT` on the backend child to the port it actually
+/// launched Vite on, so the injected `<script src=…>` tag always matches
+/// the running Vite server — even after free-port scanning moved it.
+fn vite_dev_server_from_env() -> String {
+    if let Ok(url) = std::env::var("INERTIA_VITE_DEV_SERVER") {
+        let trimmed = url.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    let port = std::env::var("VITE_PORT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .unwrap_or(DEFAULT_VITE_PORT);
+    format!("http://localhost:{port}")
+}
+
 impl Default for InertiaConfig {
     fn default() -> Self {
         let frontend = Frontend::detect_from_env();
         Self {
-            vite_dev_server: "http://localhost:5173".to_string(),
+            vite_dev_server: vite_dev_server_from_env(),
             entry_point: frontend.default_entry_point().to_string(),
             version: VersionResolver::Static("1.0".to_string()),
             development: true,
@@ -558,6 +586,50 @@ mod tests {
         assert_eq!(Frontend::Svelte.default_entry_point(), "src/main.ts");
         assert_eq!(Frontend::React.default_entry_point(), "src/main.tsx");
         assert_eq!(Frontend::Vue.default_entry_point(), "src/main.ts");
+    }
+
+    #[test]
+    #[serial_test::serial(inertia_vite_env)]
+    fn vite_dev_server_resolves_from_env() {
+        let prior_url = std::env::var("INERTIA_VITE_DEV_SERVER").ok();
+        let prior_port = std::env::var("VITE_PORT").ok();
+        // SAFETY: single-threaded scope (serialized via serial_test), env
+        // restored at the end — same pattern as the config provider tests.
+        unsafe {
+            std::env::remove_var("INERTIA_VITE_DEV_SERVER");
+            std::env::remove_var("VITE_PORT");
+        }
+
+        // Neither set → distinctive default, NOT the old hardcoded 5173.
+        assert_eq!(
+            vite_dev_server_from_env(),
+            format!("http://localhost:{DEFAULT_VITE_PORT}")
+        );
+
+        // VITE_PORT set → the dev-head URL tracks the real Vite port.
+        unsafe {
+            std::env::set_var("VITE_PORT", "5790");
+        }
+        assert_eq!(vite_dev_server_from_env(), "http://localhost:5790");
+
+        // INERTIA_VITE_DEV_SERVER (full URL) wins over VITE_PORT — this is
+        // the hook for pointing the page at an HTTPS Vite (e.g. behind a
+        // TLS dev proxy).
+        unsafe {
+            std::env::set_var("INERTIA_VITE_DEV_SERVER", "https://vite.nebula.localhost");
+        }
+        assert_eq!(vite_dev_server_from_env(), "https://vite.nebula.localhost");
+
+        unsafe {
+            match prior_url {
+                Some(v) => std::env::set_var("INERTIA_VITE_DEV_SERVER", v),
+                None => std::env::remove_var("INERTIA_VITE_DEV_SERVER"),
+            }
+            match prior_port {
+                Some(v) => std::env::set_var("VITE_PORT", v),
+                None => std::env::remove_var("VITE_PORT"),
+            }
+        }
     }
 
     #[test]

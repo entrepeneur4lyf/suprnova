@@ -68,7 +68,7 @@ impl AppConfig {
             name: env("APP_NAME", "Suprnova Application".to_string()),
             environment,
             debug,
-            url: env("APP_URL", "http://localhost:8080".to_string()),
+            url: env("APP_URL", "http://localhost:8765".to_string()),
             trusted_proxies: parse_trusted_proxies_lenient(),
         }
     }
@@ -84,7 +84,7 @@ impl AppConfig {
         let name =
             env_strict::<String>("APP_NAME")?.unwrap_or_else(|| "Suprnova Application".to_string());
         let url =
-            env_strict::<String>("APP_URL")?.unwrap_or_else(|| "http://localhost:8080".to_string());
+            env_strict::<String>("APP_URL")?.unwrap_or_else(|| "http://localhost:8765".to_string());
         let trusted_proxies = parse_trusted_proxies_strict()?;
         Ok(Self {
             name,

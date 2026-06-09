@@ -74,12 +74,14 @@ RUN chown -R appuser:appuser /app
 
 USER appuser
 
-# Environment variables
+# Environment variables. SERVER_PORT matches Suprnova's default; the app
+# also honors $PORT (Heroku/Railway/Render/Fly inject it), which takes
+# effect when SERVER_PORT is unset.
 ENV APP_ENV=production
 ENV SERVER_HOST=0.0.0.0
-ENV SERVER_PORT=8080
+ENV SERVER_PORT=8765
 
-EXPOSE 8080
+EXPOSE 8765
 
 # Default: Run web server with auto-migrations
 # Override with different commands for other modes:

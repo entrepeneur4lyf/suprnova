@@ -1,7 +1,7 @@
 APP_NAME="Suprnova Application"
 APP_ENV=local
 APP_DEBUG=true
-APP_URL=http://localhost:8080
+APP_URL=http://localhost:8765
 
 # 32-byte AES-256 key (URL-safe base64, no padding). Generate one with
 # `suprnova key:generate` and copy it into your `.env`. Required in
@@ -9,10 +9,12 @@ APP_URL=http://localhost:8080
 # local/dev/test and APP_KEY is unset.
 APP_KEY=
 
+# Backend + Vite ports. Distinctive defaults to dodge the universally
+# squatted 8080/5173; `suprnova serve` scans upward if they're busy.
 SERVER_HOST=127.0.0.1
-SERVER_PORT=8080
+SERVER_PORT=8765
 
-VITE_PORT=5173
+VITE_PORT=5765
 
 # Database (SQLite by default, change to postgres://user:pass@localhost:5432/dbname for PostgreSQL)
 DATABASE_URL=sqlite://./database.db

@@ -1,6 +1,15 @@
-use crate::config::env::{env, env_strict};
+use crate::config::env::{env, env_optional, env_strict};
 use crate::error::FrameworkError;
 use crate::http::body::DEFAULT_MAX_REQUEST_BODY_BYTES;
+
+/// Default listen port when neither `SERVER_PORT` nor `PORT` is set.
+///
+/// Chosen to be distinctive — `8080`/`8000` collide with nearly every
+/// other dev server and proxy on a typical machine. `8765` (an 8-7-6-5
+/// countdown) is rarely squatted; the `8xxx` prefix keeps it readable as
+/// a backend port. The matching Vite default is `5765`
+/// ([`crate::inertia::config::DEFAULT_VITE_PORT`]).
+pub const DEFAULT_SERVER_PORT: u16 = 8765;
 
 /// Server configuration.
 ///
@@ -40,7 +49,7 @@ impl ServerConfig {
     pub fn from_env() -> Self {
         Self {
             host: env("SERVER_HOST", "127.0.0.1".to_string()),
-            port: env("SERVER_PORT", 8080),
+            port: resolve_port_lenient(),
             max_body_size: env("SERVER_MAX_BODY_SIZE", DEFAULT_MAX_REQUEST_BODY_BYTES),
         }
     }
@@ -51,7 +60,12 @@ impl ServerConfig {
     /// of silently reverting to the default.
     pub fn try_from_env() -> Result<Self, FrameworkError> {
         let host = env_strict::<String>("SERVER_HOST")?.unwrap_or_else(|| "127.0.0.1".to_string());
-        let port = env_strict::<u16>("SERVER_PORT")?.unwrap_or(8080);
+        // Precedence: SERVER_PORT (explicit) > PORT (PaaS convention —
+        // Heroku/Railway/Render/Fly inject it) > distinctive default.
+        let port = match env_strict::<u16>("SERVER_PORT")? {
+            Some(p) => p,
+            None => env_strict::<u16>("PORT")?.unwrap_or(DEFAULT_SERVER_PORT),
+        };
         let max_body_size =
             env_strict::<usize>("SERVER_MAX_BODY_SIZE")?.unwrap_or(DEFAULT_MAX_REQUEST_BODY_BYTES);
         Ok(Self {
@@ -71,6 +85,18 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self::from_env()
     }
+}
+
+/// Resolve the listen port for the lenient (non-boot) path.
+///
+/// Precedence mirrors [`ServerConfig::try_from_env`]: `SERVER_PORT` >
+/// `PORT` (PaaS convention) > [`DEFAULT_SERVER_PORT`]. Unparseable values
+/// are treated as unset here (the strict `try_from_env` path is what
+/// fails boot on a typo).
+fn resolve_port_lenient() -> u16 {
+    env_optional::<u16>("SERVER_PORT")
+        .or_else(|| env_optional::<u16>("PORT"))
+        .unwrap_or(DEFAULT_SERVER_PORT)
 }
 
 /// Builder for ServerConfig
@@ -128,9 +154,9 @@ mod tests {
     #[serial_test::serial(server_config_env)]
     fn try_from_env_rejects_unparseable_port() {
         // `SERVER_PORT=abc` must fail boot via `try_from_env`, not
-        // silently fall back to 8080 the way the lenient `from_env`
-        // path does. This is the boot-time fail-loud guarantee
-        // `Config::init` relies on.
+        // silently fall back to the default the way the lenient
+        // `from_env` path does. This is the boot-time fail-loud
+        // guarantee `Config::init` relies on.
         let prior = std::env::var("SERVER_PORT").ok();
         // SAFETY: this test mutates a process-global env var. Other
         // tests in this crate use the same single-threaded pattern;
@@ -177,6 +203,52 @@ mod tests {
         if let Some(v) = prior {
             unsafe {
                 std::env::set_var("SERVER_MAX_BODY_SIZE", v);
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(server_config_env)]
+    fn port_precedence_server_port_then_port_then_default() {
+        let prior_server = std::env::var("SERVER_PORT").ok();
+        let prior_port = std::env::var("PORT").ok();
+
+        // SAFETY: single-threaded scope (no await across the mutation),
+        // restored at the end — same pattern as the sibling env tests.
+        unsafe {
+            std::env::remove_var("SERVER_PORT");
+            std::env::remove_var("PORT");
+        }
+
+        // Neither set → distinctive default.
+        assert_eq!(ServerConfig::from_env().port, DEFAULT_SERVER_PORT);
+        assert_eq!(
+            ServerConfig::try_from_env().unwrap().port,
+            DEFAULT_SERVER_PORT
+        );
+
+        // Only PORT set (PaaS: Heroku/Railway/Render/Fly inject it).
+        unsafe {
+            std::env::set_var("PORT", "4321");
+        }
+        assert_eq!(ServerConfig::from_env().port, 4321);
+        assert_eq!(ServerConfig::try_from_env().unwrap().port, 4321);
+
+        // SERVER_PORT wins over PORT when both are set.
+        unsafe {
+            std::env::set_var("SERVER_PORT", "9999");
+        }
+        assert_eq!(ServerConfig::from_env().port, 9999);
+        assert_eq!(ServerConfig::try_from_env().unwrap().port, 9999);
+
+        unsafe {
+            match prior_server {
+                Some(v) => std::env::set_var("SERVER_PORT", v),
+                None => std::env::remove_var("SERVER_PORT"),
+            }
+            match prior_port {
+                Some(v) => std::env::set_var("PORT", v),
+                None => std::env::remove_var("PORT"),
             }
         }
     }
