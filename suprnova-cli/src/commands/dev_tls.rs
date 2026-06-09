@@ -211,4 +211,23 @@ mod tests {
             "firefox profile lacking cert9.db must be excluded: {dbs:?}"
         );
     }
+
+    #[test]
+    fn nss_databases_discovers_flatpak_firefox_profile() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path();
+        let profile = home.join(".var/app/org.mozilla.firefox/.mozilla/firefox/xyz.default");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(profile.join("cert9.db"), b"fake").unwrap();
+
+        let dbs = nss_databases(home);
+        let ff = dbs
+            .iter()
+            .find(|d| d.path == profile)
+            .expect("flatpak firefox profile must be discovered");
+        assert!(
+            !ff.create_if_missing,
+            "firefox profile must NOT be create_if_missing"
+        );
+    }
 }
