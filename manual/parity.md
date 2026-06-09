@@ -134,7 +134,7 @@ gaps as of the shipped framework.
 | Password Reset | `PasswordReset` + `PasswordResetMail` + `PasswordChangedMail`; `CanResetPassword` contract on the user model | shipped | Provider-backed (no torii) — [Auth Flows](auth-flows.md) |
 | Brute-force throttling | `BruteForce` + `LoginThrottleMiddleware` | shipped | Per-IP + per-user accounting |
 | Two-Factor (TOTP) | `TwoFactor` + `TwoFactorChallengeMiddleware` + `TwoFactorUser` trait | shipped | Recovery codes + replay protection |
-| Remember-me | Long-lived signed cookie via `SessionGuard` | shipped | Re-exported from torii |
+| Remember-me | Long-lived signed cookie via `SessionGuard` | shipped | Framework-owned `auth::remember`: DB-row + bcrypt + single-use rotation |
 | OAuth (Socialite) | Via the vendored `torii_integration` fork (Google / GitHub / Apple etc.) | shipped | [Authentication](authentication.md) |
 | Sanctum (API tokens) | `TokenGuard` + DB-backed tokens via torii | diverged | Token model + bearer middleware ship; no separate Sanctum API surface |
 | Passport (OAuth server) | Not yet | not yet | If you need an OAuth provider, run a dedicated identity service (Keycloak, Hydra) behind Suprnova |
