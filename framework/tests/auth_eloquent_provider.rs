@@ -10,7 +10,8 @@ use std::any::Any;
 use chrono::{DateTime, Utc};
 use suprnova::testing::TestDatabase;
 use suprnova::{
-    Authenticatable, Credentials, EloquentUserProvider, MustVerifyEmail, UserProvider, model,
+    Authenticatable, CanResetPassword, Credentials, EloquentUserProvider, MustVerifyEmail,
+    UserProvider, model,
 };
 
 // The app's `User` shape: a typed model that is also Authenticatable.
@@ -51,6 +52,12 @@ impl MustVerifyEmail for TestUser {
     }
     fn set_email_verified_at(&mut self, v: Option<DateTime<Utc>>) {
         self.email_verified_at = v;
+    }
+}
+
+impl CanResetPassword for TestUser {
+    fn email_for_reset(&self) -> &str {
+        &self.email
     }
     fn set_password_hash(&mut self, hash: &str) {
         self.password = hash.to_string();
@@ -222,4 +229,27 @@ async fn eloquent_provider_supports_auth_flow_methods() {
         .expect("password hash present");
     assert!(suprnova::hashing::verify("newpass", stored).unwrap());
     assert!(!suprnova::hashing::verify("secret", stored).unwrap());
+}
+
+// The absent-user contract: the mutating flow methods are silent no-ops on a
+// non-existent id (load returns None → nothing to mutate, `Ok(())`), and the
+// read returns `false`. Locks the behaviour the password-reset / verification
+// flows rely on when an id no longer resolves.
+#[tokio::test]
+async fn auth_flow_methods_are_no_ops_on_absent_user() {
+    let _db = setup().await;
+    let p = provider();
+    let absent = "999";
+
+    // No row → no mutation, no error.
+    p.mark_email_verified(absent).await.unwrap();
+    p.set_password(absent, &suprnova::hash("whatever").unwrap())
+        .await
+        .unwrap();
+
+    // Read on a missing id is `false`, not an error.
+    assert!(!p.is_email_verified(absent).await.unwrap());
+
+    // The carriers resolve to None for an absent user too.
+    assert!(p.flow_user_by_id(absent).await.unwrap().is_none());
 }

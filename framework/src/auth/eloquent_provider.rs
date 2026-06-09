@@ -27,7 +27,7 @@ use serde_json::Value;
 use chrono::Utc;
 
 use super::authenticatable::Authenticatable;
-use super::must_verify_email::{AuthFlowUser, MustVerifyEmail};
+use super::must_verify_email::{AuthFlowUser, CanResetPassword, MustVerifyEmail};
 use super::provider::UserProvider;
 use crate::eloquent::{EagerLoadDispatch, Model};
 use crate::error::FrameworkError;
@@ -143,6 +143,7 @@ where
     M: Model
         + Authenticatable
         + MustVerifyEmail
+        + CanResetPassword
         + From<<M::Entity as EntityTrait>::Model>
         + EagerLoadDispatch,
     <M::Entity as EntityTrait>::Model: From<M>
@@ -211,23 +212,34 @@ where
         email: &str,
     ) -> Result<Option<AuthFlowUser>, FrameworkError> {
         let user = M::query().filter("email", email).first().await?;
+        // This is the lookup BY email: the caller already supplied the target
+        // address, so echo the queried `email` back into the carrier — it IS
+        // the verify/reset target the user typed.
         Ok(user.map(|u| AuthFlowUser {
             id: u.get_auth_identifier(),
-            email: u.email().to_string(),
+            email: email.to_string(),
             name: u.name().map(str::to_string),
         }))
     }
 
     async fn flow_user_by_id(&self, id: &str) -> Result<Option<AuthFlowUser>, FrameworkError> {
         let user = self.find_by_identifier(id).await?;
+        // This path exists only to address the password-changed mail in the
+        // reset flow, so source the address from `email_for_reset()` (the
+        // `CanResetPassword` contract) rather than the verification email.
         Ok(user.map(|u| AuthFlowUser {
             id: u.get_auth_identifier(),
-            email: u.email().to_string(),
+            email: u.email_for_reset().to_string(),
             name: u.name().map(str::to_string),
         }))
     }
 
     async fn mark_email_verified(&self, id: &str) -> Result<(), FrameworkError> {
+        // load → mutate → `Model::save`: this (a) fires the full model
+        // lifecycle (Saving/Updating/Updated/Saved) so observers and audit see
+        // the change, and (b) is a read-modify-write of the whole row, so a
+        // concurrent flow on the same user could clobber a field — acceptable
+        // here as both verify/reset paths are token-gated. Absent id → no-op.
         if let Some(mut user) = self.find_by_identifier(id).await? {
             user.set_email_verified_at(Some(Utc::now()));
             <M as Model>::save(&user).await?;
@@ -236,6 +248,11 @@ where
     }
 
     async fn set_password(&self, id: &str, hashed: &str) -> Result<(), FrameworkError> {
+        // load → mutate → `Model::save`: this (a) fires the full model
+        // lifecycle (Saving/Updating/Updated/Saved) so observers and audit see
+        // the change, and (b) is a read-modify-write of the whole row, so a
+        // concurrent flow on the same user could clobber a field — acceptable
+        // here as both verify/reset paths are token-gated. Absent id → no-op.
         if let Some(mut user) = self.find_by_identifier(id).await? {
             // `hashed` arrives ALREADY HASHED — store it verbatim. `save()`
             // overlays the full serialized model onto the ActiveModel, so the
