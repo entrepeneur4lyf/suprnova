@@ -3,8 +3,8 @@
 use dialoguer::{Confirm, theme::ColorfulTheme};
 use std::fs;
 use std::path::Path;
-use toml::Value;
 
+use crate::commands::cargo_meta;
 use crate::templates;
 use crate::ui;
 
@@ -40,30 +40,12 @@ pub fn run(with_mailpit: bool, with_minio: bool) {
 }
 
 fn get_project_name() -> String {
-    let cargo_toml = match fs::read_to_string("Cargo.toml") {
-        Ok(content) => content,
-        Err(_) => {
-            return std::env::current_dir()
-                .ok()
-                .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
-                .unwrap_or_else(|| "suprnova_app".to_string());
-        }
-    };
-
-    let parsed: Value = match cargo_toml.parse() {
-        Ok(v) => v,
-        Err(_) => {
-            return std::env::current_dir()
-                .ok()
-                .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
-                .unwrap_or_else(|| "suprnova_app".to_string());
-        }
-    };
-
-    parsed["package"]["name"]
-        .as_str()
-        .unwrap_or("suprnova_app")
-        .to_string()
+    cargo_meta::package_name_from_path(Path::new("Cargo.toml")).unwrap_or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
+            .unwrap_or_else(|| "suprnova_app".to_string())
+    })
 }
 
 fn prompt_for_services(with_mailpit: bool, with_minio: bool) -> (bool, bool) {

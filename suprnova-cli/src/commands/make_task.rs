@@ -424,12 +424,7 @@ fn detect_lib_crate(main_src: &str) -> Option<String> {
 /// Read `[package].name` from the current directory's Cargo.toml, normalizing
 /// hyphens to underscores to match the Rust crate identifier.
 fn crate_name_from_cargo() -> Option<String> {
-    let raw = fs::read_to_string("Cargo.toml").ok()?;
-    let value: toml::Value = toml::from_str(&raw).ok()?;
-    let name = value.get("package")?.get("name")?.as_str()?;
-    if name.is_empty() {
-        return None;
-    }
+    let name = crate::commands::cargo_meta::package_name_from_path(Path::new("Cargo.toml"))?;
     Some(name.replace('-', "_"))
 }
 

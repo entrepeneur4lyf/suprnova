@@ -102,15 +102,10 @@ fn get_package_name() -> Result<String, String> {
     let content = std::fs::read_to_string(cargo_toml)
         .map_err(|e| format!("Failed to read Cargo.toml: {}", e))?;
 
-    let parsed: toml::Value = content
-        .parse()
+    crate::commands::cargo_meta::parse_cargo_toml(&content)
         .map_err(|e| format!("Failed to parse Cargo.toml: {}", e))?;
 
-    parsed
-        .get("package")
-        .and_then(|p| p.get("name"))
-        .and_then(|n| n.as_str())
-        .map(|s| s.to_string())
+    crate::commands::cargo_meta::package_name_from_content(&content)
         .ok_or_else(|| "Could not find package name in Cargo.toml".to_string())
 }
 

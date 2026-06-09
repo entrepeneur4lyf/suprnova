@@ -1,3 +1,4 @@
+pub mod cargo_meta;
 pub mod db_sync;
 pub mod docker_compose;
 pub mod docker_init;

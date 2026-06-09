@@ -2,8 +2,8 @@
 
 use std::fs;
 use std::path::Path;
-use toml::Value;
 
+use crate::commands::cargo_meta;
 use crate::templates;
 use crate::ui;
 
@@ -58,18 +58,5 @@ pub fn run() {
 }
 
 fn get_package_name() -> String {
-    let cargo_toml = match fs::read_to_string("Cargo.toml") {
-        Ok(content) => content,
-        Err(_) => return "app".to_string(),
-    };
-
-    let parsed: Value = match cargo_toml.parse() {
-        Ok(v) => v,
-        Err(_) => return "app".to_string(),
-    };
-
-    parsed["package"]["name"]
-        .as_str()
-        .unwrap_or("app")
-        .to_string()
+    cargo_meta::package_name_from_path(Path::new("Cargo.toml")).unwrap_or_else(|| "app".to_string())
 }
