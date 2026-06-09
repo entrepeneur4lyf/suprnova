@@ -29,6 +29,7 @@ pub mod events;
 pub mod mail;
 pub mod password_reset;
 pub mod remember_me;
+pub mod token_store;
 pub mod two_factor;
 pub mod two_factor_challenge_middleware;
 
@@ -48,6 +49,7 @@ pub use events::{
 };
 pub use mail::{EmailVerificationMail, PasswordChangedMail, PasswordResetMail};
 pub use password_reset::PasswordReset;
+pub use token_store::{TokenPurpose, create_auth_flow_tokens_table};
 pub use two_factor::{EnrollmentResponse, TwoFactor, TwoFactorUser};
 pub use two_factor_challenge_middleware::TwoFactorChallengeMiddleware;
 
