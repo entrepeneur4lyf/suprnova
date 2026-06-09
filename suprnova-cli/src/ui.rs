@@ -174,6 +174,7 @@ pub fn print_help() {
     println!("  {}", style("CREATE").bold().underlined());
     help_line("new [name]", "Create a new Suprnova project");
     help_line("serve", "Start dev servers (backend + frontend)");
+    help_line("dev:tls", "Trust portless CA + register HTTPS dev URL");
     br();
 
     println!("  {}", style("GENERATE").bold().underlined());

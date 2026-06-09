@@ -68,6 +68,23 @@ enum Commands {
         #[arg(long)]
         skip_types: bool,
     },
+    /// Register an HTTPS dev URL (https://<name>.localhost) and trust
+    /// portless's CA in your browsers' certificate stores
+    #[command(name = "dev:tls")]
+    DevTls {
+        /// App name for the URL. Defaults to the project's Cargo.toml
+        /// package name.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Backend port to route to. Defaults to SERVER_PORT, else 8765.
+        #[arg(long, short = 'p')]
+        port: Option<u16>,
+
+        /// Only trust the CA; skip registering the portless route.
+        #[arg(long)]
+        no_alias: bool,
+    },
     /// Run the web server (app runtime)
     #[command(name = "web:run")]
     WebRun,
@@ -252,6 +269,13 @@ fn main() {
             skip_types,
         } => {
             commands::serve::run(port, frontend_port, backend_only, frontend_only, skip_types);
+        }
+        Commands::DevTls {
+            name,
+            port,
+            no_alias,
+        } => {
+            commands::dev_tls::run(name, port, no_alias);
         }
         Commands::WebRun => {
             commands::web_run::run();
