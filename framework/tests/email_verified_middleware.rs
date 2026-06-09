@@ -48,7 +48,7 @@ use suprnova::auth::AuthConfig;
 use suprnova::auth_flows::token_store::create_auth_flow_tokens_table;
 use suprnova::http::text;
 use suprnova::{
-    App, Auth, Authenticatable, AuthManager, CanResetPassword, DB, DatabaseConfig, DbConnection,
+    App, Auth, AuthManager, Authenticatable, CanResetPassword, DB, DatabaseConfig, DbConnection,
     EloquentUserProvider, EnsureEmailVerifiedMiddleware, Middleware, MiddlewareRegistry,
     MustVerifyEmail, Next, Request, Response, Router, handle_request, model,
 };

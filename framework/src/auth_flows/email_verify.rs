@@ -187,11 +187,11 @@ impl EmailVerification {
     pub async fn verify(token: &str) -> Result<String, FrameworkError> {
         let user_id = TokenStore::consume(token, TokenPurpose::EmailVerification)
             .await?
-            .ok_or_else(|| {
-                FrameworkError::bad_request("invalid or expired verification token")
-            })?;
+            .ok_or_else(|| FrameworkError::bad_request("invalid or expired verification token"))?;
 
-        active_user_provider()?.mark_email_verified(&user_id).await?;
+        active_user_provider()?
+            .mark_email_verified(&user_id)
+            .await?;
 
         // Intentionally discard the dispatch error — verification has already
         // committed; a downstream listener failure must not surface as a

@@ -651,10 +651,7 @@ mod tests {
             .group("/", |r| r.get("/login", h))
             .middleware(NoopMw)
             .into();
-        assert_eq!(
-            router.get_route_middleware(&Method::GET, "/login").len(),
-            1,
-        );
+        assert_eq!(router.get_route_middleware(&Method::GET, "/login").len(), 1,);
     }
 
     /// Trailing-slash prefixes join cleanly on the fluent surface too.

@@ -81,9 +81,7 @@ mod tests {
             self
         }
 
-        fn into_arc_any(
-            self: std::sync::Arc<Self>,
-        ) -> std::sync::Arc<dyn Any + Send + Sync> {
+        fn into_arc_any(self: std::sync::Arc<Self>) -> std::sync::Arc<dyn Any + Send + Sync> {
             self
         }
     }

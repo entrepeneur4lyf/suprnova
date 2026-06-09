@@ -24,14 +24,14 @@ use sea_orm_migration::prelude::*;
 use serial_test::serial;
 
 use suprnova::auth::AuthConfig;
-use suprnova::auth_flows::token_store::create_auth_flow_tokens_table;
 use suprnova::auth_flows::PasswordReset;
+use suprnova::auth_flows::token_store::create_auth_flow_tokens_table;
 use suprnova::container::testing::TestContainer;
 use suprnova::session::{DatabaseSessionDriver, SessionData, SessionStore};
 use suprnova::testing::TestDatabase;
 use suprnova::{
-    model, Auth, AuthManager, Authenticatable, CanResetPassword, EloquentUserProvider,
-    MustVerifyEmail, UserProvider,
+    Auth, AuthManager, Authenticatable, CanResetPassword, EloquentUserProvider, MustVerifyEmail,
+    UserProvider, model,
 };
 
 // Schema for the `sessions` table — ported verbatim from
@@ -192,15 +192,27 @@ async fn setup() -> Harness {
         )
         .col(ColumnDef::new(RememberTokens::UserId).string().not_null())
         .col(ColumnDef::new(RememberTokens::Selector).string().not_null())
-        .col(ColumnDef::new(RememberTokens::TokenHash).string().not_null())
-        .col(ColumnDef::new(RememberTokens::ExpiresAt).timestamp().not_null())
+        .col(
+            ColumnDef::new(RememberTokens::TokenHash)
+                .string()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(RememberTokens::ExpiresAt)
+                .timestamp()
+                .not_null(),
+        )
         .col(
             ColumnDef::new(RememberTokens::CreatedAt)
                 .timestamp()
                 .not_null()
                 .default(Expr::current_timestamp()),
         )
-        .col(ColumnDef::new(RememberTokens::LastUsedAt).timestamp().null())
+        .col(
+            ColumnDef::new(RememberTokens::LastUsedAt)
+                .timestamp()
+                .null(),
+        )
         .to_owned();
     conn.execute(conn.get_database_backend().build(&create_remember))
         .await

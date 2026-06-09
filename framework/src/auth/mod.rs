@@ -107,7 +107,8 @@ use std::sync::Arc;
 /// Returns [`crate::error::FrameworkError::internal`] with the same
 /// remediation [`Auth::user`] uses when no provider is configured by either
 /// path.
-pub(crate) fn active_user_provider() -> Result<Arc<dyn UserProvider>, crate::error::FrameworkError> {
+pub(crate) fn active_user_provider() -> Result<Arc<dyn UserProvider>, crate::error::FrameworkError>
+{
     if let Some(manager) = crate::container::App::get::<AuthManager>()
         && let Ok(provider) = manager.default_provider()
     {

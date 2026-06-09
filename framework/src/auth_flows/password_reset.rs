@@ -187,7 +187,9 @@ impl PasswordReset {
     ///   resolver when no `UserProvider` is registered.
     pub async fn complete(token: &str, new_password: &str) -> Result<String, FrameworkError> {
         if new_password.trim().is_empty() {
-            return Err(FrameworkError::bad_request("new_password must not be empty"));
+            return Err(FrameworkError::bad_request(
+                "new_password must not be empty",
+            ));
         }
 
         // Consume the token first (single-use). If the rotation that follows
@@ -209,15 +211,11 @@ impl PasswordReset {
         match crate::session::destroy_all_for_user(&id).await {
             Ok(n) => {
                 if n > 0 {
-                    tracing::info!(
-                        "revoked {n} session row(s) for user {id} after password reset"
-                    );
+                    tracing::info!("revoked {n} session row(s) for user {id} after password reset");
                 }
             }
             Err(e) => {
-                tracing::warn!(
-                    "session revocation failed for user {id} after password reset: {e}"
-                );
+                tracing::warn!("session revocation failed for user {id} after password reset: {e}");
             }
         }
         match crate::auth::remember::revoke_all_for_user(&id).await {

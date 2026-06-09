@@ -207,10 +207,7 @@ where
         }
     }
 
-    async fn retrieve_by_email(
-        &self,
-        email: &str,
-    ) -> Result<Option<AuthFlowUser>, FrameworkError> {
+    async fn retrieve_by_email(&self, email: &str) -> Result<Option<AuthFlowUser>, FrameworkError> {
         let user = M::query().filter("email", email).first().await?;
         // This is the lookup BY email: the caller already supplied the target
         // address, so echo the queried `email` back into the carrier — it IS

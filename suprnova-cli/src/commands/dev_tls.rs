@@ -214,8 +214,8 @@ fn trust_ca_linux() -> Result<(), String> {
         return Err("certutil not found".to_string());
     }
 
-    let home =
-        home_dir().ok_or_else(|| "Could not determine your home directory ($HOME unset)".to_string())?;
+    let home = home_dir()
+        .ok_or_else(|| "Could not determine your home directory ($HOME unset)".to_string())?;
     let dbs = nss_databases(&home);
 
     let mut trusted = Vec::new();
@@ -408,7 +408,10 @@ mod tests {
         let dbs = nss_databases(home);
         let chrome = home.join(".pki").join("nssdb");
         let found = dbs.iter().find(|d| d.path == chrome).expect("chrome store");
-        assert!(found.create_if_missing, "chrome store must be create_if_missing");
+        assert!(
+            found.create_if_missing,
+            "chrome store must be create_if_missing"
+        );
     }
 
     #[test]
@@ -416,19 +419,20 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let home = tmp.path();
         // A flatpak browser with an nssdb...
-        let browser_nssdb = home
-            .join(".var/app/io.github.someone.Chromium/.pki/nssdb");
+        let browser_nssdb = home.join(".var/app/io.github.someone.Chromium/.pki/nssdb");
         std::fs::create_dir_all(&browser_nssdb).unwrap();
         // ...and a flatpak app with NO nssdb (must be excluded).
         std::fs::create_dir_all(home.join(".var/app/org.example.NotABrowser")).unwrap();
 
         let dbs = nss_databases(home);
         assert!(
-            dbs.iter().any(|d| d.path == browser_nssdb && d.create_if_missing),
+            dbs.iter()
+                .any(|d| d.path == browser_nssdb && d.create_if_missing),
             "flatpak nssdb should be discovered: {dbs:?}"
         );
         assert!(
-            !dbs.iter().any(|d| d.path.to_string_lossy().contains("NotABrowser")),
+            !dbs.iter()
+                .any(|d| d.path.to_string_lossy().contains("NotABrowser")),
             "flatpak app without nssdb must be excluded: {dbs:?}"
         );
     }
@@ -444,8 +448,14 @@ mod tests {
         std::fs::create_dir_all(&without_db).unwrap();
 
         let dbs = nss_databases(home);
-        let ff = dbs.iter().find(|d| d.path == with_db).expect("firefox profile");
-        assert!(!ff.create_if_missing, "firefox profile must NOT be create_if_missing");
+        let ff = dbs
+            .iter()
+            .find(|d| d.path == with_db)
+            .expect("firefox profile");
+        assert!(
+            !ff.create_if_missing,
+            "firefox profile must NOT be create_if_missing"
+        );
         assert!(
             !dbs.iter().any(|d| d.path == without_db),
             "firefox profile lacking cert9.db must be excluded: {dbs:?}"

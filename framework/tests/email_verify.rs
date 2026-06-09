@@ -20,13 +20,13 @@ use chrono::{DateTime, Utc};
 use serial_test::serial;
 
 use suprnova::auth::AuthConfig;
-use suprnova::auth_flows::token_store::create_auth_flow_tokens_table;
 use suprnova::auth_flows::EmailVerification;
+use suprnova::auth_flows::token_store::create_auth_flow_tokens_table;
 use suprnova::container::testing::TestContainer;
 use suprnova::testing::TestDatabase;
 use suprnova::{
-    model, Auth, AuthManager, Authenticatable, CanResetPassword, EloquentUserProvider,
-    MustVerifyEmail, UserProvider,
+    Auth, AuthManager, Authenticatable, CanResetPassword, EloquentUserProvider, MustVerifyEmail,
+    UserProvider, model,
 };
 
 // The app's `User` shape: a typed model that is also Authenticatable +
@@ -193,7 +193,11 @@ async fn send_link_then_verify_marks_verified_single_use() {
         .lines()
         .find(|l| l.contains("token="))
         .expect("a line with the token link");
-    let token = link.rsplit("token=").next().expect("token after marker").trim();
+    let token = link
+        .rsplit("token=")
+        .next()
+        .expect("token after marker")
+        .trim();
 
     // Not yet verified.
     assert!(!reload_ada().await.is_email_verified());

@@ -62,7 +62,7 @@ use suprnova::FrameworkError;
 use suprnova::auth::AuthConfig;
 use suprnova::http::text;
 use suprnova::{
-    App, Auth, Authenticatable, AuthManager, EnsureEmailVerifiedMiddleware, Middleware,
+    App, Auth, AuthManager, Authenticatable, EnsureEmailVerifiedMiddleware, Middleware,
     MiddlewareRegistry, Next, Request, Response, Router, UserProvider, handle_request,
 };
 

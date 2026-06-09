@@ -224,9 +224,7 @@ async fn eloquent_provider_supports_auth_flow_methods() {
         .await
         .unwrap()
         .expect("user 1 still exists");
-    let stored = reloaded
-        .get_auth_password()
-        .expect("password hash present");
+    let stored = reloaded.get_auth_password().expect("password hash present");
     assert!(suprnova::hashing::verify("newpass", stored).unwrap());
     assert!(!suprnova::hashing::verify("secret", stored).unwrap());
 }

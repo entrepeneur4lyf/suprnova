@@ -1470,7 +1470,10 @@ mod tests {
         assert_eq!(join_paths("/", "/"), "/");
         assert_eq!(join_paths("", ""), "/");
         // Params pass through untouched — conversion runs on the result.
-        assert_eq!(join_paths("/api/:version", "/users/:id"), "/api/:version/users/:id");
+        assert_eq!(
+            join_paths("/api/:version", "/users/:id"),
+            "/api/:version/users/:id"
+        );
     }
 
     /// Root-prefix group — the scaffold's `group!("/", { ... })` shape.
