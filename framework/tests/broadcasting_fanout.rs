@@ -216,9 +216,11 @@ async fn track_and_list_members() {
     assert!(hub.list_members("presence.lobby").await.is_empty());
 
     hub.track_member("presence.lobby", "user-1", json!({ "name": "Alice" }))
-        .await;
+        .await
+        .expect("track user-1");
     hub.track_member("presence.lobby", "user-2", json!({ "name": "Bob" }))
-        .await;
+        .await
+        .expect("track user-2");
 
     let members = hub.list_members("presence.lobby").await;
     assert_eq!(members.len(), 2);
@@ -229,7 +231,9 @@ async fn track_and_list_members() {
     assert!(names.contains(&"Alice"));
     assert!(names.contains(&"Bob"));
 
-    hub.untrack_member("presence.lobby", "user-1").await;
+    hub.untrack_member("presence.lobby", "user-1")
+        .await
+        .expect("untrack user-1");
 
     let members = hub.list_members("presence.lobby").await;
     assert_eq!(members.len(), 1);
@@ -342,10 +346,12 @@ async fn cross_process_member_visibility() {
 
     hub_a
         .track_member("presence.lobby", "alice", json!({ "user_id": 1 }))
-        .await;
+        .await
+        .expect("track alice");
     hub_b
         .track_member("presence.lobby", "bob", json!({ "user_id": 2 }))
-        .await;
+        .await
+        .expect("track bob");
 
     // Poll until both hubs see both members (stream round-trip complete).
     wait_for_member_count(&hub_a, "presence.lobby", 2, Duration::from_secs(2)).await;
@@ -393,10 +399,12 @@ async fn untrack_propagates_across_processes() {
 
     hub_a
         .track_member("presence.lobby", "alice", json!({ "user_id": 1 }))
-        .await;
+        .await
+        .expect("track alice");
     hub_b
         .track_member("presence.lobby", "bob", json!({ "user_id": 2 }))
-        .await;
+        .await
+        .expect("track bob");
 
     // Poll until hub_b sees both members before removing one.
     wait_for_member_count(&hub_b, "presence.lobby", 2, Duration::from_secs(2)).await;
@@ -407,7 +415,10 @@ async fn untrack_propagates_across_processes() {
     );
 
     // Remove alice from hub_a.
-    hub_a.untrack_member("presence.lobby", "alice").await;
+    hub_a
+        .untrack_member("presence.lobby", "alice")
+        .await
+        .expect("untrack alice");
 
     // Poll until hub_b sees alice has been removed.
     wait_for_member_count(&hub_b, "presence.lobby", 1, Duration::from_secs(2)).await;
@@ -462,7 +473,8 @@ async fn crashed_hub_members_pruned_via_ttl() {
 
         hub_a
             .track_member("presence.lobby", "alice", json!({ "user_id": 1 }))
-            .await;
+            .await
+            .expect("track alice");
 
         // Wait until hub_b sees alice (presence event propagated).
         wait_for_member_count(&hub_b, "presence.lobby", 1, Duration::from_secs(2)).await;
