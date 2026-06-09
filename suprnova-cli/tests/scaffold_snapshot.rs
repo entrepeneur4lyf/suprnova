@@ -164,6 +164,34 @@ fn default_starter_has_no_stub_markers_vue() {
 }
 
 // ---------------------------------------------------------------------------
+// Auth contract audits — the scaffolded model must keep the trait overrides
+// the login flow depends on.
+// ---------------------------------------------------------------------------
+
+/// The scaffolded `User` must override `Authenticatable::get_auth_password`
+/// to expose the stored hash. The trait default returns `None`, which makes
+/// `EloquentUserProvider::validate_credentials` reject every password — a
+/// freshly scaffolded app's `Auth::attempt` login 422s on correct
+/// credentials. The project still compiles without the override, so only a
+/// content check catches the regression.
+#[test]
+fn scaffolded_user_model_exposes_auth_password() {
+    let tmp = TempDir::new().unwrap();
+    scaffold(&tmp, "auth_pw", &["--frontend", "svelte"]);
+    let model = tmp.path().join("auth_pw").join("src/models/user.rs");
+    let body = std::fs::read_to_string(&model).expect("scaffolded user model should exist");
+    assert!(
+        body.contains("fn get_auth_password"),
+        "scaffolded User must override get_auth_password or Auth::attempt \
+         rejects every password:\n{body}"
+    );
+    assert!(
+        body.contains("Some(&self.password)"),
+        "get_auth_password must return the stored hash:\n{body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // make:* generator audits — ensure the in-place commands emit clean code.
 // ---------------------------------------------------------------------------
 

@@ -113,6 +113,15 @@ impl Authenticatable for User {
         "id"
     }
 
+    // Returning the stored hash is what lets the registered
+    // `EloquentUserProvider<User>` verify credentials. The trait default
+    // returns `None` (for models that authenticate by other means —
+    // OAuth, passkeys), which makes `Auth::attempt` reject every
+    // password.
+    fn get_auth_password(&self) -> Option<&str> {
+        Some(&self.password)
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -230,5 +239,33 @@ impl Observer<User> for UserObserver {
             "user created",
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Authenticatable::get_auth_password` must expose the stored hash.
+    /// The trait default returns `None`, which makes
+    /// `EloquentUserProvider::validate_credentials` reject every password
+    /// — the app compiles either way, so this pins the override itself.
+    #[test]
+    fn auth_password_exposes_stored_hash() {
+        let user = User {
+            id: 1,
+            name: "Ada".into(),
+            email: "ada@example.com".into(),
+            password: "$argon2id$stored-hash".into(),
+            remember_token: None,
+            email_verified_at: None,
+            active: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            deleted_at: None,
+            __eager: Default::default(),
+            __pivot: Default::default(),
+        };
+        assert_eq!(user.get_auth_password(), Some("$argon2id$stored-hash"));
     }
 }
