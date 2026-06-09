@@ -13,7 +13,10 @@ use std::process::{Command, Stdio};
 
 use crate::ui;
 
-/// The CA's nickname in NSS, matching the cert's subject CN.
+/// The CA's nickname in NSS, matching the cert's subject CN. Only used by
+/// the Linux NSS path; gated so non-Linux builds don't warn under
+/// `-D warnings`.
+#[cfg(target_os = "linux")]
 const CA_NICKNAME: &str = "portless Local CA";
 
 /// Default backend port. Mirrors `serve::DEFAULT_BACKEND_PORT` and the
