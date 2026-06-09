@@ -4,7 +4,7 @@
 //! auth_flows facades:
 //!
 //! - [`EmailVerified`] — `EmailVerification::verify` consumed a valid token.
-//! - [`PasswordResetLinkSent`] — `PasswordReset::request` issued a token
+//! - [`PasswordResetLinkSent`] — `PasswordReset::send_link` issued a token
 //!   for an on-file email (anti-enumeration: no event fires when the
 //!   email is absent).
 //! - [`PasswordResetCompleted`] — `PasswordReset::complete` succeeded.
@@ -45,20 +45,20 @@ impl Event for EmailVerified {
     }
 }
 
-/// Fires when [`crate::auth_flows::PasswordReset::request`] successfully
+/// Fires when [`crate::auth_flows::PasswordReset::send_link`] successfully
 /// issues a reset token for an email that is on file.
 ///
 /// **Anti-enumeration:** the event does **not** fire when the email
-/// is absent — that path returns `Ok(None)` with no token minted and
-/// no side effect, so a listener that counts events cannot
-/// distinguish "absent email" from "no request made." Listeners
-/// typically audit-log the action (the user just received a sensitive
-/// security email) or alert on suspicious patterns (repeated requests
-/// against the same user from different peer IPs).
+/// is absent — that path mints no token and has no side effect, so a
+/// listener that counts events cannot distinguish "absent email" from
+/// "no request made." Listeners typically audit-log the action (the
+/// user just received a sensitive security email) or alert on
+/// suspicious patterns (repeated requests against the same user from
+/// different peer IPs).
 ///
-/// `user_id` is the stringified torii `UserId`; `email` is the address
-/// the reset link was dispatched to (matches the input on file, not
-/// necessarily the raw request input, in case torii normalises).
+/// `user_id` is the user's stable identifier; `email` is the address
+/// the reset link was dispatched to (the on-file address from the
+/// configured `UserProvider`).
 #[derive(Debug, Clone)]
 pub struct PasswordResetLinkSent {
     /// Stringified torii user id the reset was issued for.
@@ -76,7 +76,7 @@ impl Event for PasswordResetLinkSent {
 /// Fires when a user successfully completes a password reset via
 /// [`crate::auth_flows::PasswordReset::complete`].
 ///
-/// `user_id` is the stringified torii `UserId`. Listeners typically
+/// `user_id` is the user's stable identifier. Listeners typically
 /// revoke active sessions, audit-log the event, or trigger
 /// supplemental security notifications beyond the built-in
 /// [`crate::auth_flows::PasswordChangedMail`].

@@ -178,9 +178,8 @@ impl EmailVerification {
     ///   invalid, already consumed, or expired.
     /// - Whatever the provider returns from `mark_email_verified` when the
     ///   storage layer fails.
-    /// - The "no provider configured" error from
-    ///   [`active_user_provider`](crate::auth::active_user_provider) when no
-    ///   `UserProvider` is registered.
+    /// - The "no provider configured" error from the active-user-provider
+    ///   resolver when no `UserProvider` is registered.
     pub async fn verify(token: &str) -> Result<String, FrameworkError> {
         let user_id = TokenStore::consume(token, TokenPurpose::EmailVerification)
             .await?
