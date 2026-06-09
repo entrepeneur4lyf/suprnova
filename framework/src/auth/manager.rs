@@ -113,6 +113,20 @@ impl AuthManager {
         self.guard(&self.config.default_guard)
     }
 
+    /// Resolve the [`UserProvider`] backing the default guard.
+    ///
+    /// Selects the provider the same way [`default_guard`](Self::default_guard)
+    /// does — by the default guard's configured provider name — but hands back
+    /// the bare provider rather than a guard wrapper. The auth-flow facades
+    /// ([`crate::auth_flows::EmailVerification`],
+    /// [`crate::auth_flows::PasswordReset`]) use this to reach the
+    /// `retrieve_by_email` / `mark_email_verified` / `set_password` surface
+    /// without going through a guard's request-scoped user cache.
+    pub fn default_provider(&self) -> Result<Arc<dyn UserProvider>, FrameworkError> {
+        let config = self.guard_config(&self.config.default_guard)?;
+        self.provider(&config.provider)
+    }
+
     /// Resolve the default guard as a [`StatefulGuard`].
     pub fn default_stateful_guard(&self) -> Result<Arc<dyn StatefulGuard>, FrameworkError> {
         self.stateful_guard(&self.config.default_guard)

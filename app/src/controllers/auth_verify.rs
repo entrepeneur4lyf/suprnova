@@ -5,9 +5,10 @@
 //! - `POST /auth/verify/resend?email=alice@…` — request a fresh
 //!   verification link. Anti-enumeration: always responds 200 with
 //!   the same body whether or not the email is on file. The mail
-//!   dispatch is conditional on `find_user_by_email_lookup_only`
-//!   returning `Some` (so failed-attempt probing cannot create
-//!   accounts or differentiate via response timing of a token mint).
+//!   dispatch is owned by `EmailVerification::resend`, which looks the
+//!   user up through the configured provider and only mints + sends a
+//!   token when an account exists (so probing cannot differentiate via
+//!   status code or payload).
 //! - `GET  /auth/verify?token=…` — consume the token via the
 //!   `EmailVerification` facade and 302 back to `/`.
 //!
@@ -19,17 +20,16 @@
 use std::collections::HashMap;
 
 use suprnova::auth_flows::EmailVerification;
-use suprnova::torii_integration::find_user_by_email_lookup_only;
 use suprnova::{FrameworkError, HttpResponse, Request, Response};
 
 /// `POST /auth/verify/resend?email=...` — anti-enumeration resend.
 ///
-/// Always returns 200 with the same body. When the email maps to a
-/// real user, dispatches a fresh verification link through
-/// `EmailVerification::send_link`. When it doesn't, the handler
-/// silently no-ops and returns the same body — an attacker probing
-/// the endpoint cannot distinguish the two branches through status
-/// code or response payload.
+/// Always returns 200 with the same body. The actual lookup + dispatch
+/// is owned by `EmailVerification::resend`, which resolves the user
+/// through the configured provider and only mints + sends a verification
+/// link when an account is on file. An unknown email is a silent no-op
+/// (still `Ok`), so an attacker probing the endpoint cannot distinguish
+/// the two branches through status code or response payload.
 pub async fn resend(req: Request) -> Response {
     resend_inner(req).await.map_err(HttpResponse::from)
 }
@@ -43,17 +43,14 @@ async fn resend_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
         .get("email")
         .ok_or_else(|| FrameworkError::bad_request("missing email query parameter"))?;
 
-    // Anti-enumeration: only dispatch when the user exists; respond
-    // identically in both branches. The lookup helper deliberately
-    // never creates a row (`find_user_by_email_lookup_only`) so a
-    // probing caller cannot mint accounts here either.
-    if let Some(user) = find_user_by_email_lookup_only(email).await? {
-        let base = format!(
-            "{}/auth/verify",
-            std::env::var("APP_URL").unwrap_or_else(|_| "http://localhost:8000".into())
-        );
-        EmailVerification::send_link(&user, &base).await?;
-    }
+    let base = format!(
+        "{}/auth/verify",
+        std::env::var("APP_URL").unwrap_or_else(|_| "http://localhost:8000".into())
+    );
+    // `resend` is anti-enumeration: it sends only when the email is on
+    // file and returns `Ok(())` either way, so both branches respond
+    // identically below.
+    EmailVerification::resend(email, &base).await?;
 
     Ok(HttpResponse::text(
         "If this email is on file, a verification link has been sent.",
@@ -66,7 +63,7 @@ async fn resend_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
 /// also fires the `EmailVerified` event). On success, 302s the user
 /// back to `/`. On failure, the framework's standard error mapping
 /// turns the `FrameworkError` into the right HTTP status — invalid /
-/// expired tokens propagate as torii's domain error.
+/// expired tokens propagate as a `400 Bad Request` from the facade.
 pub async fn verify(req: Request) -> Response {
     verify_inner(req).await.map_err(HttpResponse::from)
 }

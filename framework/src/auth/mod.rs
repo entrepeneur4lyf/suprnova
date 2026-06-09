@@ -82,3 +82,43 @@ pub use must_verify_email::{AuthFlowUser, CanResetPassword, MustVerifyEmail};
 pub use provider::UserProvider;
 pub use session_guard::SessionGuard;
 pub use token_guard::TokenGuard;
+
+use std::sync::Arc;
+
+/// Resolve the active [`UserProvider`] for the request — the same provider
+/// [`Auth::user`] would resolve against, minus the guard's request-scoped
+/// user cache.
+///
+/// Resolution order mirrors [`Auth::user`]:
+///
+/// 1. A container-bound [`AuthManager`]'s default-guard provider
+///    (registered via `Auth::register_provider("users", ...)`).
+/// 2. A legacy globally-bound `App::make::<dyn UserProvider>()`.
+///
+/// The auth-flow facades ([`crate::auth_flows::EmailVerification`],
+/// [`crate::auth_flows::PasswordReset`]) call this so a lookup-by-email or a
+/// mark-verified hits whichever provider the rest of the auth surface uses.
+/// `Auth::user` deliberately keeps its own body: it resolves a *guard* (to
+/// preserve request-scoped caching of the resolved user), not a bare provider,
+/// so it is not routed through this helper.
+///
+/// # Errors
+///
+/// Returns [`crate::error::FrameworkError::internal`] with the same
+/// remediation [`Auth::user`] uses when no provider is configured by either
+/// path.
+pub(crate) fn active_user_provider() -> Result<Arc<dyn UserProvider>, crate::error::FrameworkError> {
+    if let Some(manager) = crate::container::App::get::<AuthManager>()
+        && let Ok(provider) = manager.default_provider()
+    {
+        return Ok(provider);
+    }
+    crate::container::App::make::<dyn UserProvider>().ok_or_else(|| {
+        crate::error::FrameworkError::internal(
+            "No user provider configured. Register one with \
+             Auth::register_provider(\"users\", Arc::new(...)) (named-guard system), \
+             or bind!(dyn UserProvider, ...) in bootstrap.rs (legacy)."
+                .to_string(),
+        )
+    })
+}
