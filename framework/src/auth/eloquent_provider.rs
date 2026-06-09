@@ -24,7 +24,10 @@ use sea_orm::{EntityTrait, FromQueryResult, IntoActiveModel, PrimaryKeyTrait};
 use serde::Serialize;
 use serde_json::Value;
 
+use chrono::Utc;
+
 use super::authenticatable::Authenticatable;
+use super::must_verify_email::{AuthFlowUser, MustVerifyEmail};
 use super::provider::UserProvider;
 use crate::eloquent::{EagerLoadDispatch, Model};
 use crate::error::FrameworkError;
@@ -101,6 +104,35 @@ impl<M> Default for EloquentUserProvider<M> {
     }
 }
 
+impl<M> EloquentUserProvider<M>
+where
+    M: Model + Authenticatable + From<<M::Entity as EntityTrait>::Model> + EagerLoadDispatch,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + FromQueryResult
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    /// Load the typed model `M` by id, using the same lookup column and
+    /// id-binding as [`retrieve_by_id`](UserProvider::retrieve_by_id). Shared
+    /// by the auth-flow methods that need the concrete `M` (not a trait
+    /// object) so they can read [`MustVerifyEmail`] fields and `save()`.
+    async fn find_by_identifier(&self, id: &str) -> Result<Option<M>, FrameworkError> {
+        let column = self
+            .identifier_column
+            .clone()
+            .unwrap_or_else(|| M::primary_key_name().to_string());
+        M::query()
+            .filter(column, (self.id_parser)(id))
+            .first()
+            .await
+    }
+}
+
 #[async_trait]
 impl<M> UserProvider for EloquentUserProvider<M>
 where
@@ -108,7 +140,11 @@ where
     // `M: Model` bound, and `Builder::first` adds `EagerLoadDispatch` +
     // `FromQueryResult`. Restated here to match `Builder`'s terminal
     // impl block (`Self` → `M`).
-    M: Model + Authenticatable + From<<M::Entity as EntityTrait>::Model> + EagerLoadDispatch,
+    M: Model
+        + Authenticatable
+        + MustVerifyEmail
+        + From<<M::Entity as EntityTrait>::Model>
+        + EagerLoadDispatch,
     <M::Entity as EntityTrait>::Model: From<M>
         + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
         + FromQueryResult
@@ -123,14 +159,7 @@ where
         &self,
         id: &str,
     ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
-        let column = self
-            .identifier_column
-            .clone()
-            .unwrap_or_else(|| M::primary_key_name().to_string());
-        let user = M::query()
-            .filter(column, (self.id_parser)(id))
-            .first()
-            .await?;
+        let user = self.find_by_identifier(id).await?;
         Ok(user.map(|u| Arc::new(u) as Arc<dyn Authenticatable>))
     }
 
@@ -175,5 +204,53 @@ where
             (Some(plaintext), Some(hash)) => hashing::verify_async(plaintext, hash).await,
             _ => Ok(false),
         }
+    }
+
+    async fn retrieve_by_email(
+        &self,
+        email: &str,
+    ) -> Result<Option<AuthFlowUser>, FrameworkError> {
+        let user = M::query().filter("email", email).first().await?;
+        Ok(user.map(|u| AuthFlowUser {
+            id: u.get_auth_identifier(),
+            email: u.email().to_string(),
+            name: u.name().map(str::to_string),
+        }))
+    }
+
+    async fn flow_user_by_id(&self, id: &str) -> Result<Option<AuthFlowUser>, FrameworkError> {
+        let user = self.find_by_identifier(id).await?;
+        Ok(user.map(|u| AuthFlowUser {
+            id: u.get_auth_identifier(),
+            email: u.email().to_string(),
+            name: u.name().map(str::to_string),
+        }))
+    }
+
+    async fn mark_email_verified(&self, id: &str) -> Result<(), FrameworkError> {
+        if let Some(mut user) = self.find_by_identifier(id).await? {
+            user.set_email_verified_at(Some(Utc::now()));
+            <M as Model>::save(&user).await?;
+        }
+        Ok(())
+    }
+
+    async fn set_password(&self, id: &str, hashed: &str) -> Result<(), FrameworkError> {
+        if let Some(mut user) = self.find_by_identifier(id).await? {
+            // `hashed` arrives ALREADY HASHED — store it verbatim. `save()`
+            // overlays the full serialized model onto the ActiveModel, so the
+            // password column persists regardless of fillable/guarded.
+            user.set_password_hash(hashed);
+            <M as Model>::save(&user).await?;
+        }
+        Ok(())
+    }
+
+    async fn is_email_verified(&self, id: &str) -> Result<bool, FrameworkError> {
+        Ok(self
+            .find_by_identifier(id)
+            .await?
+            .map(|u| u.is_email_verified())
+            .unwrap_or(false))
     }
 }

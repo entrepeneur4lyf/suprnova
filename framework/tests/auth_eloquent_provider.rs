@@ -7,17 +7,24 @@
 
 use std::any::Any;
 
+use chrono::{DateTime, Utc};
 use suprnova::testing::TestDatabase;
-use suprnova::{Authenticatable, Credentials, EloquentUserProvider, UserProvider, model};
+use suprnova::{
+    Authenticatable, Credentials, EloquentUserProvider, MustVerifyEmail, UserProvider, model,
+};
 
 // The app's `User` shape: a typed model that is also Authenticatable.
 // The table carries an extra `is_admin` column the model doesn't map —
 // it exists only to prove the credential allowlist never filters on it.
+// `email_verified_at` is a nullable datetime — the model macro auto-injects
+// `AsOptionalDateTime` on `Option<DateTime<Utc>>` fields, so no explicit cast
+// is needed.
 #[model(table = "users", fillable = ["email", "password"])]
 pub struct TestUser {
     pub id: i64,
     pub email: String,
     pub password: String,
+    pub email_verified_at: Option<DateTime<Utc>>,
 }
 
 impl Authenticatable for TestUser {
@@ -35,6 +42,21 @@ impl Authenticatable for TestUser {
     }
 }
 
+impl MustVerifyEmail for TestUser {
+    fn email(&self) -> &str {
+        &self.email
+    }
+    fn email_verified_at(&self) -> Option<DateTime<Utc>> {
+        self.email_verified_at
+    }
+    fn set_email_verified_at(&mut self, v: Option<DateTime<Utc>>) {
+        self.email_verified_at = v;
+    }
+    fn set_password_hash(&mut self, hash: &str) {
+        self.password = hash.to_string();
+    }
+}
+
 /// Fresh in-memory DB with a `users` table and one seeded user
 /// (`a@b.com` / bcrypt(`secret`), not admin). The returned guard must be
 /// held for the duration of the test.
@@ -45,6 +67,7 @@ async fn setup() -> TestDatabase {
             id INTEGER PRIMARY KEY AUTOINCREMENT, \
             email TEXT NOT NULL, \
             password TEXT NOT NULL, \
+            email_verified_at TEXT, \
             is_admin INTEGER NOT NULL DEFAULT 0\
          )",
     )
@@ -149,4 +172,54 @@ async fn no_allowlisted_credential_returns_none() {
     let p = provider();
     let creds = Credentials::new().insert("is_admin", true).as_value();
     assert!(p.retrieve_by_credentials(&creds).await.unwrap().is_none());
+}
+
+// The auth-flow surface: lookup-by-email, the AuthFlowUser id round-trip,
+// the email-verification toggle, and a password reset — all against the real
+// SQLite-backed model, end to end.
+#[tokio::test]
+async fn eloquent_provider_supports_auth_flow_methods() {
+    let _db = setup().await;
+    let p = provider();
+    let id = "1".to_string();
+
+    // retrieve_by_email returns the AuthFlowUser carrier.
+    let found = p
+        .retrieve_by_email("a@b.com")
+        .await
+        .unwrap()
+        .expect("user a@b.com exists");
+    assert_eq!(found.email, "a@b.com");
+    assert_eq!(found.id, id);
+    let missing = p.retrieve_by_email("nobody@b.com").await.unwrap();
+    assert!(missing.is_none());
+
+    // flow_user_by_id round-trips the email by primary key.
+    let by_id = p
+        .flow_user_by_id(&id)
+        .await
+        .unwrap()
+        .expect("user 1 exists");
+    assert_eq!(by_id.email, "a@b.com");
+    assert_eq!(by_id.id, id);
+
+    // Not verified → verified. mark_email_verified persists through save().
+    assert!(!p.is_email_verified(&id).await.unwrap());
+    p.mark_email_verified(&id).await.unwrap();
+    assert!(p.is_email_verified(&id).await.unwrap());
+
+    // set_password stores the pre-hashed value verbatim: the new password
+    // verifies, the old one no longer does.
+    let new_hash = suprnova::hash("newpass").unwrap();
+    p.set_password(&id, &new_hash).await.unwrap();
+    let reloaded = p
+        .retrieve_by_id(&id)
+        .await
+        .unwrap()
+        .expect("user 1 still exists");
+    let stored = reloaded
+        .get_auth_password()
+        .expect("password hash present");
+    assert!(suprnova::hashing::verify("newpass", stored).unwrap());
+    assert!(!suprnova::hashing::verify("secret", stored).unwrap());
 }

@@ -99,4 +99,44 @@ pub trait UserProvider: Send + Sync + 'static {
         let _ = crate::hashing::verify_async("dummy_password_never_matches", DUMMY_HASH).await;
         Ok(false)
     }
+
+    /// Look up a user by email for the auth-flow facades. Default: not
+    /// supported (token-only providers return None).
+    async fn retrieve_by_email(
+        &self,
+        _email: &str,
+    ) -> Result<Option<crate::auth::AuthFlowUser>, FrameworkError> {
+        Ok(None)
+    }
+
+    /// Look up a user by id, returning the auth-flow carrier (email/name).
+    /// Used by PasswordReset to address the change-notification mail.
+    /// Default: not supported.
+    async fn flow_user_by_id(
+        &self,
+        _id: &str,
+    ) -> Result<Option<crate::auth::AuthFlowUser>, FrameworkError> {
+        Ok(None)
+    }
+
+    /// Mark a user's email verified. Default: unsupported.
+    async fn mark_email_verified(&self, _id: &str) -> Result<(), FrameworkError> {
+        Err(FrameworkError::internal(
+            "this user provider does not support email verification",
+        ))
+    }
+
+    /// Set a user's password hash. Default: unsupported.
+    async fn set_password(&self, _id: &str, _hashed: &str) -> Result<(), FrameworkError> {
+        Err(FrameworkError::internal(
+            "this user provider does not support password reset",
+        ))
+    }
+
+    /// Whether a user's email is verified. Default: unsupported.
+    async fn is_email_verified(&self, _id: &str) -> Result<bool, FrameworkError> {
+        Err(FrameworkError::internal(
+            "this user provider does not support email verification",
+        ))
+    }
 }

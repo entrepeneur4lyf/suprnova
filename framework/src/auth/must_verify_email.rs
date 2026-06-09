@@ -17,6 +17,13 @@ pub trait MustVerifyEmail: Authenticatable {
     /// Set/clear the verification timestamp (used by the provider to mark
     /// verified, and to re-trigger verification on email change).
     fn set_email_verified_at(&mut self, v: Option<DateTime<Utc>>);
+    /// Overwrite the stored password hash. The value arrives ALREADY HASHED
+    /// (the password-reset flow hashes the new plaintext before calling the
+    /// provider) — store it verbatim. Mirrors [`set_email_verified_at`] as the
+    /// second mutable field the auth flows write through this trait, so a
+    /// generic [`UserProvider`](crate::auth::UserProvider) can persist a reset
+    /// password without coupling to any concrete model's field layout.
+    fn set_password_hash(&mut self, hash: &str);
     /// True once verified.
     fn is_email_verified(&self) -> bool {
         self.email_verified_at().is_some()
@@ -49,6 +56,7 @@ mod tests {
     struct SampleUser {
         id: String,
         email: String,
+        password: String,
         verified_at: Option<DateTime<Utc>>,
     }
 
@@ -80,6 +88,10 @@ mod tests {
         fn set_email_verified_at(&mut self, v: Option<DateTime<Utc>>) {
             self.verified_at = v;
         }
+
+        fn set_password_hash(&mut self, hash: &str) {
+            self.password = hash.to_string();
+        }
     }
 
     #[test]
@@ -87,6 +99,7 @@ mod tests {
         let mut user = SampleUser {
             id: "1".to_string(),
             email: "user@example.com".to_string(),
+            password: "old-hash".to_string(),
             verified_at: None,
         };
         assert!(!user.is_email_verified());
@@ -97,5 +110,8 @@ mod tests {
         assert!(user.is_email_verified());
         assert_eq!(user.email_verified_at(), Some(now));
         assert_eq!(user.email(), "user@example.com");
+
+        user.set_password_hash("new-hash");
+        assert_eq!(user.password, "new-hash");
     }
 }
