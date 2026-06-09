@@ -6,7 +6,7 @@
 //!
 //! 1. Each session has a unique CSRF token
 //! 2. The token is included in HTML responses via a meta tag
-//! 3. JavaScript (Inertia.js) reads the token and sends it with requests
+//! 3. The frontend (Inertia.js) reads the token and sends it with requests
 //! 4. The middleware validates the token on state-changing requests
 //!
 //! # Setup
@@ -31,11 +31,21 @@
 //! <meta name="csrf-token" content="{{ csrf_token() }}">
 //! ```
 //!
-//! Configure Axios/fetch to include the token:
+//! Forward the token on every Inertia visit. Inertia 3 uses the native
+//! `fetch` API (no axios), so subscribe to the `before` event and inject
+//! the header from the meta tag:
 //!
 //! ```javascript
-//! axios.defaults.headers.common['X-CSRF-TOKEN'] =
-//!     document.querySelector('meta[name="csrf-token"]').content;
+//! import { router } from '@inertiajs/svelte' // or react / vue3
+//!
+//! const csrfToken = document
+//!     .querySelector('meta[name="csrf-token"]')
+//!     ?.getAttribute('content')
+//! if (csrfToken) {
+//!     router.on('before', (event) => {
+//!         event.detail.visit.headers['X-CSRF-TOKEN'] = csrfToken
+//!     })
+//! }
 //! ```
 
 pub mod middleware;
