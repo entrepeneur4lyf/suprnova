@@ -14,6 +14,7 @@ pub fn run(
     no_git: bool,
     frontend: Option<String>,
     api: bool,
+    with_portless: bool,
 ) {
     ui::banner();
 
@@ -32,7 +33,7 @@ pub fn run(
         ));
         ui::br();
 
-        if let Err(e) = create_api_project(&project_name, &package_name, no_git) {
+        if let Err(e) = create_api_project(&project_name, &package_name, no_git, with_portless) {
             ui::error(&e);
             std::process::exit(1);
         }
@@ -57,6 +58,13 @@ pub fn run(
         ui::br();
         ui::label_value("API", "http://localhost:8765/api");
         ui::br();
+        if with_portless {
+            ui::header("portless — HTTPS dev URL");
+            ui::hint("Wrote portless.json. For a named https://<name>.localhost URL:");
+            ui::command("suprnova dev:tls   # one-time: trust the CA + register the route");
+            ui::command("suprnova serve");
+            ui::br();
+        }
         return;
     }
 
@@ -79,6 +87,7 @@ pub fn run(
         &author,
         no_git,
         frontend,
+        with_portless,
     ) {
         ui::error(&e.to_string());
         std::process::exit(1);
@@ -101,6 +110,13 @@ pub fn run(
     ui::label_value("Backend", "http://localhost:8765");
     ui::label_value("Frontend", "http://localhost:5765");
     ui::br();
+    if with_portless {
+        ui::header("portless — HTTPS dev URL");
+        ui::hint("Wrote portless.json. For a named https://<name>.localhost URL:");
+        ui::command("suprnova dev:tls   # one-time: trust the CA + register the route");
+        ui::command("suprnova serve");
+        ui::br();
+    }
 }
 
 fn get_project_name(name: Option<String>, no_interaction: bool) -> String {
@@ -236,6 +252,21 @@ fn to_snake_case(s: &str) -> String {
     s.replace('-', "_").to_lowercase()
 }
 
+/// The default backend port written into scaffolded `.env` files
+/// (`SERVER_PORT=8765`). `portless.json`'s `appPort` must match it so
+/// `portless run` routes the named URL to the app's fixed port.
+const SCAFFOLD_SERVER_PORT: u16 = 8765;
+
+/// Write a `portless.json` at the project root. `name` is the portless
+/// route label — we use the snake_case package name so it matches
+/// `suprnova dev:tls`'s default (which reads `[package].name`), giving
+/// one stable URL `https://<package_name>.localhost`.
+fn write_portless_json(project_path: &Path, name: &str, app_port: u16) -> Result<(), String> {
+    let body = format!("{{\n  \"name\": \"{name}\",\n  \"appPort\": {app_port}\n}}\n");
+    fs::write(project_path.join("portless.json"), body)
+        .map_err(|e| format!("Failed to write portless.json: {e}"))
+}
+
 /// Validate a project name supplied to `suprnova new`.
 ///
 /// Domain 22 audit D22-A: `get_project_name` previously returned the
@@ -310,7 +341,12 @@ fn to_title_case(s: &str) -> String {
         .join(" ")
 }
 
-fn create_api_project(project_name: &str, package_name: &str, no_git: bool) -> Result<(), String> {
+fn create_api_project(
+    project_name: &str,
+    package_name: &str,
+    no_git: bool,
+    with_portless: bool,
+) -> Result<(), String> {
     let project_path = Path::new(project_name);
 
     if project_path.exists() {
@@ -321,6 +357,10 @@ fn create_api_project(project_name: &str, package_name: &str, no_git: bool) -> R
         .map_err(|e| format!("Failed to create project directory: {}", e))?;
 
     templates::scaffold_api(project_path, project_name, package_name)?;
+
+    if with_portless {
+        write_portless_json(project_path, package_name, SCAFFOLD_SERVER_PORT)?;
+    }
 
     if !no_git {
         Command::new("git")
@@ -340,6 +380,7 @@ fn create_project(
     author: &str,
     no_git: bool,
     frontend: Frontend,
+    with_portless: bool,
 ) -> Result<(), String> {
     let project_path = Path::new(project_name);
 
@@ -571,6 +612,12 @@ fn create_project(
     // === Frontend files ===
     let title = to_title_case(project_name);
     templates::scaffold_frontend(project_path, project_name, &title, frontend)?;
+
+    // portless.json (opt-in via --with-portless) — maps the app's fixed
+    // backend port to https://<package_name>.localhost for `portless run`.
+    if with_portless {
+        write_portless_json(project_path, package_name, SCAFFOLD_SERVER_PORT)?;
+    }
 
     // Initialize git repository
     if !no_git {

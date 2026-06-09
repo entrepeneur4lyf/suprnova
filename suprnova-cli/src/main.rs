@@ -41,6 +41,11 @@ enum Commands {
         /// Scaffold a JSON:API-only project (no Inertia, no frontend).
         #[arg(long)]
         api: bool,
+
+        /// Emit a portless.json so `suprnova dev:tls` can serve the app
+        /// at https://<name>.localhost. Opt-in; nothing else changes.
+        #[arg(long)]
+        with_portless: bool,
     },
     /// Start the development servers (backend + frontend)
     Serve {
@@ -258,8 +263,9 @@ fn main() {
             no_git,
             frontend,
             api,
+            with_portless,
         } => {
-            commands::new::run(name, no_interaction, no_git, frontend, api);
+            commands::new::run(name, no_interaction, no_git, frontend, api, with_portless);
         }
         Commands::Serve {
             port,
