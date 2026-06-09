@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Enforced local CI: nothing reaches the remote ungated.
+#
+# Skips the (long) gate run when scripts/gate.sh already stamped this
+# exact tree as green — the normal flow is commit, gate, push, and the
+# stamp makes the push instant. Any change to the tree (new commit,
+# dirty file) invalidates the stamp and the gate re-runs here.
+#
+# One-time setup on a fresh clone:  git config core.hooksPath .githooks
+# Emergency escape:                 git push --no-verify  (don't)
+
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+stamp=.git/suprnova-gate-pass
+if [[ -f "$stamp" \
+    && -z "$(git status --porcelain)" \
+    && "$(cat "$stamp")" == "$(git rev-parse 'HEAD^{tree}')" ]]; then
+    echo "pre-push: gate already green for this tree ($(git rev-parse --short HEAD))"
+    exit 0
+fi
+
+echo "pre-push: no green stamp for this tree — running scripts/gate.sh"
+exec scripts/gate.sh

@@ -2,10 +2,10 @@ name: CI
 
 # CI auto-runs are DISABLED during development — no GitHub Actions billing on
 # push/PR. The full pipeline below is preserved and can only be started
-# manually (Actions tab -> Run workflow). The equivalent gate is run LOCALLY
-# before commits (cargo fmt --all --check; cargo clippy --workspace
-# --all-targets -- -D warnings; the two --features clippy builds; cargo test
-# --workspace), which costs nothing.
+# manually (Actions tab -> Run workflow). The equivalent gate runs LOCALLY
+# via scripts/gate.sh, enforced by the tracked pre-push hook
+# (.githooks/pre-push). Keep gate.sh and this file in sync — gate.sh
+# mirrors these jobs step for step on the Linux dev platform.
 #
 # TO RE-ENABLE before launch, restore the auto-triggers:
 #   push:
