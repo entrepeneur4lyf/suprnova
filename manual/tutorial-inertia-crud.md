@@ -483,7 +483,7 @@ their own templating — the backend doesn't change.
 suprnova serve
 ```
 
-Visit `http://127.0.0.1:8000/todos`, add a few rows, toggle them, edit
+Visit `http://127.0.0.1:8765/todos`, add a few rows, toggle them, edit
 one, delete another. The page transitions happen through Inertia — no
 full reload — and every form submission validates server-side before
 the redirect lands.

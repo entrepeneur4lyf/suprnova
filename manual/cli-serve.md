@@ -21,15 +21,15 @@ suprnova serve [OPTIONS]
 
 | Option | Default | Description |
 |---|---|---|
-| `-p, --port <PORT>` | `8000` (CLI) / `$SERVER_PORT` (env) | Backend HTTP port |
-| `--frontend-port <PORT>` | `5173` (CLI) / `$VITE_PORT` (env) | Vite dev server port |
+| `-p, --port <PORT>` | `8765` (CLI) / `$SERVER_PORT` (env) | Backend HTTP port |
+| `--frontend-port <PORT>` | `5765` (CLI) / `$VITE_PORT` (env) | Vite dev server port |
 | `--backend-only` | `false` | Skip the Vite dev server |
 | `--frontend-only` | `false` | Skip the backend, just run Vite |
 | `--skip-types` | `false` | Don't regenerate TypeScript types on Rust changes |
 
 The CLI flags take precedence over environment variables, which take precedence
-over the built-in defaults. A scaffolded `.env` ships with `SERVER_PORT=8080`
-and `VITE_PORT=5173`; you'll see those values used unless you override with
+over the built-in defaults. A scaffolded `.env` ships with `SERVER_PORT=8765`
+and `VITE_PORT=5765`; you'll see those values used unless you override with
 `--port`.
 
 ## Examples

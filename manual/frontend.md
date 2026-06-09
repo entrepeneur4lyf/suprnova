@@ -215,7 +215,7 @@ suprnova serve
 ```
 
 This boots the Rust server and `vite` together. The HTML shell loads
-modules from `http://localhost:5173`.
+modules from `http://localhost:5765`.
 
 For production, build the frontend once and point the backend at the
 hashed manifest under `public/assets/`:

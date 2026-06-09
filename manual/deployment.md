@@ -49,7 +49,7 @@ misconfigured. The minimum set to deploy:
 |---|---|---|
 | `APP_ENV` | Selects the environment (`production`, `staging`, etc.). | Defaults to `local` if unset — your app runs in dev mode in prod. |
 | `APP_KEY` | 32-byte AES-256 base64 key for `Crypt`, sessions, cookies, and pagination cursors. | Boot returns a typed error and exits non-zero when `APP_ENV` is not local/dev/test and `APP_KEY` is missing or malformed. |
-| `APP_URL` | Canonical absolute URL of your app (`https://app.example.com`). | Defaults to `http://localhost:8080`; signed URLs, redirects, mail links, and absolute Inertia URLs all use this. |
+| `APP_URL` | Canonical absolute URL of your app (`https://app.example.com`). | Defaults to `http://localhost:8765`; signed URLs, redirects, mail links, and absolute Inertia URLs all use this. |
 | `DATABASE_URL` | Connection URL for your relational database. | Boot refuses to start when `APP_ENV` is `production` or `staging` and `DATABASE_URL` is unset — the dev SQLite fallback is rejected explicitly. |
 
 Generate `APP_KEY` once with the CLI:
@@ -68,7 +68,7 @@ Beyond the four required vars, common production knobs:
 | Variable | Default | Notes |
 |---|---|---|
 | `SERVER_HOST` | `127.0.0.1` | Use `0.0.0.0` in containers. |
-| `SERVER_PORT` | `8080` | Match your platform's expected port. |
+| `SERVER_PORT` | `8765` | Match your platform's expected port. |
 | `APP_DEBUG` | env-derived | `false` in production/staging/custom envs. Set explicitly if you want loud errors in staging. |
 | `SERVER_MAX_BODY_SIZE` | per-handler default | Process-wide request body cap. |
 | `DB_MAX_CONNECTIONS` | `10` | Pool size. |
@@ -140,7 +140,7 @@ This writes a `Dockerfile` with three stages:
 2. **Backend build** — `rust:slim-bookworm`, compiles your crate in
    release mode with dependency caching.
 3. **Runtime** — `debian:bookworm-slim`, copies the compiled binary
-   and Vite output, runs as a non-root `appuser`, exposes port 8080,
+   and Vite output, runs as a non-root `appuser`, exposes port 8765,
    and runs `CMD ["./app"]` (the auto-migrating server).
 
 Build and run locally to verify before pushing:
@@ -149,10 +149,10 @@ Build and run locally to verify before pushing:
 docker build -t myapp .
 
 # With an env file
-docker run --rm -p 8080:8080 --env-file .env.production myapp
+docker run --rm -p 8765:8765 --env-file .env.production myapp
 
 # Or with explicit vars (the four required ones)
-docker run --rm -p 8080:8080 \
+docker run --rm -p 8765:8765 \
   -e APP_ENV=production \
   -e APP_KEY=$APP_KEY \
   -e APP_URL=https://app.example.com \
@@ -225,14 +225,14 @@ The `_suprnova/` prefix is reserved so your own routes can never
 collide with it.
 
 ```bash
-curl http://localhost:8080/_suprnova/health
+curl http://localhost:8765/_suprnova/health
 # {"status":"ok","timestamp":"2026-05-30T12:34:56+00:00"}
 ```
 
 Add `?db=true` to also probe the database:
 
 ```bash
-curl http://localhost:8080/_suprnova/health?db=true
+curl http://localhost:8765/_suprnova/health?db=true
 # Healthy:
 #   200 {"status":"ok","timestamp":"…","database":"connected"}
 # Degraded:
@@ -247,11 +247,11 @@ Digital Ocean health check can wire up directly:
 livenessProbe:
   httpGet:
     path: /_suprnova/health
-    port: 8080
+    port: 8765
 readinessProbe:
   httpGet:
     path: /_suprnova/health?db=true
-    port: 8080
+    port: 8765
 ```
 
 The endpoint short-circuits before the middleware chain so it stays

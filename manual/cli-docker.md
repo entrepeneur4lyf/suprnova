@@ -38,7 +38,7 @@ only the compiled binary plus its required shared libraries:
    `cargo build --release`.
 3. **`runtime`** — `debian:bookworm-slim` with `ca-certificates` and
    `libssl3`. Runs as a non-root `appuser`. Copies the binary in as
-   `./app` and the `public/` directory beside it. Exposes port 8080.
+   `./app` and the `public/` directory beside it. Exposes port 8765.
 
 The final image's default `CMD` is `["./app"]`, which runs the unified
 binary's `serve` subcommand (web server with auto-migrations on
@@ -47,7 +47,7 @@ startup). To run a different subcommand, override the command at
 
 ```bash
 # Web server (default)
-docker run -p 8080:8080 --env-file .env.production my-app
+docker run -p 8765:8765 --env-file .env.production my-app
 
 # Run migrations only and exit
 docker run --env-file .env.production my-app ./app migrate

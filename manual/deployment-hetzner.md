@@ -106,7 +106,7 @@ curl -fsSL https://get.docker.com | sh
 docker run -d \
   --name myapp \
   --restart unless-stopped \
-  -p 8080:8080 \
+  -p 8765:8765 \
   --env-file /opt/myapp/.env.production \
   your-registry/myapp:latest
 ```
@@ -133,7 +133,7 @@ APP_URL=https://myapp.com
 APP_KEY=paste-the-generated-key-here
 
 SERVER_HOST=127.0.0.1
-SERVER_PORT=8080
+SERVER_PORT=8765
 
 # Database — bind to localhost when DB is on the same box
 DATABASE_URL=postgres://myapp:your_secure_password@localhost:5432/myapp_production
@@ -308,7 +308,7 @@ Edit `/etc/caddy/Caddyfile`:
 
 ```
 myapp.com {
-    reverse_proxy localhost:8080
+    reverse_proxy localhost:8765
 
     # Enable compression
     encode gzip
@@ -420,7 +420,7 @@ ssh "$SERVER" << 'EOF'
 
     # Verify health (give the server a moment to bind)
     sleep 2
-    curl -fsS http://localhost:8080/_suprnova/health?db=true > /dev/null || exit 1
+    curl -fsS http://localhost:8765/_suprnova/health?db=true > /dev/null || exit 1
 
     echo "Deployment complete!"
 EOF
@@ -474,7 +474,7 @@ ufw enable
 
 > **Warning:**
 >
-> Never expose port 8080 directly. Always use Caddy as a reverse proxy to handle SSL and security headers.
+> Never expose port 8765 directly. Always use Caddy as a reverse proxy to handle SSL and security headers.
 
 
 ## Scaling
@@ -553,10 +553,10 @@ sudo -u app psql $DATABASE_URL -c "SELECT 1"
 systemctl status myapp
 
 # Test health endpoint directly
-curl http://localhost:8080/_suprnova/health
+curl http://localhost:8765/_suprnova/health
 
 # Check with database
-curl http://localhost:8080/_suprnova/health?db=true
+curl http://localhost:8765/_suprnova/health?db=true
 ```
 
 A `503` response with `"status": "degraded"` means the app is up but the database health check failed — inspect `database_error` in the body and check the `DATABASE_URL`, Postgres logs, and connection limits.

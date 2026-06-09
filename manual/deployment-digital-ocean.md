@@ -41,7 +41,7 @@ and gives you a managed Postgres if you want one.
 | Setting | Value |
 |---|---|
 | Resource type | Web Service |
-| HTTP port | `8080` |
+| HTTP port | `8765` |
 | Run command | leave empty — the Dockerfile's `CMD` runs `./app` |
 | Health check (HTTP path) | `/_suprnova/health` |
 
@@ -66,7 +66,7 @@ In the **Environment Variables** section of your web component, set:
 | `APP_ENV` | `production` | triggers the fail-closed `APP_KEY` check |
 | `APP_KEY` | output of `suprnova key:generate --show` | mark as **encrypted** |
 | `SERVER_HOST` | `0.0.0.0` | bind to all interfaces |
-| `SERVER_PORT` | `8080` | matches the Dockerfile's `EXPOSE` |
+| `SERVER_PORT` | `8765` | matches the Dockerfile's `EXPOSE` |
 | `APP_URL` | `https://your-app.ondigitalocean.app` | used by Inertia + signed URLs |
 
 `DATABASE_URL` is provided automatically by the managed database
@@ -119,7 +119,7 @@ services:
       repo: your-username/your-repo
       branch: main
       deploy_on_push: true
-    http_port: 8080
+    http_port: 8765
     instance_count: 1
     instance_size_slug: basic-xxs
     health_check:
@@ -134,7 +134,7 @@ services:
       - key: SERVER_HOST
         value: 0.0.0.0
       - key: SERVER_PORT
-        value: "8080"
+        value: "8765"
       - key: APP_URL
         value: https://your-app.ondigitalocean.app
       - key: DATABASE_URL
@@ -276,7 +276,7 @@ The platform pings `/_suprnova/health` and expects a 200 within the
 configured timeout. If it's failing:
 
 - Confirm the path is `/_suprnova/health` exactly (not `/health`).
-- Confirm the port is `8080` and matches `SERVER_PORT`.
+- Confirm the port is `8765` and matches `SERVER_PORT`.
 - Add `?db=true` to the health check path to also verify Postgres
   connectivity: `/_suprnova/health?db=true`. If this fails, the app
   can bind but can't reach Postgres — check the `DATABASE_URL`

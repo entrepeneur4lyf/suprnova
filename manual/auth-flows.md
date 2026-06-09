@@ -231,7 +231,7 @@ async fn resend_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
     if let Some(user) = find_user_by_email_lookup_only(email).await? {
         let base = format!(
             "{}/auth/verify",
-            std::env::var("APP_URL").unwrap_or_else(|_| "http://localhost:8000".into()),
+            std::env::var("APP_URL").unwrap_or_else(|_| "http://localhost:8765".into()),
         );
         EmailVerification::send_link(&user, &base).await?;
     }

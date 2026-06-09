@@ -20,27 +20,27 @@ The CLI prints two URLs and then a continuous stream of prefixed
 output from each child process:
 
 ```
-Backend  http://127.0.0.1:8000
-Frontend http://127.0.0.1:5173
+Backend  http://127.0.0.1:8765
+Frontend http://127.0.0.1:5765
 
 [backend]  Compiling links v0.1.0
 [backend]  Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.21s
 [backend]  Running `target/debug/links`
 [frontend] VITE v6.0.1  ready in 312 ms
-[frontend]   ➜  Local:   http://localhost:5173/
+[frontend]   ➜  Local:   http://localhost:5765/
 [types]    Watching for Rust file changes to regenerate types
 ```
 
-You hit the backend URL (`127.0.0.1:8000`). Vite serves your JS/CSS
-through Inertia's dev integration — you don't visit `:5173` directly.
+You hit the backend URL (`127.0.0.1:8765`). Vite serves your JS/CSS
+through Inertia's dev integration — you don't visit `:5765` directly.
 Press `Ctrl+C` once and the CLI shuts both children down cleanly.
 
 ### Flags
 
 | Flag | Default | What it does |
 |---|---|---|
-| `-p`, `--port <N>` | `8000` | Backend port |
-| `--frontend-port <N>` | `5173` | Vite port |
+| `-p`, `--port <N>` | `8765` | Backend port |
+| `--frontend-port <N>` | `5765` | Vite port |
 | `--backend-only` | off | Skip the Vite child (API-only work) |
 | `--frontend-only` | off | Skip the backend child (component work against a running backend elsewhere) |
 | `--skip-types` | off | Skip the TypeScript-type generator + its watcher |
@@ -198,7 +198,7 @@ Both are documented under the frontend chapter — see
 A short triage list for the most common dev-loop hiccups:
 
 - **Port already in use.** Another `suprnova serve` is still up, or a
-  prior backend wedged. `lsof -i :8000` to find it, or just pass
+  prior backend wedged. `lsof -i :8765` to find it, or just pass
   `--port 8001`.
 - **`cargo-watch` keeps recompiling.** Some editor is rewriting files
   on save (formatters, linters with autofix). Disable on-save format

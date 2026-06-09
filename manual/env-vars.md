@@ -47,7 +47,7 @@ becomes relevant as you opt into subsystems.
 | `APP_NAME` | `"Suprnova Application"` | `String` | Application name. Used as the TOTP issuer (2FA), the HTTP Basic `WWW-Authenticate` realm, mail subject branding, and structured-log fields. |
 | `APP_ENV` | `local` | `String` | Drives `Environment::detect()` and `.env.<suffix>` lookup. Recognised aliases (case-insensitive): `local`, `development`/`dev`, `staging`/`stage`/`stg`, `production`/`prod`, `testing`/`test`. Any other value is preserved as `Environment::Custom(...)` with original casing. |
 | `APP_DEBUG` | env-aware (see Required) | `bool` | Verbose error pages + extra logs. Default is `true` in `local`/`development`/`testing` and `false` everywhere else (including `staging`, `production`, and any unrecognised custom environment). An explicit value always wins; an unparseable value falls back to the env-aware default with a `warn!`. The strict `try_from_env` variant aborts boot on a parse failure. |
-| `APP_URL` | `"http://localhost:8080"` (AppConfig) / `"http://localhost"` (URL fallback) | `String` | Base URL for absolute URL generation, signed URLs, and Inertia redirects. Trailing slashes are trimmed on read. |
+| `APP_URL` | `"http://localhost:8765"` (AppConfig) / `"http://localhost"` (URL fallback) | `String` | Base URL for absolute URL generation, signed URLs, and Inertia redirects. Trailing slashes are trimmed on read. |
 | `APP_KEY` | none — required in non-dev | `String` (base64-url-no-pad, 32 bytes) | AES-256-GCM key for `Crypt`, encrypted sessions, pagination cursors, signed URLs, and any other encrypt-at-rest path. Boot **fails closed** when missing or malformed outside `local`/`development`/`testing`. Generate with `suprnova key:generate`. |
 | `APP_KEY_PREVIOUS` | none | `String` (comma-separated base64 keys, max 8) | Comma-separated previous keys used during rotation. `Crypt::decrypt` tries the current `APP_KEY` first, then each entry in order. Hard cap of 8 entries — `crypto::MAX_PREVIOUS_KEYS`. A half-rotated entry that fails to decode aborts boot. See [Encryption](encryption.md#key-rotation). |
 | `APP_PREVIOUS_KEYS` | none | `String` (alias of `APP_KEY_PREVIOUS`) | Laravel-compat alias accepted so a Laravel `.env` dropped into a Suprnova deploy still graceful-decrypts legacy data. When both are set with different values, `APP_KEY_PREVIOUS` wins with a `warn!` to surface the duplicate; identical values are accepted silently. |
@@ -72,7 +72,7 @@ The HTTP listener and request body limits.
 | Var | Default | Type | Purpose |
 |---|---|---|---|
 | `SERVER_HOST` | `"127.0.0.1"` | `String` | Bind address. Set to `0.0.0.0` to expose outside the loopback interface (e.g. in containers). |
-| `SERVER_PORT` | `8080` | `u16` | Bind port. Lenient parse warns and defaults; strict `try_from_env` aborts boot on a typo. |
+| `SERVER_PORT` | `8765` | `u16` | Bind port. Lenient parse warns and defaults; strict `try_from_env` aborts boot on a typo. |
 | `SERVER_MAX_BODY_SIZE` | `8388608` (8 MiB) | `usize` (bytes) | Process-global maximum request body size. Per-`FormRequest::max_body_bytes` overrides still apply on individual endpoints. The configured value is wired into the global cap during `Server::from_config`. |
 
 ## Database
@@ -284,7 +284,7 @@ or are honoured by `suprnova serve` / `suprnova ssr:*`.
 
 | Var | Default | Type | Purpose |
 |---|---|---|---|
-| `VITE_PORT` | `5173` | `u16` | Port Vite binds to in `suprnova serve`. CLI `--frontend-port` overrides. |
+| `VITE_PORT` | `5765` | `u16` | Port Vite binds to in `suprnova serve`. CLI `--frontend-port` overrides. |
 | `SUPRNOVA_SSR_RUNTIME` | `"node"` | `String` | Runtime to launch the SSR worker under (`suprnova ssr:start`). CLI `--runtime` overrides. |
 | `SUPRNOVA_SSR_BUNDLE` | `frontend/bootstrap/ssr/ssr.js` | `Path` | Path to the built SSR bundle. CLI `--bundle` overrides. |
 | `SUPRNOVA_SSR_URL` | `"http://127.0.0.1:13714"` | `String` | SSR worker URL for `suprnova ssr:check`. CLI `--url` overrides. |

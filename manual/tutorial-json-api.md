@@ -385,7 +385,7 @@ suprnova serve --backend-only
 ### Create
 
 ```bash
-curl -X POST http://localhost:8080/api/todos \
+curl -X POST http://localhost:8765/api/todos \
   -H "Content-Type: application/json" \
   -d '{"title": "Read JSON:API spec", "description": "All of it"}'
 ```
@@ -409,7 +409,7 @@ curl -X POST http://localhost:8080/api/todos \
 ### List (paginated)
 
 ```bash
-curl http://localhost:8080/api/todos
+curl http://localhost:8765/api/todos
 ```
 
 ```json
@@ -437,7 +437,7 @@ curl http://localhost:8080/api/todos
 ### Sparse fieldsets
 
 ```bash
-curl 'http://localhost:8080/api/todos/1?fields[todos]=title,done'
+curl 'http://localhost:8765/api/todos/1?fields[todos]=title,done'
 ```
 
 ```json
@@ -457,7 +457,7 @@ the handler doesn't see the query parameter at all.
 ### Update
 
 ```bash
-curl -X PUT http://localhost:8080/api/todos/1 \
+curl -X PUT http://localhost:8765/api/todos/1 \
   -H "Content-Type: application/json" \
   -d '{"done": true}'
 ```
@@ -468,14 +468,14 @@ A partial body works because every field in `UpdateTodoRequest` is
 ### Delete
 
 ```bash
-curl -X DELETE http://localhost:8080/api/todos/1
+curl -X DELETE http://localhost:8765/api/todos/1
 # {"deleted": true}
 ```
 
 ### Validation failure
 
 ```bash
-curl -X POST http://localhost:8080/api/todos \
+curl -X POST http://localhost:8765/api/todos \
   -H "Content-Type: application/json" \
   -d '{"title": ""}'
 ```

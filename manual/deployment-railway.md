@@ -46,7 +46,7 @@ from the database services so rotations don't require re-pasting.
 APP_ENV=production
 APP_KEY=<paste the output of `suprnova key:generate --show`>
 SERVER_HOST=0.0.0.0
-SERVER_PORT=8080
+SERVER_PORT=8765
 DATABASE_URL=${{ Postgres.DATABASE_URL }}
 REDIS_URL=${{ Redis.REDIS_URL }}
 ```
@@ -62,7 +62,7 @@ A few things worth knowing:
   the container's network interface; binding to `127.0.0.1` (the local
   default) will look like a refused connection.
 - **`SERVER_PORT` matches `EXPOSE` in the Dockerfile.** The generated
-  Dockerfile exposes 8080. Railway maps it to a public URL automatically.
+  Dockerfile exposes 8765. Railway maps it to a public URL automatically.
 
 ## Build and deploy
 

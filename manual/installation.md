@@ -107,8 +107,8 @@ npm install              # in the project root
 suprnova serve
 ```
 
-`suprnova serve` runs the backend on `http://127.0.0.1:8000` and Vite
-on `http://127.0.0.1:5173`. Hit the backend URL — Vite is proxied so
+`suprnova serve` runs the backend on `http://127.0.0.1:8765` and Vite
+on `http://127.0.0.1:5765`. Hit the backend URL — Vite is proxied so
 you don't need to visit it directly.
 
 You should see the welcome page. Then visit `/register` to make an

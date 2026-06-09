@@ -181,8 +181,8 @@ let proto_relative = url::to("//cdn.example/asset.js");
 ```
 
 The host, scheme, and port all come from `APP_URL`. If `APP_URL` is
-`http://localhost:8080`, then `url::to("/foo")` yields
-`"http://localhost:8080/foo"`. The trailing slash on `APP_URL` is
+`http://localhost:8765`, then `url::to("/foo")` yields
+`"http://localhost:8765/foo"`. The trailing slash on `APP_URL` is
 normalised away so you never end up with `https://host//path`.
 
 ### Forcing HTTPS

@@ -436,7 +436,7 @@ use suprnova::{InertiaConfig, Frontend};
 
 let cfg = InertiaConfig::new()
     .frontend(Frontend::Svelte)              // overrides SUPRNOVA_FRONTEND
-    .vite_dev_server("http://localhost:5173")
+    .vite_dev_server("http://localhost:5765")
     .entry_point("src/main.ts")
     .version(env!("CARGO_PKG_VERSION"))
     .default_title("My App")

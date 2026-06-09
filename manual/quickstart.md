@@ -18,7 +18,7 @@ npm install
 suprnova serve
 ```
 
-Open `http://127.0.0.1:8000`. You should see the welcome page. Stop
+Open `http://127.0.0.1:8765`. You should see the welcome page. Stop
 the server (`Ctrl+C`) — we're going to add a feature.
 
 ## 2. Create the model and migration
@@ -211,7 +211,7 @@ own templating — the Inertia bridge is identical.)
 suprnova serve
 ```
 
-Visit `http://127.0.0.1:8000/links`. Add a couple of links via the form.
+Visit `http://127.0.0.1:8765/links`. Add a couple of links via the form.
 They post to `/links`, the controller writes to the `links` table, and
 the Inertia request re-fetches the index props. No JSON marshalling
 glue — `InertiaProps` derived the wire format for you.

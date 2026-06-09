@@ -21,7 +21,7 @@ to boot:
 APP_NAME="my-app"
 APP_ENV=local                # local, development, staging, production, testing, …
 APP_DEBUG=true               # detailed error pages + verbose logs
-APP_URL=http://localhost:8080
+APP_URL=http://localhost:8765
 
 # 32-byte AES-256 key (URL-safe base64, no padding). Encrypts session
 # cookies, pagination cursors, and anything via `suprnova::Crypt`.
@@ -29,8 +29,8 @@ APP_URL=http://localhost:8080
 APP_KEY=<32-byte base64>
 
 SERVER_HOST=127.0.0.1
-SERVER_PORT=8080
-VITE_PORT=5173
+SERVER_PORT=8765
+VITE_PORT=5765
 
 # Database — SQLite by default; swap to postgres://user:pass@host/db
 DATABASE_URL=sqlite://./database.db
@@ -95,7 +95,7 @@ For one-off reads of strings, numbers, bools — anything implementing
 ```rust
 use suprnova::config::{env, env_required, env_optional};
 
-let port: u16 = env("SERVER_PORT", 8080);                    // with default
+let port: u16 = env("SERVER_PORT", 8765);                    // with default
 let url: String = env_required("APP_URL");                   // panics if missing — boot-only
 let smtp_host: Option<String> = env_optional("MAIL_HOST");   // None if missing
 ```
@@ -306,11 +306,11 @@ Your app reads more on top.
 | `APP_NAME` | `"app"` | Logged at boot, used in some default error messages |
 | `APP_ENV` | `local` | Drives `Environment::detect` and `.env.<suffix>` lookup |
 | `APP_DEBUG` | env-aware (`false` in production) | Verbose error pages + extra logging |
-| `APP_URL` | `http://localhost:8080` | Base URL for absolute URL generation, signed URLs |
+| `APP_URL` | `http://localhost:8765` | Base URL for absolute URL generation, signed URLs |
 | `APP_KEY` | none (required in prod) | AES-256 key for `Crypt`, sessions, cursors |
 | `APP_KEY_PREVIOUS` | none | Comma-separated previous keys for rotation (max 8) |
 | `SERVER_HOST` | `127.0.0.1` | Bind address |
-| `SERVER_PORT` | `8080` | Bind port |
+| `SERVER_PORT` | `8765` | Bind port |
 | `DATABASE_URL` | none | Required if your app uses the database |
 | `DB_MAX_CONNECTIONS` | `10` | sqlx pool max |
 | `DB_MIN_CONNECTIONS` | `1` | sqlx pool min |
