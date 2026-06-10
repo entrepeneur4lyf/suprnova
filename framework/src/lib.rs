@@ -84,6 +84,8 @@ pub mod seed;
 pub mod server;
 pub mod session;
 pub mod sse;
+/// Static file fallback serving.
+pub mod static_files;
 pub mod supervisor;
 pub mod telemetry;
 pub mod testing;
@@ -323,6 +325,7 @@ pub use session::{
     regenerate_csrf_token, regenerate_session_id, session, session_mut, set_auth_user,
 };
 pub use sse::SseEvent;
+pub use static_files::StaticFiles;
 pub use supervisor::{RestartPolicy, Supervisor, SupervisorEntry, SupervisorRegistry};
 pub use telemetry::{
     CounterHandle, GaugeHandle, HistogramHandle, Metrics, OtelConfig, TelemetryGuard,
