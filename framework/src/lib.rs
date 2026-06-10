@@ -78,6 +78,7 @@ pub mod payments;
 pub mod prelude;
 pub mod queue;
 pub mod rate_limit;
+pub mod rbac;
 pub mod resources;
 pub mod routing;
 pub mod schedule;
@@ -273,6 +274,7 @@ pub use rate_limit::{
     BackendErrorPolicy, GlobalLimit, Limit, LimitResult, RateLimitMiddleware, RateLimiter,
     RateLimiterDriver, SlidingWindowConfig, ThrottleRequestsMiddleware, Unlimited,
 };
+pub use rbac::{HasRoles, PermissionMiddleware, RoleMiddleware};
 pub use resources::{
     AsRelationshipValue, IncludeResolutionError, IncludeTree, IncludedSink, IntoJsonResource,
     JsonApi, JsonApiBuilder, JsonApiInfo, JsonApiResponse, Maybe, MissingValue, PushIncluded,
