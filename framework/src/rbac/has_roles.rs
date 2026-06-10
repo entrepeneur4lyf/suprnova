@@ -63,8 +63,8 @@ pub async fn create_role_on_guard(name: &str, guard_name: &str) -> Result<i64, F
         return Ok(id);
     }
     DB::insert(
-        "INSERT INTO roles (name, guard_name) VALUES (?, ?)",
-        vec![value(name), value(guard_name)],
+        "INSERT INTO roles (name, display_name, guard_name) VALUES (?, ?, ?)",
+        vec![value(name), value(name), value(guard_name)],
     )
     .await?;
     find_role_id(name, guard_name)
@@ -92,8 +92,8 @@ pub async fn create_permission_on_guard(
         return Ok(id);
     }
     DB::insert(
-        "INSERT INTO permissions (name, guard_name) VALUES (?, ?)",
-        vec![value(name), value(guard_name)],
+        "INSERT INTO permissions (name, display_name, guard_name) VALUES (?, ?, ?)",
+        vec![value(name), value(name), value(guard_name)],
     )
     .await?;
     find_permission_id(name, guard_name).await?.ok_or_else(|| {

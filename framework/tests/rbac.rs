@@ -63,6 +63,14 @@ async fn setup() -> TestDatabase {
 }
 
 async fn request(path: &str) -> Request {
+    request_with_inertia(path, false).await
+}
+
+async fn inertia_request(path: &str) -> Request {
+    request_with_inertia(path, true).await
+}
+
+async fn request_with_inertia(path: &str, inertia: bool) -> Request {
     let path = path.to_string();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -102,12 +110,14 @@ async fn request(path: &str) -> Request {
         tokio::spawn(async move {
             let _ = connection.await;
         });
-        let req = hyper::Request::builder()
+        let mut req = hyper::Request::builder()
             .method("GET")
             .uri(path)
-            .header("Host", "localhost")
-            .body(Full::new(Bytes::new()))
-            .unwrap();
+            .header("Host", "localhost");
+        if inertia {
+            req = req.header("X-Inertia", "true");
+        }
+        let req = req.body(Full::new(Bytes::new())).unwrap();
         let _ = sender.send_request(req).await.unwrap();
     });
 
@@ -199,6 +209,50 @@ async fn middleware_returns_forbidden_when_permission_is_missing() {
             Err(response) => response,
         };
         assert_eq!(response.status_code(), 403);
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn middleware_redirects_browser_denials_when_configured() {
+    let _db = setup().await;
+
+    request_state_scope_for_test(async {
+        let response = match RoleMiddleware::<User>::redirect_to("admin", "/login")
+            .handle(request("/admin").await, next_ok())
+            .await
+        {
+            Ok(response) => panic!(
+                "expected role middleware to deny, got {}",
+                response.status_code()
+            ),
+            Err(response) => response,
+        };
+        assert_eq!(response.status_code(), 302);
+        assert_eq!(response.header_value("Location"), Some("/login"));
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn middleware_redirects_inertia_denials_with_conflict_location() {
+    let _db = setup().await;
+
+    request_state_scope_for_test(async {
+        let response = match PermissionMiddleware::<User>::redirect_to("articles.delete", "/login")
+            .handle(inertia_request("/articles/delete").await, next_ok())
+            .await
+        {
+            Ok(response) => panic!(
+                "expected permission middleware to deny, got {}",
+                response.status_code()
+            ),
+            Err(response) => response,
+        };
+        assert_eq!(response.status_code(), 409);
+        assert_eq!(response.header_value("X-Inertia-Location"), Some("/login"));
     })
     .await;
 }

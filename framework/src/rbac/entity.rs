@@ -10,6 +10,8 @@ pub struct Role {
     pub id: i64,
     /// Role name, unique with [`Self::guard_name`].
     pub name: String,
+    /// Human-readable label shown in admin UIs.
+    pub display_name: Option<String>,
     /// Guard namespace; defaults to `"web"` for normal session users.
     pub guard_name: String,
     /// Timestamp at which the row was inserted.
@@ -26,6 +28,8 @@ pub struct Permission {
     pub id: i64,
     /// Permission name, unique with [`Self::guard_name`].
     pub name: String,
+    /// Human-readable label shown in admin UIs.
+    pub display_name: Option<String>,
     /// Guard namespace; defaults to `"web"` for normal session users.
     pub guard_name: String,
     /// Timestamp at which the row was inserted.

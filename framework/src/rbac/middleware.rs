@@ -5,16 +5,20 @@ use std::marker::PhantomData;
 use async_trait::async_trait;
 
 use crate::auth::Auth;
+use crate::error::FrameworkError;
 use crate::http::{HttpResponse, Request, Response};
 use crate::middleware::{Middleware, Next};
 
 use super::HasRoles;
 
-fn forbidden_response() -> HttpResponse {
-    HttpResponse::json(serde_json::json!({
-        "message": "This action is unauthorized."
-    }))
-    .status(403)
+fn unauthorized_response(redirect_to: Option<&str>, request: &Request) -> HttpResponse {
+    match redirect_to {
+        Some(path) if request.is_inertia() => HttpResponse::text("")
+            .status(409)
+            .header("X-Inertia-Location", path),
+        Some(path) => HttpResponse::new().status(302).header("Location", path),
+        None => FrameworkError::Unauthorized.into(),
+    }
 }
 
 /// Middleware that requires the authenticated user to have a role.
@@ -24,6 +28,7 @@ fn forbidden_response() -> HttpResponse {
 /// handled consistently before role checks run.
 pub struct RoleMiddleware<U> {
     role: String,
+    redirect_to: Option<String>,
     marker: PhantomData<fn() -> U>,
 }
 
@@ -32,8 +37,25 @@ impl<U> RoleMiddleware<U> {
     pub fn new(role: impl Into<String>) -> Self {
         Self {
             role: role.into(),
+            redirect_to: None,
             marker: PhantomData,
         }
+    }
+
+    /// Create middleware requiring `role`, redirecting denials to `path`.
+    ///
+    /// Inertia requests receive `409` with `X-Inertia-Location`; normal browser
+    /// requests receive `302 Location`.
+    pub fn redirect_to(role: impl Into<String>, path: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            redirect_to: Some(path.into()),
+            marker: PhantomData,
+        }
+    }
+
+    fn unauthorized_response(&self, request: &Request) -> HttpResponse {
+        unauthorized_response(self.redirect_to.as_deref(), request)
     }
 }
 
@@ -44,13 +66,13 @@ where
 {
     async fn handle(&self, request: Request, next: Next) -> Response {
         let Some(user) = Auth::user_as_arc::<U>().await? else {
-            return Err(forbidden_response());
+            return Err(self.unauthorized_response(&request));
         };
 
         if user.has_role(&self.role).await? {
             next(request).await
         } else {
-            Err(forbidden_response())
+            Err(self.unauthorized_response(&request))
         }
     }
 }
@@ -61,6 +83,7 @@ where
 /// are both accepted.
 pub struct PermissionMiddleware<U> {
     permission: String,
+    redirect_to: Option<String>,
     marker: PhantomData<fn() -> U>,
 }
 
@@ -69,8 +92,25 @@ impl<U> PermissionMiddleware<U> {
     pub fn new(permission: impl Into<String>) -> Self {
         Self {
             permission: permission.into(),
+            redirect_to: None,
             marker: PhantomData,
         }
+    }
+
+    /// Create middleware requiring `permission`, redirecting denials to `path`.
+    ///
+    /// Inertia requests receive `409` with `X-Inertia-Location`; normal browser
+    /// requests receive `302 Location`.
+    pub fn redirect_to(permission: impl Into<String>, path: impl Into<String>) -> Self {
+        Self {
+            permission: permission.into(),
+            redirect_to: Some(path.into()),
+            marker: PhantomData,
+        }
+    }
+
+    fn unauthorized_response(&self, request: &Request) -> HttpResponse {
+        unauthorized_response(self.redirect_to.as_deref(), request)
     }
 }
 
@@ -81,13 +121,13 @@ where
 {
     async fn handle(&self, request: Request, next: Next) -> Response {
         let Some(user) = Auth::user_as_arc::<U>().await? else {
-            return Err(forbidden_response());
+            return Err(self.unauthorized_response(&request));
         };
 
         if user.has_permission_to(&self.permission).await? {
             next(request).await
         } else {
-            Err(forbidden_response())
+            Err(self.unauthorized_response(&request))
         }
     }
 }

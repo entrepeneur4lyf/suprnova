@@ -16,6 +16,7 @@ enum Roles {
     Table,
     Id,
     Name,
+    DisplayName,
     GuardName,
     CreatedAt,
     UpdatedAt,
@@ -26,6 +27,7 @@ enum Permissions {
     Table,
     Id,
     Name,
+    DisplayName,
     GuardName,
     CreatedAt,
     UpdatedAt,
@@ -73,6 +75,7 @@ impl MigrationTrait for Migration {
                             .primary_key(),
                     )
                     .col(ColumnDef::new(Roles::Name).string_len(255).not_null())
+                    .col(ColumnDef::new(Roles::DisplayName).string_len(255).null())
                     .col(
                         ColumnDef::new(Roles::GuardName)
                             .string_len(255)
@@ -119,6 +122,11 @@ impl MigrationTrait for Migration {
                             .primary_key(),
                     )
                     .col(ColumnDef::new(Permissions::Name).string_len(255).not_null())
+                    .col(
+                        ColumnDef::new(Permissions::DisplayName)
+                            .string_len(255)
+                            .null(),
+                    )
                     .col(
                         ColumnDef::new(Permissions::GuardName)
                             .string_len(255)
