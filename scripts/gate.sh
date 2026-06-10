@@ -11,7 +11,7 @@
 #   scripts/gate.sh --full    # + feature-set test runs + cargo audit
 #
 # On success with a clean working tree, the tree hash is stamped to
-# .git/suprnova-gate-pass; the pre-push hook (.githooks/pre-push) skips
+# git's suprnova-gate-pass path; the pre-push hook (.githooks/pre-push) skips
 # re-running the gate when the stamp matches HEAD's tree, so the usual
 # flow — commit, gate, push — runs the suite once, not twice.
 #
@@ -98,8 +98,9 @@ echo "GATE GREEN ($((SECONDS - GATE_START))s total)"
 # clean — a dirty tree means the gate validated state that no commit
 # pins, so the pre-push hook must re-run it.
 if [[ -z "$(git status --porcelain)" ]]; then
-    git rev-parse 'HEAD^{tree}' > .git/suprnova-gate-pass
-    echo "stamped .git/suprnova-gate-pass for $(git rev-parse --short HEAD)"
+    stamp="$(git rev-parse --git-path suprnova-gate-pass)"
+    git rev-parse 'HEAD^{tree}' > "$stamp"
+    echo "stamped $stamp for $(git rev-parse --short HEAD)"
 else
     echo "working tree dirty — no gate stamp written (commit first, then gate, to skip the pre-push re-run)"
 fi
