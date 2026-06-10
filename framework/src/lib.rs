@@ -50,6 +50,7 @@ pub mod cache;
 pub mod config;
 pub mod console;
 pub mod container;
+pub mod content;
 pub mod context;
 pub mod cors;
 pub mod crypto;
