@@ -465,6 +465,9 @@ pub mod react {
     pub fn inertia_props_types() -> &'static str {
         include_str!("files/frontend/react/src/types/inertia-props.ts.tpl")
     }
+    pub fn vite_env_dts() -> &'static str {
+        include_str!("files/frontend/react/src/vite-env.d.ts.tpl")
+    }
     pub fn app_css() -> &'static str {
         include_str!("files/frontend/react/src/app.css.tpl")
     }
@@ -646,7 +649,10 @@ pub fn scaffold_frontend(
             fs::write(src.join("shims-vue.d.ts"), vue::shims_dts())
                 .map_err(|e| format!("Failed to write src/shims-vue.d.ts: {}", e))?;
         }
-        Frontend::React => {}
+        Frontend::React => {
+            fs::write(src.join("vite-env.d.ts"), react::vite_env_dts())
+                .map_err(|e| format!("Failed to write src/vite-env.d.ts: {}", e))?;
+        }
     }
 
     Ok(())

@@ -1,5 +1,5 @@
 import './app.css'
-import { createInertiaApp, router } from '@inertiajs/react'
+import { createInertiaApp, router, type ResolvedComponent } from '@inertiajs/react'
 import { createRoot, hydrateRoot } from 'react-dom/client'
 
 // Forward the per-session CSRF token (rendered into <meta name="csrf-token">
@@ -16,7 +16,10 @@ if (csrfToken) {
 
 createInertiaApp({
   resolve: (name) => {
-    const pages = import.meta.glob('./pages/**/*.tsx', { eager: true })
+    const pages = import.meta.glob<ResolvedComponent>('./pages/**/*.tsx', {
+      eager: true,
+      import: 'default',
+    })
     return pages[`./pages/${name}.tsx`]
   },
   setup({ el, App, props }) {
