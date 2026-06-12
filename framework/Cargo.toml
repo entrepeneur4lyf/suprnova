@@ -123,6 +123,9 @@ tera = "1"
 aws-sigv4 = "1"
 suprnova-web-push = { version = "0.1.0", path = "../crates/suprnova-web-push" }
 aws-credential-types = "1.2.14"
+# Compatibility pin for fresh downstream resolutions: time 0.3.48 currently
+# triggers coherence conflicts in sea-query/aws-smithy-types on Rust 1.96.
+time = { version = "=0.3.47", default-features = false }
 fake = { version = "5.1.0", features = ["chrono", "derive", "uuid"] }
 envy = "0.4.2"
 hyper-tungstenite = "0.20.0"

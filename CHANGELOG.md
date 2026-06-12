@@ -10,6 +10,12 @@ Pre-1.0, internal API churn is expected. Semver guarantees begin at `1.0.0`.
 
 Post-`v0.1.0` maintenance and `v0.1.x` work will land here.
 
+### Fixed
+
+- Freshly generated apps now inherit a framework-level `time = 0.3.47`
+  compatibility pin, avoiding Rust 1.96 coherence conflicts from
+  `time 0.3.48` in fresh scaffold dependency resolutions.
+
 ## [0.1.0] — 2026-06-10
 
 The initial Suprnova release. Suprnova is a Laravel-inspired web
