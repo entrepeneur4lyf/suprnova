@@ -1,96 +1,82 @@
 # Release Notes
 
-Suprnova is **pre-launch** — `v0.1.0` is not yet tagged. This page
-will host the full release history once the first version ships.
+Suprnova `v0.1.0` is released through the git distribution model.
+Nothing is published to crates.io for this line: generated apps depend
+on the GitHub repository, and the CLI installs from GitHub.
 
-## What's in the current `main` branch
+## v0.1.0 - 2026-06-10
 
-As of the latest commit on `main`:
+Initial Suprnova release: a Laravel-inspired full-stack web framework
+for Rust with Laravel 13.x as the parity target and Tokio as the runtime
+foundation.
 
-- **Laravel 13.x surface** is complete across all 30 documented domains
-  (HTTP, routing, controllers, requests, responses, middleware, CSRF,
-  CORS, validation, errors, logging, container, bootstrap, sessions,
-  database, Eloquent, queues, console, broadcasting, cache, events,
-  filesystem, HTTP client, mail, notifications, rate limiting,
-  scheduling, authentication, auth flows, authorization)
-- **External code review** is fully closed — every issue raised by
-  independent audits has been resolved
-- **Test suite** runs 3400+ tests across the workspace
-- **Frontend starters** ship for Svelte 5 (default), React 19, and Vue 3.5
-- **Payments adapters** in tree for Stripe (gateway model) and Paddle
-  (Merchant of Record model)
-- **Vector backends** in tree for Memory, Qdrant, Pinecone, and
-  MariaDB
-- **Mail providers** in tree for SMTP, SES, Mailgun, Postmark, SendGrid,
-  Resend, plus log and in-memory drivers for tests
+### Install
 
-## What's gating `v0.1.0`
+```bash
+cargo install --git https://github.com/entrepeneur4lyf/suprnova.git suprnova-cli
+suprnova new myapp --frontend svelte
+cd myapp
+suprnova serve
+```
 
-The framework's API surface is considered settled — internal API churn
-this cycle is fixing audit findings and adding Laravel-parity features
-that were already specified. What's left before tagging:
-
-- **CI re-enable** — the GitHub Actions workflows are stubbed; the
-  cross-platform runners (Linux + macOS via Tart on Apple hardware)
-  need to be activated
-- **`docs/deployment.md`** — production deployment guide (Railway,
-  Digital Ocean, Hetzner)
-- **First release tag** — once CI is green
-- **Scaffold edition bump** — generated `Cargo.toml` emits
-  `edition = "2021"` but the workspace uses 2024; needs alignment
-- **Payments adapter distribution** — `suprnova-payments-stripe` and
-  `suprnova-payments-paddle` face the same "framework not on
-  crates.io" constraint as the CLI; decide git-dep vs eventual publish
-  before tagging
-
-## Versioning policy
-
-After `v0.1.0`, Suprnova follows Cargo's SemVer interpretation:
-
-- **MAJOR** version (`1.0.0` → `2.0.0`) — breaking API changes that
-  consumers must address
-- **MINOR** version (`0.1.0` → `0.2.0`) — backwards-compatible feature
-  additions; consumers can upgrade freely
-- **PATCH** version (`0.1.0` → `0.1.1`) — backwards-compatible bug
-  fixes
-
-During the `0.x` series Cargo treats minor version bumps as
-potentially breaking by default. We'll signal compat intent in each
-minor release's notes.
-
-## Update path before `v0.1.0`
-
-While we're pre-launch and depending via git:
+Generated apps depend on the framework with:
 
 ```toml
 suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git" }
 ```
 
-To pull the latest:
+To update an app that already depends on Suprnova:
 
 ```bash
 cargo update -p suprnova
 ```
 
-If you want to pin to a specific commit:
+To pin an app to a specific released commit:
 
 ```toml
-suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", rev = "abc123def" }
+suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", rev = "11ec6599e3c9ffc113d26c30f118f1899e439698" }
 ```
 
-Once `v0.1.0` ships and Suprnova is on crates.io, the install story
-will simplify to `cargo install suprnova-cli` and
-`suprnova = "0.1"` in your `Cargo.toml`.
+### What shipped
 
-## When `v0.1.0` ships
+- **Laravel 13.x surface** across the core framework domains: routing,
+  middleware, controllers, requests, responses, validation, errors,
+  logging, container, bootstrap, sessions, database, Eloquent-style ORM,
+  queues, console, broadcasting, cache, events, filesystem, HTTP client,
+  mail, notifications, rate limiting, scheduling, authentication,
+  authorization, and auth flows.
+- **Frontend starters** for Svelte 5, React 19, and Vue 3.5 on Inertia
+  3.1.1, Vite, and Tailwind.
+- **Auth flows** for email verification, password reset, remember-me
+  cookies, 2FA TOTP, brute-force protection, login throttling, and
+  provider-backed user lookup.
+- **Payments adapters** for Stripe and Paddle, plus provider-agnostic
+  checkout, payment, subscription, customer-store, and webhook traits.
+- **Vector backends** for memory, Qdrant, Pinecone, and MariaDB native
+  `VECTOR(N)`.
+- **Mail providers** for SMTP, SES, Mailgun, Postmark, SendGrid,
+  Resend, plus log and in-memory drivers for local development and
+  tests.
+- **Broadcasting and WebSockets** with public, private, and presence
+  channels, plus an opt-in sea-streamer fanout adapter.
+- **Release hardening**: local release gate, enforced pre-push hook,
+  rustdoc warning gate, comprehensive changelog, adapter READMEs, and
+  scaffold drift guards.
 
-This page will be updated with:
+See [CHANGELOG.md](../CHANGELOG.md) for the complete release notes.
 
-- The release date
-- A complete CHANGELOG-style summary of what's in `v0.1.0`
-- The download/install commands
-- Migration notes from `main` snapshots (likely minimal — APIs are
-  settled)
+## Versioning policy
 
-Watch the [GitHub releases](https://github.com/entrepeneur4lyf/suprnova/releases)
-page for the announcement.
+After `v0.1.0`, Suprnova follows Cargo's SemVer interpretation:
+
+- **MAJOR** version (`1.0.0` to `2.0.0`) means breaking API changes that
+  consumers must address.
+- **MINOR** version (`0.1.0` to `0.2.0`) means backwards-compatible
+  feature additions where possible; during the `0.x` series, Cargo
+  treats minor bumps as potentially breaking.
+- **PATCH** version (`0.1.0` to `0.1.1`) means backwards-compatible bug
+  fixes.
+
+SemVer guarantees begin at `1.0.0`. The `0.1.x` line may still include
+internal API churn while the framework is dogfooded by real consumer
+apps.

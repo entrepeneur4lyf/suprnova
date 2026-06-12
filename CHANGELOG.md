@@ -8,13 +8,17 @@ Pre-1.0, internal API churn is expected. Semver guarantees begin at `1.0.0`.
 
 ## [Unreleased]
 
-Work toward `v0.1.0` is in flight. Tracked in `release-prep.md`.
+Post-`v0.1.0` maintenance and `v0.1.x` work will land here.
 
-## [0.1.0] — TBD
+## [0.1.0] — 2026-06-10
 
 The initial Suprnova release. Suprnova is a Laravel-inspired web
 framework for Rust, forked from Kit and taken in its own direction.
 Today's parity target is Laravel 13.x.
+
+This release uses the git distribution model: framework consumers depend
+on `suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git" }`,
+and the CLI installs with `cargo install --git`.
 
 ### Added
 
@@ -268,6 +272,31 @@ Today's parity target is Laravel 13.x.
 - HTTP test helpers — `Test::get`, `Test::post`, JSON / form / multipart
 - Queue / Mail / Notification / Event fakes
 - `assert_emitted`, `assert_dispatched`, `assert_dispatched_times`
+
+### Changed
+
+- Auth verification and password-reset flows now operate through the
+  configured user provider instead of Torii internals.
+- Generated apps must implement `get_auth_password`; scaffolded examples
+  now fail loudly instead of allowing login to always fail silently.
+- The local release gate is wired into `scripts/release.sh`, and the repo
+  includes an enforced pre-push hook for fmt, clippy, tests, docs, and
+  feature builds.
+- Scaffolded dev-port documentation moved to the current backend/frontend
+  defaults (`8765` / `5765`), with `dev:tls` and `--with-portless`
+  documented.
+- `MAIL_FROM` is validated before verification or reset tokens are issued,
+  avoiding orphaned auth-flow rows when mail configuration is invalid.
+
+### Fixed
+
+- React scaffold template drift from the released starter.
+- Root route groups no longer generate duplicate `//` paths.
+- Literal-path redirects now dispatch through the intended routing path.
+- Broadcasting fanout tests now handle `track` / `untrack` results.
+- The mail log driver emits the rendered text body, so verification and
+  password-reset links surface in local development logs.
+- Password-reset coverage pins session and remember-me revocation behavior.
 
 ### Notes
 
