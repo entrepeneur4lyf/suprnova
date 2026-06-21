@@ -388,18 +388,25 @@ mod refcount_tests {
             "an inner guard drop must NOT clear named connections still owned by outer guards",
         );
 
-        // Outer drop is the last guard — registry gets cleared as part
-        // of teardown.
+        // Drop our two remaining guards. `db` holds a `TestContainerGuard`
+        // via `TestDatabase`, so the registry is only cleared once both it
+        // and `outer` are gone.
         drop(outer);
-
-        // `db` itself still holds a `TestContainerGuard` via
-        // `TestDatabase`, so even after dropping `outer` the count is
-        // not yet zero. Drop the test database to release it.
         drop(db);
 
-        assert!(
-            !ConnectionRegistry::has("refcount_outer_test").await,
-            "the last guard drop must clear named connections for next-test isolation",
-        );
+        // The teardown clear fires only when a drop takes the *global*
+        // live-guard count to zero. Under a parallel `cargo test`, other
+        // (non-serial) tests may still hold fake guards via `TestDatabase`,
+        // in which case NOT clearing is the correct behaviour — so only
+        // assert the clear when we are genuinely the last live guard.
+        // Asserting unconditionally is order-dependent and flaky; the
+        // regression that matters (an inner drop must not wipe entries owned
+        // by outer guards) is verified above and stays deterministic.
+        if FAKE_GUARDS.load(Ordering::SeqCst) == 0 {
+            assert!(
+                !ConnectionRegistry::has("refcount_outer_test").await,
+                "the last guard drop must clear named connections for next-test isolation",
+            );
+        }
     }
 }
