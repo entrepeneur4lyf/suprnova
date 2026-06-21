@@ -106,6 +106,13 @@ pub trait DynNotification: Send + Sync {
     fn name(&self) -> &'static str;
     /// The JSON-serializable payload.
     fn data(&self) -> serde_json::Value;
+    /// Object-safe forward to [`Notification::should_send`]. The queued path
+    /// consults this so consent / opt-out / quiet-hours vetoes are honoured
+    /// on the worker exactly as they are on the synchronous dispatcher.
+    fn should_send(&self, channel: &str) -> bool;
+    /// Object-safe forward to [`Notification::after_sending`]. Invoked by the
+    /// worker once per channel that delivered successfully.
+    fn after_sending(&self, channel: &str) -> Result<(), FrameworkError>;
 }
 
 impl<N: Notification> DynNotification for N {
@@ -114,6 +121,12 @@ impl<N: Notification> DynNotification for N {
     }
     fn data(&self) -> serde_json::Value {
         <N as Notification>::data(self)
+    }
+    fn should_send(&self, channel: &str) -> bool {
+        <N as Notification>::should_send(self, channel)
+    }
+    fn after_sending(&self, channel: &str) -> Result<(), FrameworkError> {
+        <N as Notification>::after_sending(self, channel)
     }
 }
 
@@ -399,6 +412,13 @@ impl Notify {
     /// skipped, mirroring the dispatcher's `route_for(channel).is_none()`
     /// behaviour.
     ///
+    /// The per-channel [`Notification::should_send`] veto is honoured here
+    /// too: a channel the notification vetoes is never enqueued. The worker
+    /// re-checks the veto before delivering and runs
+    /// [`Notification::after_sending`] on success, so consent / opt-out /
+    /// quiet-hours suppression behaves identically on the queued and
+    /// synchronous paths even if state changes between enqueue and run.
+    ///
     /// The push loop is non-atomic across channels: if the second of
     /// three pushes fails, the first channel is already queued and the
     /// caller sees `Err`. The trade-off is intentional — it is strictly
@@ -438,6 +458,13 @@ impl Notify {
             let Some(route) = recipient.route_for(channel) else {
                 continue;
             };
+            // Trait-level per-channel veto, honoured before the job is
+            // enqueued so a vetoed channel never reaches the worker.
+            // Re-checked again in `SendNotificationJob::handle` because
+            // consent state can change between enqueue and run.
+            if !notification.should_send(channel) {
+                continue;
+            }
             let mut routes: HashMap<String, String> = HashMap::new();
             routes.insert((*channel).to_string(), route);
             let job = SendNotificationJob {

@@ -104,14 +104,16 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 | `notification_name()` | Stable identifier persisted by the database channel, used as the queue envelope key, and the lookup key for the mail renderer registry. |
 | `channels(&self)` | Channel names this notification dispatches to. Order is iteration order. |
 | `data(&self)` | JSON-serializable payload channels deliver / persist. Typically `serde_json::to_value(self)` of the subset of fields the channels need. |
-| `should_send(&self, channel)` | Per-channel veto consulted by `Notify::send`. Returning `false` skips that channel for this dispatch. Default: always send. |
-| `after_sending(&self, channel)` | Post-success hook invoked once per channel that completed (synchronous `Notify::send` only). Returning `Err` propagates the same way a channel error would. Default: no-op. |
+| `should_send(&self, channel)` | Per-channel veto consulted on both the synchronous and queued paths. Returning `false` skips that channel for this dispatch. Default: always send. |
+| `after_sending(&self, channel)` | Post-success hook invoked once per channel that completed, on both the synchronous and queued paths. Returning `Err` propagates the same way a channel error would. Default: no-op. |
 
-`should_send` and `after_sending` fire only on the synchronous path
-(`Notify::send` → dispatcher). The queued path executes channels
-directly without consulting them — if you rely on the hooks, send
-synchronously or perform the equivalent check inside the channel
-itself.
+`should_send` and `after_sending` are honored on **both** paths. `Notify::send`
+consults them in the dispatcher; `Notify::queue` checks `should_send` before
+enqueuing each per-channel job, and the worker re-checks `should_send` before
+delivery (state can change between enqueue and run) and runs `after_sending`
+after a successful send. The three lifecycle *events*
+(`NotificationSending` / `NotificationSent` / `NotificationFailed`) still fire
+only on the synchronous path.
 
 ## Channels
 
@@ -407,17 +409,21 @@ At dispatch time the worker:
 1. Looks up the notification factory by `notification_name`
 2. Reconstructs the typed notification from the JSON payload
 3. Iterates the channels recorded at queue time
-4. For each, looks up the channel on the bound dispatcher and calls
-   `deliver(route, &notification)` directly
+4. For each, re-checks `should_send(channel)` (skipping vetoed channels),
+   looks up the channel on the bound dispatcher, calls
+   `deliver(route, &notification)`, then runs `after_sending(channel)`
 
 Channels that were declared at queue time but aren't registered when
 the worker runs log a WARN and are skipped — same contract as the
 synchronous path. Channels with no pre-resolved route are skipped
 silently (the recipient returned `None` at queue time).
 
-The queued path **does not** invoke `should_send`, `after_sending`, or
-the three lifecycle events. If you depend on any of them, send through
-`Notify::send` or move the logic inside the channel.
+`Notify::queue` also evaluates `should_send` at enqueue time, so a vetoed
+channel is never enqueued in the first place; the worker re-check covers
+state that changes between enqueue and run. The queued path **does not**
+fire the three lifecycle events (`NotificationSending` / `NotificationSent`
+/ `NotificationFailed`) — those remain synchronous-only. If you depend on
+the events, send through `Notify::send`.
 
 ### Why Suprnova diverges
 

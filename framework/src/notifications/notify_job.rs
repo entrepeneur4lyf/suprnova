@@ -53,8 +53,166 @@ impl Job for SendNotificationJob {
                 );
                 continue;
             };
+            // Re-check the per-channel veto on the worker: consent /
+            // opt-out / quiet-hours state can change between when the job
+            // was enqueued and when it runs, so the queue-time decision is
+            // not authoritative. Mirrors the synchronous dispatcher's
+            // `should_send` short-circuit.
+            if !notification.should_send(channel_name) {
+                continue;
+            }
             channel.deliver(route, notification.as_ref()).await?;
+            // Post-send hook, parity with the synchronous path: runs once
+            // per channel that delivered successfully. An error here
+            // propagates as a job failure, matching the dispatcher's
+            // first-failure-stops contract.
+            notification.after_sending(channel_name)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::notifications::{
+        Channel, DynNotification, Notification, NotificationDispatcher,
+        register_notification_factory, set_dispatcher,
+    };
+    use crate::queue::Job;
+    use async_trait::async_trait;
+    use serde::{Deserialize, Serialize};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static DELIVER_HITS: AtomicU32 = AtomicU32::new(0);
+    static AFTER_HITS: AtomicU32 = AtomicU32::new(0);
+
+    /// Vetoes the `database` channel via `should_send` while permitting any
+    /// other channel through. Counts its own `after_sending` calls.
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    struct ConsentAware;
+
+    impl Notification for ConsentAware {
+        fn notification_name() -> &'static str {
+            "ConsentAware"
+        }
+        fn channels(&self) -> Vec<&'static str> {
+            vec!["database"]
+        }
+        fn data(&self) -> serde_json::Value {
+            serde_json::Value::Null
+        }
+        fn should_send(&self, channel: &str) -> bool {
+            channel != "database"
+        }
+        fn after_sending(&self, _channel: &str) -> Result<(), FrameworkError> {
+            AFTER_HITS.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// Always permits delivery; used to confirm the worker invokes
+    /// `after_sending` on the success path.
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    struct AlwaysSend;
+
+    impl Notification for AlwaysSend {
+        fn notification_name() -> &'static str {
+            "AlwaysSend"
+        }
+        fn channels(&self) -> Vec<&'static str> {
+            vec!["database"]
+        }
+        fn data(&self) -> serde_json::Value {
+            serde_json::Value::Null
+        }
+        fn after_sending(&self, _channel: &str) -> Result<(), FrameworkError> {
+            AFTER_HITS.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct CountingChannel;
+
+    #[async_trait]
+    impl Channel for CountingChannel {
+        fn name(&self) -> &'static str {
+            "database"
+        }
+        async fn deliver(
+            &self,
+            _route: &str,
+            _notification: &dyn DynNotification,
+        ) -> Result<(), FrameworkError> {
+            DELIVER_HITS.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn job_for(name: &str) -> SendNotificationJob {
+        let mut routes = HashMap::new();
+        routes.insert("database".to_string(), "42".to_string());
+        SendNotificationJob {
+            notifiable_route_per_channel: routes,
+            notification_name: name.to_string(),
+            notification_payload: serde_json::Value::Null,
+            channels: vec!["database".to_string()],
+        }
+    }
+
+    // Regression: the queued path must honour `should_send`. Before the
+    // fix, `handle` called `channel.deliver` unconditionally, so a channel
+    // the notification vetoes (consent / opt-out / quiet-hours) was still
+    // delivered on the worker even though the synchronous dispatcher
+    // suppresses it.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn queued_path_honours_should_send_veto() {
+        DELIVER_HITS.store(0, Ordering::SeqCst);
+        AFTER_HITS.store(0, Ordering::SeqCst);
+
+        let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(CountingChannel));
+        set_dispatcher(Arc::new(dispatcher)).unwrap();
+        register_notification_factory::<ConsentAware>().unwrap();
+
+        job_for("ConsentAware").handle().await.unwrap();
+
+        assert_eq!(
+            DELIVER_HITS.load(Ordering::SeqCst),
+            0,
+            "a vetoed channel must not be delivered on the queued path",
+        );
+        assert_eq!(
+            AFTER_HITS.load(Ordering::SeqCst),
+            0,
+            "after_sending must not run for a channel that was never delivered",
+        );
+    }
+
+    // The worker runs `after_sending` exactly once per channel that
+    // delivered successfully, matching the synchronous dispatcher.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn queued_path_runs_after_sending_on_success() {
+        DELIVER_HITS.store(0, Ordering::SeqCst);
+        AFTER_HITS.store(0, Ordering::SeqCst);
+
+        let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(CountingChannel));
+        set_dispatcher(Arc::new(dispatcher)).unwrap();
+        register_notification_factory::<AlwaysSend>().unwrap();
+
+        job_for("AlwaysSend").handle().await.unwrap();
+
+        assert_eq!(
+            DELIVER_HITS.load(Ordering::SeqCst),
+            1,
+            "the permitted channel is delivered once",
+        );
+        assert_eq!(
+            AFTER_HITS.load(Ordering::SeqCst),
+            1,
+            "after_sending runs once on the queued success path",
+        );
     }
 }
