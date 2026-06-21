@@ -152,6 +152,13 @@ impl CronField {
         }
     }
 
+    /// `true` when this field is the unrestricted wildcard `*`. Used by
+    /// [`CronExpression::is_due_at`] to decide whether the day-of-month and
+    /// day-of-week fields combine with AND or OR.
+    fn is_any(&self) -> bool {
+        matches!(self, CronField::Any)
+    }
+
     /// Parse a single cron-field token against the supplied bounds.
     ///
     /// `bounds` carries the per-field inclusive range (minute 0..=59,
@@ -314,14 +321,30 @@ impl CronExpression {
     /// `tokio::time::pause()` against wall-clock advancement. Generic over
     /// `TimeZone` so callers can also pass `Utc` or a custom offset when
     /// the per-schedule timezone follow-up lands.
+    ///
+    /// The day-of-month and day-of-week fields follow the Vixie/POSIX cron
+    /// rule (which Laravel inherits): when *both* day fields are restricted
+    /// (neither is `*`), the expression fires when *either* matches — so
+    /// `0 0 13 * 5` runs on the 13th of the month OR on any Friday. When at
+    /// least one day field is `*`, the two combine with AND as usual. The
+    /// minute, hour, and month fields always AND.
     pub fn is_due_at<Tz: TimeZone>(&self, now: DateTime<Tz>) -> bool {
+        let dom_match = self.day_of_month.matches(now.day());
+        let dow_match = self
+            .day_of_week
+            .matches(now.weekday().num_days_from_sunday());
+
+        // Vixie cron: if both day fields are restricted, OR them; otherwise AND.
+        let day_ok = if !self.day_of_month.is_any() && !self.day_of_week.is_any() {
+            dom_match || dow_match
+        } else {
+            dom_match && dow_match
+        };
+
         self.minute.matches(now.minute())
             && self.hour.matches(now.hour())
-            && self.day_of_month.matches(now.day())
             && self.month.matches(now.month())
-            && self
-                .day_of_week
-                .matches(now.weekday().num_days_from_sunday())
+            && day_ok
     }
 
     /// Get the raw cron expression string
@@ -847,5 +870,77 @@ mod tests {
             err.contains("0..=59"),
             "should call out the minute bounds: {err}"
         );
+    }
+
+    // ---- day-of-month / day-of-week OR semantics ------------------------
+    //
+    // Vixie/POSIX cron (and Laravel) treat the two day fields specially:
+    // when BOTH are restricted (neither is `*`), the expression fires when
+    // EITHER matches. The previous all-fields-ANDed evaluation required the
+    // 13th to also be a Friday, so `0 0 13 * 5` would only ever fire on a
+    // Friday-the-13th — silently dropping every other 13th and every other
+    // Friday.
+
+    /// Build a fixed local instant at midnight for OR-semantics tests.
+    fn at_midnight(year: i32, month: u32, day: u32) -> DateTime<Local> {
+        use chrono::NaiveDate;
+        let naive = NaiveDate::from_ymd_opt(year, month, day)
+            .expect("valid calendar date")
+            .and_hms_opt(0, 0, 0)
+            .expect("valid time");
+        Local
+            .from_local_datetime(&naive)
+            .single()
+            .expect("unambiguous local instant")
+    }
+
+    #[test]
+    fn both_day_fields_restricted_fires_on_either_match() {
+        // `0 0 13 * 5` — midnight on the 13th OR on any Friday.
+        let expr = CronExpression::parse("0 0 13 * 5").unwrap();
+
+        // 2026-06-13 is a Saturday (not Friday) but it IS the 13th -> fires
+        // by day-of-month even though day-of-week does not match.
+        let saturday_the_13th = at_midnight(2026, 6, 13);
+        assert_eq!(saturday_the_13th.weekday(), chrono::Weekday::Sat);
+        assert!(
+            expr.is_due_at(saturday_the_13th),
+            "the 13th must fire even when it isn't a Friday"
+        );
+
+        // 2026-06-19 is a Friday but not the 13th -> fires by day-of-week
+        // even though day-of-month does not match.
+        let friday_not_13th = at_midnight(2026, 6, 19);
+        assert_eq!(friday_not_13th.weekday(), chrono::Weekday::Fri);
+        assert!(
+            expr.is_due_at(friday_not_13th),
+            "any Friday must fire even when it isn't the 13th"
+        );
+
+        // A day that is neither the 13th nor a Friday must NOT fire.
+        let plain_tuesday = at_midnight(2026, 6, 16);
+        assert_eq!(plain_tuesday.weekday(), chrono::Weekday::Tue);
+        assert!(
+            !expr.is_due_at(plain_tuesday),
+            "a day matching neither field must not fire"
+        );
+    }
+
+    #[test]
+    fn one_day_field_wildcard_keeps_and_semantics() {
+        // `0 0 13 * *` — day-of-week is `*`, so only the 13th fires; an
+        // ordinary day must not.
+        let dom_only = CronExpression::parse("0 0 13 * *").unwrap();
+        assert!(dom_only.is_due_at(at_midnight(2026, 6, 13)));
+        assert!(!dom_only.is_due_at(at_midnight(2026, 6, 14)));
+
+        // `0 0 * * 5` — day-of-month is `*`, so only Fridays fire.
+        let dow_only = CronExpression::parse("0 0 * * 5").unwrap();
+        let friday = at_midnight(2026, 6, 19);
+        assert_eq!(friday.weekday(), chrono::Weekday::Fri);
+        assert!(dow_only.is_due_at(friday));
+        let thursday = at_midnight(2026, 6, 18);
+        assert_eq!(thursday.weekday(), chrono::Weekday::Thu);
+        assert!(!dow_only.is_due_at(thursday));
     }
 }

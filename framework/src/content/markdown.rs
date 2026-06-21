@@ -221,10 +221,28 @@ fn append_plain_text(out: &mut String, text: &str) {
         return;
     }
 
+    // A SoftBreak/LineBreak before a node whose text opens with closing
+    // punctuation (`.`, `,`, etc.) leaves a single break-introduced space
+    // sitting in front of that punctuation — e.g. `Hello\n. World` walks to
+    // `"Hello . World"`. Drop only that spurious break space; intentional
+    // spaced punctuation inside a single Text run (French `Bonjour : ...`)
+    // is left untouched because it never crosses a break boundary.
+    if starts_with_closing_punctuation(text) && out.ends_with(' ') {
+        out.pop();
+    }
+
     if should_insert_space(out, text) {
         out.push(' ');
     }
     out.push_str(text);
+}
+
+/// Closing punctuation that should hug the preceding word rather than be
+/// pushed onto a new line by a Markdown SoftBreak/LineBreak.
+fn starts_with_closing_punctuation(text: &str) -> bool {
+    text.chars()
+        .next()
+        .is_some_and(|ch| matches!(ch, '.' | ',' | ':' | ';' | '!' | '?' | ')' | ']'))
 }
 
 fn should_insert_space(out: &str, text: &str) -> bool {
@@ -232,9 +250,7 @@ fn should_insert_space(out: &str, text: &str) -> bool {
         return false;
     }
 
-    text.chars()
-        .next()
-        .is_some_and(|ch| !matches!(ch, '.' | ',' | ':' | ';' | '!' | '?' | ')' | ']'))
+    !starts_with_closing_punctuation(text)
 }
 
 fn append_space(out: &mut String) {
@@ -244,15 +260,7 @@ fn append_space(out: &mut String) {
 }
 
 fn normalize_whitespace(text: &str) -> String {
-    text.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .replace(" .", ".")
-        .replace(" ,", ",")
-        .replace(" :", ":")
-        .replace(" ;", ";")
-        .replace(" !", "!")
-        .replace(" ?", "?")
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn excerpt_from_plain_text(plain_text: &str) -> String {
@@ -314,4 +322,69 @@ fn escape_attribute(value: &str) -> String {
         .replace('"', "&quot;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn break_before_punctuation_drops_only_the_spurious_space() {
+        // Simulate the AST walk for `Hello\n. World`: Text, SoftBreak, Text.
+        // The break introduces a space that would otherwise sit in front of
+        // the leading `.`.
+        let mut out = String::new();
+        append_plain_text(&mut out, "Hello");
+        append_space(&mut out); // SoftBreak / LineBreak
+        append_plain_text(&mut out, ". World");
+        assert_eq!(out, "Hello. World");
+    }
+
+    #[test]
+    fn intentional_spaced_punctuation_in_a_single_run_is_preserved() {
+        // French typography keeps a space before `:` and `?`. When the text
+        // arrives as a single run (no break boundary), the spacing must
+        // survive — the old global ` :` -> `:` replace corrupted it.
+        let mut out = String::new();
+        append_plain_text(&mut out, "Bonjour : comment ça va ?");
+        assert_eq!(out, "Bonjour : comment ça va ?");
+        // normalize_whitespace only collapses runs; it must not touch the
+        // intentional single spaces around the punctuation.
+        assert_eq!(
+            normalize_whitespace(&out),
+            "Bonjour : comment ça va ?",
+            "spaced punctuation in body text must not be glued to its word"
+        );
+    }
+
+    #[test]
+    fn spaced_punctuation_survives_full_render_pipeline() {
+        // End-to-end through the renderer: intentional spaced punctuation in
+        // the body must reach plain_text and excerpt untouched.
+        let out = MarkdownRenderer::default()
+            .render("Bonjour : comment ça va ?")
+            .expect("render");
+        assert_eq!(out.plain_text, "Bonjour : comment ça va ?");
+        assert_eq!(out.excerpt, "Bonjour : comment ça va ?");
+    }
+
+    #[test]
+    fn closing_brackets_after_break_also_hug_the_word() {
+        // `)` and `]` are in the closing set too, so a break before them is
+        // collapsed the same way.
+        let mut out = String::new();
+        append_plain_text(&mut out, "see footnote");
+        append_space(&mut out);
+        append_plain_text(&mut out, ") done");
+        assert_eq!(out, "see footnote) done");
+    }
+
+    #[test]
+    fn normalize_whitespace_only_collapses_runs() {
+        assert_eq!(
+            normalize_whitespace("  a \t b\n c  "),
+            "a b c",
+            "whitespace runs collapse to single spaces; nothing else changes"
+        );
+    }
 }

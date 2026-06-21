@@ -34,9 +34,19 @@
 //! - **`expires` inside the signed payload** binds the expiration to the
 //!   signature itself — a client cannot strip or extend the expiration
 //!   without invalidating the HMAC.
-//! - **HMAC-SHA256, hex** matches Laravel's wire format (32-byte digest,
-//!   64-char hex) so signed URLs minted by either side remain
-//!   interchangeable when keys match.
+//! - **HMAC-SHA256, hex** — a 32-byte digest rendered as 64 lowercase hex
+//!   characters, the same primitive and encoding Laravel uses.
+//!
+//! ## Not byte-compatible with Laravel's default signatures
+//!
+//! Suprnova signs the **path + sorted query** (host-independent). Laravel's
+//! default `UrlGenerator` signs the **absolute URL** — scheme, host, path,
+//! and query together. Because the signed payloads differ, a signature
+//! minted by one side will **not** verify on the other even when the
+//! `APP_KEY` is identical: same primitive, different message. Signing
+//! path+query keeps Suprnova links portable across hostnames (proxies,
+//! preview domains, local vs. production) without re-minting, which is the
+//! deliberate divergence — at the cost of cross-framework wire interchange.
 //!
 //! ## Key source
 //!
