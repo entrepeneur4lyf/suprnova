@@ -3104,31 +3104,19 @@ where
 
         // Fetch into the entity's `Model` — the SeaORM type that's
         // auto-implementing `FromQueryResult`. This is the storage-shape
-        // type, not the user's runtime struct. T11: route through the
-        // resolved executor (transaction or pool).
+        // type, not the user's runtime struct.
         //
-        // SeaORM's `.all<C: ConnectionTrait>` is generic + `Sized`;
-        // `&dyn ConnectionTrait` won't satisfy it. Match the executor
-        // variant and call `.all(...)` on each concrete arm so the
-        // generic resolves to either `DatabaseTransaction` or
-        // `DatabaseConnection`.
-        let raw_rows = match &exec {
-            crate::database::transaction::ExecutorChoice::Tx(t, _) => {
-                <<M as EloquentModel>::Entity as sea_orm::EntityTrait>::Model::find_by_statement(
-                    stmt,
-                )
-                .all(t.as_ref())
-                .await
-            }
-            crate::database::transaction::ExecutorChoice::Pool(c, _) => {
-                <<M as EloquentModel>::Entity as sea_orm::EntityTrait>::Model::find_by_statement(
-                    stmt,
-                )
-                .all(c.inner())
-                .await
-            }
-        }
-        .map_err(|e| FrameworkError::database(e.to_string()))?;
+        // Route through the resolved executor's instrumented
+        // `statement_all` terminal rather than calling
+        // `find_by_statement(stmt).all(conn)` straight at the
+        // connection, so the base SELECT — and the eager-load IN-queries
+        // that recurse back through `Builder::get` — emit `QueryExecuted`
+        // to `DB::listen` / the query log. T11: tx-vs-pool routing is
+        // handled inside the executor.
+        let raw_rows = exec
+            .statement_all::<<<M as EloquentModel>::Entity as sea_orm::EntityTrait>::Model>(stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
 
         let mut out: Vec<M> = if runtime_casts.is_empty() {
             // Fast path — convert each row via the macro-emitted

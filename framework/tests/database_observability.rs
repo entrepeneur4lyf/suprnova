@@ -14,10 +14,10 @@
 //! - `db_listen_fires_for_db_table_get` proves the chokepoint actually
 //!   covers a path that wasn't hand-wired to dispatch (the model-less
 //!   `DB::table(...).get()` builder routes through
-//!   `ExecutorChoice::query_all` which is the only place QueryExecuted
-//!   is emitted for prepared statements). If this test ever regresses
-//!   to "passes because we wrapped the literal DB::select callsite,"
-//!   the parity claim is fake.
+//!   `ExecutorChoice::query_all`, one of the instrumented
+//!   `ExecutorChoice` terminals where QueryExecuted is emitted). If this
+//!   test ever regresses to "passes because we wrapped the literal
+//!   DB::select callsite," the parity claim is fake.
 
 use serial_test::serial;
 use std::sync::atomic::{AtomicUsize, Ordering};

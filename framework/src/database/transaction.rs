@@ -564,6 +564,38 @@ impl ExecutorChoice {
         .await
     }
 
+    /// Execute a prepared `Statement` that produces rows and hydrate
+    /// each into `T` via [`FromQueryResult`](sea_orm::FromQueryResult).
+    /// Instrumented identically to [`Self::query_all`] — emits
+    /// [`QueryExecuted`](crate::database::events::QueryExecuted) when
+    /// observation is active.
+    ///
+    /// This is the read terminal the Eloquent `Builder` uses, so model
+    /// SELECTs — and the eager-load IN-queries that recurse back through
+    /// `Builder::get` — surface in `DB::listen` / the query log the way
+    /// Laravel's do. Behaviourally equivalent to
+    /// `find_by_statement(stmt).all(conn)` (SeaORM hydrates each row with
+    /// the empty column prefix) but routed through the observability
+    /// fan-out instead of straight at the connection.
+    #[doc(hidden)]
+    pub async fn statement_all<T>(&self, stmt: sea_orm::Statement) -> Result<Vec<T>, sea_orm::DbErr>
+    where
+        T: sea_orm::FromQueryResult,
+    {
+        self.run_instrumented(stmt, Some(super::events::ReadWriteType::Read), |s, e| {
+            Box::pin(async move {
+                let rows = match e {
+                    ExecutorChoice::Tx(t, _) => t.query_all(s).await?,
+                    ExecutorChoice::Pool(c, _) => c.inner().query_all(s).await?,
+                };
+                rows.iter()
+                    .map(|r| <T as sea_orm::FromQueryResult>::from_query_result(r, ""))
+                    .collect::<Result<Vec<T>, sea_orm::DbErr>>()
+            })
+        })
+        .await
+    }
+
     /// Execute a prepared `Statement` that doesn't produce rows
     /// (INSERT / UPDATE / DELETE / DDL). See [`Self::query_all`] for
     /// the observability contract.

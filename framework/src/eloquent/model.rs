@@ -217,15 +217,10 @@ where
             Self::default_connection_name(),
         )
         .await?;
-        let row = match &exec {
-            crate::database::transaction::ExecutorChoice::Tx(t, _) => {
-                Self::Entity::find_by_id(id).one(t.as_ref()).await
-            }
-            crate::database::transaction::ExecutorChoice::Pool(c, _) => {
-                Self::Entity::find_by_id(id).one(c.inner()).await
-            }
-        }
-        .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let row = exec
+            .select_one(Self::Entity::find_by_id(id))
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
         let hydrated = row.map(Self::try_from_storage).transpose()?;
         if let Some(ref m) = hydrated {
             Self::__dispatch_retrieved(m).await?;
@@ -284,21 +279,10 @@ where
             Self::default_connection_name(),
         )
         .await?;
-        let rows = match &exec {
-            crate::database::transaction::ExecutorChoice::Tx(t, _) => {
-                Self::Entity::find()
-                    .filter(pk.into_column().is_in(id_vec.clone()))
-                    .all(t.as_ref())
-                    .await
-            }
-            crate::database::transaction::ExecutorChoice::Pool(c, _) => {
-                Self::Entity::find()
-                    .filter(pk.into_column().is_in(id_vec.clone()))
-                    .all(c.inner())
-                    .await
-            }
-        }
-        .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let rows = exec
+            .select_all(Self::Entity::find().filter(pk.into_column().is_in(id_vec.clone())))
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
 
         let mut by_id: HashMap<_, _> = rows
             .into_iter()
@@ -338,15 +322,10 @@ where
             Self::default_connection_name(),
         )
         .await?;
-        let rows = match &exec {
-            crate::database::transaction::ExecutorChoice::Tx(t, _) => {
-                Self::Entity::find().all(t.as_ref()).await
-            }
-            crate::database::transaction::ExecutorChoice::Pool(c, _) => {
-                Self::Entity::find().all(c.inner()).await
-            }
-        }
-        .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let rows = exec
+            .select_all(Self::Entity::find())
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
         let out: Vec<Self> = rows
             .into_iter()
             .map(Self::try_from_storage)
