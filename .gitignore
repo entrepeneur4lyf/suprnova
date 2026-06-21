@@ -45,3 +45,8 @@ docs/superpowers/
 CLAUDE.md
 AGENTS.md
 assets/
+
+# Local dev tooling + stray artifacts — kept locally, not published
+/database.db
+/bacon.toml
+/dev.sh
