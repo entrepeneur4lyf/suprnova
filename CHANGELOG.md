@@ -48,6 +48,62 @@ Pre-1.0, internal API churn is expected. Semver guarantees begin at `1.0.0`.
 - **Payments** — the mock provider's verifier fails closed outside a development
   environment, and webhook source IPs resolve through `TrustedProxiesConfig`
   (`req.ip()`) rather than a raw `X-Forwarded-For` header.
+- **Filesystem path guard** now walks to the nearest *existing* ancestor when a
+  write target doesn't exist yet, closing a symlink escape where a planted
+  intermediate symlink with a missing immediate parent slipped past the guard.
+- **`DB::init_with`** validates the environment before connecting (matching
+  `DB::init`), so the dev SQLite fallback can no longer boot silently in
+  production through that entry point.
+- **Static-file serving** rejects dotfiles (`.env`, `.git/config`, `.htpasswd`,
+  any leading-`.` segment), not just `.`/`..` traversal.
+- **Payment webhooks** serialize concurrent retries of the same unprocessed
+  event with a `FOR UPDATE` lock + re-check, and treat mirror-table unique
+  violations as benign already-applied; `payments_subscription_items` gains a
+  `UNIQUE(subscription_id, provider_item_id)`.
+- **RBAC** defaults the model discriminator to the fully-qualified type name, so
+  two authenticatable types sharing a leaf name can no longer inherit each
+  other's roles/permissions.
+- **`invalidate_session()`** rotates the session id (not just flushes), closing a
+  session-fixation gap; the queue `WithoutOverlapping` middleware releases its
+  cache lock even when the job panics.
+- **Mail providers** cap error-response body reads (8 KiB), matching the
+  web-push client, so a hostile endpoint can't drive sender memory.
+
+### Fixed
+
+- **Nested eager loading** (`with(["posts.comments"])`) is now a constant number
+  of queries — the tail segment loads in one batched IN query across all
+  parents instead of one query per parent (N+1).
+- **`where_has`/`where_doesnt_have`** qualify closure columns with the target
+  table, so a column present on both pivot and target no longer produces an
+  ambiguous-column error on many-to-many relations.
+- **Soft-delete `delete`/`force_delete`/`touch` and factory `persist`** honor a
+  model's `#[model(connection = "…")]` routing (matching `restore` and the
+  other write paths) instead of falling back to the primary pool.
+- **JSON:API `Maybe::Missing`** uses a non-collidable wire sentinel, so user
+  data shaped like `{"__missing__": true}` is no longer silently stripped.
+- **Queued notifications** honor `should_send` (per-channel veto) and
+  `after_sending`, re-checked on the worker — previously only the synchronous
+  path did.
+- **Released jobs** push the retry copy before acking the original, so a transient
+  driver push error no longer drops the job.
+- **Paddle adjustment (refund) webhooks** key the mirror update off the referenced
+  transaction id and read amounts from `data.totals`, instead of inserting a
+  zero-amount row under the adjustment id.
+- **SQLite URLs** carrying a query string (`sqlite://db.sqlite?mode=rwc`) build a
+  valid single-query connection URL and a clean on-disk filename.
+- **HTTP** clamps `Accept` `q`-values to `[0,1]` and enforces a `FormRequest`'s
+  `max_body_bytes` even when the body was pre-buffered; **WebSocket** config
+  rejects `max_missed_pings < 2` (1 closed every connection on its first ping).
+- **Cron** day-of-month and day-of-week use OR semantics when both are restricted
+  (Vixie/POSIX parity); Markdown `plain_text`/excerpts preserve intentional
+  spaced punctuation; `CachedEvaluator` bounds its cache growth;
+  `SupervisorRegistry::start_all` no longer double-spawns on a second call; the
+  test container recovers in place from a poisoned lock.
+- Corrected stale docs on `filter_op` (operators are allowlist-validated), signed
+  URLs (not byte-compatible with Laravel's default absolute signatures),
+  `UniqueIdKind::is_valid` (a caller helper, not auto-wired into `find`), and the
+  identifier length cap (128, not 64).
 
 ### Documentation
 
