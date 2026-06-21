@@ -143,8 +143,13 @@ impl<T> From<Maybe<T>> for Option<T> {
 }
 
 /// Sentinel object inserted into a `serde_json::Value` to signal "omit
-/// this key during the attributes-rendering pass". Wraps a discriminant
-/// string the renderer recognises.
+/// this key during the attributes-rendering pass". The wire field key
+/// itself is this long, namespaced constant — `serde_json` discards the
+/// struct name passed to `serialize_struct`, so the collision-resistance
+/// has to live in the field key, not the struct name. A short key like
+/// `__missing__` is plausible real user data; nobody serializes
+/// `{"__suprnova_maybe_missing__": true}` by accident, so a `Maybe::Missing`
+/// can never be confused with genuine attribute data at any nesting depth.
 const SUPRNOVA_MAYBE_MISSING_TAG: &str = "__suprnova_maybe_missing__";
 
 impl<T: Serialize> Serialize for Maybe<T> {
@@ -158,9 +163,11 @@ impl<T: Serialize> Serialize for Maybe<T> {
                 // Emit a one-field object that `strip_missing_values`
                 // recognises and removes. Using a tagged object — not
                 // `null` — lets us distinguish "user explicitly stored
-                // null" from "value was omitted by design".
+                // null" from "value was omitted by design". The single
+                // field is keyed on the long namespaced constant so the
+                // sentinel can't collide with real user data on the wire.
                 let mut st = serializer.serialize_struct(SUPRNOVA_MAYBE_MISSING_TAG, 1)?;
-                st.serialize_field("__missing__", &true)?;
+                st.serialize_field(SUPRNOVA_MAYBE_MISSING_TAG, &true)?;
                 st.end()
             }
         }
@@ -168,12 +175,14 @@ impl<T: Serialize> Serialize for Maybe<T> {
 }
 
 /// True if `v` is the sentinel object emitted by `Maybe::Missing`'s
-/// `Serialize` impl.
+/// `Serialize` impl. Matches on the long namespaced key so genuine user
+/// data — even data shaped like `{"__missing__": true}` — is never
+/// mistaken for the sentinel.
 pub(crate) fn is_missing_sentinel(v: &Value) -> bool {
     let Some(obj) = v.as_object() else {
         return false;
     };
-    obj.len() == 1 && obj.get("__missing__").and_then(Value::as_bool) == Some(true)
+    obj.len() == 1 && obj.get(SUPRNOVA_MAYBE_MISSING_TAG).and_then(Value::as_bool) == Some(true)
 }
 
 /// Drop every key whose value is a `Maybe::Missing` sentinel, recursing
@@ -277,10 +286,13 @@ mod tests {
 
     #[test]
     fn strip_removes_missing_keys() {
+        // Build the sentinel via the actual Serialize impl so the test
+        // tracks the wire shape rather than hardcoding it.
+        let sentinel = || serde_json::to_value(Maybe::<i32>::missing()).unwrap();
         let mut v = serde_json::json!({
             "kept": 1,
-            "dropped": { "__missing__": true },
-            "nested": { "kept2": 2, "dropped2": { "__missing__": true } }
+            "dropped": sentinel(),
+            "nested": { "kept2": 2, "dropped2": sentinel() }
         });
         strip_missing_values(&mut v);
         assert_eq!(v["kept"], 1);
@@ -291,14 +303,43 @@ mod tests {
 
     #[test]
     fn strip_removes_missing_in_arrays() {
-        let mut v = serde_json::json!([
-            { "__missing__": true },
-            { "real": 1 },
-            { "__missing__": true }
-        ]);
+        let sentinel = || serde_json::to_value(Maybe::<i32>::missing()).unwrap();
+        let mut v = serde_json::json!([sentinel(), { "real": 1 }, sentinel()]);
         strip_missing_values(&mut v);
         assert_eq!(v.as_array().unwrap().len(), 1);
         assert_eq!(v[0]["real"], 1);
+    }
+
+    #[test]
+    fn user_data_shaped_like_old_sentinel_survives() {
+        // Real attribute data equal to the old short, collidable sentinel
+        // shape `{"__missing__": true}` must NOT be treated as a missing
+        // marker — at the top level, nested in an object, and inside an
+        // array. Only a genuine `Maybe::Missing` is stripped.
+        let collidable = || serde_json::json!({ "__missing__": true });
+        let real_missing = || serde_json::to_value(Maybe::<i32>::missing()).unwrap();
+
+        let mut v = serde_json::json!({
+            "looks_missing": collidable(),
+            "nested": { "also_looks_missing": collidable() },
+            "list": [collidable(), { "ok": 1 }],
+            "really_missing": real_missing(),
+        });
+        strip_missing_values(&mut v);
+
+        // The user data that merely looks like the old sentinel survives.
+        assert_eq!(v["looks_missing"], collidable());
+        assert_eq!(v["nested"]["also_looks_missing"], collidable());
+        assert_eq!(v["list"].as_array().unwrap().len(), 2);
+        assert_eq!(v["list"][0], collidable());
+        assert_eq!(v["list"][1]["ok"], 1);
+
+        // The genuine `Maybe::Missing` is still stripped.
+        assert!(v.get("really_missing").is_none());
+
+        // And the collidable shape is not classified as the sentinel.
+        assert!(!is_missing_sentinel(&collidable()));
+        assert!(is_missing_sentinel(&real_missing()));
     }
 
     #[test]

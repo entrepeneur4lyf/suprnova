@@ -734,9 +734,17 @@ pub fn regenerate_session_id() {
 }
 
 /// Invalidate the current session (clear all data)
+///
+/// Mirrors Laravel's `Store::invalidate`: flush every value, then
+/// regenerate the session id (and CSRF token) so a fixed/stale id can't
+/// be replayed against the now-empty session. Rotating the id here keeps
+/// `invalidate_session` in lockstep with [`regenerate_session_id`] and
+/// `Auth::logout_and_invalidate` — the regeneration-aware persistence
+/// step in [`SessionMiddleware`] then destroys the old store row.
 pub fn invalidate_session() {
     session_mut(|session| {
         session.flush();
+        session.id = generate_session_id();
         session.csrf_token = generate_csrf_token();
     });
 }
@@ -902,4 +910,55 @@ pub fn clear_two_factor_pending_remember() {
             session.dirty = true;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slot_with(session: SessionData) -> Arc<Mutex<Option<SessionData>>> {
+        Arc::new(Mutex::new(Some(session)))
+    }
+
+    #[tokio::test]
+    async fn invalidate_session_rotates_id_and_flushes() {
+        let original_id = "a".repeat(40);
+        let original_csrf = "b".repeat(40);
+        let mut session = SessionData::new(original_id.clone(), original_csrf.clone());
+        session.user_id = Some("7".to_string());
+        session.put("color", "blue");
+
+        let slot = slot_with(session);
+        SESSION_CONTEXT
+            .scope(slot.clone(), async {
+                invalidate_session();
+            })
+            .await;
+
+        let after = slot.lock().unwrap().take().expect("session present");
+
+        // Session-fixation guard: the id must rotate, matching Laravel's
+        // `invalidate()` (flush + regenerate).
+        assert_ne!(
+            after.id, original_id,
+            "invalidate_session must rotate the session id"
+        );
+        assert!(
+            crate::session::store::is_valid_session_id(&after.id),
+            "rotated id must match the generated session-id shape"
+        );
+
+        // Data is flushed and the CSRF token rotated.
+        assert!(after.user_id.is_none());
+        assert_eq!(after.get::<String>("color"), None);
+        assert_ne!(after.csrf_token, original_csrf);
+        assert!(after.is_dirty());
+    }
+
+    #[tokio::test]
+    async fn invalidate_session_is_noop_without_scope() {
+        // Outside a request scope there is nothing to invalidate; the
+        // helper must not panic.
+        invalidate_session();
+    }
 }

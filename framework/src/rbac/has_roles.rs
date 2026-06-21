@@ -15,14 +15,6 @@ fn int_value(i: i64) -> Value {
     Value::from(i)
 }
 
-fn short_type_name<T: ?Sized>() -> String {
-    std::any::type_name::<T>()
-        .rsplit("::")
-        .next()
-        .unwrap_or("Model")
-        .to_string()
-}
-
 async fn find_role_id(name: &str, guard_name: &str) -> Result<Option<i64>, FrameworkError> {
     let row = DB::select_one(
         "SELECT id FROM roles WHERE name = ? AND guard_name = ? LIMIT 1",
@@ -139,7 +131,9 @@ pub async fn give_permission_to_role_on_guard(
 
 /// Assign a role to a model on the default `"web"` guard.
 ///
-/// `model_type` is usually the short Rust type name, for example `"User"`.
+/// `model_type` is the model discriminator — for [`HasRoles`] implementors
+/// this is [`HasRoles::rbac_model_type`], which defaults to the
+/// fully-qualified Rust type path.
 pub async fn assign_role_to_model(
     model_type: &str,
     model_id: &str,
@@ -311,15 +305,29 @@ pub async fn has_permission_for_model_on_guard(
 /// Trait for authenticatable models that can receive RBAC roles and
 /// permissions.
 ///
-/// The default model discriminator is the short Rust type name
-/// (`User` for `crate::models::user::User`). Override [`Self::rbac_model_type`]
-/// when an app needs a stable custom discriminator.
+/// The default model discriminator is the fully-qualified Rust type path
+/// (`crate::models::user::User`, not the short leaf `User`). Using the full
+/// path means two distinct authenticatable types that happen to share a leaf
+/// name cannot silently collide on the same `(model_type, model_id)` rows —
+/// which would leak one type's roles and permissions onto the other.
+///
+/// Override [`Self::rbac_model_type`] when an app wants a stable custom
+/// discriminator. Two requirements for any override:
+///
+/// 1. **It must be globally unique** across every authenticatable type that
+///    shares the same RBAC tables — two types returning the same string will
+///    share roles and permissions for matching ids.
+/// 2. **Prefer an override for any persisted discriminator you depend on.**
+///    `std::any::type_name` is *not* guaranteed stable across compiler
+///    versions or refactors (renaming or moving the type changes it), so apps
+///    that persist `model_type` long-term and need it to stay constant should
+///    return their own fixed string rather than rely on the default.
 #[async_trait]
 pub trait HasRoles: Authenticatable {
     /// Model discriminator stored in `model_roles.model_type` and
     /// `model_permissions.model_type`.
     fn rbac_model_type(&self) -> String {
-        short_type_name::<Self>()
+        std::any::type_name::<Self>().to_string()
     }
 
     /// Model identifier stored in `model_roles.model_id` and
@@ -358,5 +366,88 @@ pub trait HasRoles: Authenticatable {
             permission_name,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::any::Any;
+    use std::sync::Arc;
+
+    // Two distinct authenticatable types that share the leaf name `Account`
+    // but live in separate modules, so their fully-qualified type paths
+    // differ. With the short-leaf-name default they collided; the
+    // fully-qualified default must keep them apart.
+    mod first {
+        use super::*;
+
+        pub struct Account {
+            pub id: i64,
+        }
+
+        impl Authenticatable for Account {
+            fn get_auth_identifier(&self) -> String {
+                self.id.to_string()
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+                self
+            }
+        }
+
+        impl HasRoles for Account {}
+    }
+
+    mod second {
+        use super::*;
+
+        pub struct Account {
+            pub id: i64,
+        }
+
+        impl Authenticatable for Account {
+            fn get_auth_identifier(&self) -> String {
+                self.id.to_string()
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+                self
+            }
+        }
+
+        impl HasRoles for Account {}
+    }
+
+    #[test]
+    fn distinct_types_with_same_leaf_name_get_distinct_discriminators() {
+        let a = first::Account { id: 7 };
+        let b = second::Account { id: 7 };
+
+        // Same leaf name, same id — but the discriminators must differ so
+        // the two types cannot share roles/permissions rows.
+        assert_ne!(
+            a.rbac_model_type(),
+            b.rbac_model_type(),
+            "distinct types sharing a leaf name must not share an RBAC discriminator"
+        );
+        // The default is the fully-qualified type path, not the leaf.
+        assert!(a.rbac_model_type().contains("::"));
+        assert!(a.rbac_model_type().ends_with("Account"));
+        assert!(b.rbac_model_type().ends_with("Account"));
+    }
+
+    #[test]
+    fn rbac_model_id_uses_auth_identifier() {
+        let a = first::Account { id: 42 };
+        assert_eq!(a.rbac_model_id(), "42");
     }
 }

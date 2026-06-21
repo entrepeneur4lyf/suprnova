@@ -56,7 +56,10 @@ async fn setup() -> TestDatabase {
     suprnova::rbac::give_permission_to_role("author", "articles.create")
         .await
         .unwrap();
-    suprnova::rbac::assign_role_to_model("User", "7", "author")
+    // Use the model's own discriminator (the fully-qualified type name)
+    // so the seeded assignment matches what the trait checks and the
+    // Role/Permission middleware query at runtime.
+    suprnova::rbac::assign_role_to_model(&User { id: 7 }.rbac_model_type(), "7", "author")
         .await
         .unwrap();
     db
