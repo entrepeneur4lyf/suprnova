@@ -192,6 +192,39 @@ fn scaffolded_user_model_exposes_auth_password() {
 }
 
 // ---------------------------------------------------------------------------
+// Inertia client pin — the scaffolds must ship a current `@inertiajs/*`
+// adapter. A typo or accidental downgrade compiles fine (npm isn't part of
+// `cargo check`), so only a content assertion catches drift.
+// ---------------------------------------------------------------------------
+
+/// The expected `@inertiajs/*` caret pin every frontend scaffold ships.
+/// Bump this in lockstep with the `package.json.tpl` files.
+const EXPECTED_INERTIA_PIN: &str = "^3.4.0";
+
+fn assert_inertia_pin(tmp: &TempDir, project: &str, frontend: &str, adapter: &str) {
+    scaffold(tmp, project, &["--frontend", frontend]);
+    let pkg = tmp
+        .path()
+        .join(project)
+        .join("frontend")
+        .join("package.json");
+    let body = std::fs::read_to_string(&pkg).expect("scaffolded package.json should exist");
+    let needle = format!("\"@inertiajs/{adapter}\": \"{EXPECTED_INERTIA_PIN}\"");
+    assert!(
+        body.contains(&needle),
+        "{frontend} scaffold must pin @inertiajs/{adapter} at {EXPECTED_INERTIA_PIN}:\n{body}"
+    );
+}
+
+#[test]
+fn scaffold_pins_current_inertia_client() {
+    let tmp = TempDir::new().unwrap();
+    assert_inertia_pin(&tmp, "inertia_svelte", "svelte", "svelte");
+    assert_inertia_pin(&tmp, "inertia_react", "react", "react");
+    assert_inertia_pin(&tmp, "inertia_vue", "vue", "vue3");
+}
+
+// ---------------------------------------------------------------------------
 // make:* generator audits — ensure the in-place commands emit clean code.
 // ---------------------------------------------------------------------------
 

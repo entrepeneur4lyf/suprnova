@@ -177,6 +177,46 @@ fail at runtime — the infallible methods convert the panic into a 500
 via [the panic boundary](error-model.md), so reach for `try_*` when
 you'd rather handle the failure explicitly.
 
+### Merge strategies and infinite scroll
+
+`.merge` (append), `.merge_prepend`, and `.deep_merge` cover the common
+"load more" cases. To diff-merge — update rows the client already holds
+instead of duplicating them — reach for `.merge_with` with an explicit
+`MergeStrategy` carrying a `match_on` key:
+
+```rust
+use suprnova::{InertiaResponse, MergeStrategy};
+
+InertiaResponse::new("Feed/Index")
+    .merge_with(
+        "posts",
+        next_page,                                     // the new page slice
+        MergeStrategy::Append { match_on: Some("id".into()) },
+    )
+```
+
+`match_on` names the field the client dedupes on (emitted to the page
+object as `matchPropsOn`), so a refetch that overlaps the current window
+replaces matching rows in place rather than appending copies. `Prepend`
+and `Deep` take the same `match_on`.
+
+Infinite scroll is the same machinery with pagination metadata attached.
+`.scroll` / `.scroll_with` — or `.paginate`, which adapts a
+`LengthAwarePaginator` or `CursorPaginator` directly — emit `scrollProps`
+next to the data, and the client's `<InfiniteScroll>` component drives the
+next/previous fetches:
+
+```rust
+// `posts` is a CursorPaginator from the query builder.
+InertiaResponse::new("Feed/Index").paginate("posts", posts)
+```
+
+The framework reads the merge direction from the
+`X-Inertia-Infinite-Scroll-Merge-Intent` request header the client sends
+(`append` when scrolling down, `prepend` when scrolling up). On a fresh
+visit — no intent header — `scrollProps["posts"].reset` is `true`, so the
+client clears its accumulator before rendering the first window.
+
 ## Partial reloads
 
 The Inertia 3 client can request a subset of a page's props (or a

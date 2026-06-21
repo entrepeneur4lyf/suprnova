@@ -10,7 +10,7 @@
     "check": "vue-tsc --noEmit"
   },
   "dependencies": {
-    "@inertiajs/vue3": "^3.1.1",
+    "@inertiajs/vue3": "^3.4.0",
     "vue": "^3.5.34"
   },
   "devDependencies": {

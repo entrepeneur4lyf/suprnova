@@ -103,7 +103,7 @@ today. Detail per feature lives in the [CHANGELOG](CHANGELOG.md) and the
 ### Frontend (Inertia)
 
 - [x] Inertia v3 protocol — full protocol, SSR client + CLI worker, Precognition, infinite scroll, history encryption, partial reloads
-- [x] Frontend starters — React 19 / Vue 3.5 / Svelte 5 on Vite + Tailwind v4 + Inertia 3.1
+- [x] Frontend starters — React 19 / Vue 3.5 / Svelte 5 on Vite + Tailwind v4 + Inertia 3.4
 - [x] Data objects — `#[derive(Data)]` DTOs + TS export, tri-state `Field<T>`
 - [x] Pagination — length-aware + cursor paginators, encrypted cursors, Inertia scroll bridge
 - [x] JSON:API resources — `#[json_resource]`, compound docs, sparse fieldsets, includes

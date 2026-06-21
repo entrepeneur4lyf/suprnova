@@ -327,6 +327,67 @@ function submit() {
 </template>
 ```
 
+### Form callbacks
+
+`form.post(url, options)` — and the matching `.put` / `.patch` /
+`.delete` — accept the standard visit callbacks (`onStart`, `onSuccess`,
+`onError`, `onFinish`). Validation errors returned by your Rust handler
+land in `form.errors` automatically; the callbacks are for side effects:
+
+```ts
+form.post('/posts', {
+  onSuccess: async () => { await refreshDrafts() },  // awaited since Inertia 3.4
+  onError: (errors) => console.warn(errors),
+  onFinish: () => form.reset('content'),
+})
+```
+
+As of Inertia 3.4 an async `onSuccess` is awaited before the submission
+settles, so `form.processing` stays `true` until your callback resolves —
+handy when a successful submit kicks off follow-up work you don't want the
+UI to race past.
+
+## Polling
+
+For a page that should refresh on an interval — a live dashboard, a job
+status, an unread badge — the `usePoll` hook reissues a partial reload on
+a timer. Import it from your adapter:
+
+```ts
+import { usePoll } from '@inertiajs/svelte' // or '@inertiajs/react' / '@inertiajs/vue3'
+```
+
+Pair it with `only` so each tick fetches just the props that change — the
+server then resolves only those keys (see
+[partial reloads](frontend-inertia-responses.md#partial-reloads)):
+
+```ts
+const { stop, start } = usePoll(5000, { only: ['stats', 'jobs'] })
+```
+
+`usePoll(interval, requestOptions, options)`:
+
+- **`interval`** — milliseconds between reloads.
+- **`requestOptions`** — a reload options object (`only`, `except`,
+  `data`, `onSuccess`, …) **or a function returning one**, so the request
+  can depend on current state (e.g. a cursor that advances each tick).
+- **`options.mode`** — how a tick that fires while the previous request is
+  still in flight is handled: `'overlap'` (default — fire anyway),
+  `'cancel'` (abort the in-flight request), or `'rest'` (skip this tick).
+- **`options.keepAlive`** — keep polling while the tab is backgrounded
+  (default `false`: polling pauses on a hidden tab).
+- **`options.autoStart`** — begin immediately (default `true`); pass
+  `false` and call the returned `start()` when you're ready.
+
+The hook returns `{ stop, start }` for manual control. Outside a
+component, `router.poll(...)` from `@inertiajs/core` is the same call.
+
+Because every tick is an ordinary partial reload, the props under `only`
+flow through the same Lazy / Optional / Defer resolvers as any other
+request — and those resolvers run concurrently (capped by
+`max_concurrent_resolvers`), so a dashboard polling six widgets issues six
+parallel queries per tick instead of six serial ones.
+
 ## Shared props
 
 Anything you register as a shared prop at boot — typically the current user,

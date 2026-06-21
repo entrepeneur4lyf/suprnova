@@ -1,7 +1,7 @@
 # Frontend Overview
 
 Suprnova bridges Rust handlers to a single-page frontend via
-[Inertia.js](https://inertiajs.com/) 3.1.1. You write controllers in Rust
+[Inertia.js](https://inertiajs.com/) 3.4.0. You write controllers in Rust
 and pages in Svelte, React, or Vue; the framework moves typed props
 between them without a separate HTTP API in the middle.
 
@@ -21,7 +21,7 @@ All three scaffolds share the same stack:
 
 | Layer | Version |
 |---|---|
-| Inertia client adapter | `@inertiajs/{svelte,react,vue3}` 3.1.1 |
+| Inertia client adapter | `@inertiajs/{svelte,react,vue3}` 3.4.0 |
 | Build tool | Vite 8 |
 | Styling | Tailwind v4 (`@tailwindcss/vite`) |
 | TypeScript | strict mode |

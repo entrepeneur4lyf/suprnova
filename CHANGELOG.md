@@ -26,6 +26,13 @@ bumped and pushed, not by cutting a tag. Newest first.
 - **Constant-time comparison helper** — `constant_time_eq(a, b)` (subtle-backed)
   for webhook signature verification; `WebhookHandler::verify` docs now mandate
   constant-time digest comparison.
+- **Inertia client to 3.4.0** — the Svelte/React/Vue scaffolds now pin
+  `@inertiajs/{svelte,react,vue3}` at `^3.4.0` (from `3.1.1`), picking up
+  `router.poll` modes, dynamic `usePoll`, `Inertia.once`, the InfiniteScroll
+  cancel fix, and awaited Form `onSuccess`. The server already emits the full
+  3.4.0 page-object and header surface (once-props, the prepend/deep-merge
+  scroll family, `matchPropsOn`, rescued/shared props), so this is a
+  client-currency bump with no protocol change.
 
 ### Security
 
