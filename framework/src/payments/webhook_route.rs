@@ -9,10 +9,16 @@
 //!    `duplicate` immediately. A duplicate of an event that previously
 //!    *failed* (`processed_at IS NULL`, `process_error` set) re-attempts
 //!    hydration — the provider's retry is the recovery mechanism.
-//! 2. **Atomic hydration.** All mirror-table writes for one event happen
-//!    inside a single DB transaction along with `mark_processed`. Partial
-//!    state is not observable: either the mirror catches up AND
-//!    `processed_at` is set, or both are rolled back together.
+//! 2. **Atomic, serialized hydration.** All mirror-table writes for one
+//!    event happen inside a single DB transaction along with
+//!    `mark_processed`. Partial state is not observable: either the mirror
+//!    catches up AND `processed_at` is set, or both are rolled back
+//!    together. Concurrent retries of the *same* unprocessed event are
+//!    serialized by taking a `FOR UPDATE` lock on the audit row before
+//!    re-checking `processed_at` — the second arrival blocks until the
+//!    first commits, then sees `processed_at` set and short-circuits
+//!    instead of double-applying. Mirror-table `UNIQUE` violations from a
+//!    racing apply are treated as benign already-applied (200, not 503).
 //! 3. **5xx on failure.** Hydration errors return 503 so the provider
 //!    retries with backoff. The audit row's `process_error` is updated
 //!    outside the rolled-back transaction so operators can see the
@@ -34,7 +40,7 @@ use crate::routing::Router;
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
-    Set, TransactionTrait,
+    QuerySelect, Set, TransactionTrait,
 };
 use std::sync::Arc;
 
@@ -169,9 +175,34 @@ async fn handle_webhook_inner(
     //    degraded provider would otherwise exhaust the pool. The pre-fetched
     //    snapshot is passed through to `process_webhook`, which then does
     //    only pure-DB work inside the transaction.
+    //
+    //    Concurrent retries of the same unprocessed event are serialized
+    //    inside the transaction by a `FOR UPDATE` lock on the audit row: the
+    //    loser blocks until the winner commits, then sees `processed_at` set
+    //    and reports `AlreadyProcessed` instead of double-applying.
     match try_hydrate(db, provider.as_ref(), &event).await {
-        Ok(()) => text("ok"),
+        Ok(HydrationOutcome::Processed) => text("ok"),
+        Ok(HydrationOutcome::AlreadyProcessed) => {
+            tracing::debug!(
+                provider = %provider_name,
+                event_id = %event.provider_event_id,
+                "concurrent retry observed event already processed under row lock"
+            );
+            err_response(200, "duplicate")
+        }
         Err(e) => {
+            // A mirror-table `UNIQUE` violation means a racing apply already
+            // landed the row this attempt was about to write. The state the
+            // provider asked for exists; surfacing 503 would just provoke a
+            // pointless retry. Treat it as already-applied: 200.
+            if is_unique_violation(&format!("{e}")) {
+                tracing::debug!(
+                    provider = %provider_name,
+                    event_id = %event.provider_event_id,
+                    "mirror upsert hit a unique violation from a concurrent apply; treating as already-applied"
+                );
+                return err_response(200, "duplicate-applied");
+            }
             tracing::error!(
                 provider = %provider_name,
                 event_id = %event.provider_event_id,
@@ -182,6 +213,16 @@ async fn handle_webhook_inner(
             err_response(503, "hydration-failed")
         }
     }
+}
+
+/// Result of a single hydration attempt that committed without error.
+enum HydrationOutcome {
+    /// This attempt performed the mirror writes and set `processed_at`.
+    Processed,
+    /// A concurrent attempt had already set `processed_at` by the time this
+    /// one acquired the audit-row lock — no work was done and the caller
+    /// should report a duplicate, not re-apply.
+    AlreadyProcessed,
 }
 
 /// Pre-fetch any provider-side state the hydration path needs BEFORE opening
@@ -221,11 +262,21 @@ async fn prefetch_provider_state(
 ///
 /// External provider HTTP calls are hoisted to `prefetch_provider_state`
 /// above so the transaction scope contains only DB work.
+///
+/// Concurrent retries of the same event are serialized here: the first thing
+/// the transaction does is take a `FOR UPDATE` lock on the audit row, then
+/// re-read `processed_at`. A second retry that arrives while the first is
+/// still committing blocks on that lock; once the first commits, the second
+/// observes `processed_at` set and returns [`HydrationOutcome::AlreadyProcessed`]
+/// without re-applying the mirror writes. On backends without row-level locks
+/// (SQLite uses file-level transaction locking) `lock_for_update` is a no-op,
+/// but the re-read under the open transaction plus the mirror-table `UNIQUE`
+/// constraints still prevent a double-apply from being observable.
 async fn try_hydrate(
     db: &DatabaseConnection,
     provider: &dyn PaymentProvider,
     event: &WebhookEvent,
-) -> Result<(), PaymentError> {
+) -> Result<HydrationOutcome, PaymentError> {
     let subscription_snapshot = prefetch_provider_state(provider, event).await?;
 
     let txn = db
@@ -233,11 +284,36 @@ async fn try_hydrate(
         .await
         .map_err(|e| PaymentError::Internal(format!("begin tx: {e}")))?;
 
+    // Serialize concurrent retries: lock the audit row, then re-check whether
+    // a racing attempt already finished. `lock_exclusive` emits
+    // `SELECT … FOR UPDATE` on Postgres/MySQL/MariaDB and is a documented
+    // no-op on SQLite, which serializes writers at the file level instead.
+    let locked = match webhook_event::Entity::find()
+        .filter(webhook_event::Column::Provider.eq(&event.provider))
+        .filter(webhook_event::Column::ProviderEventId.eq(&event.provider_event_id))
+        .lock_exclusive()
+        .one(&txn)
+        .await
+    {
+        Ok(row) => row,
+        Err(e) => {
+            let _ = txn.rollback().await;
+            return Err(PaymentError::Internal(format!("lock audit row: {e}")));
+        }
+    };
+    if locked.as_ref().is_some_and(|r| r.processed_at.is_some()) {
+        // A concurrent retry committed while we waited on the lock. Roll back
+        // — we have nothing to add — and report the duplicate.
+        let _ = txn.rollback().await;
+        return Ok(HydrationOutcome::AlreadyProcessed);
+    }
+
     match process_webhook(&txn, provider, event, subscription_snapshot.as_ref()).await {
         Ok(()) => match mark_processed(&txn, event).await {
             Ok(()) => txn
                 .commit()
                 .await
+                .map(|()| HydrationOutcome::Processed)
                 .map_err(|e| PaymentError::Internal(format!("commit: {e}"))),
             Err(e) => {
                 let _ = txn.rollback().await;
@@ -687,4 +763,144 @@ pub fn webhook_routes(db: Arc<DatabaseConnection>) -> Router {
             }
         })
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::payments::{MockPaymentProvider, PaymentProvider, PaymentProviderRegistry};
+    use crate::testing::TestDatabase;
+    use sea_orm_migration::MigratorTrait;
+
+    struct PaymentsTestMigrator;
+
+    #[async_trait::async_trait]
+    impl MigratorTrait for PaymentsTestMigrator {
+        fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
+            crate::payments::migrations::migrations()
+        }
+    }
+
+    fn register_mock(name: &'static str) -> Arc<MockPaymentProvider> {
+        let mock = Arc::new(MockPaymentProvider::new());
+        let as_trait: Arc<dyn PaymentProvider> = mock.clone();
+        PaymentProviderRegistry::bind(name, as_trait);
+        mock
+    }
+
+    /// Status of a `Response` regardless of which arm carries it.
+    fn status_of(resp: &Response) -> u16 {
+        match resp {
+            Ok(r) | Err(r) => r.status_code(),
+        }
+    }
+
+    fn payment_succeeded_body(event_id: &str, txn_id: &str) -> bytes::Bytes {
+        bytes::Bytes::from(
+            serde_json::json!({
+                "id": event_id,
+                "type": "payment.succeeded",
+                "data": { "object": {
+                    "id": txn_id,
+                    "customer": "cus_concurrent",
+                    "amount": 4242,
+                    "currency": "USD"
+                }}
+            })
+            .to_string(),
+        )
+    }
+
+    /// `is_unique_violation` recognises the per-backend phrasings so a benign
+    /// concurrent-apply collision is mapped to 200 rather than a spurious 503.
+    #[test]
+    fn unique_violation_matcher_covers_each_backend_phrasing() {
+        assert!(is_unique_violation("UNIQUE constraint failed: t.col"));
+        assert!(is_unique_violation(
+            "duplicate key value violates unique constraint \"uniq_x\""
+        ));
+        assert!(is_unique_violation(
+            "Duplicate entry 'a-b' for key 'uniq_x'"
+        ));
+        assert!(!is_unique_violation("connection refused"));
+    }
+
+    /// Two concurrent RETRY deliveries of the same unprocessed event must
+    /// result in a single effective processing: both callers get 200, exactly
+    /// one mirror transaction row exists, and the audit row ends up processed
+    /// exactly once. The `FOR UPDATE` lock + `processed_at` re-check inside the
+    /// transaction serializes the apply; the loser observes the winner's commit
+    /// and reports a duplicate instead of double-applying.
+    #[tokio::test]
+    async fn concurrent_retries_of_unprocessed_event_process_once() {
+        let provider_name: &'static str = "mock-webhook-concurrent-retry";
+        let _mock = register_mock(provider_name);
+
+        let db = TestDatabase::fresh::<PaymentsTestMigrator>()
+            .await
+            .expect("TestDatabase::fresh");
+        let conn = Arc::new(db.conn().clone());
+
+        let event_id = "evt_concurrent_retry";
+        let txn_id = "txn_concurrent_retry";
+
+        // Seed an existing, UNPROCESSED audit row — this is the retry precondition:
+        // a prior delivery landed the audit row but hydration has not completed.
+        let seed = webhook_event::ActiveModel {
+            provider: Set("mock".into()),
+            provider_event_id: Set(event_id.into()),
+            provider_event_type: Set("payment.succeeded".into()),
+            neutral_event_kind: Set(Some("payment_succeeded".into())),
+            payload: Set(serde_json::json!({})),
+            received_at: Set(Utc::now().to_rfc3339()),
+            processed_at: Set(None),
+            process_error: Set(Some("transient failure on first attempt".into())),
+            ..Default::default()
+        };
+        seed.insert(&*conn).await.expect("seed audit row");
+
+        // Fire two retry deliveries of the same event concurrently.
+        let body = payment_succeeded_body(event_id, txn_id);
+        let (db1, db2) = (conn.clone(), conn.clone());
+        let (b1, b2) = (body.clone(), body);
+        let (r1, r2) = tokio::join!(
+            handle_webhook_inner(&db1, provider_name, None, http::HeaderMap::new(), b1),
+            handle_webhook_inner(&db2, provider_name, None, http::HeaderMap::new(), b2),
+        );
+
+        // Both deliveries succeed (one processes, one observes the duplicate).
+        assert_eq!(status_of(&r1), 200, "first retry must return 200");
+        assert_eq!(status_of(&r2), 200, "second retry must return 200");
+
+        // Exactly one mirror transaction row — no double-insert.
+        let txns = transaction::Entity::find()
+            .filter(transaction::Column::ProviderTransactionId.eq(txn_id))
+            .all(&*conn)
+            .await
+            .expect("db ok");
+        assert_eq!(
+            txns.len(),
+            1,
+            "concurrent retries must produce exactly one transaction mirror row, got {}",
+            txns.len()
+        );
+        assert_eq!(txns[0].amount_total_minor, 4242);
+        assert_eq!(txns[0].status, "succeeded");
+
+        // Exactly one audit row, now processed and with the stale error cleared.
+        let audit = webhook_event::Entity::find()
+            .filter(webhook_event::Column::ProviderEventId.eq(event_id))
+            .all(&*conn)
+            .await
+            .expect("db ok");
+        assert_eq!(audit.len(), 1, "retry must reuse the single audit row");
+        assert!(
+            audit[0].processed_at.is_some(),
+            "audit row must be marked processed after the winning apply"
+        );
+        assert!(
+            audit[0].process_error.is_none(),
+            "the winning apply clears the stale process_error"
+        );
+    }
 }

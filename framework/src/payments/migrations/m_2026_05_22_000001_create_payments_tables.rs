@@ -362,6 +362,21 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
+        // A subscription can hold each provider line item only once;
+        // this UNIQUE lets the webhook sync treat a concurrent
+        // duplicate-apply as a benign already-applied row rather than
+        // double-inserting it.
+        manager
+            .create_index(
+                Index::create()
+                    .name("uniq_payments_subscription_items_provider_item")
+                    .table(Alias::new("payments_subscription_items"))
+                    .col(Alias::new("subscription_id"))
+                    .col(Alias::new("provider_item_id"))
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
 
         // ── payments_transactions ─────────────────────────────────────
         manager
