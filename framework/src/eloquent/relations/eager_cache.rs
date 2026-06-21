@@ -145,6 +145,33 @@ impl EagerLoadCache {
             .insert(name.to_string(), RelationCell::One(ClonedBox::new(row)));
     }
 
+    /// Take the eager-loaded HasMany / BelongsToMany row vector out by
+    /// value, leaving an empty vector in its place (so the cell still
+    /// reports as loaded). Used by the batched nested-recursion arm,
+    /// which gathers every parent's children into one owned slice — owning
+    /// them sidesteps the lifetimes of holding `&mut` through a slice of
+    /// `&mut Self` — then puts them back via [`set_many`](Self::set_many).
+    /// Returns `None` if the cell isn't a populated `Many`.
+    pub fn take_many<T: Any + Send + Sync>(&mut self, name: &str) -> Option<Vec<T>> {
+        match self.rows.get_mut(name) {
+            Some(RelationCell::Many(boxed)) => boxed.downcast_mut::<Vec<T>>().map(std::mem::take),
+            _ => None,
+        }
+    }
+
+    /// Take the eager-loaded HasOne / BelongsTo row out by value, leaving
+    /// a typed `None` in its place (so the cell still reports as loaded).
+    /// Companion to [`take_many`](Self::take_many) for single-value kinds.
+    /// Returns `None` if the cell isn't a populated `One(Some(_))`.
+    pub fn take_one<T: Any + Send + Sync>(&mut self, name: &str) -> Option<T> {
+        match self.rows.get_mut(name) {
+            Some(RelationCell::One(boxed)) => {
+                boxed.downcast_mut::<Option<T>>().and_then(Option::take)
+            }
+            _ => None,
+        }
+    }
+
     /// Read an eager-loaded HasOne / BelongsTo row.
     ///
     /// Returns `None` if the relation was not loaded OR if the FK was

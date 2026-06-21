@@ -470,7 +470,18 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                             &now,
                         )?,
                     );
-                    let exec = ::suprnova::database::transaction::ExecutorChoice::resolve()?;
+                    // Route through `resolve_write` so the timestamp
+                    // bump honours the full write-side precedence chain
+                    // — tx override → ambient CURRENT_TX → per-model
+                    // `#[model(connection = ".")]` → primary. The bare
+                    // `resolve()` only consults CURRENT_TX, silently
+                    // ignoring per-model connection routing.
+                    let exec = ::suprnova::database::transaction::ExecutorChoice::resolve_write(
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
+                    )
+                    .await?;
                     exec.update_active(am)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -628,9 +639,18 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                         "UPDATE {table} SET {} = ? WHERE {pk_name} = ?",
                         #soft_delete_col,
                     );
-                    // T11: route through ExecutorChoice so soft-deletes
-                    // inside `DB::transaction` land in the active tx.
-                    let exec = ::suprnova::database::transaction::ExecutorChoice::resolve()?;
+                    // Route through `resolve_write` so the tombstone
+                    // UPDATE honours the full write-side precedence chain
+                    // — tx override → ambient CURRENT_TX → per-model
+                    // `#[model(connection = ".")]` → primary — matching
+                    // `restore()`. The bare `resolve()` only consults
+                    // CURRENT_TX, silently ignoring per-model routing.
+                    let exec = ::suprnova::database::transaction::ExecutorChoice::resolve_write(
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
+                    )
+                    .await?;
                     let backend = exec.backend();
                     exec.run(
                         ::suprnova::sea_orm::Statement::from_sql_and_values(
@@ -752,9 +772,18 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     let snapshot = ::core::clone::Clone::clone(&self);
                     let row: <<Self as ::suprnova::eloquent::EloquentModel>::Entity as ::suprnova::sea_orm::EntityTrait>::Model = self.into();
                     let am = <_ as ::suprnova::sea_orm::IntoActiveModel<_>>::into_active_model(row);
-                    // T11: route through ExecutorChoice so force-deletes
-                    // inside `DB::transaction` land in the active tx.
-                    let exec = ::suprnova::database::transaction::ExecutorChoice::resolve()?;
+                    // Route through `resolve_write` so the hard DELETE
+                    // honours the full write-side precedence chain — tx
+                    // override → ambient CURRENT_TX → per-model
+                    // `#[model(connection = ".")]` → primary — matching
+                    // `restore()`. The bare `resolve()` only consults
+                    // CURRENT_TX, silently ignoring per-model routing.
+                    let exec = ::suprnova::database::transaction::ExecutorChoice::resolve_write(
+                        ::core::option::Option::None,
+                        ::core::option::Option::None,
+                        <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
+                    )
+                    .await?;
                     exec.delete_active(am)
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
@@ -1057,9 +1086,18 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         impl ::suprnova::Persistable for #struct_ident {
             async fn persist(self) -> ::core::result::Result<Self, ::suprnova::FrameworkError> {
                 let inner: #module_name::Model = self.into();
-                // T11: route through ExecutorChoice so factory persists
-                // inside `DB::transaction` land in the active tx.
-                let exec = ::suprnova::database::transaction::ExecutorChoice::resolve()?;
+                // Route through `resolve_write` so factory persists honour
+                // the full write-side precedence chain — tx override →
+                // ambient CURRENT_TX → per-model `#[model(connection = ".")]`
+                // → primary — matching every other write path. The bare
+                // `resolve()` only consults CURRENT_TX, silently ignoring
+                // per-model connection routing.
+                let exec = ::suprnova::database::transaction::ExecutorChoice::resolve_write(
+                    ::core::option::Option::None,
+                    ::core::option::Option::None,
+                    <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
+                )
+                .await?;
                 let inserted = match &exec {
                     ::suprnova::database::transaction::ExecutorChoice::Tx(t, _) => {
                         ::suprnova::persist_via_seaorm(inner, t.as_ref()).await?

@@ -905,7 +905,12 @@ impl<M> Builder<M> {
     }
 
     /// `WHERE col <op> val` for arbitrary SQL operators (`>=`, `<`,
-    /// `!=`, ...). No operator validation — pass-through to SQL.
+    /// `!=`, ...). The operator is recorded as-is here and checked
+    /// against the SQL-operator allowlist at execution time (in the
+    /// terminal methods, via
+    /// [`crate::database::validate_sql_operator`]); an operator outside
+    /// the allowlist surfaces as `Err(FrameworkError::param)` rather
+    /// than reaching the SQL renderer.
     #[doc(alias = "db_where_op")]
     pub fn filter_op(mut self, col: impl IntoColumn, op: &str, val: impl IntoVal) -> Self {
         self.where_terms.push(WhereTerm::Op(
@@ -1760,9 +1765,21 @@ fn render_exists(
         ));
     }
 
-    // Inner constraint from `where_has`'s closure.
+    // Inner constraint from `where_has`'s closure. Qualify bare
+    // columns with the target table the same way `where_relation`
+    // does below — on a pivot/m2m relation the FROM is `pivot JOIN
+    // target`, so a shared column name (`id`, `created_at`) is
+    // ambiguous without the qualifier and the database rejects the
+    // statement. The qualifier is `None` only when there's no target
+    // table (the degenerate "no relation metadata" path already
+    // returned a fail-closed `1 = 0` before reaching here).
+    let inner_qualifier: Option<&str> = if spec.target_table.is_empty() {
+        None
+    } else {
+        Some(spec.target_table.as_str())
+    };
     for t in &spec.inner_terms {
-        let part = render_subquery_term(backend, t, values, n);
+        let part = render_subquery_term(backend, inner_qualifier, t, values, n);
         where_parts.push(part);
     }
 
@@ -1826,24 +1843,45 @@ fn render_exists(
 /// renderer doesn't require a `Builder<M>` receiver — the inner terms
 /// were copied off a typed `Builder<R>` at `where_has` time and the
 /// types `R` have already been discarded.
+///
+/// `qualifier` is the table name to prefix bare columns with (e.g.
+/// `target` so `created_at` reads `target.created_at`). It is `Some`
+/// whenever the EXISTS subquery has a target table — required on
+/// pivot/m2m relations whose FROM is `pivot JOIN target`, where an
+/// unqualified shared column (`id`, `created_at`) is ambiguous and the
+/// database rejects the statement. The `Raw` escape hatch is left
+/// verbatim: the caller owns its qualification the same way it owns the
+/// trust boundary the validator skips for it.
 fn render_subquery_term(
     backend: DbBackend,
+    qualifier: Option<&str>,
     term: &WhereTerm,
     values: &mut Vec<SeaValue>,
     n: &mut usize,
 ) -> String {
+    // Prefix a bare column with the subquery's target table when one is
+    // present, so it reads unambiguously across the JOIN. A column the
+    // caller already qualified (carries a `.`) is left as-is — both to
+    // avoid a bogus three-segment `target.other.col` and to respect an
+    // explicit table choice in the `where_has` closure.
+    let q = |col: &str| -> String {
+        match qualifier {
+            Some(table) if !col.contains('.') => format!("{table}.{col}"),
+            _ => col.to_string(),
+        }
+    };
     match term {
         WhereTerm::Eq(col, v) => {
             *n += 1;
             let ph = placeholder(backend, *n);
             values.push(json_value_to_sea_value(v));
-            format!("{col} = {ph}")
+            format!("{} = {ph}", q(col))
         }
         WhereTerm::Op(col, op, v) => {
             *n += 1;
             let ph = placeholder(backend, *n);
             values.push(json_value_to_sea_value(v));
-            format!("{col} {op} {ph}")
+            format!("{} {op} {ph}", q(col))
         }
         WhereTerm::In(col, vs) => {
             let phs: Vec<String> = vs
@@ -1858,7 +1896,7 @@ fn render_subquery_term(
             if phs.is_empty() {
                 "1 = 0".to_string()
             } else {
-                format!("{col} IN ({})", phs.join(", "))
+                format!("{} IN ({})", q(col), phs.join(", "))
             }
         }
         WhereTerm::NotIn(col, vs) => {
@@ -1874,7 +1912,7 @@ fn render_subquery_term(
             if phs.is_empty() {
                 "1 = 1".to_string()
             } else {
-                format!("{col} NOT IN ({})", phs.join(", "))
+                format!("{} NOT IN ({})", q(col), phs.join(", "))
             }
         }
         WhereTerm::Between(col, a, b) => {
@@ -1884,7 +1922,7 @@ fn render_subquery_term(
             *n += 1;
             let pb = placeholder(backend, *n);
             values.push(json_value_to_sea_value(b));
-            format!("{col} BETWEEN {pa} AND {pb}")
+            format!("{} BETWEEN {pa} AND {pb}", q(col))
         }
         WhereTerm::NotBetween(col, a, b) => {
             *n += 1;
@@ -1893,23 +1931,23 @@ fn render_subquery_term(
             *n += 1;
             let pb = placeholder(backend, *n);
             values.push(json_value_to_sea_value(b));
-            format!("{col} NOT BETWEEN {pa} AND {pb}")
+            format!("{} NOT BETWEEN {pa} AND {pb}", q(col))
         }
-        WhereTerm::Null(col) => format!("{col} IS NULL"),
-        WhereTerm::NotNull(col) => format!("{col} IS NOT NULL"),
+        WhereTerm::Null(col) => format!("{} IS NULL", q(col)),
+        WhereTerm::NotNull(col) => format!("{} IS NOT NULL", q(col)),
         WhereTerm::Like(col, pat) => {
             *n += 1;
             let ph = placeholder(backend, *n);
             values.push(SeaValue::String(Some(Box::new(pat.clone()))));
-            format!("{col} LIKE {ph}")
+            format!("{} LIKE {ph}", q(col))
         }
         WhereTerm::NotLike(col, pat) => {
             *n += 1;
             let ph = placeholder(backend, *n);
             values.push(SeaValue::String(Some(Box::new(pat.clone()))));
-            format!("{col} NOT LIKE {ph}")
+            format!("{} NOT LIKE {ph}", q(col))
         }
-        WhereTerm::Column(a, b) => format!("{a} = {b}"),
+        WhereTerm::Column(a, b) => format!("{} = {}", q(a), q(b)),
         WhereTerm::Raw(sql, bindings) => {
             for v in bindings {
                 *n += 1;
@@ -1921,24 +1959,24 @@ fn render_subquery_term(
             *n += 1;
             let ph = placeholder(backend, *n);
             values.push(json_value_to_sea_value(v));
-            render_json_contains(backend, col, &ph)
+            render_json_contains(backend, &q(col), &ph)
         }
-        WhereTerm::JsonLength(col, op, len) => render_json_length(backend, col, op, *len),
+        WhereTerm::JsonLength(col, op, len) => render_json_length(backend, &q(col), op, *len),
         WhereTerm::DatePart(part, col, v) => {
             *n += 1;
             let ph = placeholder(backend, *n);
             values.push(json_value_to_sea_value(v));
-            let lhs = render_date_part(backend, *part, col);
+            let lhs = render_date_part(backend, *part, &q(col));
             format!("{lhs} = {ph}")
         }
         WhereTerm::Not(inner) => {
-            let inner_sql = render_subquery_term(backend, inner, values, n);
+            let inner_sql = render_subquery_term(backend, qualifier, inner, values, n);
             format!("NOT ({inner_sql})")
         }
         WhereTerm::Or(terms) => {
             let parts: Vec<String> = terms
                 .iter()
-                .map(|t| render_subquery_term(backend, t, values, n))
+                .map(|t| render_subquery_term(backend, qualifier, t, values, n))
                 .collect();
             format!("({})", parts.join(" OR "))
         }

@@ -127,3 +127,110 @@ async fn restore_routes_through_per_model_named_connection() {
 
     ConnectionRegistry::clear();
 }
+
+/// The soft-delete `delete()` and `force_delete()` write paths must
+/// route through `#[model(connection = "alt")]` too — the same defect
+/// `restore()` had. (`touch()` shares the identical `resolve_write`
+/// routing and is covered by the same fix.) Before the fix these
+/// resolved through `DB::connection()?` (primary), which has no
+/// `rnc_users` table, so a misrouted write crashes with "no such table".
+#[tokio::test]
+#[serial]
+async fn soft_delete_and_force_delete_route_through_per_model_named_connection() {
+    // Primary: empty in-memory SQLite with NO `rnc_users` table.
+    let _primary = TestDatabase::sqlite_memory().await.unwrap();
+
+    // alt: the model's declared connection, with the table + two live rows.
+    let alt_conn = sea_orm::Database::connect("sqlite::memory:?mode=rwc")
+        .await
+        .expect("alt in-memory connection");
+    let alt = DbConnection::from_raw(alt_conn);
+    use sea_orm::ConnectionTrait;
+    alt.inner()
+        .execute_unprepared(
+            "CREATE TABLE rnc_users (\
+                id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                name TEXT NOT NULL, \
+                deleted_at TEXT\
+             )",
+        )
+        .await
+        .unwrap();
+    alt.inner()
+        .execute_unprepared(
+            "INSERT INTO rnc_users (id, name, deleted_at) \
+             VALUES (1, 'Alice', NULL), (2, 'Bob', NULL)",
+        )
+        .await
+        .unwrap();
+    ConnectionRegistry::register_existing("alt", alt.clone())
+        .await
+        .unwrap();
+
+    // Soft-delete row 1. Must land on `alt`; the buggy resolve() path
+    // would hit the table-less primary and fail.
+    let alice = RncUser::find(1i64)
+        .await
+        .unwrap()
+        .expect("alice is live on alt");
+    alice
+        .delete()
+        .await
+        .expect("soft delete must route through `alt`, not primary");
+
+    // Default scope now hides the trashed row; with_trashed still sees it.
+    assert!(
+        RncUser::find(1i64).await.unwrap().is_none(),
+        "soft-deleted row is hidden by the default scope",
+    );
+    let trashed = RncUser::with_trashed()
+        .filter("id", 1i64)
+        .first()
+        .await
+        .unwrap()
+        .expect("row 1 still present, trashed");
+    assert!(
+        trashed.deleted_at.is_some(),
+        "deleted_at must be set on the alt row",
+    );
+
+    // Hard-delete row 2 via force_delete — also must land on `alt`.
+    let bob = RncUser::find(2i64)
+        .await
+        .unwrap()
+        .expect("bob is live on alt");
+    bob.force_delete()
+        .await
+        .expect("force_delete must route through `alt`, not primary");
+    assert!(
+        RncUser::with_trashed()
+            .filter("id", 2i64)
+            .first()
+            .await
+            .unwrap()
+            .is_none(),
+        "row 2 is hard-deleted from alt",
+    );
+
+    // Confirm directly on `alt`: row 1 remains (trashed), row 2 is gone.
+    use sea_orm::FromQueryResult;
+    let stmt = sea_orm::Statement::from_string(
+        sea_orm::DatabaseBackend::Sqlite,
+        "SELECT COUNT(*) AS n FROM rnc_users".to_string(),
+    );
+    #[derive(FromQueryResult)]
+    struct Cnt {
+        n: i64,
+    }
+    let cnt = Cnt::find_by_statement(stmt)
+        .one(alt.inner())
+        .await
+        .unwrap()
+        .expect("count row");
+    assert_eq!(
+        cnt.n, 1,
+        "alt holds exactly the trashed row 1 after soft-delete + force_delete",
+    );
+
+    ConnectionRegistry::clear();
+}

@@ -387,6 +387,15 @@ pub fn find_relation<T: 'static>(name: &str) -> Option<&'static RelationEntry> {
 ///     ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>> {
 ///         unimplemented!()
 ///     }
+///     fn recurse_eager_load_batched<'a>(
+///         _p: &'a mut [&'a mut Self],
+///         _r: &'a str,
+///         _rs: &'a str,
+///         _d: &'a DatabaseConnection,
+///         _missing_only: bool,
+///     ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>> {
+///         unimplemented!()
+///     }
 ///     fn set_pivot_arc(
 ///         &mut self,
 ///         _p: Option<std::sync::Arc<dyn Any + Send + Sync>>,
@@ -457,6 +466,25 @@ pub trait EagerLoadDispatch: __sealed::Sealed + Sized {
     /// at every level.
     fn recurse_eager_load<'a>(
         &'a mut self,
+        relation: &'a str,
+        rest: &'a str,
+        db: &'a DatabaseConnection,
+        missing_only: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>>;
+
+    /// Collection-wide sibling of [`recurse_eager_load`](Self::recurse_eager_load):
+    /// recurse the next path segment across **every** parent at once.
+    ///
+    /// The per-parent form issues the next segment's IN query once per
+    /// parent, which is N+1 at every nested level. This form gathers all
+    /// parents' cached children of `relation` into one slice, loads the
+    /// next segment with a single IN query, and recurses the same way —
+    /// so a dotted path like `"posts.comments.author"` stays a constant
+    /// number of queries regardless of how many parents are in the set.
+    /// `missing_only` carries the same partition semantics as the
+    /// per-parent form.
+    fn recurse_eager_load_batched<'a>(
+        parents: &'a mut [&'a mut Self],
         relation: &'a str,
         rest: &'a str,
         db: &'a DatabaseConnection,

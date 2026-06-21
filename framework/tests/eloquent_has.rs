@@ -311,6 +311,28 @@ async fn has_through_pivot_joins_against_targets_custom_primary_key() {
     );
 }
 
+// ---- where_has closure columns are qualified on pivot relations --------
+//
+// Regression — a `where_has` closure term rendered its column unqualified
+// (`name = $1`). On a pivot-shaped EXISTS (`FROM pivot JOIN target`) a
+// column present on both sides is ambiguous and the database rejects the
+// query. The fix qualifies the closure's inner column with the target
+// table, matching the `where_relation` shortcut.
+#[tokio::test]
+async fn where_has_qualifies_closure_column_on_pivot_relation() {
+    use suprnova::sea_orm::DbBackend;
+
+    let (sql, _vals) = HexPivotUser::query()
+        .where_has::<HexPivotGroup, _>("groups", |q| q.filter("name", "ops"))
+        .to_sql_with_bindings_for(DbBackend::Postgres);
+
+    assert!(
+        sql.contains("hex_pivot_groups.name"),
+        "where_has closure column must be qualified with the target table so it is \
+         unambiguous against the pivot join, got SQL: {sql}",
+    );
+}
+
 // ---- has/where_has auto-applies related soft-delete scope --------------
 //
 // Regression — Laravel's `has`/`where_has` walks the related model's

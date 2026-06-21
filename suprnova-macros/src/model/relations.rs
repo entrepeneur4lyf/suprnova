@@ -142,6 +142,22 @@ fn emit_dispatch_impl(struct_ident: &syn::Ident) -> TokenStream {
                 ::std::boxed::Box::pin(self.__recurse_eager_load(relation, rest, db, missing_only))
             }
 
+            fn recurse_eager_load_batched<'a>(
+                parents: &'a mut [&'a mut Self],
+                relation: &'a str,
+                rest: &'a str,
+                db: &'a ::suprnova::sea_orm::DatabaseConnection,
+                missing_only: bool,
+            ) -> ::core::pin::Pin<
+                ::std::boxed::Box<
+                    dyn ::core::future::Future<
+                            Output = ::core::result::Result<(), ::suprnova::FrameworkError>,
+                        > + ::core::marker::Send + 'a,
+                >,
+            > {
+                ::std::boxed::Box::pin(Self::__recurse_eager_load_batched(parents, relation, rest, db, missing_only))
+            }
+
             fn set_pivot_arc(
                 &mut self,
                 pivot: ::core::option::Option<
@@ -176,6 +192,7 @@ fn emit_dispatchers(input: &ModelInput) -> Result<TokenStream> {
     let mut count_arms: Vec<TokenStream> = Vec::new();
     let mut aggregate_arms: Vec<TokenStream> = Vec::new();
     let mut recurse_arms: Vec<TokenStream> = Vec::new();
+    let mut recurse_batched_arms: Vec<TokenStream> = Vec::new();
     for rel in input.relations.as_deref().unwrap_or(&[]) {
         if let Some(arm) = emit_eager_arm(input, rel)? {
             eager_arms.push(arm);
@@ -188,6 +205,9 @@ fn emit_dispatchers(input: &ModelInput) -> Result<TokenStream> {
         }
         if let Some(arm) = emit_recurse_arm(input, rel)? {
             recurse_arms.push(arm);
+        }
+        if let Some(arm) = emit_recurse_batched_arm(input, rel)? {
+            recurse_batched_arms.push(arm);
         }
     }
 
@@ -252,6 +272,34 @@ fn emit_dispatchers(input: &ModelInput) -> Result<TokenStream> {
                 let _ = (rest, db, missing_only);
                 match relation {
                     #(#recurse_arms)*
+                    other => ::core::result::Result::Err(
+                        ::suprnova::FrameworkError::internal(::std::format!(
+                            "model `{}` has no relation `{}` to recurse into",
+                            ::std::any::type_name::<Self>(),
+                            other,
+                        )),
+                    ),
+                }
+            }
+
+            /// Batched sibling of [`Self::__recurse_eager_load`]: recurse
+            /// the next path segment across EVERY parent at once. Gathers
+            /// all parents' cached children of `relation` into one slice,
+            /// issues a single IN query for the next segment, then recurses
+            /// — so a dotted path stays a constant number of queries
+            /// instead of N+1 per nested level. Used by the eager-load
+            /// orchestrator for both `with(...)` and `load_missing(...)`.
+            #[doc(hidden)]
+            pub async fn __recurse_eager_load_batched(
+                parents: &mut [&mut Self],
+                relation: &str,
+                rest: &str,
+                db: &::suprnova::sea_orm::DatabaseConnection,
+                missing_only: bool,
+            ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
+                let _ = (rest, db, missing_only);
+                match relation {
+                    #(#recurse_batched_arms)*
                     other => ::core::result::Result::Err(
                         ::suprnova::FrameworkError::internal(::std::format!(
                             "model `{}` has no relation `{}` to recurse into",
@@ -5803,6 +5851,160 @@ fn emit_recurse_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Tok
         // v1. The macro emits an explicit error so the user gets a
         // clear message rather than silent success. See
         // `docs/core/eloquent.md` for the limitation note.
+        RelationKindAttr::MorphTo => Ok(Some(quote! {
+            #name_str => {
+                return ::core::result::Result::Err(
+                    ::suprnova::FrameworkError::internal(::std::format!(
+                        "model `{}` has a MorphTo relation `{}`; nested eager loading \
+                         through MorphTo is not supported in v1 (the per-family enum \
+                         erases the child types). Load each polymorphic target \
+                         separately for now.",
+                        ::core::stringify!(#parent_name),
+                        #name_str,
+                    )),
+                );
+            }
+        })),
+    }
+}
+
+/// `__recurse_eager_load_batched` arm — the collection-wide form of
+/// [`emit_recurse_arm`]. Instead of walking a single parent's cached
+/// children, it gathers EVERY parent's children of the relation into one
+/// slice, loads the next path segment with a single IN query, and
+/// recurses batched. This keeps a dotted path (`"posts.comments"`) a
+/// constant number of queries regardless of parent count; the per-parent
+/// form re-issues the next-segment query once per parent (N+1).
+fn emit_recurse_batched_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<TokenStream>> {
+    let name_str = rel.name.to_string();
+    let target_ty: &syn::Type = match rel.kind {
+        RelationKindAttr::HasManyThrough | RelationKindAttr::HasOneThrough => {
+            rel.through.as_ref().ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &rel.name,
+                    "HasOneThrough / HasManyThrough require a final target type \
+                     (parser bug if reached)",
+                )
+            })?
+        }
+        _ => &rel.target,
+    };
+    let parent_name = &input.item.ident;
+
+    // Holding `&mut` to children reached through a slice of `&mut Self`
+    // across the whole batch defeats the borrow checker (the double
+    // indirection can't escape the gather loop). So we TAKE the children
+    // out by value (no borrows held across the gather), load + recurse on
+    // the owned flat slice, then put them back in original order. MorphTo
+    // erases child types, so nested recursion isn't supported.
+    //
+    // The load + recurse step over the owned `Vec<#target_ty>` is shared;
+    // only the take and the put-back differ by cardinality.
+    let process_owned = quote! {
+        let (head, tail) = match rest.split_once('.') {
+            ::core::option::Option::Some((h, t)) => (h, ::core::option::Option::Some(t)),
+            ::core::option::Option::None => (rest, ::core::option::Option::None),
+        };
+        {
+            // Bulk-load the next segment ONCE across every gathered child.
+            // `missing_only` filters to children still missing `head`.
+            let mut refs: ::std::vec::Vec<&mut #target_ty> = if missing_only {
+                owned
+                    .iter_mut()
+                    .filter(|c| !<#target_ty as ::suprnova::EagerLoadDispatch>::has_eager(c, head))
+                    .collect()
+            } else {
+                owned.iter_mut().collect()
+            };
+            if !refs.is_empty() {
+                <#target_ty as ::suprnova::EagerLoadDispatch>::eager_load(
+                    head,
+                    refs.as_mut_slice(),
+                    db,
+                    ::core::option::Option::None,
+                )
+                .await?;
+            }
+        }
+        if let ::core::option::Option::Some(more) = tail {
+            let mut refs: ::std::vec::Vec<&mut #target_ty> = owned.iter_mut().collect();
+            <#target_ty as ::suprnova::EagerLoadDispatch>::recurse_eager_load_batched(
+                refs.as_mut_slice(),
+                head,
+                more,
+                db,
+                missing_only,
+            )
+            .await?;
+        }
+    };
+
+    match rel.kind {
+        RelationKindAttr::HasMany
+        | RelationKindAttr::BelongsToMany
+        | RelationKindAttr::HasManyThrough
+        | RelationKindAttr::MorphMany
+        | RelationKindAttr::MorphToMany
+        | RelationKindAttr::MorphedByMany => Ok(Some(quote! {
+            #name_str => {
+                // Take every parent's children out by value, recording the
+                // per-parent counts so they can be restored in order.
+                let mut owned: ::std::vec::Vec<#target_ty> = ::std::vec::Vec::new();
+                let mut takes: ::std::vec::Vec<(usize, usize)> = ::std::vec::Vec::new();
+                for (i, p) in parents.iter_mut().enumerate() {
+                    if let ::core::option::Option::Some(mut children) =
+                        p.__eager.take_many::<#target_ty>(#name_str)
+                    {
+                        let n = children.len();
+                        owned.append(&mut children);
+                        takes.push((i, n));
+                    }
+                }
+                if owned.is_empty() {
+                    return ::core::result::Result::Ok(());
+                }
+                #process_owned
+                // Put the (now-populated) children back into each parent in
+                // the same order they were taken.
+                let mut drained = owned.into_iter();
+                for (i, n) in takes {
+                    let chunk: ::std::vec::Vec<#target_ty> =
+                        drained.by_ref().take(n).collect();
+                    parents[i].__eager.set_many(#name_str, chunk);
+                }
+                return ::core::result::Result::Ok(());
+            }
+        })),
+
+        RelationKindAttr::HasOne
+        | RelationKindAttr::BelongsTo
+        | RelationKindAttr::HasOneThrough
+        | RelationKindAttr::MorphOne => Ok(Some(quote! {
+            #name_str => {
+                let mut owned: ::std::vec::Vec<#target_ty> = ::std::vec::Vec::new();
+                let mut takes: ::std::vec::Vec<usize> = ::std::vec::Vec::new();
+                for (i, p) in parents.iter_mut().enumerate() {
+                    if let ::core::option::Option::Some(child) =
+                        p.__eager.take_one::<#target_ty>(#name_str)
+                    {
+                        owned.push(child);
+                        takes.push(i);
+                    }
+                }
+                if owned.is_empty() {
+                    return ::core::result::Result::Ok(());
+                }
+                #process_owned
+                let mut drained = owned.into_iter();
+                for i in takes {
+                    if let ::core::option::Option::Some(child) = drained.next() {
+                        parents[i].__eager.set_one(#name_str, ::core::option::Option::Some(child));
+                    }
+                }
+                return ::core::result::Result::Ok(());
+            }
+        })),
+
         RelationKindAttr::MorphTo => Ok(Some(quote! {
             #name_str => {
                 return ::core::result::Result::Err(

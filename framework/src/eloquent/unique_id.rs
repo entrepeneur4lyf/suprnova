@@ -57,9 +57,23 @@ impl UniqueIdKind {
         }
     }
 
-    /// Whether the generated ID is valid for this kind. Mirrors
-    /// Laravel's `isValidUniqueId` check. Used by `find` to refuse
-    /// malformed identifiers before they reach the database.
+    /// Whether `value` is a well-formed identifier for this kind.
+    /// Mirrors Laravel's `isValidUniqueId` check.
+    ///
+    /// This is a caller-invokable helper, not an automatic gate inside
+    /// [`crate::eloquent::Model::find`]. `Model::find<K>` is generic
+    /// over `K: Into<<PrimaryKey as PrimaryKeyTrait>::ValueType>` — the
+    /// key type is opaque at that layer, so there is no type-safe way to
+    /// view it as `&str` and run this check without breaking the trait
+    /// contract for non-string keys. Call it explicitly when you want to
+    /// reject a malformed identifier before a lookup:
+    ///
+    /// ```ignore
+    /// if !<User as HasUniqueId>::UNIQUE_ID_KIND.is_valid(&raw_id) {
+    ///     return Err(FrameworkError::not_found("no such user"));
+    /// }
+    /// let user = User::find(raw_id).await?;
+    /// ```
     pub fn is_valid(&self, value: &str) -> bool {
         match self {
             Self::UuidV7 | Self::UuidV4 => Uuid::parse_str(value).is_ok(),
@@ -361,5 +375,33 @@ mod tests {
     fn reject_invalid_strings() {
         assert!(!UniqueIdKind::Ulid.is_valid("too-short"));
         assert!(!UniqueIdKind::UuidV7.is_valid("not a uuid"));
+    }
+
+    /// The documented caller-invokable path: reach `is_valid` through a
+    /// model's `HasUniqueId::UNIQUE_ID_KIND` const (the shape the doc
+    /// example shows) and confirm it accepts a freshly-generated ID and
+    /// rejects a malformed one. Proves the helper is usable exactly as
+    /// documented without any `Model::find` wiring.
+    #[test]
+    fn has_unique_id_kind_drives_caller_side_validation() {
+        struct UuidModel;
+        impl HasUniqueId for UuidModel {
+            const UNIQUE_ID_KIND: UniqueIdKind = UniqueIdKind::UuidV7;
+        }
+
+        struct UlidModel;
+        impl HasUniqueId for UlidModel {
+            const UNIQUE_ID_KIND: UniqueIdKind = UniqueIdKind::Ulid;
+        }
+
+        let fresh_uuid = <UuidModel as HasUniqueId>::new_unique_id();
+        assert!(<UuidModel as HasUniqueId>::UNIQUE_ID_KIND.is_valid(&fresh_uuid));
+        assert!(!<UuidModel as HasUniqueId>::UNIQUE_ID_KIND.is_valid("not a uuid"));
+
+        let fresh_ulid = <UlidModel as HasUniqueId>::new_unique_id();
+        assert!(<UlidModel as HasUniqueId>::UNIQUE_ID_KIND.is_valid(&fresh_ulid));
+        // A valid UUID is the wrong shape for a ULID model — 36 chars,
+        // not 26 — so the per-kind check rejects it.
+        assert!(!<UlidModel as HasUniqueId>::UNIQUE_ID_KIND.is_valid(&fresh_uuid));
     }
 }

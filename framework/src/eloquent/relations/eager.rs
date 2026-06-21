@@ -3,7 +3,7 @@
 //! Bridges [`Builder<M>`][crate::eloquent::Builder]'s recorded
 //! `Vec<EagerSpec>` plan to the per-model `__eager_load` /
 //! `__count_relation` / `__aggregate_relation` /
-//! `__recurse_eager_load` dispatchers the
+//! `__recurse_eager_load_batched` dispatchers the
 //! `#[suprnova::model]` macro emits.
 //!
 //! Phase 10B T9 ships:
@@ -11,8 +11,10 @@
 //! - [`apply_eager_specs`] — the top-level dispatcher. Walks each
 //!   `EagerSpec` and routes to the right per-model entrypoint.
 //! - Nested-path support via [`load_path`] — splits `"posts.comments"`
-//!   into head + tail and asks the loaded children to recurse on the
-//!   tail through their own `__recurse_eager_load` dispatcher.
+//!   into head + tail, then batches the tail across every parent via
+//!   the `__recurse_eager_load_batched` dispatcher: all parents' cached
+//!   children of the head are gathered into one slice and the next
+//!   segment is loaded once, never once-per-parent (which would be N+1).
 //! - `with_where` predicate routing via [`load_path_with_predicate`].
 //!   The closure is type-erased here; downcast happens inside the
 //!   per-relation dispatcher arm where the target type is statically
@@ -141,16 +143,19 @@ where
 ///     - Rows WITHOUT the head: load the FULL path against just that
 ///       subset (head + tail) — nothing's cached on these so a normal
 ///       eager-load drives the whole walk.
-///     - Rows WITH the head cached: recurse into each parent's cached
-///       children with `missing_only = true` so the per-child
-///       partitioning happens one level down (and again at every
-///       further level of a longer dotted path).
+///     - Rows WITH the head cached: recurse into the cached children
+///       with `missing_only = true` so the per-child partitioning
+///       happens one level down (and again at every further level of a
+///       longer dotted path).
 ///
-/// The `missing_only` flag propagates through the macro-emitted
-/// `__recurse_eager_load` arms — each arm partitions its own
-/// children_vec the same way before bulk-loading the next segment.
-/// Flat `with(...)` always passes `missing_only = false`, so the
-/// partition is a no-op there (bulk-loads everything every time).
+/// The tail recursion is batched across every parent through
+/// `__recurse_eager_load_batched`: all parents' cached children of the
+/// head are gathered into one slice and the next segment is loaded once,
+/// not once per parent (which would be N+1 on a deep path). The
+/// `missing_only` flag propagates through the batched arm — it
+/// partitions the combined children the same way before bulk-loading the
+/// next segment. Flat `with(...)` always passes `missing_only = false`,
+/// so the partition is a no-op there (bulk-loads everything every time).
 pub(crate) async fn load_missing_path<M>(
     parents: &mut [M],
     path: &str,
@@ -179,10 +184,10 @@ where
         Some(rest) => {
             // Dotted path. Walk the parents once to learn which need
             // the head loaded; bulk-load the head against just that
-            // subset, then recurse the tail on EVERY parent with
-            // `missing_only = true`. The per-child partition then
-            // happens one level down inside the macro-emitted
-            // `__recurse_eager_load` arm.
+            // subset, then recurse the tail batched across EVERY parent
+            // with `missing_only = true`. The per-child partition then
+            // happens one level down inside the macro-emitted batched
+            // recurse arm.
             //
             // The tail recursion runs on every row (needs-full and
             // has-head alike) because freshly-loaded children have
@@ -192,8 +197,8 @@ where
             // already-cached tails.
             //
             // We do the head bulk-load in a scope so the
-            // `Vec<&mut M>` borrow ends before the per-row recursion
-            // loop. Otherwise Rust holds the slice's borrow across
+            // `Vec<&mut M>` borrow ends before the batched recursion
+            // call. Otherwise Rust holds the slice's borrow across
             // the await and refuses the second `iter_mut()`.
             {
                 let mut needs_head: Vec<&mut M> =
@@ -202,17 +207,23 @@ where
                     M::eager_load(head, needs_head.as_mut_slice(), db, None).await?;
                 }
             }
-            for p in parents.iter_mut() {
-                p.recurse_eager_load(head, rest, db, true).await?;
-            }
+            // Recurse the tail batched across ALL parents (see
+            // `load_path` for why per-parent recursion is N+1). The
+            // batched arm gathers every parent's cached children of
+            // `head` into one slice, loads the next segment once with
+            // `missing_only = true` (so already-cached tails are
+            // skipped), then recurses on the remainder.
+            let mut refs: Vec<&mut M> = parents.iter_mut().collect();
+            M::recurse_eager_load_batched(refs.as_mut_slice(), head, rest, db, true).await?;
             Ok(())
         }
     }
 }
 
 /// Drive `__eager_load` for a single relation. Dotted paths
-/// (`"posts.comments"`) load the head segment, then recurse into each
-/// parent's loaded children via `__recurse_eager_load`.
+/// (`"posts.comments"`) load the head segment across all parents, then
+/// recurse into the loaded children batched across every parent via
+/// `__recurse_eager_load_batched` so each nested segment is one query.
 async fn load_path<M>(
     parents: &mut [M],
     path: &str,
@@ -229,24 +240,26 @@ where
     {
         // Borrow scope — the dispatcher's `&mut [&mut M]` shape
         // requires a fresh `Vec<&mut M>` per call. Drop the borrow
-        // before the recursion loop so the parents slice is free for
-        // the per-row `__recurse_eager_load` calls.
+        // before the batched recursion so the parents slice is free for
+        // the `__recurse_eager_load_batched` call below.
         let mut refs: Vec<&mut M> = parents.iter_mut().collect();
         M::eager_load(head, refs.as_mut_slice(), db, None).await?;
     }
 
     if let Some(rest) = tail {
-        // Recurse into each parent's loaded children. The macro-
-        // emitted `__recurse_eager_load(head, rest, db, missing_only)`
-        // looks up the cached child rows on `self.__eager`, gets a
-        // `&mut [Child]`, and recursively calls
-        // `Child::__eager_load(rest_head, ...)` — peeling one segment
-        // per step. The `false` here means "always bulk-load each
-        // segment"; the `load_missing` orchestrator passes `true` to
-        // skip already-cached segments.
-        for p in parents.iter_mut() {
-            p.recurse_eager_load(head, rest, db, false).await?;
-        }
+        // Recurse into the loaded children, batched across ALL parents.
+        // The macro-emitted `__recurse_eager_load_batched(parents, head,
+        // rest, db, missing_only)` gathers every parent's cached
+        // children of `head` into one combined `&mut [Child]` slice and
+        // issues a SINGLE `Child::eager_load(rest_head, ...)` across the
+        // lot, then recurses on the remaining tail. Doing this per
+        // parent instead — one `eager_load` per parent — would re-issue
+        // the next-segment query N times (one per parent), the classic
+        // N+1. The `false` here means "always bulk-load each segment";
+        // the `load_missing` orchestrator passes `true` to skip
+        // already-cached segments.
+        let mut refs: Vec<&mut M> = parents.iter_mut().collect();
+        M::recurse_eager_load_batched(refs.as_mut_slice(), head, rest, db, false).await?;
     }
     Ok(())
 }
