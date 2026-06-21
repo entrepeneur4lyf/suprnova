@@ -50,6 +50,7 @@ pub mod cache;
 pub mod config;
 pub mod console;
 pub mod container;
+pub mod content;
 pub mod context;
 pub mod cors;
 pub mod crypto;
@@ -77,6 +78,7 @@ pub mod payments;
 pub mod prelude;
 pub mod queue;
 pub mod rate_limit;
+pub mod rbac;
 pub mod resources;
 pub mod routing;
 pub mod schedule;
@@ -84,6 +86,8 @@ pub mod seed;
 pub mod server;
 pub mod session;
 pub mod sse;
+/// Static file fallback serving.
+pub mod static_files;
 pub mod supervisor;
 pub mod telemetry;
 pub mod testing;
@@ -270,6 +274,7 @@ pub use rate_limit::{
     BackendErrorPolicy, GlobalLimit, Limit, LimitResult, RateLimitMiddleware, RateLimiter,
     RateLimiterDriver, SlidingWindowConfig, ThrottleRequestsMiddleware, Unlimited,
 };
+pub use rbac::{HasRoles, PermissionMiddleware, RoleMiddleware};
 pub use resources::{
     AsRelationshipValue, IncludeResolutionError, IncludeTree, IncludedSink, IntoJsonResource,
     JsonApi, JsonApiBuilder, JsonApiInfo, JsonApiResponse, Maybe, MissingValue, PushIncluded,
@@ -323,6 +328,7 @@ pub use session::{
     regenerate_csrf_token, regenerate_session_id, session, session_mut, set_auth_user,
 };
 pub use sse::SseEvent;
+pub use static_files::StaticFiles;
 pub use supervisor::{RestartPolicy, Supervisor, SupervisorEntry, SupervisorRegistry};
 pub use telemetry::{
     CounterHandle, GaugeHandle, HistogramHandle, Metrics, OtelConfig, TelemetryGuard,

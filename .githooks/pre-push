@@ -12,7 +12,7 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-stamp=.git/suprnova-gate-pass
+stamp="$(git rev-parse --git-path suprnova-gate-pass)"
 if [[ -f "$stamp" \
     && -z "$(git status --porcelain)" \
     && "$(cat "$stamp")" == "$(git rev-parse 'HEAD^{tree}')" ]]; then
