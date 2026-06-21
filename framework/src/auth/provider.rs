@@ -5,9 +5,40 @@
 
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use super::authenticatable::Authenticatable;
 use crate::error::FrameworkError;
+
+/// Precomputed bcrypt hash of an arbitrary string at the framework's
+/// OWASP-floor cost (12). Used as the fallback dummy hash when the
+/// configured driver can't be resolved or fails to mint one — so
+/// [`UserProvider::dummy_verify`] always does *some* representative work
+/// and never errors out the auth flow.
+const FALLBACK_DUMMY_HASH: &str = "$2b$12$WzkqK0YIMJW8a4hkOEX/cuFNNDU.lI5jvyiQekkLwnAi8sFxlnEv6";
+
+/// Process-wide cache of the dummy hash, minted once from the configured
+/// driver. Caching avoids re-running the (deliberately expensive) hash
+/// primitive on every enumeration-equalising call; the verify against it
+/// still runs the full cost per call.
+static DUMMY_HASH: OnceLock<String> = OnceLock::new();
+
+/// A throwaway hash in the *configured* algorithm, suitable for feeding to
+/// [`crate::hashing::verify_async`] so the verify cost tracks a real
+/// stored-password verify under any `HASH_DRIVER`. Minted once and cached.
+///
+/// Falls back to [`FALLBACK_DUMMY_HASH`] (bcrypt cost 12) if the configured
+/// driver can't be resolved or hashing fails — equalisation degrades to the
+/// previous fixed-cost behaviour rather than erroring.
+fn dummy_hash() -> String {
+    DUMMY_HASH
+        .get_or_init(|| {
+            crate::hashing::default_driver()
+                .and_then(|driver| driver.hash("dummy_password_never_matches"))
+                .unwrap_or_else(|_| FALLBACK_DUMMY_HASH.to_string())
+        })
+        .clone()
+}
 
 /// Trait for retrieving authenticated users from storage
 ///
@@ -82,21 +113,24 @@ pub trait UserProvider: Send + Sync + 'static {
     ///
     /// Returns `Ok(false)` once the dummy verify completes; the
     /// result is discarded by the caller. The default implementation
-    /// drives [`crate::hashing::verify_async`] against a precomputed
-    /// throwaway hash so providers using the framework's hashing
-    /// surface get equalisation for free. Providers whose
-    /// `validate_credentials` uses a different verifier (custom
-    /// JWT, external IDP) should override this to emit a
+    /// drives [`crate::hashing::verify_async`] against a throwaway
+    /// hash minted by the *configured* driver so providers using the
+    /// framework's hashing surface get equalisation for free — and so
+    /// the dummy cost tracks the real verify cost regardless of
+    /// `HASH_DRIVER` (a bcrypt-cost-12 dummy under `HASH_DRIVER=argon2id`
+    /// would re-open the enumeration oracle through the timing gap).
+    /// Providers whose `validate_credentials` uses a different verifier
+    /// (custom JWT, external IDP) should override this to emit a
     /// comparable-cost no-op against their own primitive.
     async fn dummy_verify(&self) -> Result<bool, FrameworkError> {
-        // Precomputed bcrypt hash of the empty string at cost 12 —
-        // the framework's OWASP-floor default cost. The verify call
-        // runs the full bcrypt cost regardless of input (bcrypt verifies
-        // input-against-hash, not the other way around), so we get
-        // representative timing without computing the hash fresh per
-        // request. Any password input is rejected.
-        const DUMMY_HASH: &str = "$2b$12$WzkqK0YIMJW8a4hkOEX/cuFNNDU.lI5jvyiQekkLwnAi8sFxlnEv6";
-        let _ = crate::hashing::verify_async("dummy_password_never_matches", DUMMY_HASH).await;
+        // Verify a throwaway hash produced by the configured driver, so
+        // the work matches what a real verify of a stored password would
+        // cost. `verify_async`/`verify_with` dispatch on the *stored*
+        // hash's algorithm, so as long as the dummy hash is in the
+        // configured algorithm the dummy and real paths run the same
+        // primitive at the same cost. Any password input is rejected.
+        let dummy_hash = dummy_hash();
+        let _ = crate::hashing::verify_async("dummy_password_never_matches", &dummy_hash).await;
         Ok(false)
     }
 

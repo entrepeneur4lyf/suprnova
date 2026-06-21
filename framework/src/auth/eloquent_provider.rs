@@ -203,7 +203,20 @@ where
         let password = credentials.get("password").and_then(|v| v.as_str());
         match (password, user.get_auth_password()) {
             (Some(plaintext), Some(hash)) => hashing::verify_async(plaintext, hash).await,
-            _ => Ok(false),
+            // A password was supplied but the matched account is
+            // passwordless. Returning `Ok(false)` here with no hash work
+            // would fingerprint "account exists but is passwordless": the
+            // unknown-identifier and wrong-password paths both run a
+            // fixed-cost verify (the latter the real one, the former via
+            // `dummy_verify`), while this branch would short-circuit. Run
+            // the same dummy verify so all three paths cost the same.
+            (Some(_), None) => {
+                self.dummy_verify().await?;
+                Ok(false)
+            }
+            // No password supplied at all — nothing to equalise against a
+            // real verify, so no dummy work is warranted.
+            (None, _) => Ok(false),
         }
     }
 
