@@ -178,3 +178,113 @@ async fn increment_validates_column_argument() {
         .expect_err("attacker-controlled column must be rejected");
     assert!(format!("{err}").contains("SQL identifier"));
 }
+
+// ---- Projection-column terminals -------------------------------------
+//
+// `pluck`, `value`, `pluck_keyed`, `sole_value`, and the SUM/AVG/MIN/MAX
+// aggregates interpolate the *projection* column into the SELECT list
+// directly (it is passed to the renderer as `column_expr`, bypassing
+// `validate_inputs`, which only walks the WHERE / GROUP BY / ORDER BY
+// / `select()` identifiers). Without an explicit guard, a
+// request-derived column name reaches the SQL string verbatim — e.g.
+// `query().pluck(user_param)` is an injection vector. These tests prove
+// the projection column is now validated too.
+
+#[tokio::test]
+async fn pluck_projection_column_legitimate_works() {
+    let _db = setup().await;
+    let _: Vec<i64> = T338BuilderIdentUser::query()
+        .pluck("id")
+        .await
+        .expect("a normal projection column must still execute");
+}
+
+#[tokio::test]
+async fn pluck_projection_column_injection_is_rejected() {
+    let _db = setup().await;
+    let err = T338BuilderIdentUser::query()
+        .pluck::<i64>("id; DROP TABLE t338_builder_ident_users--")
+        .await
+        .expect_err("attacker-controlled pluck column must be rejected");
+    assert!(format!("{err}").contains("SQL identifier"));
+}
+
+#[tokio::test]
+async fn pluck_subquery_projection_is_rejected() {
+    let _db = setup().await;
+    let err = T338BuilderIdentUser::query()
+        .pluck::<i64>("id, (SELECT email FROM t338_builder_ident_users)")
+        .await
+        .expect_err("a subquery smuggled into the pluck column must be rejected");
+    assert!(format!("{err}").contains("SQL identifier"));
+}
+
+#[tokio::test]
+async fn value_projection_column_injection_is_rejected() {
+    let _db = setup().await;
+    let err = T338BuilderIdentUser::query()
+        .value::<i64>("id) UNION SELECT email FROM t338_builder_ident_users --")
+        .await
+        .expect_err("attacker-controlled value column must be rejected");
+    assert!(format!("{err}").contains("SQL identifier"));
+}
+
+#[tokio::test]
+async fn pluck_keyed_projection_columns_are_validated() {
+    let _db = setup().await;
+
+    // Malicious key column.
+    let err = T338BuilderIdentUser::query()
+        .pluck_keyed::<i64, String>("id) OR (1=1", "email")
+        .await
+        .expect_err("attacker-controlled pluck_keyed key column must be rejected");
+    assert!(format!("{err}").contains("SQL identifier"));
+
+    // Malicious value column.
+    let err = T338BuilderIdentUser::query()
+        .pluck_keyed::<i64, String>("id", "email FROM t338_builder_ident_users --")
+        .await
+        .expect_err("attacker-controlled pluck_keyed value column must be rejected");
+    assert!(format!("{err}").contains("SQL identifier"));
+
+    // Both legitimate — must still execute.
+    let _: std::collections::HashMap<i64, String> = T338BuilderIdentUser::query()
+        .pluck_keyed("id", "email")
+        .await
+        .expect("legitimate key/value columns must still execute");
+}
+
+#[tokio::test]
+async fn aggregate_projection_columns_are_validated() {
+    let _db = setup().await;
+
+    let err = T338BuilderIdentUser::query()
+        .sum::<i64>("id) FROM t338_builder_ident_users --")
+        .await
+        .expect_err("attacker-controlled SUM column must be rejected");
+    assert!(format!("{err}").contains("SQL identifier"));
+
+    let err = T338BuilderIdentUser::query()
+        .avg::<f64>("id); DROP TABLE t338_builder_ident_users --")
+        .await
+        .expect_err("attacker-controlled AVG column must be rejected");
+    assert!(format!("{err}").contains("SQL identifier"));
+
+    let err = T338BuilderIdentUser::query()
+        .min::<i64>("id) UNION SELECT email")
+        .await
+        .expect_err("attacker-controlled MIN column must be rejected");
+    assert!(format!("{err}").contains("SQL identifier"));
+
+    let err = T338BuilderIdentUser::query()
+        .max::<i64>("id, (SELECT email)")
+        .await
+        .expect_err("attacker-controlled MAX column must be rejected");
+    assert!(format!("{err}").contains("SQL identifier"));
+
+    // Legitimate aggregates must still execute.
+    let _: i64 = T338BuilderIdentUser::query()
+        .sum("id")
+        .await
+        .expect("a normal SUM column must still execute");
+}

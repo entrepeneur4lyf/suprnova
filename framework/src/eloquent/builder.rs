@@ -3229,6 +3229,7 @@ where
         let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
         let col_name = col.col_name();
+        crate::database::validate_identifier(&col_name)?;
         let (sql, vals) = self.render_select_for(backend, M::TABLE, &col_name)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let rows = exec
@@ -3876,7 +3877,9 @@ where
         self,
         col: impl IntoColumn,
     ) -> Result<T, FrameworkError> {
-        self.aggregate_value::<T>(&format!("COALESCE(SUM({}), 0)", col.col_name()))
+        let col_name = col.col_name();
+        crate::database::validate_identifier(&col_name)?;
+        self.aggregate_value::<T>(&format!("COALESCE(SUM({col_name}), 0)"))
             .await
     }
 
@@ -3886,7 +3889,9 @@ where
         self,
         col: impl IntoColumn,
     ) -> Result<T, FrameworkError> {
-        self.aggregate_value::<T>(&format!("COALESCE(AVG({}), 0)", col.col_name()))
+        let col_name = col.col_name();
+        crate::database::validate_identifier(&col_name)?;
+        self.aggregate_value::<T>(&format!("COALESCE(AVG({col_name}), 0)"))
             .await
     }
 
@@ -3895,7 +3900,9 @@ where
         self,
         col: impl IntoColumn,
     ) -> Result<Option<T>, FrameworkError> {
-        self.aggregate_optional::<T>(&format!("MIN({})", col.col_name()))
+        let col_name = col.col_name();
+        crate::database::validate_identifier(&col_name)?;
+        self.aggregate_optional::<T>(&format!("MIN({col_name})"))
             .await
     }
 
@@ -3904,7 +3911,9 @@ where
         self,
         col: impl IntoColumn,
     ) -> Result<Option<T>, FrameworkError> {
-        self.aggregate_optional::<T>(&format!("MAX({})", col.col_name()))
+        let col_name = col.col_name();
+        crate::database::validate_identifier(&col_name)?;
+        self.aggregate_optional::<T>(&format!("MAX({col_name})"))
             .await
     }
 
@@ -3920,6 +3929,7 @@ where
         let mut s = self;
         s.limit = Some(1);
         let col_name = col.col_name();
+        crate::database::validate_identifier(&col_name)?;
         let (sql, vals) = s.render_select_for(backend, M::TABLE, &col_name)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let row = exec
@@ -3939,6 +3949,7 @@ where
         let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
         let col_name = col.col_name();
+        crate::database::validate_identifier(&col_name)?;
         let (sql, vals) = self.render_select_for(backend, M::TABLE, &col_name)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let rows = exec
@@ -3963,6 +3974,8 @@ where
         let backend = exec.backend();
         let kn = key_col.col_name();
         let vn = val_col.col_name();
+        crate::database::validate_identifier(&kn)?;
+        crate::database::validate_identifier(&vn)?;
         let (sql, vals) = self.render_select_for(backend, M::TABLE, &format!("{kn}, {vn}"))?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let rows = exec
