@@ -40,15 +40,29 @@ use app::models::users::HasScope_active_User;
 use suprnova::eloquent::observers::bootstrap_observers;
 use suprnova::testing::TestDatabase;
 use suprnova::{Collection, DB, FrameworkError, LengthAwarePaginator, Model, attrs};
+use tokio::sync::OnceCell;
 
-/// Install every `#[suprnova::observer(...)]` declared in the binary.
-/// The macro emits an `AtomicBool` gate per observer type so calling
-/// this repeatedly is safe — only the first call actually registers
-/// the listener adapters with the framework's `EventDispatcher`.
+/// Process-wide guard so concurrent tests await ONE *completed*
+/// observer registration. In a real app `bootstrap_observers()` runs
+/// once at boot; here every test calls it, and the macro's per-observer
+/// gate marks registration *started*, not *finished* — so under load a
+/// second caller could return before the dispatcher wiring lands and
+/// race its `create()` ahead of the observer (mixed-case email slips
+/// through un-lowered). `OnceCell::get_or_init` makes every caller await
+/// the same init future to completion, so observers are guaranteed wired
+/// before any test proceeds.
+static OBSERVERS_INSTALLED: OnceCell<()> = OnceCell::const_new();
+
+/// Install every `#[suprnova::observer(...)]` declared in the binary,
+/// exactly once, with all concurrent callers awaiting completion.
 async fn install_observers() {
-    bootstrap_observers()
-        .await
-        .expect("UserObserver install must succeed");
+    OBSERVERS_INSTALLED
+        .get_or_init(|| async {
+            bootstrap_observers()
+                .await
+                .expect("UserObserver install must succeed");
+        })
+        .await;
 }
 
 // ---- 1. Observer wiring -------------------------------------------------
