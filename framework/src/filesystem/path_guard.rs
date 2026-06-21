@@ -106,11 +106,13 @@ fn symlink_escape_error(path: &str) -> Error {
 ///
 /// The full on-disk path is `root + path`. If it exists, it is canonicalized
 /// (which resolves every symlink component) and must lie under the canonical
-/// root. If it does not exist yet — the common case for a new write — the parent
-/// directory is canonicalized instead, so a symlinked destination directory is
-/// still rejected even before the leaf is created. A missing parent is treated
-/// as inside the root (the backend will create it under the root); only a parent
-/// that *exists and resolves outside* the root is an escape.
+/// root. If it does not exist yet — the common case for a new write — we walk
+/// the target's ancestors up to the *nearest ancestor that actually exists* and
+/// canonicalize that one, so a symlinked ancestor directory is still rejected
+/// even before the leaf (and any intermediate dirs) are created. Components that
+/// exist nowhere on disk are the only ones safe to create under the root; an
+/// existing ancestor that resolves (or traverses a symlink) outside the root is
+/// an escape and is rejected.
 ///
 /// Canonicalization uses `tokio::fs` so it never blocks the async executor,
 /// matching the FS backend's own `tokio::fs`-based IO.
@@ -135,39 +137,42 @@ async fn validate_resolved_path(root: &str, path: &str) -> Result<()> {
     let relative = path.trim_end_matches('/');
     let target = Path::new(root).join(relative);
 
-    let resolved = match tokio::fs::canonicalize(&target).await {
-        Ok(resolved) => resolved,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Leaf doesn't exist yet — confine its parent directory instead so a
-            // symlinked destination dir can't smuggle the write out of the root.
-            match target.parent() {
-                Some(parent) => match tokio::fs::canonicalize(parent).await {
-                    Ok(parent) => parent,
-                    // Parent is missing too: it will be created under the root,
-                    // so there's nothing here that escapes. The lexical gate
-                    // already proved no `..`/absolute component is present.
-                    Err(pe) if pe.kind() == std::io::ErrorKind::NotFound => {
-                        return Ok(());
-                    }
-                    Err(pe) => {
-                        return Err(Error::new(
-                            ErrorKind::Unexpected,
-                            "canonicalize of storage path parent failed",
-                        )
-                        .set_source(pe));
-                    }
-                },
-                // No parent means the target is the root itself.
-                None => canonical_root.clone(),
+    // Walk from the leaf upward to the nearest ancestor that exists on disk and
+    // canonicalize *that*. `target.ancestors()` yields the target first, then
+    // each successive parent, so the first one that resolves is either the leaf
+    // itself (existing target) or the deepest existing directory above it (new
+    // write). Confining only the *immediate* parent — as an earlier version did —
+    // let an intermediate symlink escape: if `root/evil -> /outside`, then
+    // writing `evil/newdir/payload` has a missing leaf AND a missing immediate
+    // parent (`evil/newdir`), so the old early-return treated it as safe while
+    // the FS backend would follow `evil` and write to `/outside/newdir/payload`.
+    // Resolving the nearest *existing* ancestor (`root/evil`, the symlink) and
+    // requiring it to be within the root catches that escape. Components that
+    // exist nowhere on disk — `newdir`, `payload` — are the only ones genuinely
+    // safe to create under the root, since the kernel can only follow links that
+    // already exist.
+    let mut resolved: Option<std::path::PathBuf> = None;
+    for ancestor in target.ancestors() {
+        match tokio::fs::canonicalize(ancestor).await {
+            Ok(resolved_ancestor) => {
+                resolved = Some(resolved_ancestor);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    "canonicalize of storage path failed",
+                )
+                .set_source(e));
             }
         }
-        Err(e) => {
-            return Err(
-                Error::new(ErrorKind::Unexpected, "canonicalize of storage path failed")
-                    .set_source(e),
-            );
-        }
-    };
+    }
+
+    // No ancestor resolved at all. This only happens if even the disk root is
+    // gone, but `canonical_root` above already required it to exist, so fall back
+    // to the canonical root for the prefix check.
+    let resolved = resolved.unwrap_or_else(|| canonical_root.clone());
 
     if is_within_root(&canonical_root, &resolved) {
         Ok(())
@@ -402,6 +407,43 @@ mod tests {
         assert!(
             validate_resolved_path(&root_str, "escape").await.is_err(),
             "operating on the escaping symlink node (resolved) must be rejected"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_ancestor_escape_with_missing_immediate_parent_is_rejected() {
+        // The escape the nearest-existing-ancestor walk closes: the symlinked
+        // ancestor is NOT the immediate parent of the write target — both the
+        // leaf and its immediate parent don't exist, so an
+        // immediate-parent-only check would canonicalize NotFound and wave the
+        // write through, letting the FS backend follow the symlink out of root.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).expect("create root");
+        // A real directory OUTSIDE the root.
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("create outside");
+        // A symlink INSIDE the root that points at the outside directory.
+        std::os::unix::fs::symlink(&outside, root.join("evil")).expect("create escaping symlink");
+
+        let root_str = canonical_root(&root);
+        // Writing `evil/newdir/payload`: leaf missing AND immediate parent
+        // (`evil/newdir`) missing, but `evil` -> outside exists. The walk must
+        // resolve `evil` (the nearest existing ancestor), see it escapes, and
+        // reject. `outside/newdir/payload` would otherwise be created off-root.
+        assert!(
+            validate_resolved_path(&root_str, "evil/newdir/payload")
+                .await
+                .is_err(),
+            "write whose nearest existing ancestor is an escaping symlink must be rejected"
+        );
+        // A deeper missing chain through the same symlink is rejected too.
+        assert!(
+            validate_resolved_path(&root_str, "evil/a/b/c/payload")
+                .await
+                .is_err(),
+            "an even deeper missing chain through the escaping symlink must be rejected"
         );
     }
 
