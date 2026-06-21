@@ -19,6 +19,6 @@ pub use money::{Currency, Money};
 pub use registry::{PaymentProviderEntry, PaymentProviderRegistry};
 pub use traits::{
     Checkout, CustomerSnapshot, CustomerStore, PayloadIds, Payment, PaymentProvider,
-    PaymentSnapshot, Subscription, WebhookHandler,
+    PaymentSnapshot, Subscription, WebhookHandler, constant_time_eq,
 };
 pub use webhook_route::webhook_routes;

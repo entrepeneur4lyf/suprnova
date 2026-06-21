@@ -6,6 +6,38 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use subtle::ConstantTimeEq;
+
+/// Constant-time byte-slice comparison for webhook signature verification.
+///
+/// Provider adapters that authenticate webhooks with an HMAC (Stripe's
+/// `Stripe-Signature`, a shared-secret digest, etc.) MUST compare the
+/// computed digest against the header-supplied one with this helper
+/// rather than `==`. A naive `==` over `&[u8]` short-circuits on the
+/// first differing byte, leaking the position of the mismatch as a
+/// timing side channel an attacker can use to forge a valid signature
+/// byte by byte.
+///
+/// Backed by [`subtle::ConstantTimeEq`] — the same reviewed primitive
+/// the CSRF and crypto layers use — so the comparison runs in time
+/// independent of where the inputs diverge. A length mismatch returns
+/// `false` immediately; for fixed-length digests (HMAC-SHA256 is always
+/// 32 bytes) this is a structural reject, not a timing oracle for a
+/// same-length attacker.
+///
+/// ```rust,ignore
+/// use suprnova::payments::constant_time_eq;
+///
+/// fn verify_sig(computed: &[u8], header: &[u8]) -> bool {
+///     constant_time_eq(computed, header)
+/// }
+/// ```
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.ct_eq(b).into()
+}
 
 /// Webhook handling surface implemented by every payment provider.
 ///
@@ -19,6 +51,12 @@ pub trait WebhookHandler: Send + Sync {
     /// Must reject (return [`super::super::PaymentError::WebhookSignature`])
     /// on any tampering, replay outside the allowed window, or missing
     /// signature header.
+    ///
+    /// Implementations that compare an HMAC / digest against a
+    /// header-supplied signature MUST use [`constant_time_eq`] (or another
+    /// constant-time primitive) for that comparison — a byte-wise `==`
+    /// leaks the mismatch position as a timing side channel and lets an
+    /// attacker forge a signature byte by byte.
     fn verify(&self, ctx: &WebhookContext<'_>) -> PaymentResult<()>;
     /// Parse the raw body into a [`WebhookEvent`] with the provider's
     /// event identifier, type string, and (when recognised) a neutral
@@ -117,4 +155,31 @@ pub struct CustomerSnapshot {
     pub email: Option<String>,
     /// Refreshed provider customer payload, preserved verbatim.
     pub provider_metadata: Value,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constant_time_eq_matches_identical_slices() {
+        assert!(constant_time_eq(b"abc123", b"abc123"));
+        assert!(constant_time_eq(b"", b""));
+        // 32-byte HMAC-SHA256 digest shape.
+        let digest = [0x5au8; 32];
+        assert!(constant_time_eq(&digest, &digest));
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_differing_slices() {
+        assert!(!constant_time_eq(b"abc123", b"abc124"));
+        assert!(!constant_time_eq(b"abc123", b"xbc123"));
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_length_mismatch() {
+        assert!(!constant_time_eq(b"abc123", b"abc12"));
+        assert!(!constant_time_eq(b"", b"a"));
+        assert!(!constant_time_eq(b"a", b""));
+    }
 }

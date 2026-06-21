@@ -19,7 +19,9 @@ pub use checkout::Checkout;
 pub use customer::CustomerStore;
 pub use payment::Payment;
 pub use subscription::Subscription;
-pub use webhook::{CustomerSnapshot, PayloadIds, PaymentSnapshot, WebhookHandler};
+pub use webhook::{
+    CustomerSnapshot, PayloadIds, PaymentSnapshot, WebhookHandler, constant_time_eq,
+};
 
 /// Umbrella trait every provider MUST implement. `Payment` is queried separately —
 /// providers that don't expose server-capture omit that impl.

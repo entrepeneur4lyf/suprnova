@@ -210,8 +210,26 @@ impl CustomerStore for MockPaymentProvider {
 
 #[async_trait]
 impl WebhookHandler for MockPaymentProvider {
+    /// The mock signs nothing — it accepts every webhook so local dev and
+    /// the test bed can exercise the ingress path without a real provider
+    /// secret. That makes it a no-op verifier, so it must never run as a
+    /// registered provider outside development: a forged
+    /// `POST /webhooks/payments/mock` would otherwise hydrate mirror rows.
+    ///
+    /// This mirrors the framework's APP_KEY fail-closed contract
+    /// (`crate::crypto::resolve_boot_keyring`): permissive in
+    /// `local` / `development` / `testing`, hard-rejecting in any other
+    /// `APP_ENV` (production, staging, or a custom environment).
     fn verify(&self, _ctx: &WebhookContext<'_>) -> PaymentResult<()> {
-        Ok(())
+        use crate::config::Environment;
+        match Environment::detect() {
+            Environment::Local | Environment::Development | Environment::Testing => Ok(()),
+            env => Err(PaymentError::WebhookSignature(format!(
+                "MockPaymentProvider accepts every webhook unverified and refuses \
+                 to run outside a development environment (APP_ENV={env}). Register \
+                 a real provider with signature verification in production/staging."
+            ))),
+        }
     }
 
     fn parse_event(&self, body: &[u8]) -> PaymentResult<WebhookEvent> {
@@ -356,6 +374,81 @@ impl WebhookHandler for MockPaymentProvider {
                 })
             }
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::HeaderMap;
+
+    /// Save `APP_ENV`, set it to `value`, run `f`, then restore. Callers
+    /// must be `#[serial]` because `APP_ENV` is process-global.
+    fn with_app_env(value: Option<&str>, f: impl FnOnce()) {
+        let prior = std::env::var("APP_ENV").ok();
+        // SAFETY: mutates a process-global env var; callers serialize on
+        // the shared `app_config_env` key so this never races a sibling.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var("APP_ENV", v),
+                None => std::env::remove_var("APP_ENV"),
+            }
+        }
+        f();
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("APP_ENV", v),
+                None => std::env::remove_var("APP_ENV"),
+            }
+        }
+    }
+
+    fn empty_ctx<'a>(headers: &'a HeaderMap, body: &'a [u8]) -> WebhookContext<'a> {
+        WebhookContext {
+            body,
+            headers,
+            remote_addr: None,
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(app_config_env)]
+    fn verify_accepts_in_development_environments() {
+        let provider = MockPaymentProvider::new();
+        let headers = HeaderMap::new();
+        for env in ["local", "development", "dev", "testing", "test"] {
+            with_app_env(Some(env), || {
+                let ctx = empty_ctx(&headers, b"{}");
+                assert!(
+                    provider.verify(&ctx).is_ok(),
+                    "mock verify should accept in APP_ENV={env}"
+                );
+            });
+        }
+        // Unset APP_ENV defaults to Local — also permissive.
+        with_app_env(None, || {
+            let ctx = empty_ctx(&headers, b"{}");
+            assert!(provider.verify(&ctx).is_ok());
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(app_config_env)]
+    fn verify_fails_closed_outside_development() {
+        let provider = MockPaymentProvider::new();
+        let headers = HeaderMap::new();
+        for env in ["production", "prod", "staging", "stage", "k8s-prod"] {
+            with_app_env(Some(env), || {
+                let ctx = empty_ctx(&headers, b"{}");
+                let err = provider
+                    .verify(&ctx)
+                    .expect_err("mock verify must reject outside development");
+                assert!(
+                    matches!(err, PaymentError::WebhookSignature(_)),
+                    "expected WebhookSignature in APP_ENV={env}, got {err:?}"
+                );
+            });
         }
     }
 }

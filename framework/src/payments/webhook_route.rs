@@ -662,12 +662,15 @@ pub fn webhook_routes(db: Arc<DatabaseConnection>) -> Router {
         .post("/webhooks/payments/{provider}", move |req: Request| {
             let db = db_for_handler.clone();
             async move {
-                // Extract header map and remote addr before consuming the request body.
+                // Extract header map and client IP before consuming the request body.
                 let headers = req.headers().clone();
-                let remote_addr_str = headers
-                    .get("x-forwarded-for")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.to_string());
+                // Resolve the client IP through the trusted-proxy allowlist:
+                // `X-Forwarded-For` / `X-Real-IP` are honoured only when the TCP
+                // peer is a configured trusted proxy, otherwise this is the socket
+                // peer addr. Reading the raw `X-Forwarded-For` header directly here
+                // would let any client spoof `remote_addr` and defeat an adapter
+                // that IP-allowlists via `WebhookContext::remote_addr`.
+                let remote_addr_str = req.ip();
                 let provider_name = match req.param("provider") {
                     Ok(s) => s.to_string(),
                     Err(_) => return err_response(404, "unknown provider"),
