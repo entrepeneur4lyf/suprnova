@@ -4,12 +4,15 @@ All notable changes to Suprnova are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
-Pre-1.0, internal API churn is expected. Semver guarantees begin at `1.0.0`.
-
-## [Unreleased]
+## 0.3.0 — 2026-06-21
 
 ### Added
 
+- **Query instrumentation for Eloquent reads** — `Builder::get`, `Model::find`,
+  `find_many`, and `all` now emit `QueryExecuted`, so model SELECTs and
+  eager-load queries surface in `DB::listen` and the in-memory query log
+  alongside writes and raw queries. Adds the instrumented
+  `ExecutorChoice::statement_all` read terminal.
 - **Resource-route authorization** — `ResourceRoutes::authorize_resource::<U, R>()`
   attaches the conventional ability check to every generated resource route as
   per-route middleware (Laravel `authorizeResource` parity). The action→ability
@@ -111,7 +114,7 @@ Pre-1.0, internal API churn is expected. Semver guarantees begin at `1.0.0`.
   and authorization chapters, and the atomic `hit_and_check` counter in the
   rate-limiting chapter.
 
-## [0.2.0] — 2026-06-21
+## 0.2.0 — 2026-06-21
 
 Adds role-based access control, a Markdown content / docs-rendering pipeline, and
 native static-file serving.
@@ -143,7 +146,7 @@ native static-file serving.
   restructured the roadmap around the shipped surface; and reconciled version
   references throughout the docs.
 
-## [0.1.0] — 2026-06-10
+## 0.1.0 — 2026-06-10
 
 The initial Suprnova release. Suprnova is a Laravel-inspired web
 framework for Rust, forked from Kit and taken in its own direction.
@@ -436,12 +439,3 @@ and the CLI installs with `cargo install --git`.
 - **Distribution model**: git-based end-to-end.
   `suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git" }`;
   CLI via `cargo install --git`. Nothing is published to crates.io.
-- **Permanent deferrals**: Phase 14 Telescope/Pulse (use `tracing` +
-  OpenTelemetry instead); Phase 15 browser testing (use
-  `chrome-devtools-mcp` instead).
-- **Internal API churn through `0.1.x`** is expected and intentional;
-  semver guarantees begin at `1.0.0`.
-
-[Unreleased]: https://github.com/entrepeneur4lyf/suprnova/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/entrepeneur4lyf/suprnova/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/entrepeneur4lyf/suprnova/releases/tag/v0.1.0

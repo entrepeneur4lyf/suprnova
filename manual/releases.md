@@ -1,8 +1,9 @@
 # Release Notes
 
-Suprnova `v0.1.0` is released through the git distribution model.
-Nothing is published to crates.io for this line: generated apps depend
-on the GitHub repository, and the CLI installs from GitHub.
+Suprnova is distributed through git. Nothing is published to crates.io
+and there are no release tags: generated apps depend on the GitHub
+repository, and the CLI installs from GitHub. See the
+[CHANGELOG](../CHANGELOG.md) for the full per-version history.
 
 ## v0.1.0 - 2026-06-10
 
@@ -67,7 +68,7 @@ See [CHANGELOG.md](../CHANGELOG.md) for the complete release notes.
 
 ## Versioning policy
 
-After `v0.1.0`, Suprnova follows Cargo's SemVer interpretation:
+Suprnova follows Cargo's SemVer interpretation:
 
 - **MAJOR** version (`1.0.0` to `2.0.0`) means breaking API changes that
   consumers must address.
@@ -77,6 +78,5 @@ After `v0.1.0`, Suprnova follows Cargo's SemVer interpretation:
 - **PATCH** version (`0.1.0` to `0.1.1`) means backwards-compatible bug
   fixes.
 
-SemVer guarantees begin at `1.0.0`. The `0.1.x` line may still include
-internal API churn while the framework is dogfooded by real consumer
-apps.
+During the `0.x` line, internal API churn is expected while the
+framework is dogfooded by real consumer apps.

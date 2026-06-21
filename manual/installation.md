@@ -181,27 +181,21 @@ To pull the latest framework changes:
 cargo update -p suprnova
 ```
 
-If you want to pin to a specific commit or tag, edit `Cargo.toml`:
+If you want to pin to a specific commit, edit `Cargo.toml`:
 
 ```toml
-suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", tag = "v0.1.0" }
-# or
 suprnova = { git = "https://github.com/entrepeneur4lyf/suprnova.git", rev = "abc123def" }
 ```
 
-## Pre-launch note
+Suprnova doesn't publish release tags — pin by commit `rev` when you need
+a reproducible build.
 
-Suprnova isn't on crates.io yet — both the framework and the CLI are
-installed from git. This is intentional for the v0.x phase; once we tag
-v0.1.0 and the API is stable, both will publish to crates.io and the
-install commands will simplify to:
+## Distribution model
 
-```bash
-# Coming with v0.1.0
-cargo install suprnova-cli
-```
-
-Until then, the `--git` form is the supported install path.
+Suprnova is distributed through git, not crates.io — both the framework
+and the CLI install from GitHub, and there are no release tags. Pin an
+app to a specific commit with `rev` when you need a reproducible build;
+otherwise the git dependency tracks the default branch.
 
 ## Editor setup
 

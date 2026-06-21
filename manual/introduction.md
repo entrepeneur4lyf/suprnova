@@ -128,11 +128,11 @@ current HEAD:
 - The workspace test suite passes on every change
 - Every public API in `framework/src/lib.rs` is feature-stable for v0.1
 
-The framework is **pre-launch**: v0.1.0 is not yet tagged. APIs are
-considered settled, but the first published release is gated on
-deployment documentation, CI maturity, and one more pass on developer
-ergonomics. See the [Release Notes](releases.md) for details when v0.1.0
-lands.
+The framework is in active **0.x development**, distributed through git
+(no crates.io, no release tags). The public API is largely settled but
+may still shift during the 0.x line as real consumer apps dogfood it.
+See the [Release Notes](releases.md) and [CHANGELOG](../CHANGELOG.md) for
+the per-version history.
 
 ## Pick a reading path
 
