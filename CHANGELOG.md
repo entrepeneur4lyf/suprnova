@@ -1,8 +1,8 @@
 # Changelog
 
-All notable changes to Suprnova are documented in this file. The format
-follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
-versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
+A readable, per-version log of what changed in Suprnova. Each version
+section is that version's release record — a version is released when it's
+bumped and pushed, not by cutting a tag. Newest first.
 
 ## 0.3.0 — 2026-06-21
 
