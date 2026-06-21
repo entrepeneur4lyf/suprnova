@@ -7,7 +7,7 @@
 
 use crate::error::FrameworkError;
 use crate::mail::address::Address;
-use crate::mail::http_provider::{err, shared_client};
+use crate::mail::http_provider::{err, read_error_body, shared_client};
 use crate::mail::transport::{MailTransport, OutgoingMessage};
 use async_trait::async_trait;
 use aws_sigv4::http_request::{SignableBody, SignableRequest, SigningSettings, sign};
@@ -359,7 +359,7 @@ impl MailTransport for SesMailTransport {
 
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
-            let body = resp.text().await.unwrap_or_default();
+            let body = read_error_body(resp).await;
             return Err(err("SES", status, body));
         }
         Ok(())
