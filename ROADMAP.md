@@ -452,6 +452,26 @@ the framework today.
   webhook events. Flow-tagged `SessionPayload` enum drives Inertia
   frontend dispatch. No gatekeeping — third parties can publish their
   own adapter crates without coordinating with the framework.
+- **Role-based access control (RBAC)** — `HasRoles` trait for any
+  authenticatable model over framework-owned `roles` / `permissions` /
+  `role_has_permissions` tables (`CreateRbacTables` migration).
+  `create_role` / `create_permission` / `give_permission_to_role` /
+  `assign_role_to_model` / `give_permission_to_model` helpers (each with
+  an `_on_guard` variant for guard-scoped roles) + `has_role_for_model`
+  / `has_permission_for_model` checks. `RoleMiddleware` +
+  `PermissionMiddleware` route guards, both fail-closed / default-deny.
+  Layers on top of the shipped Gate/Policy authorization rather than
+  replacing it.
+- **Content rendering** — `MarkdownRenderer` (`MarkdownOptions` →
+  `RenderedMarkdown`) with end-to-end sanitisation (comrak → syntect
+  highlighting → ammonia) and a `build_docs(DocsBuildConfig)` pipeline
+  producing a searchable `DocsCatalog` of `DocsChapter`s, with heading
+  extraction + `slugify_heading`. The Markdown docs / blog surface a kit
+  needs, with no separate static-site generator.
+- **Native static-file serving** — `StaticFiles::public()` /
+  `StaticFiles::from_dir(...)` fallback handler serves a `public/`
+  directory at the web root (configurable `cache_control`), replacing
+  the hand-rolled per-asset whitelist controllers apps used to write.
 
 **Starter kits:**
 
@@ -492,18 +512,6 @@ or programmatic config:
 
 The trait surface stays the same; swapping a backend is a one-line
 config change. None of these are gatekept behind a single engine.
-
-### Admin Panel
-
-A TOML-driven CRUD / RBAC / audit surface over every entity, served as a
-separate Inertia app at `/admin` that reuses Suprnova's auth, routing,
-and policies — no parallel framework underneath. A file like
-`admin/tables/users.toml` declares which columns show, which relations
-expand, which actions appear, and which `#[policy]` impls gate them, so
-the common case needs no UI code; drop to a custom Inertia page for
-bespoke views. Opt-in audit trails write a diff row per
-create/update/delete. Every admin read goes through the same SeaORM
-entity + Policy gate as the application — there is no admin-bypass path.
 
 ### Schema & Query Builder facades
 

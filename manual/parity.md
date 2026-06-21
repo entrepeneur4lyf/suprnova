@@ -70,6 +70,7 @@ gaps as of the shipped framework.
 | Responses | `HttpResponse` builders + `json!()` / `text!()` / `Redirect::to` / `view` | shipped | [Responses](responses.md) |
 | Views (Blade) | Server-rendered Inertia pages (Svelte/React/Vue) — no Blade equivalent | diverged | Inertia is the view layer. Use [Pages](frontend-pages.md) instead of Blade |
 | Asset Bundling (Vite) | Vite 8 ships in every scaffold; `suprnova serve` runs Vite + backend together | shipped | Manifest reading + HMR auto-wired |
+| Static assets (`public/`, served by the web server in Laravel) | `StaticFiles::public()` in-process fallback handler serving `public/` at the web root | shipped | `StaticFiles::from_dir(...)` + `cache_control(...)`; no separate web server needed |
 | URL Generation | `url("posts.show", &[…])`, `route("posts.show", …)`, `redirect(...)`, `redirect_to(...)` | shipped | [URL Generation](urls.md) |
 | Session | `session()`, `session_mut()`, flash bag via `req.flash()` | shipped | DB-backed via `DatabaseSessionDriver`; cookie-backed by default. [Session](session.md) |
 | Validation | `#[derive(Validate)]` + 17 built-in rules + `Rule`/`AsyncRule` traits | shipped | Async rules (e.g. `Unique`) hit the DB. [Validation](validation.md) |
@@ -122,6 +123,7 @@ gaps as of the shipped framework.
 | Web Push (VAPID) | Browser push notifications as a first-class channel | [Web Push](web-push.md) |
 | Multi-connection read/write split | `READ_REPLICA_CONNECTION_NAME` + `DB::on("read").select(...)` | [Database](database.md) |
 | HTTP/2 + WebSocket on the same socket | `hyper.with_upgrades()` in `Server::run` | [Lifecycle](lifecycle.md) |
+| Markdown content + docs pipeline | `MarkdownRenderer` (sanitised comrak → syntect → ammonia) + `build_docs(DocsBuildConfig)` → searchable `DocsCatalog` of `DocsChapter`s | Heading extraction + `slugify_heading`; powers Markdown docs / blog with no separate static-site generator |
 
 ## Security
 
@@ -140,6 +142,7 @@ gaps as of the shipped framework.
 | Passport (OAuth server) | Not yet | not yet | If you need an OAuth provider, run a dedicated identity service (Keycloak, Hydra) behind Suprnova |
 | Fortify (auth backend) | Replaced by `auth_flows` module + `auth_flows::*` types | shipped | Same job; no headless-vs-headed split needed because the frontend is Inertia |
 | Authorization (Policies / Gates) | `Gate::allows/denies` + `#[policy] impl PostPolicy` + `Authorizable` trait + macro registration | shipped | [Authorization](authorization.md) |
+| Roles & permissions (spatie/laravel-permission) | `HasRoles` trait + `roles` / `permissions` / `role_has_permissions` tables (`CreateRbacTables`) + `RoleMiddleware` / `PermissionMiddleware` (fail-closed) | shipped | First-party, not a community package. `create_role` / `give_permission_to_role` / `assign_role_to_model` helpers; layers on top of Gate/Policy. [Authorization](authorization.md) |
 | Encryption | `Crypt::encrypt/decrypt` + `CryptPurpose` AAD binding | shipped | AES-256-GCM, key rotation via `APP_KEY_PREVIOUS`. [Encryption](encryption.md) |
 | Hashing | `hash::*` + `BcryptHasher`, `Argon2idHasher`, `Argon2iHasher`, `needs_rehash`, `is_hashed`, `verify` | shipped | Bcrypt default; argon2id available. [Hashing](hashing.md) |
 
