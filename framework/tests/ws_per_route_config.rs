@@ -45,7 +45,9 @@ fn ws_route_with_explicit_config_surfaces_it() {
         ping_interval: Duration::from_secs(5),
         max_message_size: 1024,
         max_frame_size: 512,
-        max_missed_pings: 1,
+        // Explicit non-default value (default is 2); must be >= 2 since a
+        // threshold of 1 closes every connection on its first ping.
+        max_missed_pings: 4,
         ..Default::default()
     };
     let router = Router::new().ws_with_config("/ws/fast", NoopHandler, cfg);
@@ -54,7 +56,7 @@ fn ws_route_with_explicit_config_surfaces_it() {
     assert_eq!(surfaced.ping_interval, Duration::from_secs(5));
     assert_eq!(surfaced.max_message_size, 1024);
     assert_eq!(surfaced.max_frame_size, 512);
-    assert_eq!(surfaced.max_missed_pings, 1);
+    assert_eq!(surfaced.max_missed_pings, 4);
 }
 
 #[test]

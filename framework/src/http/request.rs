@@ -892,8 +892,19 @@ impl Request {
             // Middleware buffered the body upstream (typically the CSRF
             // middleware). Return the cached bytes without touching the
             // stream (which is gone) so downstream extractors still see
-            // the original payload.
-            BodyState::Buffered(b) => b,
+            // the original payload. The cap still applies: a FormRequest
+            // overriding `max_body_bytes` below the buffering middleware's
+            // limit (e.g. the CSRF 64 KiB ceiling) must still see the
+            // tighter bound honored, matching the streaming arm's 413.
+            BodyState::Buffered(b) => {
+                if b.len() > max_bytes {
+                    return Err(FrameworkError::domain(
+                        format!("request body exceeds {max_bytes} bytes (cap)"),
+                        413,
+                    ));
+                }
+                b
+            }
             BodyState::Consumed => {
                 return Err(FrameworkError::internal(
                     "Request body has already been consumed and was not buffered. \
@@ -1099,6 +1110,10 @@ fn port_of(host: &str) -> Option<u16> {
 /// order. Bare media types (no `q=`) are kept in source order ahead of
 /// any explicitly lower-q items. Mirrors Symfony's `AcceptHeader`
 /// q-sort, simplified to the subset Laravel exposes.
+///
+/// `q` values are clamped to `[0.0, 1.0]` per RFC 7231 §5.3.1, so a
+/// malformed weight (e.g. `q=5`) cannot outrank a legitimately
+/// top-priority type and invert content negotiation.
 fn parse_accept(raw: &str) -> Vec<String> {
     let mut entries: Vec<(usize, f32, String)> = Vec::new();
     for (idx, piece) in raw.split(',').enumerate() {
@@ -1112,9 +1127,9 @@ fn parse_accept(raw: &str) -> Vec<String> {
         for param in piece.split(';').skip(1) {
             let p = param.trim();
             if let Some(qv) = p.strip_prefix("q=") {
-                q = qv.parse().unwrap_or(1.0);
+                q = qv.parse::<f32>().unwrap_or(1.0).clamp(0.0, 1.0);
             } else if let Some(qv) = p.strip_prefix("Q=") {
-                q = qv.parse().unwrap_or(1.0);
+                q = qv.parse::<f32>().unwrap_or(1.0).clamp(0.0, 1.0);
             }
         }
         entries.push((idx, q, piece.to_string()));
@@ -1218,6 +1233,98 @@ mod url_helper_tests {
                 "application/json".to_string(),
             ]
         );
+    }
+
+    /// A malformed `q` weight above the RFC 7231 ceiling must not invert
+    /// content negotiation. A bare `q=5` should be clamped to 1.0 and so
+    /// tie (not outrank) a legitimate `q=1.0` type, with source order
+    /// breaking the tie — the over-limit weight gains no priority.
+    #[test]
+    fn parse_accept_clamps_q_above_one() {
+        let parsed = parse_accept("application/json;q=1.0, text/html;q=5");
+        assert_eq!(
+            parsed,
+            vec![
+                "application/json;q=1.0".to_string(),
+                "text/html;q=5".to_string(),
+            ],
+            "q=5 must clamp to 1.0 and not outrank an explicit q=1.0 type"
+        );
+    }
+
+    /// A negative `q` is clamped up to 0.0 (the RFC floor), so it still
+    /// sorts last rather than wrapping into an unexpected ordering.
+    #[test]
+    fn parse_accept_clamps_negative_q_to_floor() {
+        let parsed = parse_accept("text/html;q=-3, application/json;q=0.5");
+        assert_eq!(
+            parsed,
+            vec![
+                "application/json;q=0.5".to_string(),
+                "text/html;q=-3".to_string(),
+            ],
+            "q=-3 must clamp to 0.0 and sort below a positive-weight type"
+        );
+    }
+
+    /// A pre-buffered body (typical of CSRF-buffered form requests) must
+    /// still honor a tighter per-request cap. A FormRequest overriding
+    /// `max_body_bytes` below the buffering middleware's limit must see
+    /// the over-limit 413, identical to the streaming arm — the cap is
+    /// not silently lost just because the bytes are already in memory.
+    #[tokio::test]
+    async fn buffered_body_over_cap_is_rejected() {
+        let parts = hyper::Request::builder()
+            .method("POST")
+            .uri("/")
+            .body(())
+            .expect("build request parts")
+            .into_parts()
+            .0;
+        let req = Request {
+            parts,
+            body: BodyState::Buffered(Bytes::from_static(&[0u8; 128])),
+            params: HashMap::new(),
+            route_pattern: None,
+            peer_addr: None,
+            trusted_proxies: TrustedProxiesConfig::empty(),
+        };
+
+        // Use `.err()` rather than `expect_err` so the test doesn't require
+        // the Ok variant `(RequestParts, Bytes)` to be `Debug`.
+        let err = req
+            .body_bytes_with_cap(64)
+            .await
+            .err()
+            .expect("128-byte buffered body must exceed the 64-byte cap");
+        assert_eq!(err.status_code(), 413, "over-cap buffered body is 413");
+    }
+
+    /// A pre-buffered body within the cap returns its cached bytes
+    /// unchanged — the cap check only rejects, it never truncates.
+    #[tokio::test]
+    async fn buffered_body_within_cap_passes_through() {
+        let parts = hyper::Request::builder()
+            .method("POST")
+            .uri("/")
+            .body(())
+            .expect("build request parts")
+            .into_parts()
+            .0;
+        let req = Request {
+            parts,
+            body: BodyState::Buffered(Bytes::from_static(b"hello")),
+            params: HashMap::new(),
+            route_pattern: None,
+            peer_addr: None,
+            trusted_proxies: TrustedProxiesConfig::empty(),
+        };
+
+        let (_, bytes) = req
+            .body_bytes_with_cap(64)
+            .await
+            .expect("5-byte body within 64-byte cap");
+        assert_eq!(bytes.as_ref(), b"hello");
     }
 
     #[test]

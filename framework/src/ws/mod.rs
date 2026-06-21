@@ -171,12 +171,14 @@ impl WsConfig {
     /// - `ping_interval` is non-zero. `tokio::time::interval(Duration::ZERO)`
     ///   panics on construction; the heartbeat task would tear down the
     ///   process the first time the route was hit.
-    /// - `max_missed_pings` is non-zero. A zero threshold means the very
-    ///   first ping send increments past the bound and closes the
-    ///   connection with 1011 before the peer ever has a chance to pong —
-    ///   effectively "drop every connection on its first heartbeat tick".
-    ///   Routes that want to disable close-on-no-pong should set this to
-    ///   [`usize::MAX`], which the heartbeat path documents.
+    /// - `max_missed_pings` is at least 2. The heartbeat increments the
+    ///   counter on each ping send and checks the bound before the peer
+    ///   has had its grace interval to pong, so a threshold of 1 closes
+    ///   the connection with 1011 on the very first tick — identical to
+    ///   the rejected value 0. A usable threshold needs at least one grace
+    ///   cycle (ping, then a pong can reset the counter). Routes that want
+    ///   to disable close-on-no-pong should set this to [`usize::MAX`],
+    ///   which the heartbeat path documents.
     ///
     /// Size knobs (`max_message_size`, `max_frame_size`) are intentionally
     /// not validated here: their safety is a per-deployment policy, not a
@@ -189,9 +191,9 @@ impl WsConfig {
                 "WsConfig.ping_interval must be > 0 (tokio::time::interval panics on Duration::ZERO)",
             );
         }
-        if self.max_missed_pings == 0 {
+        if self.max_missed_pings < 2 {
             return Err(
-                "WsConfig.max_missed_pings must be >= 1 (0 closes every connection on its first ping); set usize::MAX to disable close-on-no-pong",
+                "WsConfig.max_missed_pings must be >= 2 (1 closes every connection on its first ping, before a pong can reset the counter); set usize::MAX to disable close-on-no-pong",
             );
         }
         Ok(())
@@ -330,6 +332,35 @@ mod tests {
         };
         let err = cfg.validate().expect_err("zero max_missed_pings invalid");
         assert!(err.contains("max_missed_pings"), "msg: {err}");
+    }
+
+    /// `max_missed_pings = 1` passes a naive "non-zero" check but behaves
+    /// identically to `0`: the heartbeat increments the counter to 1 on
+    /// the first ping send and the `>= max_missed` check fires before the
+    /// peer's grace interval, closing every connection on its first tick.
+    /// A usable threshold needs at least one grace cycle, so validation
+    /// must reject 1 too.
+    #[test]
+    fn one_max_missed_pings_rejected() {
+        let cfg = WsConfig {
+            max_missed_pings: 1,
+            ..Default::default()
+        };
+        let err = cfg.validate().expect_err("one max_missed_pings invalid");
+        assert!(err.contains("max_missed_pings"), "msg: {err}");
+    }
+
+    /// The smallest threshold that affords a grace cycle (ping, then a
+    /// pong can reset the counter) must pass validation — it's the
+    /// boundary the runtime relies on.
+    #[test]
+    fn two_max_missed_pings_is_valid() {
+        let cfg = WsConfig {
+            max_missed_pings: 2,
+            ..Default::default()
+        };
+        cfg.validate()
+            .expect("two is the smallest usable threshold");
     }
 
     #[test]
