@@ -29,6 +29,31 @@
 //! Both keys carry the same TTL, so the cache store cleans them up
 //! automatically when the window ends. This is the same two-key shape
 //! Laravel uses in `Cache/RateLimiter.php:147-181`.
+//!
+//! ## Concurrency — gate on the post-increment count
+//!
+//! A read-then-write gate ([`too_many_attempts`](RateLimiter::too_many_attempts)
+//! followed later by [`hit`](RateLimiter::hit)) has a check-then-act race:
+//! concurrent callers can all observe a count below the limit, then each
+//! increment, over-admitting past the configured ceiling and widening the
+//! brute-force window. The atomic alternative is
+//! [`hit_and_check`](RateLimiter::hit_and_check) — it increments first and
+//! decides on the returned count, so the decision and the write are a single
+//! step with no gap. The HTTP middleware uses it; prefer it over the
+//! read-gate-then-`hit` pair anywhere correctness under concurrency matters.
+//!
+//! ## Multi-process correctness needs Redis
+//!
+//! The atomicity guarantee is per backing store. The default
+//! [`InMemoryCache`](crate::cache::InMemoryCache) is **per-process**: each
+//! worker process keeps its own counter map, so a fixed-window limit set to N
+//! admits up to `N × processes` across a multi-process deployment. For correct
+//! limiting across processes (or hosts), back the cache with **Redis** — its
+//! `INCR` is atomic and the counter is shared by every process pointed at the
+//! same instance. (The sliding-window
+//! [`RateLimiterDriver`](super::RateLimiterDriver) Redis path is likewise
+//! cross-process by construction; in-memory is the per-process fallback for
+//! both surfaces.)
 
 use crate::Request;
 use crate::cache::Cache;
@@ -268,6 +293,40 @@ impl RateLimiter {
     /// Returns the new counter value.
     pub async fn hit(key: &str, decay_seconds: u64) -> Result<i64, FrameworkError> {
         Self::increment(key, decay_seconds, 1).await
+    }
+
+    /// Atomic increment-and-check: bump the counter by 1, open the window if
+    /// needed, and decide on the **post-increment** count whether the bucket
+    /// is now over its limit. Returns `true` when this hit pushed the count
+    /// past `max_attempts` (i.e. the caller should be refused).
+    ///
+    /// This is the race-free alternative to a
+    /// [`too_many_attempts`](Self::too_many_attempts) read-gate followed by a
+    /// separate [`hit`](Self::hit). Because the increment is the cache's atomic
+    /// primitive and the decision uses its return value, concurrent callers
+    /// receive distinct sequential counts and the bucket admits at most
+    /// `max_attempts` per window — closing the check-then-act gap that lets a
+    /// burst over-admit.
+    ///
+    /// `i64::MAX` is treated as unlimited: the counter is still bumped (so
+    /// usage stays observable) but the bucket never trips.
+    ///
+    /// Window self-healing is implicit: the counter shares its TTL with the
+    /// `:timer` deadline, so once the window expires both age out together and
+    /// the next call re-seeds the timer and starts the count fresh at 1.
+    ///
+    /// The atomicity is per backing store — see the module-level note on
+    /// needing Redis for correct multi-process limiting.
+    pub async fn hit_and_check(
+        key: &str,
+        max_attempts: i64,
+        decay_seconds: u64,
+    ) -> Result<bool, FrameworkError> {
+        let new_value = Self::increment(key, decay_seconds, 1).await?;
+        if max_attempts == i64::MAX {
+            return Ok(false);
+        }
+        Ok(new_value > max_attempts)
     }
 
     /// Increment the counter by `amount` and seed the `:timer` if
@@ -587,6 +646,155 @@ mod tests {
         let name = "test:rfor:02";
         RateLimiter::r#for(name, |_req| Limit::per_minute(10).into());
         assert!(RateLimiter::has_limiter(name));
+    }
+
+    #[tokio::test]
+    async fn hit_and_check_admits_exactly_max_then_blocks() {
+        let _g = fresh_test_container();
+        let key = "iac:boundary";
+        let max = 3;
+        // First `max` hits admit (return false = not over limit).
+        for i in 1..=max {
+            let over = RateLimiter::hit_and_check(key, max, 60).await.unwrap();
+            assert!(!over, "hit {i} of {max} must be admitted");
+        }
+        assert_eq!(RateLimiter::attempts(key).await.unwrap(), max);
+        // The (max+1)th hit trips.
+        let over = RateLimiter::hit_and_check(key, max, 60).await.unwrap();
+        assert!(over, "the {n}th hit must be refused", n = max + 1);
+    }
+
+    #[tokio::test]
+    async fn hit_and_check_treats_i64_max_as_unlimited() {
+        let _g = fresh_test_container();
+        let key = "iac:unlimited";
+        for _ in 0..10 {
+            let over = RateLimiter::hit_and_check(key, i64::MAX, 60).await.unwrap();
+            assert!(!over, "unlimited limiter never trips");
+        }
+        // Counter still tracks usage for observability.
+        assert_eq!(RateLimiter::attempts(key).await.unwrap(), 10);
+    }
+
+    /// The core anti-TOCTOU property: when many hits race the same bucket at
+    /// the boundary, increment-and-check admits at most `max_attempts` of
+    /// them — no over-admission past the configured ceiling. A read-gate
+    /// (`too_many_attempts` then `hit`) would let concurrent callers all
+    /// observe a below-limit count and all pass, over-admitting.
+    ///
+    /// The tasks run on a single-thread `LocalSet` so they all share the
+    /// thread-local `TestContainer` cache binding (the container is
+    /// thread-local, and a binding installed on one worker thread is not
+    /// visible to a task resumed on another). Concurrency is still real:
+    /// the tasks interleave at the `.await` points inside `hit_and_check`,
+    /// which is exactly where a read-gate's check-then-act window lives.
+    #[tokio::test(flavor = "current_thread")]
+    async fn concurrent_burst_does_not_over_admit() {
+        let _g = fresh_test_container();
+        let key = "iac:burst";
+        let max = 5_i64;
+        let bursts = 50_i64;
+
+        let admitted = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let local = tokio::task::LocalSet::new();
+        for _ in 0..bursts {
+            let admitted = admitted.clone();
+            local.spawn_local(async move {
+                let over = RateLimiter::hit_and_check(key, max, 60).await.unwrap();
+                if !over {
+                    admitted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            });
+        }
+        local.await;
+
+        let admitted = admitted.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            admitted, max,
+            "increment-and-check must admit exactly max_attempts under a \
+             concurrent burst — no over-admission"
+        );
+        assert!(
+            RateLimiter::attempts(key).await.unwrap() >= max,
+            "every hit was counted (tripped hits still increment)"
+        );
+    }
+
+    /// Demonstrates the bug the fix closes, side by side. The old gate read
+    /// the count, decided, and only later wrote (`too_many_attempts` then
+    /// `hit`). When several callers observe the same below-limit snapshot
+    /// before any of them writes, they all pass and over-admit. The fixed
+    /// gate (`hit_and_check`) folds the write into the decision, so it never
+    /// over-admits.
+    #[tokio::test]
+    async fn read_gate_over_admits_but_increment_and_check_does_not() {
+        let _g = fresh_test_container();
+        let max = 3_i64;
+
+        // Reproduce the read-then-write race against a single shared snapshot:
+        // N callers all read the same pre-write count of 0, all see `0 < max`,
+        // all admit. That is the TOCTOU over-admission.
+        let race_key = "iac:race:readgate";
+        let mut read_gate_admitted = 0_i64;
+        let snapshot = RateLimiter::attempts(race_key).await.unwrap(); // 0
+        for _ in 0..(max + 4) {
+            // Every caller decides on the SAME stale snapshot, then writes —
+            // exactly what concurrent read-gate callers do before any write
+            // lands.
+            if snapshot < max {
+                read_gate_admitted += 1;
+                RateLimiter::hit(race_key, 60).await.unwrap();
+            }
+        }
+        assert!(
+            read_gate_admitted > max,
+            "the read-then-write gate over-admits ({read_gate_admitted} > {max})"
+        );
+
+        // The fixed gate decides on its own post-increment count, so the same
+        // burst admits at most `max`.
+        let fixed_key = "iac:race:fixed";
+        let mut fixed_admitted = 0_i64;
+        for _ in 0..(max + 4) {
+            let over = RateLimiter::hit_and_check(fixed_key, max, 60)
+                .await
+                .unwrap();
+            if !over {
+                fixed_admitted += 1;
+            }
+        }
+        assert_eq!(
+            fixed_admitted, max,
+            "increment-and-check admits exactly max — no over-admission"
+        );
+    }
+
+    /// Sequentially driving `hit_and_check` past the limit then waiting for
+    /// the window to expire must reopen the bucket — the increment-and-check
+    /// path self-heals the window just like the read-gate path.
+    #[tokio::test]
+    async fn hit_and_check_reopens_after_window_expiry() {
+        let _g = fresh_test_container();
+        let key = "iac:reopen";
+        let max = 2_i64;
+        assert!(!RateLimiter::hit_and_check(key, max, 1).await.unwrap());
+        assert!(!RateLimiter::hit_and_check(key, max, 1).await.unwrap());
+        assert!(
+            RateLimiter::hit_and_check(key, max, 1).await.unwrap(),
+            "third hit in the window trips"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+
+        assert!(
+            !RateLimiter::hit_and_check(key, max, 1).await.unwrap(),
+            "window reopened: first hit of the new window is admitted"
+        );
+        assert_eq!(
+            RateLimiter::attempts(key).await.unwrap(),
+            1,
+            "counter restarts at 1 in the fresh window"
+        );
     }
 
     /// The counter MUST age out with the window — `attempts(key)` must

@@ -124,35 +124,36 @@ impl Middleware for ThrottleRequestsMiddleware {
             }
         };
 
-        // Apply each limit's gate. If any one says "too many attempts",
-        // build the 429 response (or its custom-response equivalent) and
-        // short-circuit. Matches Laravel's first-trip-wins pass through
-        // `handleRequest`.
+        // Apply each limit's gate. First trip wins, then short-circuit with
+        // the 429 (or its custom-response equivalent). Matches Laravel's
+        // first-trip-wins pass through `handleRequest`.
+        //
+        // Two gating shapes:
+        //
+        // - Limits WITHOUT an `after_callback` debit unconditionally, so the
+        //   gate and the debit are fused into a single atomic
+        //   increment-and-check (`hit_and_check`). Gating on the
+        //   post-increment count closes the check-then-act race a separate
+        //   `too_many_attempts`-then-`hit` pair would leave open — a
+        //   concurrent burst can no longer all observe a below-limit count and
+        //   all pass, over-admitting past the ceiling.
+        // - Limits WITH an `after_callback` only burn an attempt when the
+        //   post-response predicate matches, so the debit is deferred until
+        //   after `next`. They gate on the already-recorded count via a read
+        //   (`too_many_attempts`); there is nothing to increment yet.
         for limit in &limits {
             let key = match prefixed_key(limit, &self.mode, &self.prefix) {
                 Some(k) => k,
                 None => continue, // Unlimited limit -- never trips.
             };
-            if RateLimiter::too_many_attempts(&key, limit.max_attempts).await? {
+            let over = if limit.after_callback.is_some() {
+                RateLimiter::too_many_attempts(&key, limit.max_attempts).await?
+            } else {
+                RateLimiter::hit_and_check(&key, limit.max_attempts, limit.decay_seconds()).await?
+            };
+            if over {
                 return Err(build_too_many_attempts_response(&request, limit, &key).await?);
             }
-        }
-
-        // Pre-debit any limit without an `after_callback`. Limits WITH
-        // an after-callback only burn an attempt when the post-response
-        // predicate matches, so we defer those until after `next`.
-        for limit in &limits {
-            if limit.after_callback.is_some() {
-                continue;
-            }
-            let key = match prefixed_key(limit, &self.mode, &self.prefix) {
-                Some(k) => k,
-                None => continue,
-            };
-            if limit.max_attempts == i64::MAX {
-                continue;
-            }
-            RateLimiter::hit(&key, limit.decay_seconds()).await?;
         }
 
         let response = next(request).await;
