@@ -44,7 +44,7 @@ gaps as of the shipped framework.
 | Agentic Development (AI) | No first-class AI SDK in framework | by design no | Use the crates you'd use anyway (`async-openai`, `anthropic-rs`, `tokenizers`, etc.) under `App::bind(Arc<dyn YourLlm>)` |
 | Directory Structure | `src/{actions,bootstrap,controllers,middleware,models,routes}` | shipped | Same intent, Rust-idiomatic layout. [Structure](structure.md) |
 | Frontend | Inertia v3 over Svelte 5 / React 19 / Vue 3.5 | shipped | [Frontend](frontend.md), [Pages](frontend-pages.md), [TS Types](frontend-typescript-types.md) |
-| Starter Kits | Plain `suprnova new --frontend <…>` ships auth, dashboard, payment-ready layout | not yet | Breeze/Jetstream/Spark-tier kits planned; today the default scaffold is closest to Breeze. [Starter Kits](starter-kits.md) |
+| Starter Kits | **Nebula** (auth) and **Pulsar** (full product site), plus the plain `suprnova new` scaffold | shipped | Two kits ship today — Nebula is the Breeze equivalent; Pulsar adds docs, blog, community, and RBAC. [Starter Kits](starter-kits.md) |
 | Deployment | Single binary; Docker / Railway / DO / Hetzner recipes | diverged | One artifact, not a PHP runtime + opcache + FPM. [Deployment](deployment.md) |
 
 ## The basics
@@ -69,7 +69,7 @@ gaps as of the shipped framework.
 | File uploads | `req.file("avatar")?` returns `UploadedFile`; streaming multipart with size + part caps | shipped | Auto-spill to tempfile above threshold |
 | Responses | `HttpResponse` builders + `json!()` / `text!()` / `Redirect::to` / `view` | shipped | [Responses](responses.md) |
 | Views (Blade) | Server-rendered Inertia pages (Svelte/React/Vue) — no Blade equivalent | diverged | Inertia is the view layer. Use [Pages](frontend-pages.md) instead of Blade |
-| Asset Bundling (Vite) | Vite 6 ships in every scaffold; `suprnova serve` runs Vite + backend together | shipped | Manifest reading + HMR auto-wired |
+| Asset Bundling (Vite) | Vite 8 ships in every scaffold; `suprnova serve` runs Vite + backend together | shipped | Manifest reading + HMR auto-wired |
 | URL Generation | `url("posts.show", &[…])`, `route("posts.show", …)`, `redirect(...)`, `redirect_to(...)` | shipped | [URL Generation](urls.md) |
 | Session | `session()`, `session_mut()`, flash bag via `req.flash()` | shipped | DB-backed via `DatabaseSessionDriver`; cookie-backed by default. [Session](session.md) |
 | Validation | `#[derive(Validate)]` + 17 built-in rules + `Rule`/`AsyncRule` traits | shipped | Async rules (e.g. `Unique`) hit the DB. [Validation](validation.md) |
@@ -233,7 +233,7 @@ gaps as of the shipped framework.
 | Cashier (Stripe) | `suprnova-payments-stripe` adapter crate behind generic `Payment` / `Subscription` / `CustomerStore` / `WebhookHandler` traits | diverged | Generic surface, concrete adapter. [Payments](payments.md), [Stripe Adapter](payments-stripe.md) |
 | Cashier (Paddle) | `suprnova-payments-paddle` adapter | diverged | Merchant-of-Record flow + no direct `Payment` impl (Paddle owns the gateway). [Paddle Adapter](payments-paddle.md) |
 | Custom provider | Implement `PaymentProvider` + `SessionPayload` + `WebhookHandler` | shipped | [Provider Guide](payments-provider-guide.md) |
-| Inertia checkout components | Documented dispatch loops for Svelte / React / Vue against `SessionPayload.flow` | shipped | [Payments Frontend](payments-frontend.md). Starter-kit-tier pre-wired billing pages land with the Spark-tier kit ([Starter Kits](starter-kits.md)) |
+| Inertia checkout components | Documented dispatch loops for Svelte / React / Vue against `SessionPayload.flow` | shipped | [Payments Frontend](payments-frontend.md). Ready-made billing pages are a planned starter-kit addition ([Starter Kits](starter-kits.md)) |
 | Subscription lifecycles | `Subscription::subscribe / update / cancel / get` (where the provider supports them) | shipped | `NotSupported` returned where the provider doesn't (e.g. Paddle `subscribe` and price-set replacement) |
 | Webhook idempotency | `payments_webhook_events` mirror table with `UNIQUE(provider, provider_event_id)` | shipped | Stripe-style replay protection |
 | Mirror tables | `payments_customers`, `payments_payment_methods`, `payments_subscriptions`, `payments_subscription_items`, `payments_transactions`, `payments_webhook_events` | shipped | `provider_metadata` JSONB column on each for adapter-specific fields |
@@ -370,7 +370,6 @@ shape of the gap in one place:
 
 | Area | What's missing | Workaround until shipped |
 |---|---|---|
-| Starter kits (Breeze/Jetstream/Spark tier) | Themed auth + dashboard + billing scaffolds | The default `suprnova new` scaffold is closest to Breeze |
 | Localization (i18n) | Translation file loader + `__("key", params)` helper | Use `fluent`, `rust-i18n`, or `gettext` crates directly |
 | Search (Scout — keyword) | Algolia / Meilisearch / Elastic adapter | Roll your own with `meilisearch-sdk` / `elasticsearch` until shipped; [Vector](vector.md) handles semantic search today |
 | Passport (OAuth server) | First-party OAuth identity provider | Run Hydra / Keycloak behind Suprnova |

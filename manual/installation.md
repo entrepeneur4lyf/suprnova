@@ -12,7 +12,7 @@ scaffolded project. If you're already there, jump to the
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
 - **Node.js 20+** and **npm** (or pnpm/yarn/bun) for the frontend
-  toolchain. Suprnova uses Vite 6 and your starter ships TypeScript +
+  toolchain. Suprnova uses Vite 8 and your starter ships TypeScript +
   Tailwind v4. Install via [nodejs.org](https://nodejs.org/) or your
   package manager.
 - **A database client library** that matches the driver you want to use:
@@ -78,7 +78,7 @@ application built with Suprnova") and author (empty). To set those,
 edit the generated `Cargo.toml` after scaffolding.
 
 The three frontend choices each ship their own runes-on/Svelte-5,
-React-19, or Vue-3.5 starter. All three use Inertia v3 + Vite 6 +
+React-19, or Vue-3.5 starter. All three use Inertia v3 + Vite 8 +
 Tailwind v4 and pre-wire a Login/Register/Dashboard flow with
 session-based auth.
 

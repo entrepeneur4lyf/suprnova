@@ -92,7 +92,9 @@ is what makes Rust frameworks reach 80% production-ready and stall.
 
 ## Where we are
 
-**Production-ready and complete:**
+The list below is the shipped surface as of the **v0.1.0** release
+(2026-06-10). Every item here is production-ready, tested, and live in
+the framework today.
 
 - **Inertia v3 protocol** - every protocol field, every header, SSR client
   + CLI worker (`ssr:start` / `ssr:check`), Precognition (Validate-Only
@@ -100,8 +102,12 @@ is what makes Rust frameworks reach 80% production-ready and stall.
   (`Inertia::scroll` + `scrollProps`), preserveFragment via session-flash,
   history encryption, shared data, lazy/optional/defer/merge/once props,
   flash, 302→303 conversion. 229 framework tests.
-- **Auth** (basic) - session-based, regenerate-on-login, UserProvider
-  trait, login/logout/check/user facade.
+- **Auth** - session-based with regenerate-on-login, `Authenticatable`
+  trait + `EloquentUserProvider<M>`, multiple named guards (web session
+  + API token), `Auth::attempt` / `login` / `user` / `user_as<T>` /
+  `logout` / `check` facade. Email verification, password reset,
+  two-factor TOTP (with recovery codes + replay protection),
+  brute-force / login throttling, and remember-me cookies all ship.
 - **Session** - `tokio::task_local!` (async-safe), DB-backed store with
   flash, CSRF token, regenerate-id, AES-keyed cookies.
 - **CSRF** - middleware, helpers, meta-tag emit.
@@ -114,7 +120,7 @@ is what makes Rust frameworks reach 80% production-ready and stall.
   middleware-per-group, compile-time path validation via macros.
 - **Container** - type-safe `#[injectable]` / `#[service]` macros,
   `App::make::<T>()` and `App::resolve::<T>()`.
-- **Database** - SeaORM, three drivers (MySQL, Postgres, SQLite),
+- **Database** - SeaORM, four databases (SQLite, Postgres, MySQL, and MariaDB via the MySQL driver),
   migrations, model derives.
 - **Frontend starters** - React 19 / Vue 3 / Svelte 5, all on Vite 8 +
   Tailwind v4 + Inertia 3.1, SSR-aware (`data-server-rendered` honored).
@@ -261,20 +267,20 @@ is what makes Rust frameworks reach 80% production-ready and stall.
   `AsyncRule` with `Unique` issuing real parameterized DB queries
   (no in-memory fakes). `FormRequest::after_validation` cross-field
   hook. `ValidationErrors::add_to_bag` for named-scope errors.
-- **Queue + Rate Limiter + Cache** (Phase 5A) — `Queue::dispatch` /
+- **Queue + Rate Limiter + Cache** — `Queue::dispatch` /
   `Queue::push` over Redis / Database / in-process drivers; typed
   `Job` trait; supervised workers via `queue:work`. `RateLimiter::for`
   fluent attempts/decay/lockout API + `ThrottleRequests` middleware.
   Multi-store `Cache::store("redis")` / `Cache::store("memory")` with
   `remember` / `forever` / `tags` / `lock` (atomic per-key lock).
-- **Mail + Notifications** (Phase 5B) — `Mail::to(&user).send(WelcomeEmail)`
+- **Mail + Notifications** — `Mail::to(&user).send(WelcomeEmail)`
   facade over SMTP / SES / Postmark / Mailgun / Resend / SendGrid /
   log drivers (six first-class transports). `Mailable` trait +
   Markdown + plain-text + HTML rendering via `tera`. `Notifications`
   facade with mail + database + slack channels. `#[derive(NotificationMailable)]`
   for compile-time notification wiring. Test fakes (`Mail::fake()` /
   `Notification::fake()`) record sends for `assert_sent` / `assert_to`.
-- **Factories + Seeders + Typed Config + Console** (Phases 6A + 6B) —
+- **Factories + Seeders + Typed Config + Console** —
   `Factory` trait + `FactoryBuilder` with `Sequence`, `count(n)`,
   `state(closure)`. `Persistable` bridges factory output to the DB.
   `Seeder` trait with `db:seed` console command. `Config::resolve::<T>()`
@@ -283,7 +289,7 @@ is what makes Rust frameworks reach 80% production-ready and stall.
   CLI surface. App-binary console runner (`cargo run --bin console`) —
   Rust analogue of `php artisan`. `make:command` generator. `silent`
   error variant for graceful CLI exit codes.
-- **WebSockets + Broadcasting + Supervised Workers** (Phases 7A + 7B) —
+- **WebSockets + Broadcasting + Supervised Workers** —
   `ws!()` macro + `Router::ws` + `hyper-tungstenite` upgrade
   integration. `WsSocket` Sink/Stream split. Per-connection heartbeat
   with close-on-no-pong. `BroadcastHub` trait + in-memory + sea-streamer
@@ -294,15 +300,15 @@ is what makes Rust frameworks reach 80% production-ready and stall.
   `Supervisor` trait + registry with panic-catch auto-restart and
   graceful shutdown. Cross-process presence via sea-streamer
   meta-channel.
-- **Eloquent Foundation** (Phase 10A) — `#[suprnova::model]` attribute
+- **Eloquent Foundation** — `#[suprnova::model]` attribute
   macro emits SeaORM-bridged Entity + Column + ActiveModel + inner
   Model. `Model` trait CRUD (`find` / `save` / `update` / `delete` /
   `refresh` / `replicate` / `first_or_create` / `update_or_create` /
   `increment` / `decrement`). `Builder<M>` with dual-API where surface
   (`filter*` Rust-shape + `db_where`/`where_*` Laravel-shape, both
   first-class aliases). Inventory-backed `ModelEntry` registry for
-  Phase 8 admin enumeration. `Fillable` / `Guarded` + `attrs!` macro +
-  `unguarded(closure)` task-local bypass. **21 built-in casts**:
+  admin enumeration. `Fillable` / `Guarded` + `attrs!` macro +
+  `unguarded(closure)` task-local bypass. **22 built-in casts**:
   primitive (`AsBool` / `AsInt` / `AsFloat` / `AsString` / `AsDecimal`),
   temporal (`AsDate` / `AsDateTime` / `AsTimestamp` / `AsImmutableDate*`),
   structured (`AsJson` / `AsObject` / `AsArray` / `AsArrayObject` /
@@ -316,7 +322,7 @@ is what makes Rust frameworks reach 80% production-ready and stall.
   / `only_trashed`). `Prunable` (per-row with `pruning()` hook) +
   `MassPrunable` (set-based DELETE) + inventory-registered `model:prune`
   command.
-- **Eloquent Relationships** (Phase 10B) — every Eloquent relation
+- **Eloquent Relationships** — every Eloquent relation
   kind: `HasOne` / `BelongsTo` (with `with_default` closure) / `HasMany`
   / `BelongsToMany` (first-class `Pivot` models as their own
   `#[suprnova::model]`, `attach` / `detach` / `sync` mutators, transactional
@@ -345,7 +351,7 @@ is what makes Rust frameworks reach 80% production-ready and stall.
   declarations route correctly. `with_trashed` / `only_trashed`
   forwarding on all 10 relation types. Prunable does NOT cascade
   (correct Laravel default); cascade via DB FK or `pruning()` hook.
-- **Vector** (Phase 9A + 9B) — `VectorDriver` trait + `Vector::register` /
+- **Vector** — `VectorDriver` trait + `Vector::register` /
   `Vector::store` facade + `VectorItem` / `VectorMatch` contract.
   Four production drivers ship in v1: `MemoryVectorDriver` (in-process,
   cosine similarity), `QdrantVectorDriver` (gRPC via `qdrant-client`,
@@ -365,7 +371,7 @@ is what makes Rust frameworks reach 80% production-ready and stall.
   driver anchors the "one DB, four jobs" production positioning
   (relational + vector + JSON + temporal on one engine — see
   `docs/core/vector.md` for the SQLite-dev / MariaDB-prod story).
-- **Eloquent Lifecycle + Collections + Querying Power** (Phase 10C)
+- **Eloquent Lifecycle + Collections + Querying Power**
   — Model events: 16 lifecycle structs in a per-model `events::*`
   submodule (`Retrieving` / `Retrieved` / `Saving` / `Creating` /
   `Updating` / `Deleting` / `Restoring` / `Created` / `Updated` /
@@ -421,7 +427,7 @@ is what makes Rust frameworks reach 80% production-ready and stall.
   `serde_json`. Debugging — `Builder::dump()` (chainable, logs at
   `tracing::info!`) + `Builder::dd()` (returns `!`, logs at
   `tracing::error!` then panics with `eloquent dd: <sql>`).
-- **Auth Flows** (Phase 11) — `EmailVerification::send` / `verify` /
+- **Auth Flows** — `EmailVerification::send` / `verify` /
   `resend` over signed URLs. `PasswordReset::start` / `verify` /
   `complete` with token expiry + session-revocation on completion +
   remember-me cookie invalidation. `BruteForce` facade + `LoginThrottleMiddleware`
@@ -429,735 +435,110 @@ is what makes Rust frameworks reach 80% production-ready and stall.
   verify + recovery codes (one-time-use); time-step replay prevention;
   rate-limited verify path. Six events (`Registered` / `Verified` /
   `PasswordReset` / `LockoutTriggered` / `TwoFactorEnabled` / etc.).
-- **Feature Flags** (Phase 13) — `Features::active("flag_name")` /
+- **Feature Flags** — `Features::active("flag_name")` /
   `for_user` / `for_team` evaluation. `DatabaseEvaluator` (SeaORM-backed
   snapshot) + `CachedEvaluator` (TTL over `Cache`) composition.
   `FeatureMiddleware` with extractor builder for per-request
   `Context`. Admin CRUD endpoints. `FeatureSync` trait for sub-second
   propagation (live evaluator refresh on admin mutations). String-typed
   user IDs end-to-end. `FeatureRetrieved` event for analytics.
-
-**Partial - needs filling in:**
-
-- Cookie (via session; standalone API unclear)
-- Container scoped bindings (singletons work; per-request scoping
-  underspecified)
-- Schema DSL + Query Builder facades (migrations work via SeaORM's
-  migration types, but no Laravel-shape `Schema::create("users", |t| { ... })`
-  builder; no entity-less `Query::table("users").where(...).get()`
-  for ad-hoc queries). **Foundation: re-export
-  [`sea-query`](https://github.com/SeaQL/sea-query) 1.0
-  (MIT/Apache-2.0)** — it's already a transitive dep via SeaORM, so
-  exposing `suprnova::schema::*` and `suprnova::query::*` as thin
-  re-export facades is free leverage. Covers MySQL/Postgres/SQLite
-  with the same DSL.
-**Missing - the rest of this document.**
-
-Major missing tracks beyond Phase 12:
-
-- **Phase 8 — Admin Panel** (8A backend contract + 8B Scheduler/Queue
-  inspectors + 8C UI shell on Inertia). Phase 8A walks the
-  `ModelEntry` + `RelationEntry` + `MorphTypeEntry` + `CommandEntry` +
-  `SupervisorEntry` inventories — plus the Phase 12 `payments_*` mirror
-  tables — to enumerate every administerable surface in the binary.
-  Deferred until a starter kit demands it (see
-  `project_starter_kits_strategy`).
-
-Shipped tracks:
-
-- **Phase 12 — Payments v1** Generic provider-neutral trait surface
-  (`Checkout` + `Payment`-optional + `Subscription` + `CustomerStore` +
-  `WebhookHandler`) shipped in `framework/src/payments/`. Two reference
-  adapters as workspace member crates: `suprnova-payments-stripe`
-  (Stripe gateway, full Payment impl) and `suprnova-payments-paddle`
-  (Merchant-of-Record, no Payment impl by design). Six mirror tables
-  with `provider_metadata` jsonb escape hatch + free idempotency via
-  `UNIQUE(provider, provider_event_id)` on webhook_events. Flow-tagged
-  `SessionPayload` enum drives Inertia frontend dispatch. The architecture
-  is "no gatekeeping" — third parties can publish their own adapter
-  crates without coordination with the framework.
-
-## The remaining tracks
-
-Grouped by "what does a real production app actually need" rather than
-by Illuminate-module name. Each track lists what Laravel does, where
-Suprnova should diverge, what backends to support, and a rough scope.
-
-### Track 1 - Observability foundation + Error handling + minimal SSE
-
-Every other track wants these. The longer we wait, the more retrofitting
-we owe. The current `eprintln!` calls and the `on_ssr_error` callback
-hook are technical debt that get paid back here.
-
-**Logging.** `Log::info(...)` / `Log::error(...)` /
-`Log::with_context(...)` facade. Drivers: stderr-pretty (dev), JSON
-(prod), file rotation, syslog. Built on the `tracing` ecosystem with
-the Laravel-shaped facade on top. **Rust gun:** structured spans that
-survive `.await` resumes, automatic request-id propagation via
-`task_local`, span context attached to errors.
-
-**Events.** `Event::dispatch(event)` / `Event::listen<E>(handler)`.
-Sync + async + queued listeners. Typed events (no string event names),
-compile-time listener registration via `#[listener]` macro. **Rust gun:**
-Tokio broadcast channels for fan-out, listener trait objects the IDE
-understands. The reflection-driven `EventServiceProvider` becomes a
-macro-generated `register_events!()` call.
-
-**Error handling pipeline.** Errors in Rust are values, not exceptions,
-but the framework still needs an opinion on how they flow through. Two
-behaviors live on every error: how it logs (reportable) and how it
-becomes an HTTP response (renderable).
-
-```rust
-#[derive(Debug, thiserror::Error, Renderable, Reportable)]
-pub enum CheckoutError {
-    #[error("Payment declined")]
-    #[render(status = 402, message = "Your card was declined")]
-    #[report(level = "warn")]
-    PaymentDeclined,
-
-    #[error("Inventory unavailable for SKU {sku}")]
-    #[render(status = 409)]
-    OutOfStock { sku: String },
-}
-```
-
-The `Renderable` derive controls per-variant HTTP response shape (status,
-JSON body, Inertia error page, redirect — context-aware on Accept and
-X-Inertia headers). The `Reportable` derive hooks into Track-1 Logging
-automatically — no `Log::error(...)` peppered through controllers. Custom
-error pages for 404/500/etc. via `ErrorPages::register("404", controller)`.
-
-**Server-Sent Events (minimal).** Events deserve a delivery primitive
-that ships in the same phase. SSE is the one-way push that pairs
-naturally with `Event::dispatch`:
-
-```rust
-pub async fn live_feed(_req: Request) -> Response {
-    sse::stream(|tx| async move {
-        let mut events = Event::subscribe::<OrderPlaced>();
-        while let Ok(event) = events.recv().await {
-            tx.send(sse::Event::json("order", &event)).await?;
-        }
-        Ok(())
-    })
-}
-```
-
-This is the "real-time without infrastructure" demo at MVP scale — works
-for live feeds, notifications, progress bars, log tailing. Full
-WebSocket + presence + channel auth lives in Track 8; SSE here so
-real-time is on the table from week one. Consumers like
-`nation-x.com` (a social network) need feed updates well before they
-need typed presence channels.
-
-### Track 2 - Encryption + Outbound HTTP
-
-**Encryption.** `Crypt::encryptString` / `decryptString`. Symmetric
-AES-GCM via `aes-gcm` crate. Cookie encryption replaces the
-sign-only path we have today. ~200 LOC.
-
-**HTTP client.** `Http::get(url)` / `Http::post(url).json(body)` /
-`Http::pool(...)`. Built on `reqwest`. Retries, fakes for tests,
-async by default. **Rust gun:** real per-process connection pooling,
-typed retry strategies with exponential backoff,
-`Http::concurrent(vec![...])` fan-out as a one-liner.
-
-### Track 3 - Filesystem + File uploads
-
-`Storage::disk("s3").put(path, contents).await?` on the outbound side;
-multipart parsing + validation + temp staging on the inbound side.
-Both halves matter: storage drivers handle where a file goes, upload
-handling determines how it arrives. Controllers touch both.
-
-**Foundation: [`opendal`](https://opendal.apache.org/) (Apache-2.0).**
-A unified data-access trait over 40+ storage backends from the Apache
-foundation. We adopt it as the storage abstraction layer; every
-`Storage::disk(...)` driver is an opendal `Operator` under a
-Suprnova-named alias. Switching backends is one config-value change.
-Matches our "no gatekeeping" philosophy: S3, Azure Blob, GCS, local
-FS, in-memory, HTTP, WebDAV, FTP/SFTP, IPFS, and many more all ship
-through the same facade — Laravel's Flysystem is the closest analog
-but has fewer adapters and no streaming-first design. (Validated by
-loco's choice of the same library.)
-
-**Storage drivers (outbound):**
-- Local (`services-fs`) — with subdir scoping
-- S3 and S3-compatible (R2, MinIO, Backblaze B2, DigitalOcean Spaces,
-  Wasabi) via `services-s3`
-- Azure Blob via `services-azblob`
-- Google Cloud Storage via `services-gcs`
-- In-memory (`services-memory`) — for tests
-- All other opendal-supported backends (Aliyun OSS, Tencent COS, IPFS,
-  WebDAV, etc.) are wired through the same `Storage::disk(...)` facade
-  with a single feature-flag flip.
-
-For users requiring STS / AssumeRole / IMDS / cross-account IAM
-patterns beyond what opendal's S3 service handles, an optional
-`s3-aws` feature flag pulls in `aws-sdk-s3` as an alternate driver.
-Default install stays slim.
-
-All first-class. **Rust gun:** streaming `AsyncRead` / `AsyncWrite`
-everywhere - no `file_get_contents()` patterns that materialize 4GB
-files in memory. Cross-disk operations (`local.copy_to(s3, ...)`) run
-as concurrent streams over a Tokio bridge, not a buffered round-trip.
-
-**File upload handling (inbound).** Multipart parsing baked into the
-HTTP layer with size limits enforced at parse time (not after the
-whole body lands in memory). Typed `UploadedFile` extracts:
-
-```rust
-pub async fn upload_avatar(
-    user: AuthUser,
-    file: UploadedFile<"avatar", Image, MaxSize::<5_MB>>,
-) -> Response {
-    let path = file.store_as(Storage::disk("s3"), &format!("avatars/{}.jpg", user.id)).await?;
-    user.update_avatar(path).await?;
-    redirect!("profile.show").into()
-}
-```
-
-The `Image` validator checks magic bytes (not just Content-Type — that
-lies); `MaxSize` is enforced as bytes-streamed-so-far during multipart
-parse, so a 5GB POST against a 5MB limit gets rejected at byte 5_242_881
-without buffering the rest. Image manipulation (resize, format-convert,
-strip EXIF) via `image` crate on a tokio blocking pool. **Rust gun:**
-streaming from the network straight to the storage driver without ever
-hitting disk, when both sides support it (S3 multipart upload + chunked
-request body).
-
-### Track 4 - Mail
-
-`Mail::to(user).send(WelcomeEmail::new(user))`. Same drivers-everywhere
-story.
-
-**Foundation: [`lettre`](https://github.com/lettre/lettre) 0.11.x
-(MIT).** lettre gives us the `Message` builder (MIME, multipart,
-attachments, headers, DKIM), the SMTP transport with built-in
-connection pooling, and tokio-native async via the `tokio1-rustls`
-feature. We pin it as the email primitives layer; every Suprnova
-mail driver ships a `lettre::Message` over its preferred wire.
-`#[derive(Mailable)]` is a thin proc macro that compiles to a
-`lettre::Message` builder. The vendored reference lives at
-`reference/lettre-0.11.22/` for cross-checking while we wrap it.
-
-**Drivers:** SMTP and sendmail (lettre native transports), AWS SES,
-Postmark, SendGrid, Mailgun, Resend (our own HTTP `Transport` impls
-that accept `lettre::Message` and POST via the provider API), log
-and file (dev/test modes that record sends for assertions —
-`Mail::fake()` + `Mail::assert_sent(...)`).
-
-**Mailables.** Typed templates with `#[derive(Mailable)]` macro that
-provides `to()`, `subject()`, `view()`. Template engine: pick one and
-ship it (likely `askama` for compile-time-checked templates that match
-the framework's type-safety stance, with `minijinja` as a runtime
-alternative for hot-reload).
-
-**Rust gun:** mail building is synchronous and fast; sending is
-async on the in-process queue (Track 7) so a controller can
-`Mail::queue(welcome_email)` and return without blocking. No separate
-queue worker needed for transactional mail. lettre's connection pool
-means a burst of `Mail::send` calls reuses an open SMTP/TLS session
-instead of negotiating a new handshake per message.
-
-### Track 5 - Authorization + API mode
-
-Two separate but related stories that together cover the gap between
-"the user is logged in" (today's Auth) and "the user is allowed to do
-this thing to this resource." Every real app needs this on day one.
-Laravel ships Gates, Policies, and Sanctum for it; Suprnova ships the
-typed equivalents.
-
-**Foundation: [`torii-rs`](https://github.com/cmackenzie1/torii-rs).**
-We adopt `torii-core` + `torii-storage-seaorm` as the auth-method
-foundation (skipping `torii-axum` since we have our own HTTP layer).
-This gives us password + **OAuth/OIDC** + **Passkeys/WebAuthn** +
-**Magic Links** + session management without reinventing months of
-careful crypto work. MIT-licensed. The `suprnova::auth::{passkey,
-oauth, magic_link, password}` facades are thin adapters over torii;
-the existing session-based auth we ship today becomes one option
-among several. If upstream churn becomes painful, we fork into the
-workspace as `suprnova-torii` at a pinned version.
-
-**Authorization (Gates + Policies).**
-
-```rust
-#[policy]
-impl PostPolicy {
-    pub fn view(&self, user: &User, post: &Post) -> bool {
-        post.is_public || user.id == post.author_id
-    }
-
-    pub fn update(&self, user: &User, post: &Post) -> Result<bool, AuthError> {
-        if user.is_banned() {
-            return Err(AuthError::Banned);
-        }
-        Ok(user.id == post.author_id || user.is_admin())
-    }
-}
-
-// In a controller:
-pub async fn update(post: Post, user: AuthUser, req: UpdatePostRequest) -> Response {
-    Gate::authorize_on::<PostPolicy>("update", &user, &post)?;
-    // ...
-}
-```
-
-Gates work for non-resource checks (`Gate::define("admin-area", ...)`).
-Policies attach to model types. The `#[policy]` macro registers the
-type with the container and validates that policy method names match
-controller action verbs. **Rust gun:** policies are trait impls — the
-compiler refuses to let you call a policy method that doesn't exist,
-and `Gate::authorize_on` requires the policy type as a generic, so
-typos become compile errors instead of silent allow-alls.
-
-**API mode + token auth (Sanctum equivalent).** Suprnova should be
-just as good at building a JSON API as it is at building an Inertia
-SPA. `suprnova new --api` scaffolds a project without the frontend
-starter; `suprnova new --api+spa` ships both.
-
-API surface:
-- `#[derive(Resource)]` on a struct emits a JSON-API-style resource
-  with `from(model)` + filter/include/sparse-field support.
-- Personal access tokens via `User::create_token("api", &abilities)`
-  → returns the plaintext once + hashed in DB. `TokenAuthMiddleware`
-  reads `Authorization: Bearer …`, looks up by SHA-256, scopes the
-  request to the token's abilities.
-- Stateless route group (`api.middleware(TokenAuth)`) — no sessions,
-  no CSRF, no cookies. Separate routing concern from the session-based
-  web routes.
-- Built-in OpenAPI emit via `suprnova openapi:emit` — reads the
-  `#[derive(Resource)]` types + the route table + the `FormRequest`
-  derives, emits an OpenAPI 3.1 spec. Free documentation, free SDK
-  generation downstream.
-
-**Rust gun:** token abilities are checked at compile time when the
-controller declares what it needs (`AuthUser<Ability::WriteOrders>`)
-— a route that requires `write:orders` won't accept a token without
-that scope, and the type signature makes the requirement explicit.
-
-### Track 6 - Validation, Pagination, Factories, Console, Configuration
-
-The boring-but-essential leg-day reps. Each is small alone; together
-they cover the day-one expectations a Laravel dev has.
-
-**Validation parity.** Richer `FormRequest`:
-- `prepareForValidation` hook
-- `withValidator` for chained custom rules
-- `after` hooks
-- Rule objects: `Rule::unique("users", "email").ignoring(self.id)`,
-  `Rule::exists("posts", "id")`, custom rule via `Rule` trait
-- Error bags as first-class (we wire the bag name; the rules need to
-  know about it)
-- Conditional rules: `required_if`, `required_with`, `required_unless`
-- Cross-field validation
-
-**Pagination.** SeaORM-aware paginator with offset, cursor, and simple
-modes. `Inertia::paginate(query, per_page)` shorthand that wires
-through to our existing `scrollProps`. ~400 LOC.
-
-**Console.** User-registrable Artisan-style commands.
-
-```rust
-#[command(name = "user:create", description = "Create a new user")]
-pub struct CreateUserCommand {
-    #[arg(long)]
-    email: String,
-    #[arg(long, default_value = "user")]
-    role: String,
-}
-
-impl CreateUserCommand {
-    pub async fn handle(self) -> Result<(), FrameworkError> {
-        // ...
-    }
-}
-```
-
-Lives alongside `suprnova-cli`'s built-in commands. **Rust gun:**
-typed args via `clap` underneath, zero string-arg parsing in the
-handler body.
-
-**Factories + Seeders.** `User::factory().count(50).create().await?`.
-The single feature Laravel devs reach for hardest in development and
-testing. Suprnova ships:
-
-```rust
-#[factory(User)]
-pub fn user_factory() -> UserFactory {
-    UserFactory::default()
-        .name(faker::name())
-        .email(faker::email())
-        .password(Hash::make("password"))
-}
-
-// In tests / seeders:
-let users = User::factory().count(50).create().await?;
-let admin = User::factory().state(|u| u.is_admin = true).create_one().await?;
-let post = Post::factory().for_user(&admin).create_one().await?;
-```
-
-Seeders are typed structs with a `run()` method, registered via
-`#[seeder]` macro. `suprnova db:seed` runs them in registered order;
-`suprnova db:seed --class WelcomePostsSeeder` runs one. **Rust gun:**
-factory states are typed methods, not stringly-typed
-`->state('admin')` lookups. Faker integration via the `fake` crate.
-
-**Configuration management.** Typed config struct with a `Config`
-derive macro, loaded from env + optional TOML overlay:
-
-```rust
-#[derive(Config)]
-#[config(prefix = "MAIL")]
-pub struct MailConfig {
-    pub driver: MailDriver,           // env: MAIL_DRIVER
-    pub host: String,                 // env: MAIL_HOST
-    #[config(default = 587)]
-    pub port: u16,
-    pub from_address: String,
-    pub from_name: String,
-}
-
-// Access anywhere:
-let mail_cfg = Config::resolve::<MailConfig>();
-```
-
-No `config('mail.driver')` string lookups — typos are compile errors.
-Hot-reload in dev via file watcher; production loads at boot and stays
-fixed. **Rust gun:** config validation happens at boot — a missing
-required env var fails the app start, not a request three hours later.
-
-### Track 7 - Queue + Cache + Notifications + Rate Limiting
-
-**Queue.** Plain job dispatch - separate from the durable workflow
-runtime we already have.
-
-```rust
-#[job]
-pub struct SendInvoice { order_id: i64 }
-
-impl SendInvoice {
-    pub async fn handle(self) -> Result<(), FrameworkError> { ... }
-}
-
-// Dispatch from a controller:
-Queue::push(SendInvoice { order_id: 42 }).await?;
-```
-
-**Foundation: [`sea-streamer`](https://github.com/SeaQL/sea-streamer)
-0.5 (MIT/Apache-2.0).** A backend-agnostic stream processing toolkit
-with first-class **Redis Streams** and **Kafka** backends behind a
-common trait, plus file + stdio backends for testing and dev. We
-adopt it as the underlying transport for the Queue (and reuse it for
-fanout in Broadcasting, Track 8). Redis Streams as a queue backend
-gives us consumer groups, per-message acknowledgment, and replay —
-strictly better than the Redis-list pattern Laravel uses. Kafka comes
-free in the same package; the same `Queue::push` call targets either
-by changing one URL. The vendored reference lives at
-`reference/sea-streamer-0.5.2/` for cross-checking.
-
-**Drivers:** Redis Streams (sea-streamer), Kafka (sea-streamer),
-database (default for new apps — Postgres / MySQL / SQLite), NATS,
-Amazon SQS, in-process. File-based queue (also via sea-streamer)
-ships as a dev/test backend with replayable history — a regression
-captured as a `.ss` file can be replayed deterministically.
-
-**Rust gun:** the in-process driver runs jobs on Tokio tasks in the
-same process — for monolith apps, zero infrastructure required. Real
-backends for when you need scale-out. Job retries, backoff,
-fail-handler hooks. Built-in dead-letter-queue. With sea-streamer
-under the hood, the read/process/ack loops are decoupled so a
-single worker can saturate throughput on the I/O-bound legs while
-processing in parallel — Laravel Horizon's whole reason to exist
-is matching this for Redis-list queues; we get it natively because
-Redis Streams + decoupled loops are built in.
-
-**Cache extensions.** Atomic locks, tags.
-
-```rust
-Cache::lock("import-{user_id}").get(|| import_user_data()).await?;
-Cache::tags(&["users"]).flush().await?;
-```
-
-**Drivers we still need:** Memcached, DragonflyDB (Redis-compat works
-today).
-
-**Rate limiting** — promoted to its own first-class concern, not
-buried inside cache extensions. Every production API needs it from
-day one and it should not depend on the rest of cache shipping.
-
-```rust
-// Programmatic:
-RateLimiter::for_("login").limit(5).per_minute().attempt(&ip)?;
-
-// As middleware on a route group:
-group!("/api", { ... }).middleware(ThrottleMiddleware::per_minute(60))
-```
-
-Built on the same Redis / DragonflyDB / in-process backends as cache,
-but with the API exposed at the middleware layer where it's actually
-applied. Per-IP, per-user, per-token-ability all supported.
-**Rust gun:** the sliding-window algorithm runs on a Redis Lua script
-or an in-process `DashMap`, both atomic — no race conditions under
-load that PHP-style "increment + check" implementations leak.
-
-**Notifications.** Channel-based delivery.
-
-```rust
-Notify::send(&user, OrderShipped { order_id })
-    .via(&["mail", "slack", "database", "web-push"]).await?;
-```
-
-Channels: mail, Slack, Discord, SMS via Twilio, database, webhook,
-**browser push (Web Push API)** via
-[`web-push`](https://crates.io/crates/web-push) (Apache-2.0,
-HTTP-ECE + VAPID), broadcast (Track 8). Depends on Mail (Track 4)
-and Broadcasting (Track 8).
-
-The `web-push` channel is worth calling out: Laravel needs the
-community `laravel-notification-channels/webpush` package for this;
-Suprnova ships it as a first-class channel. A controller that
-dispatches an `OrderShipped` notification reaches all four channels
-(email + DB record + Slack + browser push) in one call.
-
-### Track 8 - Real-time at full strength (where Rust eats Laravel's lunch)
-
-The "rust guns" track. Track 1 ships minimal SSE so events have a
-delivery primitive from day one; this track ships the full
-two-way WebSocket story plus presence and supervised workers.
-Laravel uses Pusher or Reverb bolted on as a separate service.
-Suprnova runs it in-process by default.
-
-**Broadcasting via WebSocket.**
-
-```rust
-// Define a typed channel:
-#[channel("orders.{id}")]
-pub struct OrderChannel { pub id: i64 }
-
-impl OrderChannel {
-    pub async fn authorize(self, user: &User) -> bool {
-        user.can_view_order(self.id).await
-    }
-}
-
-// Broadcast:
-Broadcast::channel(OrderChannel { id: 42 }).send(OrderUpdated { ... }).await?;
-```
-
-**Rust gun:** WebSocket connections held by the same process running
-your HTTP handlers. No separate broadcast server. Channels are typed;
-presence and private auth are compile-time-checked. Built on
-`tokio-tungstenite`.
-
-**Multi-process fanout.** When you scale beyond one server,
-`sea-streamer` (foundation library from Track 7) handles
-inter-process pub/sub via Redis Streams or Kafka. Each
-WebSocket-handling process subscribes to a stream key
-(`channel:orders.42`) and re-broadcasts received events to its
-locally-connected clients. Same library, same code path, different
-URL — no separate fanout service to deploy.
-
-**Presence channels** — `PresenceChannel<RoomId>` knows who's
-connected, server-side, in real time. Joining/leaving fires `Event`s
-that other listeners (or other connected clients) react to.
-
-**Supervised background workers** in-process.
-
-```rust
-Worker::supervise("payments.poll", Duration::from_secs(30), || async {
-    poll_pending_payments().await
-}).await?;
-```
-
-Crashes restart with exponential backoff. Scoped to app lifetime.
-For monolith apps, this replaces the entire "deploy Horizon + Redis
-+ a separate worker container" stack.
-
-### Track 9 - No-gatekeeping differentiation
-
-The Suprnova-specific value-add. Each is a trait + driver(s).
-
-**Vector DBs.**
-
-```rust
-Vector::store("documents")
-    .upsert(&[("doc-1", embedding, metadata)])
-    .await?;
-Vector::store("documents").similar(query_embedding, k: 10).await?;
-```
-
-Drivers: Qdrant, Weaviate, Milvus, LanceDB, pgvector, MariaDB
-(VECTOR data type), LibSQL/SQLite (`vector` extension). Type-safe
-embeddings (`Vec<f32>` of compile-checked dimension). The MariaDB
-and LibSQL drivers are the concrete proof of "no gatekeeping" —
-neither is supported by Laravel's vector story today.
-
-**Graph DBs.** `Graph::node(...).related_to(...).match(...)`.
-Drivers: Neo4j (Bolt protocol), ArangoDB, SurrealDB, MemGraph.
-
-**Time-series.** `Timeseries::write(measurement, tags, fields, ts)`,
-batched writes. Drivers: InfluxDB, TimescaleDB, QuestDB, ClickHouse.
-
-**Search.** `Search::index("users").add(doc).query("alice").await?`.
-Drivers: Meilisearch, Typesense, Elasticsearch, Algolia.
-
-The pattern that matters: trait surface stays the same, drivers swap
-behind it. A consumer migrating from Meilisearch to Typesense changes
-one config value.
-
-### Track 10 - Polish
-
-Small individually, big collectively.
-
-- **Translation (i18n)** - file-based locales, `__("users.welcome", name: "Sue")`.
-- **Support helpers** - `Str::camel`, `Arr::pluck`, `Stringable` chain.
-  Most exist in std/itertools; we ship the Laravel-named wrappers.
-- **Routing extras** - resource routing (`Route::resource("users", UsersController)`
-  → 7 RESTful routes), signed routes, named-route reverse,
-  sub-domain routing. (Route throttling lives in Track 7 alongside
-  rate limiting.)
-- **Container scoped bindings** - singleton / per-request / transient.
-  We have some of this; needs filling in.
-- **Process** - `Process::run("git status").output().await`. Wraps
-  `tokio::process`. Small.
-- **Schedule polish** — natural-language cron strings via
-  [`english-to-cron`](https://crates.io/crates/english-to-cron):
-  `Schedule::call(send_digests).at("every day at 8am")` compiles to
-  the right cron expression at runtime. Cribbed from loco's DX win.
-- **`suprnova doctor`** — diagnostic command that validates env vars,
-  config files, DB connectivity, migration state, and Inertia/SSR
-  worker reachability. First port-of-call when a new dev clones the
-  repo and `serve` fails. Modeled on `cargo loco doctor`.
-
-> **Note on testing helpers.** `Mail::fake()` / `Queue::fake()` /
-> `Event::fake()` / `Http::fake()` are *not* polish items. They ship
-> with their respective tracks per Philosophy rule 4. They appear here
-> only as a cross-reference, not as deferred work.
-
-### Track 11 - Admin Panel
-
-CRUD on every entity, search, RBAC views, audit trails. Production
-apps need this by month one — Laravel ships Nova / Filament; Rails
-ships ActiveAdmin / Avo / RailsAdmin. Real Rust apps deserve the
-same productivity boost. **Inspired by [SeaORM Pro](https://www.sea-ql.org/sea-orm-pro/)'s
-TOML-driven config pattern** (which itself is loco-bound today, so
-we crib the design and build our own implementation against the
-Suprnova HTTP layer + auth + policies).
-
-**TOML-config approach.** A file at `admin/tables/users.toml`
-declares which columns show, which relations expand, which actions
-appear, and which policies gate them. No UI code required for the
-common case. Override with a custom Inertia page when you need
-bespoke UX.
-
-```toml
-[table]
-entity = "users"
-title = "Users"
-icon = "user"
-
-[[columns]]
-field = "email"
-sortable = true
-searchable = true
-
-[[columns]]
-field = "created_at"
-format = "datetime"
-
-[policies]
-view = "UserPolicy::view"
-edit = "UserPolicy::edit"
-delete = "UserPolicy::delete"
-
-[audit]
-enabled = true
-```
-
-**Architecture.** The admin panel is a separate Inertia app served
-at `/admin` (configurable). It reuses Suprnova's auth, routing,
-policies (Track 5), and migrations — no separate framework
-underneath. Built on our React / Vue / Svelte starter (user picks
-at scaffold time; default React 19). Gated with an `[admin]`
-middleware that requires an `is_admin` claim or a `super_admin`
-role from Track 5's Authorization layer.
-
-**Composite views.** SeaORM Pro's `composite_tables` pattern
-translated to TOML: declare a "Sales Order" view that joins
-`sales_order_header` with `sales_order_detail` and `customer`, all
-rendered in one page with related-record navigation.
-
-**RBAC.** Built on top of Track 5's Authorization. Policies declared
-in TOML reference our `#[policy]` impls — the admin panel does not
-invent a parallel auth system. Same Gate trips for both end users
-and admin staff.
-
-**Audit trail.** Opt-in per table via `[audit] enabled = true`. The
-framework writes a row to `audits` on every create/update/delete
-with the acting user id, table, row id, action, and a JSON diff of
-the changed columns. Powers "who edited this record" queries
-without instrumenting each controller.
-
-**Rust gun:** every admin read goes through the same SeaORM entity
-+ Policy gate as the application — no "admin bypass" path that
-silently skips authorization (a recurring source of pwned Laravel
-apps). Streaming pagination over millions of rows because we use
-async cursors, not `LIMIT N OFFSET M` page joins.
-
-## Recommended sequencing
-
-Each phase unblocks the next. Every phase ships its fakes /
-assertions in the same commit (Philosophy rule 4). Order is set
-by dependency; we ship a phase when it's done, not on a calendar.
-
-**Phase 1: Logging + Events + Error handling + minimal SSE.**
-Foundation observability. Everything else uses them. The longer we
-wait, the more retrofitting we owe. Minimal SSE rides along so
-events have a delivery primitive from day one.
-
-**Phase 2: HTTP client + Pagination + Encryption.**
-Small, high-leverage, often-used. Encryption replaces the sign-only
-cookie path; HTTP client unblocks third-party API integrations every
-real app needs.
-
-**Phase 3: Authorization + API mode.**
-Gates + Policies + token auth + JSON Resources + `--api` scaffolding.
-Day-one expectation for any Laravel dev, separate from the Auth track
-that already shipped. The bigger your app gets, the more this matters.
-
-**Phase 4: Filesystem + File uploads + Validation parity.**
-Storage drivers and upload handling together because controllers
-touch both. Validation gets finished here because we already exercised
-the gaps in Precognition.
-
-**Phase 5: Queue + Mail + Notifications + Rate Limiting.**
-Mail-via-queue is the canonical pattern; ship them together.
-Rate limiting middleware in the same wave because cache + redis are
-already set up. Notifications layer on top.
-
-**Phase 6: Factories + Seeders + Configuration + Console.**
-The Laravel-dev day-one expectations not covered earlier. Small but
-high-impact for DX.
-
-**Phase 7: Full Broadcasting + supervised background workers.**
-WebSocket + presence + channel auth. The "Rust eats Laravel's lunch"
-moment at full strength — Phase 1 already shipped SSE for the simpler
-cases. This is the demo that gets a Laravel dev to say "wait, you can
-do that in one process?"
-
-**Phase 8: Admin Panel.**
-TOML-driven CRUD + RBAC + audit trails over every entity. Depends
-on Authorization (Phase 3) and Filesystem (Phase 4) shipping first.
-
-**Phase 9: Differentiation** *(ongoing as consumers demand it).*
-Vectors, graphs, search, time-series. Driven by real consumer needs
-(`nation-x.com` will exercise some). Ship one when the demand exists;
-the others queue up behind.
-
-**Phase 10: Polish** *(parallel with the phases above).*
-Translation, Support helpers, Process, scoped bindings, routing extras,
-`english-to-cron`, `suprnova doctor`. These fit between bigger pieces.
+- **Payments** — generic provider-neutral trait surface (`Checkout` +
+  `Payment`-optional + `Subscription` + `CustomerStore` +
+  `WebhookHandler`). Two reference adapters as workspace member crates:
+  `suprnova-payments-stripe` (Stripe gateway, full `Payment` impl) and
+  `suprnova-payments-paddle` (Merchant-of-Record, no `Payment` impl by
+  design). Six mirror tables with a `provider_metadata` jsonb escape
+  hatch + free idempotency via `UNIQUE(provider, provider_event_id)` on
+  webhook events. Flow-tagged `SessionPayload` enum drives Inertia
+  frontend dispatch. No gatekeeping — third parties can publish their
+  own adapter crates without coordinating with the framework.
+
+**Starter kits:**
+
+Two production starter kits ship in their own repos, each pinned to a
+released Suprnova and dogfooding the framework end-to-end:
+
+- **[Nebula](https://github.com/entrepeneur4lyf/Nebula)** — a
+  Breeze-tier authentication kit on Inertia 3 + Svelte 5: register,
+  email verification, login with remember-me, password reset, and
+  profile management.
+- **[Pulsar](https://github.com/entrepeneur4lyf/Pulsar)** — a full
+  product-site and community kit on Vue 3.5 + Vuetify: auth, a
+  marketing landing page, a dashboard, a Markdown docs pipeline, a
+  blog with RSS, member profiles, taxonomy, role-based access control,
+  and an admin / moderation surface.
+
+## What's next
+
+The framework's core surface is shipped. What follows is the forward
+roadmap — new capability layers built on the same trait + driver
+pattern the shipped framework already uses. We ship a piece when it's
+production-ready, not on a calendar.
+
+### More no-gatekeeping backends
+
+The shipped Vector layer (`VectorDriver` trait + Memory / Qdrant /
+Pinecone / MariaDB drivers) is the template. The next domains follow the
+same trait + driver shape, with the consumer picking a backend via env
+or programmatic config:
+
+- **Graph DBs** — `Graph::node(...).related_to(...).match(...)` across
+  Neo4j (Bolt), ArangoDB, SurrealDB, and MemGraph.
+- **Search** — `Search::index("users").add(doc).query("alice")` across
+  Meilisearch, Typesense, Elasticsearch, and Algolia.
+- **Time-series** — `Timeseries::write(measurement, tags, fields, ts)`
+  with batched writes across InfluxDB, TimescaleDB, QuestDB, and
+  ClickHouse.
+
+The trait surface stays the same; swapping a backend is a one-line
+config change. None of these are gatekept behind a single engine.
+
+### Admin Panel
+
+A TOML-driven CRUD / RBAC / audit surface over every entity, served as a
+separate Inertia app at `/admin` that reuses Suprnova's auth, routing,
+and policies — no parallel framework underneath. A file like
+`admin/tables/users.toml` declares which columns show, which relations
+expand, which actions appear, and which `#[policy]` impls gate them, so
+the common case needs no UI code; drop to a custom Inertia page for
+bespoke views. Opt-in audit trails write a diff row per
+create/update/delete. Every admin read goes through the same SeaORM
+entity + Policy gate as the application — there is no admin-bypass path.
+
+### Schema & Query Builder facades
+
+Laravel-shape `Schema::create("users", |t| { ... })` for migrations and
+ad-hoc `Query::table("users").where(...).get()` for entity-less queries,
+exposed as thin `suprnova::schema::*` / `suprnova::query::*` re-export
+facades over [`sea-query`](https://github.com/SeaQL/sea-query) — already
+a transitive dependency via SeaORM, so it covers MySQL / Postgres /
+SQLite with one DSL.
+
+### More starter kits
+
+Beyond Nebula and Pulsar, additional kits layer on the shipped framework
+— for example a teams-and-2FA kit and a billing kit on top of the
+Payments surface.
+
+### Polish
+
+Small individually, big collectively:
+
+- **Translation (i18n)** — file-based locales,
+  `__("users.welcome", name: "Sue")`.
+- **Support helpers** — `Str::camel`, `Arr::pluck`, `Stringable`
+  chains; the Laravel-named wrappers over std / itertools.
+- **`Process` facade** — `Process::run("git status").output().await`
+  over `tokio::process`.
+- **Container scoped bindings** — per-request and transient scoping
+  alongside today's singletons.
+- **Natural-language cron** — `Schedule::call(...).at("every day at
+  8am")` via [`english-to-cron`](https://crates.io/crates/english-to-cron).
+- **`suprnova doctor`** — a diagnostic command that validates env vars,
+  config files, DB connectivity, migration state, and SSR-worker
+  reachability.
+
+Beyond these, the hot module reload moonshot has its own section below.
 
 ## How a Laravel dev experiences this
 
@@ -1214,10 +595,10 @@ lives in the configured backends.
   be reconstituted.
 - Background workers can be split off — `suprnova queue:work` runs
   jobs from the configured queue backend without serving HTTP.
-- Broadcasting via WebSocket scales horizontally with a Redis-backed
-  pub/sub bridge that ships in Track 8 — multiple binaries each hold
-  some connections; a publish on one fanout-emits via Redis to
-  subscribers on the others.
+- Broadcasting via WebSocket scales horizontally with the shipped
+  Redis-backed pub/sub bridge — multiple binaries each hold some
+  connections; a publish on one fanout-emits via Redis to subscribers
+  on the others.
 
 The `suprnova docker:init` and `docker:compose` CLI commands already
 ship the "one binary, multiple roles" pattern. Documentation for
@@ -1293,7 +674,7 @@ Why we'd want it anyway:
 - WebSocket-heavy apps lose context every rebuild today (you have to
   reconnect the test page). With hot-swap, the connection stays,
   the page state stays, and the new handler is just live.
-- Compounds with Phase 7's broadcasting/presence — iterate on a live
+- Compounds with broadcasting and presence — iterate on a live
   feature without losing the multiplayer state you're testing.
 
 This sits in research / not-on-the-critical-path. But if a contributor

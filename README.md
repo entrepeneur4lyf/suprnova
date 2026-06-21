@@ -21,7 +21,7 @@ cd myapp
 suprnova serve
 ```
 
-Your app is now serving at `http://localhost:8000`, with a Vite dev server
+Your app is now serving at `http://localhost:8765`, with a Vite dev server
 proxied for the frontend.
 
 ## Quick taste
@@ -89,7 +89,7 @@ The Laravel-13 parity surface plus the Rust-native wins:
 | **Inertia 3 bridge** | `InertiaProps` derive + TypeScript codegen, partial reloads, deferred / lazy props, version mismatch handling, SSR loopback, `#[handler]` integration, three starters: **Svelte 5 / React 19 / Vue 3.5** |
 | **Eloquent ORM** | `#[suprnova::model]` macro, 11 relation kinds (hasMany / belongsToMany / morph / polymorphic / through), eager loading, soft deletes, observers, global & local scopes, casts, 16 lifecycle events, factories + seeders, `Collection<M>`, 3 paginators, chunk/lazy/cursor iteration, multi-connection R/W split, transactions + savepoints + retry-on-deadlock |
 | **Auth** | `Auth::user`/`login`/`once`/`check`, named guards via `AuthManager`, remember-me, 2FA TOTP with recovery codes, email verification, password reset, brute-force lockout, login throttle, role/permission gates, `#[policy]` registration |
-| **Database** | SeaORM-backed migrations + entity codegen, four drivers: **SQLite / Postgres / MySQL / MariaDB**, `DB::transaction` with savepoints, query logging, multi-connection registry |
+| **Database** | SeaORM-backed migrations + entity codegen, four databases: **SQLite / Postgres / MySQL / MariaDB** (MariaDB rides the MySQL driver and adds a native vector driver), `DB::transaction` with savepoints, query logging, multi-connection registry |
 | **Cache** | Memory, file, Redis — `Cache::remember` + lock-based `Cache::lock` + tags + atomic Redis Retry-After |
 | **Queues & jobs** | Memory, sync, Redis, database — middleware pipeline, batches, chains, retry schedules, failed-job store, unique jobs, `#[job]` macro |
 | **Events & bus** | `Event::dispatch`, `Listener`/`Subscriber`, queued listeners, panic-isolated dispatcher, command/query bus |
@@ -107,6 +107,21 @@ The Laravel-13 parity surface plus the Rust-native wins:
 | **Testing** | `#[suprnova_test]`, in-memory SQLite via `TestDatabase`, fakes (`Mail::fake()`, `Queue::fake()`, `Event::fake()`, `BroadcastHub` recorder), `expect!` macro, `handle_request` in-process driver |
 | **Feature flags** | `DatabaseEvaluator` + `CachedEvaluator` + admin CRUD + sub-second propagation via `FeatureSync` |
 | **Idempotency, rate-limit, CORS, CSRF, sessions, hashing, crypto** | First-class; each subsystem ships fail-open vs fail-closed as an explicit policy choice |
+
+## Starter kits
+
+Don't start from an empty scaffold — fork a kit:
+
+- **[Nebula](https://github.com/entrepeneur4lyf/Nebula)** — authentication
+  (Breeze-tier): register, email verification, login with remember-me, password
+  reset, and profile management, on Inertia 3 + Svelte 5.
+- **[Pulsar](https://github.com/entrepeneur4lyf/Pulsar)** — a full product site
+  and community on Vue 3.5 + Vuetify: everything in Nebula plus a marketing
+  landing, dashboard, a Markdown docs pipeline, a blog with RSS, member
+  profiles, taxonomy, role-based access control, and admin/moderation surfaces.
+
+See **[Starter Kits](./manual/starter-kits.md)** for the full rundown, or run
+`suprnova new` for the plain scaffold on any of the three frontends.
 
 ## End-to-end type safety
 
@@ -174,7 +189,7 @@ suprnova workflow:work
 
 ## Documentation
 
-- **[Manual](./manual/README.md)** — 100 chapters, every public subsystem.
+- **[Manual](./manual/README.md)** — 100+ chapters, every public subsystem.
   Pick a reading path: [From Laravel](./manual/from-laravel.md) (if you
   know `Auth::user()` / Eloquent / Blade) or
   [From Rust Web](./manual/from-rust-web.md) (if you know Axum / Actix / Rocket).

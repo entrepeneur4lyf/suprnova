@@ -95,7 +95,7 @@ the short version is:
 - `src/` — controllers, actions, commands, config, middleware,
   models, migrations, plus `bootstrap.rs` and `routes.rs`
 - `src/bin/console.rs` — the per-project `php artisan` analogue
-- `frontend/` — Vite 6 + Tailwind v4 + your chosen framework, with
+- `frontend/` — Vite 8 + Tailwind v4 + your chosen framework, with
   Home / Dashboard / Login / Register pages already wired through
   Inertia
 - `src/migrations/` — `users`, `sessions`, and `remember_tokens`

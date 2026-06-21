@@ -50,7 +50,7 @@ and the CLI installs with `cargo install --git`.
 - `#[derive(InertiaProps)]` with TypeScript type emission
 - `inertia_response!` macro with compile-time component validation
 - Three first-class starter frontends — **Svelte 5** (runes-on),
-  **React 19**, **Vue 3.5** — all on Inertia 3.1.1 + Vite 6 + Tailwind v4
+  **React 19**, **Vue 3.5** — all on Inertia 3.1.1 + Vite 8 + Tailwind v4
 - Partial reloads (`only` / `except`), deferred props, persistent
   layout, encrypted history, scroll preservation
 - `Inertia::paginate(component, key, paginator)` for paginator → Inertia

@@ -508,7 +508,6 @@ Things Laravel has that Suprnova doesn't (yet):
 - Telescope / Pulse (observability surface) — basic [observability](observability.md) ships, the dashboards don't
 - Sanctum / Passport token auth — torii integration covers OAuth and session auth, token auth is on the roadmap
 - Horizon — queue introspection is built into the framework, no separate dashboard
-- Starter kits (Breeze / Jetstream / Spark) — coming after v0.1.0
 - Blade — by design; Inertia is the frontend story
 - Localization helpers — on the roadmap; English-only today
 
