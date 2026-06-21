@@ -461,7 +461,9 @@ the framework today.
   / `has_permission_for_model` checks. `RoleMiddleware` +
   `PermissionMiddleware` route guards, both fail-closed / default-deny.
   Layers on top of the shipped Gate/Policy authorization rather than
-  replacing it.
+  replacing it. Resource surfaces gate in one call via
+  `authorize_resource::<U, R>()` (Laravel `authorizeResource` parity),
+  which attaches the conventional ability check to all seven routes.
 - **Content rendering** — `MarkdownRenderer` (`MarkdownOptions` →
   `RenderedMarkdown`) with end-to-end sanitisation (comrak → syntect
   highlighting → ammonia) and a `build_docs(DocsBuildConfig)` pipeline

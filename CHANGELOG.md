@@ -8,7 +8,48 @@ Pre-1.0, internal API churn is expected. Semver guarantees begin at `1.0.0`.
 
 ## [Unreleased]
 
-Post-`v0.2.0` maintenance and `v0.2.x` work will land here.
+### Added
+
+- **Resource-route authorization** — `ResourceRoutes::authorize_resource::<U, R>()`
+  attaches the conventional ability check to every generated resource route as
+  per-route middleware (Laravel `authorizeResource` parity). The action→ability
+  map is `index`/`show` → `view`, `create`/`store` → `create`,
+  `edit`/`update` → `update`, `destroy` → `delete`. One call gates the whole
+  seven-action surface instead of relying on every controller body to remember
+  a `Gate::authorize`.
+- **Atomic rate-limit hit** — `RateLimiter::hit_and_check(key, max, decay)`
+  increments a fixed window and tests it in a single round-trip, returning
+  whether the bucket is now over its limit (`i64::MAX` means unlimited).
+- **Constant-time comparison helper** — `constant_time_eq(a, b)` (subtle-backed)
+  for webhook signature verification; `WebhookHandler::verify` docs now mandate
+  constant-time digest comparison.
+
+### Security
+
+- **Resource routes** fail closed on the authorization registry's type-erased
+  downcast instead of panicking, and `authorize_resource` denials /
+  unauthenticated requests are refused before the handler runs.
+- **Rate limiter** closes a fixed-window check-then-hit race by incrementing and
+  comparing atomically (`hit_and_check`).
+- **Upload validators** (`mimetypes` / `mime`) content-sniff the uploaded bytes
+  instead of trusting the client-supplied `Content-Type`.
+- **Filesystem path guard** canonicalizes paths to catch symlink traversal out
+  of the storage root, beyond the prior lexical `../` / absolute / UNC checks.
+- **Auth** closes a passwordless-login timing oracle — a matched-but-passwordless
+  account given a password now runs a fixed-cost verify — and `dummy_verify`
+  drives the configured hasher so the unmatched-user path is constant-time.
+- **Eloquent** validates column identifiers on the `pluck` / `value` /
+  `pluck_keyed` / `sole_value` and `sum` / `avg` / `min` / `max` projection
+  paths.
+- **Payments** — the mock provider's verifier fails closed outside a development
+  environment, and webhook source IPs resolve through `TrustedProxiesConfig`
+  (`req.ip()`) rather than a raw `X-Forwarded-For` header.
+
+### Documentation
+
+- Documented resource-route authorization (`authorize_resource`) in the routing
+  and authorization chapters, and the atomic `hit_and_check` counter in the
+  rate-limiting chapter.
 
 ## [0.2.0] — 2026-06-21
 

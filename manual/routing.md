@@ -453,6 +453,45 @@ Router::new()
     .api_resources([("authors", Box::new(AuthorsCtl) as Box<dyn ResourceController>)]);
 ```
 
+### Authorizing the whole resource
+
+`authorize_resource::<U, R>()` attaches the conventional ability check to
+every generated route as per-route middleware — Laravel's
+`authorizeResource` parity. Without it, a resource surface is ungated
+unless every controller body remembers to call `Gate::authorize`; a single
+forgotten `destroy` ships an ungated delete.
+
+```rust
+use suprnova::{Router, Gate};
+
+// Abilities are keyed on (ability, user type, resource marker type).
+Gate::define::<User, Post>("view",   |u, _p| u.is_member);
+Gate::define::<User, Post>("create", |u, _p| u.is_author);
+Gate::define::<User, Post>("update", |u, _p| u.is_author);
+Gate::define::<User, Post>("delete", |u, _p| u.is_admin);
+
+let router: Router = Router::new()
+    .resource("posts", PostsCtl)
+    .authorize_resource::<User, Post>()
+    .into();
+```
+
+The action → ability mapping mirrors Laravel:
+
+| Action(s) | Ability |
+|---|---|
+| `index`, `show`     | `view`   |
+| `create`, `store`   | `create` |
+| `edit`, `update`    | `update` |
+| `destroy`           | `delete` |
+
+`PATCH` shares the `update` action, so it is gated identically to `PUT`. A
+denied ability short-circuits with `403` before the handler runs, and an
+unauthenticated request fails closed. The resource marker `R` only needs
+`Default` — the gate discriminates on its *type*, the way Laravel
+discriminates on the model class. See the [authorization chapter](authorization.md)
+for defining the abilities themselves.
+
 ## Router-level redirects and views
 
 Three sugar methods on `Router` cover route declarations that don't need

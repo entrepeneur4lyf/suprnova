@@ -267,6 +267,28 @@ if Gate::check_async(&["update", "view"], &user, &post).await {
 }
 ```
 
+### Gating resource routes
+
+When a `Router::resource` surface exists, `authorize_resource::<U, R>()`
+wires the conventional ability check onto all seven routes at once, so you
+do not depend on every controller method remembering to authorize:
+
+```rust
+Gate::define::<User, Post>("view",   |u, _p| u.is_member);
+Gate::define::<User, Post>("create", |u, _p| u.is_author);
+Gate::define::<User, Post>("update", |u, _p| u.is_author);
+Gate::define::<User, Post>("delete", |u, _p| u.is_admin);
+
+let router: Router = Router::new()
+    .resource("posts", PostsCtl)
+    .authorize_resource::<User, Post>()   // index/show→view, store→create, …
+    .into();
+```
+
+A denied ability returns `403` before the handler runs; an unauthenticated
+request fails closed. The full action → ability table lives in the
+[routing chapter](routing.md).
+
 ## Async semantics
 
 `Gate::define_async`'s closure must return an **owned** future — the

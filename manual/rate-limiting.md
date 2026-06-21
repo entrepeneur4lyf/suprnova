@@ -101,6 +101,15 @@ use suprnova::RateLimiter;
 // Burn one attempt; seeds the window if missing.
 let n = RateLimiter::hit("login:1.2.3.4", 60).await?;
 
+// Burn one attempt AND test the limit in a single atomic round-trip.
+// Returns `true` when this hit pushed the bucket over `max` (refuse the
+// request), `false` when it was admitted. Use this instead of a separate
+// `too_many_attempts` + `hit` pair: checking and then hitting as two calls
+// lets concurrent requests slip past the limit (a check-then-act race).
+// `i64::MAX` as the max means "unlimited" — always admits, still counts.
+let over_limit = RateLimiter::hit_and_check("login:1.2.3.4", 5, 60).await?;
+if over_limit { /* return 429 */ }
+
 // Increment by N; useful for "cost-weighted" limits (each request burns
 // more than one attempt).
 let n = RateLimiter::increment("api:user:1", 60, 5).await?;
