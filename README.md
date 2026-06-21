@@ -110,7 +110,7 @@ The Laravel-13 parity surface plus the Rust-native wins:
 
 ## Starter kits
 
-Don't start from an empty scaffold — fork a kit:
+Don't start from an empty scaffold (unless you want to o_O) — fork a kit:
 
 - **[Nebula](https://github.com/entrepeneur4lyf/Nebula)** — authentication
   (Breeze-tier): register, email verification, login with remember-me, password
