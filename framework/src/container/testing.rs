@@ -199,11 +199,12 @@ impl TestContainer {
     /// TestContainer::singleton(FakeDatabase::new());
     /// ```
     pub fn singleton<T: Any + Send + Sync + 'static>(instance: T) {
-        // Task-local first.
-        let task_done = TASK_CONTAINER.try_with(|c| c.clone()).ok();
-        if let Some(container) = task_done
-            && let Ok(mut c) = container.write()
-        {
+        // Task-local first. Recover in place on a poisoned lock — a
+        // panicked writer leaves the container map structurally intact,
+        // and silently dropping the registration would surface as a
+        // baffling "fake not found" later in the same test.
+        if let Ok(container) = TASK_CONTAINER.try_with(|c| c.clone()) {
+            let mut c = container.write().unwrap_or_else(|e| e.into_inner());
             c.singleton(instance);
             return;
         }
@@ -229,10 +230,10 @@ impl TestContainer {
         T: Any + Send + Sync + 'static,
         F: Fn() -> T + Send + Sync + 'static,
     {
-        let task_done = TASK_CONTAINER.try_with(|c| c.clone()).ok();
-        if let Some(container) = task_done
-            && let Ok(mut c) = container.write()
-        {
+        // Recover in place on a poisoned task-local lock — see
+        // [`TestContainer::singleton`] for the rationale.
+        if let Ok(container) = TASK_CONTAINER.try_with(|c| c.clone()) {
+            let mut c = container.write().unwrap_or_else(|e| e.into_inner());
             c.factory(factory);
             return;
         }
@@ -253,10 +254,10 @@ impl TestContainer {
     /// TestContainer::bind::<dyn HttpClient>(Arc::new(FakeHttpClient::new()));
     /// ```
     pub fn bind<T: ?Sized + Send + Sync + 'static>(instance: Arc<T>) {
-        let task_done = TASK_CONTAINER.try_with(|c| c.clone()).ok();
-        if let Some(container) = task_done
-            && let Ok(mut c) = container.write()
-        {
+        // Recover in place on a poisoned task-local lock — see
+        // [`TestContainer::singleton`] for the rationale.
+        if let Ok(container) = TASK_CONTAINER.try_with(|c| c.clone()) {
+            let mut c = container.write().unwrap_or_else(|e| e.into_inner());
             c.bind(instance);
             return;
         }
@@ -280,10 +281,10 @@ impl TestContainer {
     where
         F: Fn() -> Arc<T> + Send + Sync + 'static,
     {
-        let task_done = TASK_CONTAINER.try_with(|c| c.clone()).ok();
-        if let Some(container) = task_done
-            && let Ok(mut c) = container.write()
-        {
+        // Recover in place on a poisoned task-local lock — see
+        // [`TestContainer::singleton`] for the rationale.
+        if let Ok(container) = TASK_CONTAINER.try_with(|c| c.clone()) {
+            let mut c = container.write().unwrap_or_else(|e| e.into_inner());
             c.bind_factory(factory);
             return;
         }
@@ -408,5 +409,64 @@ mod refcount_tests {
                 "the last guard drop must clear named connections for next-test isolation",
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod poison_recovery_tests {
+    //! Regression: registering a fake through `TestContainer::bind`
+    //! (and friends) must survive a poisoned task-local container lock.
+    //! A test that panics while holding the container write guard would
+    //! otherwise poison the `RwLock`, and the old `if let Ok(mut c) =
+    //! container.write()` pattern silently dropped the registration —
+    //! the fake would never resolve, surfacing as a confusing "not
+    //! found" rather than the original panic.
+    use super::*;
+    use std::panic::AssertUnwindSafe;
+
+    trait Greeter: Send + Sync {
+        fn greet(&self) -> &'static str;
+    }
+
+    struct FakeGreeter;
+    impl Greeter for FakeGreeter {
+        fn greet(&self) -> &'static str {
+            "hello"
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_survives_poisoned_task_local_lock() {
+        TestContainer::scope(async {
+            // Poison the task-local container's RwLock: take a write
+            // guard and panic while it is held. `catch_unwind` keeps the
+            // panic from failing the test; the poisoned lock is the
+            // condition under test.
+            let container = TASK_CONTAINER
+                .try_with(|c| c.clone())
+                .expect("inside scope: task-local container must exist");
+            let poisoned = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                let _guard = container.write().expect("first write must succeed");
+                panic!("deliberately poison the container lock");
+            }));
+            assert!(poisoned.is_err(), "the closure must have panicked");
+            assert!(container.write().is_err(), "the lock must now be poisoned",);
+
+            // The registration must still land despite the poison.
+            TestContainer::bind::<dyn Greeter>(Arc::new(FakeGreeter));
+
+            // Read it back through the same (still-poisoned) task-local
+            // container, recovering in place exactly as production does.
+            let resolved: Option<Arc<dyn Greeter>> = {
+                let c = container.write().unwrap_or_else(|e| e.into_inner());
+                c.make::<dyn Greeter>()
+            };
+            assert!(
+                resolved.is_some(),
+                "bind must register the fake even when the task-local lock was poisoned",
+            );
+            assert_eq!(resolved.unwrap().greet(), "hello");
+        })
+        .await;
     }
 }

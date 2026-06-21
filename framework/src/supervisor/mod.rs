@@ -78,6 +78,7 @@
 
 use crate::error::FrameworkError;
 use async_trait::async_trait;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::task::{JoinError, JoinSet};
@@ -123,6 +124,17 @@ static SUPERVISOR_TASKS: OnceLock<TokioMutex<JoinSet<()>>> = OnceLock::new();
 /// that `tokio::select!` on `cancel.cancelled()` exit cleanly within the
 /// grace window.
 static SUPERVISOR_CANCEL: OnceLock<CancellationToken> = OnceLock::new();
+
+/// Guards the inventory-drain spawn loop in
+/// [`SupervisorRegistry::start_all`] so it runs at most once.
+///
+/// The `SUPERVISOR_TASKS` / `SUPERVISOR_CANCEL` `OnceLock`s only make
+/// the *statics* idempotent — they don't stop a second `start_all` from
+/// iterating the inventory again and double-spawning every registered
+/// supervisor into the existing JoinSet. This flag closes that gap: the
+/// first caller flips it and drains the inventory; later callers observe
+/// it already set and skip the loop.
+static SUPERVISORS_SPAWNED: AtomicBool = AtomicBool::new(false);
 
 // ── Public accessors (used by Server::run) ────────────────────────────────────
 
@@ -217,13 +229,26 @@ impl SupervisorRegistry {
     /// supervisors can exit cleanly on shutdown.
     ///
     /// Call this once at application boot, e.g. inside `bootstrap::register`.
-    /// Subsequent calls are idempotent — the statics are `OnceLock`s.
+    /// Subsequent calls are idempotent — the statics are `OnceLock`s and
+    /// the inventory drain is guarded by `SUPERVISORS_SPAWNED`, so a
+    /// second call does not double-spawn the registered supervisors.
     pub async fn start_all() {
         // OnceLock::set silently fails if already initialized — idempotent.
         let _ = SUPERVISOR_TASKS.set(TokioMutex::new(JoinSet::new()));
         let cancel = SUPERVISOR_CANCEL
             .get_or_init(CancellationToken::new)
             .clone();
+
+        // Claim the spawn loop exactly once. A second `start_all` (or a
+        // race between two callers) finds the flag already set and skips
+        // the inventory drain — otherwise every supervisor would be
+        // spawned twice into the shared JoinSet.
+        if SUPERVISORS_SPAWNED
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
 
         let mut tasks_guard = SUPERVISOR_TASKS.get().unwrap().lock().await;
         for entry in inventory::iter::<SupervisorEntry> {
@@ -422,6 +447,43 @@ pub async fn run_with_restart_for_testing_with_cancel(
 
 // ── Unit tests ───────────────────────────────────────────────────────────────
 
+/// Counts how many times the test-only inventory factory below has been
+/// invoked. `start_all` calls each registered factory once per spawn, so
+/// this lets the idempotency test prove the inventory drain runs at most
+/// once regardless of how many times `start_all` is called.
+#[cfg(test)]
+static SPAWN_FACTORY_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Cancel-aware supervisor registered into the inventory only for the
+/// lib-test binary. Its `run` parks on the cancel token so the spawned
+/// task stays alive in the JoinSet (it never completes on its own),
+/// which keeps the spawn observable for the duration of the test.
+#[cfg(test)]
+struct CountingInventorySupervisor;
+
+#[cfg(test)]
+#[async_trait]
+impl Supervisor for CountingInventorySupervisor {
+    fn name(&self) -> &'static str {
+        "counting_inventory"
+    }
+    async fn run(&self, cancel: CancellationToken) -> Result<(), FrameworkError> {
+        cancel.cancelled().await;
+        Ok(())
+    }
+    fn restart_policy(&self) -> RestartPolicy {
+        RestartPolicy::Never
+    }
+}
+
+#[cfg(test)]
+inventory::submit!(SupervisorEntry {
+    factory: || {
+        SPAWN_FACTORY_COUNT.fetch_add(1, Ordering::SeqCst);
+        Box::new(CountingInventorySupervisor)
+    }
+});
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,6 +519,53 @@ mod tests {
             1,
             "Never should run exactly once"
         );
+    }
+
+    /// A second `start_all` must not re-drain the inventory and
+    /// double-spawn every registered supervisor. The lib-test binary
+    /// has exactly one registered `SupervisorEntry` — the
+    /// `CountingInventorySupervisor` factory above — whose factory bumps
+    /// `SPAWN_FACTORY_COUNT` on each invocation. Before the spawn-loop
+    /// guard, two `start_all` calls invoked the factory twice (and
+    /// spawned two restart loops); after it, the factory runs once.
+    ///
+    /// This is the only `start_all` caller in the lib-test binary, so the
+    /// process-global statics are uncontended here.
+    #[tokio::test]
+    async fn start_all_is_idempotent_and_does_not_double_spawn() {
+        // First boot drains the inventory exactly once.
+        SupervisorRegistry::start_all().await;
+        let after_first = SPAWN_FACTORY_COUNT.load(Ordering::SeqCst);
+        assert_eq!(
+            after_first, 1,
+            "first start_all must spawn the single registered supervisor exactly once"
+        );
+
+        // Second boot must be a no-op for the spawn loop — the factory
+        // must not run again.
+        SupervisorRegistry::start_all().await;
+        let after_second = SPAWN_FACTORY_COUNT.load(Ordering::SeqCst);
+        assert_eq!(
+            after_second, 1,
+            "a second start_all must not re-run the inventory drain (double-spawn); \
+             factory ran {after_second} times"
+        );
+
+        // The JoinSet must hold exactly the one spawned restart loop, not
+        // two — a direct check that nothing was double-spawned.
+        {
+            let sv_tasks = supervisor_tasks().expect("start_all initialises SUPERVISOR_TASKS");
+            let guard = sv_tasks.lock().await;
+            assert_eq!(
+                guard.len(),
+                1,
+                "exactly one restart-loop task must be spawned; found {}",
+                guard.len()
+            );
+        }
+
+        // Drain the parked supervisor so it doesn't leak into other tests.
+        SupervisorRegistry::shutdown(std::time::Duration::from_secs(1)).await;
     }
 
     struct PanickingSupervisor {

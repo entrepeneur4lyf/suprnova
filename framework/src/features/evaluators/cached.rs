@@ -53,12 +53,33 @@ use featureflag::{context::Context, evaluator::Evaluator};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// When the cache size reaches this threshold, a single insert sweeps
+/// every entry whose age is `>= ttl` (i.e. would be re-fetched on its
+/// next read anyway). This caps the map's growth: without it, a
+/// high-cardinality or attacker-influenced `user_id`/`team` stream
+/// would accumulate one never-revisited entry per distinct scope and
+/// never reclaim them, since expired entries are only overwritten when
+/// their exact key is re-read.
+///
+/// The sweep is amortised — it runs only on the miss/expiry insert
+/// path once the map has grown past the threshold, mirroring the
+/// brute-force dedup map's bounded eviction. Sized so a normally-scoped
+/// workload (a bounded set of users/teams) never trips it, while a
+/// pathological scope stream is held to roughly this many live entries
+/// plus whatever was inserted since the last sweep.
+const SWEEP_THRESHOLD: usize = 4096;
+
 /// TTL-cached wrapper around any [`Evaluator`].
 pub struct CachedEvaluator {
     inner: Arc<dyn Evaluator + Send + Sync>,
     ttl: Duration,
     /// Key format: `"{feature}::u={user_id?}::t={team?}"`. Empty
     /// segments encode "field absent in this context."
+    ///
+    /// Growth is bounded by an opportunistic sweep on insert (see
+    /// [`SWEEP_THRESHOLD`]): once the map reaches the threshold, the
+    /// next insert drops every entry older than `ttl`, so an unbounded
+    /// stream of distinct scopes can't leak memory.
     cache: DashMap<String, CacheEntry>,
 }
 
@@ -165,13 +186,26 @@ impl Evaluator for CachedEvaluator {
         // a stable answer worth caching to avoid re-walking the
         // scope chain on every request.
         let value = self.inner.is_enabled(feature, context);
+        let now = Instant::now();
         self.cache.insert(
             key,
             CacheEntry {
                 value,
-                inserted_at: Instant::now(),
+                inserted_at: now,
             },
         );
+
+        // Bounded-growth backstop: once the map crosses the threshold,
+        // drop every entry that is already past its TTL (those are
+        // dead weight — a read would re-fetch them anyway). This keeps
+        // a high-cardinality scope stream from growing the cache
+        // without bound. Amortised: it runs only on this insert path,
+        // and only after the size trips the threshold.
+        if self.cache.len() >= SWEEP_THRESHOLD {
+            self.cache
+                .retain(|_, entry| now.duration_since(entry.inserted_at) < self.ttl);
+        }
+
         value
     }
 
@@ -196,6 +230,14 @@ mod tests {
     use featureflag::context::Context;
     use featureflag::evaluator::with_default;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Build a context scoped to a distinct user id. The installed
+    /// [`TranslatingEvaluator`] turns the `user_id` field into a
+    /// `UserIdField` extension during `on_new_context`, so each id
+    /// produces a distinct [`CachedEvaluator`] cache key.
+    fn ctx_for_user(id: usize) -> Context {
+        featureflag::context! { user_id = format!("user-{id}") }
+    }
 
     /// Inner evaluator that counts how many times `is_enabled` was
     /// actually invoked. Lets tests assert cache hit/miss behaviour
@@ -331,6 +373,49 @@ mod tests {
     }
 
     #[test]
+    fn expired_entries_are_swept_once_threshold_is_crossed() {
+        // A moderate TTL: long enough that the fill loop below finishes
+        // well inside it (so no entry expires mid-fill), short enough
+        // that a single sleep ages every entry out afterwards.
+        let inner = Arc::new(CountingEvaluator::new(Some(true)));
+        let cached = CachedEvaluator::new(inner.clone(), Duration::from_millis(50));
+
+        // The default evaluator translates `user_id` into a `UserIdField`
+        // extension so each distinct id yields a distinct cache key.
+        with_default(Arc::new(TranslatingEvaluator), || {
+            // Fill to one short of the threshold with distinct scopes.
+            // The sweep condition is `len() >= SWEEP_THRESHOLD`, so it
+            // can never fire during this phase regardless of how long the
+            // fill takes — the map grows one entry per distinct scope.
+            for i in 0..SWEEP_THRESHOLD - 1 {
+                let ctx = ctx_for_user(i);
+                cached.is_enabled("flag", &ctx);
+            }
+            assert_eq!(
+                cached.len(),
+                SWEEP_THRESHOLD - 1,
+                "below the threshold the map grows unbounded (one entry per distinct scope)"
+            );
+
+            // Age every entry past the TTL, then insert one more. That
+            // insert takes the map to SWEEP_THRESHOLD, trips the sweep,
+            // and drops every entry older than the TTL — all the
+            // pre-existing ones — leaving only the entry just written.
+            std::thread::sleep(Duration::from_millis(120));
+            let ctx = ctx_for_user(SWEEP_THRESHOLD);
+            cached.is_enabled("flag", &ctx);
+
+            assert_eq!(
+                cached.len(),
+                1,
+                "crossing the threshold must sweep every expired entry, keeping only the \
+                 just-inserted one; got {} entries",
+                cached.len()
+            );
+        });
+    }
+
+    #[test]
     fn invalidate_all_clears_everything() {
         let inner = Arc::new(CountingEvaluator::new(Some(true)));
         let cached = CachedEvaluator::new(inner.clone(), Duration::from_secs(60));
@@ -353,6 +438,29 @@ mod tests {
     impl Evaluator for NoopEvaluator {
         fn is_enabled(&self, _feature: &str, _context: &Context) -> Option<bool> {
             None
+        }
+    }
+
+    /// Default evaluator that translates the `user_id` context field
+    /// into a [`UserIdField`] extension on `on_new_context`, the same
+    /// way [`DatabaseEvaluator`](super::super::database::DatabaseEvaluator)
+    /// does. Lets the sweep test create distinct cache keys per user
+    /// without depending on a database-backed evaluator.
+    struct TranslatingEvaluator;
+
+    impl Evaluator for TranslatingEvaluator {
+        fn is_enabled(&self, _feature: &str, _context: &Context) -> Option<bool> {
+            None
+        }
+
+        fn on_new_context(
+            &self,
+            mut context: featureflag::context::ContextRef<'_>,
+            fields: featureflag::fields::Fields<'_>,
+        ) {
+            if let Some(id) = fields.get("user_id").and_then(|v| v.as_str()) {
+                context.extensions_mut().insert(UserIdField(id.to_string()));
+            }
         }
     }
 }
