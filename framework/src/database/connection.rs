@@ -51,9 +51,11 @@ impl DbConnection {
 
         // For SQLite, ensure the database file can be created
         let url = if config.url.starts_with("sqlite://") {
-            // Extract the file path from the URL
-            let path = config.url.trim_start_matches("sqlite://");
-            let path = path.trim_start_matches("./");
+            // Normalize once: separate the file portion from any query
+            // string the caller already supplied so filesystem ops never
+            // run against a query-polluted path, and rebuild the URL with
+            // `mode=rwc` merged exactly once.
+            let (path, normalized) = normalize_sqlite_url(&config.url);
 
             // Don't apply to in-memory databases
             if path != ":memory:" && !path.starts_with(":memory:") {
@@ -63,7 +65,7 @@ impl DbConnection {
                 // path context so misconfigured paths and permission
                 // problems surface as a clear filesystem diagnostic
                 // instead of a downstream "unable to open database file."
-                if let Some(parent) = std::path::Path::new(path).parent()
+                if let Some(parent) = std::path::Path::new(&path).parent()
                     && !parent.as_os_str().is_empty()
                 {
                     std::fs::create_dir_all(parent).map_err(|e| {
@@ -75,8 +77,7 @@ impl DbConnection {
                 }
             }
 
-            // Use the file path format that SQLite prefers with create mode
-            format!("sqlite:{}?mode=rwc", path)
+            normalized
         } else {
             config.url.clone()
         };
@@ -159,6 +160,63 @@ impl DbConnection {
     }
 }
 
+/// Normalize a `sqlite://` URL into `(file_path, connect_url)`.
+///
+/// Splits the file portion from any caller-supplied query string so
+/// filesystem ops only ever see the file, strips a leading `./`, and
+/// rebuilds the connect URL with `mode=rwc` merged exactly once. An
+/// input that already carries a query (`sqlite://file.db?cache=shared`)
+/// keeps that query intact instead of being double-suffixed.
+///
+/// In-memory targets (`:memory:`) are returned with their query
+/// preserved verbatim — `mode=rwc` is meaningless there and SQLite
+/// rejects an unexpected `?mode=rwc` on `:memory:`.
+pub(crate) fn normalize_sqlite_url(url: &str) -> (String, String) {
+    let without_scheme = url.trim_start_matches("sqlite://");
+    let (raw_path, query) = match without_scheme.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (without_scheme, None),
+    };
+    let path = raw_path.trim_start_matches("./");
+
+    if path == ":memory:" || path.starts_with(":memory:") {
+        let connect_url = match query {
+            Some(q) => format!("sqlite:{path}?{q}"),
+            None => format!("sqlite:{path}"),
+        };
+        return (path.to_string(), connect_url);
+    }
+
+    (
+        path.to_string(),
+        format!("sqlite:{}?{}", path, merge_rwc_query(query)),
+    )
+}
+
+/// Merge `mode=rwc` into an optional SQLite query string exactly once.
+///
+/// SQLite needs `mode=rwc` to create the database file on connect. We
+/// must add it without (a) duplicating it when the caller already
+/// supplied it and (b) clobbering a deliberate `mode=` the caller set
+/// (e.g. `mode=ro`). Any other params (`cache=shared`, …) are preserved
+/// verbatim and in order.
+fn merge_rwc_query(query: Option<&str>) -> String {
+    let existing = query.unwrap_or("");
+    if existing.is_empty() {
+        return "mode=rwc".to_string();
+    }
+    // If a `mode=` param is already present, the caller's choice wins —
+    // appending a second `mode=` would be ambiguous to SQLite.
+    let has_mode = existing
+        .split('&')
+        .any(|pair| pair == "mode" || pair.starts_with("mode="));
+    if has_mode {
+        existing.to_string()
+    } else {
+        format!("{existing}&mode=rwc")
+    }
+}
+
 // Domain 6 audit D6-3 — `pub fn is_closed(&self) -> bool` was removed.
 // The previous implementation hardcoded `false` with a comment saying
 // "SeaORM doesn't expose this directly, but we can check via ping"; in
@@ -180,5 +238,70 @@ impl std::ops::Deref for DbConnection {
 
     fn deref(&self) -> &Self::Target {
         &self.inner
+    }
+}
+
+#[cfg(test)]
+mod sqlite_url_tests {
+    use super::normalize_sqlite_url;
+
+    #[test]
+    fn plain_path_gets_single_rwc() {
+        let (path, url) = normalize_sqlite_url("sqlite://database.sqlite");
+        assert_eq!(path, "database.sqlite");
+        assert_eq!(url, "sqlite:database.sqlite?mode=rwc");
+    }
+
+    #[test]
+    fn leading_dot_slash_is_stripped() {
+        let (path, url) = normalize_sqlite_url("sqlite://./database.db");
+        assert_eq!(path, "database.db");
+        assert_eq!(url, "sqlite:database.db?mode=rwc");
+    }
+
+    #[test]
+    fn existing_mode_rwc_is_not_duplicated() {
+        // The bug: `sqlite://file.db?mode=rwc` previously produced
+        // `sqlite:file.db?mode=rwc?mode=rwc` and a query-polluted path.
+        let (path, url) = normalize_sqlite_url("sqlite://file.db?mode=rwc");
+        assert_eq!(path, "file.db", "filesystem path must be query-free");
+        assert_eq!(url, "sqlite:file.db?mode=rwc");
+        // Exactly one query separator and one mode param.
+        assert_eq!(url.matches('?').count(), 1);
+        assert_eq!(url.matches("mode=rwc").count(), 1);
+    }
+
+    #[test]
+    fn other_query_params_are_preserved_with_rwc_merged() {
+        let (path, url) = normalize_sqlite_url("sqlite://file.db?cache=shared");
+        assert_eq!(path, "file.db", "filesystem path must be query-free");
+        assert_eq!(url, "sqlite:file.db?cache=shared&mode=rwc");
+        assert_eq!(url.matches('?').count(), 1);
+        assert_eq!(url.matches("mode=rwc").count(), 1);
+    }
+
+    #[test]
+    fn caller_mode_choice_is_not_clobbered() {
+        // A deliberate `mode=ro` must win — we don't append a conflicting
+        // second `mode=`.
+        let (path, url) = normalize_sqlite_url("sqlite://file.db?mode=ro");
+        assert_eq!(path, "file.db");
+        assert_eq!(url, "sqlite:file.db?mode=ro");
+        assert_eq!(url.matches("mode=").count(), 1);
+    }
+
+    #[test]
+    fn in_memory_is_left_alone() {
+        let (path, url) = normalize_sqlite_url("sqlite://:memory:");
+        assert_eq!(path, ":memory:");
+        assert_eq!(url, "sqlite::memory:");
+    }
+
+    #[test]
+    fn in_memory_with_query_preserves_query_without_rwc() {
+        let (path, url) = normalize_sqlite_url("sqlite://:memory:?cache=shared");
+        assert_eq!(path, ":memory:");
+        assert_eq!(url, "sqlite::memory:?cache=shared");
+        assert!(!url.contains("mode=rwc"));
     }
 }

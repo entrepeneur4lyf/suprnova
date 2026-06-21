@@ -16,8 +16,9 @@ APP_KEY={app_key}
 SERVER_HOST=127.0.0.1
 SERVER_PORT=8765
 
-# SQLite (default — zero config)
-DATABASE_URL=sqlite://database.sqlite?mode=rwc
+# SQLite (default — zero config). The framework appends `?mode=rwc`
+# automatically so the database file is created on first connect.
+DATABASE_URL=sqlite://database.sqlite
 
 # PostgreSQL example:
 # DATABASE_URL=postgres://user:pass@localhost:5432/{package_name}

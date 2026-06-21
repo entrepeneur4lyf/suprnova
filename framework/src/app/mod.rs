@@ -632,34 +632,42 @@ where
         // filesystem errors (permission denied, no such path, read-only fs)
         // with an actionable message rather than letting them re-surface
         // later as a generic "failed to connect" panic.
+        //
+        // `normalize_sqlite_url` splits the file portion from any query
+        // string the caller already supplied (e.g. `?mode=rwc`,
+        // `?cache=shared`) so the filesystem ops below run on the bare
+        // file path, and rebuilds the connect URL with `mode=rwc` merged
+        // exactly once instead of double-suffixing it.
         let database_url = if database_url.starts_with("sqlite://") {
-            let path = database_url.trim_start_matches("sqlite://");
-            let path = path.trim_start_matches("./");
+            let (path, connect_url) =
+                crate::database::connection::normalize_sqlite_url(&database_url);
 
-            if let Some(parent) = Path::new(path).parent()
-                && !parent.as_os_str().is_empty()
-                && let Err(e) = std::fs::create_dir_all(parent)
-            {
-                eprintln!(
-                    "suprnova: failed to create SQLite parent directory \
-                     {parent}: {e}. Check that the path is writable and the \
-                     enclosing filesystem is not read-only.",
-                    parent = parent.display(),
-                );
-                std::process::exit(1);
+            if path != ":memory:" && !path.starts_with(":memory:") {
+                if let Some(parent) = Path::new(&path).parent()
+                    && !parent.as_os_str().is_empty()
+                    && let Err(e) = std::fs::create_dir_all(parent)
+                {
+                    eprintln!(
+                        "suprnova: failed to create SQLite parent directory \
+                         {parent}: {e}. Check that the path is writable and the \
+                         enclosing filesystem is not read-only.",
+                        parent = parent.display(),
+                    );
+                    std::process::exit(1);
+                }
+
+                if !Path::new(&path).exists()
+                    && let Err(e) = std::fs::File::create(&path)
+                {
+                    eprintln!(
+                        "suprnova: failed to create SQLite database file {path}: \
+                         {e}. Check filesystem permissions on the target path.",
+                    );
+                    std::process::exit(1);
+                }
             }
 
-            if !Path::new(path).exists()
-                && let Err(e) = std::fs::File::create(path)
-            {
-                eprintln!(
-                    "suprnova: failed to create SQLite database file {path}: \
-                     {e}. Check filesystem permissions on the target path.",
-                );
-                std::process::exit(1);
-            }
-
-            format!("sqlite:{}?mode=rwc", path)
+            connect_url
         } else {
             database_url
         };

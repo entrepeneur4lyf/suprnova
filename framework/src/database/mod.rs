@@ -140,11 +140,11 @@ impl DB {
             )
         })?;
 
-        // Audit HIGH `database` #1: refuse the silent SQLite fallback
-        // in production-like environments. `validate_for_environment`
-        // is a no-op in Local/Development/Testing/Custom envs so the
-        // documented dev posture ("zero-setup SQLite") is preserved.
-        config.validate_for_environment(&crate::Config::environment())?;
+        // Refuse the silent SQLite fallback in production-like
+        // environments. `validate_for_environment` is a no-op in
+        // Local/Development/Testing/Custom envs so the documented dev
+        // posture ("zero-setup SQLite") is preserved.
+        config.validate_for_environment(&Config::environment())?;
 
         let connection = DbConnection::connect(&config).await?;
         App::singleton(connection);
@@ -164,6 +164,15 @@ impl DB {
     /// DB::init_with(config).await?;
     /// ```
     pub async fn init_with(config: DatabaseConfig) -> Result<(), FrameworkError> {
+        // Same production guard as `init`: refuse the silent SQLite
+        // fallback in production-like environments. Passing
+        // `DatabaseConfig::from_env()` here with no `DATABASE_URL` set
+        // would otherwise boot against the dev fallback in production.
+        // No-op for Local/Development/Testing/Custom envs and for any
+        // config carrying an explicit URL (`sqlite::memory:` tests and
+        // builder URLs pass unchanged).
+        config.validate_for_environment(&Config::environment())?;
+
         let connection = DbConnection::connect(&config).await?;
         App::singleton(connection);
         Ok(())
@@ -265,3 +274,107 @@ impl DB {
 
 // Re-export sea_orm types that users commonly need
 pub use sea_orm;
+
+#[cfg(test)]
+mod init_with_tests {
+    use super::*;
+    use serial_test::serial;
+
+    /// Restores `APP_ENV` / `DATABASE_URL` after the test and starts
+    /// from a clean slate. `init_with` reads the environment through
+    /// `Config::environment()` (process-wide), so these tests must run
+    /// serially and undo their mutations.
+    struct EnvGuard {
+        keys: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn new(keys: &[&'static str]) -> Self {
+            let saved = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+            for k in keys {
+                // SAFETY: tests are gated with #[serial] so no other
+                // test concurrently reads or mutates these env vars.
+                unsafe {
+                    std::env::remove_var(k);
+                }
+            }
+            Self { keys: saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.keys {
+                // SAFETY: same as above — serial test, single-threaded
+                // env mutation.
+                unsafe {
+                    match v {
+                        Some(value) => std::env::set_var(k, value),
+                        None => std::env::remove_var(k),
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn init_with_refuses_default_sqlite_in_production() {
+        let _guard = EnvGuard::new(&["APP_ENV", "DATABASE_URL"]);
+        // SAFETY: serial test.
+        unsafe {
+            std::env::set_var("APP_ENV", "production");
+        }
+
+        // DATABASE_URL unset → from_env records UrlSource::Default.
+        let config = DatabaseConfig::from_env();
+        assert_eq!(config.url_source, UrlSource::Default);
+
+        let err = DB::init_with(config)
+            .await
+            .expect_err("init_with must refuse the dev SQLite fallback in production");
+        assert!(
+            format!("{err}").contains("DATABASE_URL is required"),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn init_with_accepts_explicit_url_in_production() {
+        let _guard = EnvGuard::new(&["APP_ENV", "DATABASE_URL"]);
+        // SAFETY: serial test.
+        unsafe {
+            std::env::set_var("APP_ENV", "production");
+        }
+
+        // An explicit builder URL is UrlSource::Explicit — the operator
+        // chose it, so production must accept it.
+        let config = DatabaseConfig::builder().url("sqlite::memory:").build();
+        assert_eq!(config.url_source, UrlSource::Explicit);
+
+        DB::init_with(config)
+            .await
+            .expect("explicit URL must pass the production guard");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn init_with_accepts_default_sqlite_in_testing() {
+        let _guard = EnvGuard::new(&["APP_ENV", "DATABASE_URL"]);
+        // SAFETY: serial test.
+        unsafe {
+            std::env::set_var("APP_ENV", "testing");
+            std::env::set_var("DATABASE_URL", "sqlite::memory:");
+        }
+
+        // Testing is not production-like, so even the env-sourced URL
+        // (or the silent fallback) is allowed — the guard is a no-op.
+        let config = DatabaseConfig::from_env();
+        assert_eq!(config.url_source, UrlSource::Env);
+
+        DB::init_with(config)
+            .await
+            .expect("testing environment must not trip the production guard");
+    }
+}
