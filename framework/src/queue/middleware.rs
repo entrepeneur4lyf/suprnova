@@ -10,8 +10,8 @@
 //! Concrete middleware bundled here:
 //! - [`WithoutOverlapping`] — `Cache::lock` around the handler, release on
 //!   contention.
-//! - [`RateLimited`] — `RateLimiter::too_many_attempts` against a key,
-//!   release on over-budget.
+//! - [`RateLimited`] — `RateLimiter::hit_and_check` against a key (atomic
+//!   increment-and-test), release on over-budget.
 //! - [`ThrottlesExceptions`] — exponential back-off on consecutive
 //!   failures (rate-limit on errors, not requests).
 //! - [`Skip`] — apply `when`/`unless` conditions before reaching the
@@ -198,7 +198,12 @@ impl JobMiddleware for RateLimited {
             .key
             .clone()
             .unwrap_or_else(|| format!("job-rate:{}", env.job_name));
-        if RateLimiter::too_many_attempts(&key, self.max_attempts).await? {
+        // Atomic increment-and-test: a separate `too_many_attempts` check
+        // followed by a `hit` lets concurrent workers all pass the check
+        // before any of them increments, admitting more than `max_attempts`
+        // jobs per window. `hit_and_check` burns the attempt and tests the
+        // budget in one round-trip, so exactly `max_attempts` are admitted.
+        if RateLimiter::hit_and_check(&key, self.max_attempts, self.decay.as_secs()).await? {
             let delay = match self.release_after {
                 Some(d) => d,
                 None => {
@@ -208,7 +213,6 @@ impl JobMiddleware for RateLimited {
             };
             return Ok(JobOutcome::Released { delay });
         }
-        RateLimiter::hit(&key, self.decay.as_secs()).await?;
         next(env).await
     }
 }
@@ -502,6 +506,43 @@ mod tests {
             .release_after(Duration::from_secs(5));
         let r = mw.handle(fresh_env("J"), ok_next()).await.unwrap();
         assert!(matches!(r, JobOutcome::Released { .. }));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn rate_limited_admits_exactly_max_under_concurrency() {
+        cache_bootstrap();
+        let key = "test_rl_concurrent";
+        RateLimiter::clear(key).await.unwrap();
+        let max = 3_i64;
+        let mw = RateLimited::new(max, Duration::from_secs(60)).by(key);
+
+        // Fire many more dispatches than the budget, all concurrently against
+        // the same limiter key. With the old check-then-hit pair these would
+        // interleave their checks before any hit and over-admit; the atomic
+        // `hit_and_check` admits exactly `max` and releases the rest.
+        let dispatches = 12;
+        let futs = (0..dispatches).map(|_| mw.handle(fresh_env("J"), ok_next()));
+        let results = futures::future::join_all(futs).await;
+
+        let completed = results
+            .iter()
+            .filter(|r| matches!(r.as_ref().unwrap(), JobOutcome::Completed))
+            .count();
+        let released = results
+            .iter()
+            .filter(|r| matches!(r.as_ref().unwrap(), JobOutcome::Released { .. }))
+            .count();
+
+        assert_eq!(
+            completed, max as usize,
+            "exactly the budget may run; admitted {completed}"
+        );
+        assert_eq!(
+            released,
+            dispatches - max as usize,
+            "every dispatch over budget is released; released {released}"
+        );
     }
 
     #[tokio::test]

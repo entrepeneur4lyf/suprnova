@@ -31,6 +31,10 @@ Pre-1.0, internal API churn is expected. Semver guarantees begin at `1.0.0`.
   unauthenticated requests are refused before the handler runs.
 - **Rate limiter** closes a fixed-window check-then-hit race by incrementing and
   comparing atomically (`hit_and_check`).
+- **Queue `RateLimited` middleware** now admits jobs through that atomic
+  `hit_and_check` instead of a separate `too_many_attempts` + `hit` pair, so
+  concurrent workers can no longer all pass the budget check before any of them
+  increments and over-admit past `max_attempts`.
 - **Upload validators** (`mimetypes` / `mime`) content-sniff the uploaded bytes
   instead of trusting the client-supplied `Content-Type`.
 - **Filesystem path guard** canonicalizes paths to catch symlink traversal out
