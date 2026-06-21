@@ -615,18 +615,17 @@ async fn handle_released(
     // copy with `attempts += 1` (per the trait contract), defeating the
     // purpose. So instead:
     //   1. Decrement the local copy back to its pre-dispatch attempt count.
-    //   2. ACK the original reservation (drop the driver's copy).
-    //   3. PUSH the local copy with `available_at` shifted by `delay`.
-    // This is at-least-once: a crash between ack and push re-delivers the
-    // original via visibility expiry. For the release case (lock busy,
-    // throttle exceeded) that re-delivery is benign — it produces another
-    // release attempt — and is strictly better than incrementing the
-    // attempts counter on every contention cycle.
+    //   2. PUSH the local copy with `available_at` shifted by `delay`.
+    //   3. ACK the original reservation (drop the driver's copy) — only
+    //      after the push succeeds.
+    // Push-before-ack keeps the released job safe across every failure mode.
+    // A push `Err` returns early WITHOUT acking, so the reservation stays
+    // live and the original is redelivered on visibility expiry — the job is
+    // never lost. A crash between push and ack leaves both copies, yielding a
+    // benign at-least-once duplicate (deduped downstream via `env.id`), which
+    // for a release (lock busy, throttle exceeded) just produces another
+    // release attempt and is strictly better than dropping the job.
     env.attempts = env.attempts.saturating_sub(1);
-    if let Err(e) = driver.ack(token).await {
-        settlement_failure(driver, env, "ack", "released", &e);
-        return;
-    }
     let new_available = Utc::now()
         + match chrono::Duration::from_std(delay) {
             Ok(d) => d,
@@ -639,8 +638,12 @@ async fn handle_released(
             id = %env.id,
             driver = driver.name(),
             error = %e,
-            "queue released-push failed; reservation has been ack'd, the job is now lost"
+            "queue released-push failed; reservation left intact for visibility-expiry redelivery"
         );
+        return;
+    }
+    if let Err(e) = driver.ack(token).await {
+        settlement_failure(driver, env, "ack", "released", &e);
         return;
     }
     let _ = EventFacade::dispatch(queue_events::JobReleased {
@@ -809,5 +812,168 @@ async fn fire_batch_callbacks(batch: &crate::queue::batch::Batch, phase: BatchPh
                 "batch callback name has no registered handler"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::queue::BackoffSchedule;
+    use crate::queue::CURRENT_SCHEMA_VERSION;
+    use crate::queue::driver::{Reservation, ReservationToken};
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use uuid::Uuid;
+
+    /// Records the ack/push calls `handle_released` makes, with a knob to
+    /// fail `push` so we can prove the reservation is left intact (the job
+    /// survives) when the re-enqueue cannot land.
+    struct RecordingDriver {
+        push_fails: bool,
+        acks: AtomicUsize,
+        pushes: AtomicUsize,
+        pushed: Mutex<Vec<Envelope>>,
+    }
+
+    impl RecordingDriver {
+        fn new(push_fails: bool) -> Self {
+            Self {
+                push_fails,
+                acks: AtomicUsize::new(0),
+                pushes: AtomicUsize::new(0),
+                pushed: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn ack_count(&self) -> usize {
+            self.acks.load(Ordering::SeqCst)
+        }
+
+        fn push_count(&self) -> usize {
+            self.pushes.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl QueueDriver for RecordingDriver {
+        async fn push(&self, env: Envelope) -> Result<(), FrameworkError> {
+            self.pushes.fetch_add(1, Ordering::SeqCst);
+            if self.push_fails {
+                return Err(FrameworkError::internal("push exploded"));
+            }
+            self.pushed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(env);
+            Ok(())
+        }
+
+        async fn pop(
+            &self,
+            _visibility_timeout: Duration,
+        ) -> Result<Option<Reservation>, FrameworkError> {
+            Ok(None)
+        }
+
+        async fn ack(&self, _token: &ReservationToken) -> Result<(), FrameworkError> {
+            self.acks.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn nack(
+            &self,
+            _token: &ReservationToken,
+            _requeue_delay: Duration,
+        ) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+    }
+
+    fn fresh_env(name: &str, attempts: u32) -> Envelope {
+        Envelope {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            id: Uuid::new_v4(),
+            job_name: name.into(),
+            payload: serde_json::json!({}),
+            dispatched_at: Utc::now(),
+            available_at: Utc::now(),
+            attempts,
+            max_tries: 3,
+            backoff: BackoffSchedule::default(),
+            timeout_secs: None,
+            fail_on_timeout: false,
+            idempotency_key: None,
+            batch_id: None,
+            chain_remaining: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn released_pushes_before_acking_so_a_failed_push_keeps_the_job() {
+        // Push fails: the reservation must NOT be acked, so the original
+        // survives for visibility-expiry redelivery rather than being lost.
+        let driver = RecordingDriver::new(true);
+        let token = ReservationToken(Uuid::new_v4());
+        let mut env = fresh_env("J", 1);
+
+        handle_released(
+            &driver,
+            &token,
+            &mut env,
+            Duration::from_secs(5),
+            "test",
+            "middleware",
+        )
+        .await;
+
+        assert_eq!(
+            driver.push_count(),
+            1,
+            "the released copy is pushed first, before any ack"
+        );
+        assert_eq!(
+            driver.ack_count(),
+            0,
+            "a failed push must leave the reservation un-acked so the job survives"
+        );
+    }
+
+    #[tokio::test]
+    async fn released_acks_after_a_successful_push() {
+        // Push succeeds: both the re-enqueue and the ack run, and the pushed
+        // copy carries the decremented attempt count and shifted availability.
+        let driver = RecordingDriver::new(false);
+        let token = ReservationToken(Uuid::new_v4());
+        let mut env = fresh_env("J", 2);
+        let before = env.available_at;
+
+        handle_released(
+            &driver,
+            &token,
+            &mut env,
+            Duration::from_secs(30),
+            "test",
+            "middleware",
+        )
+        .await;
+
+        assert_eq!(driver.push_count(), 1);
+        assert_eq!(
+            driver.ack_count(),
+            1,
+            "the original reservation is acked only after the push lands"
+        );
+
+        let pushed = driver.pushed.lock().unwrap_or_else(|e| e.into_inner());
+        let copy = pushed.first().expect("a released copy was pushed");
+        assert_eq!(
+            copy.attempts, 1,
+            "release does not burn an attempt — the pre-dispatch count is restored"
+        );
+        assert!(
+            copy.available_at > before,
+            "the released copy is delayed by the requested duration"
+        );
     }
 }

@@ -25,7 +25,9 @@ use crate::queue::envelope::Envelope;
 use crate::queue::outcome::JobOutcome;
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
+use futures::FutureExt;
 use futures::future::BoxFuture;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -134,9 +136,19 @@ impl JobMiddleware for WithoutOverlapping {
         let key = self.lock_key(&env.job_name);
         match Cache::lock(&key, self.expires_after).await? {
             Some(guard) => {
-                let result = next(env).await;
+                // `LockGuard` has no `Drop` auto-release (cross-process Redis
+                // semantics demand an explicit acknowledgement), so a panic
+                // unwinding through this call would skip `release()` and strand
+                // the lock until its TTL expires — blocking every other holder
+                // of the same key for up to `expires_after`. Catch the unwind,
+                // release on every exit path, then resume the panic so the
+                // worker's own boundary still converts it to a failed attempt.
+                let result = AssertUnwindSafe(next(env)).catch_unwind().await;
                 guard.release().await?;
-                result
+                match result {
+                    Ok(outcome) => outcome,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
             }
             None => match self.release_after {
                 Some(delay) => Ok(JobOutcome::Released { delay }),
@@ -480,6 +492,39 @@ mod tests {
         let r = mw.handle(fresh_env("J"), ok_next()).await.unwrap();
         assert!(matches!(r, JobOutcome::Released { .. }));
         held.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn without_overlapping_releases_lock_on_panic() {
+        cache_bootstrap();
+        let key = "test_overlap_panic";
+        let full_key = format!("laravel-queue-overlap:J:{key}");
+        let mw = WithoutOverlapping::new(key).expire_after(Duration::from_secs(60));
+
+        // A handler that panics while the overlap lock is held. Before the
+        // panic-boundary fix the lock would survive the unwind and stay held
+        // until its 60s TTL, so the re-lock below would fail.
+        let panic_next: Next = Box::new(|_env| {
+            Box::pin(async {
+                panic!("handler exploded mid-flight");
+            })
+        });
+
+        let handle_fut = AssertUnwindSafe(mw.handle(fresh_env("J"), panic_next)).catch_unwind();
+        let result = handle_fut.await;
+        assert!(
+            result.is_err(),
+            "the panic must propagate out of handle (resume_unwind), not be swallowed"
+        );
+
+        // The lock must be free immediately — re-acquiring the same key proves
+        // `release()` ran on the panic path rather than waiting on the TTL.
+        let relock = Cache::lock(&full_key, Duration::from_secs(30))
+            .await
+            .unwrap()
+            .expect("lock must be re-acquirable immediately after a panicking handler");
+        relock.release().await.unwrap();
     }
 
     #[tokio::test]
