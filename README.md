@@ -5,6 +5,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![CHANGELOG](https://img.shields.io/badge/CHANGELOG-keep%20a%20changelog-orange)](./CHANGELOG.md)
 
+![Suprnova - A Laravel-inspired web framework for Rust](manual/suprnova_header.jpg)
+
 Suprnova is a full-stack Rust web framework with Laravel 13's developer
 experience and Tokio's runtime model. Familiar API surfaces — `Auth::login`,
 `Cache::remember`, `Mail::to`, `Event::dispatch`, Eloquent-style models,
