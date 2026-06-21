@@ -23,7 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 indexmap = { version = "2", features = ["serde"] }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
-suprnova-macros = { path = "../suprnova-macros", version = "0.2" }
+suprnova-macros = { path = "../suprnova-macros", version = "0.3" }
 dotenvy = "0.15"
 inventory = "0.3"
 sea-orm = { version = "1.1", features = ["sqlx-mysql", "sqlx-postgres", "sqlx-sqlite", "runtime-tokio-rustls", "macros"] }
@@ -121,7 +121,7 @@ sea-streamer-redis = { version = "0.5.2", features = ["runtime-tokio"] }
 lettre = { version = "0.11.22", default-features = false, features = ["smtp-transport", "pool", "rustls-tls", "hostname", "builder", "tokio1", "tokio1-rustls"] }
 tera = "1"
 aws-sigv4 = "1"
-suprnova-web-push = { version = "0.2.0", path = "../crates/suprnova-web-push" }
+suprnova-web-push = { version = "0.3.0", path = "../crates/suprnova-web-push" }
 aws-credential-types = "1.2.14"
 # Compatibility pin for fresh downstream resolutions: time 0.3.48 currently
 # triggers coherence conflicts in sea-query/aws-smithy-types on Rust 1.96.
