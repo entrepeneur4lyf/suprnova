@@ -8,13 +8,39 @@ Pre-1.0, internal API churn is expected. Semver guarantees begin at `1.0.0`.
 
 ## [Unreleased]
 
-Post-`v0.1.0` maintenance and `v0.1.x` work will land here.
+Post-`v0.2.0` maintenance and `v0.2.x` work will land here.
+
+## [0.2.0] — 2026-06-21
+
+Adds role-based access control, a Markdown content / docs-rendering pipeline, and
+native static-file serving.
+
+### Added
+
+- **Tier-2 RBAC** — `HasRoles` trait; roles + permissions with a
+  `role_has_permissions` join; `PermissionMiddleware` / `RoleMiddleware` (both
+  fail-closed / default-deny); the `CreateRbacTables` migration; and
+  `create_role` / `create_permission` / `give_permission_to_role` helpers.
+- **Content rendering** — Markdown rendering and a docs-build pipeline:
+  `MarkdownRenderer`, `build_docs`, `DocsCatalog` / `DocsChapter`, heading
+  extraction and `slugify_heading`. Rendered HTML is sanitized
+  (comrak + syntect + ammonia).
+- **Native static-file serving** — `StaticFiles::public()` fallback handler for
+  serving a `public/` directory at the web root, replacing hand-rolled per-asset
+  whitelist controllers in apps.
 
 ### Fixed
 
-- Freshly generated apps now inherit a framework-level `time = 0.3.47`
-  compatibility pin, avoiding Rust 1.96 coherence conflicts from
-  `time 0.3.48` in fresh scaffold dependency resolutions.
+- Freshly generated apps inherit a framework-level `time = 0.3.47` compatibility
+  pin, avoiding Rust 1.96 coherence conflicts from `time 0.3.48` in fresh
+  scaffold dependency resolutions.
+
+### Documentation
+
+- Documented the two shipped starter kits — **Nebula** (Breeze-tier auth) and
+  **Pulsar** (product site + community) — across the manual, README, and roadmap;
+  restructured the roadmap around the shipped surface; and reconciled version
+  references throughout the docs.
 
 ## [0.1.0] — 2026-06-10
 
@@ -315,5 +341,6 @@ and the CLI installs with `cargo install --git`.
 - **Internal API churn through `0.1.x`** is expected and intentional;
   semver guarantees begin at `1.0.0`.
 
-[Unreleased]: https://github.com/entrepeneur4lyf/suprnova/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/entrepeneur4lyf/suprnova/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/entrepeneur4lyf/suprnova/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/entrepeneur4lyf/suprnova/releases/tag/v0.1.0
