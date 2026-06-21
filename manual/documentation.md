@@ -1,7 +1,7 @@
 # Suprnova Documentation
 
 - ## Prologue
-    - [Release Notes](releases.md)
+    - [Changelog](../CHANGELOG.md)
     - [Contribution Guide](contributions.md)
 - ## Getting Started
     - [Introduction](introduction.md)

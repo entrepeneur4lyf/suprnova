@@ -58,8 +58,8 @@ community — not just authentication.
 | An API-only backend (token auth, no frontend) | `suprnova new my-api --api` |
 
 Both kits track the framework as a git dependency and run on the same stack you
-already know — see each repo's README for setup. More kits are planned; watch
-[Release Notes](releases.md) for announcements.
+already know — see each repo's README for setup. More kits are planned — see
+the [roadmap](../ROADMAP.md).
 
 ## What the default scaffold gives you
 
