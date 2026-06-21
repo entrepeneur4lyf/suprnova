@@ -34,6 +34,23 @@ enum GateEntry {
     Async(AsyncGateFn),
 }
 
+// Downcast the type-erased (user, resource) pair back to the concrete
+// `(U, R)` the gate was registered with. Returns `None` when either side
+// fails to downcast.
+//
+// A mismatch is unreachable in normal dispatch: gates are keyed by
+// `(action, TypeId::of::<U>(), TypeId::of::<R>())` and only invoked through
+// `invoke` / `invoke_async`, which look the entry up by that exact tuple. The
+// `None` arm exists so a corrupted dispatch fails **closed** (deny) instead of
+// panicking — the request-path panic→500 net would catch a panic, but failing
+// closed keeps the authorization posture end-to-end.
+fn downcast_pair<'a, U: 'static, R: 'static>(
+    u: &'a dyn Any,
+    r: &'a dyn Any,
+) -> Option<(&'a U, &'a R)> {
+    Some((u.downcast_ref::<U>()?, r.downcast_ref::<R>()?))
+}
+
 pub(crate) struct GateRegistry {
     gates: RwLock<HashMap<(String, TypeId, TypeId), GateEntry>>,
     // before/after hooks are stored behind `Arc` so the evaluation path can
@@ -61,10 +78,9 @@ impl GateRegistry {
         action: &str,
         f: impl Fn(&U, &R) -> bool + Send + Sync + 'static,
     ) {
-        let erased: SyncGateFn = Box::new(move |u, r| {
-            let u = u.downcast_ref::<U>().expect("gate user type");
-            let r = r.downcast_ref::<R>().expect("gate resource type");
-            Response::from(f(u, r))
+        let erased: SyncGateFn = Box::new(move |u, r| match downcast_pair::<U, R>(u, r) {
+            Some((u, r)) => Response::from(f(u, r)),
+            None => Response::deny(),
         });
         self.insert_gate::<U, R>(action, GateEntry::Sync(erased), "sync");
     }
@@ -77,10 +93,9 @@ impl GateRegistry {
         action: &str,
         f: impl Fn(&U, &R) -> Response + Send + Sync + 'static,
     ) {
-        let erased: SyncGateFn = Box::new(move |u, r| {
-            let u = u.downcast_ref::<U>().expect("gate user type");
-            let r = r.downcast_ref::<R>().expect("gate resource type");
-            f(u, r)
+        let erased: SyncGateFn = Box::new(move |u, r| match downcast_pair::<U, R>(u, r) {
+            Some((u, r)) => f(u, r),
+            None => Response::deny(),
         });
         self.insert_gate::<U, R>(action, GateEntry::Sync(erased), "sync(response)");
     }
@@ -99,10 +114,15 @@ impl GateRegistry {
         Fut: Future<Output = bool> + Send + 'static,
     {
         let erased: AsyncGateFn = Box::new(move |u, r| {
-            let u = u.downcast_ref::<U>().expect("gate user type");
-            let r = r.downcast_ref::<R>().expect("gate resource type");
-            let fut = f(u, r);
-            Box::pin(async move { Response::from(fut.await) })
+            let out: Pin<Box<dyn Future<Output = Response> + Send>> =
+                match downcast_pair::<U, R>(u, r) {
+                    Some((u, r)) => {
+                        let fut = f(u, r);
+                        Box::pin(async move { Response::from(fut.await) })
+                    }
+                    None => Box::pin(async { Response::deny() }),
+                };
+            out
         });
         self.insert_gate::<U, R>(action, GateEntry::Async(erased), "async");
     }
@@ -116,10 +136,12 @@ impl GateRegistry {
         Fut: Future<Output = Response> + Send + 'static,
     {
         let erased: AsyncGateFn = Box::new(move |u, r| {
-            let u = u.downcast_ref::<U>().expect("gate user type");
-            let r = r.downcast_ref::<R>().expect("gate resource type");
-            let fut = f(u, r);
-            Box::pin(fut)
+            let out: Pin<Box<dyn Future<Output = Response> + Send>> =
+                match downcast_pair::<U, R>(u, r) {
+                    Some((u, r)) => Box::pin(f(u, r)),
+                    None => Box::pin(async { Response::deny() }),
+                };
+            out
         });
         self.insert_gate::<U, R>(action, GateEntry::Async(erased), "async(response)");
     }
@@ -183,8 +205,14 @@ impl GateRegistry {
         f: impl Fn(&U, &str) -> Option<bool> + Send + Sync + 'static,
     ) {
         let erased: Arc<BeforeFn> = Arc::new(move |u: &dyn Any, action: &str| {
-            let u = u.downcast_ref::<U>().expect("before-hook user type");
-            f(u, action)
+            // Type-erased downcast mismatch is unreachable in normal dispatch
+            // (hooks are keyed by `TypeId::of::<U>()` and only invoked for that
+            // user type). Fail safe by abstaining — `None` lets evaluation
+            // continue to the gate, which defaults to deny.
+            match u.downcast_ref::<U>() {
+                Some(u) => f(u, action),
+                None => None,
+            }
         });
         match self.before.write() {
             Ok(mut map) => map.entry(TypeId::of::<U>()).or_default().push(erased),
@@ -203,8 +231,14 @@ impl GateRegistry {
     ) {
         let erased: Arc<AfterFn> =
             Arc::new(move |u: &dyn Any, action: &str, current: Option<bool>| {
-                let u = u.downcast_ref::<U>().expect("after-hook user type");
-                f(u, action, current)
+                // Type-erased downcast mismatch is unreachable in normal
+                // dispatch (hooks are keyed by `TypeId::of::<U>()`). Fail
+                // safe by abstaining — an after hook can only *fill* an
+                // undecided result, so `None` leaves the decision untouched.
+                match u.downcast_ref::<U>() {
+                    Some(u) => f(u, action, current),
+                    None => None,
+                }
             });
         match self.after.write() {
             Ok(mut map) => map.entry(TypeId::of::<U>()).or_default().push(erased),
@@ -471,6 +505,43 @@ mod tests {
         assert!(
             !logs_contain("overwriting an existing gate"),
             "a first-time registration must not warn"
+        );
+    }
+
+    #[test]
+    fn downcast_pair_returns_none_on_type_mismatch() {
+        // The type-erased gate closures call `downcast_pair` to recover the
+        // concrete `(U, R)` they were registered with. A mismatch must yield
+        // `None` (so the gate fails closed) rather than panicking.
+        let u = U;
+        let r = R;
+        let bad = "wrong type";
+
+        // Correct types round-trip.
+        assert!(downcast_pair::<U, R>(&u as &dyn Any, &r as &dyn Any).is_some());
+        // A mismatched user side fails closed.
+        assert!(downcast_pair::<U, R>(&bad as &dyn Any, &r as &dyn Any).is_none());
+        // A mismatched resource side fails closed.
+        assert!(downcast_pair::<U, R>(&u as &dyn Any, &bad as &dyn Any).is_none());
+    }
+
+    #[test]
+    fn type_erased_gate_denies_on_downcast_mismatch_without_panicking() {
+        // Build the registered sync closure exactly as `register` does, then
+        // invoke it with a wrong-typed user. Before the fix this `.expect()`ed
+        // and panicked; now it must deny (fail closed) and return without
+        // unwinding.
+        let erased: SyncGateFn = Box::new(move |u, r| match downcast_pair::<U, R>(u, r) {
+            Some((_u, _r)) => Response::from(true),
+            None => Response::deny(),
+        });
+
+        let wrong_user = "not a U";
+        let r = R;
+        let decision = erased(&wrong_user as &dyn Any, &r as &dyn Any);
+        assert!(
+            !decision.allowed(),
+            "a downcast type mismatch must fail closed (deny), not panic"
         );
     }
 
