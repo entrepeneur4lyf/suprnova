@@ -20,6 +20,14 @@ use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 const FILE_CHUNK_SIZE: usize = 64 * 1024;
 const SNIFF_PREFIX_BYTES: usize = 8 * 1024;
 
+/// Files at or below this size are read fully into memory and served as a
+/// buffered body whose `Content-Length` is the exact number of bytes read.
+/// This makes the declared length self-consistent with the body for the
+/// common case — there is no window in which the file can change between the
+/// `stat` and the read. Larger files keep streaming so a multi-gigabyte
+/// download never has to be resident in memory.
+const BUFFERED_BODY_LIMIT: u64 = 1024 * 1024;
+
 /// Static file fallback handler rooted at a configured directory.
 #[derive(Clone, Debug)]
 pub struct StaticFiles {
@@ -95,14 +103,36 @@ impl StaticFiles {
 
         let content_type = content_type_for(&file_path).await;
         let content_length = metadata.len();
+
         let mut response = if is_head {
+            // HEAD carries no body, so the stat-derived length is reported
+            // directly; there is no body for it to disagree with.
             drop(file);
             HttpResponse::bytes_body(Bytes::new(), content_type)
+                .header("Content-Length", content_length.to_string())
+        } else if content_length <= BUFFERED_BODY_LIMIT {
+            // Read the whole file and size `Content-Length` from the bytes we
+            // actually send. If the file changed between the `stat` and the
+            // read the buffered length still matches the body exactly, so the
+            // client never sees a length that disagrees with the payload.
+            let mut file = file;
+            let mut buffer = Vec::with_capacity(content_length as usize);
+            let Ok(_) = file.read_to_end(&mut buffer).await else {
+                return not_found();
+            };
+            let length = buffer.len();
+            HttpResponse::bytes_body(Bytes::from(buffer), content_type)
+                .header("Content-Length", length.to_string())
         } else {
+            // Stream large files. The declared `Content-Length` is the stat
+            // size; if the file is truncated or read fails mid-flight the
+            // stream stops short of that length, so hyper's length-delimited
+            // encoder reaches end-of-stream with bytes still owed and aborts
+            // the connection rather than completing a short body cleanly.
             HttpResponse::stream_bytes(FileByteStream::new(file, content_length))
                 .header("Content-Type", content_type)
-        }
-        .header("Content-Length", content_length.to_string());
+                .header("Content-Length", content_length.to_string())
+        };
 
         if let Some(value) = &self.cache_control {
             response = response.header("Cache-Control", value.clone());
@@ -137,7 +167,12 @@ fn safe_relative_path(path: &str) -> Option<PathBuf> {
     let mut safe = PathBuf::new();
     for component in path.components() {
         match component {
-            Component::Normal(part) => safe.push(part),
+            Component::Normal(part) => {
+                if starts_with_dot(part) {
+                    return None;
+                }
+                safe.push(part);
+            }
             Component::CurDir
             | Component::ParentDir
             | Component::RootDir
@@ -152,6 +187,14 @@ fn safe_relative_path(path: &str) -> Option<PathBuf> {
     } else {
         Some(safe)
     }
+}
+
+/// Dotfiles (`.env`, `.git/`, `.htpasswd`, …) routinely hold secrets and
+/// repository internals, so any path segment whose name begins with the dot
+/// character is refused. This is broader than the `.`/`..` traversal check:
+/// it hides every hidden file and directory, not just the relative cursors.
+fn starts_with_dot(segment: &std::ffi::OsStr) -> bool {
+    segment.as_encoded_bytes().first() == Some(&b'.')
 }
 
 fn decode_url_path(path: &str) -> Option<String> {
@@ -287,6 +330,19 @@ async fn sniff_prefix(path: &Path) -> Option<Vec<u8>> {
     Some(prefix)
 }
 
+/// Streaming body for files above [`BUFFERED_BODY_LIMIT`].
+///
+/// The body declares a `Content-Length` equal to `remaining` at construction.
+/// The stream caps its output at that length and stops as soon as the
+/// underlying file returns end-of-file or an error. If that happens before
+/// `remaining` reaches zero — a truncated file or a mid-flight read failure —
+/// the stream yields its terminal `None` with bytes still owed, leaving
+/// hyper's length-delimited encoder short of the promised body. hyper then
+/// fails the response with a body-write-aborted error and resets the
+/// connection, so the client sees a broken transfer rather than a cleanly
+/// completed body that is silently shorter than its `Content-Length`. The
+/// framework's streaming bodies are `Infallible`, so this short-body abort is
+/// how a read failure is surfaced to the client.
 struct FileByteStream {
     file: tokio::fs::File,
     remaining: u64,
@@ -325,6 +381,13 @@ impl Stream for FileByteStream {
                 let read = read_buffer.filled().len();
                 if read == 0 {
                     this.finished = true;
+                    if this.remaining > 0 {
+                        tracing::warn!(
+                            owed = this.remaining,
+                            "static file shrank mid-stream; ending body short so \
+                             the connection aborts instead of serving a truncated payload"
+                        );
+                    }
                     Poll::Ready(None)
                 } else {
                     this.remaining = this.remaining.saturating_sub(read as u64);
@@ -336,7 +399,9 @@ impl Stream for FileByteStream {
                 this.finished = true;
                 tracing::warn!(
                     error = %error,
-                    "static file stream read failed; ending response body"
+                    owed = this.remaining,
+                    "static file stream read failed; ending body short so the \
+                     connection aborts instead of completing a partial payload"
                 );
                 Poll::Ready(None)
             }
@@ -377,5 +442,66 @@ mod tests {
         }
 
         assert_eq!(emitted, b"abc");
+    }
+
+    #[tokio::test]
+    async fn file_byte_stream_ends_short_when_file_shrinks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("asset.bin");
+        tokio::fs::write(&path, b"abcdefghij")
+            .await
+            .expect("write seed");
+
+        let file = tokio::fs::File::open(&path)
+            .await
+            .expect("open stream file");
+        // The body promised ten bytes...
+        let captured_len = 10;
+
+        // ...but the file is truncated to three before any chunk is read.
+        let truncate = tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .await
+            .expect("open truncate handle");
+        truncate.set_len(3).await.expect("shrink file");
+        truncate.sync_all().await.expect("sync shrink");
+        drop(truncate);
+
+        let mut stream = FileByteStream::new(file, captured_len);
+        let mut emitted = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            emitted.extend_from_slice(&chunk.expect("infallible stream chunk"));
+        }
+
+        // Fewer bytes than promised are emitted, and the stream finishes with
+        // bytes still owed. hyper's length-delimited encoder reaches EOF below
+        // the declared Content-Length and aborts the connection instead of
+        // completing a silently-truncated body.
+        assert_eq!(emitted, b"abc");
+        assert!(emitted.len() < captured_len as usize);
+        assert!(stream.remaining > 0, "shrunken file must leave bytes owed");
+        assert!(stream.finished);
+    }
+
+    #[test]
+    fn safe_relative_path_rejects_dotfiles() {
+        assert!(safe_relative_path("/.env").is_none());
+        assert!(safe_relative_path("/.git/config").is_none());
+        assert!(safe_relative_path("/.htpasswd").is_none());
+        assert!(safe_relative_path("/assets/.secret").is_none());
+        // Percent-encoded leading dot is rejected too.
+        assert!(safe_relative_path("/%2eenv").is_none());
+
+        // Ordinary assets and dotted file names that do not start a segment
+        // with a dot remain reachable.
+        assert_eq!(
+            safe_relative_path("/assets/app.css"),
+            Some(PathBuf::from("assets/app.css"))
+        );
+        assert_eq!(
+            safe_relative_path("/app.min.js"),
+            Some(PathBuf::from("app.min.js"))
+        );
     }
 }
