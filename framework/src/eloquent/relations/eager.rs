@@ -292,6 +292,14 @@ async fn load_aggregate<M>(
 where
     M: EagerLoadDispatch + Send + Sync,
 {
+    // `col` flows untyped from the public `with_sum`/`with_avg`/`with_min`/
+    // `with_max` surface straight into `format!("SUM({col})", ...)` inside the
+    // macro-emitted `aggregate_relation`. Unlike `Builder::sum`/`avg`/… (which
+    // validate their column) and the rest of the builder, `Builder::validate_inputs`
+    // never walks `eager_specs`, so this is the one aggregate path with no fence.
+    // Validate the identifier here — the single chokepoint for every aggregate
+    // kind and every model — so a crafted column can't break out of the call.
+    crate::database::validate_identifier(col)?;
     let mut refs: Vec<&mut M> = parents.iter_mut().collect();
     M::aggregate_relation(rel, col, kind, refs.as_mut_slice(), db).await
 }

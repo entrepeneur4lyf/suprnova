@@ -217,6 +217,22 @@ async fn with_sum_aggregate() {
 }
 
 #[tokio::test]
+async fn with_sum_rejects_malicious_aggregate_column() {
+    // The aggregate column flows into `SUM(<col>)` inside the eager-load
+    // dispatcher. `Builder::validate_inputs` never walks eager specs, so the
+    // identifier guard lives in the aggregate load path — a column carrying
+    // anything but a bare identifier must be rejected before it reaches SQL.
+    let _db = fixture().await;
+    let result = EgUser::with_sum(("posts", "views); DROP TABLE posts;--"))
+        .get()
+        .await;
+    assert!(
+        result.is_err(),
+        "a non-identifier aggregate column must be rejected, got Ok"
+    );
+}
+
+#[tokio::test]
 async fn with_avg_aggregate() {
     // Avg over views: u1 has (10 + 5) / 2 = 7.5.
     let _db = fixture().await;
