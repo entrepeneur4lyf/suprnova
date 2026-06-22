@@ -269,10 +269,10 @@ impl NotificationDispatcher {
 
                 match channel.deliver(&route, notification).await {
                     Ok(()) => {
-                        if let Err(e) = notification.after_sending(channel_name) {
-                            result = Err(e);
-                            break;
-                        }
+                        // Delivery succeeded — emit Sent before running the
+                        // post-send hook, so a failing after_sending can't
+                        // suppress the event for a notification that was in
+                        // fact delivered.
                         let _ = crate::events::EventFacade::dispatch_best_effort(
                             events::NotificationSent {
                                 notification: payload_name.clone(),
@@ -282,6 +282,10 @@ impl NotificationDispatcher {
                             },
                         )
                         .await;
+                        if let Err(e) = notification.after_sending(channel_name) {
+                            result = Err(e);
+                            break;
+                        }
                     }
                     Err(e) => {
                         let _ = crate::events::EventFacade::dispatch_best_effort(

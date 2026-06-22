@@ -40,6 +40,9 @@ impl Job for SendNotificationJob {
     async fn handle(self) -> Result<(), FrameworkError> {
         let dispatcher = dispatcher_for_queue()?;
         let factory = factory_for(&self.notification_name)?;
+        // Snapshot the payload before the factory consumes it — it doubles as
+        // the `data` field on the lifecycle events below.
+        let payload = self.notification_payload.clone();
         let notification: Box<dyn DynNotification> = factory(self.notification_payload)?;
         for channel_name in &self.channels {
             let Some(route) = self.notifiable_route_per_channel.get(channel_name) else {
@@ -61,12 +64,69 @@ impl Job for SendNotificationJob {
             if !notification.should_send(channel_name) {
                 continue;
             }
-            channel.deliver(route, notification.as_ref()).await?;
-            // Post-send hook, parity with the synchronous path: runs once
-            // per channel that delivered successfully. An error here
-            // propagates as a job failure, matching the dispatcher's
-            // first-failure-stops contract.
-            notification.after_sending(channel_name)?;
+
+            let payload_name = self.notification_name.clone();
+            let channel_str = channel_name.clone();
+            let data = payload.clone();
+
+            // Lifecycle events, parity with the synchronous dispatcher: a
+            // NotificationSending listener error vetoes the channel.
+            let sending = crate::notifications::events::NotificationSending {
+                notification: payload_name.clone(),
+                channel: channel_str.clone(),
+                route: route.clone(),
+                data: data.clone(),
+            };
+            if let Err(veto) = crate::events::EventFacade::dispatch(sending).await {
+                tracing::debug!(
+                    channel = %channel_str,
+                    notification = %payload_name,
+                    reason = %veto,
+                    "NotificationSending listener veto; skipping channel (queued)"
+                );
+                continue;
+            }
+
+            match channel.deliver(route, notification.as_ref()).await {
+                Ok(()) => {
+                    let _ = crate::events::EventFacade::dispatch_best_effort(
+                        crate::notifications::events::NotificationSent {
+                            notification: payload_name.clone(),
+                            channel: channel_str.clone(),
+                            route: route.clone(),
+                            data: data.clone(),
+                        },
+                    )
+                    .await;
+                    // Post-send hook. Unlike the synchronous path, an
+                    // after_sending error here must NOT fail the job: the
+                    // delivery already succeeded, and a job retry re-runs the
+                    // whole channel list, double-sending every channel that
+                    // already delivered. Log and carry on.
+                    if let Err(e) = notification.after_sending(channel_name) {
+                        tracing::warn!(
+                            channel = %channel_str,
+                            notification = %payload_name,
+                            error = %e,
+                            "after_sending failed on queued delivery; not retrying \
+                             (delivery already succeeded)"
+                        );
+                    }
+                }
+                Err(e) => {
+                    let _ = crate::events::EventFacade::dispatch_best_effort(
+                        crate::notifications::events::NotificationFailed {
+                            notification: payload_name.clone(),
+                            channel: channel_str.clone(),
+                            route: route.clone(),
+                            data: data.clone(),
+                            error: e.to_string(),
+                        },
+                    )
+                    .await;
+                    return Err(e);
+                }
+            }
         }
         Ok(())
     }
