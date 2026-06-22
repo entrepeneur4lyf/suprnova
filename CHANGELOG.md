@@ -8,12 +8,13 @@ bumped and pushed, not by cutting a tag. Newest first.
 
 ### Changed
 
-- **Distribution is plain git-tracked, no tags.** Scaffolded apps depend on
-  `suprnova = { git = "…/suprnova.git" }` and track the default branch; pull
-  updates with `cargo update -p suprnova`. Suprnova publishes no crates.io
-  releases and no git tags — `Cargo.lock` already pins the exact resolved
-  commit, so builds stay reproducible without hand-pinning a `rev`. The
-  installation docs no longer present commit-pinning as the update path.
+- **Distribution is git-tracked; you don't pin to tags.** Scaffolded apps
+  depend on `suprnova = { git = "…/suprnova.git" }` and track the default
+  branch; pull updates with `cargo update -p suprnova`. Versions are published
+  as tagged GitHub Releases (`v0.4.0`, …) for the changelog, but `Cargo.lock`
+  already pins the exact resolved commit — so builds stay reproducible without
+  hand-pinning a `tag` or `rev`. The installation docs no longer present
+  commit-pinning as the update path.
 
 ## 0.3.0 — 2026-06-21
 
