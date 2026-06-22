@@ -9,7 +9,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use suprnova::payments::{
     CustomerSnapshot, NeutralEventKind, PayloadIds, PaymentError, PaymentResult, PaymentSnapshot,
-    WebhookContext, WebhookEvent, WebhookHandler,
+    WebhookContext, WebhookEvent, WebhookHandler, constant_time_eq,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -314,24 +314,6 @@ impl WebhookHandler for StripeProvider {
             _ => None,
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Constant-time byte slice comparison to prevent timing attacks.
-///
-/// Returns `true` only when `a` and `b` have equal length and equal contents.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 // ---------------------------------------------------------------------------
