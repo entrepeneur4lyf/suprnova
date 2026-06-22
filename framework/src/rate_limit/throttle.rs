@@ -115,12 +115,15 @@ impl Middleware for ThrottleRequestsMiddleware {
             ResolvedLimits::Ok(limits) => limits,
             ResolvedLimits::ShortCircuit(resp) => return Ok(resp),
             ResolvedLimits::MissingLimiter(name) => {
-                tracing::warn!(name = %name, "throttle middleware: named limiter not registered");
-                return Err(HttpResponse::text(format!(
-                    "Rate limiter [{name}] is not defined. Register one with \
-                     RateLimiter::define(\"{name}\", |req| ...) at boot."
-                ))
-                .status(503));
+                // A boot misconfiguration, not a client error — but the body must
+                // not name the internal limiter or echo framework API instructions
+                // to the public. The operator gets the actionable detail in the log.
+                tracing::error!(
+                    name = %name,
+                    "throttle middleware: named limiter [{name}] not registered — \
+                     register it with RateLimiter::define(\"{name}\", |req| ...) at boot",
+                );
+                return Err(HttpResponse::text("Service Unavailable").status(503));
             }
         };
 
@@ -297,9 +300,14 @@ async fn build_too_many_attempts_response(
     limit: &Limit,
     key: &str,
 ) -> Result<HttpResponse, HttpResponse> {
-    let retry_after = RateLimiter::available_in(key)
-        .await
-        .map_err(|e| HttpResponse::text(format!("rate limiter error: {e}")).status(500))?;
+    let retry_after = RateLimiter::available_in(key).await.map_err(|e| {
+        // The backend error (Redis address, Lua script detail, key names) must
+        // not reach the wire — every other 5xx in the framework is sanitised to
+        // a fixed body, this direct HttpResponse path was the exception. Detail
+        // stays in the structured log.
+        tracing::error!(error = %e, "rate limiter backend error computing retry-after");
+        HttpResponse::text("Internal Server Error").status(500)
+    })?;
     let remaining = 0_i64;
     if let Some(cb) = &limit.response_callback {
         let resp = cb(request);
