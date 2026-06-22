@@ -136,7 +136,11 @@ fn map_paddle_subscription(s: &paddle_rust_sdk::entities::Subscription) -> Subsc
         .map(|item| SubscriptionItemSnapshot {
             provider_item_id: item.price.id.to_string(),
             provider_price_id: item.price.id.to_string(),
-            quantity: item.quantity as u32,
+            // Saturate rather than silently wrapping: a Paddle i64 quantity
+            // outside u32 range (a negative adjustment, or an absurd bulk
+            // count) must not two's-complement-wrap into a bogus billing
+            // quantity. Real subscription quantities are small positives.
+            quantity: item.quantity.clamp(0, u32::MAX as i64) as u32,
             unit_amount: None,
         })
         .collect();

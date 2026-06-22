@@ -107,7 +107,13 @@ fn map_subscription(s: StripeSubscription) -> SubscriptionResult {
             SubscriptionItemSnapshot {
                 provider_item_id: item.id.as_str().to_string(),
                 provider_price_id: item.price.id.as_str().to_string(),
-                quantity: item.quantity.map(|q| q as u32).unwrap_or(1),
+                // Saturate a u64 quantity into u32 rather than truncating the
+                // high bits; default to 1 when Stripe omits it (non-quantitative
+                // prices).
+                quantity: item
+                    .quantity
+                    .map(|q| u32::try_from(q).unwrap_or(u32::MAX))
+                    .unwrap_or(1),
                 unit_amount,
             }
         })
