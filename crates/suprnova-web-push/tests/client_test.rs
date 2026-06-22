@@ -346,3 +346,45 @@ fn new_accepts_https_subject() {
     let signer = VapidSigner::new(VapidKey::generate());
     WebPushClient::new(signer, "https://example.org/contact").expect("https:// must succeed");
 }
+
+#[tokio::test]
+async fn client_does_not_follow_redirects_ssrf_guard() {
+    // The host a malicious 3xx would point at (internal / cloud-metadata
+    // stand-in). It must never receive a request.
+    let internal = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&internal)
+        .await;
+
+    // The (attacker-influenced) push endpoint passes validation but
+    // 302-redirects toward the internal host.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/push"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", format!("{}/latest/meta-data", internal.uri())),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let signer = VapidSigner::new(VapidKey::generate());
+    let client = WebPushClient::new(signer, "mailto:admin@example.org")
+        .expect("test subject is a valid mailto: URI")
+        .with_endpoint_policy(EndpointPolicy::AllowAny);
+
+    let err = client
+        .send(&sub_for(&server), b"hi", ContentEncoding::Aes128Gcm, 60)
+        .await
+        .unwrap_err();
+
+    // With redirects disabled the 302 is surfaced verbatim (not chased).
+    assert!(
+        matches!(err, WebPushError::PushServiceRejected { status: 302, .. }),
+        "expected an unfollowed 302; got {err:?}"
+    );
+    // On drop, `internal` asserts its `.expect(0)` — it was never contacted.
+}

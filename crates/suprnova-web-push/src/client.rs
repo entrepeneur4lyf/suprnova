@@ -83,6 +83,8 @@ impl WebPushClient {
     ///
     /// The default transport applies a 30-second per-request timeout so a
     /// slow or hostile push service cannot tie up the caller indefinitely.
+    /// The default transport does not follow redirects (a push service never
+    /// issues a 3xx, and following one would bypass endpoint SSRF validation).
     /// Callers needing a different transport policy build their own
     /// [`Client`] and use [`Self::with_client`] instead.
     ///
@@ -91,6 +93,12 @@ impl WebPushClient {
     pub fn new(signer: VapidSigner, subject: impl Into<String>) -> Result<Self, WebPushError> {
         let http = Client::builder()
             .timeout(DEFAULT_REQUEST_TIMEOUT)
+            // Web Push (RFC 8030) services answer 2xx/4xx/5xx, never 3xx.
+            // Following redirects would let a subscription endpoint that
+            // passes `validate_strict_endpoint` bounce the request to an
+            // internal host / cloud metadata (the initial URL is the only
+            // one validated). Disabling redirects closes that SSRF.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("default reqwest Client builds without TLS/proxy config");
         Self::with_client(http, signer, subject)
