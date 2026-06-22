@@ -46,7 +46,7 @@ pub const DEFAULT_WEBHOOK_SIGNATURE_TOLERANCE_SECONDS: i64 = 300;
 /// signing secret for `WebhookHandler::verify`.
 ///
 /// Clone is cheap — `stripe::Client` is internally `Arc`-backed.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct StripeProvider {
     client: Client,
     /// Stripe publishable key, surfaced in `SessionPayload::StripeElements` and
@@ -61,6 +61,20 @@ pub struct StripeProvider {
     /// payloads outside this window are rejected. Defaults to
     /// [`DEFAULT_WEBHOOK_SIGNATURE_TOLERANCE_SECONDS`].
     webhook_signature_tolerance_seconds: i64,
+}
+
+impl std::fmt::Debug for StripeProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StripeProvider")
+            .field("client", &self.client)
+            .field("publishable_key", &self.publishable_key)
+            .field("webhook_signing_secret", &"[REDACTED]")
+            .field(
+                "webhook_signature_tolerance_seconds",
+                &self.webhook_signature_tolerance_seconds,
+            )
+            .finish()
+    }
 }
 
 impl StripeProvider {
@@ -164,5 +178,30 @@ impl PaymentProvider for StripeProvider {
     /// so the `Payment` trait is implemented for `StripeProvider`.
     fn as_payment(&self) -> Option<&dyn Payment> {
         Some(self)
+    }
+}
+
+#[cfg(test)]
+mod debug_redaction_tests {
+    use super::*;
+    use std::sync::Once;
+
+    static INIT: Once = Once::new();
+
+    fn init() {
+        INIT.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+    }
+
+    #[test]
+    fn debug_does_not_leak_webhook_secret() {
+        init();
+        let p = StripeProvider::new("sk_test_x", "pk_test_x", "whsec_TOPSECRET");
+        let dbg = format!("{p:?}");
+        assert!(
+            !dbg.contains("whsec_TOPSECRET"),
+            "Debug leaked the webhook signing secret: {dbg}"
+        );
     }
 }
