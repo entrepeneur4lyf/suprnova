@@ -33,6 +33,12 @@ bumped and pushed, not by cutting a tag. Newest first.
   3.4.0 page-object and header surface (once-props, the prepend/deep-merge
   scroll family, `matchPropsOn`, rescued/shared props), so this is a
   client-currency bump with no protocol change.
+- **Optional connection cap** — `SERVER_MAX_CONNECTIONS` (and the programmatic
+  `Server::max_connections(n)`) bounds concurrently active connections with a
+  semaphore on the accept loop, applying back-pressure at the TCP level. Unset —
+  or `0` — leaves connections unbounded (the default, unchanged). A backstop to
+  pair with a reverse proxy and `LimitNOFILE`, not a replacement for upstream
+  rate limiting.
 
 ### Security
 
@@ -50,8 +56,9 @@ bumped and pushed, not by cutting a tag. Newest first.
 - **Filesystem path guard** canonicalizes paths to catch symlink traversal out
   of the storage root, beyond the prior lexical `../` / absolute / UNC checks.
 - **Auth** closes a passwordless-login timing oracle — a matched-but-passwordless
-  account given a password now runs a fixed-cost verify — and `dummy_verify`
-  drives the configured hasher so the unmatched-user path is constant-time.
+  account given a password now runs a fixed-cost verify, across both the Eloquent
+  and database user providers — and `dummy_verify` drives the configured hasher so
+  the unmatched-user path is constant-time.
 - **Eloquent** validates column identifiers on the `pluck` / `value` /
   `pluck_keyed` / `sole_value` and `sum` / `avg` / `min` / `max` projection
   paths.
@@ -78,6 +85,17 @@ bumped and pushed, not by cutting a tag. Newest first.
   cache lock even when the job panics.
 - **Mail providers** cap error-response body reads (8 KiB), matching the
   web-push client, so a hostile endpoint can't drive sender memory.
+- **Web push** disables HTTP redirect-following on the default client, so an
+  attacker-influenced push endpoint can no longer `3xx`-redirect a notification
+  POST toward an internal or cloud-metadata host (SSRF). A redirect now surfaces
+  as a rejected push rather than a silently followed request.
+- **Stripe adapter** `Debug` redacts the webhook signing secret *and* prints a
+  placeholder for the `stripe::Client` (which carries the API secret key in its
+  auth header), so neither secret can reach logs through a `{:?}` of
+  `StripeProvider`, regardless of the upstream client's own `Debug`.
+- **Stripe adapter** `from_env` rejects present-but-blank credentials, failing
+  closed instead of constructing a client with an empty (and therefore forgeable)
+  webhook HMAC secret.
 
 ### Fixed
 
