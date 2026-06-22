@@ -412,7 +412,7 @@ fn update_models_mod(tables: &[TableInfo], models_dir: &Path) -> Result<(), Stri
         }
     }
 
-    let content = lines.join("\n");
+    let content = lines.join("\n") + "\n";
     fs::write(&mod_file, content)
         .map_err(|e| format!("Failed to write models/mod.rs {}: {e}", mod_file.display()))?;
     ui::success("Updated src/models/mod.rs");
