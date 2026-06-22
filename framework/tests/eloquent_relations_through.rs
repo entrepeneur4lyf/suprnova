@@ -904,3 +904,33 @@ async fn has_many_through_eager_load_with_string_parent_pk() {
     assert_eq!(b2_posts.len(), 1);
     assert_eq!(b2_posts[0].title, "B2-post1");
 }
+
+#[tokio::test]
+async fn has_many_through_malicious_key_rejected_before_db_io() {
+    // validate_meta() must fire before any DB connection is attempted.
+    use suprnova::HasManyThrough;
+
+    let rel: HasManyThrough<ThCountry, ThUser, ThPost> = HasManyThrough::__new(
+        serde_json::Value::from(1i64),
+        "country_id; DROP TABLE th_countries--".to_string(), // malicious first_key
+        "user_id".to_string(),
+    );
+    let err = rel.count().await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("country_id; DROP TABLE th_countries--") || msg.contains("SQL identifier"),
+        "expected first_key validation error, got: {msg}"
+    );
+
+    let rel2: HasManyThrough<ThCountry, ThUser, ThPost> = HasManyThrough::__new(
+        serde_json::Value::from(1i64),
+        "country_id".to_string(),
+        "user_id; DROP TABLE th_users--".to_string(), // malicious second_key
+    );
+    let err2 = rel2.count().await.unwrap_err();
+    let msg2 = err2.to_string();
+    assert!(
+        msg2.contains("user_id; DROP TABLE th_users--") || msg2.contains("SQL identifier"),
+        "expected second_key validation error, got: {msg2}"
+    );
+}

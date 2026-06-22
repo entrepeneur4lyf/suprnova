@@ -805,3 +805,38 @@ async fn belongs_to_many_respects_custom_related_pk() {
         .unwrap();
     assert_eq!(*sum, 35.0);
 }
+
+#[tokio::test]
+async fn belongs_to_many_malicious_key_rejected_before_db_io() {
+    // Verify that validate_meta() fires before any DB connection is
+    // attempted — no TestDatabase setup needed.
+    use suprnova::BelongsToMany;
+
+    // Malicious pivot_table — should be rejected immediately.
+    let rel: BelongsToMany<BtmUser, BtmRole, BtmRoleUserPivot> = BelongsToMany::__new(
+        serde_json::Value::from(1i64),
+        "btm_role_user; DROP TABLE btm_users--".to_string(),
+        "btm_user_id".to_string(),
+        "btm_role_id".to_string(),
+    );
+    let err = rel.count().await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("btm_role_user; DROP TABLE btm_users--") || msg.contains("SQL identifier"),
+        "expected validation error, got: {msg}"
+    );
+
+    // Malicious pivot_foreign_key.
+    let rel2: BelongsToMany<BtmUser, BtmRole, BtmRoleUserPivot> = BelongsToMany::__new(
+        serde_json::Value::from(1i64),
+        "btm_role_user".to_string(),
+        "x; DROP TABLE users--".to_string(),
+        "btm_role_id".to_string(),
+    );
+    let err2 = rel2.count().await.unwrap_err();
+    let msg2 = err2.to_string();
+    assert!(
+        msg2.contains("x; DROP TABLE users--") || msg2.contains("SQL identifier"),
+        "expected validation error for foreign_key, got: {msg2}"
+    );
+}

@@ -614,3 +614,42 @@ async fn morphed_by_many_count_via_server_side_group_by() {
     assert_eq!(by_id.get(&t1.id), Some(&2));
     assert_eq!(by_id.get(&t2.id), Some(&1));
 }
+
+#[tokio::test]
+async fn morph_to_many_malicious_morph_name_rejected_before_db_io() {
+    // validate_meta() must fire before any DB connection is attempted.
+    use suprnova::MorphToMany;
+
+    let rel: MorphToMany<MmPost, MmTag, MmTaggable> = MorphToMany::__new(
+        serde_json::Value::from(1i64),
+        "post".to_string(),
+        "taggable; DROP TABLE mm_posts--".to_string(), // malicious morph_name
+        "taggables".to_string(),
+        "mm_tag_id".to_string(),
+    );
+    let err = rel.count().await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("taggable; DROP TABLE mm_posts--") || msg.contains("SQL identifier"),
+        "expected morph_name validation error, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn morph_by_many_malicious_pivot_table_rejected_before_db_io() {
+    use suprnova::MorphedByMany;
+
+    let rel: MorphedByMany<MmTag, MmPost, MmTaggable> = MorphedByMany::__new(
+        serde_json::Value::from(1i64),
+        "post".to_string(),
+        "taggable".to_string(),
+        "taggables; DROP TABLE mm_tags--".to_string(), // malicious pivot_table
+        "mm_tag_id".to_string(),
+    );
+    let err = rel.count().await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("taggables; DROP TABLE mm_tags--") || msg.contains("SQL identifier"),
+        "expected pivot_table validation error, got: {msg}"
+    );
+}
