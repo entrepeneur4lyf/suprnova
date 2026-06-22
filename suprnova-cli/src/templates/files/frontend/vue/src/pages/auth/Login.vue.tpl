@@ -59,6 +59,10 @@ function submit() {
           {{ props.errors.email[0] }}
         </div>
 
+        <div v-if="props.errors?.password" class="text-red-600 text-sm">
+          {{ props.errors.password[0] }}
+        </div>
+
         <div class="flex items-center">
           <input
             id="remember"

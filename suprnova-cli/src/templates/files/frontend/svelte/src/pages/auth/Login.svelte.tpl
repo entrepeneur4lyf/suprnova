@@ -59,6 +59,10 @@
         <div class="text-red-600 text-sm">{errors.email[0]}</div>
       {/if}
 
+      {#if errors?.password}
+        <div class="text-red-600 text-sm">{errors.password[0]}</div>
+      {/if}
+
       <div class="flex items-center">
         <input
           id="remember"
