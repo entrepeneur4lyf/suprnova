@@ -239,20 +239,34 @@ mod tests {
         let hash = crate::hashing::hash_async("correct horse").await.unwrap();
 
         // Warm up the hasher so one-time init doesn't skew the first measurement.
-        let warm = TestUser { password: Some(hash.clone()) };
+        let warm = TestUser {
+            password: Some(hash.clone()),
+        };
         let _ = provider.validate_credentials(&warm, &creds).await.unwrap();
 
         // Wrong-password path: a full KDF verify against a real stored hash.
-        let with_hash = TestUser { password: Some(hash) };
+        let with_hash = TestUser {
+            password: Some(hash),
+        };
         let t0 = Instant::now();
-        assert!(!provider.validate_credentials(&with_hash, &creds).await.unwrap());
+        assert!(
+            !provider
+                .validate_credentials(&with_hash, &creds)
+                .await
+                .unwrap()
+        );
         let wrong_pw = t0.elapsed();
 
         // Passwordless (OAuth-only) user: must ALSO run a dummy KDF, not return
         // instantly — otherwise its wall-clock reveals the account is passwordless.
         let passwordless = TestUser { password: None };
         let t1 = Instant::now();
-        assert!(!provider.validate_credentials(&passwordless, &creds).await.unwrap());
+        assert!(
+            !provider
+                .validate_credentials(&passwordless, &creds)
+                .await
+                .unwrap()
+        );
         let no_pw = t1.elapsed();
 
         // Same order of magnitude. Pre-fix the passwordless path is ~microseconds
