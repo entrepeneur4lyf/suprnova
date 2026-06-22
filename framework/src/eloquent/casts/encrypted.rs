@@ -151,7 +151,9 @@ where
             })?
             .to_string();
         let decrypted: Vec<T> = AsEncryptedArray::<T>::from_storage(&wire)?;
-        Ok(serde_json::to_value(decrypted).expect("Vec<T> serialises"))
+        serde_json::to_value(decrypted).map_err(|e| {
+            FrameworkError::internal(format!("AsEncryptedArray: re-serialize failed: {e}"))
+        })
     }
 
     fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
@@ -225,7 +227,9 @@ where
             })?
             .to_string();
         let decrypted: T = AsEncryptedObject::<T>::from_storage(&wire)?;
-        Ok(serde_json::to_value(decrypted).expect("T serialises"))
+        serde_json::to_value(decrypted).map_err(|e| {
+            FrameworkError::internal(format!("AsEncryptedObject: re-serialize failed: {e}"))
+        })
     }
 
     fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
@@ -297,7 +301,9 @@ where
             })?
             .to_string();
         let decrypted = AsEncryptedCollection::<T>::from_storage(&wire)?;
-        Ok(serde_json::to_value(decrypted.into_vec()).expect("Vec<T> serialises"))
+        serde_json::to_value(decrypted.into_vec()).map_err(|e| {
+            FrameworkError::internal(format!("AsEncryptedCollection: re-serialize failed: {e}"))
+        })
     }
 
     fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {

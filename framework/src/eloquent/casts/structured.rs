@@ -81,7 +81,8 @@ where
         })?;
         let parsed: Vec<T> = serde_json::from_str(s)
             .map_err(|e| FrameworkError::validation("AsArray", format!("dyn parse: {e}")))?;
-        Ok(serde_json::to_value(parsed).expect("Vec<T> serialises"))
+        serde_json::to_value(parsed)
+            .map_err(|e| FrameworkError::internal(format!("AsArray: re-serialize failed: {e}")))
     }
 
     fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
@@ -141,7 +142,8 @@ where
         })?;
         let parsed: T = serde_json::from_str(s)
             .map_err(|e| FrameworkError::validation("AsObject", format!("dyn parse: {e}")))?;
-        Ok(serde_json::to_value(parsed).expect("T serialises"))
+        serde_json::to_value(parsed)
+            .map_err(|e| FrameworkError::internal(format!("AsObject: re-serialize failed: {e}")))
     }
 
     fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
@@ -208,7 +210,9 @@ where
         })?;
         let parsed: Vec<T> = serde_json::from_str(s)
             .map_err(|e| FrameworkError::validation("AsCollection", format!("dyn parse: {e}")))?;
-        Ok(serde_json::to_value(parsed).expect("Vec<T> serialises"))
+        serde_json::to_value(parsed).map_err(|e| {
+            FrameworkError::internal(format!("AsCollection: re-serialize failed: {e}"))
+        })
     }
 
     fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
@@ -269,7 +273,8 @@ where
         })?;
         let parsed: T = serde_json::from_str(s)
             .map_err(|e| FrameworkError::validation("AsJson", format!("dyn parse: {e}")))?;
-        Ok(serde_json::to_value(parsed).expect("T serialises"))
+        serde_json::to_value(parsed)
+            .map_err(|e| FrameworkError::internal(format!("AsJson: re-serialize failed: {e}")))
     }
 
     fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
@@ -337,7 +342,9 @@ where
         })?;
         let parsed: indexmap::IndexMap<String, T> = serde_json::from_str(s)
             .map_err(|e| FrameworkError::validation("AsArrayObject", format!("dyn parse: {e}")))?;
-        Ok(serde_json::to_value(parsed).expect("IndexMap serialises"))
+        serde_json::to_value(parsed).map_err(|e| {
+            FrameworkError::internal(format!("AsArrayObject: re-serialize failed: {e}"))
+        })
     }
 
     fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {

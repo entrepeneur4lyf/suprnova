@@ -67,7 +67,8 @@ impl DynCast for AsDateDyn {
             })?
             .to_string();
         let d = AsDate::from_storage(&s)?;
-        Ok(serde_json::to_value(d).expect("NaiveDate serialises"))
+        serde_json::to_value(d)
+            .map_err(|e| FrameworkError::internal(format!("AsDate: re-serialize failed: {e}")))
     }
 
     fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
@@ -119,7 +120,8 @@ impl DynCast for AsDateTimeDyn {
             })?
             .to_string();
         let dt = AsDateTime::from_storage(&s)?;
-        Ok(serde_json::to_value(dt).expect("DateTime<Utc> serialises"))
+        serde_json::to_value(dt)
+            .map_err(|e| FrameworkError::internal(format!("AsDateTime: re-serialize failed: {e}")))
     }
 
     fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
@@ -231,7 +233,11 @@ impl DynCast for AsOptionalDateTimeDyn {
             serde_json::Value::Null => Ok(serde_json::Value::Null),
             serde_json::Value::String(s) => {
                 let dt = AsDateTime::from_storage(s)?;
-                Ok(serde_json::to_value(dt).expect("DateTime<Utc> serialises"))
+                serde_json::to_value(dt).map_err(|e| {
+                    FrameworkError::internal(format!(
+                        "AsOptionalDateTime: re-serialize failed: {e}"
+                    ))
+                })
             }
             other => Err(FrameworkError::validation(
                 "AsOptionalDateTime",
