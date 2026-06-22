@@ -32,13 +32,23 @@ fn ensure_crypt() {
 
 /// A unique, non-existent down-file path per test so parallel tests never
 /// collide on shared maintenance state.
+///
+/// A process-wide atomic counter guarantees uniqueness: `SystemTime::now()`
+/// alone can return identical values for two threads under load on a
+/// coarse-resolution clock, which let parallel tests land on one shared
+/// down-file and clobber each other's maintenance state.
 fn unique_down_path() -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
     let mut p = std::env::temp_dir();
-    p.push(format!("suprnova-maint-it-{}-{nanos}", std::process::id()));
+    p.push(format!(
+        "suprnova-maint-it-{}-{nanos}-{seq}",
+        std::process::id()
+    ));
     p.push("framework/down");
     p
 }
