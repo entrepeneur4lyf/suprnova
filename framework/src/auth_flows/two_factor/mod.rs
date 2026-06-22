@@ -277,13 +277,27 @@ impl TwoFactor {
     /// - `FrameworkError::domain(.., 401)` if no row exists for this
     ///   user, or if the supplied code does not match.
     pub async fn confirm<U: TwoFactorUser>(user: &U, code: &str) -> Result<(), FrameworkError> {
+        // Throttle confirmation like every other code-checking path
+        // (`verify`, `complete_challenge`, `re_enroll`). Without a gate the
+        // 6-digit TOTP on a pending enrollment is online-grindable. Best-effort
+        // lockout: when torii isn't initialised the gate reads "not locked",
+        // the same posture as the other brute-force interactions in this module.
+        if is_locked_best_effort(user.email()).await {
+            return Err(FrameworkError::domain(
+                "account is locked due to too many failed attempts",
+                429,
+            ));
+        }
+
         let secret_b32 = load_secret(user.user_id())
             .await?
             .ok_or_else(|| FrameworkError::domain("no pending 2FA enrollment", 401))?;
 
         if !check_code(&secret_b32, code)? {
+            record_2fa_failure(user.email()).await;
             return Err(FrameworkError::domain("invalid 2FA code", 401));
         }
+        reset_2fa_failures(user.email()).await;
 
         set_confirmed_at(user.user_id(), chrono::Utc::now()).await?;
 
