@@ -378,16 +378,22 @@ impl Request {
     pub fn ip(&self) -> Option<String> {
         if self.peer_is_trusted_proxy() {
             if let Some(xff) = self.header("X-Forwarded-For") {
-                let first = xff.split(',').next().unwrap_or("").trim();
-                if !first.is_empty() {
-                    return Some(first.to_string());
+                // Return the first hop that parses as an IP and emit its
+                // normalised form. A trusted proxy can still append a garbage
+                // token, and never surfacing an unvalidated string also stops a
+                // client from rotating rate-limit buckets with junk XFF values.
+                if let Some(ip) = xff
+                    .split(',')
+                    .filter_map(|p| p.trim().parse::<std::net::IpAddr>().ok())
+                    .next()
+                {
+                    return Some(ip.to_string());
                 }
             }
-            if let Some(real) = self.header("X-Real-IP") {
-                let v = real.trim();
-                if !v.is_empty() {
-                    return Some(v.to_string());
-                }
+            if let Some(real) = self.header("X-Real-IP")
+                && let Ok(ip) = real.trim().parse::<std::net::IpAddr>()
+            {
+                return Some(ip.to_string());
             }
         }
         self.peer_addr.map(|ip| ip.to_string())
@@ -407,16 +413,21 @@ impl Request {
         if self.peer_is_trusted_proxy() {
             if let Some(xff) = self.header("X-Forwarded-For") {
                 for piece in xff.split(',') {
-                    let t = piece.trim();
-                    if !t.is_empty() {
-                        out.push(t.to_string());
+                    // Validate each hop as an IP and emit the normalised form;
+                    // drop anything that doesn't parse so a spoofed header can't
+                    // inject arbitrary strings (e.g. markup) into the chain a
+                    // consumer might render or log.
+                    if let Ok(ip) = piece.trim().parse::<std::net::IpAddr>() {
+                        out.push(ip.to_string());
                     }
                 }
             }
-            if let Some(real) = self.header("X-Real-IP") {
-                let t = real.trim();
-                if !t.is_empty() && !out.iter().any(|v| v == t) {
-                    out.push(t.to_string());
+            if let Some(real) = self.header("X-Real-IP")
+                && let Ok(ip) = real.trim().parse::<std::net::IpAddr>()
+            {
+                let s = ip.to_string();
+                if !out.iter().any(|v| v == &s) {
+                    out.push(s);
                 }
             }
         }
@@ -1338,5 +1349,73 @@ mod url_helper_tests {
         assert!(glob_match("*", "anything"));
         assert!(glob_match("exact", "exact"));
         assert!(!glob_match("exact", "Exact"));
+    }
+
+    #[test]
+    fn forwarded_for_drops_unparseable_hops() {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let peer = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let parts = hyper::Request::builder()
+            .method("GET")
+            .uri("/")
+            .header(
+                "X-Forwarded-For",
+                "1.2.3.4, <script>alert(1)</script>, 5.6.7.8",
+            )
+            .body(())
+            .expect("build request parts")
+            .into_parts()
+            .0;
+        let req = Request {
+            parts,
+            body: BodyState::Buffered(Bytes::new()),
+            params: HashMap::new(),
+            route_pattern: None,
+            peer_addr: Some(peer),
+            trusted_proxies: TrustedProxiesConfig::with_ips([peer]),
+        };
+
+        // The bogus middle hop is dropped — only parseable IPs (plus the
+        // authoritative peer) survive. A spoofed token can't inject an
+        // arbitrary string into the chain a consumer might render or log.
+        assert_eq!(
+            req.ips(),
+            vec![
+                "1.2.3.4".to_string(),
+                "5.6.7.8".to_string(),
+                "127.0.0.1".to_string(),
+            ],
+        );
+        // `ip()` returns the first parseable forwarded hop.
+        assert_eq!(req.ip().as_deref(), Some("1.2.3.4"));
+    }
+
+    #[test]
+    fn forwarded_for_junk_falls_through_to_peer() {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+        let parts = hyper::Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("X-Forwarded-For", "not-an-ip, also-garbage")
+            .body(())
+            .expect("build request parts")
+            .into_parts()
+            .0;
+        let req = Request {
+            parts,
+            body: BodyState::Buffered(Bytes::new()),
+            params: HashMap::new(),
+            route_pattern: None,
+            peer_addr: Some(peer),
+            trusted_proxies: TrustedProxiesConfig::with_ips([peer]),
+        };
+
+        // A junk-only forwarded chain can't rotate rate-limit buckets — `ip()`
+        // falls through to the authoritative TCP peer instead of echoing junk.
+        assert_eq!(req.ip().as_deref(), Some("10.0.0.9"));
+        assert_eq!(req.ips(), vec!["10.0.0.9".to_string()]);
     }
 }
