@@ -139,7 +139,11 @@ fn normalize_pattern(pattern: &str) -> String {
     if pattern == "/" {
         return "/".to_string();
     }
-    pattern.trim_matches('/').to_string()
+    // Strip only the LEADING slash. Stripping the trailing slash too would
+    // make an exact exempt rule (`/api/webhook`) also exempt its trailing-
+    // slash sibling (`/api/webhook/`) — an over-broad exemption an attacker
+    // could ride to bypass CSRF on the unintended path.
+    pattern.trim_start_matches('/').to_string()
 }
 
 /// CSRF protection middleware
@@ -678,6 +682,9 @@ mod tests {
         assert!(csrf.is_excluded("/api/public", "DELETE"));
         assert!(!csrf.is_excluded("/api/private", "POST"));
         assert!(!csrf.is_excluded("/login", "POST"));
+        // An exact exempt rule must NOT also exempt its trailing-slash
+        // sibling — that over-broad match was a CSRF bypass.
+        assert!(!csrf.is_excluded("/api/public/", "POST"));
     }
 
     #[test]
