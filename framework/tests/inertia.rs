@@ -2330,6 +2330,41 @@ async fn empty_error_bag_header_treated_as_unset() {
     assert!(errors.is_empty(), "expected flat errors, got {:?}", errors);
 }
 
+#[tokio::test]
+async fn flashed_default_bag_errors_seed_flat_not_bag_keyed() {
+    use suprnova::Redirect;
+    use suprnova::session::{new_session_slot_for_test, session_mut, session_scope_for_test};
+
+    let slot = new_session_slot_for_test();
+    session_scope_for_test(slot, async {
+        // A previous request flashed validation errors under the default bag.
+        let _: suprnova::Response = Redirect::to("/login")
+            .with_errors([("email", "Invalid")])
+            .into();
+        // SessionMiddleware ages new -> old at the start of the next request.
+        session_mut(|s| s.age_flash_data());
+
+        // The receiving page (no X-Inertia-Error-Bag header) must surface
+        // errors FLAT (`errors.email`), not nested under the bag name
+        // (`errors.default.email`) — otherwise the Inertia client's
+        // `$errors.email` binding comes up undefined.
+        let req = MockReq::new("/").inertia();
+        let resp = InertiaResponse::new("Login").resolve(&req).await.unwrap();
+        let body = body_to_string(resp.into_hyper().into_body());
+        let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let errors = page["props"]["errors"].as_object().unwrap();
+        assert_eq!(
+            errors["email"][0], "Invalid",
+            "default-bag errors must be flat; got {errors:?}"
+        );
+        assert!(
+            !errors.contains_key("default"),
+            "default bag must be flattened, not nested under \"default\"; got {errors:?}"
+        );
+    })
+    .await;
+}
+
 // ---- X-Inertia-Reset header ----
 //
 // When the client sends X-Inertia-Reset with merge-prop key names, the

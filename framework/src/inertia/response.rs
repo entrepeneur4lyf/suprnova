@@ -975,9 +975,29 @@ async fn resolve_props(
     // The session lookup is bounded to a single bag prefix scan and is
     // a no-op outside a `SessionMiddleware` scope (silently produces
     // the empty object).
+    // `pull_errors_flash` returns the raw `{bag: {field: [...]}}` map.
+    // Resolve it to the Inertia shape, mirroring Laravel's
+    // `resolveValidationErrors`:
+    //  - `X-Inertia-Error-Bag` header → that bag's errors, flat; the
+    //    post-pass below re-wraps them (and any handler-injected errors)
+    //    under the bag name.
+    //  - no header, `default` bag present → that bag's errors, flat
+    //    (`{field: [...]}`) — what the Inertia client binds to directly
+    //    (`page.props.errors.field`), not nested under `"default"`.
+    //  - no header, no default bag → every bag, keyed by name.
     let session_errors: serde_json::Map<String, Value> =
         crate::session::session_mut(|s| s.pull_errors_flash()).unwrap_or_default();
-    materialized.insert("errors".to_string(), Value::Object(session_errors));
+    let seeded_errors = match error_bag {
+        Some(bag) => session_errors
+            .get(bag)
+            .cloned()
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new())),
+        None => match session_errors.get("default") {
+            Some(default_bag) => default_bag.clone(),
+            None => Value::Object(session_errors),
+        },
+    };
+    materialized.insert("errors".to_string(), seeded_errors);
 
     let mut tasks: Vec<TaskFuture> = Vec::new();
 
