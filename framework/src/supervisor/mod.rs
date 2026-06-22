@@ -60,8 +60,11 @@
 //! # Backoff
 //!
 //! Restarts start at 100 ms and double on each subsequent failure, capped at
-//! 60 seconds. A successful run (for `Always`) resets nothing — the backoff
-//! accumulates across the entire lifetime of the supervisor task.
+//! 60 seconds. A run that stays up at least 60 seconds (the cap) is treated as
+//! healthy: the next restart resets to the 100 ms floor rather than inheriting
+//! backoff that climbed during an earlier burst of failures. A crash loop
+//! whose runs never reach that threshold keeps ramping to the cap, so the
+//! reset never masks a genuinely flapping supervisor.
 //!
 //! # Shutdown
 //!
@@ -80,6 +83,7 @@ use crate::error::FrameworkError;
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::task::{JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
@@ -340,6 +344,35 @@ impl SupervisorRegistry {
 
 // ── Restart loop ─────────────────────────────────────────────────────────────
 
+/// Initial restart backoff, and the floor a freshly-reset loop returns to.
+const INITIAL_BACKOFF_MS: u64 = 100;
+
+/// Maximum restart backoff. The delay doubles each restart up to this cap.
+const MAX_BACKOFF_MS: u64 = 60_000;
+
+/// A run that stays up at least this long is treated as healthy: the next
+/// restart resets to [`INITIAL_BACKOFF_MS`] instead of carrying the climbed
+/// backoff forward. Pinned to [`MAX_BACKOFF_MS`] so the rule reads "a run that
+/// outlived the maximum possible backoff was clearly not crash-looping."
+const HEALTHY_RUNTIME_RESET: Duration = Duration::from_millis(MAX_BACKOFF_MS);
+
+/// The backoff to apply for the *next* restart, given how long the run that
+/// just finished lasted.
+///
+/// A run that stayed up at least `healthy_reset` is healthy and resets to
+/// [`INITIAL_BACKOFF_MS`] — so a daemon that ran cleanly for a long stretch
+/// and then blipped restarts promptly instead of inheriting backoff that
+/// climbed during an earlier burst of failures. A shorter run carries
+/// `current_ms` forward unchanged; the caller doubles it after sleeping, so a
+/// tight crash loop still ramps to [`MAX_BACKOFF_MS`].
+fn backoff_after_run(current_ms: u64, ran_for: Duration, healthy_reset: Duration) -> u64 {
+    if ran_for >= healthy_reset {
+        INITIAL_BACKOFF_MS
+    } else {
+        current_ms
+    }
+}
+
 /// Run the supervisor in a restart loop with exponential backoff.
 ///
 /// Each call to `run()` is wrapped in a fresh `tokio::spawn` so that panics
@@ -348,15 +381,20 @@ impl SupervisorRegistry {
 ///
 /// The backoff starts at 100 ms and doubles on each restart, capped at 60 s.
 /// Backoff applies on every restart path (both `Err` and `Always`-on-`Ok`).
+/// Each run is timed: one that stays up at least [`HEALTHY_RUNTIME_RESET`]
+/// resets the backoff to [`INITIAL_BACKOFF_MS`] before the next restart (via
+/// [`backoff_after_run`]), so a long-healthy supervisor that blips recovers a
+/// prompt restart instead of waiting out backoff that climbed earlier.
 ///
 /// The `cancel` token is shared across all restarts. If it is cancelled at
 /// the top of the loop (or during the backoff sleep), the restart loop exits
 /// immediately without spawning another run.
 async fn run_with_restart(supervisor: Arc<dyn Supervisor>, cancel: CancellationToken) {
-    let mut backoff_ms: u64 = 100;
+    let mut backoff_ms: u64 = INITIAL_BACKOFF_MS;
     loop {
         let sv = Arc::clone(&supervisor);
         let cancel_for_run = cancel.clone();
+        let started = Instant::now();
         let handle = tokio::spawn(async move { sv.run(cancel_for_run).await });
 
         let outcome: Result<(), String> = match handle.await {
@@ -367,6 +405,7 @@ async fn run_with_restart(supervisor: Arc<dyn Supervisor>, cancel: CancellationT
             }
             Err(join_err) => Err(format!("join error: {join_err}")),
         };
+        let ran_for = started.elapsed();
 
         // Decide whether to restart. Never / OnError+Ok return early here.
         match (supervisor.restart_policy(), &outcome) {
@@ -409,15 +448,20 @@ async fn run_with_restart(supervisor: Arc<dyn Supervisor>, cancel: CancellationT
             return;
         }
 
+        // Reset-on-healthy-uptime: a run that stayed up past the cap was
+        // clearly not crash-looping, so it earns back a prompt restart rather
+        // than inheriting backoff that climbed during an earlier failure burst.
+        backoff_ms = backoff_after_run(backoff_ms, ran_for, HEALTHY_RUNTIME_RESET);
+
         // Wait for the backoff delay, but abort early if cancel fires.
         tokio::select! {
             _ = cancel.cancelled() => {
                 tracing::info!(supervisor = supervisor.name(), "supervisor shutdown during backoff; exiting");
                 return;
             }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)) => {}
+            _ = tokio::time::sleep(Duration::from_millis(backoff_ms)) => {}
         }
-        backoff_ms = (backoff_ms * 2).min(60_000); // cap at 60 s
+        backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS); // cap at 60 s
     }
 }
 
@@ -488,6 +532,48 @@ inventory::submit!(SupervisorEntry {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn backoff_resets_after_healthy_run() {
+        // A run lasting at least the threshold drops back to the floor,
+        // however high the backoff had climbed — including the exact boundary.
+        assert_eq!(
+            backoff_after_run(MAX_BACKOFF_MS, HEALTHY_RUNTIME_RESET, HEALTHY_RUNTIME_RESET),
+            INITIAL_BACKOFF_MS,
+            "a run at exactly the threshold is healthy and resets to the floor"
+        );
+        assert_eq!(
+            backoff_after_run(6_400, Duration::from_secs(120), HEALTHY_RUNTIME_RESET),
+            INITIAL_BACKOFF_MS,
+            "a long healthy run resets the climbed backoff to the floor"
+        );
+    }
+
+    #[test]
+    fn backoff_carries_forward_after_short_run() {
+        // A run shorter than the threshold leaves the backoff untouched; the
+        // caller doubles it after sleeping, so a crash loop still ramps. Using
+        // 800 (not the floor) distinguishes "carried forward" from "reset".
+        assert_eq!(
+            backoff_after_run(800, Duration::from_millis(5), HEALTHY_RUNTIME_RESET),
+            800,
+            "a short run carries the current backoff forward unchanged"
+        );
+        assert_eq!(
+            backoff_after_run(
+                800,
+                HEALTHY_RUNTIME_RESET - Duration::from_millis(1),
+                HEALTHY_RUNTIME_RESET,
+            ),
+            800,
+            "just under the threshold is not healthy; backoff carries forward"
+        );
+        assert_eq!(
+            backoff_after_run(400, Duration::ZERO, HEALTHY_RUNTIME_RESET),
+            400,
+            "an immediate return (tight loop) never resets"
+        );
+    }
 
     struct OneShotSupervisor {
         counter: Arc<AtomicUsize>,
