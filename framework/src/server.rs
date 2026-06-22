@@ -271,6 +271,10 @@ impl Server {
     /// providing back-pressure at the TCP level. When unset (the default),
     /// connections are unbounded. Pair with a reverse proxy and an
     /// appropriate `LimitNOFILE` for full protection.
+    ///
+    /// `n == 0` is treated as unset (unbounded), matching the
+    /// `SERVER_MAX_CONNECTIONS` env knob — a zero cap would accept no
+    /// connections at all, which is never the intent.
     pub fn max_connections(mut self, n: usize) -> Self {
         self.max_connections = if n > 0 { Some(n) } else { None };
         self

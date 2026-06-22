@@ -65,8 +65,13 @@ pub struct StripeProvider {
 
 impl std::fmt::Debug for StripeProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Do NOT forward `&self.client`: `stripe::Client` holds the API
+        // secret key (`sk_…`) in its Authorization header, and its own Debug
+        // impl is outside our control — a future upstream version could print
+        // it. A stable placeholder makes the "no secret in Debug" guarantee
+        // hold regardless of async-stripe's Debug behavior.
         f.debug_struct("StripeProvider")
-            .field("client", &self.client)
+            .field("client", &"stripe::Client { .. }")
             .field("publishable_key", &self.publishable_key)
             .field("webhook_signing_secret", &"[REDACTED]")
             .field(
@@ -221,6 +226,12 @@ mod debug_redaction_tests {
         assert!(
             !dbg.contains("whsec_TOPSECRET"),
             "Debug leaked the webhook signing secret: {dbg}"
+        );
+        // The API secret key reaches the struct only through `client`. The
+        // Debug impl must not expose it via the forwarded client either.
+        assert!(
+            !dbg.contains("sk_test_x"),
+            "Debug leaked the API secret key: {dbg}"
         );
     }
 
