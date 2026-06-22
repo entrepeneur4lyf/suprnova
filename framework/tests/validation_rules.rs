@@ -3,8 +3,9 @@
 
 use sea_orm::{ConnectionTrait, Database, DbBackend, Statement, Value};
 use suprnova::rules::{
-    Alpha, AlphaNum, Between, Boolean, Confirmed, Different, Email, HttpUrl, In, Integer, Max, Min,
-    NotIn, Numeric, Required, RequiredIf, RequiredUnless, RequiredWith, Same, Url, Uuid,
+    Alpha, AlphaDash, AlphaNum, Between, Boolean, Confirmed, Different, Email, HttpUrl, In,
+    Integer, Max, Min, NotIn, Numeric, Required, RequiredIf, RequiredUnless, RequiredWith, Same,
+    Url, Uuid,
 };
 use suprnova::testing::TestContainer;
 use suprnova::{AsyncRule, ContextualRule, DbConnection, FormContext, Rule, Unique};
@@ -247,9 +248,18 @@ fn alpha_and_alphanum_check_character_classes() {
     assert!(Alpha.passes("").is_err());
 
     assert!(AlphaNum.passes("hello42").is_ok());
-    assert!(AlphaNum.passes("user_name-42").is_ok());
+    // AlphaNum (Laravel `alpha_num`) is letters + digits only — separators
+    // belong to AlphaDash.
+    assert!(AlphaNum.passes("user_name-42").is_err());
     assert!(AlphaNum.passes("user@name").is_err());
     assert!(AlphaNum.passes("").is_err());
+
+    // AlphaDash (Laravel `alpha_dash`) also allows '-' and '_', but not
+    // spaces or other punctuation.
+    assert!(AlphaDash.passes("user_name-42").is_ok());
+    assert!(AlphaDash.passes("user name").is_err());
+    assert!(AlphaDash.passes("user@name").is_err());
+    assert!(AlphaDash.passes("").is_err());
 }
 
 #[test]

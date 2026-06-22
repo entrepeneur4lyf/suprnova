@@ -8,7 +8,7 @@
 //!   [`rules::Max`], [`rules::Between`], [`rules::In`],
 //!   [`rules::NotIn`], [`rules::Integer`], [`rules::Numeric`],
 //!   [`rules::Boolean`], [`rules::Alpha`], [`rules::AlphaNum`],
-//!   [`rules::Url`], [`rules::Uuid`].
+//!   [`rules::AlphaDash`], [`rules::Url`], [`rules::Uuid`].
 //! - [`ContextualRule`] — sync check that can read sibling fields
 //!   (think Laravel `required_if:other,value`). Built-ins:
 //!   [`rules::RequiredIf`], [`rules::RequiredWith`],
@@ -282,11 +282,26 @@ pub mod rules {
         }
     }
 
-    /// Laravel `alpha_dash` — value is letters, digits, underscores,
-    /// or hyphens; must be non-empty. Uses Unicode-aware
-    /// [`char::is_alphanumeric`].
+    /// Laravel `alpha_num` — value is letters or digits only; must be
+    /// non-empty. Uses Unicode-aware [`char::is_alphanumeric`]. For a
+    /// rule that also permits `_` and `-`, use [`AlphaDash`].
     pub struct AlphaNum;
     impl Rule for AlphaNum {
+        fn passes(&self, value: &str) -> Result<(), String> {
+            if !value.is_empty() && value.chars().all(|c| c.is_alphanumeric()) {
+                Ok(())
+            } else {
+                Err("must be alphanumeric (letters and digits only)".into())
+            }
+        }
+    }
+
+    /// Laravel `alpha_dash` — value is letters, digits, underscores,
+    /// or hyphens; must be non-empty. Uses Unicode-aware
+    /// [`char::is_alphanumeric`]. For letters and digits only, use
+    /// [`AlphaNum`].
+    pub struct AlphaDash;
+    impl Rule for AlphaDash {
         fn passes(&self, value: &str) -> Result<(), String> {
             if !value.is_empty()
                 && value
@@ -295,7 +310,7 @@ pub mod rules {
             {
                 Ok(())
             } else {
-                Err("must be alphanumeric (letters, digits, _, -)".into())
+                Err("must contain only letters, digits, dashes, and underscores".into())
             }
         }
     }
@@ -636,7 +651,7 @@ pub mod async_rules {
     pub struct Unique {
         table: &'static str,
         column: &'static str,
-        except: Option<(&'static str, i64)>,
+        except: Option<(&'static str, Value)>,
         wheres: Vec<(&'static str, Value)>,
         case_insensitive: bool,
     }
@@ -655,17 +670,20 @@ pub mod async_rules {
 
         /// Ignore the row whose `id` equals `id` — the "editing my own
         /// record" case, where a user's own email must not trip the rule
-        /// on update. Uses the `id` primary-key column.
-        pub fn ignore(mut self, id: i64) -> Self {
-            self.except = Some(("id", id));
+        /// on update. Uses the `id` primary-key column. Accepts anything
+        /// that converts into a bound parameter, so integer, UUID, and
+        /// string primary keys all work: `ignore(5)`, `ignore(uuid)`,
+        /// `ignore("01H…")`.
+        pub fn ignore(mut self, id: impl Into<Value>) -> Self {
+            self.except = Some(("id", id.into()));
             self
         }
 
         /// Like [`ignore`](Self::ignore) but excludes on a custom key
         /// column instead of `id` (a non-`id` primary key, or excluding
         /// by another unique key).
-        pub fn ignore_with_column(mut self, id_column: &'static str, id: i64) -> Self {
-            self.except = Some((id_column, id));
+        pub fn ignore_with_column(mut self, id_column: &'static str, id: impl Into<Value>) -> Self {
+            self.except = Some((id_column, id.into()));
             self
         }
 
@@ -711,10 +729,10 @@ pub mod async_rules {
             values.push(Value::from(value.to_string()));
 
             // Exclude the row being edited.
-            if let Some((id_column, id)) = self.except {
+            if let Some((id_column, id)) = &self.except {
                 let id_column = validate_identifier(id_column).map_err(|e| e.to_string())?;
                 clauses.push(format!("{id_column} <> ?"));
-                values.push(Value::from(id));
+                values.push(id.clone());
             }
 
             // Scoped uniqueness predicates (AND together).
