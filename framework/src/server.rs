@@ -60,6 +60,12 @@ pub struct Server {
     middleware: MiddlewareRegistry,
     host: String,
     port: u16,
+    /// Optional cap on concurrent active connections. `None` = unbounded.
+    /// Set via `SERVER_MAX_CONNECTIONS` in the environment (or programmatically
+    /// via [`Server::max_connections`]). When `Some(n)`, the accept loop
+    /// acquires a semaphore permit per connection and holds it for the
+    /// connection's lifetime, providing back-pressure at the TCP level.
+    max_connections: Option<usize>,
 }
 
 impl Server {
@@ -77,6 +83,7 @@ impl Server {
             middleware: MiddlewareRegistry::from_global(),
             host: "127.0.0.1".to_string(),
             port: 8000,
+            max_connections: None,
         }
     }
 
@@ -222,6 +229,7 @@ impl Server {
             middleware: MiddlewareRegistry::from_global(),
             host: config.host,
             port: config.port,
+            max_connections: config.max_connections,
         })
     }
 
@@ -253,6 +261,18 @@ impl Server {
     /// Set the listen port.
     pub fn port(mut self, port: u16) -> Self {
         self.port = port;
+        self
+    }
+
+    /// Cap the number of concurrently active connections.
+    ///
+    /// When set, the server will not accept new connections once `n` are
+    /// active. The accept loop blocks until an existing connection closes,
+    /// providing back-pressure at the TCP level. When unset (the default),
+    /// connections are unbounded. Pair with a reverse proxy and an
+    /// appropriate `LimitNOFILE` for full protection.
+    pub fn max_connections(mut self, n: usize) -> Self {
+        self.max_connections = if n > 0 { Some(n) } else { None };
         self
     }
 
@@ -325,6 +345,14 @@ impl Server {
         // share the same drain registry and shutdown handles both.
         let _ = WS_TASKS.set(TokioMutex::new(JoinSet::new()));
 
+        // Optional concurrency cap. `None` => unbounded (unchanged default).
+        // When set, the accept loop acquires a permit before handing the
+        // connection off to a task; the permit is moved into the task and
+        // released when the task completes (i.e. when the connection closes).
+        let conn_limit: Option<Arc<tokio::sync::Semaphore>> = self
+            .max_connections
+            .map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
+
         // Track in-flight connections so shutdown can drain them
         // before flushing OTel buffers. Each accepted connection is
         // spawned into this JoinSet rather than via bare tokio::spawn.
@@ -361,6 +389,23 @@ impl Server {
                             continue;
                         }
                     };
+
+                    // Acquire a permit when a cap is configured. This
+                    // blocks the accept loop (not a spawned task) until a
+                    // slot opens, providing back-pressure at the TCP level.
+                    // The permit is moved into the spawned connection task
+                    // below so it is released exactly when that task ends
+                    // (i.e. when the connection closes), not sooner.
+                    let conn_permit = match &conn_limit {
+                        Some(sem) => Some(
+                            sem.clone()
+                                .acquire_owned()
+                                .await
+                                .expect("connection semaphore is never closed"),
+                        ),
+                        None => None,
+                    };
+
                     // Capture the peer IP off the accepted TCP socket so
                     // every request served on this connection can report
                     // its connecting address via `Request::ip()` as the
@@ -371,6 +416,11 @@ impl Server {
                     let middleware = middleware.clone();
 
                     connections.spawn(async move {
+                        // Hold the permit for the lifetime of this connection.
+                        // Dropping it here (when the task ends) releases one
+                        // slot in the semaphore so the accept loop can proceed.
+                        let _conn_permit = conn_permit;
+
                         let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                             let router = router.clone();
                             let middleware = middleware.clone();

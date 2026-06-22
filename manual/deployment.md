@@ -71,6 +71,7 @@ Beyond the four required vars, common production knobs:
 | `SERVER_PORT` | `8765` | Match your platform's expected port. |
 | `APP_DEBUG` | env-derived | `false` in production/staging/custom envs. Set explicitly if you want loud errors in staging. |
 | `SERVER_MAX_BODY_SIZE` | per-handler default | Process-wide request body cap. |
+| `SERVER_MAX_CONNECTIONS` | unset (unbounded) | Cap on concurrent active TCP connections. See below. |
 | `DB_MAX_CONNECTIONS` | `10` | Pool size. |
 | `REDIS_URL` | unset | Required if you've configured the Redis cache/queue/session drivers. |
 
@@ -295,6 +296,48 @@ not in process memory.
   filters — see [Queues](queues.md)).
 - **Workflow.** Scale horizontally; row-level claim/heartbeat
   coordinates the workers.
+
+## Connection cap (`SERVER_MAX_CONNECTIONS`)
+
+By default the server accepts an unbounded number of concurrent TCP
+connections. In most deployments a reverse proxy (nginx, Caddy, Traefik)
+or the platform's load balancer provides the first line of defence. If
+you want a hard backstop inside the process itself — to prevent a single
+misbehaving client pool from exhausting file descriptors — set
+`SERVER_MAX_CONNECTIONS`:
+
+```bash
+# .env.production — cap concurrent connections at 1024
+SERVER_MAX_CONNECTIONS=1024
+```
+
+When the cap is reached the **accept loop blocks** (back-pressure at the
+TCP level) until an existing connection closes; the pending handshake
+remains in the kernel's accept backlog. The permit is held for the full
+lifetime of each connection and released the moment the connection ends,
+so slots turn over promptly.
+
+Rules of thumb:
+
+- **Unset (default = unbounded).** Correct if you have a reverse proxy
+  applying its own connection limit, or if you're running behind a PaaS
+  that manages concurrency for you.
+- **Set to a concrete value** if the process runs directly on the
+  internet or you want defence-in-depth regardless of the proxy
+  configuration. A typical starting point is 2 × your expected peak
+  concurrent users, adjusted upward for long-lived connections
+  (WebSocket, SSE).
+- **Pair with `LimitNOFILE`** (systemd) or `ulimit -n` so the OS
+  file-descriptor limit doesn't become the surprise cap. Each HTTP
+  connection costs one file descriptor; add your database pool size and
+  a few dozen for OS housekeeping.
+- **This is a backstop, not a replacement for upstream rate limiting.**
+  `SERVER_MAX_CONNECTIONS` stops runaway accumulation; your reverse
+  proxy or `rate_limit` middleware should handle per-client or per-IP
+  throttling.
+
+Blank, unparseable, or zero values are silently treated as unset so a
+typo does not prevent the server from starting.
 
 ## Per-platform walkthroughs
 

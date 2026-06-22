@@ -32,6 +32,20 @@ pub struct ServerConfig {
     /// per-FormRequest `max_body_bytes` overrides still apply on
     /// individual endpoints.
     pub max_body_size: usize,
+    /// Optional cap on the number of concurrently active TCP connections.
+    ///
+    /// When `Some(n)`, the server acquires a semaphore permit for each
+    /// accepted connection and holds it until the connection closes;
+    /// once all `n` permits are taken the accept loop blocks until an
+    /// existing connection ends. When `None` (the default), behaviour is
+    /// unchanged — connections are unbounded.
+    ///
+    /// Set via `SERVER_MAX_CONNECTIONS` in the environment. Blank,
+    /// unparseable, or zero values are treated as `None` so a typo does
+    /// not prevent the server from starting. This is a backstop against
+    /// runaway connection accumulation; pair it with a reverse proxy and
+    /// an appropriate `LimitNOFILE` for full protection.
+    pub max_connections: Option<usize>,
 }
 
 impl ServerConfig {
@@ -51,6 +65,9 @@ impl ServerConfig {
             host: env("SERVER_HOST", "127.0.0.1".to_string()),
             port: resolve_port_lenient(),
             max_body_size: env("SERVER_MAX_BODY_SIZE", DEFAULT_MAX_REQUEST_BODY_BYTES),
+            max_connections: parse_max_connections(
+                std::env::var("SERVER_MAX_CONNECTIONS").ok().as_deref(),
+            ),
         }
     }
 
@@ -68,10 +85,16 @@ impl ServerConfig {
         };
         let max_body_size =
             env_strict::<usize>("SERVER_MAX_BODY_SIZE")?.unwrap_or(DEFAULT_MAX_REQUEST_BODY_BYTES);
+        // `SERVER_MAX_CONNECTIONS` is intentionally lenient even in the
+        // strict path: a typo here should not abort boot, just log via
+        // parse_max_connections returning None.
+        let max_connections =
+            parse_max_connections(std::env::var("SERVER_MAX_CONNECTIONS").ok().as_deref());
         Ok(Self {
             host,
             port,
             max_body_size,
+            max_connections,
         })
     }
 
@@ -99,12 +122,25 @@ fn resolve_port_lenient() -> u16 {
         .unwrap_or(DEFAULT_SERVER_PORT)
 }
 
+/// Parse the optional `SERVER_MAX_CONNECTIONS` cap from a raw env-var
+/// string. A blank or unparseable value — or zero — is treated as unset
+/// (`None` = unbounded) rather than a boot error: it is an optional
+/// hardening knob, not a required setting, and a typo should not prevent
+/// the server from starting.
+pub(crate) fn parse_max_connections(raw: Option<&str>) -> Option<usize> {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+}
+
 /// Builder for ServerConfig
 #[derive(Default)]
 pub struct ServerConfigBuilder {
     host: Option<String>,
     port: Option<u16>,
     max_body_size: Option<usize>,
+    max_connections: Option<usize>,
 }
 
 impl ServerConfigBuilder {
@@ -126,6 +162,16 @@ impl ServerConfigBuilder {
         self
     }
 
+    /// Cap the number of concurrently active connections.
+    ///
+    /// When set, the server will not accept new connections once this
+    /// many are active; the accept loop blocks until an existing
+    /// connection closes. When unset, connections are unbounded.
+    pub fn max_connections(mut self, n: usize) -> Self {
+        self.max_connections = Some(n);
+        self
+    }
+
     /// Build the ServerConfig
     pub fn build(self) -> ServerConfig {
         let default = ServerConfig::from_env();
@@ -133,6 +179,7 @@ impl ServerConfigBuilder {
             host: self.host.unwrap_or(default.host),
             port: self.port.unwrap_or(default.port),
             max_body_size: self.max_body_size.unwrap_or(default.max_body_size),
+            max_connections: self.max_connections.or(default.max_connections),
         }
     }
 }
@@ -149,6 +196,21 @@ mod tests {
     //! the audit regression.
 
     use super::*;
+
+    #[test]
+    fn parses_max_connections_from_env() {
+        // unset → None (unbounded, behavior unchanged)
+        assert_eq!(parse_max_connections(None), None);
+        // set → Some(n)
+        assert_eq!(parse_max_connections(Some("1024")), Some(1024));
+        // blank / unparseable → None (don't fail boot over a typo'd optional knob)
+        assert_eq!(parse_max_connections(Some("")), None);
+        assert_eq!(parse_max_connections(Some("abc")), None);
+        // zero → None (a zero cap would be a dead lock; treat as unset)
+        assert_eq!(parse_max_connections(Some("0")), None);
+        // whitespace-padded value is accepted
+        assert_eq!(parse_max_connections(Some("  512  ")), Some(512));
+    }
 
     #[test]
     #[serial_test::serial(server_config_env)]
