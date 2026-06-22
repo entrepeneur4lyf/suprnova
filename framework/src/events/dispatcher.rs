@@ -478,43 +478,53 @@ impl EventDispatcher {
     /// it, so a listener that itself dispatches a queued event cannot deadlock
     /// against the drain.
     pub async fn drain_queued(&self, timeout: Duration) -> usize {
-        let mut set = {
-            let mut guard = self.queued_tasks.lock().await;
-            std::mem::replace(&mut *guard, JoinSet::new())
-        };
-        if set.is_empty() {
-            return 0;
-        }
         let deadline = tokio::time::sleep(timeout);
         tokio::pin!(deadline);
+        // Outer loop re-swaps the task set after each batch drains. A
+        // `spawn_queued_listener` parked at `acquire_owned().await` can resume
+        // *after* the swap below and `spawn` into the fresh JoinSet — past the
+        // point a single-shot drain would observe. Re-swapping until a lock
+        // acquisition finds an empty set closes that shutdown race without
+        // closing the permit semaphore (which would leave the dispatcher
+        // permanently unusable). The shared `deadline` spans all batches so a
+        // continuous arrival stream still can't hang shutdown.
         loop {
-            tokio::select! {
-                next = set.join_next() => {
-                    match next {
-                        None => return 0, // all drained
-                        // Defense-in-depth: each spawned task body catches
-                        // its own panic before this point, so an is_panic
-                        // JoinError here means something escaped the
-                        // boundary (e.g. an abort during shutdown that
-                        // races with a panic). Log it so a missed surface
-                        // is observable rather than silently swallowed.
-                        Some(Err(join_err)) if join_err.is_panic() => {
-                            tracing::error!(
-                                target: "suprnova::events",
-                                panic = ?join_err,
-                                "queued listener task panicked outside the per-attempt boundary"
-                            );
+            let mut set = {
+                let mut guard = self.queued_tasks.lock().await;
+                std::mem::replace(&mut *guard, JoinSet::new())
+            };
+            if set.is_empty() {
+                return 0;
+            }
+            loop {
+                tokio::select! {
+                    next = set.join_next() => {
+                        match next {
+                            None => break, // this batch drained; re-swap for late arrivals
+                            // Defense-in-depth: each spawned task body catches
+                            // its own panic before this point, so an is_panic
+                            // JoinError here means something escaped the
+                            // boundary (e.g. an abort during shutdown that
+                            // races with a panic). Log it so a missed surface
+                            // is observable rather than silently swallowed.
+                            Some(Err(join_err)) if join_err.is_panic() => {
+                                tracing::error!(
+                                    target: "suprnova::events",
+                                    panic = ?join_err,
+                                    "queued listener task panicked outside the per-attempt boundary"
+                                );
+                            }
+                            Some(Err(_cancelled)) => {
+                                // Cancellation during shutdown is expected; no log.
+                            }
+                            Some(Ok(())) => {}
                         }
-                        Some(Err(_cancelled)) => {
-                            // Cancellation during shutdown is expected; no log.
-                        }
-                        Some(Ok(())) => {}
                     }
-                }
-                _ = &mut deadline => {
-                    let remaining = set.len();
-                    set.abort_all();
-                    return remaining;
+                    _ = &mut deadline => {
+                        let remaining = set.len();
+                        set.abort_all();
+                        return remaining;
+                    }
                 }
             }
         }
