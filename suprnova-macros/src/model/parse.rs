@@ -415,6 +415,17 @@ impl ModelInput {
             }
         }
 
+        if syn::parse_str::<Ident>(&primary_key).is_err() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "`primary_key = \"{primary_key}\"` must be a valid Rust identifier \
+                     because it names a struct field on the model. Use a snake_case \
+                     name without dashes / spaces."
+                ),
+            ));
+        }
+
         // T9 — auto-detect timestamp columns from the struct fields.
         //
         //   user attribute       | struct has BOTH      | exactly ONE     | NEITHER

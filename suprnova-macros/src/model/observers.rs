@@ -88,8 +88,7 @@ const CANCELLABLE_METHODS: &[(&str, &str)] = &[
 /// should be aware that the inventory observer fires in addition to
 /// the manually-installed one.
 pub fn emit_per_model_observe_shim(struct_ident: &Ident) -> TokenStream {
-    let module_name: Ident = syn::parse_str(&to_snake(&struct_ident.to_string()))
-        .expect("snake-case struct name parses as ident");
+    let module_name: Ident = quote::format_ident!("{}", to_snake(&struct_ident.to_string()));
 
     let non_cancellable: Vec<TokenStream> = NON_CANCELLABLE_METHODS
         .iter()

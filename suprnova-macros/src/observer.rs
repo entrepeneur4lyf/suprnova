@@ -87,11 +87,12 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     // `expr_to_snake_module_path` instead of producing a clean
     // compile error. Path's segment-typed AST guarantees each segment
     // is already a valid `syn::Ident`, so the panic class is gone.
-    let model_path: Path = match parse_str(&attr.to_string()) {
+    let attr_ts2 = proc_macro2::TokenStream::from(attr);
+    let model_path: Path = match syn::parse2(attr_ts2.clone()) {
         Ok(p) => p,
         Err(e) => {
             return syn::Error::new_spanned(
-                proc_macro2::TokenStream::from(attr.clone()),
+                attr_ts2,
                 format!(
                     "#[suprnova::observer(Model)] takes one model type argument as a \
                      qualified path (e.g. `User`, `crate::models::User`): {e}"
