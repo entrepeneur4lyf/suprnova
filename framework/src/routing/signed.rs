@@ -142,16 +142,26 @@ fn split_url(url: &str) -> (String, Vec<(String, String)>) {
         Some(i) => &url[..i],
         None => url,
     };
+    // Normalise trailing slash so sign and verify both hash the same canonical
+    // path regardless of whether a browser or proxy appended one.  Preserve "/"
+    // itself so the root path never collapses to an empty string.
+    let normalize = |p: &str| -> String {
+        if p.len() > 1 {
+            p.trim_end_matches('/').to_string()
+        } else {
+            p.to_string()
+        }
+    };
     match url.find('?') {
         Some(i) => {
-            let path = url[..i].to_string();
+            let path = normalize(&url[..i]);
             let pairs: Vec<(String, String)> =
                 url::form_urlencoded::parse(&url.as_bytes()[i + 1..])
                     .into_owned()
                     .collect();
             (path, pairs)
         }
-        None => (url.to_string(), Vec::new()),
+        None => (normalize(url), Vec::new()),
     }
 }
 
@@ -640,5 +650,35 @@ mod tests {
         );
         assert_eq!(no_prev, SignatureVerdict::Valid);
         assert_eq!(with_prev, SignatureVerdict::Valid);
+    }
+
+    #[test]
+    #[serial_test::serial(crypt_install)]
+    fn trailing_slash_on_verify_matches_signed_path() {
+        // sign_url produces a canonical path without a trailing slash.
+        // A request that arrives at /orders/1/ (browser or proxy appended the
+        // slash) must still verify — split_url normalises both sides identically.
+        ensure_key();
+        let signed = sign_url("/orders/1", None).expect("sign");
+        // Inject a trailing slash into the path portion before verifying.
+        let with_slash = signed.replacen("/orders/1", "/orders/1/", 1);
+        assert_eq!(
+            verify_signature(&with_slash, 0).unwrap(),
+            SignatureVerdict::Valid,
+            "trailing slash on the verify side must not invalidate the signature",
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(crypt_install)]
+    fn root_path_trailing_slash_normalisation_preserves_root() {
+        // Ensure "/" is never collapsed to "" during normalisation.
+        ensure_key();
+        let signed = sign_url("/", None).expect("sign root");
+        assert_eq!(
+            verify_signature(&signed, 0).unwrap(),
+            SignatureVerdict::Valid,
+            "root path must remain valid after normalisation",
+        );
     }
 }
