@@ -73,8 +73,14 @@ impl SessionData {
     ///
     /// Returns the removed value if it existed.
     pub fn forget(&mut self, key: &str) -> Option<serde_json::Value> {
-        self.dirty = true;
-        self.data.remove(key)
+        let removed = self.data.remove(key);
+        // Only dirty the session when something was actually removed —
+        // forgetting an absent key must leave a read-only request clean so it
+        // isn't forced through the write (and fail-closed) path needlessly.
+        if removed.is_some() {
+            self.dirty = true;
+        }
+        removed
     }
 
     /// Check if the session has a key
@@ -535,4 +541,32 @@ pub trait SessionStore: Send + Sync {
     ///
     /// Returns the number of sessions cleaned up.
     async fn gc(&self) -> Result<u64, FrameworkError>;
+}
+
+#[cfg(test)]
+mod dirty_tracking_tests {
+    use super::*;
+
+    #[test]
+    fn forget_absent_key_does_not_dirty_session() {
+        let mut s = SessionData::new("sid".into(), "tok".into());
+        assert!(!s.is_dirty(), "a fresh session starts clean");
+        // Forgetting a key that was never set must leave the session clean so
+        // a read-only request isn't forced through the write (fail-closed) path.
+        let removed = s.forget("never_set");
+        assert!(removed.is_none());
+        assert!(
+            !s.is_dirty(),
+            "forgetting an absent key must not dirty the session"
+        );
+    }
+
+    #[test]
+    fn forget_present_key_dirties_and_returns_value() {
+        let mut s = SessionData::new("sid".into(), "tok".into());
+        s.put("k", 42);
+        let removed = s.forget("k");
+        assert_eq!(removed, Some(serde_json::json!(42)));
+        assert!(s.is_dirty());
+    }
 }
