@@ -39,6 +39,12 @@ bumped and pushed, not by cutting a tag. Newest first.
   or `0` — leaves connections unbounded (the default, unchanged). A backstop to
   pair with a reverse proxy and `LimitNOFILE`, not a replacement for upstream
   rate limiting.
+- **Opt out of redirect-following** — `RequestBuilder::no_redirects()` routes a
+  request through a non-following HTTP client so a `3xx` is returned as-is
+  instead of chased. Use it when the request URL is influenced by untrusted
+  input, to close a redirect-based SSRF vector (a hostile endpoint redirecting
+  toward an internal or cloud-metadata host). The default client still follows
+  redirects, matching general-client convention.
 
 ### Security
 
@@ -96,6 +102,12 @@ bumped and pushed, not by cutting a tag. Newest first.
 - **Stripe adapter** `from_env` rejects present-but-blank credentials, failing
   closed instead of constructing a client with an empty (and therefore forgeable)
   webhook HMAC secret.
+- **OAuth email verification** fails closed for unrecognised providers: a
+  userinfo payload carrying an `email` but no `email_verified` flag is no longer
+  treated as verified. An unknown provider must now assert `email_verified: true`
+  or expose a verified-emails endpoint, closing an account-link/takeover vector
+  for apps that key accounts on email. Google (explicit-`true`-only) and GitHub
+  (verified-by-the-`/user`-contract) are unchanged.
 
 ### Fixed
 

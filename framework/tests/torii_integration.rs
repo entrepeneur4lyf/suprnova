@@ -1077,10 +1077,15 @@ fn oauth_complete_sends_code_verifier_to_token_endpoint() {
                                     .and_then(|h| h.to_str().ok())
                                     .map(|s| s.to_string());
                                 *userinfo_capture.lock().unwrap() = auth;
+                                // An OIDC-conformant provider asserts the
+                                // address is verified. Unknown providers now
+                                // fail closed without this flag (no emails
+                                // endpoint is configured on this test).
                                 let payload = serde_json::json!({
                                     "id": 4242,
                                     "login": "pkce-test-user",
                                     "email": "pkce@example.com",
+                                    "email_verified": true,
                                     "name": "PKCE Test"
                                 });
                                 let bytes = serde_json::to_vec(&payload).unwrap();
@@ -1759,6 +1764,133 @@ fn oauth_complete_refuses_when_no_verified_email_available() {
             err.status_code(),
             502,
             "no verified email must map to 502 (bad upstream), got {}: {}",
+            err.status_code(),
+            err,
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("verified email"),
+            "expected verified-email error message, got: {msg}"
+        );
+    });
+}
+
+/// Fail-closed default for unknown providers: a userinfo payload that
+/// carries an `email` but NO `email_verified` flag must NOT be trusted.
+/// Before the fix the unknown-provider arm defaulted an absent flag to
+/// `true`, so a provider returning an unverified address (or a hostile
+/// userinfo endpoint) could link to — or take over — an account keyed on
+/// that email. With no verified-emails endpoint to fall back to, the flow
+/// must refuse with a 502. This is the regression guard for the flip: it
+/// fails if the unknown-provider default is ever reverted to `true`.
+#[test]
+fn oauth_complete_refuses_unflagged_userinfo_email_from_unknown_provider() {
+    use http_body_util::{BodyExt, Full};
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use std::convert::Infallible;
+
+    Lazy::force(&SETUP);
+
+    RT.block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{addr}");
+
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                tokio::spawn(async move {
+                    let io = TokioIo::new(stream);
+                    let svc = service_fn(|req: hyper::Request<hyper::body::Incoming>| async move {
+                        let path = req.uri().path().to_string();
+                        let method = req.method().to_string();
+                        if path == "/token" && method == "POST" {
+                            let _ = req.into_body().collect().await;
+                            let payload = serde_json::json!({
+                                "access_token": "unflagged-token",
+                                "token_type": "bearer",
+                            });
+                            return Ok::<_, Infallible>(
+                                hyper::Response::builder()
+                                    .status(200)
+                                    .header("content-type", "application/json")
+                                    .body(Full::new(bytes::Bytes::from(
+                                        serde_json::to_vec(&payload).unwrap(),
+                                    )))
+                                    .unwrap(),
+                            );
+                        }
+                        if path == "/userinfo" {
+                            // Email present, but NO `email_verified` flag, and
+                            // the provider name is unknown to the framework.
+                            // Fail-closed: this address must not be trusted.
+                            let payload = serde_json::json!({
+                                "id": 7777,
+                                "login": "unflagged",
+                                "email": "unflagged@example.com",
+                                "name": "Unflagged User"
+                            });
+                            return Ok::<_, Infallible>(
+                                hyper::Response::builder()
+                                    .status(200)
+                                    .header("content-type", "application/json")
+                                    .body(Full::new(bytes::Bytes::from(
+                                        serde_json::to_vec(&payload).unwrap(),
+                                    )))
+                                    .unwrap(),
+                            );
+                        }
+                        Ok::<_, Infallible>(
+                            hyper::Response::builder()
+                                .status(404)
+                                .body(Full::new(bytes::Bytes::new()))
+                                .unwrap(),
+                        )
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, svc)
+                        .await;
+                });
+            }
+        });
+
+        // Unknown provider name + no emails endpoint: the only address on
+        // offer is the unflagged userinfo `email`. Under fail-closed it is
+        // rejected, and there is no verified-emails fallback to recover it.
+        let provider_name = "oidc_unflagged_email_test";
+        Auth::oauth(provider_name).configure(
+            suprnova::torii_integration::oauth::OAuthProviderConfig {
+                client_id: "unflagged-client".into(),
+                client_secret: "unflagged-secret".into(),
+                redirect_url: "http://localhost:8000/auth/oauth/cb".into(),
+                scopes: vec!["user:email".into()],
+                endpoints_override: Some(suprnova::torii_integration::oauth::EndpointOverrides {
+                    authorize: format!("{base}/authorize"),
+                    token: format!("{base}/token"),
+                    userinfo: format!("{base}/userinfo"),
+                    emails: None,
+                }),
+            },
+        );
+
+        let slot = suprnova::session::new_session_slot_for_test();
+        let err = suprnova::session::session_scope_for_test(slot, async {
+            let kickoff = Auth::oauth(provider_name).begin().await.unwrap();
+            Auth::oauth(provider_name)
+                .complete("real-code", &kickoff.state)
+                .await
+        })
+        .await
+        .expect_err("an unknown provider's unflagged userinfo email must be refused");
+
+        assert_eq!(
+            err.status_code(),
+            502,
+            "unflagged userinfo email must map to 502 (bad upstream), got {}: {}",
             err.status_code(),
             err,
         );

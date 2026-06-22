@@ -597,17 +597,18 @@ impl OAuthAuth {
             // ever returned from `/user`). Treat presence as
             // verified for GitHub specifically.
             "github" => true,
-            // For provider names the framework does not recognise,
-            // trust the userinfo `email` field if either:
-            //   1. the payload explicitly carries `email_verified: true`
-            //      (OIDC convention), or
-            //   2. no `email_verified` field is present at all — most
-            //      non-OIDC providers (and the integration-test mock
-            //      server) do not emit the flag, and rejecting their
-            //      already-validated `email` field would force every
-            //      custom integration to also wire up an `emails`
-            //      endpoint. An explicit `false` value still rejects.
-            _ => profile.email_verified.unwrap_or(true),
+            // For provider names the framework does not recognise, fail
+            // closed: trust the userinfo `email` only when the payload
+            // explicitly carries `email_verified: true` (OIDC convention).
+            // A *missing* flag is no longer treated as verified — an
+            // unknown provider that returns an `email` without asserting
+            // it is verified could otherwise be used to link to (or take
+            // over) an existing account keyed on that address. A provider
+            // that cannot emit the flag must instead expose a
+            // verified-emails endpoint (path 2 below), which the caller
+            // falls through to when this is `false`. Both an explicit
+            // `false` and an absent flag reject the userinfo address.
+            _ => profile.email_verified.unwrap_or(false),
         };
 
         let email = match profile

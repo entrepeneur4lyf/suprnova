@@ -887,3 +887,77 @@ async fn regular_spawn_does_not_inherit_fakes() {
         "expected guard message, got {err:?}"
     );
 }
+
+/// Multi-connection server: `/redirect` answers `302 → /landing`, every
+/// other path answers `200 "arrived"`. Loops so it serves both the
+/// default flow (two requests: redirect then landing) and the
+/// no-redirect flow (a single request that stops at the 302).
+async fn spawn_redirect_server() -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let svc = service_fn(|req: hyper::Request<Incoming>| async move {
+                    if req.uri().path() == "/redirect" {
+                        return Ok::<_, Infallible>(
+                            hyper::Response::builder()
+                                .status(302)
+                                .header("location", "/landing")
+                                .body(Full::new(Bytes::new()))
+                                .unwrap(),
+                        );
+                    }
+                    Ok::<_, Infallible>(
+                        hyper::Response::builder()
+                            .status(200)
+                            .body(Full::new(Bytes::from_static(b"arrived")))
+                            .unwrap(),
+                    )
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(io, svc)
+                    .await;
+            });
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn no_redirects_surfaces_the_3xx_unfollowed() {
+    let _net = NETWORK_LOCK.lock().await;
+    let addr = spawn_redirect_server().await;
+    let url = format!("http://{}/redirect", addr);
+
+    // Opt out: the 302 is returned as-is, never followed — the SSRF guard
+    // for user-influenced URLs.
+    let resp = Http::get(&url).no_redirects().send().await.expect("send");
+    assert_eq!(
+        resp.status(),
+        302,
+        "no_redirects() must surface the 3xx instead of following it"
+    );
+}
+
+#[tokio::test]
+async fn default_client_follows_redirects() {
+    let _net = NETWORK_LOCK.lock().await;
+    let addr = spawn_redirect_server().await;
+    let url = format!("http://{}/redirect", addr);
+
+    // Default behavior (general-client parity): the 302 → /landing is
+    // followed through to the 200.
+    let resp = Http::get(&url).send().await.expect("send");
+    assert_eq!(
+        resp.status(),
+        200,
+        "the default client follows the redirect to /landing"
+    );
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "arrived");
+}

@@ -55,6 +55,7 @@ pub use fake::{RecordedRequest, assert_not_sent, assert_sent, fake_response};
 static FAIL_ON_REAL_CALLS: AtomicBool = AtomicBool::new(false);
 
 static REQWEST_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static REQWEST_CLIENT_NO_REDIRECT: OnceLock<reqwest::Client> = OnceLock::new();
 
 /// Default cap on a buffered outbound response body (25 MiB). A slow or
 /// malicious upstream can otherwise stream an unbounded body into memory
@@ -67,12 +68,38 @@ pub(crate) const DEFAULT_MAX_RESPONSE_BODY_BYTES: usize = 25 * 1024 * 1024;
 /// back to [`DEFAULT_MAX_RESPONSE_BODY_BYTES`].
 static MAX_RESPONSE_BODY_BYTES: AtomicUsize = AtomicUsize::new(0);
 
+/// Shared builder config for both clients: rustls TLS, a 30s overall
+/// timeout, a 10s connect timeout, and the suprnova user-agent. The
+/// redirect policy is layered on by each caller.
+fn base_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(10))
+        .user_agent(concat!("suprnova/", env!("CARGO_PKG_VERSION")))
+}
+
+/// The default client. Follows redirects (reqwest's default cap of 10),
+/// matching general-purpose HTTP-client convention. Callers passing a
+/// user-influenced URL that want to avoid redirect-based SSRF should use
+/// [`RequestBuilder::no_redirects`], which routes through
+/// [`client_no_redirect`].
 fn client() -> &'static reqwest::Client {
     REQWEST_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(10))
-            .user_agent(concat!("suprnova/", env!("CARGO_PKG_VERSION")))
+        base_builder()
+            .build()
+            .expect("reqwest::Client::builder().build() — rustls available")
+    })
+}
+
+/// A client that never follows redirects — a 3xx is returned to the caller
+/// as-is. Selected per request via [`RequestBuilder::no_redirects`]. Use it
+/// when the request URL is influenced by untrusted input: a redirect to an
+/// internal or cloud-metadata host (SSRF) surfaces as a 3xx response rather
+/// than being silently followed.
+fn client_no_redirect() -> &'static reqwest::Client {
+    REQWEST_CLIENT_NO_REDIRECT.get_or_init(|| {
+        base_builder()
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("reqwest::Client::builder().build() — rustls available")
     })
@@ -384,6 +411,10 @@ pub struct RequestBuilder {
     /// Per-request response-body cap; falls back to the process-global
     /// default ([`Http::max_response_bytes`]) when `None`.
     pub(crate) max_response_bytes: Option<usize>,
+    /// When `true` ([`RequestBuilder::no_redirects`]), this request routes
+    /// through the non-following client so a 3xx is returned as-is rather
+    /// than followed — an SSRF guard for user-influenced URLs.
+    pub(crate) no_redirects: bool,
 }
 
 impl RequestBuilder {
@@ -397,7 +428,23 @@ impl RequestBuilder {
             timeout: None,
             retry: None,
             max_response_bytes: None,
+            no_redirects: false,
         }
+    }
+
+    /// Do not follow HTTP redirects for this request: a 3xx response is
+    /// returned to the caller as-is instead of being followed.
+    ///
+    /// The default client follows redirects (up to reqwest's cap of 10),
+    /// which is the right behavior for a general-purpose client calling
+    /// trusted endpoints. Reach for this when the request URL is derived
+    /// from untrusted input — it closes a redirect-based SSRF vector where
+    /// a hostile endpoint answers with a 3xx pointing at an internal or
+    /// cloud-metadata address. With redirects disabled, that 3xx surfaces
+    /// as a normal response your code can inspect and reject.
+    pub fn no_redirects(mut self) -> Self {
+        self.no_redirects = true;
+        self
     }
 
     /// Append a header. Repeats are kept; reqwest will join them per
@@ -609,7 +656,15 @@ impl RequestBuilder {
 
 /// Single attempt at the request. No retry logic, no fake interception.
 async fn build_and_send(builder: &RequestBuilder) -> Result<ClientResponse, FrameworkError> {
-    let mut req = client().request(builder.method.into_reqwest(), &builder.url);
+    // User-influenced URLs can opt out of redirect-following to close the
+    // redirect-based SSRF vector; everything else uses the default
+    // redirect-following client.
+    let http = if builder.no_redirects {
+        client_no_redirect()
+    } else {
+        client()
+    };
+    let mut req = http.request(builder.method.into_reqwest(), &builder.url);
 
     for (k, v) in &builder.headers {
         req = req.header(k.as_str(), v.as_str());
@@ -632,7 +687,7 @@ async fn build_and_send(builder: &RequestBuilder) -> Result<ClientResponse, Fram
 
     inject_w3c_trace_context(&mut request);
 
-    let resp = client()
+    let resp = http
         .execute(request)
         .await
         .map_err(|e| FrameworkError::internal(format!("Http::send failed: {e}")))?;

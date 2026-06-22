@@ -145,6 +145,37 @@ timeout for this one call. There's no separate `connect_timeout`
 knob on the builder; the underlying reqwest client uses one combined
 timeout.
 
+## Redirects
+
+The shared client follows redirects by default (up to reqwest's cap of
+10) — the right behavior when you're calling a trusted endpoint that
+answers `http → https` or hands you a CDN URL.
+
+When the request URL is influenced by untrusted input, that default
+becomes a server-side request forgery (SSRF) vector: a hostile endpoint
+can answer with a `3xx` whose `Location` points at an internal service or
+a cloud-metadata address (`http://169.254.169.254/…`), and a following
+client would chase it. Disable redirect-following for those requests with
+`.no_redirects()`:
+
+```rust
+let resp = Http::get(user_supplied_url)
+    .no_redirects()
+    .send()
+    .await?;
+
+// The 3xx is returned as-is instead of being followed — inspect it and
+// reject rather than letting the client chase the Location header.
+if (300..400).contains(&resp.status()) {
+    return Err(AppError::bad_request("refusing to follow a redirect"));
+}
+```
+
+`.no_redirects()` routes the request through a separate non-following
+client; the default client — and every request that doesn't call it — is
+unchanged. This is the general-client analogue of the redirect lockdown
+the web-push sender already applies to attacker-controlled push endpoints.
+
 ## Retries
 
 `Http` ships exponential-backoff retries with full jitter — the AWS
