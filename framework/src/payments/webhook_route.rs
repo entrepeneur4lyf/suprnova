@@ -526,11 +526,20 @@ where
             Some(m) => (Some(m.minor_units()), Some(m.currency().code().to_string())),
             None => (None, None),
         };
+        // Provider quantities are u32; the column is i32. A quantity past
+        // i32::MAX must fail loudly, not silently two's-complement-wrap into a
+        // negative value written to the subscription_item row.
+        let quantity = i32::try_from(item.quantity).map_err(|_| {
+            PaymentError::Internal(format!(
+                "subscription item quantity {} overflows i32",
+                item.quantity
+            ))
+        })?;
         match existing {
             Some(model) => {
                 let mut am: subscription_item::ActiveModel = model.clone().into();
                 am.provider_price_id = Set(item.provider_price_id.clone());
-                am.quantity = Set(item.quantity as i32);
+                am.quantity = Set(quantity);
                 am.unit_amount_minor = Set(unit_amount);
                 am.unit_currency = Set(unit_currency);
                 am.updated_at = Set(now.clone());
@@ -543,7 +552,7 @@ where
                     subscription_id: Set(parent_id),
                     provider_item_id: Set(item.provider_item_id.clone()),
                     provider_price_id: Set(item.provider_price_id.clone()),
-                    quantity: Set(item.quantity as i32),
+                    quantity: Set(quantity),
                     unit_amount_minor: Set(unit_amount),
                     unit_currency: Set(unit_currency),
                     provider_metadata: Set(serde_json::Value::Null),
