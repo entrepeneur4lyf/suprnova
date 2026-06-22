@@ -62,7 +62,7 @@ enum Commands {
         frontend_port: Option<u16>,
 
         /// Only start backend server
-        #[arg(long)]
+        #[arg(long, conflicts_with = "frontend_only")]
         backend_only: bool,
 
         /// Only start frontend server

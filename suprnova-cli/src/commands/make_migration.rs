@@ -292,7 +292,7 @@ fn update_mod_file(mod_file: &Path, migration_name: &str) -> Result<(), String> 
         if line.contains("vec![]") {
             // Replace vec![] with vec![\n    Box::new(...)\n]
             lines[i] = line.replace("vec![]", &format!("vec![\n{}\n        ]", box_new_line));
-            let new_content = lines.join("\n");
+            let new_content = lines.join("\n") + "\n";
             fs::write(mod_file, new_content)
                 .map_err(|e| format!("Failed to write mod.rs: {}", e))?;
             return Ok(());
@@ -310,11 +310,21 @@ fn update_mod_file(mod_file: &Path, migration_name: &str) -> Result<(), String> 
         }
     }
 
-    if let Some(idx) = insert_vec_idx {
-        lines.insert(idx, box_new_line);
+    match insert_vec_idx {
+        Some(idx) => {
+            lines.insert(idx, box_new_line);
+        }
+        None => {
+            return Err(format!(
+                "Could not locate the migrations() vec in src/migrations/mod.rs \
+                 (the closing `]` may be on the same line as the last entry). \
+                 Please add `{}` to the vec manually.",
+                box_new_line.trim()
+            ));
+        }
     }
 
-    let new_content = lines.join("\n");
+    let new_content = lines.join("\n") + "\n";
     fs::write(mod_file, new_content).map_err(|e| format!("Failed to write mod.rs: {}", e))?;
 
     Ok(())

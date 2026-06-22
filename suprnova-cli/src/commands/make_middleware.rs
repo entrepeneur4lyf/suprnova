@@ -169,7 +169,7 @@ fn update_mod_file(mod_file: &Path, file_name: &str, struct_name: &str) -> Resul
         }
     }
 
-    let new_content = lines.join("\n");
+    let new_content = lines.join("\n") + "\n";
     fs::write(mod_file, new_content).map_err(|e| format!("Failed to write mod.rs: {}", e))?;
 
     Ok(())
