@@ -81,7 +81,7 @@ impl QueueDriver for DatabaseQueueDriver {
     ) -> Result<Option<Reservation>, FrameworkError> {
         let now = Utc::now().timestamp();
         let token = Uuid::new_v4().to_string();
-        let reserved_until = now + visibility_timeout.as_secs() as i64;
+        let reserved_until = now + visibility_timeout.as_secs().min(i64::MAX as u64) as i64;
 
         let lock_clause = match self.backend() {
             DatabaseBackend::Postgres | DatabaseBackend::MySql => "FOR UPDATE SKIP LOCKED",
@@ -208,7 +208,7 @@ impl QueueDriver for DatabaseQueueDriver {
         requeue_delay: Duration,
     ) -> Result<(), FrameworkError> {
         let now = Utc::now().timestamp();
-        let new_available = now + requeue_delay.as_secs() as i64;
+        let new_available = now + requeue_delay.as_secs().min(i64::MAX as u64) as i64;
 
         // Step 1: Read the stored envelope.
         let select_sql = format!(

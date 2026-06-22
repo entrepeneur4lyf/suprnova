@@ -59,10 +59,13 @@ impl SessionGuard {
     /// Create a session guard with an explicit name (the manager passes the
     /// registered guard name so lifecycle events are attributed correctly).
     pub fn named(name: impl Into<String>, provider: Arc<dyn UserProvider>) -> Self {
-        let remember_ttl_minutes = (crate::session::SessionConfig::from_env()
-            .remember_lifetime
-            .as_secs()
-            / 60) as i64;
+        let remember_ttl_minutes = i64::try_from(
+            crate::session::SessionConfig::from_env()
+                .remember_lifetime
+                .as_secs()
+                / 60,
+        )
+        .unwrap_or(i64::MAX);
         Self {
             name: name.into(),
             provider,

@@ -466,7 +466,8 @@ impl Middleware for SessionMiddleware {
         {
             match Cookie::read_encrypted(&raw_cookie) {
                 Ok(plaintext) => {
-                    let ttl_minutes = (self.config.remember_lifetime.as_secs() / 60) as i64;
+                    let ttl_minutes = i64::try_from(self.config.remember_lifetime.as_secs() / 60)
+                        .unwrap_or(i64::MAX);
                     match crate::auth::remember::verify_and_rotate(&plaintext, ttl_minutes).await {
                         Ok(Some((user_id, new_plaintext))) => {
                             // Hydrate session. Mirrors `Auth::login`:

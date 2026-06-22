@@ -87,7 +87,8 @@ pub async fn mark_running(
 ) -> Result<ClaimedWorkflow, FrameworkError> {
     let db = DB::connection()?;
     let now = Utc::now().naive_utc();
-    let lock_until = now + ChronoDuration::seconds(lock_timeout.as_secs() as i64);
+    let lock_until =
+        now + ChronoDuration::seconds(i64::try_from(lock_timeout.as_secs()).unwrap_or(i64::MAX));
 
     let model = workflows::Entity::find_by_id(id)
         .one(db.inner())
@@ -132,8 +133,8 @@ pub async fn claim_next_workflow(
         ));
     }
 
-    let lock_until =
-        Utc::now().naive_utc() + ChronoDuration::seconds(config.lock_timeout_secs as i64);
+    let lock_until = Utc::now().naive_utc()
+        + ChronoDuration::seconds(i64::try_from(config.lock_timeout_secs).unwrap_or(i64::MAX));
 
     // Eligible-row predicate covers two cases:
     //   1. status='pending' rows ready to run (next_run_at elapsed, no live lock).
@@ -218,7 +219,8 @@ pub async fn claim_next_workflow(
 pub async fn refresh_lock(id: i64, lock_timeout: Duration) -> Result<(), FrameworkError> {
     let db = DB::connection()?;
     let now = Utc::now().naive_utc();
-    let lock_until = now + ChronoDuration::seconds(lock_timeout.as_secs() as i64);
+    let lock_until =
+        now + ChronoDuration::seconds(i64::try_from(lock_timeout.as_secs()).unwrap_or(i64::MAX));
 
     let mut active: workflows::ActiveModel = workflows::Entity::find_by_id(id)
         .one(db.inner())

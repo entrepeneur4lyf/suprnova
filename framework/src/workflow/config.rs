@@ -128,6 +128,15 @@ impl WorkflowConfig {
                 self.retry_backoff_secs
             )));
         }
+        if self.lock_timeout_secs > i64::MAX as u64 {
+            return Err(FrameworkError::internal(format!(
+                "WorkflowConfig.lock_timeout_secs must be <= {} (i64::MAX); got {}. \
+                 Values above this wrap to a negative chrono duration, making every \
+                 workflow lease appear expired and causing reclaim thrashing.",
+                i64::MAX,
+                self.lock_timeout_secs
+            )));
+        }
         Ok(())
     }
 }

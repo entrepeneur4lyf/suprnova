@@ -46,7 +46,7 @@ impl Bucket {
     /// when the bucket is under the limit and a new hit would succeed
     /// immediately.
     pub fn retry_after(&self, max: u32, window: Duration, now: Instant) -> Option<Duration> {
-        if (self.hits.len() as u32) < max {
+        if self.hits.len() < max as usize {
             return None;
         }
         let oldest = self.hits.front().copied()?;
