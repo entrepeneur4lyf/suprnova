@@ -19,8 +19,7 @@ Cargo.lock
 .env.*.local
 
 reference/
-docs/parity/
-docs/superpowers/
+docs/
 .claude/
 .codex
 .gitnexus
