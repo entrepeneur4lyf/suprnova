@@ -49,6 +49,19 @@ type ServerBody = BoxBody<Bytes, Infallible>;
 /// know about this registry.
 static WS_TASKS: OnceLock<TokioMutex<JoinSet<()>>> = OnceLock::new();
 
+tokio::task_local! {
+    /// Carries the accept-loop connection-cap permit (when
+    /// `SERVER_MAX_CONNECTIONS` is set) into the request that may upgrade to a
+    /// WebSocket. `serve_connection(...).with_upgrades()` resolves at the 101
+    /// handshake, so the HTTP connection task ends — and would drop the permit —
+    /// while the WS session runs on for the socket's lifetime in `WS_TASKS`. The
+    /// upgrade path `take()`s the permit out of this cell and moves it into the
+    /// session task so the slot is held until the socket closes. A plain request
+    /// (and the no-`Server::run` embedder path) leaves it untaken, so it drops
+    /// when the connection task ends, exactly as before.
+    static CONN_PERMIT: std::cell::RefCell<Option<tokio::sync::OwnedSemaphorePermit>>;
+}
+
 /// Builder + runtime for the HTTP server.
 ///
 /// Wraps the router, the global middleware registry, and the listen
@@ -420,11 +433,6 @@ impl Server {
                     let middleware = middleware.clone();
 
                     connections.spawn(async move {
-                        // Hold the permit for the lifetime of this connection.
-                        // Dropping it here (when the task ends) releases one
-                        // slot in the semaphore so the accept loop can proceed.
-                        let _conn_permit = conn_permit;
-
                         let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                             let router = router.clone();
                             let middleware = middleware.clone();
@@ -433,13 +441,25 @@ impl Server {
                             }
                         });
 
-                        if let Err(err) = http1::Builder::new()
-                            .serve_connection(io, service)
-                            .with_upgrades()
-                            .await
-                        {
-                            tracing::error!(?err, "error serving connection");
-                        }
+                        let serve = async move {
+                            if let Err(err) = http1::Builder::new()
+                                .serve_connection(io, service)
+                                .with_upgrades()
+                                .await
+                            {
+                                tracing::error!(?err, "error serving connection");
+                            }
+                        };
+
+                        // Carry the permit in a task-local for this connection.
+                        // A plain request drops it when `serve` ends (the
+                        // connection closes). A WebSocket upgrade moves it into
+                        // the long-lived session task instead, so the slot stays
+                        // held until the socket closes rather than freeing at the
+                        // 101 handshake when `serve` resolves.
+                        CONN_PERMIT
+                            .scope(std::cell::RefCell::new(conn_permit), serve)
+                            .await;
                     });
                 }
                 // Reap completed connections to keep the JoinSet small.
@@ -1375,6 +1395,20 @@ async fn handle_ws_upgrade(
     // `suprnova_req`. This matches `spawn_with_request_id`, which likewise
     // carries only the id into spawned work.
     let handler_task = crate::logging::REQUEST_ID.scope(request_id, handler_task);
+
+    // Take the connection-cap permit (when SERVER_MAX_CONNECTIONS is set) out of
+    // the connection task's task-local and move it into the WS session task, so
+    // the slot is held for the socket's whole lifetime rather than released when
+    // the HTTP connection task ends at the 101 handshake. `try_with` fails on the
+    // no-`Server::run` path (embedders / test fixtures), where there's no permit.
+    let conn_permit = CONN_PERMIT
+        .try_with(|cell| cell.borrow_mut().take())
+        .ok()
+        .flatten();
+    let handler_task = async move {
+        let _conn_permit = conn_permit;
+        handler_task.await;
+    };
 
     // Track the spawned handler in WS_TASKS so Server::run can drain
     // it on shutdown. Fall back to a bare tokio::spawn when WS_TASKS
