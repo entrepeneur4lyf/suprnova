@@ -283,8 +283,13 @@ impl NotificationDispatcher {
                         )
                         .await;
                         if let Err(e) = notification.after_sending(channel_name) {
-                            result = Err(e);
-                            break;
+                            tracing::warn!(
+                                channel = %channel_str,
+                                notification = %payload_name,
+                                error = %e,
+                                "after_sending failed on sync delivery; not failing \
+                                 (delivery already succeeded)"
+                            );
                         }
                     }
                     Err(e) => {
