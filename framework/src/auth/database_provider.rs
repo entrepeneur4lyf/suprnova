@@ -196,7 +196,70 @@ impl UserProvider for DatabaseUserProvider {
         let password = credentials.get("password").and_then(|v| v.as_str());
         match (password, user.get_auth_password()) {
             (Some(plaintext), Some(hash)) => hashing::verify_async(plaintext, hash).await,
-            _ => Ok(false),
+            // A user row with no stored password (OAuth-only / passwordless). Run a
+            // dummy verify so this path costs the same as a wrong-password attempt,
+            // closing the account-type timing oracle. Mirrors EloquentUserProvider.
+            (Some(_), None) => {
+                self.dummy_verify().await?;
+                Ok(false)
+            }
+            (None, _) => Ok(false),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    struct TestUser {
+        password: Option<String>,
+    }
+    impl Authenticatable for TestUser {
+        fn get_auth_identifier(&self) -> String {
+            "1".into()
+        }
+        fn get_auth_password(&self) -> Option<&str> {
+            self.password.as_deref()
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn into_arc_any(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn passwordless_account_does_constant_work_no_timing_oracle() {
+        let provider = DatabaseUserProvider::new("users");
+        let creds = serde_json::json!({ "password": "guess" });
+        let hash = crate::hashing::hash_async("correct horse").await.unwrap();
+
+        // Warm up the hasher so one-time init doesn't skew the first measurement.
+        let warm = TestUser { password: Some(hash.clone()) };
+        let _ = provider.validate_credentials(&warm, &creds).await.unwrap();
+
+        // Wrong-password path: a full KDF verify against a real stored hash.
+        let with_hash = TestUser { password: Some(hash) };
+        let t0 = Instant::now();
+        assert!(!provider.validate_credentials(&with_hash, &creds).await.unwrap());
+        let wrong_pw = t0.elapsed();
+
+        // Passwordless (OAuth-only) user: must ALSO run a dummy KDF, not return
+        // instantly — otherwise its wall-clock reveals the account is passwordless.
+        let passwordless = TestUser { password: None };
+        let t1 = Instant::now();
+        assert!(!provider.validate_credentials(&passwordless, &creds).await.unwrap());
+        let no_pw = t1.elapsed();
+
+        // Same order of magnitude. Pre-fix the passwordless path is ~microseconds
+        // vs ~tens of ms for a real verify (>1000x). 4x tolerance absorbs jitter.
+        assert!(
+            no_pw * 4 >= wrong_pw,
+            "passwordless path ({no_pw:?}) far faster than wrong-password ({wrong_pw:?}): timing oracle present"
+        );
     }
 }
