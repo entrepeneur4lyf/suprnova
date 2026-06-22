@@ -77,6 +77,16 @@ impl std::fmt::Debug for StripeProvider {
     }
 }
 
+/// Reject a present-but-blank credential. An empty webhook signing secret is
+/// an empty-key HMAC — forgeable by anyone — so we fail closed at construction.
+fn require_nonempty(name: &str, val: String) -> Result<String, String> {
+    if val.trim().is_empty() {
+        Err(format!("{name} is set but empty"))
+    } else {
+        Ok(val)
+    }
+}
+
 impl StripeProvider {
     /// Construct a new provider.
     ///
@@ -111,19 +121,24 @@ impl StripeProvider {
     /// - `STRIPE_PUBLISHABLE_KEY`
     /// - `STRIPE_WEBHOOK_SIGNING_SECRET`
     ///
-    /// Returns an error string if any variable is missing.
+    /// Returns an error string if any variable is missing or empty.
     pub fn from_env() -> Result<Self, String> {
-        let secret_key = std::env::var("STRIPE_SECRET_KEY")
-            .map_err(|_| "STRIPE_SECRET_KEY env var not set".to_string())?;
-        let publishable_key = std::env::var("STRIPE_PUBLISHABLE_KEY")
-            .map_err(|_| "STRIPE_PUBLISHABLE_KEY env var not set".to_string())?;
-        let webhook_signing_secret = std::env::var("STRIPE_WEBHOOK_SIGNING_SECRET")
-            .map_err(|_| "STRIPE_WEBHOOK_SIGNING_SECRET env var not set".to_string())?;
-        Ok(Self::new(
-            secret_key,
-            publishable_key,
-            webhook_signing_secret,
-        ))
+        let secret_key = require_nonempty(
+            "STRIPE_SECRET_KEY",
+            std::env::var("STRIPE_SECRET_KEY")
+                .map_err(|_| "STRIPE_SECRET_KEY env var not set".to_string())?,
+        )?;
+        let publishable_key = require_nonempty(
+            "STRIPE_PUBLISHABLE_KEY",
+            std::env::var("STRIPE_PUBLISHABLE_KEY")
+                .map_err(|_| "STRIPE_PUBLISHABLE_KEY env var not set".to_string())?,
+        )?;
+        let webhook_signing_secret = require_nonempty(
+            "STRIPE_WEBHOOK_SIGNING_SECRET",
+            std::env::var("STRIPE_WEBHOOK_SIGNING_SECRET")
+                .map_err(|_| "STRIPE_WEBHOOK_SIGNING_SECRET env var not set".to_string())?,
+        )?;
+        Ok(Self::new(secret_key, publishable_key, webhook_signing_secret))
     }
 
     /// Returns a reference to the underlying `stripe::Client`.
@@ -203,5 +218,12 @@ mod debug_redaction_tests {
             !dbg.contains("whsec_TOPSECRET"),
             "Debug leaked the webhook signing secret: {dbg}"
         );
+    }
+
+    #[test]
+    fn require_nonempty_rejects_blank_secret() {
+        assert!(require_nonempty("STRIPE_WEBHOOK_SIGNING_SECRET", String::new()).is_err());
+        assert!(require_nonempty("STRIPE_WEBHOOK_SIGNING_SECRET", "   ".into()).is_err());
+        assert!(require_nonempty("STRIPE_WEBHOOK_SIGNING_SECRET", "whsec_ok".into()).is_ok());
     }
 }
