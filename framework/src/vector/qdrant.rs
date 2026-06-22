@@ -322,6 +322,16 @@ impl VectorDriver for QdrantVectorDriver {
                 "vector::upsert items have zero-length embedding",
             ));
         }
+        for item in &items {
+            if item.embedding.len() != dim {
+                return Err(FrameworkError::param(format!(
+                    "vector::upsert heterogeneous embedding dimensions: expected {dim}, \
+                     got {} for item '{}'",
+                    item.embedding.len(),
+                    item.id,
+                )));
+            }
+        }
         let points: Vec<PointStruct> = items
             .into_iter()
             .map(Self::build_point)

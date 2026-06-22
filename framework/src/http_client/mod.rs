@@ -71,6 +71,7 @@ fn client() -> &'static reqwest::Client {
     REQWEST_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10))
             .user_agent(concat!("suprnova/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("reqwest::Client::builder().build() — rustls available")

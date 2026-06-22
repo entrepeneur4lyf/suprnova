@@ -62,6 +62,18 @@ fn join(addrs: &[Address]) -> String {
         .join(", ")
 }
 
+/// Reject a caller-supplied header name that would inject into multipart
+/// `Content-Disposition` or corrupt a form-encoded body. CR, LF, and NUL
+/// are the injection characters; any name containing them is rejected.
+fn validate_header_name(name: &str) -> Result<(), FrameworkError> {
+    if name.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0) {
+        return Err(FrameworkError::param(format!(
+            "Mailgun: header name contains illegal character (CR, LF, or NUL): {name:?}"
+        )));
+    }
+    Ok(())
+}
+
 /// Build the common Mailgun field set shared by the form-encoded and
 /// multipart code paths. Kept as a single function so the two paths can't
 /// drift on field names or order.
@@ -72,7 +84,7 @@ fn join(addrs: &[Address]) -> String {
 /// * `v:<name>` — message variables (Mailgun's metadata mechanism)
 /// * `h:<header-name>` — custom MIME headers
 /// * `h:X-Priority` — used by Mailgun for explicit priority
-fn build_form_fields(msg: &OutgoingMessage) -> Vec<(String, String)> {
+fn build_form_fields(msg: &OutgoingMessage) -> Result<Vec<(String, String)>, FrameworkError> {
     let mut form: Vec<(String, String)> = Vec::with_capacity(32);
     form.push(("from".into(), msg.from.to_string()));
     form.push(("to".into(), join(&msg.to)));
@@ -99,6 +111,7 @@ fn build_form_fields(msg: &OutgoingMessage) -> Vec<(String, String)> {
         form.push((format!("v:{k}"), v.clone()));
     }
     for (k, v) in &msg.headers {
+        validate_header_name(k)?;
         form.push((format!("h:{k}"), v.clone()));
     }
     if let Some(p) = msg.priority {
@@ -107,13 +120,13 @@ fn build_form_fields(msg: &OutgoingMessage) -> Vec<(String, String)> {
     if let Some(rp) = &msg.return_path {
         form.push(("h:Return-Path".into(), rp.to_string()));
     }
-    form
+    Ok(form)
 }
 
 #[async_trait]
 impl MailTransport for MailgunMailTransport {
     async fn send(&self, msg: &OutgoingMessage) -> Result<(), FrameworkError> {
-        let fields = build_form_fields(msg);
+        let fields = build_form_fields(msg)?;
 
         let resp = if msg.attachments.is_empty() {
             // Form-encoded path: smaller wire payload, no multipart overhead.
@@ -169,6 +182,65 @@ impl MailTransport for MailgunMailTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mail::transport::OutgoingMessage;
+
+    fn base_msg() -> OutgoingMessage {
+        use crate::mail::address::Address;
+        OutgoingMessage {
+            from: Address::new("sender@example.com"),
+            to: vec![Address::new("to@example.com")],
+            cc: vec![],
+            bcc: vec![],
+            reply_to: vec![],
+            subject: "Test".into(),
+            html: None,
+            text: Some("hello".into()),
+            tags: vec![],
+            metadata: std::collections::BTreeMap::new(),
+            headers: vec![],
+            attachments: vec![],
+            priority: None,
+            return_path: None,
+        }
+    }
+
+    #[test]
+    fn header_name_with_crlf_is_rejected() {
+        let mut msg = base_msg();
+        msg.headers = vec![("X-Bad\r\nInjected".into(), "value".into())];
+        assert!(
+            build_form_fields(&msg).is_err(),
+            "CRLF in header name must be rejected"
+        );
+    }
+
+    #[test]
+    fn header_name_with_lf_is_rejected() {
+        let mut msg = base_msg();
+        msg.headers = vec![("X-Bad\nHeader".into(), "value".into())];
+        assert!(
+            build_form_fields(&msg).is_err(),
+            "LF in header name must be rejected"
+        );
+    }
+
+    #[test]
+    fn header_name_with_nul_is_rejected() {
+        let mut msg = base_msg();
+        msg.headers = vec![("X-Bad\x00Header".into(), "value".into())];
+        assert!(
+            build_form_fields(&msg).is_err(),
+            "NUL in header name must be rejected"
+        );
+    }
+
+    #[test]
+    fn clean_header_names_are_accepted() {
+        let mut msg = base_msg();
+        msg.headers = vec![("X-Custom-Header".into(), "some value".into())];
+        let fields = build_form_fields(&msg).expect("clean header name must succeed");
+        assert!(fields.iter().any(|(k, _)| k == "h:X-Custom-Header"));
+    }
 
     #[test]
     fn new_uses_us_endpoint() {
