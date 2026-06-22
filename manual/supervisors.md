@@ -92,7 +92,7 @@ The panic is logged at `error!` level with the supervisor name before the restar
 
 When a supervisor exits and its policy says to restart, the registry waits before spawning the replacement:
 
-| Restart | Delay |
+| Consecutive restart | Delay |
 |---------|-------|
 | 1st | 100ms |
 | 2nd | 200ms |
@@ -101,7 +101,9 @@ When a supervisor exits and its policy says to restart, the registry waits befor
 | ... | doubles each time |
 | Capped | 60s |
 
-The backoff does **not** reset. The counter is initialised once when the restart loop starts and only ever doubles, capped at 60 s, for the entire lifetime of the supervisor task. A long-lived supervisor that flaps occasionally will eventually sleep 60 s between retries until the process restarts. There is no liveness-based reset and no "healthy enough" threshold — accumulating backoff is the design.
+The backoff resets after a healthy run. The delay doubles on each *consecutive* restart up to the 60 s cap, but a run that stays up at least 60 s (the cap duration) is treated as healthy: the next restart drops back to the 100 ms floor instead of inheriting backoff that climbed during an earlier burst of failures. So a daemon that ran cleanly for hours and then blips restarts promptly, not after a 60 s wait it accumulated long ago.
+
+The reset is liveness-based, and deliberately conservative: only a run that *outlives the maximum possible backoff* counts as healthy. A run that exits before that threshold carries the current backoff forward, so a genuinely flapping supervisor — one whose runs never reach the threshold — still ramps all the way to the 60 s cap and stays there. The reset never masks a supervisor that is crash-looping.
 
 The 60-second cap prevents a permanently-broken supervisor from sleeping indefinitely or hammering external dependencies on every retry. Combine with `error!`-level logging to alert when a supervisor enters the high-backoff band.
 

@@ -128,6 +128,12 @@ bumped and pushed, not by cutting a tag. Newest first.
   spaced punctuation; `CachedEvaluator` bounds its cache growth;
   `SupervisorRegistry::start_all` no longer double-spawns on a second call; the
   test container recovers in place from a poisoned lock.
+- **Supervisor restart backoff** resets to the 100 ms floor after a run that
+  stays up at least the 60 s cap, so a daemon that ran healthily for a long
+  stretch and then exits restarts promptly instead of inheriting backoff that
+  climbed during an earlier failure burst. A crash loop whose runs never reach
+  the threshold still ramps to the cap, so the reset never masks a flapping
+  supervisor.
 - Corrected stale docs on `filter_op` (operators are allowlist-validated), signed
   URLs (not byte-compatible with Laravel's default absolute signatures),
   `UniqueIdKind::is_valid` (a caller helper, not auto-wired into `find`), and the
