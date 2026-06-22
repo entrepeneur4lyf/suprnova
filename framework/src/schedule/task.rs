@@ -256,9 +256,13 @@ pub(crate) async fn run_handler_with_optional_overlap_guard(
     match crate::cache::Cache::lock(&lock_key, overlap_ttl).await {
         Ok(Some(guard)) => {
             let result = handler.handle().await;
-            // Best-effort release — TTL is the leak guard if release fails
-            // (network blip, token rotation). Either way we move on.
-            let _ = guard.release().await;
+            if let Err(e) = guard.release().await {
+                tracing::warn!(
+                    target: "suprnova::schedule",
+                    error = %e,
+                    "schedule: failed to release task lock; it will expire via TTL",
+                );
+            }
             result
         }
         Ok(None) => {
