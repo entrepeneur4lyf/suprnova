@@ -252,17 +252,24 @@ impl CacheStore for RedisCache {
         // membership via the aux set and skips a key whose aux set says
         // "no longer tagged with t" (or no longer exists at all).
         let aux = self.key_tags_set(&pkey);
-        let deleted: i64 = redis::cmd("DEL")
+        // `DEL key aux` returns the count of ALL keys removed, so deleting the
+        // value and its aux bookkeeping key together would report `true` even
+        // when only the aux key survived (e.g. the value expired first while
+        // its aux entry lagged). Delete both in one pipeline but report
+        // existence based on the VALUE key's own DEL result — the aux delete is
+        // ignored so it doesn't inflate the count.
+        let (value_deleted,): (i64,) = redis::pipe()
+            .atomic()
+            .cmd("DEL")
             .arg(&pkey)
+            .cmd("DEL")
             .arg(&aux)
+            .ignore()
             .query_async(&mut conn)
             .await
             .map_err(|e| FrameworkError::internal(format!("Cache delete error: {}", e)))?;
 
-        // Return whether the value itself existed. The aux key tagging
-        // along is bookkeeping — its prior absence doesn't make `forget`
-        // a no-op from the caller's perspective.
-        Ok(deleted > 0)
+        Ok(value_deleted > 0)
     }
 
     async fn flush(&self) -> Result<(), FrameworkError> {
