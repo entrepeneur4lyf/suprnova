@@ -1,8 +1,9 @@
 //! Synchronous queue driver — runs jobs inline on `push`.
 //!
-//! Mirrors Laravel's `SyncQueue`. The envelope is dispatched via the worker
-//! registry (`dispatch_by_name`) before `push` returns; there is no
-//! background worker, no retry, and no delayed-job support — `push` for an
+//! Mirrors Laravel's `SyncQueue`. The envelope runs inline through the
+//! worker's middleware pipeline (`run_through_middleware`) before `push`
+//! returns; there is no background worker, no retry, and no delayed-job
+//! support — `push` for an
 //! envelope with `available_at` in the future runs immediately anyway, just
 //! like Laravel's sync driver (a "fake" queue for development).
 //!
@@ -14,7 +15,7 @@
 use crate::error::FrameworkError;
 use crate::queue::driver::{QueueDriver, Reservation, ReservationToken};
 use crate::queue::envelope::Envelope;
-use crate::queue::worker::dispatch_by_name;
+use crate::queue::worker::run_through_middleware;
 use async_trait::async_trait;
 use std::time::Duration;
 
@@ -34,12 +35,17 @@ impl SyncQueueDriver {
 #[async_trait]
 impl QueueDriver for SyncQueueDriver {
     async fn push(&self, env: Envelope) -> Result<(), FrameworkError> {
-        // Sync drivers run the dispatcher inline. If no dispatcher is
-        // registered for this job_name, `dispatch_by_name` returns the
-        // same "unknown job" error a worker would. Errors propagate to
-        // the caller of `Queue::push` — there is no retry path because
-        // there is no background worker.
-        dispatch_by_name(&env.job_name, env.payload).await
+        // Sync drivers run the job inline through the SAME middleware
+        // pipeline the worker uses (`run_through_middleware`), so
+        // `WithoutOverlapping`, `RateLimited`, `ThrottlesExceptions`, etc.
+        // apply here exactly as they would on a background worker — running
+        // the bare dispatcher would silently bypass every registered
+        // `JobMiddleware`. If no dispatcher is registered for this job_name,
+        // the pipeline's terminal returns the same "unknown job" error a
+        // worker would. Errors propagate to the caller of `Queue::push`;
+        // there is no retry or loop-lifecycle event path because there is no
+        // background worker (the loop owns reservation/retry/event state).
+        run_through_middleware(env).await.map(|_outcome| ())
     }
 
     async fn pop(&self, _vt: Duration) -> Result<Option<Reservation>, FrameworkError> {
