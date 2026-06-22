@@ -271,6 +271,18 @@ where
         self
     }
 
+    /// Validate all three SQL identifiers that flow unquoted into every
+    /// raw-SQL statement this relation builds. Called at the top of
+    /// every terminal method so a misconfigured key (e.g. one set via
+    /// the public builder setters from untrusted input) is rejected
+    /// before any network I/O.
+    fn validate_meta(&self) -> Result<(), FrameworkError> {
+        crate::database::validate_identifier(&self.pivot_table)?;
+        crate::database::validate_identifier(&self.pivot_foreign_key)?;
+        crate::database::validate_identifier(&self.pivot_related_key)?;
+        Ok(())
+    }
+
     /// Insert a pivot row linking the parent to `related_id`.
     /// Equivalent to `attach_with(related_id, Attrs::new())`.
     ///
@@ -308,6 +320,7 @@ where
         related_id: impl Into<serde_json::Value>,
         extra: Attrs,
     ) -> Result<(), FrameworkError> {
+        self.validate_meta()?;
         // Resolve through ExecutorChoice so the pivot INSERT lands on
         // the ambient transaction connection when CURRENT_TX is active,
         // and so the parent model's `#[model(connection = "...")]`
@@ -354,6 +367,7 @@ where
         self,
         related_id: impl Into<serde_json::Value>,
     ) -> Result<(), FrameworkError> {
+        self.validate_meta()?;
         // Resolve through ExecutorChoice so the pivot DELETE lands on
         // the ambient transaction connection when CURRENT_TX is active,
         // and honours the parent model's `#[model(connection = "...")]`
@@ -406,6 +420,7 @@ where
         I: IntoIterator<Item = V>,
         V: Into<serde_json::Value>,
     {
+        self.validate_meta()?;
         use std::collections::{HashMap, HashSet};
 
         // Resolve through ExecutorChoice so the SELECT + INSERTs +
@@ -585,6 +600,7 @@ where
     /// `FromQueryResult` derive. Two homogeneous queries each round-
     /// trip the rows cleanly through each model's own deserialiser.
     pub async fn get(self) -> Result<Collection<R>, FrameworkError> {
+        self.validate_meta()?;
         // Route the pivot-id SELECT through ExecutorChoice so it
         // honours CURRENT_TX and the parent model's
         // `#[model(connection = "...")]` default. The downstream
@@ -692,6 +708,7 @@ where
     /// Returns `i64` to match the [`crate::eloquent::HasMany::count`]
     /// surface.
     pub async fn count(self) -> Result<i64, FrameworkError> {
+        self.validate_meta()?;
         // Read via ExecutorChoice so a count taken inside
         // `DB::transaction { ... }` sees in-tx pivot
         // attaches/detaches, and honour the parent model's

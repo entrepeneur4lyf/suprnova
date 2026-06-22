@@ -198,6 +198,16 @@ where
         self
     }
 
+    /// Validate the three SQL identifiers that flow unquoted into the
+    /// JOIN SQL rendered by `render_select_sql` / `render_count_sql`.
+    /// Called at the top of every terminal method.
+    fn validate_meta(&self) -> Result<(), FrameworkError> {
+        crate::database::validate_identifier(&self.first_key)?;
+        crate::database::validate_identifier(&self.second_key)?;
+        crate::database::validate_identifier(&self.second_local_key)?;
+        Ok(())
+    }
+
     /// Fetch every `C` row reachable from this parent through `B`.
     ///
     /// Issues a single `INNER JOIN` query:
@@ -220,6 +230,7 @@ where
     /// target's `#[model(connection = "...")]` default, and the
     /// read-replica auto-routing chain.
     pub async fn get(self) -> Result<Collection<C>, FrameworkError> {
+        self.validate_meta()?;
         let exec = ExecutorChoice::resolve_read(
             None,
             None,
@@ -256,6 +267,7 @@ where
     /// on the same terms as [`Self::get`], including the same
     /// soft-delete filtering for `B` and `C`.
     pub async fn count(self) -> Result<i64, FrameworkError> {
+        self.validate_meta()?;
         let exec = ExecutorChoice::resolve_read(
             None,
             None,

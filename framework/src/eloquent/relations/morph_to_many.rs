@@ -272,6 +272,18 @@ where
         self
     }
 
+    /// Validate the three SQL identifiers that flow unquoted into every
+    /// raw-SQL statement this relation builds. `morph_name` is the root
+    /// of the derived `<morph_name>_id` / `<morph_name>_type` column
+    /// names; validating it covers both derived names. Called at the
+    /// top of every terminal method.
+    fn validate_meta(&self) -> Result<(), FrameworkError> {
+        crate::database::validate_identifier(&self.morph_name)?;
+        crate::database::validate_identifier(&self.pivot_table)?;
+        crate::database::validate_identifier(&self.pivot_related_key)?;
+        Ok(())
+    }
+
     /// Insert a pivot row linking the parent (`<morph_name>_id =
     /// parent.id AND <morph_name>_type = parent_morph_type`) to
     /// `related_id`. Equivalent to `attach_with(related_id,
@@ -298,6 +310,7 @@ where
         related_id: impl Into<serde_json::Value>,
         extra: Attrs,
     ) -> Result<(), FrameworkError> {
+        self.validate_meta()?;
         // Phase 10C audit-fix AF2 — resolve through ExecutorChoice so the
         // pivot INSERT lands on the ambient transaction when CURRENT_TX
         // is active.
@@ -343,6 +356,7 @@ where
         self,
         related_id: impl Into<serde_json::Value>,
     ) -> Result<(), FrameworkError> {
+        self.validate_meta()?;
         // Phase 10C audit-fix AF2 — see attach_with above.
         let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
@@ -384,6 +398,7 @@ where
         I: IntoIterator<Item = V>,
         V: Into<serde_json::Value>,
     {
+        self.validate_meta()?;
         use std::collections::{HashMap, HashSet};
 
         // Phase 10C audit-fix AF2 — same shape as BelongsToMany::sync —
@@ -542,6 +557,7 @@ where
     /// related-FK values (filtered by the parent's id + type), then
     /// fetch pivot rows separately and zip via `(parent_id, related_id)`.
     pub async fn get(self) -> Result<Collection<R>, FrameworkError> {
+        self.validate_meta()?;
         // Phase 10C audit-fix AF2 — route the pivot-id SELECT through
         // ExecutorChoice so it honors CURRENT_TX. Downstream
         // Model::query() calls already do so via Builder::get.
@@ -654,6 +670,7 @@ where
     /// `SELECT COUNT(*) FROM pivot WHERE <name>_id = ? AND <name>_type = ?`.
     /// Returns `i64` to match [`BelongsToMany::count`](super::BelongsToMany::count).
     pub async fn count(self) -> Result<i64, FrameworkError> {
+        self.validate_meta()?;
         // Phase 10C audit-fix AF2 — see attach_with above.
         let exec = ExecutorChoice::resolve_read(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
@@ -935,6 +952,16 @@ where
         self
     }
 
+    /// Validate the SQL identifiers that flow into raw-SQL statements.
+    /// `morph_name` is the root of the derived column names; validating
+    /// it covers both `<morph_name>_id` and `<morph_name>_type`.
+    fn validate_meta(&self) -> Result<(), FrameworkError> {
+        crate::database::validate_identifier(&self.morph_name)?;
+        crate::database::validate_identifier(&self.pivot_table)?;
+        crate::database::validate_identifier(&self.pivot_foreign_key)?;
+        Ok(())
+    }
+
     /// Fetch every R row attached to this Tag via the polymorphic
     /// pivot, filtered to the declared target morph family. Each
     /// returned R carries its pivot context via `__pivot` (accessible
@@ -1025,6 +1052,7 @@ where
 
     /// `SELECT COUNT(*) FROM pivot WHERE pfk = ? AND <name>_type = ?`.
     pub async fn count(self) -> Result<i64, FrameworkError> {
+        self.validate_meta()?;
         // Phase 10C audit-fix AF2 — route the count through
         // ExecutorChoice so it honors CURRENT_TX.
         let exec = ExecutorChoice::resolve_read(None, None, L::default_connection_name()).await?;
