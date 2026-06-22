@@ -1015,6 +1015,15 @@ impl DB {
     /// if the handle is dropped the underlying SeaORM
     /// `DatabaseTransaction::drop` rolls back automatically.
     ///
+    /// Note: the implicit drop-rollback rolls back the database but does
+    /// NOT emit the [`TransactionRolledBack`](crate::events::TransactionRolledBack)
+    /// event — only an explicit [`Transaction::rollback`] does. A `Drop`
+    /// impl is synchronous and cannot await the async dispatcher without a
+    /// detached spawn that could outlive runtime shutdown, so the event is
+    /// tied to the explicit call. If a listener must observe every rollback
+    /// (audit, metrics), call `rollback()` explicitly on the error path
+    /// rather than relying on `?`-propagation dropping the handle.
+    ///
     /// Manual mode does NOT install `CURRENT_TX`. Scope individual
     /// operations through the transaction with `Builder::with_tx(&tx)`
     /// or the `Model::*_with_tx(&tx, ...)` shims.
