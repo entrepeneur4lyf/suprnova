@@ -16,12 +16,14 @@
 //! This middleware is **opt-in**. Register globally from your app's
 //! bootstrap so it runs on every request:
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use suprnova::{global_middleware, InertiaConfig, InertiaVersionMiddleware};
 //!
 //! pub fn register() {
-//!     let cfg = InertiaConfig::new().version(env!("CARGO_PKG_VERSION"));
-//!     global_middleware!(InertiaVersionMiddleware::new(cfg.version));
+//!     let version = env!("CARGO_PKG_VERSION");
+//!     let cfg = InertiaConfig::new().version(version);
+//!     let _ = cfg;
+//!     global_middleware!(InertiaVersionMiddleware::new(version));
 //! }
 //! ```
 //!

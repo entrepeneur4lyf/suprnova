@@ -4,7 +4,7 @@
 //! receive parsed, typed arguments instead of a raw `Vec<String>`.
 //! Combined with `#[derive(Command)]`, the user writes:
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use async_trait::async_trait;
 //! use suprnova::{Command, FrameworkError, TypedCommand};
 //!

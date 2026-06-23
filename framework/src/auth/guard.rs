@@ -21,9 +21,14 @@ use crate::events::EventFacade;
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::{Auth, Credentials};
 ///
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+/// # let email = "alice@example.com";
+/// # let password = "s3cret!";
+/// # let remember = true;
+/// # let user_id = "42";
 /// // Check if authenticated (sync, session-backed)
 /// if Auth::check() {
 ///     let user_id: String = Auth::id().unwrap();
@@ -41,6 +46,7 @@ use crate::events::EventFacade;
 /// // Log out — clears the session + request user, revokes remember-me,
 /// // and fires Logout.
 /// Auth::logout().await?;
+/// # Ok(()) }
 /// ```
 pub struct Auth;
 
@@ -433,12 +439,14 @@ impl Auth {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
     /// use suprnova::Auth;
     ///
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// if let Some(user) = Auth::user().await? {
     ///     println!("Logged in as user {}", user.auth_identifier());
     /// }
+    /// # Ok(()) }
     /// ```
     ///
     /// # Errors
@@ -446,8 +454,9 @@ impl Auth {
     /// Returns an error if no `UserProvider` is registered in the container.
     /// Make sure to register a `UserProvider` in your `bootstrap.rs`:
     ///
-    /// ```rust,ignore
-    /// bind!(dyn UserProvider, DatabaseUserProvider);
+    /// ```rust,no_run
+    /// # use suprnova::{bind, UserProvider, DatabaseUserProvider};
+    /// bind!(dyn UserProvider, DatabaseUserProvider::new("users"));
     /// ```
     pub async fn user() -> Result<Option<Arc<dyn Authenticatable>>, crate::error::FrameworkError> {
         // Named-guard system when configured: the default guard checks the
@@ -505,12 +514,14 @@ impl Auth {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
     /// use suprnova::Auth;
     ///
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// // In a handler behind `Authenticate` middleware:
     /// let user = Auth::user_or_fail().await?;
     /// println!("Welcome, user {}!", user.get_auth_identifier());
+    /// # Ok(()) }
     /// ```
     pub async fn user_or_fail() -> Result<Arc<dyn Authenticatable>, crate::error::FrameworkError> {
         match Self::user().await? {
@@ -528,13 +539,24 @@ impl Auth {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use std::any::Any;
+    /// # use std::sync::Arc;
+    /// # use suprnova::Authenticatable;
     /// use suprnova::Auth;
-    /// use crate::models::users::User;
     ///
+    /// # #[derive(Clone)]
+    /// # struct User { id: u64 }
+    /// # impl Authenticatable for User {
+    /// #     fn get_auth_identifier(&self) -> String { self.id.to_string() }
+    /// #     fn as_any(&self) -> &dyn Any { self }
+    /// #     fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> { self }
+    /// # }
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// if let Some(user) = Auth::user_as::<User>().await? {
     ///     println!("Welcome, user #{}!", user.id);
     /// }
+    /// # Ok(()) }
     /// ```
     ///
     /// # Performance — when to prefer the `Arc` sibling
@@ -613,8 +635,13 @@ impl Auth {
     /// `providers` section: the instance is registered programmatically
     /// because a Suprnova provider carries a Rust type.
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use suprnova::{Auth, DatabaseUserProvider};
+    /// # fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let my_user_provider = DatabaseUserProvider::new("users");
     /// Auth::register_provider("users", Arc::new(my_user_provider))?;
+    /// # Ok(()) }
     /// ```
     pub fn register_provider(
         name: impl Into<String>,
@@ -626,8 +653,11 @@ impl Auth {
 
     /// Resolve a named guard as the read-only [`Guard`] contract.
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::Auth;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// if Auth::guard("api")?.check().await? { /* ... */ }
+    /// # Ok(()) }
     /// ```
     pub fn guard(name: &str) -> Result<Arc<dyn Guard>, crate::error::FrameworkError> {
         Self::manager()?.guard(name)
@@ -637,10 +667,16 @@ impl Auth {
     ///
     /// Errors if the named guard is stateless (a token guard).
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::{Auth, Credentials};
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let email = "alice@example.com";
+    /// # let password = "s3cret!";
+    /// # let remember = true;
     /// let user = Auth::stateful_guard("web")?
     ///     .attempt(&Credentials::password(email, password), remember)
     ///     .await?;
+    /// # Ok(()) }
     /// ```
     pub fn stateful_guard(
         name: &str,
@@ -777,13 +813,15 @@ impl Auth {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
     /// use suprnova::Auth;
     ///
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let user = Auth::password().register("alice@example.com", "s3cret!").await?;
     /// let (user, session) = Auth::password()
     ///     .authenticate("alice@example.com", "s3cret!", None, None)
     ///     .await?;
+    /// # Ok(()) }
     /// ```
     pub fn password() -> crate::torii_integration::password::PasswordAuth {
         crate::torii_integration::password::PasswordAuth
@@ -797,10 +835,13 @@ impl Auth {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
     /// use suprnova::Auth;
     /// use suprnova::torii_integration::oauth::OAuthProviderConfig;
     ///
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let code = String::from("auth-code-from-callback");
+    /// # let state = String::from("state-from-callback");
     /// Auth::oauth("github").configure(OAuthProviderConfig {
     ///     client_id: "...".into(),
     ///     client_secret: "...".into(),
@@ -813,6 +854,7 @@ impl Auth {
     /// // Redirect user to kickoff.authorization_url, store kickoff.state in session.
     ///
     /// let (user, session) = Auth::oauth("github").complete(&code, &state).await?;
+    /// # Ok(()) }
     /// ```
     pub fn oauth(provider: impl Into<String>) -> crate::torii_integration::oauth::OAuthAuth {
         crate::torii_integration::oauth::OAuthAuth::new(provider.into())

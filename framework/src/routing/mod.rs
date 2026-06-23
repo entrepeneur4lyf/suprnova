@@ -53,8 +53,8 @@ pub use signed::{
 /// to `/` so the common case (`return redirect()`) compiles without a
 /// path argument. Pass a path to redirect there:
 ///
-/// ```rust,ignore
-/// use suprnova::redirect;
+/// ```rust,no_run
+/// use suprnova::{redirect, redirect_to};
 ///
 /// // bare → /
 /// let r = redirect();

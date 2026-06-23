@@ -183,12 +183,12 @@ pub enum BackendErrorPolicy {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use std::sync::Arc;
 /// use std::time::Duration;
 /// use suprnova::rate_limit::{BackendErrorPolicy, RateLimitMiddleware, SlidingWindowConfig};
 /// use suprnova::rate_limit::memory::InMemoryRateLimiter;
-///
+/// # fn ex() {
 /// let limiter = Arc::new(InMemoryRateLimiter::new());
 /// let cfg = SlidingWindowConfig { max_requests: 100, window: Duration::from_secs(60) };
 /// let mw = RateLimitMiddleware::new(limiter, cfg, |req| {
@@ -196,6 +196,7 @@ pub enum BackendErrorPolicy {
 /// })
 /// // Opt sensitive routes into fail-closed (HTTP 503 if the backend is down):
 /// .on_backend_error(BackendErrorPolicy::FailClosed);
+/// # }
 /// ```
 pub struct RateLimitMiddleware<F>
 where

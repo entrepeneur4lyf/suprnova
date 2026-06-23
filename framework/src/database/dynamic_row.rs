@@ -10,9 +10,10 @@
 //!
 //! ## Usage
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use suprnova::DB;
 //!
+//! # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 //! let rows = DB::table("audit_log")
 //!     .filter_op("actor_id", ">", 0)
 //!     .order_by_desc("id")
@@ -26,6 +27,7 @@
 //!     let score: Option<i64> = row.get_optional_int("score")?;
 //!     // ...
 //! }
+//! # Ok(()) }
 //! ```
 //!
 //! ## Missing key vs null value

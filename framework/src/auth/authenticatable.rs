@@ -22,9 +22,11 @@ use std::any::Any;
 ///
 /// # Example — numeric primary key
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::auth::Authenticatable;
 /// use std::any::Any;
+/// # use std::sync::Arc;
+/// # struct User { id: u64 }
 ///
 /// impl Authenticatable for User {
 ///     fn get_auth_identifier(&self) -> String {
@@ -34,12 +36,17 @@ use std::any::Any;
 ///     fn as_any(&self) -> &dyn Any {
 ///         self
 ///     }
+/// #   fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> { self }
 /// }
 /// ```
 ///
 /// # Example — opaque string id (UUID, torii)
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::auth::Authenticatable;
+/// # use std::any::Any;
+/// # use std::sync::Arc;
+/// # struct User { id: String }
 /// impl Authenticatable for User {
 ///     fn get_auth_identifier(&self) -> String {
 ///         self.id.clone()
@@ -48,6 +55,7 @@ use std::any::Any;
 ///     fn as_any(&self) -> &dyn Any {
 ///         self
 ///     }
+/// #   fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> { self }
 /// }
 /// ```
 pub trait Authenticatable: Send + Sync + 'static {
@@ -101,12 +109,18 @@ pub trait Authenticatable: Send + Sync + 'static {
     ///
     /// Every impl writes the same one-line body:
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::auth::Authenticatable;
+    /// # struct User;
+    /// # impl Authenticatable for User {
+    /// #     fn get_auth_identifier(&self) -> String { String::new() }
+    /// #     fn as_any(&self) -> &dyn std::any::Any { self }
     /// fn into_arc_any(self: std::sync::Arc<Self>)
     ///     -> std::sync::Arc<dyn std::any::Any + Send + Sync>
     /// {
     ///     self
     /// }
+    /// # }
     /// ```
     ///
     /// The boilerplate is unavoidable: a default body would need

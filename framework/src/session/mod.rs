@@ -12,7 +12,7 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use suprnova::session::{session, session_mut};
 //!
 //! // Read from session
@@ -31,10 +31,10 @@
 //!
 //! Add the `SessionMiddleware` to your bootstrap:
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use suprnova::{global_middleware, SessionMiddleware, SessionConfig};
 //!
-//! pub async fn register() {
+//! pub fn register() {
 //!     let config = SessionConfig::from_env();
 //!     global_middleware!(SessionMiddleware::new(config));
 //! }

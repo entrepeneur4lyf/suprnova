@@ -11,14 +11,33 @@
 //! on graceful shutdown, but its work does NOT survive a crash. Reach for
 //! `QueuedListener` when the work must happen no matter what.
 //!
-//! ```ignore
-//! use suprnova::{Event, QueuedListener};
-//!
+//! ```rust,no_run
+//! use suprnova::events::{Event, EventFacade, QueuedListener};
+//! # use suprnova::queue::Job;
+//! # use suprnova::FrameworkError;
+//! # use async_trait::async_trait;
+//! # use std::sync::Arc;
+//! # #[derive(Debug, Clone)]
+//! # struct UserRegistered { user_id: i64 }
+//! # impl Event for UserRegistered {
+//! #     fn event_name() -> &'static str { "UserRegistered" }
+//! # }
+//! # #[derive(serde::Serialize, serde::Deserialize)]
+//! # struct SendWelcomeEmail { user_id: i64 }
+//! # #[async_trait]
+//! # impl Job for SendWelcomeEmail {
+//! #     fn job_name() -> &'static str { "SendWelcomeEmail" }
+//! #     async fn handle(self) -> Result<(), FrameworkError> { Ok(()) }
+//! # }
+//! # async fn ex() {
 //! // `UserRegistered` is a normal (unbounded) event; `SendWelcomeEmail` is a Job.
-//! Event::listen(QueuedListener::<UserRegistered, SendWelcomeEmail>::new(
-//!     |e| SendWelcomeEmail { user_id: e.user_id },
+//! EventFacade::listen::<UserRegistered, _>(Arc::new(
+//!     QueuedListener::<UserRegistered, SendWelcomeEmail>::new(
+//!         |e| SendWelcomeEmail { user_id: e.user_id },
+//!     ),
 //! ))
 //! .await;
+//! # }
 //! ```
 //!
 //! Register `QueuedListener` for a synchronous (non-`queued`) event: the

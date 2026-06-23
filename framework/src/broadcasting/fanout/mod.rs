@@ -11,17 +11,19 @@
 //! suprnova = { version = "...", features = ["broadcasting-fanout"] }
 //! ```
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use suprnova::broadcasting::fanout::SeaStreamerBroadcastHub;
 //! use suprnova::broadcasting::BroadcastHub;
 //! use std::sync::Arc;
 //!
+//! # async fn ex() {
 //! let hub = Arc::new(
 //!     SeaStreamerBroadcastHub::new("stdio://", "my-app-broadcast")
 //!         .await
 //!         .expect("connect"),
 //! );
 //! // Register hub in the container so handlers receive it via injection.
+//! # }
 //! ```
 
 mod sea_streamer;

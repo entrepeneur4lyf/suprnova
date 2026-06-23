@@ -312,9 +312,13 @@ pub fn current_include_set() -> Arc<RequestIncludeSet> {
 /// [`super::IncludeMiddleware`] (to bind the parsed query string) and
 /// by tests/handlers that need to install a programmatic set.
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::{RequestIncludeSet, scope_include_set};
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 /// let set = RequestIncludeSet::from_query("include=author");
 /// let result = scope_include_set(set, async { /* handler code */ }).await;
+/// # let _ = result;
+/// # Ok(()) }
 /// ```
 pub async fn scope_include_set<F, R>(set: RequestIncludeSet, f: F) -> R
 where
@@ -329,15 +333,23 @@ where
 /// includes/excludes on top of what the request's query string
 /// already declared.
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::with_include_overrides;
+/// # struct User;
+/// # impl User { fn is_admin(&self) -> bool { true } }
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+/// # let user = User;
 /// // Inside a handler — admins get the audit-log relationship
 /// // appended to whatever the client asked for.
 /// let body = with_include_overrides(
 ///     |set| if user.is_admin() { set.include(["audit_log"]) } else { set },
 ///     async move {
-///         Inertia::data("Album/Show", album).into_response()
+///         // ...build and return the response here...
+///         "Album/Show".to_string()
 ///     },
 /// ).await;
+/// # let _ = body;
+/// # Ok(()) }
 /// ```
 ///
 /// Calling this when no set is currently bound starts from the empty

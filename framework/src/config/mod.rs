@@ -171,7 +171,8 @@ impl Config {
     /// `#[serde(default = "...")]` for fallbacks and
     /// `#[serde(rename = "...")]` to override the env-var name.
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// #[derive(serde::Deserialize)]
     /// struct MailConfig {
     ///     pub mail_driver: String,
@@ -182,6 +183,7 @@ impl Config {
     /// fn default_port() -> u16 { 587 }
     ///
     /// let cfg: MailConfig = suprnova::Config::resolve()?;
+    /// # Ok(()) }
     /// ```
     pub fn resolve<T: serde::de::DeserializeOwned>() -> Result<T, crate::error::FrameworkError> {
         typed::resolve()

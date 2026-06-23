@@ -733,12 +733,14 @@ async fn mark_failed(
 
 /// Mount the webhook ingress route onto an Axum-compatible Router.
 ///
-/// ```ignore
+/// ```rust,no_run
 /// use std::sync::Arc;
 /// use suprnova::payments::webhook_routes;
-///
+/// # use sea_orm::DatabaseConnection;
+/// # fn ex(db: Arc<DatabaseConnection>) {
 /// let router = webhook_routes(db.clone());
 /// // Merge into your app router.
+/// # }
 /// ```
 pub fn webhook_routes(db: Arc<DatabaseConnection>) -> Router {
     // The handler is a `Fn(Request) -> Future` closure that clones Arc per call.

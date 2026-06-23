@@ -99,7 +99,7 @@ impl Default for CookieOptions {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::Cookie;
 /// use std::time::Duration;
 ///
@@ -243,9 +243,13 @@ impl Cookie {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::Cookie;
+    /// # use suprnova::http::HttpResponse;
+    /// # let response = HttpResponse::new();
     /// let forget = Cookie::forget("session");
     /// response.cookie(forget)
+    /// # ;
     /// ```
     pub fn forget(name: impl Into<String>) -> Self {
         Self::new(name, "")
@@ -297,7 +301,8 @@ impl Cookie {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::http::parse_cookies;
 /// let cookies = parse_cookies("session=abc123; user_id=42");
 /// assert_eq!(cookies.get("session"), Some(&"abc123".to_string()));
 /// ```

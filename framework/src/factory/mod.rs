@@ -1,9 +1,16 @@
 //! Model factories — produce randomized model instances for tests and
 //! seed data with a Laravel-style fluent builder.
 //!
-//! ```ignore
+//! ```rust,no_run
 //! use suprnova::factory::Factory;
 //! use fake::{Fake, Faker};
+//! # #[derive(Clone)]
+//! # struct User { is_admin: bool, name: String }
+//! # impl fake::Dummy<Faker> for User {
+//! #     fn dummy_with_rng<R: rand::Rng + ?Sized>(_: &Faker, rng: &mut R) -> Self {
+//! #         User { is_admin: false, name: fake::faker::name::en::Name().fake_with_rng(rng) }
+//! #     }
+//! # }
 //!
 //! // The minimal hand-written form: pair a marker struct with a
 //! // `Factory` impl that knows how to build one instance.

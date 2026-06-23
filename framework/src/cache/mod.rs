@@ -12,15 +12,17 @@
 //! driver defaults to in-memory; set `CACHE_DRIVER=redis` to bootstrap
 //! against `REDIS_URL`.
 //!
-//! ```rust,ignore
+//! ```rust,no_run
+//! # async fn ex() -> Result<(), suprnova::FrameworkError> {
 //! use suprnova::Cache;
 //! use std::time::Duration;
 //!
+//! # let user = "alice";
 //! // Store a value with 1 hour TTL
 //! Cache::put("user:1", &user, Some(Duration::from_secs(3600))).await?;
 //!
 //! // Retrieve it
-//! let cached: Option<User> = Cache::get("user:1").await?;
+//! let cached: Option<String> = Cache::get("user:1").await?;
 //!
 //! // Check if exists
 //! if Cache::has("user:1").await? {
@@ -32,6 +34,7 @@
 //!
 //! // Clear all cache
 //! Cache::flush().await?;
+//! # Ok(()) }
 //! ```
 
 pub mod config;
@@ -58,10 +61,12 @@ use std::time::Duration;
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::Cache;
 /// use std::time::Duration;
-///
+/// # async fn expensive_computation() -> Result<String, suprnova::FrameworkError> { Ok(String::new()) }
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+/// # let value = String::from("payload");
 /// // Store with TTL
 /// Cache::put("key", &value, Some(Duration::from_secs(3600))).await?;
 ///
@@ -69,12 +74,13 @@ use std::time::Duration;
 /// Cache::forever("key", &value).await?;
 ///
 /// // Retrieve
-/// let value: Option<MyType> = Cache::get("key").await?;
+/// let value: Option<String> = Cache::get("key").await?;
 ///
 /// // Get or compute (remember pattern)
-/// let value = Cache::remember("key", Some(Duration::from_secs(3600)), || async {
+/// let value: String = Cache::remember("key", Some(Duration::from_secs(3600)), || async {
 ///     expensive_computation().await
 /// }).await?;
+/// # Ok(()) }
 /// ```
 pub struct Cache;
 
@@ -140,8 +146,11 @@ impl Cache {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// let user: Option<User> = Cache::get("user:1").await?;
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), suprnova::FrameworkError> {
+    /// let user: Option<String> = Cache::get("user:1").await?;
+    /// # Ok(()) }
     /// ```
     pub async fn get<T: DeserializeOwned>(key: &str) -> Result<Option<T>, FrameworkError> {
         let store = Self::store()?;
@@ -165,8 +174,13 @@ impl Cache {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use std::time::Duration;
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let user = "alice";
     /// Cache::put("user:1", &user, Some(Duration::from_secs(3600))).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn put<T: Serialize>(
         key: &str,
@@ -188,8 +202,12 @@ impl Cache {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let settings = "theme=dark";
     /// Cache::forever("config:settings", &settings).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn forever<T: Serialize>(key: &str, value: &T) -> Result<(), FrameworkError> {
         let store = Self::store()?;
@@ -205,10 +223,13 @@ impl Cache {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// if Cache::has("user:1").await? {
     ///     println!("User is cached");
     /// }
+    /// # Ok(()) }
     /// ```
     pub async fn has(key: &str) -> Result<bool, FrameworkError> {
         let store = Self::store()?;
@@ -220,10 +241,14 @@ impl Cache {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn warm_cache_for_user(_id: u64) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// if Cache::missing("user:1").await? {
     ///     warm_cache_for_user(1).await?;
     /// }
+    /// # Ok(()) }
     /// ```
     pub async fn missing(key: &str) -> Result<bool, FrameworkError> {
         Ok(!Self::has(key).await?)
@@ -239,9 +264,13 @@ impl Cache {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let uid = 1u64;
     /// // One-shot consumption: drain the pending notice for this user
     /// let notice: Option<String> = Cache::pull(&format!("notice:{}", uid)).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn pull<T: DeserializeOwned>(key: &str) -> Result<Option<T>, FrameworkError> {
         let value = Self::get::<T>(key).await?;
@@ -271,10 +300,16 @@ impl Cache {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use std::time::Duration;
+    /// # use suprnova::Cache;
+    /// # async fn send_winner_email(_id: u64) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let user_id = 1u64;
     /// // Only the first writer wins this slot; subsequent callers see false
     /// let won = Cache::add("daily:winner", &user_id, Some(Duration::from_secs(86_400))).await?;
     /// if won { send_winner_email(user_id).await?; }
+    /// # Ok(()) }
     /// ```
     pub async fn add<T: Serialize>(
         key: &str,
@@ -296,10 +331,14 @@ impl Cache {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// let settings = Cache::sear("config:settings", || async {
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn load_settings_from_database() -> Result<String, suprnova::FrameworkError> { Ok(String::new()) }
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// let settings: String = Cache::sear("config:settings", || async {
     ///     load_settings_from_database().await
     /// }).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn sear<T, F, Fut>(key: &str, default: F) -> Result<T, FrameworkError>
     where
@@ -316,8 +355,11 @@ impl Cache {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// Cache::forget("user:1").await?;
+    /// # Ok(()) }
     /// ```
     pub async fn forget(key: &str) -> Result<bool, FrameworkError> {
         let store = Self::store()?;
@@ -328,8 +370,11 @@ impl Cache {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// Cache::flush().await?;
+    /// # Ok(()) }
     /// ```
     pub async fn flush() -> Result<(), FrameworkError> {
         let store = Self::store()?;
@@ -343,8 +388,11 @@ impl Cache {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let count = Cache::increment("visits", 1).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn increment(key: &str, amount: i64) -> Result<i64, FrameworkError> {
         let store = Self::store()?;
@@ -358,8 +406,11 @@ impl Cache {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let remaining = Cache::decrement("quota", 1).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn decrement(key: &str, amount: i64) -> Result<i64, FrameworkError> {
         let store = Self::store()?;
@@ -383,26 +434,37 @@ impl Cache {
     ///
     /// For stampede-safe rebuilds wrap the call in [`Cache::lock`]:
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
     /// use std::time::Duration;
     /// use suprnova::Cache;
-    ///
+    /// # struct User;
+    /// # impl User { async fn find(_id: u64) -> Result<String, suprnova::FrameworkError> { Ok(String::new()) } }
+    /// # async fn ex() -> Result<String, Box<dyn std::error::Error>> {
     /// if let Some(guard) = Cache::lock("rebuild:user:1", Duration::from_secs(10)).await? {
-    ///     let user = Cache::remember("user:1", Some(Duration::from_secs(3600)), || async {
+    ///     let user: String = Cache::remember("user:1", Some(Duration::from_secs(3600)), || async {
     ///         User::find(1).await
     ///     }).await?;
     ///     guard.release().await?;
     ///     return Ok(user);
     /// }
     /// // Lost the race — read whatever the winner wrote (or fall back).
+    /// # Ok(String::new()) }
     /// ```
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// let user = Cache::remember("user:1", Some(Duration::from_secs(3600)), || async {
+    /// ```rust,no_run
+    /// # use std::time::Duration;
+    /// # use suprnova::Cache;
+    /// # struct User;
+    /// # impl User {
+    /// #     async fn find(_id: u64) -> Result<String, suprnova::FrameworkError> { Ok(String::new()) }
+    /// # }
+    /// # async fn ex() -> Result<(), suprnova::FrameworkError> {
+    /// let user: String = Cache::remember("user:1", Some(Duration::from_secs(3600)), || async {
     ///     User::find(1).await
     /// }).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn remember<T, F, Fut>(
         key: &str,
@@ -450,8 +512,13 @@ impl Cache {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use std::time::Duration;
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let user = "alice";
     /// Cache::tags_put(&["users"], "user:1", &user, Some(Duration::from_secs(3600))).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn tags_put<T: Serialize>(
         tags: &[&str],
@@ -469,8 +536,11 @@ impl Cache {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// Cache::flush_tags(&["users", "active"]).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn flush_tags(tags: &[&str]) -> Result<(), FrameworkError> {
         let store = Self::store()?;
@@ -488,11 +558,16 @@ impl Cache {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use std::time::Duration;
+    /// # use suprnova::Cache;
+    /// # async fn do_exclusive_work() {}
+    /// # async fn ex() -> Result<(), suprnova::FrameworkError> {
     /// if let Some(guard) = Cache::lock("job:42", Duration::from_secs(30)).await? {
     ///     do_exclusive_work().await;
     ///     guard.release().await?;
     /// }
+    /// # Ok(()) }
     /// ```
     pub async fn lock(key: &str, ttl: Duration) -> Result<Option<LockGuard>, FrameworkError> {
         let store = Self::store()?;
@@ -513,8 +588,12 @@ impl Cache {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use std::time::Duration;
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let refreshed = Cache::touch("user:1", Duration::from_secs(3600)).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn touch(key: &str, ttl: Duration) -> Result<bool, FrameworkError> {
         Self::store()?.touch(key, ttl).await

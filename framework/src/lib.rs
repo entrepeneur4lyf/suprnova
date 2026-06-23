@@ -540,8 +540,13 @@ pub use suprnova_macros::test;
 /// Wraps the body in `Ok(...)` so the macro plugs directly into a handler
 /// returning `Result<HttpResponse, _>`.
 ///
-/// ```ignore
+/// ```rust,no_run
+/// # use suprnova::{json_response, HttpResponse, FrameworkError};
+/// # fn ex() -> Result<HttpResponse, FrameworkError> {
+/// # let id = 1u64;
+/// # let name = "Ada";
 /// json_response!({ "ok": true, "user": { "id": id, "name": name } })
+/// # }
 /// ```
 #[macro_export]
 macro_rules! json_response {
@@ -575,14 +580,22 @@ macro_rules! text_response {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// // In bootstrap.rs
 /// use suprnova::global_middleware;
-/// use crate::middleware;
+/// use suprnova::middleware::{Middleware, Next};
+/// use suprnova::http::{Request, Response};
+/// use suprnova::async_trait;
+///
+/// #[derive(Clone)]
+/// struct LoggingMiddleware;
+/// #[async_trait]
+/// impl Middleware for LoggingMiddleware {
+///     async fn handle(&self, req: Request, next: Next) -> Response { next(req).await }
+/// }
 ///
 /// pub fn register() {
-///     global_middleware!(middleware::LoggingMiddleware);
-///     global_middleware!(middleware::CorsMiddleware);
+///     global_middleware!(LoggingMiddleware);
 /// }
 /// ```
 #[macro_export]
@@ -596,8 +609,12 @@ macro_rules! global_middleware {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::expect;
+/// # let actual = 1;
+/// # let expected = 1;
+/// # let result: Result<(), ()> = Ok(());
+/// # let vec = vec![1, 2, 3];
 ///
 /// expect!(actual).to_equal(expected);
 /// expect!(result).to_be_ok();

@@ -103,8 +103,11 @@ impl DbTableBuilder {
 
     /// Restrict the SELECT to a specific column list. Empty means `*`.
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::DB;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// DB::table("audit_log").select(["id", "event"]).get().await?;
+    /// # Ok(()) }
     /// ```
     pub fn select<I, S>(mut self, cols: I) -> Self
     where
@@ -620,13 +623,16 @@ impl DB {
     /// Open a model-less query builder for `name`. See
     /// [`DbTableBuilder`] for the chainable surface.
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::DB;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let rows = DB::table("audit_log")
     ///     .filter("actor_id", 42)
     ///     .order_by_desc("id")
     ///     .limit(50)
     ///     .get()
     ///     .await?;
+    /// # Ok(()) }
     /// ```
     pub fn table(name: impl Into<String>) -> DbTableBuilder {
         DbTableBuilder::new(name)
@@ -636,11 +642,14 @@ impl DB {
     /// Placeholders must match the active backend (`$1, $2, ...` for
     /// Postgres, `?` for MySQL + SQLite).
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::DB;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let rows = DB::select(
     ///     "SELECT * FROM audit_log WHERE actor_id = ?",
     ///     vec![42i64.into()],
     /// ).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn select(
         sql: &str,
@@ -685,9 +694,12 @@ impl DB {
     /// `T` must implement `sea_orm::TryGetable` — the framework
     /// re-exports the trait at the crate root.
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::DB;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let count: i64 = DB::scalar("SELECT COUNT(*) FROM users", vec![]).await?;
     /// let name: String = DB::scalar("SELECT name FROM users LIMIT 1", vec![]).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn scalar<T>(
         sql: &str,

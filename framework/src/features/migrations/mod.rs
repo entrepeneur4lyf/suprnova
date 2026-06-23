@@ -3,8 +3,9 @@
 //! Re-exported under [`crate::features::migrations`] so consumer apps
 //! can register the schema in their own `Migrator`:
 //!
-//! ```ignore
+//! ```rust,no_run
 //! use suprnova::features::migrations::CreateFeaturesTable;
+//! # struct Migrator;
 //!
 //! impl sea_orm_migration::MigratorTrait for Migrator {
 //!     fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {

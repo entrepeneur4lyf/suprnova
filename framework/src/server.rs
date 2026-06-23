@@ -252,12 +252,26 @@ impl Server {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::{Server, async_trait, Middleware, Next, Request, Response};
+    /// # use suprnova::routing::Router;
+    /// # pub struct LoggingMiddleware;
+    /// # #[async_trait]
+    /// # impl Middleware for LoggingMiddleware {
+    /// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+    /// # }
+    /// # pub struct CorsMiddleware;
+    /// # #[async_trait]
+    /// # impl Middleware for CorsMiddleware {
+    /// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+    /// # }
+    /// # async fn ex(router: Router) -> Result<(), Box<dyn std::error::Error>> {
     /// Server::from_config(router)?
     ///     .middleware(LoggingMiddleware)  // Global
     ///     .middleware(CorsMiddleware)     // Global
     ///     .run()
     ///     .await;
+    /// # Ok(()) }
     /// ```
     pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
         self.middleware = self.middleware.append(middleware);

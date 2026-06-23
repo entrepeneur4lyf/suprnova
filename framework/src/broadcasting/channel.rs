@@ -112,11 +112,9 @@ fn is_pattern(name: &str) -> bool {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use async_trait::async_trait;
 /// use suprnova::broadcasting::Channel;
-/// use suprnova::http::Request;
-/// use serde_json::Value;
 ///
 /// pub struct OrderUpdates;
 ///
@@ -186,10 +184,25 @@ pub trait Channel: Send + Sync + 'static {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use async_trait::async_trait;
+    /// # use suprnova::broadcasting::{Channel, ChannelParams, PresenceChannel};
+    /// # use suprnova::http::Request;
+    /// # use suprnova::FrameworkError;
+    /// # use serde_json::{Value, json};
+    /// # struct Lobby;
+    /// # #[async_trait]
+    /// # impl Channel for Lobby {
+    /// #     fn name(&self) -> &'static str { "presence.lobby" }
     /// fn presence_info<'a>(&'a self) -> Option<&'a dyn PresenceChannel> {
     ///     Some(self)
     /// }
+    /// # }
+    /// # #[async_trait]
+    /// # impl PresenceChannel for Lobby {
+    /// #     async fn member_info(&self, _req: &Request, _params: &ChannelParams)
+    /// #         -> Result<Value, FrameworkError> { Ok(json!({ "user_id": 42 })) }
+    /// # }
     /// ```
     fn presence_info(&self) -> Option<&dyn PresenceChannel> {
         None
@@ -217,7 +230,7 @@ pub trait PrivateChannel: Channel {}
 /// and `member_info` is never called. The compiler cannot catch this on
 /// stable Rust, so both halves must be supplied by hand:
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use async_trait::async_trait;
 /// use suprnova::broadcasting::{Channel, ChannelParams, PresenceChannel};
 /// use suprnova::http::Request;
@@ -271,8 +284,19 @@ pub type BoxedChannel = Arc<dyn Channel>;
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::broadcasting::{ChannelRegistry, Channel};
+/// # use async_trait::async_trait;
+/// # struct OrderUpdates;
+/// # #[async_trait]
+/// # impl Channel for OrderUpdates {
+/// #     fn name(&self) -> &'static str { "order.updates" }
+/// # }
+/// # struct LobbyChat;
+/// # #[async_trait]
+/// # impl Channel for LobbyChat {
+/// #     fn name(&self) -> &'static str { "chat.lobby" }
+/// # }
 ///
 /// let mut registry = ChannelRegistry::new();
 /// registry.register(OrderUpdates);

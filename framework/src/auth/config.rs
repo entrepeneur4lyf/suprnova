@@ -11,9 +11,9 @@
 //! cannot name. The config still selects *which* registered provider a
 //! guard uses, by name.
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use suprnova::{AuthConfig, GuardConfig, GuardDriver};
-//!
+//! # fn ex() {
 //! // The defaults: a `web` session guard and an `api` token guard, both
 //! // backed by the `users` provider. Override the default via AUTH_GUARD.
 //! let config = AuthConfig::from_env();
@@ -22,6 +22,7 @@
 //! let config = AuthConfig::new("web")
 //!     .guard("web", GuardConfig::session("users"))
 //!     .guard("admin", GuardConfig::session("admins"));
+//! # }
 //! ```
 
 use std::collections::HashMap;

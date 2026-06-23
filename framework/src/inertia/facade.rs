@@ -92,7 +92,7 @@ impl Inertia {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
     /// use suprnova::{Inertia, InertiaConfig};
     ///
     /// pub fn register() {

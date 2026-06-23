@@ -20,7 +20,10 @@
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::data::IsRelationLoaded;
+/// # struct Album;
+/// # struct Song;
 /// struct AlbumWithRelations {
 ///     pub album: Album,
 ///     pub songs: Option<Vec<Song>>,
@@ -51,11 +54,21 @@ pub trait IsRelationLoaded {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::when_loaded;
-///
-/// let prop = when_loaded!(&entity, "songs", || async {
-///     serde_json::to_value(&entity.songs).unwrap()
+/// # use suprnova::data::IsRelationLoaded;
+/// # #[derive(Clone, serde::Serialize)]
+/// # struct Song { title: String }
+/// # struct Album { songs: Vec<Song> }
+/// # impl IsRelationLoaded for Album {
+/// #     fn is_relation_loaded(&self, name: &str) -> bool { name == "songs" }
+/// # }
+/// # let entity = Album { songs: vec![] };
+/// // The lazy closure must be `'static`, so it owns its data.
+/// let songs = entity.songs.clone();
+/// let prop = when_loaded!(&entity, "songs", move || {
+///     let songs = songs.clone();
+///     async move { serde_json::to_value(&songs).unwrap() }
 /// });
 /// ```
 #[macro_export]

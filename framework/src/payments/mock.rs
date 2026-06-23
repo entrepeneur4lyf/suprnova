@@ -8,9 +8,10 @@
 //!
 //! # Usage
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use suprnova::payments::*;
 //!
+//! # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 //! let provider = MockPaymentProvider::new();
 //! let cus = provider.create_customer(CreateCustomerRequest {
 //!     user_id: "user_1".into(),
@@ -18,6 +19,7 @@
 //!     name: None,
 //!     metadata: None,
 //! }).await.unwrap();
+//! # Ok(()) }
 //! ```
 //!
 //! See `framework/tests/payments_mock_discriminator.rs` for the full E2E flow.

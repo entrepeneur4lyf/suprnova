@@ -10,7 +10,7 @@
 //! time and uses `serde_json::json!` to coerce values, so all of these
 //! work:
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use suprnova::attrs;
 //!
 //! let a = attrs! { name: "Alice", email: "a@example.com" };
@@ -105,7 +105,7 @@ impl From<Value> for Attrs {
 /// pass through `serde_json::json!` so anything `Serialize` works
 /// directly (numbers, strings, bools, `Vec<T>`, arrays).
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::attrs;
 ///
 /// let attrs = attrs! {

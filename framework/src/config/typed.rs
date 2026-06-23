@@ -9,12 +9,16 @@
 //! [`resolve_prefixed`] reads only env vars sharing a prefix, with
 //! the prefix stripped before mapping to fields:
 //!
-//! ```ignore
+//! ```rust,no_run
+//! # use serde::Deserialize;
+//! # use suprnova::config::Config;
+//! # fn ex() {
 //! // env: APP_NAME=suprnova, APP_DEBUG=true
 //! #[derive(Deserialize)]
 //! struct AppCfg { name: String, debug: bool }
 //! let cfg: AppCfg = Config::resolve_prefixed("APP_").unwrap();
 //! assert_eq!(cfg.name, "suprnova");
+//! # }
 //! ```
 //!
 //! Why not subsume the existing `Config::get::<T>()` repository?

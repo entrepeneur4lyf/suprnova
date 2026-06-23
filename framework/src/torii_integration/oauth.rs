@@ -183,10 +183,12 @@ pub struct OAuthKickoff {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use suprnova::Auth;
-/// use suprnova::torii_integration::oauth::OAuthProviderConfig;
-///
+/// ```rust,no_run
+/// # use suprnova::Auth;
+/// # use suprnova::torii_integration::oauth::OAuthProviderConfig;
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+/// # let code = String::new();
+/// # let state = String::new();
 /// // Configure once at startup (idempotent):
 /// Auth::oauth("github").configure(OAuthProviderConfig {
 ///     client_id: std::env::var("GITHUB_CLIENT_ID").unwrap(),
@@ -202,6 +204,7 @@ pub struct OAuthKickoff {
 ///
 /// // Complete on callback:
 /// let (user, session) = Auth::oauth("github").complete(&code, &state).await?;
+/// # Ok(()) }
 /// ```
 pub struct OAuthAuth {
     provider: String,

@@ -17,9 +17,11 @@
 //!
 //! # Examples
 //!
-//! ```ignore
+//! ```rust,no_run
 //! use suprnova::resources::Maybe;
 //!
+//! # struct User { email: String, phone: String, show_phone: bool }
+//! # impl User {
 //! // Manual: hand-rolling `IntoJsonResource::resource_attributes`.
 //! fn resource_attributes(&self, _fs: Option<&[&str]>) -> serde_json::Value {
 //!     use suprnova::resources::insert_maybe;
@@ -32,6 +34,7 @@
 //!     );
 //!     serde_json::Value::Object(map)
 //! }
+//! # }
 //! ```
 
 use serde::ser::{Serialize, SerializeStruct, Serializer};

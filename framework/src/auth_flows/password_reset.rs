@@ -60,15 +60,19 @@ use crate::mail::Mail;
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::auth_flows::PasswordReset;
 ///
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+/// # let token_from_query = String::new();
+/// # let new_password = String::new();
 /// // From the "forgot password" form (anti-enumeration: an unknown address
 /// // silently sends nothing):
 /// PasswordReset::send_link("alice@example.com", "https://example.com/reset").await?;
 ///
 /// // From the click-through handler, after the user enters a new password:
 /// let user_id = PasswordReset::complete(&token_from_query, &new_password).await?;
+/// # Ok(()) }
 /// ```
 pub struct PasswordReset;
 

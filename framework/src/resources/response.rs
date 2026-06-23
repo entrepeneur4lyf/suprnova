@@ -264,10 +264,21 @@ impl Resource {
 /// Laravel-shape facade alias for [`Resource`]. Both names construct
 /// the same `JsonApiResponse`.
 ///
-/// ```ignore
+/// ```rust,ignore
+/// use suprnova::{Data, JsonApi, Resource};
+///
+/// #[derive(Debug, Clone, Data)]
+/// #[json_resource("users")]
+/// pub struct UserResource {
+///     pub id: i64,
+///     pub email: String,
+/// }
+///
+/// # fn ex(user: UserResource) {
 /// // These two calls are identical:
-/// let r = JsonApi::single(user);
+/// let r = JsonApi::single(user.clone());
 /// let r = Resource::single(user);
+/// # }
 /// ```
 pub struct JsonApi;
 

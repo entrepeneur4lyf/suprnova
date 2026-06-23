@@ -55,9 +55,10 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use suprnova::hashing;
 //!
+//! # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 //! // Async (preferred inside request handlers):
 //! let hash = hashing::hash_async("my_password").await?;
 //! let valid = hashing::verify_async("my_password", &hash).await?;
@@ -67,10 +68,12 @@
 //! let valid = hashing::verify("my_password", &hash)?;
 //!
 //! // Algorithm-aware rotation:
+//! # let stored_hash = String::new();
 //! if hashing::needs_rehash(&stored_hash) {
 //!     let fresh = hashing::hash_async("my_password").await?;
 //!     // persist `fresh` in place of `stored_hash`
 //! }
+//! # Ok(()) }
 //! ```
 
 use crate::error::FrameworkError;

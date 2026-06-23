@@ -7,7 +7,7 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use suprnova::{async_trait, Middleware, Next, Request, Response, HttpResponse};
 //!
 //! pub struct AuthMiddleware;
@@ -81,7 +81,7 @@ pub type BoxedMiddleware = Arc<dyn Fn(Request, Next) -> MiddlewareFuture + Send 
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::{async_trait, Middleware, Next, Request, Response, HttpResponse};
 ///
 /// pub struct LoggingMiddleware;

@@ -350,15 +350,27 @@ pub(crate) fn ensure_default_repository() {
 
 /// Builder for a queued batch. Mirrors Laravel's `PendingBatch`.
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// use suprnova::{Job, Queue};
+/// use suprnova::FrameworkError;
+///
+/// # #[derive(serde::Serialize, serde::Deserialize)]
+/// # struct MyJob { id: u64 }
+/// # #[suprnova::async_trait]
+/// # impl Job for MyJob {
+/// #     fn job_name() -> &'static str { "MyJob" }
+/// #     async fn handle(self) -> Result<(), FrameworkError> { Ok(()) }
+/// # }
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 /// let batch_id = Queue::batch()
 ///     .name("import-users")
-///     .add(MyJob { ... })
-///     .add(MyJob { ... })
+///     .add(MyJob { id: 1 })
+///     .add(MyJob { id: 2 })
 ///     .then("notify_complete")
 ///     .catch("notify_failed")
 ///     .dispatch()
 ///     .await?;
+/// # Ok(()) }
 /// ```
 pub struct PendingBatch {
     /// Human-readable batch name (surfaced in events and dashboards).

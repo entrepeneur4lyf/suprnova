@@ -7,8 +7,14 @@
 //! order matters because seeders typically have implicit dependencies
 //! (users before posts, posts before comments).
 //!
-//! ```ignore
+//! ```rust,no_run
 //! use suprnova::{async_trait, FrameworkError, Seeder};
+//! # struct UserFactory;
+//! # impl UserFactory {
+//! #     fn new() -> Self { UserFactory }
+//! #     fn count(self, _n: usize) -> Self { self }
+//! #     async fn create_many(self) -> Result<(), FrameworkError> { Ok(()) }
+//! # }
 //!
 //! pub struct UsersSeeder;
 //!
@@ -21,11 +27,13 @@
 //!     }
 //! }
 //!
+//! # async fn bootstrap() -> Result<(), Box<dyn std::error::Error>> {
 //! // In bootstrap:
 //! suprnova::seed::register::<UsersSeeder>();
 //!
 //! // Later (e.g. the `db:seed` console command):
 //! suprnova::seed::run_all().await?;
+//! # Ok(()) }
 //! ```
 //!
 //! # Registry semantics
@@ -248,8 +256,13 @@ pub fn is_registered(name: &str) -> bool {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```rust,no_run
 /// use suprnova::{seed, async_trait, FrameworkError, Seeder};
+/// # #[derive(Default)]
+/// # struct User { id: u64, name: String }
+/// # impl User {
+/// #     async fn create(_user: User) -> Result<(), FrameworkError> { Ok(()) }
+/// # }
 ///
 /// pub struct UsersSeeder;
 ///

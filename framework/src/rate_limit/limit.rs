@@ -162,8 +162,12 @@ impl Limit {
 
     /// Set the bucket key. Idiomatic shape:
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::rate_limit::Limit;
+    /// # struct User { id: u64 }
+    /// # fn ex(user: User) -> Limit {
     /// Limit::per_minute(10).by(format!("user:{}", user.id))
+    /// # }
     /// ```
     pub fn by(mut self, key: impl Into<String>) -> Self {
         self.key = key.into();

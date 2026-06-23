@@ -4,7 +4,7 @@
 //! by [`crate::workflow::store`]. Consumer apps register them in their
 //! own `Migrator`:
 //!
-//! ```ignore
+//! ```rust,no_run
 //! use suprnova::workflow::migrations::{CreateWorkflowsTable, CreateWorkflowStepsTable};
 //! use sea_orm_migration::MigratorTrait;
 //!

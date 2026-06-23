@@ -17,9 +17,12 @@ use crate::error::FrameworkError;
 /// Authentication credentials — a JSON object, typically
 /// `{"email": …, "password": …}` (Laravel's `array $credentials`).
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::Credentials;
+/// # fn ex() {
 /// let creds = Credentials::password("alice@example.com", "s3cret");
 /// let creds = Credentials::new().insert("username", "alice").insert("password", "s3cret");
+/// # }
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Credentials(pub serde_json::Map<String, serde_json::Value>);

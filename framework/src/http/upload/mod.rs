@@ -393,9 +393,13 @@ impl<V: UploadValidator> UploadedFile<V> {
     ///
     /// # Examples
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::http::upload::UploadedFile;
+    /// # async fn ex(file: UploadedFile, disk: suprnova::opendal::Operator, user_id: u64)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
     /// let path = format!("avatars/{}.{}", user_id, file.extension_from_magic());
     /// file.store_as(&disk, &path).await?;
+    /// # Ok(()) }
     /// ```
     pub fn extension_from_magic(&self) -> &'static str {
         self.inferred_extension.unwrap_or("bin")

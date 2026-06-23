@@ -4,9 +4,17 @@
 //!
 //! # Quick Start
 //!
-//! ```rust,ignore
-//! use suprnova::{Config, DB, DatabaseConfig};
-//!
+//! ```rust,no_run
+//! # use suprnova::{Config, DB, DatabaseConfig};
+//! # struct User;
+//! # impl User {
+//! #     fn find() -> Query { Query }
+//! # }
+//! # struct Query;
+//! # impl Query {
+//! #     async fn all<C>(self, _conn: &C) -> Result<Vec<String>, suprnova::FrameworkError> { Ok(vec![]) }
+//! # }
+//! # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 //! // 1. Register database config (in config/mod.rs)
 //! Config::register(DatabaseConfig::from_env());
 //!
@@ -16,6 +24,7 @@
 //! // 3. Use in controllers
 //! let conn = DB::connection()?;
 //! let users = User::find().all(conn.inner()).await?;
+//! # Ok(()) }
 //! ```
 //!
 //! # Configuration
@@ -74,9 +83,14 @@ pub use transaction::{Transaction, TxHandle};
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use suprnova::{injectable, Database};
-///
+/// ```rust,no_run
+/// # use suprnova::{injectable, Database};
+/// # struct User;
+/// # impl User { fn find() -> Query { Query } }
+/// # struct Query;
+/// # impl Query {
+/// #     async fn all<C>(self, _conn: &C) -> Result<Vec<String>, suprnova::FrameworkError> { Ok(vec![]) }
+/// # }
 /// #[injectable]
 /// pub struct CreateUserAction {
 ///     #[inject]
@@ -84,8 +98,9 @@ pub use transaction::{Transaction, TxHandle};
 /// }
 ///
 /// impl CreateUserAction {
-///     pub async fn execute(&self) {
+///     pub async fn execute(&self) -> Result<(), Box<dyn std::error::Error>> {
 ///         let users = User::find().all(self.db.conn()).await?;
+///         Ok(())
 ///     }
 /// }
 /// ```
@@ -101,15 +116,16 @@ use crate::{App, Config};
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use suprnova::{DB, DatabaseConfig, Config};
-///
+/// ```rust,no_run
+/// # use suprnova::{DB, DatabaseConfig, Config};
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 /// // Initialize (usually in bootstrap.rs)
 /// Config::register(DatabaseConfig::from_env());
 /// DB::init().await?;
 ///
 /// // Use anywhere in your app
 /// let conn = DB::connection()?;
+/// # Ok(()) }
 /// ```
 pub struct DB;
 
@@ -127,7 +143,8 @@ impl DB {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::DB;
     /// // In bootstrap.rs
     /// pub async fn register() {
     ///     DB::init().await.expect("Failed to connect to database");
@@ -157,11 +174,14 @@ impl DB {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::{DB, DatabaseConfig};
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = DatabaseConfig::builder()
     ///     .url("sqlite::memory:")
     ///     .build();
     /// DB::init_with(config).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn init_with(config: DatabaseConfig) -> Result<(), FrameworkError> {
         // Same production guard as `init`: refuse the silent SQLite
@@ -190,13 +210,22 @@ impl DB {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::DB;
+    /// # struct User;
+    /// # impl User { fn find() -> Query { Query } }
+    /// # struct Query;
+    /// # impl Query {
+    /// #     async fn all<C>(self, _conn: &C) -> Result<Vec<String>, suprnova::FrameworkError> { Ok(vec![]) }
+    /// # }
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let conn = DB::connection()?;
     ///
     /// // Use with SeaORM queries
     /// let users = User::find()
     ///     .all(conn.inner())
     ///     .await?;
+    /// # Ok(()) }
     /// ```
     pub fn connection() -> Result<DbConnection, FrameworkError> {
         App::resolve::<DbConnection>()
@@ -206,11 +235,14 @@ impl DB {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::DB;
+    /// # fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// if DB::is_connected() {
     ///     let conn = DB::connection()?;
     ///     // ...
     /// }
+    /// # Ok(()) }
     /// ```
     pub fn is_connected() -> bool {
         App::has::<DbConnection>()

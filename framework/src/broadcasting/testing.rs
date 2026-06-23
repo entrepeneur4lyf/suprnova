@@ -18,7 +18,7 @@ use tokio::sync::broadcast;
 /// subscribe / publish / presence behave exactly as in production, and
 /// additionally records every published [`BroadcastEnvelope`] for assertions.
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::broadcasting::RecordingBroadcastHub;
 ///
 /// let hub = RecordingBroadcastHub::new();

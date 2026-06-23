@@ -236,17 +236,19 @@ impl Storage {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
     /// use opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer, TracingLayer};
     /// use std::time::Duration;
     /// use suprnova::Storage;
     ///
+    /// # fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// Storage::register_fs_with("local", "./storage", |op| {
     ///     op.layer(RetryLayer::new().with_max_times(3))
     ///       .layer(TimeoutLayer::new().with_timeout(Duration::from_secs(30)))
     ///       .layer(LoggingLayer::default())
     ///       .layer(TracingLayer::new())
     /// })?;
+    /// # Ok(()) }
     /// ```
     pub fn register_fs_with(
         name: impl Into<String>,
@@ -298,7 +300,7 @@ impl Storage {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
     /// use opendal::layers::{LoggingLayer, RetryLayer};
     /// use suprnova::Storage;
     ///
@@ -351,6 +353,7 @@ impl Storage {
     /// use std::time::Duration;
     /// use suprnova::{S3Config, Storage};
     ///
+    /// # fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut registry = Registry::default();
     /// let metrics_layer = PrometheusClientLayer::new(&mut registry);
     ///
@@ -365,6 +368,7 @@ impl Storage {
     ///           .layer(metrics_layer)
     ///     },
     /// )?;
+    /// # Ok(()) }
     /// ```
     pub fn register_s3_with(
         name: impl Into<String>,

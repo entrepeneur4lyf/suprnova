@@ -180,10 +180,12 @@ fn normalize_pattern(pattern: &str) -> String {
 ///
 /// # Usage
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::{global_middleware, CsrfMiddleware};
 ///
+/// # fn ex() {
 /// global_middleware!(CsrfMiddleware::new());
+/// # }
 /// ```
 pub struct CsrfMiddleware {
     /// HTTP methods that require CSRF validation
@@ -262,7 +264,8 @@ impl CsrfMiddleware {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::CsrfMiddleware;
     /// let csrf = CsrfMiddleware::new()
     ///     .except(vec!["/webhooks/*", "/api/external/*"]);
     /// ```
@@ -285,7 +288,8 @@ impl CsrfMiddleware {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::CsrfMiddleware;
     /// let csrf = CsrfMiddleware::new()
     ///     // Stripe POST callbacks are exempt…
     ///     .except_method("POST", "/webhooks/stripe/*")
@@ -394,11 +398,14 @@ impl CsrfMiddleware {
     /// respects those overrides and an XSRF cookie that silently
     /// doesn't. Calling this at boot keeps the two in lockstep:
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::{global_middleware, CsrfMiddleware, SessionMiddleware, SessionConfig};
+    /// # fn ex() {
     /// let session_config = SessionConfig::from_env();
     /// let csrf = CsrfMiddleware::new().with_session_config(&session_config);
     /// global_middleware!(SessionMiddleware::new(session_config));
     /// global_middleware!(csrf);
+    /// # }
     /// ```
     ///
     /// The `SessionConfig::cookie_same_site` string is parsed

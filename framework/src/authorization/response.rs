@@ -24,9 +24,12 @@ use crate::FrameworkError;
 /// and is re-exported at the crate root as `GateResponse`. Import it under the
 /// Laravel spelling when you want it:
 ///
-/// ```ignore
+/// ```rust,no_run
 /// use suprnova::authorization::Response;
-///
+/// # use suprnova::Gate;
+/// # struct User { id: u64 }
+/// # struct Post { author_id: u64 }
+/// # fn ex() {
 /// Gate::define_with::<User, Post>("update", |u, p| {
 ///     if p.author_id == u.id {
 ///         Response::allow()
@@ -34,6 +37,7 @@ use crate::FrameworkError;
 ///         Response::deny_with("You do not own this post.")
 ///     }
 /// });
+/// # }
 /// ```
 ///
 /// # Serialization

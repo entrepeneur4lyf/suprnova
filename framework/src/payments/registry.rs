@@ -11,10 +11,11 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use suprnova::payments::{PaymentProviderRegistry, MockPaymentProvider};
 //! use std::sync::Arc;
 //!
+//! # let my_stripe_provider = MockPaymentProvider::new();
 //! PaymentProviderRegistry::bind("stripe", Arc::new(my_stripe_provider));
 //! let provider = PaymentProviderRegistry::get("stripe").expect("stripe not registered");
 //! ```
@@ -29,9 +30,17 @@ use std::sync::{Arc, OnceLock, RwLock};
 /// that defines the [`PaymentProvider`] implementation:
 ///
 /// ```rust,ignore
+/// # use std::sync::Arc;
+/// # use suprnova::inventory;
+/// # use suprnova::payments::{PaymentProvider, PaymentProviderEntry};
+/// # struct StripeProvider;
+/// # impl StripeProvider { fn new() -> Self { StripeProvider } }
+/// # impl PaymentProvider for StripeProvider {
+/// #     fn name(&self) -> &'static str { "stripe" }
+/// # }
 /// inventory::submit!(PaymentProviderEntry {
 ///     name: "stripe",
-///     factory: || Arc::new(StripeProvider::new()),
+///     factory: || Arc::new(StripeProvider::new()) as Arc<dyn PaymentProvider>,
 /// });
 /// ```
 pub struct PaymentProviderEntry {

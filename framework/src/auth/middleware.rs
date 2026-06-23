@@ -53,8 +53,9 @@ impl AuthMiddleware {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// AuthMiddleware::redirect_to("/login")
+    /// ```rust,no_run
+    /// # use suprnova::AuthMiddleware;
+    /// let _mw = AuthMiddleware::redirect_to("/login");
     /// ```
     pub fn redirect_to(path: impl Into<String>) -> Self {
         Self {
@@ -66,9 +67,10 @@ impl AuthMiddleware {
     /// Check a named guard instead of the default. Chainable on `new()` /
     /// `redirect_to(...)`:
     ///
-    /// ```rust,ignore
-    /// AuthMiddleware::new().for_guard("api")                  // 401 if the api guard is a guest
-    /// AuthMiddleware::redirect_to("/login").for_guard("web")  // otherwise redirect
+    /// ```rust,no_run
+    /// # use suprnova::AuthMiddleware;
+    /// let _api = AuthMiddleware::new().for_guard("api");                  // 401 if the api guard is a guest
+    /// let _web = AuthMiddleware::redirect_to("/login").for_guard("web");  // otherwise redirect
     /// ```
     ///
     /// Note: a token guard (e.g. `for_guard("api")`) expects the bearer-token

@@ -231,7 +231,7 @@ impl HttpResponse {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
     /// use suprnova::{Cookie, HttpResponse};
     ///
     /// let response = HttpResponse::text("OK")

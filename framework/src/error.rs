@@ -13,7 +13,7 @@ use thiserror::Error;
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::HttpError;
 ///
 /// #[derive(Debug)]
@@ -50,10 +50,11 @@ pub trait HttpError: std::error::Error + Send + Sync + 'static {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::{AppError, FrameworkError};
 ///
 /// pub async fn process() -> Result<(), FrameworkError> {
+///     # let invalid = false;
 ///     if invalid {
 ///         return Err(AppError::bad_request("Invalid input").into());
 ///     }
@@ -207,12 +208,16 @@ impl ValidationErrors {
     /// Designed for the tail of an `after_validation` body (and the
     /// expansion of the [`crate::validate!`] macro):
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::ValidationErrors;
+    /// # struct MyForm;
+    /// # impl MyForm {
     /// fn after_validation(&self) -> Result<(), ValidationErrors> {
     ///     let mut errs = ValidationErrors::new();
     ///     // ... accumulate via Rule::check / AsyncRule::check_async ...
     ///     errs.into_result()
     /// }
+    /// # }
     /// ```
     pub fn into_result(self) -> Result<(), Self> {
         if self.errors.is_empty() {
@@ -330,12 +335,17 @@ impl std::error::Error for ValidationErrors {}
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use suprnova::{App, FrameworkError, Response};
+/// ```rust,no_run
+/// use suprnova::{App, FrameworkError, HttpResponse, Request, Response};
 ///
+/// # #[derive(Clone)]
+/// # struct MyService;
 /// pub async fn index(_req: Request) -> Response {
-///     let service = App::resolve::<MyService>()?;  // Returns FrameworkError on failure
+///     // Resolve a service; `?` propagates a FrameworkError on failure.
+///     let _service = App::get::<MyService>()
+///         .ok_or_else(FrameworkError::service_not_found::<MyService>)?;
 ///     // ...
+///     HttpResponse::text("ok").ok()
 /// }
 /// ```
 ///
@@ -344,12 +354,14 @@ impl std::error::Error for ValidationErrors {}
 /// `FrameworkError` implements `From` for common error types, allowing seamless
 /// use of the `?` operator:
 ///
-/// ```rust,ignore
-/// use suprnova::{DB, FrameworkError};
-/// use sea_orm::ActiveModelTrait;
+/// ```rust,no_run
+/// use suprnova::{DB, DbErr, FrameworkError};
 ///
+/// # struct Todo;
+/// # async fn persist() -> Result<Todo, DbErr> { Ok(Todo) }
 /// pub async fn create_todo() -> Result<Todo, FrameworkError> {
-///     let todo = new_todo.insert(&*DB::get()?).await?;  // DbErr converts automatically!
+///     let _conn = DB::get()?;            // FrameworkError on connection failure
+///     let todo = persist().await?;       // DbErr converts automatically!
 ///     Ok(todo)
 /// }
 /// ```
@@ -564,9 +576,23 @@ impl FrameworkError {
     /// custom error through `?` without writing a one-off
     /// `From<MyError>` impl:
     ///
-    /// ```rust,ignore
-    /// use suprnova::{FrameworkError, HttpError};
+    /// ```rust,no_run
+    /// use suprnova::{FrameworkError, HttpError, HttpResponse};
     ///
+    /// # #[derive(Debug)]
+    /// # struct NotFound;
+    /// # impl std::fmt::Display for NotFound {
+    /// #     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    /// #         write!(f, "not found")
+    /// #     }
+    /// # }
+    /// # impl std::error::Error for NotFound {}
+    /// # impl HttpError for NotFound { fn status_code(&self) -> u16 { 404 } }
+    /// # struct Request;
+    /// # impl Request { fn param(&self, _name: &str) -> Result<u64, FrameworkError> { Ok(1) } }
+    /// # fn find_user(_id: u64) -> Result<suprnova::serde_json::Value, NotFound> {
+    /// #     Ok(suprnova::serde_json::json!({}))
+    /// # }
     /// pub async fn show(req: Request) -> Result<HttpResponse, FrameworkError> {
     ///     let user = find_user(req.param("id")?)
     ///         .map_err(FrameworkError::from_http_error)?;
@@ -662,7 +688,13 @@ impl FrameworkError {
     /// of that race receives and render it as the same clean 422 the
     /// advisory rule would have produced, instead of leaking a 500:
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::{DbErr, FrameworkError};
+    /// # struct NewUser;
+    /// # impl NewUser {
+    /// #     async fn insert(self, _db: &()) -> Result<String, DbErr> { Ok(String::new()) }
+    /// # }
+    /// # async fn ex(new_user: NewUser, db: &()) -> Result<(), FrameworkError> {
     /// // `users.email` has a UNIQUE constraint in the migration.
     /// let user = new_user
     ///     .insert(db)
@@ -672,6 +704,7 @@ impl FrameworkError {
     ///         "That email address is already registered.",
     ///         e,
     ///     ))?;
+    /// # Ok(()) }
     /// ```
     ///
     /// Use the advisory [`Unique`] rule for a friendly pre-submit message
@@ -764,10 +797,15 @@ impl FrameworkError {
     /// Use this when an error needs to be re-raised with operation
     /// context:
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use suprnova::{DbErr, FrameworkError};
+    /// # struct Db;
+    /// # impl Db { async fn insert(&self, _user: ()) -> Result<(), DbErr> { Ok(()) } }
+    /// # async fn ex(db: Db, user: ()) -> Result<(), FrameworkError> {
     /// db.insert(user).await
     ///     .map_err(FrameworkError::from)
     ///     .map_err(|e| e.context("creating new user"))?;
+    /// # Ok(()) }
     /// ```
     ///
     /// Variant preservation: structured response variants

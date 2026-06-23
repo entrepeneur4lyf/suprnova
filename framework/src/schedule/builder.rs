@@ -17,7 +17,9 @@ use std::time::Duration;
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::Schedule;
+/// # fn ex(schedule: &Schedule) {
 /// schedule.call(|| async {
 ///     println!("Running task!");
 ///     Ok(())
@@ -26,6 +28,7 @@ use std::time::Duration;
 /// .at("03:00")
 /// .name("daily-task")
 /// .description("Runs every day at 3 AM");
+/// # }
 /// ```
 pub struct TaskBuilder {
     pub(crate) task: BoxedTask,
@@ -72,13 +75,23 @@ impl TaskBuilder {
     /// This allows using the fluent schedule API with struct-based tasks.
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::{Schedule, Task, TaskResult};
+    /// # use async_trait::async_trait;
+    /// # struct CleanupLogsTask;
+    /// # impl CleanupLogsTask { fn new() -> Self { Self } }
+    /// # #[async_trait]
+    /// # impl Task for CleanupLogsTask {
+    /// #     async fn handle(&self) -> TaskResult { Ok(()) }
+    /// # }
+    /// # fn ex(schedule: &mut Schedule) {
     /// schedule.add(
     ///     schedule.task(CleanupLogsTask::new())
     ///         .daily()
     ///         .at("03:00")
     ///         .name("cleanup:logs")
     /// );
+    /// # }
     /// ```
     pub fn from_task<T: Task + 'static>(task: T) -> Self {
         Self {
@@ -99,8 +112,12 @@ impl TaskBuilder {
     /// Set a custom cron expression
     ///
     /// # Example
-    /// ```rust,ignore
-    /// .cron("0 */5 * * *") // Every 5 hours at minute 0
+    /// ```rust,no_run
+    /// # use suprnova::Schedule;
+    /// # fn ex(schedule: &Schedule) {
+    /// schedule.call(|| async { Ok(()) })
+    /// .cron("0 */5 * * *"); // Every 5 hours at minute 0
+    /// # }
     /// ```
     ///
     /// # Panics
@@ -172,8 +189,12 @@ impl TaskBuilder {
     /// Run every hour at a specific minute
     ///
     /// # Example
-    /// ```rust,ignore
-    /// .hourly_at(30) // Every hour at XX:30
+    /// ```rust,no_run
+    /// # use suprnova::Schedule;
+    /// # fn ex(schedule: &Schedule) {
+    /// schedule.call(|| async { Ok(()) })
+    /// .hourly_at(30); // Every hour at XX:30
+    /// # }
     /// ```
     ///
     /// # Panics
@@ -230,8 +251,12 @@ impl TaskBuilder {
     /// Run daily at a specific time
     ///
     /// # Example
-    /// ```rust,ignore
-    /// .daily_at("13:00") // Daily at 1:00 PM
+    /// ```rust,no_run
+    /// # use suprnova::Schedule;
+    /// # fn ex(schedule: &Schedule) {
+    /// schedule.call(|| async { Ok(()) })
+    /// .daily_at("13:00"); // Daily at 1:00 PM
+    /// # }
     /// ```
     ///
     /// # Panics
@@ -264,8 +289,12 @@ impl TaskBuilder {
     /// Run twice daily at specific times
     ///
     /// # Example
-    /// ```rust,ignore
-    /// .twice_daily(1, 13) // At 1:00 AM and 1:00 PM
+    /// ```rust,no_run
+    /// # use suprnova::Schedule;
+    /// # fn ex(schedule: &Schedule) {
+    /// schedule.call(|| async { Ok(()) })
+    /// .twice_daily(1, 13); // At 1:00 AM and 1:00 PM
+    /// # }
     /// ```
     ///
     /// # Panics
@@ -304,9 +333,12 @@ impl TaskBuilder {
     /// want the parse failure to surface as an error.
     ///
     /// # Example
-    /// ```rust,ignore
-    /// .daily().at("14:30") // Daily at 2:30 PM
-    /// .weekly().at("09:00") // Weekly at 9:00 AM
+    /// ```rust,no_run
+    /// # use suprnova::Schedule;
+    /// # fn ex(schedule: &Schedule) {
+    /// schedule.call(|| async { Ok(()) }).daily().at("14:30"); // Daily at 2:30 PM
+    /// schedule.call(|| async { Ok(()) }).weekly().at("09:00"); // Weekly at 9:00 AM
+    /// # }
     /// ```
     pub fn at(mut self, time: &str) -> Self {
         self.expression = self.expression.at(time);
@@ -335,8 +367,12 @@ impl TaskBuilder {
     /// Run weekly on a specific day at midnight
     ///
     /// # Example
-    /// ```rust,ignore
-    /// .weekly_on(DayOfWeek::Monday)
+    /// ```rust,no_run
+    /// # use suprnova::{Schedule, DayOfWeek};
+    /// # fn ex(schedule: &Schedule) {
+    /// schedule.call(|| async { Ok(()) })
+    /// .weekly_on(DayOfWeek::Monday);
+    /// # }
     /// ```
     pub fn weekly_on(mut self, day: DayOfWeek) -> Self {
         self.expression = CronExpression::weekly_on(day);
@@ -346,8 +382,12 @@ impl TaskBuilder {
     /// Run on specific days of the week at midnight
     ///
     /// # Example
-    /// ```rust,ignore
-    /// .days(&[DayOfWeek::Monday, DayOfWeek::Wednesday, DayOfWeek::Friday])
+    /// ```rust,no_run
+    /// # use suprnova::{Schedule, DayOfWeek};
+    /// # fn ex(schedule: &Schedule) {
+    /// schedule.call(|| async { Ok(()) })
+    /// .days(&[DayOfWeek::Monday, DayOfWeek::Wednesday, DayOfWeek::Friday]);
+    /// # }
     /// ```
     pub fn days(mut self, days: &[DayOfWeek]) -> Self {
         self.expression = CronExpression::on_days(days);
@@ -417,8 +457,12 @@ impl TaskBuilder {
     /// Run monthly on a specific day at midnight
     ///
     /// # Example
-    /// ```rust,ignore
-    /// .monthly_on(15) // On the 15th of each month
+    /// ```rust,no_run
+    /// # use suprnova::Schedule;
+    /// # fn ex(schedule: &Schedule) {
+    /// schedule.call(|| async { Ok(()) })
+    /// .monthly_on(15); // On the 15th of each month
+    /// # }
     /// ```
     ///
     /// # Panics

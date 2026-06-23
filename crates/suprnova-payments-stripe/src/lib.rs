@@ -178,7 +178,7 @@ impl StripeProvider {
     /// A negative value would reject every payload — clamped to zero so the
     /// minimum behaviour is "exact-timestamp match" rather than always-fail.
     ///
-    /// ```ignore
+    /// ```rust,no_run
     /// use suprnova_payments_stripe::StripeProvider;
     /// let provider = StripeProvider::new("sk_test", "pk_test", "whsec_test")
     ///     .with_signature_tolerance(60);

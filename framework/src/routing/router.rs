@@ -1236,14 +1236,22 @@ impl Router {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
     /// use std::time::Duration;
     /// use suprnova::ws::WsConfig;
-    ///
+    /// # use suprnova::{async_trait, Router, Request, FrameworkError};
+    /// # use suprnova::ws::{WebSocketHandler, WsSocket};
+    /// # struct ChatHandler;
+    /// # #[async_trait]
+    /// # impl WebSocketHandler for ChatHandler {
+    /// #     async fn handle(&self, _socket: WsSocket, _request: Request) -> Result<(), FrameworkError> {
+    /// #         Ok(())
+    /// #     }
+    /// # }
     /// Router::new().ws_with_config("/ws/chat", ChatHandler, WsConfig {
     ///     ping_interval: Duration::from_secs(5),
     ///     ..Default::default()
-    /// })
+    /// });
     /// ```
     ///
     /// [`WsConfig`]: crate::ws::WsConfig
@@ -1643,10 +1651,23 @@ impl RouteBuilder {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::{async_trait, Router, Middleware, Next, Request, Response, HttpResponse};
+    /// # async fn admin_handler(_req: Request) -> Response { Ok(HttpResponse::text("ok")) }
+    /// # async fn users_handler(_req: Request) -> Response { Ok(HttpResponse::text("ok")) }
+    /// # struct AuthMiddleware;
+    /// # struct CorsMiddleware;
+    /// # #[async_trait]
+    /// # impl Middleware for AuthMiddleware {
+    /// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+    /// # }
+    /// # #[async_trait]
+    /// # impl Middleware for CorsMiddleware {
+    /// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+    /// # }
     /// Router::new()
     ///     .get("/admin", admin_handler).middleware(AuthMiddleware)
-    ///     .get("/api/users", users_handler).middleware(CorsMiddleware)
+    ///     .get("/api/users", users_handler).middleware(CorsMiddleware);
     /// ```
     pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> RouteBuilder {
         let method = self.last_method.clone();

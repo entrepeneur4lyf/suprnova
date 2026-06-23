@@ -27,10 +27,11 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use std::time::Duration;
 //! use suprnova::features;
 //!
+//! # async fn ex() {
 //! // Inside main / boot after DB::init has run:
 //! let features = features::bootstrap_database_cached(Duration::from_secs(60))
 //!     .await
@@ -40,6 +41,7 @@
 //! // reloads or expose admin diff views. Most apps drop the handle
 //! // and let `notify`-driven refresh do the work.
 //! drop(features);
+//! # }
 //! ```
 
 use crate::container::App;

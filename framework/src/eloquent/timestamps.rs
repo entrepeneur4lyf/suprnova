@@ -51,14 +51,22 @@ pub fn touches_disabled() -> bool {
 /// `tokio::spawn` boundaries and concurrent requests on other tasks
 /// continue to honour their own scope (or its absence).
 ///
-/// ```ignore
-/// use suprnova::eloquent::without_touching;
-///
+/// ```rust,no_run
+/// use suprnova::eloquent::{without_touching, Touchable};
+/// # struct Post;
+/// # #[suprnova::async_trait]
+/// # impl Touchable for Post {
+/// #     async fn touch(&self) -> Result<(), suprnova::FrameworkError> { Ok(()) }
+/// # }
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+/// # let post = Post;
 /// without_touching(async {
 ///     // Inside this scope, `post.touch().await` is a no-op even
 ///     // though the touchable impl is wired through.
 ///     post.touch().await?;
-/// }).await;
+///     Ok::<(), suprnova::FrameworkError>(())
+/// }).await?;
+/// # Ok(()) }
 /// ```
 pub async fn without_touching<F, T>(fut: F) -> T
 where

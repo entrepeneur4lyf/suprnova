@@ -48,7 +48,10 @@ impl<T: Debug + PartialEq> Expect<T> {
     /// Assert that the value equals the expected value
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::expect;
+    /// # let actual = 3;
+    /// # let expected = 3;
     /// expect!(actual).to_equal(expected);
     /// ```
     pub fn to_equal(&self, expected: T) {
@@ -65,7 +68,10 @@ impl<T: Debug + PartialEq> Expect<T> {
     /// Assert that the value does not equal the unexpected value
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::expect;
+    /// # let actual = 3;
+    /// # let unexpected = 4;
     /// expect!(actual).to_not_equal(unexpected);
     /// ```
     pub fn to_not_equal(&self, unexpected: T) {
@@ -85,7 +91,9 @@ impl Expect<bool> {
     /// Assert that the value is true
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::expect;
+    /// # let condition = true;
     /// expect!(condition).to_be_true();
     /// ```
     pub fn to_be_true(&self) {
@@ -100,7 +108,9 @@ impl Expect<bool> {
     /// Assert that the value is false
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::expect;
+    /// # let condition = false;
     /// expect!(condition).to_be_false();
     /// ```
     pub fn to_be_false(&self) {
@@ -118,7 +128,9 @@ impl<T: Debug> Expect<Option<T>> {
     /// Assert that the Option is Some
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::expect;
+    /// # let option: Option<i32> = Some(5);
     /// expect!(option).to_be_some();
     /// ```
     pub fn to_be_some(&self) {
@@ -133,7 +145,9 @@ impl<T: Debug> Expect<Option<T>> {
     /// Assert that the Option is None
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::expect;
+    /// # let option: Option<i32> = None;
     /// expect!(option).to_be_none();
     /// ```
     pub fn to_be_none(&self) {
@@ -152,7 +166,8 @@ impl<T: Debug + PartialEq> Expect<Option<T>> {
     /// Assert that the Option contains the expected value
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::expect;
     /// expect!(Some(5)).to_contain_value(5);
     /// ```
     pub fn to_contain_value(&self, expected: T) {
@@ -182,7 +197,9 @@ impl<T: Debug, E: Debug> Expect<Result<T, E>> {
     /// Assert that the Result is Ok
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::expect;
+    /// # let result: Result<i32, String> = Ok(5);
     /// expect!(result).to_be_ok();
     /// ```
     pub fn to_be_ok(&self) {
@@ -198,7 +215,9 @@ impl<T: Debug, E: Debug> Expect<Result<T, E>> {
     /// Assert that the Result is Err
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::expect;
+    /// # let result: Result<i32, String> = Err("boom".to_string());
     /// expect!(result).to_be_err();
     /// ```
     pub fn to_be_err(&self) {
@@ -217,7 +236,9 @@ impl Expect<String> {
     /// Assert that the string contains the substring
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::expect;
+    /// # let string = String::from("hello world");
     /// expect!(string).to_contain("hello");
     /// ```
     pub fn to_contain(&self, substring: &str) {
@@ -234,7 +255,9 @@ impl Expect<String> {
     /// Assert that the string starts with the prefix
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::expect;
+    /// # let string = String::from("hello world");
     /// expect!(string).to_start_with("hello");
     /// ```
     pub fn to_start_with(&self, prefix: &str) {
@@ -251,7 +274,9 @@ impl Expect<String> {
     /// Assert that the string ends with the suffix
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::expect;
+    /// # let string = String::from("hello world");
     /// expect!(string).to_end_with("world");
     /// ```
     pub fn to_end_with(&self, suffix: &str) {
@@ -268,7 +293,9 @@ impl Expect<String> {
     /// Assert that the string has the expected length
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::expect;
+    /// # let string = String::from("hello");
     /// expect!(string).to_have_length(5);
     /// ```
     pub fn to_have_length(&self, expected: usize) {
@@ -288,7 +315,9 @@ impl Expect<String> {
     /// Assert that the string is empty
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::expect;
+    /// # let string = String::new();
     /// expect!(string).to_be_empty();
     /// ```
     pub fn to_be_empty(&self) {
@@ -372,7 +401,9 @@ impl<T: Debug + PartialEq> Expect<Vec<T>> {
     /// Assert that the Vec has the expected length
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::expect;
+    /// # let vec = vec![1, 2, 3];
     /// expect!(vec).to_have_length(3);
     /// ```
     pub fn to_have_length(&self, expected: usize) {
@@ -391,7 +422,10 @@ impl<T: Debug + PartialEq> Expect<Vec<T>> {
     /// Assert that the Vec contains the item
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::expect;
+    /// # let vec = vec![1, 2, 3];
+    /// # let item = 2;
     /// expect!(vec).to_contain(&item);
     /// ```
     pub fn to_contain(&self, item: &T) {
@@ -408,7 +442,9 @@ impl<T: Debug + PartialEq> Expect<Vec<T>> {
     /// Assert that the Vec is empty
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::expect;
+    /// # let vec: Vec<i32> = Vec::new();
     /// expect!(vec).to_be_empty();
     /// ```
     pub fn to_be_empty(&self) {
@@ -427,7 +463,8 @@ impl<T: Debug + PartialOrd> Expect<T> {
     /// Assert that the value is greater than the expected value
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::expect;
     /// expect!(10).to_be_greater_than(5);
     /// ```
     pub fn to_be_greater_than(&self, expected: T) {
@@ -444,7 +481,8 @@ impl<T: Debug + PartialOrd> Expect<T> {
     /// Assert that the value is less than the expected value
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::expect;
     /// expect!(5).to_be_less_than(10);
     /// ```
     pub fn to_be_less_than(&self, expected: T) {
@@ -461,7 +499,8 @@ impl<T: Debug + PartialOrd> Expect<T> {
     /// Assert that the value is greater than or equal to the expected value
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::expect;
     /// expect!(10).to_be_greater_than_or_equal(10);
     /// ```
     pub fn to_be_greater_than_or_equal(&self, expected: T) {
@@ -478,7 +517,8 @@ impl<T: Debug + PartialOrd> Expect<T> {
     /// Assert that the value is less than or equal to the expected value
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::expect;
     /// expect!(5).to_be_less_than_or_equal(5);
     /// ```
     pub fn to_be_less_than_or_equal(&self, expected: T) {

@@ -7,15 +7,20 @@
 //! Weaviate / Milvus / LanceDB / pgvector / LibSQL queue up behind
 //! real consumer demand.
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use suprnova::Vector;
+//! # use suprnova::vector::VectorItem;
 //!
+//! # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+//! # let embedding: Vec<f32> = vec![0.0; 8];
+//! # let query_embedding: Vec<f32> = vec![0.0; 8];
 //! let store = Vector::store("documents")?;
 //! store.upsert(vec![
 //!     VectorItem::new("doc-1", embedding, serde_json::json!({ "title": "Hello" })),
 //! ]).await?;
 //!
 //! let hits = store.similar(query_embedding, 10).await?;
+//! # Ok(()) }
 //! ```
 //!
 //! ## Configuration

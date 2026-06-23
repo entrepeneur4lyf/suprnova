@@ -46,7 +46,12 @@ use validator::Validate;
 ///
 /// Override `authorize()` to add authorization logic:
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::{FormRequest, Request};
+/// # use serde::Deserialize;
+/// # use validator::Validate;
+/// # #[derive(Deserialize, Validate)]
+/// # struct CreateUserRequest { email: String }
 /// impl FormRequest for CreateUserRequest {
 ///     fn authorize(_req: &Request) -> bool {
 ///         // Check if user is authenticated
@@ -82,7 +87,12 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::{FormRequest, ValidationErrors};
+    /// # use serde::Deserialize;
+    /// # use validator::Validate;
+    /// # #[derive(Deserialize, Validate)]
+    /// # struct UpdatePasswordRequest { new_password: String, confirmation: String }
     /// impl FormRequest for UpdatePasswordRequest {
     ///     fn after_validation(&self) -> Result<(), ValidationErrors> {
     ///         if self.new_password != self.confirmation {
@@ -109,7 +119,13 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
     /// method as the final validation stage, so overriding it is all an
     /// app needs:
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::{FormRequest, ValidationErrors, Unique, AsyncRule};
+    /// # use serde::Deserialize;
+    /// # use validator::Validate;
+    /// # use async_trait::async_trait;
+    /// # #[derive(Deserialize, Validate)]
+    /// # struct CreateUserRequest { email: String }
     /// #[async_trait]
     /// impl FormRequest for CreateUserRequest {
     ///     async fn after_validation_async(&self) -> Result<(), ValidationErrors> {
@@ -154,7 +170,12 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
     /// Override this for endpoints that accept legitimately large JSON
     /// payloads (analytics ingest, bulk import, etc.):
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::FormRequest;
+    /// # use serde::Deserialize;
+    /// # use validator::Validate;
+    /// # #[derive(Deserialize, Validate)]
+    /// # struct ImportPayload { rows: Vec<String> }
     /// impl FormRequest for ImportPayload {
     ///     fn max_body_bytes() -> usize { 64 * 1024 * 1024 } // 64 MiB
     /// }

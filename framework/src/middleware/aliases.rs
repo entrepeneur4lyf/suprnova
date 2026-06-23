@@ -78,8 +78,14 @@ fn priority_lock() -> &'static RwLock<Vec<TypeId>> {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::middleware::register_middleware_alias;
+/// # use suprnova::{async_trait, Middleware, Next, Request, Response};
+/// # struct AuthMiddleware;
+/// # #[async_trait]
+/// # impl Middleware for AuthMiddleware {
+/// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+/// # }
 ///
 /// register_middleware_alias("auth", || AuthMiddleware);
 /// ```

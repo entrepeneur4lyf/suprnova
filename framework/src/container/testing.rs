@@ -21,37 +21,45 @@
 //!
 //! # Example — thread-local
 //!
-//! ```rust,ignore
-//! use suprnova::testing::{TestContainer, TestContainerGuard};
+//! ```rust,no_run
+//! # use std::sync::Arc;
+//! # use suprnova::App;
+//! # use suprnova::testing::{TestContainer, TestContainerGuard};
+//! # trait HttpClient: Send + Sync {}
+//! # struct FakeHttpClient;
+//! # impl FakeHttpClient { fn new() -> Self { FakeHttpClient } }
+//! # impl HttpClient for FakeHttpClient {}
+//! # fn ex() {
+//! // Set up test container - automatically cleared when guard is dropped
+//! let _guard: TestContainerGuard = TestContainer::fake();
 //!
-//! #[tokio::test]
-//! async fn test_with_fake_service() {
-//!     // Set up test container - automatically cleared when guard is dropped
-//!     let _guard = TestContainer::fake();
+//! // Register fake implementations
+//! TestContainer::bind::<dyn HttpClient>(Arc::new(FakeHttpClient::new()));
 //!
-//!     // Register fake implementations
-//!     TestContainer::bind::<dyn HttpClient>(Arc::new(FakeHttpClient::new()));
-//!
-//!     // App::make() will now return the fake
-//!     let client: Arc<dyn HttpClient> = App::make::<dyn HttpClient>().unwrap();
-//! }
+//! // App::make() will now return the fake
+//! let client: Arc<dyn HttpClient> = App::make::<dyn HttpClient>().unwrap();
+//! # }
 //! ```
 //!
 //! # Example — task-local (multi-thread runtime)
 //!
-//! ```rust,ignore
-//! use suprnova::testing::TestContainer;
-//!
-//! #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-//! async fn test_async_safe() {
-//!     TestContainer::scope(async {
-//!         TestContainer::bind::<dyn HttpClient>(Arc::new(FakeHttpClient::new()));
-//!         // App::make() inside this future sees the fake even after
-//!         // awaits that hop between worker threads.
-//!         do_async_work().await;
-//!     })
-//!     .await;
-//! }
+//! ```rust,no_run
+//! # use std::sync::Arc;
+//! # use suprnova::testing::TestContainer;
+//! # trait HttpClient: Send + Sync {}
+//! # struct FakeHttpClient;
+//! # impl FakeHttpClient { fn new() -> Self { FakeHttpClient } }
+//! # impl HttpClient for FakeHttpClient {}
+//! # async fn do_async_work() {}
+//! # async fn ex() {
+//! TestContainer::scope(async {
+//!     TestContainer::bind::<dyn HttpClient>(Arc::new(FakeHttpClient::new()));
+//!     // App::make() inside this future sees the fake even after
+//!     // awaits that hop between worker threads.
+//!     do_async_work().await;
+//! })
+//! .await;
+//! # }
 //! ```
 
 use super::{Container, TASK_CONTAINER, TEST_CONTAINER};
@@ -86,12 +94,12 @@ impl TestContainer {
     /// This ensures test isolation - each test gets a fresh container.
     ///
     /// # Example
-    /// ```rust,ignore
-    /// #[tokio::test]
-    /// async fn my_test() {
-    ///     let _guard = TestContainer::fake();
-    ///     // Register fakes...
-    /// } // Container automatically cleared here
+    /// ```rust,no_run
+    /// # use suprnova::testing::TestContainer;
+    /// # fn my_test() {
+    /// let _guard = TestContainer::fake();
+    /// // Register fakes...
+    /// # } // Container automatically cleared here
     /// ```
     pub fn fake() -> TestContainerGuard {
         TEST_CONTAINER.with(|c| {
@@ -123,21 +131,28 @@ impl TestContainer {
     /// to read the fakes via `App::make` / `App::resolve`.
     ///
     /// # Example
-    /// ```rust,ignore
-    /// #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    /// async fn test_async_safe() {
-    ///     TestContainer::scope(async {
-    ///         TestContainer::bind::<dyn HttpClient>(Arc::new(FakeHttpClient::new()));
-    ///         do_async_work().await;  // sees the fake across worker hops
-    ///         TestContainer::spawn(async {
-    ///             // also sees the fake — task-local was captured and re-installed
-    ///             let client = App::make::<dyn HttpClient>().unwrap();
-    ///         })
-    ///         .await
-    ///         .unwrap();
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use suprnova::App;
+    /// # use suprnova::testing::TestContainer;
+    /// # trait HttpClient: Send + Sync {}
+    /// # struct FakeHttpClient;
+    /// # impl FakeHttpClient { fn new() -> Self { FakeHttpClient } }
+    /// # impl HttpClient for FakeHttpClient {}
+    /// # async fn do_async_work() {}
+    /// # async fn ex() {
+    /// TestContainer::scope(async {
+    ///     TestContainer::bind::<dyn HttpClient>(Arc::new(FakeHttpClient::new()));
+    ///     do_async_work().await;  // sees the fake across worker hops
+    ///     TestContainer::spawn(async {
+    ///         // also sees the fake — task-local was captured and re-installed
+    ///         let client = App::make::<dyn HttpClient>().unwrap();
     ///     })
-    ///     .await;
-    /// }
+    ///     .await
+    ///     .unwrap();
+    /// })
+    /// .await;
+    /// # }
     /// ```
     pub async fn scope<Fut: Future>(future: Fut) -> Fut::Output {
         let container = Arc::new(RwLock::new(Container::new()));
@@ -162,7 +177,15 @@ impl TestContainer {
     /// unchanged.
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use suprnova::App;
+    /// # use suprnova::testing::TestContainer;
+    /// # trait HttpClient: Send + Sync {}
+    /// # struct FakeHttpClient;
+    /// # impl FakeHttpClient { fn new() -> Self { FakeHttpClient } }
+    /// # impl HttpClient for FakeHttpClient {}
+    /// # async fn ex() {
     /// TestContainer::scope(async {
     ///     TestContainer::bind::<dyn HttpClient>(Arc::new(FakeHttpClient::new()));
     ///     let h = TestContainer::spawn(async {
@@ -172,6 +195,7 @@ impl TestContainer {
     ///     let _client = h.await.unwrap();
     /// })
     /// .await;
+    /// # }
     /// ```
     pub fn spawn<Fut>(future: Fut) -> JoinHandle<Fut::Output>
     where
@@ -195,7 +219,10 @@ impl TestContainer {
     /// Outside either scope this is a no-op.
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::testing::TestContainer;
+    /// # struct FakeDatabase;
+    /// # impl FakeDatabase { fn new() -> Self { FakeDatabase } }
     /// TestContainer::singleton(FakeDatabase::new());
     /// ```
     pub fn singleton<T: Any + Send + Sync + 'static>(instance: T) {
@@ -222,7 +249,10 @@ impl TestContainer {
     /// the precedence rules.
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::testing::TestContainer;
+    /// # struct FakeLogger;
+    /// # impl FakeLogger { fn new() -> Self { FakeLogger } }
     /// TestContainer::factory(|| FakeLogger::new());
     /// ```
     pub fn factory<T, F>(factory: F)
@@ -250,7 +280,13 @@ impl TestContainer {
     /// the precedence rules.
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use suprnova::testing::TestContainer;
+    /// # trait HttpClient: Send + Sync {}
+    /// # struct FakeHttpClient;
+    /// # impl FakeHttpClient { fn new() -> Self { FakeHttpClient } }
+    /// # impl HttpClient for FakeHttpClient {}
     /// TestContainer::bind::<dyn HttpClient>(Arc::new(FakeHttpClient::new()));
     /// ```
     pub fn bind<T: ?Sized + Send + Sync + 'static>(instance: Arc<T>) {
@@ -274,8 +310,14 @@ impl TestContainer {
     /// the precedence rules.
     ///
     /// # Example
-    /// ```rust,ignore
-    /// TestContainer::bind_factory::<dyn HttpClient>(|| Arc::new(FakeHttpClient::new()));
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use suprnova::testing::TestContainer;
+    /// # trait HttpClient: Send + Sync {}
+    /// # struct FakeHttpClient;
+    /// # impl FakeHttpClient { fn new() -> Self { FakeHttpClient } }
+    /// # impl HttpClient for FakeHttpClient {}
+    /// TestContainer::bind_factory::<dyn HttpClient, _>(|| Arc::new(FakeHttpClient::new()));
     /// ```
     pub fn bind_factory<T: ?Sized + Send + Sync + 'static, F>(factory: F)
     where

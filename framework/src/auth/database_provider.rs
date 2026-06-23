@@ -5,9 +5,13 @@
 //! macro — point it at a table and it works, so the common case needs no
 //! hand-written [`UserProvider`].
 //!
-//! ```rust,ignore
+//! ```rust,no_run
+//! # use std::sync::Arc;
+//! # use suprnova::{Auth, DatabaseUserProvider};
+//! # fn ex() -> Result<(), Box<dyn std::error::Error>> {
 //! // In bootstrap.rs:
 //! Auth::register_provider("users", Arc::new(DatabaseUserProvider::new("users")))?;
+//! # Ok(()) }
 //! ```
 
 use std::sync::Arc;

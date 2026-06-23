@@ -1,6 +1,6 @@
 //! Typed in-process pub/sub.
 //!
-//! ```ignore
+//! ```rust,no_run
 //! use suprnova::{Event, EventFacade, Listener, FrameworkError};
 //! use std::sync::Arc;
 //!
@@ -21,11 +21,13 @@
 //!     }
 //! }
 //!
+//! # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 //! // In bootstrap.rs:
-//! EventFacade::listen::<UserRegistered>(Arc::new(SendWelcomeEmail)).await;
+//! EventFacade::listen::<UserRegistered, _>(Arc::new(SendWelcomeEmail)).await;
 //!
 //! // In a controller:
 //! EventFacade::dispatch(UserRegistered { user_id: 42 }).await?;
+//! # Ok(()) }
 //! ```
 
 mod builtins;
@@ -81,9 +83,24 @@ pub trait Listener<E: Event>: Send + Sync + 'static {
 /// single struct implements `Subscriber` and registers them all from its
 /// `subscribe` method.
 ///
-/// ```ignore
+/// ```rust,no_run
 /// use suprnova::{EventFacade, Subscriber, EventDispatcher};
 /// use std::sync::Arc;
+/// # use suprnova::{Event, Listener, FrameworkError};
+/// # #[derive(Debug, Clone)] struct UserRegistered;
+/// # impl Event for UserRegistered { fn event_name() -> &'static str { "UserRegistered" } }
+/// # #[derive(Debug, Clone)] struct UserDeleted;
+/// # impl Event for UserDeleted { fn event_name() -> &'static str { "UserDeleted" } }
+/// # struct SendWelcomeEmail;
+/// # #[suprnova::async_trait]
+/// # impl Listener<UserRegistered> for SendWelcomeEmail {
+/// #     async fn handle(&self, _e: &UserRegistered) -> Result<(), FrameworkError> { Ok(()) }
+/// # }
+/// # struct CleanupUserData;
+/// # #[suprnova::async_trait]
+/// # impl Listener<UserDeleted> for CleanupUserData {
+/// #     async fn handle(&self, _e: &UserDeleted) -> Result<(), FrameworkError> { Ok(()) }
+/// # }
 ///
 /// pub struct UserEventSubscriber;
 ///
@@ -95,8 +112,10 @@ pub trait Listener<E: Event>: Send + Sync + 'static {
 ///     }
 /// }
 ///
+/// # async fn ex() {
 /// // In bootstrap.rs:
 /// EventFacade::subscribe(Arc::new(UserEventSubscriber)).await;
+/// # }
 /// ```
 #[async_trait]
 pub trait Subscriber: Send + Sync + 'static {

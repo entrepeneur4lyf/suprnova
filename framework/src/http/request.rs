@@ -202,11 +202,14 @@ impl Request {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::http::Request;
+    /// # fn ex(req: &Request) {
     /// let cookies = req.cookies();
     /// if let Some(session) = cookies.get("session") {
     ///     println!("Session: {}", session);
     /// }
+    /// # }
     /// ```
     pub fn cookies(&self) -> HashMap<String, String> {
         self.header("Cookie").map(parse_cookies).unwrap_or_default()
@@ -216,10 +219,13 @@ impl Request {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::http::Request;
+    /// # fn ex(req: &Request) {
     /// if let Some(session_id) = req.cookie("session") {
     ///     // Use session_id
     /// }
+    /// # }
     /// ```
     pub fn cookie(&self, name: &str) -> Option<String> {
         self.cookies().get(name).cloned()
@@ -987,13 +993,16 @@ impl Request {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::{Request, Response, HttpResponse};
+    /// # use serde::Deserialize;
     /// #[derive(Deserialize)]
     /// struct CreateUser { name: String, email: String }
     ///
     /// pub async fn store(req: Request) -> Response {
     ///     let data: CreateUser = req.json().await?;
     ///     // ...
+    /// #   Ok(HttpResponse::text(data.name))
     /// }
     /// ```
     pub async fn json<T: DeserializeOwned>(self) -> Result<T, FrameworkError> {
@@ -1007,13 +1016,16 @@ impl Request {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::{Request, Response, HttpResponse};
+    /// # use serde::Deserialize;
     /// #[derive(Deserialize)]
     /// struct LoginForm { username: String, password: String }
     ///
     /// pub async fn login(req: Request) -> Response {
     ///     let form: LoginForm = req.form().await?;
     ///     // ...
+    /// #   Ok(HttpResponse::text(form.username))
     /// }
     /// ```
     pub async fn form<T: DeserializeOwned>(self) -> Result<T, FrameworkError> {

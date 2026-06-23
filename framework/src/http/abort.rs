@@ -7,13 +7,13 @@
 //! standard `{ message, request_id }` JSON envelope at the right
 //! status code. Use these helpers with the `?` operator:
 //!
-//! ```rust,ignore
-//! use suprnova::{abort_if, Request, Response};
+//! ```rust,no_run
+//! use suprnova::{abort_if, json_response, Request, Response};
 //!
 //! pub async fn show(req: Request) -> Response {
 //!     abort_if(req.param("id")? == "0", 404, "User not found")?;
 //!     // ... handler continues only when condition is false ...
-//!     Ok(json_response!({ "id": 1 }))
+//!     json_response!({ "id": 1 })
 //! }
 //! ```
 
@@ -22,8 +22,11 @@ use crate::error::FrameworkError;
 /// Return an error at the given status. Mirrors Laravel's
 /// `abort($code, $message)`. Use with `?`:
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::abort_with as abort;
+/// # fn ex() -> Result<(), Box<dyn std::error::Error>> {
 /// abort(404, "User not found")?;
+/// # Ok(()) }
 /// ```
 ///
 /// `status` must be a real HTTP status code (100..=599). Values out of

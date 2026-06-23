@@ -32,11 +32,14 @@
 //! [`ResourceRoutes`] (returned by [`Router::resource`]) supports the
 //! Laravel-shaped chain:
 //!
-//! ```rust,ignore
+//! ```rust,no_run
+//! # use suprnova::routing::{Router, ResourceController, ResourceAction};
+//! # struct PostsCtl;
+//! # impl ResourceController for PostsCtl {}
 //! Router::new().resource("posts", PostsCtl)
 //!     .only(&[ResourceAction::Index, ResourceAction::Show])
-//!     .names(&[("index", "posts.list")])
-//!     .parameters(&[("posts", "post_id")])
+//!     .names([("index", "posts.list")])
+//!     .parameter("post_id");
 //! ```
 //!
 //! - [`ResourceRoutes::only`] restricts the generated set to a list.
@@ -434,6 +437,10 @@ impl ResourceRoutes {
     ///     .authorize_resource::<User, Post>()
     ///     .into();
     /// ```
+    ///
+    /// (Kept `ignore`: `authorize_resource::<U, R>` requires a `U:
+    /// Authenticatable` user model and a gate-keyed `R` resource type
+    /// that only a full application crate provides.)
     pub fn authorize_resource<U, R>(mut self) -> Self
     where
         U: Authenticatable + Clone + 'static,
@@ -662,11 +669,20 @@ impl Router {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use std::future::Future;
+    /// # use std::pin::Pin;
+    /// use suprnova::routing::{Router, ResourceController, ResourceAction};
+    /// use suprnova::http::{Request, Response, text};
+    ///
     /// struct PostsCtl;
     /// impl ResourceController for PostsCtl {
-    ///     fn index(&self, _req: Request) -> _ { Box::pin(async { Ok(text("...")) }) }
-    ///     fn show(&self, _req: Request) -> _ { Box::pin(async { Ok(text("...")) }) }
+    ///     fn index(&self, _req: Request) -> Pin<Box<dyn Future<Output = Response> + Send>> {
+    ///         Box::pin(async { text("...") })
+    ///     }
+    ///     fn show(&self, _req: Request) -> Pin<Box<dyn Future<Output = Response> + Send>> {
+    ///         Box::pin(async { text("...") })
+    ///     }
     /// }
     ///
     /// let router: Router = Router::new()

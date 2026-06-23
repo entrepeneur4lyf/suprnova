@@ -8,8 +8,8 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
-//! use async_trait::async_trait;
+//! ```rust,no_run
+//! use suprnova::async_trait;
 //! use suprnova::{FrameworkError, http::Request, ws::{WebSocketHandler, WsSocket}};
 //!
 //! pub struct EchoHandler;
@@ -123,7 +123,7 @@ pub struct WsConfig {
     /// Compare case-insensitively on protocol tokens; protocol names are
     /// ASCII per the RFC.
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
     /// use suprnova::ws::WsConfig;
     /// let cfg = WsConfig {
     ///     accepted_protocols: vec!["graphql-transport-ws".into(), "graphql-ws".into()],
@@ -210,7 +210,7 @@ impl WsConfig {
     /// reserves a buffer sized to `max_message_size`, and these
     /// limits multiply across concurrent sockets.
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
     /// use suprnova::ws::WsConfig;
     /// let cfg = WsConfig::generous();
     /// assert_eq!(cfg.max_message_size, 64 * 1024 * 1024);

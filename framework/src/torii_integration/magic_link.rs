@@ -17,9 +17,9 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
-//! use suprnova::Auth;
-//!
+//! ```rust,no_run
+//! # use suprnova::Auth;
+//! # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 //! // Generate a magic-link token. The framework does NOT email it for you.
 //! let token = Auth::magic_link()
 //!     .send("alice@example.com", "http://localhost:8000/auth/magic")
@@ -29,6 +29,7 @@
 //!
 //! // Once the user clicks the link, exchange the token for a (User, Session):
 //! let (user, session) = Auth::magic_link().consume(&token).await?;
+//! # Ok(()) }
 //! ```
 
 use super::{Session, User, instance};

@@ -25,7 +25,7 @@ use subtle::ConstantTimeEq;
 /// 32 bytes) this is a structural reject, not a timing oracle for a
 /// same-length attacker.
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::payments::constant_time_eq;
 ///
 /// fn verify_sig(computed: &[u8], header: &[u8]) -> bool {

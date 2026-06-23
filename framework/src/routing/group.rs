@@ -13,12 +13,24 @@ use std::sync::Arc;
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::routing::Router;
+/// # use suprnova::http::{Request, Response, text};
+/// # use suprnova::middleware::{Middleware, Next};
+/// # use suprnova::async_trait;
+/// # async fn list_users(_req: Request) -> Response { text("ok") }
+/// # async fn create_user(_req: Request) -> Response { text("ok") }
+/// # #[derive(Clone)]
+/// # struct ApiMiddleware;
+/// # #[async_trait]
+/// # impl Middleware for ApiMiddleware {
+/// #     async fn handle(&self, req: Request, next: Next) -> Response { next(req).await }
+/// # }
 /// Router::new()
 ///     .group("/api", |r| {
 ///         r.get("/users", list_users)
 ///          .post("/users", create_user)
-///     }).middleware(ApiMiddleware)
+///     }).middleware(ApiMiddleware);
 /// ```
 pub struct GroupBuilder {
     /// The outer router we're building into
@@ -54,10 +66,21 @@ impl GroupBuilder {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::routing::Router;
+    /// # use suprnova::http::{Request, Response, text};
+    /// # use suprnova::middleware::{Middleware, Next};
+    /// # use suprnova::async_trait;
+    /// # async fn handler(_req: Request) -> Response { text("ok") }
+    /// # #[derive(Clone)]
+    /// # struct ApiMiddleware;
+    /// # #[async_trait]
+    /// # impl Middleware for ApiMiddleware {
+    /// #     async fn handle(&self, req: Request, next: Next) -> Response { next(req).await }
+    /// # }
     /// Router::new()
     ///     .group("/api", |r| r.get("/users", handler))
-    ///     .middleware(ApiMiddleware)
+    ///     .middleware(ApiMiddleware);
     /// ```
     pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
         self.middleware.push(into_boxed(middleware));
@@ -410,14 +433,27 @@ impl Router {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::routing::Router;
+    /// # use suprnova::http::{Request, Response, text};
+    /// # use suprnova::middleware::{Middleware, Next};
+    /// # use suprnova::async_trait;
+    /// # async fn list_users(_req: Request) -> Response { text("ok") }
+    /// # async fn create_user(_req: Request) -> Response { text("ok") }
+    /// # async fn show_user(_req: Request) -> Response { text("ok") }
+    /// # #[derive(Clone)]
+    /// # struct ApiMiddleware;
+    /// # #[async_trait]
+    /// # impl Middleware for ApiMiddleware {
+    /// #     async fn handle(&self, req: Request, next: Next) -> Response { next(req).await }
+    /// # }
     /// Router::new()
     ///     .group("/api", |r| {
     ///         r.get("/users", list_users)      // -> GET /api/users
     ///          .post("/users", create_user)    // -> POST /api/users
     ///          .get("/users/{id}", show_user)  // -> GET /api/users/{id}
     ///     })
-    ///     .middleware(ApiMiddleware)
+    ///     .middleware(ApiMiddleware);
     /// ```
     pub fn group<F>(self, prefix: &str, builder_fn: F) -> GroupBuilder
     where

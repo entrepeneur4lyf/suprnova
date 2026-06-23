@@ -47,9 +47,10 @@ pub enum UrlSource {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::{Config, DatabaseConfig};
 ///
+/// # fn ex() {
 /// // Register from environment
 /// Config::register(DatabaseConfig::from_env());
 ///
@@ -58,6 +59,7 @@ pub enum UrlSource {
 ///     .url("postgres://localhost/mydb")
 ///     .max_connections(20)
 ///     .build());
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct DatabaseConfig {

@@ -7,11 +7,12 @@
 //! redirected with the `use_*_path` setters for tests or non-standard
 //! deployments.
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use suprnova::storage_path;
-//!
+//! # fn ex() {
 //! let down = storage_path("framework/down"); // <base>/storage/framework/down
 //! let dir = storage_path("");                 // <base>/storage
+//! # }
 //! ```
 
 use std::path::{Path, PathBuf};

@@ -16,7 +16,7 @@
 //! module is purely additive — consumers who prefer explicit per-symbol
 //! imports do not need to change a thing.
 //!
-//! ```ignore
+//! ```rust,no_run
 //! use suprnova::prelude::*;
 //!
 //! #[derive(serde::Serialize, serde::Deserialize)]

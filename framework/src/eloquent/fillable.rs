@@ -18,7 +18,7 @@
 //! the process-wide knob via [`prevent_silently_discarding_attributes`]
 //! at boot:
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use suprnova::eloquent::fillable::prevent_silently_discarding_attributes;
 //!
 //! prevent_silently_discarding_attributes(true);
@@ -232,9 +232,14 @@ impl Fillable {
 /// Run `fut` with the mass-assignment guard disabled for the current
 /// async task. Equivalent to Laravel's `Model::unguarded(closure)`:
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::{attrs, eloquent::unguarded};
-///
+/// # use suprnova::eloquent::Attrs;
+/// # struct User;
+/// # impl User {
+/// #     async fn create(_attrs: Attrs) -> Result<User, suprnova::FrameworkError> { Ok(User) }
+/// # }
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 /// let user = unguarded(|| async {
 ///     // Inside this scope, fillable/guarded are ignored —
 ///     // every attribute is passed through to the database.
@@ -246,6 +251,7 @@ impl Fillable {
 ///     .await
 /// })
 /// .await?;
+/// # Ok(()) }
 /// ```
 ///
 /// The bypass flag is a `tokio::task_local!`, so it does not leak

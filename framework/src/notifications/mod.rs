@@ -537,9 +537,19 @@ impl Notify {
     /// [`Notify::send`] / [`Notify::queue`] just like a model-backed
     /// recipient.
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use suprnova::notifications::{Notify, Notification};
+    /// # #[derive(serde::Serialize, serde::Deserialize)]
+    /// # struct IncidentNotification { id: u64 }
+    /// # impl Notification for IncidentNotification {
+    /// #     fn notification_name() -> &'static str { "incident" }
+    /// #     fn channels(&self) -> Vec<&'static str> { vec!["mail"] }
+    /// #     fn data(&self) -> serde_json::Value { serde_json::json!({ "id": self.id }) }
+    /// # }
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let recipient = Notify::route("mail", "ops@example.com")?;
     /// Notify::send(&recipient, &IncidentNotification { id: 7 }).await?;
+    /// # Ok(()) }
     /// ```
     pub fn route(
         channel: impl Into<String>,

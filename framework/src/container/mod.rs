@@ -43,21 +43,29 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
-//! use suprnova::{App, bind, singleton, service};
-//!
-//! // Define a service trait with auto-registration
-//! #[service(RealHttpClient)]
-//! pub trait HttpClient {
-//!     async fn get(&self, url: &str) -> Result<String, Error>;
+//! ```rust,no_run
+//! # use std::sync::Arc;
+//! # use suprnova::{App, bind, singleton};
+//! // Define a service trait for the container.
+//! pub trait HttpClient: Send + Sync {
+//!     fn get(&self, url: &str) -> String;
 //! }
 //!
-//! // Or register manually using macros
+//! # struct RealHttpClient;
+//! # impl RealHttpClient { fn new() -> Self { RealHttpClient } }
+//! # impl HttpClient for RealHttpClient { fn get(&self, _url: &str) -> String { String::new() } }
+//! # #[derive(Clone)]
+//! # struct CacheService;
+//! # impl CacheService { fn new() -> Self { CacheService } }
+//! # fn ex() {
+//! // Register implementations using the macros.
 //! bind!(dyn HttpClient, RealHttpClient::new());
 //! singleton!(CacheService::new());
 //!
-//! // Resolve anywhere in your app
+//! // Resolve anywhere in your app.
 //! let client: Arc<dyn HttpClient> = App::make::<dyn HttpClient>().unwrap();
+//! # let _ = client;
+//! # }
 //! ```
 
 pub mod provider;
@@ -171,7 +179,13 @@ impl Container {
     /// Register a singleton instance (shared across all resolutions)
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::Container;
+    /// # #[derive(Clone)]
+    /// # struct DatabaseConnection;
+    /// # impl DatabaseConnection { fn new(_url: &str) -> Self { DatabaseConnection } }
+    /// # let url = "postgres://localhost/app";
+    /// # let mut container = Container::new();
     /// container.singleton(DatabaseConnection::new(&url));
     /// ```
     pub fn singleton<T: Any + Send + Sync + 'static>(&mut self, instance: T) {
@@ -183,7 +197,11 @@ impl Container {
     /// Register a factory closure (new instance per resolution)
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::Container;
+    /// # struct RequestLogger;
+    /// # impl RequestLogger { fn new() -> Self { RequestLogger } }
+    /// # let mut container = Container::new();
     /// container.factory(|| RequestLogger::new());
     /// ```
     pub fn factory<T, F>(&mut self, factory: F)
@@ -207,8 +225,15 @@ impl Container {
     /// from boot hooks that may run more than once.
     ///
     /// # Example
-    /// ```rust,ignore
-    /// container.bind::<dyn HttpClient>(RealHttpClient::new());
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use suprnova::Container;
+    /// # trait HttpClient: Send + Sync {}
+    /// # struct RealHttpClient;
+    /// # impl RealHttpClient { fn new() -> Self { RealHttpClient } }
+    /// # impl HttpClient for RealHttpClient {}
+    /// # let mut container = Container::new();
+    /// container.bind::<dyn HttpClient>(Arc::new(RealHttpClient::new()));
     /// ```
     pub fn bind<T: ?Sized + Send + Sync + 'static>(&mut self, instance: Arc<T>) {
         // Store under TypeId of Arc<T> (works for both concrete and trait objects)
@@ -254,8 +279,15 @@ impl Container {
     /// Bind a trait object to a factory
     ///
     /// # Example
-    /// ```rust,ignore
-    /// container.bind_factory::<dyn HttpClient>(|| Arc::new(RealHttpClient::new()));
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use suprnova::Container;
+    /// # trait HttpClient: Send + Sync {}
+    /// # struct RealHttpClient;
+    /// # impl RealHttpClient { fn new() -> Self { RealHttpClient } }
+    /// # impl HttpClient for RealHttpClient {}
+    /// # let mut container = Container::new();
+    /// container.bind_factory::<dyn HttpClient, _>(|| Arc::new(RealHttpClient::new()));
     /// ```
     pub fn bind_factory<T: ?Sized + Send + Sync + 'static, F>(&mut self, factory: F)
     where
@@ -279,8 +311,13 @@ impl Container {
     /// Resolve a concrete type (requires Clone)
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::Container;
+    /// # #[derive(Clone)]
+    /// # struct DatabaseConnection;
+    /// # let container = Container::new();
     /// let db: DatabaseConnection = container.get().unwrap();
+    /// # let _ = db;
     /// ```
     pub fn get<T: Any + Send + Sync + Clone + 'static>(&self) -> Option<T> {
         self.binding(TypeId::of::<T>())?.resolve_concrete::<T>()
@@ -289,8 +326,13 @@ impl Container {
     /// Resolve a trait binding — returns `Arc<T>`.
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use suprnova::Container;
+    /// # trait HttpClient: Send + Sync {}
+    /// # let container = Container::new();
     /// let client: Arc<dyn HttpClient> = container.make::<dyn HttpClient>().unwrap();
+    /// # let _ = client;
     /// ```
     pub fn make<T: ?Sized + Send + Sync + 'static>(&self) -> Option<Arc<T>> {
         self.binding(TypeId::of::<Arc<T>>())?.resolve_make::<T>()
@@ -320,9 +362,17 @@ impl Default for Container {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use std::sync::Arc;
 /// use suprnova::{App, bind, singleton};
-///
+/// # #[derive(Clone)]
+/// # struct DatabaseConnection;
+/// # impl DatabaseConnection { fn new(_url: &str) -> Self { DatabaseConnection } }
+/// # trait HttpClient: Send + Sync {}
+/// # struct RealHttpClient;
+/// # impl RealHttpClient { fn new() -> Self { RealHttpClient } }
+/// # impl HttpClient for RealHttpClient {}
+/// # fn ex(url: &str) {
 /// // Register services at startup using macros
 /// singleton!(DatabaseConnection::new(&url));
 /// bind!(dyn HttpClient, RealHttpClient::new());
@@ -330,6 +380,8 @@ impl Default for Container {
 /// // Resolve anywhere
 /// let db: DatabaseConnection = App::get().unwrap();
 /// let client: Arc<dyn HttpClient> = App::make::<dyn HttpClient>().unwrap();
+/// # let _ = (db, client);
+/// # }
 /// ```
 pub struct App;
 
@@ -353,7 +405,12 @@ impl App {
     /// is never silently dropped.
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::App;
+    /// # #[derive(Clone)]
+    /// # struct DatabaseConnection;
+    /// # impl DatabaseConnection { fn new(_url: &str) -> Self { DatabaseConnection } }
+    /// # let url = "postgres://localhost/app";
     /// App::singleton(DatabaseConnection::new(&url));
     /// ```
     pub fn singleton<T: Any + Send + Sync + 'static>(instance: T) {
@@ -372,7 +429,12 @@ impl App {
     /// fluently.
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::App;
+    /// # #[derive(Clone)]
+    /// # struct DatabaseConnection;
+    /// # impl DatabaseConnection { fn new(_url: &str) -> Self { DatabaseConnection } }
+    /// # let url = "postgres://localhost/app";
     /// App::instance(DatabaseConnection::new(&url));
     /// ```
     pub fn instance<T: Any + Send + Sync + 'static>(value: T) {
@@ -385,7 +447,10 @@ impl App {
     /// is never silently dropped.
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::App;
+    /// # struct RequestLogger;
+    /// # impl RequestLogger { fn new() -> Self { RequestLogger } }
     /// App::factory(|| RequestLogger::new());
     /// ```
     pub fn factory<T, F>(factory: F)
@@ -408,7 +473,13 @@ impl App {
     /// never silently dropped.
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use suprnova::App;
+    /// # trait HttpClient: Send + Sync {}
+    /// # struct RealHttpClient;
+    /// # impl RealHttpClient { fn new() -> Self { RealHttpClient } }
+    /// # impl HttpClient for RealHttpClient {}
     /// App::bind::<dyn HttpClient>(Arc::new(RealHttpClient::new()));
     /// ```
     pub fn bind<T: ?Sized + Send + Sync + 'static>(instance: Arc<T>) {
@@ -456,8 +527,16 @@ impl App {
     /// never silently dropped.
     ///
     /// # Example
-    /// ```rust,ignore
-    /// App::bind_factory::<dyn HttpClient>(|| Arc::new(RealHttpClient::new()));
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use suprnova::App;
+    /// # trait HttpClient: Send + Sync {}
+    /// # struct RealHttpClient;
+    /// # impl RealHttpClient { fn new() -> Self { RealHttpClient } }
+    /// # impl HttpClient for RealHttpClient {}
+    /// App::bind_factory::<dyn HttpClient, _>(|| {
+    ///     Arc::new(RealHttpClient::new()) as Arc<dyn HttpClient>
+    /// });
     /// ```
     pub fn bind_factory<T: ?Sized + Send + Sync + 'static, F>(factory: F)
     where
@@ -488,8 +567,12 @@ impl App {
     /// or deadlocking against a re-entrant write.
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::App;
+    /// # #[derive(Clone)]
+    /// # struct DatabaseConnection;
     /// let db: DatabaseConnection = App::get().unwrap();
+    /// # let _ = db;
     /// ```
     pub fn get<T: Any + Send + Sync + Clone + 'static>() -> Option<T> {
         let type_id = TypeId::of::<T>();
@@ -545,8 +628,12 @@ impl App {
     /// trait factories registered via [`App::bind_factory`].
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use suprnova::App;
+    /// # trait HttpClient: Send + Sync {}
     /// let client: Arc<dyn HttpClient> = App::make::<dyn HttpClient>().unwrap();
+    /// # let _ = client;
     /// ```
     pub fn make<T: ?Sized + Send + Sync + 'static>() -> Option<Arc<T>> {
         let type_id = TypeId::of::<Arc<T>>();
@@ -587,11 +674,15 @@ impl App {
     /// automatic error propagation with proper HTTP responses.
     ///
     /// # Example
-    /// ```rust,ignore
-    /// pub async fn index(_req: Request) -> Response {
-    ///     let service = App::resolve::<MyService>()?;
-    ///     // ...
-    /// }
+    /// ```rust,no_run
+    /// # use suprnova::App;
+    /// # #[derive(Clone)]
+    /// # struct MyService;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// let service = App::resolve::<MyService>()?;
+    /// // ... use `service` to handle the request ...
+    /// # let _ = service;
+    /// # Ok(()) }
     /// ```
     pub fn resolve<T: Any + Send + Sync + Clone + 'static>()
     -> Result<T, crate::error::FrameworkError> {
@@ -603,8 +694,14 @@ impl App {
     /// This allows using the `?` operator for trait object resolution.
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use suprnova::App;
+    /// # trait HttpClient: Send + Sync {}
+    /// # fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let client: Arc<dyn HttpClient> = App::resolve_make::<dyn HttpClient>()?;
+    /// # let _ = client;
+    /// # Ok(()) }
     /// ```
     pub fn resolve_make<T: ?Sized + Send + Sync + 'static>()
     -> Result<Arc<T>, crate::error::FrameworkError> {
@@ -760,9 +857,12 @@ impl App {
     /// to the per-test override.
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::App;
+    /// # fn ex() {
     /// App::inertia_share("appName", "Suprnova");
     /// App::inertia_share("appVersion", env!("CARGO_PKG_VERSION"));
+    /// # }
     /// ```
     pub fn inertia_share<V: serde::Serialize>(key: impl Into<String>, value: V) {
         Self::inertia_registry().share_value(key, value);
@@ -774,10 +874,15 @@ impl App {
     /// async work — DB lookups, HTTP calls, etc.
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::App;
+    /// # use suprnova::FrameworkError;
+    /// # async fn detect_locale() -> String { "en".to_string() }
+    /// # fn ex() {
     /// App::inertia_share_lazy("locale", || async {
     ///     Ok::<_, FrameworkError>(detect_locale().await)
     /// });
+    /// # }
     /// ```
     pub fn inertia_share_lazy<F, Fut, V>(key: impl Into<String>, resolver: F)
     where
@@ -860,9 +965,20 @@ impl App {
 /// Bind a trait to a singleton implementation (auto-wraps in Arc)
 ///
 /// # Example
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::bind;
+/// # trait Database: Send + Sync {}
+/// # struct PostgresDB;
+/// # impl PostgresDB { fn connect(_url: &str) -> Self { PostgresDB } }
+/// # impl Database for PostgresDB {}
+/// # trait HttpClient: Send + Sync {}
+/// # struct RealHttpClient;
+/// # impl RealHttpClient { fn new() -> Self { RealHttpClient } }
+/// # impl HttpClient for RealHttpClient {}
+/// # fn ex(db_url: &str) {
 /// bind!(dyn Database, PostgresDB::connect(&db_url));
 /// bind!(dyn HttpClient, RealHttpClient::new());
+/// # }
 /// ```
 #[macro_export]
 macro_rules! bind {
@@ -874,8 +990,15 @@ macro_rules! bind {
 /// Bind a trait to a factory (auto-wraps in Arc, new instance each resolution)
 ///
 /// # Example
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::bind_factory;
+/// # trait HttpClient: Send + Sync {}
+/// # struct RealHttpClient;
+/// # impl RealHttpClient { fn new() -> Self { RealHttpClient } }
+/// # impl HttpClient for RealHttpClient {}
+/// # fn ex() {
 /// bind_factory!(dyn HttpClient, || RealHttpClient::new());
+/// # }
 /// ```
 #[macro_export]
 macro_rules! bind_factory {
@@ -890,8 +1013,14 @@ macro_rules! bind_factory {
 /// Register a singleton instance (concrete type)
 ///
 /// # Example
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::singleton;
+/// # #[derive(Clone)]
+/// # struct DatabaseConnection;
+/// # impl DatabaseConnection { fn new(_url: &str) -> Self { DatabaseConnection } }
+/// # fn ex(url: &str) {
 /// singleton!(DatabaseConnection::new(&url));
+/// # }
 /// ```
 #[macro_export]
 macro_rules! singleton {
@@ -903,8 +1032,13 @@ macro_rules! singleton {
 /// Register a factory (concrete type, new instance each resolution)
 ///
 /// # Example
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::factory;
+/// # struct RequestLogger;
+/// # impl RequestLogger { fn new() -> Self { RequestLogger } }
+/// # fn ex() {
 /// factory!(|| RequestLogger::new());
+/// # }
 /// ```
 #[macro_export]
 macro_rules! factory {

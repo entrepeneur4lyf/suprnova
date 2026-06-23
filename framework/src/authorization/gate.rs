@@ -6,7 +6,12 @@ use crate::FrameworkError;
 
 /// Authorization gate facade.
 ///
-/// ```ignore
+/// ```rust,no_run
+/// # use suprnova::Gate;
+/// # struct User { is_admin: bool }
+/// # struct Post { is_public: bool }
+/// # let user = User { is_admin: false };
+/// # let post = Post { is_public: true };
 /// Gate::define::<User, Post>("view", |user, post| post.is_public || user.is_admin);
 ///
 /// if Gate::allows("view", &user, &post) {
@@ -40,8 +45,11 @@ impl Gate {
     /// HTTP status that [`inspect`](Self::inspect) and [`Self::authorize`](Self::authorize)
     /// surface.
     ///
-    /// ```ignore
+    /// ```rust,no_run
     /// use suprnova::authorization::Response;
+    /// # use suprnova::Gate;
+    /// # struct User { id: u64 }
+    /// # struct Post { author_id: u64 }
     ///
     /// Gate::define_with::<User, Post>("update", |user, post| {
     ///     if post.author_id == user.id {
@@ -212,7 +220,9 @@ impl Gate {
     /// evaluation continue to the gate. The canonical use is a global override
     /// such as "administrators may do anything":
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use suprnova::Gate;
+    /// # struct User { is_admin: bool }
     /// Gate::before::<User>(|user, _action| user.is_admin.then_some(true));
     /// ```
     ///
@@ -235,7 +245,9 @@ impl Gate {
     /// that a before hook or gate already produced. Return `None` to record a
     /// no-op.
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use suprnova::Gate;
+    /// # struct User { is_superuser: bool }
     /// // Grant a fallback only when no gate is defined for the action:
     /// Gate::after::<User>(|user, _action, decided| {
     ///     decided.is_none().then(|| user.is_superuser)

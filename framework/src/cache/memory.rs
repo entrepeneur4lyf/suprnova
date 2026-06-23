@@ -50,7 +50,7 @@ impl CacheEntry {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::cache::InMemoryCache;
 ///
 /// let cache = InMemoryCache::new();

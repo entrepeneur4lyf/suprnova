@@ -10,14 +10,16 @@
 //!
 //! # Quick start
 //!
-//! ```ignore
+//! ```rust,no_run
 //! use suprnova::features::{Context, Feature};
-//! use suprnova::{context, feature, is_enabled};
+//! use suprnova::is_enabled;
+//! use featureflag::context;
 //!
 //! // Define a flag (typically a `const` at module scope).
 //! pub const NEW_CHECKOUT: Feature<'static> =
 //!     Feature::new("new-checkout", false);
 //!
+//! # fn ex() {
 //! // Inside a request with `FeatureMiddleware` installed, the
 //! // ambient `Context` carries user_id / team / roles already.
 //! if is_enabled!("new-checkout", false) {
@@ -25,10 +27,11 @@
 //! }
 //!
 //! // Out-of-request paths supply context explicitly:
-//! let ctx = context! { user_id: 42i64 };
+//! let ctx = context!(user_id = 42i64);
 //! if NEW_CHECKOUT.is_enabled_in(Some(&ctx)) {
 //!     // ...
 //! }
+//! # }
 //! ```
 //!
 //! # Why `featureflag`

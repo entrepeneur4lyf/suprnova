@@ -5,8 +5,12 @@
 //! / [`PasswordReset`](crate::auth_flows::PasswordReset) facades drive. They
 //! are dispatched via the ordinary [`Mail`](crate::Mail) facade:
 //!
-//! ```ignore
-//! Mail::to(&mail.to_address).send(mail).await?;
+//! ```rust,no_run
+//! # use suprnova::Mail;
+//! # use suprnova::auth_flows::EmailVerificationMail;
+//! # async fn ex(mail: EmailVerificationMail) -> Result<(), Box<dyn std::error::Error>> {
+//! Mail::to(mail.to_address.as_str()).send(mail).await?;
+//! # Ok(()) }
 //! ```
 //!
 //! `to_address` and `from_address` live on each struct as plain `String`s so

@@ -317,9 +317,13 @@ pub struct PasskeyAuthenticationChallenge {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use suprnova::Auth;
-///
+/// ```rust,no_run
+/// # use suprnova::Auth;
+/// # use suprnova::torii_integration::passkey::{RegisterPublicKeyCredential, PublicKeyCredential};
+/// # async fn ex(
+/// #     reg_credential_from_browser: RegisterPublicKeyCredential,
+/// #     auth_credential_from_browser: PublicKeyCredential,
+/// # ) -> Result<(), Box<dyn std::error::Error>> {
 /// // Registration
 /// let challenge = Auth::passkey()
 ///     .begin_registration("alice@example.com")
@@ -328,7 +332,7 @@ pub struct PasskeyAuthenticationChallenge {
 ///
 /// // After the browser calls navigator.credentials.create():
 /// let user = Auth::passkey()
-///     .finish_registration("alice@example.com", credential_from_browser)
+///     .finish_registration("alice@example.com", reg_credential_from_browser)
 ///     .await?;
 ///
 /// // Authentication
@@ -339,8 +343,9 @@ pub struct PasskeyAuthenticationChallenge {
 ///
 /// // After the browser calls navigator.credentials.get():
 /// let (user, session) = Auth::passkey()
-///     .finish_authentication("alice@example.com", credential_from_browser)
+///     .finish_authentication("alice@example.com", auth_credential_from_browser)
 ///     .await?;
+/// # Ok(()) }
 /// ```
 pub struct PasskeyAuth;
 

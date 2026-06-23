@@ -12,9 +12,9 @@ use crate::error::FrameworkError;
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use suprnova::Auth;
-///
+/// ```rust,no_run
+/// # use suprnova::Auth;
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 /// let user = Auth::password()
 ///     .register("alice@example.com", "s3cret!")
 ///     .await?;
@@ -22,6 +22,7 @@ use crate::error::FrameworkError;
 /// let (user, session) = Auth::password()
 ///     .authenticate("alice@example.com", "s3cret!", None, None)
 ///     .await?;
+/// # Ok(()) }
 /// ```
 pub struct PasswordAuth;
 

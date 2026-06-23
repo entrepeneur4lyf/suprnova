@@ -92,7 +92,7 @@ pub trait TaskHandler: Send + Sync {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::{Task, TaskResult};
 /// use async_trait::async_trait;
 ///

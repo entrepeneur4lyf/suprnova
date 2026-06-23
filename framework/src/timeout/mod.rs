@@ -47,10 +47,12 @@
 //! Install globally for a process-wide ceiling, or per-route/group to
 //! tighten specific endpoints:
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use std::time::Duration;
 //! use suprnova::{global_middleware, Router, TimeoutMiddleware};
-//!
+//! # use suprnova::{Request, Response, HttpResponse};
+//! # async fn report_handler(_req: Request) -> Response { Ok(HttpResponse::text("ok")) }
+//! # fn ex() {
 //! // Global: every HTTP route gets the 30s default ceiling.
 //! global_middleware!(TimeoutMiddleware::default());
 //!
@@ -58,6 +60,7 @@
 //! Router::new()
 //!     .get("/report", report_handler)
 //!     .middleware(TimeoutMiddleware::seconds(5));
+//! # }
 //! ```
 //!
 //! Global middleware runs **outside** route middleware, so a global timeout

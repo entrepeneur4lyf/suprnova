@@ -46,9 +46,9 @@ impl DayOfWeek {
 ///
 /// # Examples
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::CronExpression;
-///
+/// # fn ex() {
 /// // Every minute
 /// let expr = CronExpression::every_minute();
 ///
@@ -57,6 +57,7 @@ impl DayOfWeek {
 ///
 /// // Custom cron expression
 /// let expr = CronExpression::parse("0 */2 * * *").unwrap(); // Every 2 hours
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct CronExpression {

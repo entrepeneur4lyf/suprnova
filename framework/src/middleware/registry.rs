@@ -37,10 +37,26 @@ static GLOBAL_MIDDLEWARE: OnceLock<RwLock<Vec<(TypeId, BoxedMiddleware)>>> = Onc
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::global_middleware;
+/// # use suprnova::middleware::{Middleware, Next};
+/// # use suprnova::http::{Request, Response};
+/// # use suprnova::async_trait;
+/// # #[derive(Clone)] struct LoggingMiddleware;
+/// # #[async_trait]
+/// # impl Middleware for LoggingMiddleware {
+/// #     async fn handle(&self, req: Request, next: Next) -> Response { next(req).await }
+/// # }
+/// # #[derive(Clone)] struct CorsMiddleware;
+/// # #[async_trait]
+/// # impl Middleware for CorsMiddleware {
+/// #     async fn handle(&self, req: Request, next: Next) -> Response { next(req).await }
+/// # }
+/// # fn register() {
 /// // In bootstrap.rs
 /// global_middleware!(LoggingMiddleware);
 /// global_middleware!(CorsMiddleware);
+/// # }
 /// ```
 pub fn register_global_middleware<M: Middleware + 'static>(middleware: M) {
     let registry = GLOBAL_MIDDLEWARE.get_or_init(|| RwLock::new(Vec::new()));
@@ -168,12 +184,30 @@ pub fn clear_global_middleware_for_test() {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// Server::from_config(router)
+/// ```rust,no_run
+/// # use suprnova::Server;
+/// # use suprnova::routing::Router;
+/// # use suprnova::middleware::{Middleware, Next};
+/// # use suprnova::http::{Request, Response};
+/// # use suprnova::async_trait;
+/// # #[derive(Clone)] struct LoggingMiddleware;
+/// # #[async_trait]
+/// # impl Middleware for LoggingMiddleware {
+/// #     async fn handle(&self, req: Request, next: Next) -> Response { next(req).await }
+/// # }
+/// # #[derive(Clone)] struct CorsMiddleware;
+/// # #[async_trait]
+/// # impl Middleware for CorsMiddleware {
+/// #     async fn handle(&self, req: Request, next: Next) -> Response { next(req).await }
+/// # }
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// # let router = Router::new();
+/// Server::from_config(router)?
 ///     .middleware(LoggingMiddleware)  // Global middleware
 ///     .middleware(CorsMiddleware)
 ///     .run()
-///     .await;
+///     .await?;
+/// # Ok(()) }
 /// ```
 pub struct MiddlewareRegistry {
     /// Middleware that runs on every request (in order)
@@ -210,9 +244,24 @@ impl MiddlewareRegistry {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::middleware::{Middleware, MiddlewareRegistry, Next};
+    /// # use suprnova::http::{Request, Response};
+    /// # use suprnova::async_trait;
+    /// # #[derive(Clone)] struct LoggingMiddleware;
+    /// # #[async_trait]
+    /// # impl Middleware for LoggingMiddleware {
+    /// #     async fn handle(&self, req: Request, next: Next) -> Response { next(req).await }
+    /// # }
+    /// # #[derive(Clone)] struct CorsMiddleware;
+    /// # #[async_trait]
+    /// # impl Middleware for CorsMiddleware {
+    /// #     async fn handle(&self, req: Request, next: Next) -> Response { next(req).await }
+    /// # }
+    /// # let m = MiddlewareRegistry::new();
     /// m.append(LoggingMiddleware)
     ///  .append(CorsMiddleware)
+    /// # ;
     /// ```
     pub fn append<M: Middleware + 'static>(mut self, middleware: M) -> Self {
         self.global.push(into_boxed(middleware));

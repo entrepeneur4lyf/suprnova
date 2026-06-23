@@ -6,6 +6,8 @@
 //! an `IntoJsonResource` impl alongside the standard Inertia and serde impls.
 //!
 //! ```rust,ignore
+//! use suprnova::{Data, Resource};
+//!
 //! #[derive(Debug, Clone, Data)]
 //! #[json_resource("users")]
 //! pub struct UserResource {
@@ -15,9 +17,11 @@
 //!     pub password: String,
 //! }
 //!
+//! # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 //! // In a handler:
-//! let user = UserResource { /* ... */ };
-//! Resource::single(user).render().await
+//! let user = UserResource { id: 1, email: "a@b.c".into(), password: String::new() };
+//! Resource::single(user).render().await?;
+//! # Ok(()) }
 //! ```
 //!
 //! # Laravel parity

@@ -25,16 +25,18 @@
 //!
 //! # Example - Concrete singleton
 //!
-//! ```rust,ignore
-//! use suprnova::injectable;
+//! ```rust,no_run
+//! use suprnova::{injectable, App};
 //!
 //! #[injectable]
 //! pub struct AppState {
 //!     pub counter: u32,
 //! }
 //!
+//! # fn ex() {
 //! // Resolve via:
 //! let state: AppState = App::get().unwrap();
+//! # }
 //! ```
 //!
 //! # Boot order and dependency resolution

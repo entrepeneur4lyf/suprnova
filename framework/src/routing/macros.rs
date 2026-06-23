@@ -2,8 +2,21 @@
 //!
 //! This module provides a clean, declarative way to define routes:
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use suprnova::{routes, get, post, put, delete, group};
+//! # use suprnova::{async_trait, Middleware, Next, Request, Response};
+//! # struct AuthMiddleware;
+//! # #[async_trait]
+//! # impl Middleware for AuthMiddleware {
+//! #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+//! # }
+//! # mod controllers {
+//! #     use suprnova::{Request, Response};
+//! #     pub async fn h(_req: Request) -> Response { suprnova::http::text("ok") }
+//! #     pub mod home { pub use super::h as index; }
+//! #     pub mod user { pub use super::h as index; pub use super::h as store; }
+//! #     pub mod api { pub mod user { pub use super::super::h as index; pub use super::super::h as store; } }
+//! # }
 //!
 //! routes! {
 //!     get!("/", controllers::home::index).name("home"),
@@ -250,8 +263,13 @@ where
 /// Create a GET route definition with compile-time path validation
 ///
 /// # Example
-/// ```rust,ignore
-/// get!("/users", controllers::user::index).name("users.index")
+/// ```rust,no_run
+/// # use suprnova::get;
+/// # mod controllers { pub mod user {
+/// #     use suprnova::{Request, Response};
+/// #     pub async fn index(_req: Request) -> Response { suprnova::http::text("ok") }
+/// # } }
+/// get!("/users", controllers::user::index).name("users.index");
 /// ```
 ///
 /// # Compile Error
@@ -278,8 +296,13 @@ where
 /// Create a POST route definition with compile-time path validation
 ///
 /// # Example
-/// ```rust,ignore
-/// post!("/users", controllers::user::store).name("users.store")
+/// ```rust,no_run
+/// # use suprnova::post;
+/// # mod controllers { pub mod user {
+/// #     use suprnova::{Request, Response};
+/// #     pub async fn store(_req: Request) -> Response { suprnova::http::text("ok") }
+/// # } }
+/// post!("/users", controllers::user::store).name("users.store");
 /// ```
 ///
 /// # Compile Error
@@ -306,8 +329,13 @@ where
 /// Create a PUT route definition with compile-time path validation
 ///
 /// # Example
-/// ```rust,ignore
-/// put!("/users/{id}", controllers::user::update).name("users.update")
+/// ```rust,no_run
+/// # use suprnova::put;
+/// # mod controllers { pub mod user {
+/// #     use suprnova::{Request, Response};
+/// #     pub async fn update(_req: Request) -> Response { suprnova::http::text("ok") }
+/// # } }
+/// put!("/users/{id}", controllers::user::update).name("users.update");
 /// ```
 ///
 /// # Compile Error
@@ -334,8 +362,13 @@ where
 /// Create a DELETE route definition with compile-time path validation
 ///
 /// # Example
-/// ```rust,ignore
-/// delete!("/users/{id}", controllers::user::destroy).name("users.destroy")
+/// ```rust,no_run
+/// # use suprnova::delete;
+/// # mod controllers { pub mod user {
+/// #     use suprnova::{Request, Response};
+/// #     pub async fn destroy(_req: Request) -> Response { suprnova::http::text("ok") }
+/// # } }
+/// delete!("/users/{id}", controllers::user::destroy).name("users.destroy");
 /// ```
 ///
 /// # Compile Error
@@ -366,8 +399,13 @@ where
 /// `.name()` and `.middleware()` chaining.
 ///
 /// # Example
-/// ```rust,ignore
-/// patch!("/users/{id}", controllers::user::update).name("users.patch")
+/// ```rust,no_run
+/// # use suprnova::patch;
+/// # mod controllers { pub mod user {
+/// #     use suprnova::{Request, Response};
+/// #     pub async fn update(_req: Request) -> Response { suprnova::http::text("ok") }
+/// # } }
+/// patch!("/users/{id}", controllers::user::update).name("users.patch");
 /// ```
 ///
 /// # Compile Error
@@ -400,8 +438,13 @@ where
 /// the handler can't accidentally emit content over the wire.
 ///
 /// # Example
-/// ```rust,ignore
-/// head!("/cached", controllers::cache::head_probe)
+/// ```rust,no_run
+/// # use suprnova::head;
+/// # mod controllers { pub mod cache {
+/// #     use suprnova::{Request, Response};
+/// #     pub async fn head_probe(_req: Request) -> Response { suprnova::http::text("ok") }
+/// # } }
+/// head!("/cached", controllers::cache::head_probe);
 /// ```
 ///
 /// # Compile Error
@@ -434,8 +477,13 @@ where
 /// resource description.
 ///
 /// # Example
-/// ```rust,ignore
-/// options!("/api/posts", controllers::api::post::discover)
+/// ```rust,no_run
+/// # use suprnova::options;
+/// # mod controllers { pub mod api { pub mod post {
+/// #     use suprnova::{Request, Response};
+/// #     pub async fn discover(_req: Request) -> Response { suprnova::http::text("ok") }
+/// # } } }
+/// options!("/api/posts", controllers::api::post::discover);
 /// ```
 ///
 /// # Compile Error
@@ -473,10 +521,20 @@ where
 /// group's inherited middleware fans out across every verb too.
 ///
 /// # Example
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::{any, async_trait, Middleware, Next, Request, Response};
+/// # struct SignatureCheck;
+/// # #[async_trait]
+/// # impl Middleware for SignatureCheck {
+/// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+/// # }
+/// # mod controllers { pub mod webhooks {
+/// #     use suprnova::{Request, Response};
+/// #     pub async fn inbound(_req: Request) -> Response { suprnova::http::text("ok") }
+/// # } }
 /// any!("/webhooks/inbound", controllers::webhooks::inbound)
 ///     .name("webhooks.inbound")
-///     .middleware(SignatureCheck)
+///     .middleware(SignatureCheck);
 /// ```
 ///
 /// # Compile Error
@@ -569,8 +627,16 @@ where
 /// Create a WebSocket route definition with compile-time path validation.
 ///
 /// # Example
-/// ```rust,ignore
-/// ws!("/ws/echo", EchoHandler)
+/// ```rust,no_run
+/// # use suprnova::{ws, async_trait};
+/// # use suprnova::ws::{WebSocketHandler, WsSocket};
+/// # use suprnova::Request;
+/// # struct EchoHandler;
+/// # #[async_trait]
+/// # impl WebSocketHandler for EchoHandler {
+/// #     async fn handle(&self, _socket: WsSocket, _req: Request) -> Result<(), suprnova::FrameworkError> { Ok(()) }
+/// # }
+/// ws!("/ws/echo", EchoHandler);
 /// ```
 ///
 /// Note: WebSocket routes do NOT support `.name()` or `.middleware()`
@@ -609,10 +675,24 @@ where
 /// Per-route middleware can be chained via `.middleware(M)`, and a
 /// per-route [`WsConfig`] can be set via `.config(WsConfig)`:
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use std::time::Duration;
+/// # use suprnova::{ws, async_trait, Middleware, Next, Request, Response};
+/// # use suprnova::ws::{WebSocketHandler, WsSocket, WsConfig};
+/// # struct ChatHandler;
+/// # #[async_trait]
+/// # impl WebSocketHandler for ChatHandler {
+/// #     async fn handle(&self, _socket: WsSocket, _req: Request) -> Result<(), suprnova::FrameworkError> { Ok(()) }
+/// # }
+/// # struct SessionMiddleware;
+/// # impl SessionMiddleware { fn new() -> Self { SessionMiddleware } }
+/// # #[async_trait]
+/// # impl Middleware for SessionMiddleware {
+/// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+/// # }
 /// ws!("/ws/chat", ChatHandler)
 ///     .config(WsConfig { ping_interval: Duration::from_secs(5), ..Default::default() })
-///     .middleware(SessionMiddleware::new())
+///     .middleware(SessionMiddleware::new());
 /// ```
 ///
 /// Both chains compose in any order. The middleware chain runs over
@@ -662,10 +742,24 @@ impl WsRouteDef {
     ///
     /// Can be chained before or after `.middleware(M)`:
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use std::time::Duration;
+    /// # use suprnova::{ws, async_trait, Middleware, Next, Request, Response};
+    /// # use suprnova::ws::{WebSocketHandler, WsSocket, WsConfig};
+    /// # struct ChatHandler;
+    /// # #[async_trait]
+    /// # impl WebSocketHandler for ChatHandler {
+    /// #     async fn handle(&self, _socket: WsSocket, _req: Request) -> Result<(), suprnova::FrameworkError> { Ok(()) }
+    /// # }
+    /// # struct SessionMiddleware;
+    /// # impl SessionMiddleware { fn new() -> Self { SessionMiddleware } }
+    /// # #[async_trait]
+    /// # impl Middleware for SessionMiddleware {
+    /// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+    /// # }
     /// ws!("/ws/chat", ChatHandler)
     ///     .config(WsConfig { ping_interval: Duration::from_secs(5), ..Default::default() })
-    ///     .middleware(SessionMiddleware::new())
+    ///     .middleware(SessionMiddleware::new());
     /// ```
     ///
     /// [`WsConfig`]: crate::ws::WsConfig
@@ -740,7 +834,15 @@ where
 /// allowing you to override the default 404 behavior.
 ///
 /// # Example
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::{routes, get, fallback};
+/// # mod controllers {
+/// #     use suprnova::{Request, Response};
+/// #     pub async fn h(_req: Request) -> Response { suprnova::http::text("ok") }
+/// #     pub mod home { pub use super::h as index; }
+/// #     pub mod user { pub use super::h as index; }
+/// #     pub mod fallback { pub use super::h as invoke; }
+/// # }
 /// routes! {
 ///     get!("/", controllers::home::index),
 ///     get!("/users", controllers::user::index),
@@ -751,7 +853,19 @@ where
 /// ```
 ///
 /// With middleware:
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::{routes, get, fallback, async_trait, Middleware, Next, Request, Response};
+/// # struct LoggingMiddleware;
+/// # #[async_trait]
+/// # impl Middleware for LoggingMiddleware {
+/// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+/// # }
+/// # mod controllers {
+/// #     use suprnova::{Request, Response};
+/// #     pub async fn h(_req: Request) -> Response { suprnova::http::text("ok") }
+/// #     pub mod home { pub use super::h as index; }
+/// #     pub mod fallback { pub use super::h as invoke; }
+/// # }
 /// routes! {
 ///     get!("/", controllers::home::index),
 ///     fallback!(controllers::fallback::invoke).middleware(LoggingMiddleware),
@@ -818,7 +932,19 @@ pub trait IntoGroupItem {
 ///
 /// Supports nested groups for arbitrary route organization:
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::{routes, get, post, group, async_trait, Middleware, Next, Request, Response};
+/// # struct AuthMiddleware;
+/// # #[async_trait]
+/// # impl Middleware for AuthMiddleware {
+/// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+/// # }
+/// # mod controllers {
+/// #     use suprnova::{Request, Response};
+/// #     pub async fn h(_req: Request) -> Response { suprnova::http::text("ok") }
+/// #     pub mod user { pub use super::h as index; pub use super::h as store; }
+/// #     pub mod admin { pub use super::h as dashboard; }
+/// # }
 /// routes! {
 ///     group!("/api", {
 ///         get!("/users", controllers::user::index).name("api.users"),
@@ -879,10 +1005,22 @@ impl GroupDef {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::{get, group, async_trait, Middleware, Next, Request, Response};
+    /// # struct AuthMiddleware;
+    /// # struct RateLimitMiddleware;
+    /// # #[async_trait]
+    /// # impl Middleware for AuthMiddleware {
+    /// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+    /// # }
+    /// # #[async_trait]
+    /// # impl Middleware for RateLimitMiddleware {
+    /// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+    /// # }
+    /// # async fn handler(_req: Request) -> Response { suprnova::http::text("ok") }
     /// group!("/api", {
     ///     get!("/users", handler),
-    /// }).middleware(AuthMiddleware).middleware(RateLimitMiddleware)
+    /// }).middleware(AuthMiddleware).middleware(RateLimitMiddleware);
     /// ```
     pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
         self.group_middlewares.push(into_boxed(middleware));
@@ -1130,8 +1268,21 @@ where
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::{routes, get, post, group};
+/// # use suprnova::{async_trait, Middleware, Next, Request, Response};
+/// # struct AuthMiddleware;
+/// # #[async_trait]
+/// # impl Middleware for AuthMiddleware {
+/// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+/// # }
+/// # mod controllers {
+/// #     use suprnova::{Request, Response};
+/// #     pub async fn h(_req: Request) -> Response { suprnova::http::text("ok") }
+/// #     pub mod home { pub use super::h as index; }
+/// #     pub mod user { pub use super::h as index; pub use super::h as store; }
+/// #     pub mod admin { pub use super::h as dashboard; }
+/// # }
 ///
 /// routes! {
 ///     get!("/", controllers::home::index),
@@ -1175,7 +1326,28 @@ macro_rules! group {
 /// Place it at the top level of your `routes.rs` file.
 ///
 /// # Example
-/// ```rust,ignore
+/// ```rust,no_run
+/// # mod controllers {
+/// #     use suprnova::{Request, Response};
+/// #     pub async fn h(_req: Request) -> Response { suprnova::http::text("ok") }
+/// #     pub mod home { pub use super::h as index; }
+/// #     pub mod user {
+/// #         pub use super::h as index;
+/// #         pub use super::h as show;
+/// #         pub use super::h as store;
+/// #         pub use super::h as update;
+/// #         pub use super::h as destroy;
+/// #     }
+/// # }
+/// # mod middleware {
+/// #     use suprnova::{async_trait, Middleware, Next, Request, Response};
+/// #     pub struct AuthMiddleware;
+/// #     #[async_trait]
+/// #     impl Middleware for AuthMiddleware {
+/// #         async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+/// #     }
+/// # }
+/// # fn main() {
 /// use suprnova::{routes, get, post, put, delete};
 /// use crate::controllers;
 /// use crate::middleware::AuthMiddleware;
@@ -1189,6 +1361,7 @@ macro_rules! group {
 ///     delete!("/users/{id}", controllers::user::destroy).name("users.destroy"),
 ///     get!("/protected", controllers::home::index).middleware(AuthMiddleware),
 /// }
+/// # }
 /// ```
 #[macro_export]
 macro_rules! routes {

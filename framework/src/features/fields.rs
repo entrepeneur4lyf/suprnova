@@ -19,13 +19,24 @@
 //!   `context!` macro) can `extensions_mut().insert(UserIdField::from_i64(42))`
 //!   directly when they want to bypass the field-slice indirection.
 //!
-//! ```ignore
+//! ```rust,no_run
 //! use suprnova::features::fields::UserIdField;
-//! use featureflag::context::Context;
+//! use featureflag::context::{Context, ContextRef};
+//! use featureflag::evaluator::Evaluator;
+//! use featureflag::fields::Fields;
 //!
-//! // Programmatic insertion (rare — most callers use the `context!` macro).
-//! let mut ctx_ref: featureflag::context::ContextRef<'_> = /* ... */;
-//! ctx_ref.extensions_mut().insert(UserIdField::from_i64(42));
+//! // An evaluator receives a `ContextRef` in its `on_new_context` hook —
+//! // that's where programmatic field insertion happens (rare; most
+//! // callers use the `context!` macro instead).
+//! struct MyEvaluator;
+//! impl Evaluator for MyEvaluator {
+//!     fn is_enabled(&self, _feature: &str, _ctx: &Context) -> Option<bool> {
+//!         None
+//!     }
+//!     fn on_new_context(&self, mut ctx_ref: ContextRef<'_>, _fields: Fields<'_>) {
+//!         ctx_ref.extensions_mut().insert(UserIdField::from_i64(42));
+//!     }
+//! }
 //! ```
 //!
 //! # Why `String`?

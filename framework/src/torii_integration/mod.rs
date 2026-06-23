@@ -265,11 +265,12 @@ impl ToriiConfig {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use suprnova::torii_integration::{init_torii, ToriiConfig};
-///
+/// ```rust,no_run
+/// # use suprnova::torii_integration::{init_torii, ToriiConfig};
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = ToriiConfig::sqlite_in_memory().await?;
 /// init_torii(config).await?;
+/// # Ok(()) }
 /// ```
 pub async fn init_torii(config: ToriiConfig) -> Result<(), FrameworkError> {
     // Fast path: already initialised.

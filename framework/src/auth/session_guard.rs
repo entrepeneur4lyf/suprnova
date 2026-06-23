@@ -30,14 +30,17 @@ use crate::events::EventFacade;
 /// a name. Most apps reach it through the static [`Auth`] facade rather
 /// than constructing it directly.
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::{SessionGuard, StatefulGuard, Credentials};
 /// use std::sync::Arc;
-///
+/// # use suprnova::DatabaseUserProvider;
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+/// # let my_provider = DatabaseUserProvider::new("users");
 /// let guard = SessionGuard::new(Arc::new(my_provider));
 /// let user = guard
 ///     .attempt(&Credentials::password("alice@example.com", "s3cret"), true)
 ///     .await?;
+/// # Ok(()) }
 /// ```
 pub struct SessionGuard {
     /// The guard's name (e.g. `"web"`), carried on dispatched events.

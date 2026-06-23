@@ -42,12 +42,15 @@ use std::sync::RwLock;
 /// to empty. Use `..Default::default()` in the struct literal to skip
 /// any field you don't need:
 ///
-/// ```ignore
+/// ```rust,no_run
+/// # use suprnova::notifications::channels::mail::MailRendering;
+/// # fn ex() -> MailRendering {
 /// MailRendering {
 ///     subject: "Order shipped".into(),
 ///     text: Some("Tracking: 1Z999".into()),
 ///     ..Default::default()
 /// }
+/// # }
 /// ```
 ///
 /// # Forward-compat contract

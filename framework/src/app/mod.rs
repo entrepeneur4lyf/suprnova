@@ -4,9 +4,21 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use suprnova::Application;
 //!
+//! # mod config { pub fn register_all() {} }
+//! # mod bootstrap { pub async fn register() {} }
+//! # mod routes {
+//! #     pub fn register() -> suprnova::Router { suprnova::Router::new() }
+//! # }
+//! # mod migrations {
+//! #     use sea_orm_migration::prelude::*;
+//! #     pub struct Migrator;
+//! #     impl MigratorTrait for Migrator {
+//! #         fn migrations() -> Vec<Box<dyn MigrationTrait>> { vec![] }
+//! #     }
+//! # }
 //! #[tokio::main]
 //! async fn main() {
 //!     Application::new()
@@ -332,9 +344,13 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// App::new()
-    ///     .config(config::register_all)
+    /// ```rust,no_run
+    /// # use suprnova::Application;
+    /// # mod config { pub fn register_all() {} }
+    /// # fn ex() {
+    /// Application::new()
+    ///     .config(config::register_all);
+    /// # }
     /// ```
     pub fn config<F>(mut self, f: F) -> Self
     where
@@ -351,9 +367,13 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// App::new()
-    ///     .bootstrap(bootstrap::register)
+    /// ```rust,no_run
+    /// # use suprnova::Application;
+    /// # mod bootstrap { pub async fn register() {} }
+    /// # fn ex() {
+    /// Application::new()
+    ///     .bootstrap(bootstrap::register);
+    /// # }
     /// ```
     pub fn bootstrap<F, Fut>(mut self, f: F) -> Self
     where
@@ -370,9 +390,15 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// App::new()
-    ///     .routes(routes::register)
+    /// ```rust,no_run
+    /// # use suprnova::{Application, Router};
+    /// # mod routes {
+    /// #     pub fn register() -> suprnova::Router { suprnova::Router::new() }
+    /// # }
+    /// # fn ex() {
+    /// Application::new()
+    ///     .routes(routes::register);
+    /// # }
     /// ```
     pub fn routes<F>(mut self, f: F) -> Self
     where
@@ -391,12 +417,17 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// App::new()
+    /// ```rust,no_run
+    /// # use suprnova::{App, Application};
+    /// # #[derive(Clone, Debug)]
+    /// # struct MyConfig;
+    /// # fn ex() {
+    /// Application::new()
     ///     .booted(|| {
     ///         let cfg: MyConfig = App::get().unwrap();
     ///         tracing::info!(?cfg, "services booted");
-    ///     })
+    ///     });
+    /// # }
     /// ```
     pub fn booted<F>(mut self, f: F) -> Self
     where
@@ -415,9 +446,13 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::{Application, Schedule};
+    /// # mod schedule { pub fn register(_s: &mut suprnova::Schedule) {} }
+    /// # fn ex() {
     /// Application::new()
-    ///     .schedule(schedule::register)
+    ///     .schedule(schedule::register);
+    /// # }
     /// ```
     pub fn schedule<F>(mut self, f: F) -> Self
     where
@@ -431,9 +466,19 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::Application;
+    /// # mod migrations {
+    /// #     use sea_orm_migration::prelude::*;
+    /// #     pub struct Migrator;
+    /// #     impl MigratorTrait for Migrator {
+    /// #         fn migrations() -> Vec<Box<dyn MigrationTrait>> { vec![] }
+    /// #     }
+    /// # }
+    /// # fn ex() {
     /// Application::new()
-    ///     .migrations::<migrations::Migrator>()
+    ///     .migrations::<migrations::Migrator>();
+    /// # }
     /// ```
     pub fn migrations<NewM>(self) -> Application<NewM>
     where

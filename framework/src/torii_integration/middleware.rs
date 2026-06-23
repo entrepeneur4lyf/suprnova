@@ -28,7 +28,7 @@
 //!
 //! # Registration
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use suprnova::{global_middleware, torii_integration::middleware::BearerTokenMiddleware};
 //!
 //! pub async fn register() {

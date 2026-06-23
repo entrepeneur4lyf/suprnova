@@ -50,11 +50,12 @@ impl CacheDriver {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::{Config, CacheConfig};
-///
+/// use suprnova::cache::CacheDriver;
+/// # fn ex() -> Result<(), Box<dyn std::error::Error>> {
 /// // Register from environment
-/// Config::register(CacheConfig::from_env());
+/// Config::register(CacheConfig::from_env()?);
 ///
 /// // Or build manually
 /// Config::register(CacheConfig::builder()
@@ -62,6 +63,7 @@ impl CacheDriver {
 ///     .url("redis://localhost:6379")
 ///     .prefix("myapp:")
 ///     .build());
+/// # Ok(()) }
 /// ```
 #[derive(Debug, Clone)]
 pub struct CacheConfig {

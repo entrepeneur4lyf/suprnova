@@ -12,11 +12,12 @@
 //! for multi-node deployments without a shared filesystem). The driver is
 //! chosen by the `MAINTENANCE_DRIVER` environment variable (`file` | `cache`).
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use suprnova::{global_middleware, MaintenanceMiddleware};
-//!
+//! # fn ex() {
 //! // In bootstrap.rs — health checks stay reachable while down.
 //! global_middleware!(MaintenanceMiddleware::new().except(["api/health"]));
+//! # }
 //! ```
 
 use std::path::PathBuf;

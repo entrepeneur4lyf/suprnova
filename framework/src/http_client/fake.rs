@@ -136,9 +136,10 @@ pub fn assert_not_sent(predicate: impl Fn(&RecordedRequest) -> bool) {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use suprnova::{Http, fake_response, assert_sent};
-///
+/// ```rust,no_run
+/// # use suprnova::{Http, fake_response, assert_sent};
+/// # use suprnova::serde_json;
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 /// Http::fake(|| async {
 ///     fake_response("POST", "/api/users", 201, serde_json::json!({"id": 1}));
 ///     let resp = Http::post("https://example.com/api/users")
@@ -150,6 +151,7 @@ pub fn assert_not_sent(predicate: impl Fn(&RecordedRequest) -> bool) {
 ///     assert_sent(|r| r.method == "POST" && r.url.contains("/api/users"));
 /// })
 /// .await;
+/// # Ok(()) }
 /// ```
 pub async fn install_fake_scope<F, Fut, T>(f: F) -> T
 where

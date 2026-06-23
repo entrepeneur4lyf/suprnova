@@ -13,7 +13,7 @@
 //!
 //! Add the middleware after SessionMiddleware:
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use suprnova::{global_middleware, SessionMiddleware, CsrfMiddleware, SessionConfig};
 //!
 //! pub async fn register() {
@@ -60,7 +60,7 @@ use crate::session::get_csrf_token;
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::csrf::csrf_token;
 ///
 /// if let Some(token) = csrf_token() {
@@ -75,7 +75,7 @@ pub fn csrf_token() -> Option<String> {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::csrf::csrf_meta_tag;
 ///
 /// let meta = csrf_meta_tag();
@@ -91,7 +91,7 @@ pub fn csrf_meta_tag() -> String {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::csrf::csrf_field;
 ///
 /// let field = csrf_field();

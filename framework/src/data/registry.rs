@@ -18,11 +18,14 @@
 //! Callers — both for `register` (writes) and `is_allowed` /
 //! `allowed_for` (reads) — MUST use the same key shape:
 //!
-//! ```ignore
+//! ```rust,no_run
+//! # use suprnova::data::registry;
+//! # fn ex() {
 //! // Correct: matches what `#[derive(Data)]` writes for `crate::dto::AlbumDto`.
 //! const KEY: &str = concat!(module_path!(), "::", "AlbumDto");
 //! registry::register(KEY, &["songs", "artist"]);
 //! assert!(registry::is_allowed(KEY, "songs"));
+//! # }
 //! ```
 //!
 //! Bare struct names (`"AlbumDto"`) will silently miss every lookup —

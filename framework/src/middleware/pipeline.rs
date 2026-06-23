@@ -12,12 +12,28 @@
 //!
 //! Suprnova writes
 //!
-//! ```rust,ignore
+//! ```rust,no_run
+//! # use std::sync::Arc;
+//! # use suprnova::{async_trait, Middleware, Next, Request, Response, HttpResponse};
+//! # use suprnova::middleware::{Pipeline, into_boxed};
+//! # struct AuthMw;
+//! # #[async_trait]
+//! # impl Middleware for AuthMw {
+//! #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+//! # }
+//! # struct CorsMw;
+//! # #[async_trait]
+//! # impl Middleware for CorsMw {
+//! #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+//! # }
+//! # async fn handler(_req: Request) -> Response { Ok(HttpResponse::text("ok")) }
+//! # async fn ex(request: Request) {
 //! Pipeline::new()
 //!     .send(request)
-//!     .through([Arc::new(AuthMw), Arc::new(CorsMw)])
+//!     .through_boxed([into_boxed(AuthMw), into_boxed(CorsMw)])
 //!     .then(|req| async move { handler(req).await })
 //!     .await;
+//! # }
 //! ```
 //!
 //! The pipeline is a thin owned-state wrapper around [`MiddlewareChain`] —

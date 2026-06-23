@@ -63,7 +63,8 @@ where
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::sea_orm;
 /// use suprnova::database::EntityExt;
 /// use sea_orm::entity::prelude::*;
 ///
@@ -84,9 +85,11 @@ where
 /// // Add suprnova's EntityExt trait
 /// impl suprnova::database::EntityExt for Entity {}
 ///
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 /// // Now you can use:
 /// let users = Entity::all().await?;
 /// let user = Entity::find_by_pk(1).await?;
+/// # Ok(()) }
 /// ```
 #[async_trait]
 pub trait EntityExt: EntityTrait + Sized
@@ -96,8 +99,27 @@ where
     /// Find all records
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::sea_orm;
+    /// # mod user {
+    /// #     use suprnova::sea_orm;
+    /// #     use sea_orm::entity::prelude::*;
+    /// #     #[derive(Clone, Debug, DeriveEntityModel)]
+    /// #     #[sea_orm(table_name = "users")]
+    /// #     pub struct Model {
+    /// #         #[sea_orm(primary_key)]
+    /// #         pub id: i32,
+    /// #         pub name: String,
+    /// #     }
+    /// #     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    /// #     pub enum Relation {}
+    /// #     impl ActiveModelBehavior for ActiveModel {}
+    /// #     impl suprnova::database::EntityExt for Entity {}
+    /// # }
+    /// # use suprnova::database::EntityExt;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let users = user::Entity::all().await?;
+    /// # Ok(()) }
     /// ```
     async fn all() -> Result<Vec<Self::Model>, FrameworkError> {
         with_read_executor(|exec| async move {
@@ -112,8 +134,27 @@ where
     /// Find a record by primary key (generic version)
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::sea_orm;
+    /// # mod user {
+    /// #     use suprnova::sea_orm;
+    /// #     use sea_orm::entity::prelude::*;
+    /// #     #[derive(Clone, Debug, DeriveEntityModel)]
+    /// #     #[sea_orm(table_name = "users")]
+    /// #     pub struct Model {
+    /// #         #[sea_orm(primary_key)]
+    /// #         pub id: i32,
+    /// #         pub name: String,
+    /// #     }
+    /// #     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    /// #     pub enum Relation {}
+    /// #     impl ActiveModelBehavior for ActiveModel {}
+    /// #     impl suprnova::database::EntityExt for Entity {}
+    /// # }
+    /// # use suprnova::database::EntityExt;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let user = user::Entity::find_by_pk(1).await?;
+    /// # Ok(()) }
     /// ```
     async fn find_by_pk<K>(id: K) -> Result<Option<Self::Model>, FrameworkError>
     where
@@ -132,8 +173,27 @@ where
     /// Find a record by primary key or return an error
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::sea_orm;
+    /// # mod user {
+    /// #     use suprnova::sea_orm;
+    /// #     use sea_orm::entity::prelude::*;
+    /// #     #[derive(Clone, Debug, DeriveEntityModel)]
+    /// #     #[sea_orm(table_name = "users")]
+    /// #     pub struct Model {
+    /// #         #[sea_orm(primary_key)]
+    /// #         pub id: i32,
+    /// #         pub name: String,
+    /// #     }
+    /// #     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    /// #     pub enum Relation {}
+    /// #     impl ActiveModelBehavior for ActiveModel {}
+    /// #     impl suprnova::database::EntityExt for Entity {}
+    /// # }
+    /// # use suprnova::database::EntityExt;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let user = user::Entity::find_or_fail(1).await?;
+    /// # Ok(()) }
     /// ```
     async fn find_or_fail<K>(id: K) -> Result<Self::Model, FrameworkError>
     where
@@ -151,8 +211,27 @@ where
     /// Count all records
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::sea_orm;
+    /// # mod user {
+    /// #     use suprnova::sea_orm;
+    /// #     use sea_orm::entity::prelude::*;
+    /// #     #[derive(Clone, Debug, DeriveEntityModel)]
+    /// #     #[sea_orm(table_name = "users")]
+    /// #     pub struct Model {
+    /// #         #[sea_orm(primary_key)]
+    /// #         pub id: i32,
+    /// #         pub name: String,
+    /// #     }
+    /// #     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    /// #     pub enum Relation {}
+    /// #     impl ActiveModelBehavior for ActiveModel {}
+    /// #     impl suprnova::database::EntityExt for Entity {}
+    /// # }
+    /// # use suprnova::database::EntityExt;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let count = user::Entity::count_all().await?;
+    /// # Ok(()) }
     /// ```
     async fn count_all() -> Result<u64, FrameworkError> {
         with_read_executor(|exec| async move {
@@ -167,10 +246,29 @@ where
     /// Check if any records exist
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::sea_orm;
+    /// # mod user {
+    /// #     use suprnova::sea_orm;
+    /// #     use sea_orm::entity::prelude::*;
+    /// #     #[derive(Clone, Debug, DeriveEntityModel)]
+    /// #     #[sea_orm(table_name = "users")]
+    /// #     pub struct Model {
+    /// #         #[sea_orm(primary_key)]
+    /// #         pub id: i32,
+    /// #         pub name: String,
+    /// #     }
+    /// #     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    /// #     pub enum Relation {}
+    /// #     impl ActiveModelBehavior for ActiveModel {}
+    /// #     impl suprnova::database::EntityExt for Entity {}
+    /// # }
+    /// # use suprnova::database::EntityExt;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// if user::Entity::exists_any().await? {
     ///     println!("Users exist!");
     /// }
+    /// # Ok(()) }
     /// ```
     async fn exists_any() -> Result<bool, FrameworkError> {
         Ok(Self::count_all().await? > 0)
@@ -179,8 +277,27 @@ where
     /// Get the first record
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::sea_orm;
+    /// # mod user {
+    /// #     use suprnova::sea_orm;
+    /// #     use sea_orm::entity::prelude::*;
+    /// #     #[derive(Clone, Debug, DeriveEntityModel)]
+    /// #     #[sea_orm(table_name = "users")]
+    /// #     pub struct Model {
+    /// #         #[sea_orm(primary_key)]
+    /// #         pub id: i32,
+    /// #         pub name: String,
+    /// #     }
+    /// #     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    /// #     pub enum Relation {}
+    /// #     impl ActiveModelBehavior for ActiveModel {}
+    /// #     impl suprnova::database::EntityExt for Entity {}
+    /// # }
+    /// # use suprnova::database::EntityExt;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let first_user = user::Entity::first().await?;
+    /// # Ok(()) }
     /// ```
     async fn first() -> Result<Option<Self::Model>, FrameworkError> {
         with_read_executor(|exec| async move {
@@ -199,14 +316,31 @@ where
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::sea_orm;
 /// use suprnova::database::{EntityExt, EntityExtMut};
 /// use sea_orm::Set;
 ///
+/// # mod user {
+/// #     use suprnova::sea_orm;
+/// #     use sea_orm::entity::prelude::*;
+/// #     #[derive(Clone, Debug, DeriveEntityModel)]
+/// #     #[sea_orm(table_name = "users")]
+/// #     pub struct Model {
+/// #         #[sea_orm(primary_key)]
+/// #         pub id: i32,
+/// #         pub name: String,
+/// #         pub email: String,
+/// #     }
+/// #     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+/// #     pub enum Relation {}
+/// #     impl ActiveModelBehavior for ActiveModel {}
+/// # }
 /// // Implement both traits
-/// impl suprnova::database::EntityExt for Entity {}
-/// impl suprnova::database::EntityExtMut for Entity {}
+/// impl suprnova::database::EntityExt for user::Entity {}
+/// impl suprnova::database::EntityExtMut for user::Entity {}
 ///
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 /// // Insert a new record
 /// let new_user = user::ActiveModel {
 ///     name: Set("John".to_string()),
@@ -217,6 +351,7 @@ where
 ///
 /// // Delete by ID
 /// user::Entity::delete_by_pk(user.id).await?;
+/// # Ok(()) }
 /// ```
 #[async_trait]
 pub trait EntityExtMut: EntityExt
@@ -227,13 +362,35 @@ where
     /// Insert a new record
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::sea_orm;
+    /// # use sea_orm::Set;
+    /// # mod user {
+    /// #     use suprnova::sea_orm;
+    /// #     use sea_orm::entity::prelude::*;
+    /// #     #[derive(Clone, Debug, DeriveEntityModel)]
+    /// #     #[sea_orm(table_name = "users")]
+    /// #     pub struct Model {
+    /// #         #[sea_orm(primary_key)]
+    /// #         pub id: i32,
+    /// #         pub name: String,
+    /// #         pub email: String,
+    /// #     }
+    /// #     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    /// #     pub enum Relation {}
+    /// #     impl ActiveModelBehavior for ActiveModel {}
+    /// #     impl suprnova::database::EntityExt for Entity {}
+    /// #     impl suprnova::database::EntityExtMut for Entity {}
+    /// # }
+    /// # use suprnova::database::EntityExtMut;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let new_user = user::ActiveModel {
     ///     name: Set("John".to_string()),
     ///     email: Set("john@example.com".to_string()),
     ///     ..Default::default()
     /// };
     /// let user = user::Entity::insert_one(new_user).await?;
+    /// # Ok(()) }
     /// ```
     async fn insert_one(model: Self::ActiveModel) -> Result<Self::Model, FrameworkError> {
         with_write_executor(|exec| async move {
@@ -248,10 +405,32 @@ where
     /// Update an existing record
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::sea_orm;
+    /// # use sea_orm::{IntoActiveModel, Set};
+    /// # mod user {
+    /// #     use suprnova::sea_orm;
+    /// #     use sea_orm::entity::prelude::*;
+    /// #     #[derive(Clone, Debug, DeriveEntityModel)]
+    /// #     #[sea_orm(table_name = "users")]
+    /// #     pub struct Model {
+    /// #         #[sea_orm(primary_key)]
+    /// #         pub id: i32,
+    /// #         pub name: String,
+    /// #     }
+    /// #     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    /// #     pub enum Relation {}
+    /// #     impl ActiveModelBehavior for ActiveModel {}
+    /// #     impl suprnova::database::EntityExt for Entity {}
+    /// #     impl suprnova::database::EntityExtMut for Entity {}
+    /// # }
+    /// # use suprnova::database::EntityExtMut;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let user = user::Model { id: 1, name: "John".to_string() };
     /// let mut user: user::ActiveModel = user.into();
     /// user.name = Set("Updated Name".to_string());
     /// let updated = user::Entity::update_one(user).await?;
+    /// # Ok(()) }
     /// ```
     async fn update_one(model: Self::ActiveModel) -> Result<Self::Model, FrameworkError> {
         with_write_executor(|exec| async move {
@@ -266,8 +445,28 @@ where
     /// Delete a record by primary key
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::sea_orm;
+    /// # mod user {
+    /// #     use suprnova::sea_orm;
+    /// #     use sea_orm::entity::prelude::*;
+    /// #     #[derive(Clone, Debug, DeriveEntityModel)]
+    /// #     #[sea_orm(table_name = "users")]
+    /// #     pub struct Model {
+    /// #         #[sea_orm(primary_key)]
+    /// #         pub id: i32,
+    /// #         pub name: String,
+    /// #     }
+    /// #     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    /// #     pub enum Relation {}
+    /// #     impl ActiveModelBehavior for ActiveModel {}
+    /// #     impl suprnova::database::EntityExt for Entity {}
+    /// #     impl suprnova::database::EntityExtMut for Entity {}
+    /// # }
+    /// # use suprnova::database::EntityExtMut;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let rows_deleted = user::Entity::delete_by_pk(1).await?;
+    /// # Ok(()) }
     /// ```
     async fn delete_by_pk<K>(id: K) -> Result<u64, FrameworkError>
     where
@@ -286,12 +485,33 @@ where
     /// Save a model (insert or update based on whether primary key is set)
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::sea_orm;
+    /// # use sea_orm::Set;
+    /// # mod user {
+    /// #     use suprnova::sea_orm;
+    /// #     use sea_orm::entity::prelude::*;
+    /// #     #[derive(Clone, Debug, DeriveEntityModel)]
+    /// #     #[sea_orm(table_name = "users")]
+    /// #     pub struct Model {
+    /// #         #[sea_orm(primary_key)]
+    /// #         pub id: i32,
+    /// #         pub name: String,
+    /// #     }
+    /// #     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    /// #     pub enum Relation {}
+    /// #     impl ActiveModelBehavior for ActiveModel {}
+    /// #     impl suprnova::database::EntityExt for Entity {}
+    /// #     impl suprnova::database::EntityExtMut for Entity {}
+    /// # }
+    /// # use suprnova::database::EntityExtMut;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let user = user::ActiveModel {
     ///     name: Set("John".to_string()),
     ///     ..Default::default()
     /// };
     /// let saved = user::Entity::save_one(user).await?;
+    /// # Ok(()) }
     /// ```
     async fn save_one(model: Self::ActiveModel) -> Result<Self::Model, FrameworkError>
     where

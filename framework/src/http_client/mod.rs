@@ -156,9 +156,10 @@ impl Http {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
     /// use suprnova::{Http, fake_response, assert_sent};
     ///
+    /// # async fn ex() {
     /// Http::fake(|| async {
     ///     fake_response("POST", "/api/users", 201, serde_json::json!({"id": 1}));
     ///     let resp = Http::post("https://example.com/api/users")
@@ -170,6 +171,7 @@ impl Http {
     ///     assert_sent(|r| r.method == "POST" && r.url.contains("/api/users"));
     /// })
     /// .await;
+    /// # }
     /// ```
     pub async fn fake<F, Fut, T>(f: F) -> T
     where
@@ -190,7 +192,7 @@ impl Http {
     /// services. Pair with [`Self::allow_real_calls`] in teardown, or
     /// prefer [`FailOnRealCallsGuard`] which resets on drop:
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
     /// let _guard = suprnova::FailOnRealCallsGuard::install();
     /// // Inside this scope, any unfaked outbound call fails closed.
     /// ```
@@ -252,7 +254,9 @@ impl Http {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::{Http, fake_response};
+    /// # async fn ex() {
     /// Http::fake(|| async {
     ///     fake_response("GET", "/child", 204, serde_json::json!({}));
     ///     let handle = Http::spawn_with_fake_inheritance(async {
@@ -262,6 +266,7 @@ impl Http {
     ///     assert_eq!(response.status(), 204);
     /// })
     /// .await;
+    /// # }
     /// ```
     pub fn spawn_with_fake_inheritance<F, T>(future: F) -> tokio::task::JoinHandle<T>
     where
@@ -282,7 +287,7 @@ impl Http {
 /// test panics. Use this in test setup to avoid poisoning sibling
 /// tests when the body exits early:
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// #[tokio::test]
 /// async fn my_test() {
 ///     let _guard = suprnova::FailOnRealCallsGuard::install();

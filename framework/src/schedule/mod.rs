@@ -9,9 +9,10 @@
 //!
 //! ## Using Trait-Based Tasks
 //!
-//! ```rust,ignore
+//! ```rust,no_run
+//! # use suprnova::Schedule;
 //! use suprnova::{Task, TaskResult};
-//! use async_trait::async_trait;
+//! use suprnova::async_trait;
 //!
 //! pub struct CleanupLogsTask;
 //!
@@ -36,7 +37,7 @@
 //!
 //! ## Using Closure-Based Tasks
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use suprnova::Schedule;
 //!
 //! pub fn register(schedule: &mut Schedule) {
@@ -104,8 +105,15 @@ pub type ScheduledTaskJoin = (String, Result<(), FrameworkError>);
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::Schedule;
+/// # use suprnova::{Task, TaskResult, async_trait};
+/// # struct MyCleanupTask;
+/// # impl MyCleanupTask { fn new() -> Self { MyCleanupTask } }
+/// # #[async_trait]
+/// # impl Task for MyCleanupTask {
+/// #     async fn handle(&self) -> TaskResult { Ok(()) }
+/// # }
 ///
 /// pub fn register(schedule: &mut Schedule) {
 ///     // Register a struct implementing Task trait
@@ -140,13 +148,22 @@ impl Schedule {
     /// Returns a `TaskBuilder` that allows fluent schedule configuration.
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::{Schedule, Task, TaskResult, async_trait};
+    /// # struct CleanupLogsTask;
+    /// # impl CleanupLogsTask { fn new() -> Self { CleanupLogsTask } }
+    /// # #[async_trait]
+    /// # impl Task for CleanupLogsTask {
+    /// #     async fn handle(&self) -> TaskResult { Ok(()) }
+    /// # }
+    /// # fn ex(schedule: &mut Schedule) {
     /// schedule.add(
     ///     schedule.task(CleanupLogsTask::new())
     ///         .daily()
     ///         .at("03:00")
     ///         .name("cleanup:logs")
     /// );
+    /// # }
     /// ```
     pub fn task<T: Task + 'static>(&self, task: T) -> TaskBuilder {
         TaskBuilder::from_task(task)
@@ -159,11 +176,14 @@ impl Schedule {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::Schedule;
+    /// # fn ex(schedule: &Schedule) {
     /// schedule.call(|| async {
     ///     // Task logic here
     ///     Ok(())
     /// }).daily().at("03:00").name("my-task");
+    /// # }
     /// ```
     pub fn call<F, Fut>(&self, f: F) -> TaskBuilder
     where
@@ -179,9 +199,12 @@ impl Schedule {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::Schedule;
+    /// # fn ex(schedule: &mut Schedule) {
     /// let builder = schedule.call(|| async { Ok(()) }).daily();
     /// schedule.add(builder);
+    /// # }
     /// ```
     pub fn add(&mut self, builder: TaskBuilder) -> &mut Self {
         let task_index = self.tasks.len();
@@ -382,7 +405,7 @@ impl Default for Schedule {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::{schedule_task, Schedule};
 ///
 /// pub fn register(schedule: &mut Schedule) {

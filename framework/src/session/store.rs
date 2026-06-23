@@ -45,7 +45,9 @@ impl SessionData {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::session::SessionData;
+    /// # let session = SessionData::new("sid".into(), "tok".into());
     /// let name: Option<String> = session.get("name");
     /// ```
     pub fn get<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
@@ -58,7 +60,9 @@ impl SessionData {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::session::SessionData;
+    /// # let mut session = SessionData::new("sid".into(), "tok".into());
     /// session.put("name", "John");
     /// session.put("count", 42);
     /// ```
@@ -92,7 +96,9 @@ impl SessionData {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::session::SessionData;
+    /// # let mut session = SessionData::new("sid".into(), "tok".into());
     /// session.flash("success", "Item saved successfully!");
     /// ```
     pub fn flash<T: Serialize>(&mut self, key: &str, value: T) {

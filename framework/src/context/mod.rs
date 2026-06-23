@@ -21,12 +21,14 @@
 //! `None`. Use [`Context::current`] to snapshot the live store and
 //! [`Context::scope`] to re-enter it inside the child:
 //!
-//! ```ignore
+//! ```rust,no_run
+//! # async fn ex() {
 //! if let Some(store) = suprnova::context::Context::current() {
 //!     tokio::spawn(suprnova::context::Context::scope(store, async move {
 //!         // `Context::get`, `query_param`, etc. now see the parent bag.
 //!     }));
 //! }
+//! # }
 //! ```
 //!
 //! [`ContextStore`] holds `Arc<DashMap>` handles, so the propagated
@@ -123,10 +125,13 @@ impl Context {
     /// hand the spawned future to [`tokio::spawn`] without naming the
     /// task-local directly:
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use suprnova::context::Context;
+    /// # async fn ex() {
     /// if let Some(store) = Context::current() {
     ///     tokio::spawn(Context::scope(store, async move { /* ... */ }));
     /// }
+    /// # }
     /// ```
     pub fn scope<F>(
         store: ContextStore,

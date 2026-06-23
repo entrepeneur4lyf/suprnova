@@ -26,23 +26,29 @@ fn has_inject_attr(field: &syn::Field) -> bool {
 ///
 /// # Example - Simple (no dependencies)
 ///
-/// ```rust,ignore
-/// use suprnova::injectable;
+/// ```rust,no_run
+/// use suprnova::{injectable, App};
 ///
 /// #[injectable]
 /// pub struct AppState {
 ///     pub counter: u32,
 /// }
 ///
+/// # fn ex() {
 /// // Automatically registered at startup with Default::default()
 /// // Resolve via:
 /// let state: AppState = App::get().unwrap();
+/// # }
 /// ```
 ///
 /// # Example - With Dependencies
 ///
-/// ```rust,ignore
-/// use suprnova::injectable;
+/// ```rust,no_run
+/// use suprnova::{injectable, App};
+/// # #[derive(Clone, Default)]
+/// # pub struct AppConfig;
+/// # #[derive(Clone, Default)]
+/// # pub struct LoggerService;
 ///
 /// #[injectable]
 /// pub struct MyService {
@@ -52,9 +58,11 @@ fn has_inject_attr(field: &syn::Field) -> bool {
 ///     logger: LoggerService,
 /// }
 ///
+/// # fn ex() {
 /// // Dependencies are resolved at startup
 /// // Resolve via:
 /// let service: MyService = App::get().unwrap();
+/// # }
 /// ```
 pub fn injectable_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);

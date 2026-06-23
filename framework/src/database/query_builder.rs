@@ -4,9 +4,27 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
-//! use crate::models::todos::{Todo, Column};
-//!
+//! ```rust,no_run
+//! # use suprnova::FrameworkError;
+//! # #[derive(Clone, Copy)] enum Cond {}
+//! # #[derive(Clone, Copy)] enum Column { Id, Title, CreatedAt }
+//! # impl Column {
+//! #     fn eq<T>(self, _v: T) -> Cond { unreachable!() }
+//! #     fn gt<T>(self, _v: T) -> Cond { unreachable!() }
+//! # }
+//! # struct Model;
+//! # struct Qb;
+//! # impl Qb {
+//! #     fn filter(self, _c: Cond) -> Self { self }
+//! #     fn order_by_desc(self, _c: Column) -> Self { self }
+//! #     fn limit(self, _n: u64) -> Self { self }
+//! #     fn offset(self, _n: u64) -> Self { self }
+//! #     async fn all(self) -> Result<Vec<Model>, FrameworkError> { Ok(vec![]) }
+//! #     async fn first(self) -> Result<Option<Model>, FrameworkError> { Ok(None) }
+//! # }
+//! # struct Todo;
+//! # impl Todo { fn query() -> Qb { Qb } }
+//! # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 //! // Simple query
 //! let todos = Todo::query().all().await?;
 //!
@@ -24,6 +42,7 @@
 //!     .offset(20)
 //!     .all()
 //!     .await?;
+//! # Ok(()) }
 //! ```
 
 use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect, Select};
@@ -40,12 +59,27 @@ use crate::error::FrameworkError;
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::FrameworkError;
+/// # #[derive(Clone, Copy)] enum Cond {}
+/// # #[derive(Clone, Copy)] enum Column { Title, Active }
+/// # impl Column { fn eq<T>(self, _v: T) -> Cond { unreachable!() } }
+/// # struct Model;
+/// # struct Qb;
+/// # impl Qb {
+/// #     fn filter(self, _c: Cond) -> Self { self }
+/// #     fn order_by_asc(self, _c: Column) -> Self { self }
+/// #     async fn all(self) -> Result<Vec<Model>, FrameworkError> { Ok(vec![]) }
+/// # }
+/// # struct Todo;
+/// # impl Todo { fn query() -> Qb { Qb } }
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 /// let todos = Todo::query()
 ///     .filter(Column::Active.eq(true))
 ///     .order_by_asc(Column::Title)
 ///     .all()
 ///     .await?;
+/// # Ok(()) }
 /// ```
 pub struct QueryBuilder<E>
 where
@@ -68,12 +102,26 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::FrameworkError;
+    /// # #[derive(Clone, Copy)] enum Cond {}
+    /// # #[derive(Clone, Copy)] enum Column { Title, Active }
+    /// # impl Column { fn eq<T>(self, _v: T) -> Cond { unreachable!() } }
+    /// # struct Model;
+    /// # struct Qb;
+    /// # impl Qb {
+    /// #     fn filter(self, _c: Cond) -> Self { self }
+    /// #     async fn all(self) -> Result<Vec<Model>, FrameworkError> { Ok(vec![]) }
+    /// # }
+    /// # struct Todo;
+    /// # impl Todo { fn query() -> Qb { Qb } }
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let todos = Todo::query()
     ///     .filter(Column::Title.eq("test"))
     ///     .filter(Column::Active.eq(true))
     ///     .all()
     ///     .await?;
+    /// # Ok(()) }
     /// ```
     pub fn filter<F>(mut self, filter: F) -> Self
     where
@@ -87,11 +135,23 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::FrameworkError;
+    /// # #[derive(Clone, Copy)] enum Column { Title }
+    /// # struct Model;
+    /// # struct Qb;
+    /// # impl Qb {
+    /// #     fn order_by_asc(self, _c: Column) -> Self { self }
+    /// #     async fn all(self) -> Result<Vec<Model>, FrameworkError> { Ok(vec![]) }
+    /// # }
+    /// # struct Todo;
+    /// # impl Todo { fn query() -> Qb { Qb } }
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let todos = Todo::query()
     ///     .order_by_asc(Column::Title)
     ///     .all()
     ///     .await?;
+    /// # Ok(()) }
     /// ```
     pub fn order_by_asc<C>(mut self, col: C) -> Self
     where
@@ -105,11 +165,23 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::FrameworkError;
+    /// # #[derive(Clone, Copy)] enum Column { CreatedAt }
+    /// # struct Model;
+    /// # struct Qb;
+    /// # impl Qb {
+    /// #     fn order_by_desc(self, _c: Column) -> Self { self }
+    /// #     async fn all(self) -> Result<Vec<Model>, FrameworkError> { Ok(vec![]) }
+    /// # }
+    /// # struct Todo;
+    /// # impl Todo { fn query() -> Qb { Qb } }
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let todos = Todo::query()
     ///     .order_by_desc(Column::CreatedAt)
     ///     .all()
     ///     .await?;
+    /// # Ok(()) }
     /// ```
     pub fn order_by_desc<C>(mut self, col: C) -> Self
     where
@@ -123,12 +195,24 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use sea_orm::Order;
+    /// ```rust,no_run
+    /// # use suprnova::FrameworkError;
+    /// # use sea_orm::Order;
+    /// # #[derive(Clone, Copy)] enum Column { Title }
+    /// # struct Model;
+    /// # struct Qb;
+    /// # impl Qb {
+    /// #     fn order_by(self, _c: Column, _o: Order) -> Self { self }
+    /// #     async fn all(self) -> Result<Vec<Model>, FrameworkError> { Ok(vec![]) }
+    /// # }
+    /// # struct Todo;
+    /// # impl Todo { fn query() -> Qb { Qb } }
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let todos = Todo::query()
     ///     .order_by(Column::Title, Order::Asc)
     ///     .all()
     ///     .await?;
+    /// # Ok(()) }
     /// ```
     pub fn order_by<C>(mut self, col: C, order: Order) -> Self
     where
@@ -142,8 +226,19 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::FrameworkError;
+    /// # struct Model;
+    /// # struct Qb;
+    /// # impl Qb {
+    /// #     fn limit(self, _n: u64) -> Self { self }
+    /// #     async fn all(self) -> Result<Vec<Model>, FrameworkError> { Ok(vec![]) }
+    /// # }
+    /// # struct Todo;
+    /// # impl Todo { fn query() -> Qb { Qb } }
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let todos = Todo::query().limit(10).all().await?;
+    /// # Ok(()) }
     /// ```
     pub fn limit(mut self, limit: u64) -> Self {
         self.select = self.select.limit(limit);
@@ -154,9 +249,21 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::FrameworkError;
+    /// # struct Model;
+    /// # struct Qb;
+    /// # impl Qb {
+    /// #     fn offset(self, _n: u64) -> Self { self }
+    /// #     fn limit(self, _n: u64) -> Self { self }
+    /// #     async fn all(self) -> Result<Vec<Model>, FrameworkError> { Ok(vec![]) }
+    /// # }
+    /// # struct Todo;
+    /// # impl Todo { fn query() -> Qb { Qb } }
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// // Skip first 10, get next 10
     /// let todos = Todo::query().offset(10).limit(10).all().await?;
+    /// # Ok(()) }
     /// ```
     pub fn offset(mut self, offset: u64) -> Self {
         self.select = self.select.offset(offset);
@@ -167,8 +274,16 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::FrameworkError;
+    /// # struct Model;
+    /// # struct Qb;
+    /// # impl Qb { async fn all(self) -> Result<Vec<Model>, FrameworkError> { Ok(vec![]) } }
+    /// # struct Todo;
+    /// # impl Todo { fn query() -> Qb { Qb } }
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let todos = Todo::query().all().await?;
+    /// # Ok(()) }
     /// ```
     pub async fn all(self) -> Result<Vec<E::Model>, FrameworkError> {
         let exec =
@@ -184,11 +299,25 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::FrameworkError;
+    /// # #[derive(Clone, Copy)] enum Cond {}
+    /// # #[derive(Clone, Copy)] enum Column { Id }
+    /// # impl Column { fn eq<T>(self, _v: T) -> Cond { unreachable!() } }
+    /// # struct Model;
+    /// # struct Qb;
+    /// # impl Qb {
+    /// #     fn filter(self, _c: Cond) -> Self { self }
+    /// #     async fn first(self) -> Result<Option<Model>, FrameworkError> { Ok(None) }
+    /// # }
+    /// # struct Todo;
+    /// # impl Todo { fn query() -> Qb { Qb } }
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let todo = Todo::query()
     ///     .filter(Column::Id.eq(1))
     ///     .first()
     ///     .await?;
+    /// # Ok(()) }
     /// ```
     pub async fn first(self) -> Result<Option<E::Model>, FrameworkError> {
         let exec =
@@ -204,11 +333,25 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::FrameworkError;
+    /// # #[derive(Clone, Copy)] enum Cond {}
+    /// # #[derive(Clone, Copy)] enum Column { Id }
+    /// # impl Column { fn eq<T>(self, _v: T) -> Cond { unreachable!() } }
+    /// # struct Model;
+    /// # struct Qb;
+    /// # impl Qb {
+    /// #     fn filter(self, _c: Cond) -> Self { self }
+    /// #     async fn first_or_fail(self) -> Result<Model, FrameworkError> { Ok(Model) }
+    /// # }
+    /// # struct Todo;
+    /// # impl Todo { fn query() -> Qb { Qb } }
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let todo = Todo::query()
     ///     .filter(Column::Id.eq(1))
     ///     .first_or_fail()
     ///     .await?;
+    /// # Ok(()) }
     /// ```
     pub async fn first_or_fail(self) -> Result<E::Model, FrameworkError> {
         self.first().await?.ok_or_else(|| {
@@ -220,11 +363,24 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::FrameworkError;
+    /// # #[derive(Clone, Copy)] enum Cond {}
+    /// # #[derive(Clone, Copy)] enum Column { Active }
+    /// # impl Column { fn eq<T>(self, _v: T) -> Cond { unreachable!() } }
+    /// # struct Qb;
+    /// # impl Qb {
+    /// #     fn filter(self, _c: Cond) -> Self { self }
+    /// #     async fn count(self) -> Result<u64, FrameworkError> { Ok(0) }
+    /// # }
+    /// # struct Todo;
+    /// # impl Todo { fn query() -> Qb { Qb } }
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let count = Todo::query()
     ///     .filter(Column::Active.eq(true))
     ///     .count()
     ///     .await?;
+    /// # Ok(()) }
     /// ```
     pub async fn count(self) -> Result<u64, FrameworkError> {
         let exec =
@@ -238,11 +394,24 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::FrameworkError;
+    /// # #[derive(Clone, Copy)] enum Cond {}
+    /// # #[derive(Clone, Copy)] enum Column { Active }
+    /// # impl Column { fn eq<T>(self, _v: T) -> Cond { unreachable!() } }
+    /// # struct Qb;
+    /// # impl Qb {
+    /// #     fn filter(self, _c: Cond) -> Self { self }
+    /// #     async fn exists(self) -> Result<bool, FrameworkError> { Ok(false) }
+    /// # }
+    /// # struct Todo;
+    /// # impl Todo { fn query() -> Qb { Qb } }
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// let has_active = Todo::query()
     ///     .filter(Column::Active.eq(true))
     ///     .exists()
     ///     .await?;
+    /// # Ok(()) }
     /// ```
     pub async fn exists(self) -> Result<bool, FrameworkError> {
         Ok(self.count().await? > 0)
@@ -254,13 +423,32 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::FrameworkError;
+    /// # #[derive(Clone, Copy)] enum Cond {}
+    /// # #[derive(Clone, Copy)] enum Column { Active }
+    /// # impl Column { fn eq<T>(self, _v: T) -> Cond { unreachable!() } }
+    /// # struct Model;
+    /// # struct Conn;
+    /// # struct Sel;
+    /// # impl Sel { async fn all(self, _c: &Conn) -> Result<Vec<Model>, FrameworkError> { Ok(vec![]) } }
+    /// # struct Qb;
+    /// # impl Qb {
+    /// #     fn filter(self, _c: Cond) -> Self { self }
+    /// #     fn into_select(self) -> Sel { Sel }
+    /// # }
+    /// # struct Todo;
+    /// # impl Todo { fn query() -> Qb { Qb } }
+    /// # struct Db { conn: Conn }
+    /// # impl Db { fn inner(&self) -> &Conn { &self.conn } }
+    /// # async fn ex(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
     /// let select = Todo::query()
     ///     .filter(Column::Active.eq(true))
     ///     .into_select();
     ///
     /// // Use with SeaORM directly
     /// let todos = select.all(db.inner()).await?;
+    /// # Ok(()) }
     /// ```
     pub fn into_select(self) -> Select<E> {
         self.select

@@ -499,7 +499,7 @@ pub mod rules {
     /// Usage is through the [`crate::validate!`] macro, which threads
     /// the field ident into the rule via `stringify!($field)`:
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
     /// use suprnova::{validate, Confirmed};
     /// use std::collections::HashMap;
     /// # struct Form { password: String }
@@ -580,12 +580,18 @@ pub trait AsyncRule: Send + Sync {
     /// awkward); use this helper to accumulate async rule failures
     /// alongside your sync checks:
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::{Unique, AsyncRule, ValidationErrors};
+    /// # struct CreateUserRequest { email: String }
+    /// # impl CreateUserRequest {
+    /// # async fn ex(&self) -> Result<(), ValidationErrors> {
     /// let mut errs = ValidationErrors::new();
     /// Unique::new("users", "email")
     ///     .check_async(&self.email, &mut errs, "email")
     ///     .await;
     /// errs.into_result()
+    /// # }
+    /// # }
     /// ```
     ///
     /// [`validate!`]: crate::validate
@@ -609,14 +615,17 @@ pub mod async_rules {
     ///
     /// Construct with [`Unique::new`] and refine with the builder:
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::Unique;
+    /// # let current_user_id = 1i64;
+    /// # let tenant_id = 7i64;
     /// // `email` must be unique, ignoring the row currently being edited
-    /// Unique::new("users", "email").ignore(current_user_id)
+    /// let _edit = Unique::new("users", "email").ignore(current_user_id);
     ///
     /// // `email` unique *per tenant*, compared case-insensitively
-    /// Unique::new("users", "email")
+    /// let _scoped = Unique::new("users", "email")
     ///     .where_eq("tenant_id", tenant_id)
-    ///     .case_insensitive()
+    ///     .case_insensitive();
     /// ```
     ///
     /// # This is an advisory check, not a guarantee
@@ -777,9 +786,16 @@ pub use async_rules::Unique;
 ///
 /// # Syntax
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::{validate, Required, Email, Min, Max, RequiredIf, ValidationErrors};
-///
+/// # struct Form {
+/// #     email: String,
+/// #     password: String,
+/// #     bio: Option<String>,
+/// #     card_number: String,
+/// #     billing_type: String,
+/// # }
+/// # impl Form {
 /// fn after_validation(&self) -> Result<(), ValidationErrors> {
 ///     // Contextual rules read sibling values from a `FormContext` you
 ///     // build — a map of field name to its string value.
@@ -795,6 +811,7 @@ pub use async_rules::Unique;
 ///         } => with ctx;
 ///     }
 /// }
+/// # }
 /// ```
 ///
 /// Each row is one of three shapes:
@@ -845,11 +862,19 @@ pub use async_rules::Unique;
 /// When an `Option<String>` field must be present under a condition on a
 /// sibling field, use the `?=>` row instead:
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::{validate, RequiredIf, ValidationErrors};
+/// # struct Form { card_number: Option<String>, billing_type: String }
+/// # impl Form {
+/// # fn ex(&self) -> Result<(), ValidationErrors> {
+/// # let mut ctx = std::collections::HashMap::new();
+/// # ctx.insert("billing_type".to_string(), self.billing_type.clone());
 /// // card_number is required only when billing_type == "card"
 /// validate! { self =>
 ///     card_number ?=> RequiredIf { other: "billing_type", value: "card" } => with ctx;
 /// }
+/// # }
+/// # }
 /// ```
 ///
 /// `?=>` evaluates its rules even when the field is `None` (absence is

@@ -27,13 +27,18 @@
 //! namespaces of the same index, register one driver per namespace
 //! under different store names:
 //!
-//! ```rust,ignore
+//! ```rust,no_run
+//! # use std::sync::Arc;
+//! # use suprnova::Vector;
+//! # use suprnova::vector::PineconeVectorDriver;
+//! # fn ex() -> Result<(), Box<dyn std::error::Error>> {
 //! Vector::register("docs-public", Arc::new(
 //!     PineconeVectorDriver::from_env()?.with_namespace("public")
 //! ));
 //! Vector::register("docs-private", Arc::new(
 //!     PineconeVectorDriver::from_env()?.with_namespace("private")
 //! ));
+//! # Ok(()) }
 //! ```
 //!
 //! # Index creation

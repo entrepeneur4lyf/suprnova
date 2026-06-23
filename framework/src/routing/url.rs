@@ -22,12 +22,18 @@
 //! All helpers are free functions in the `crate::routing::url` namespace,
 //! re-exported under `suprnova::url::*` so consumers write:
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use suprnova::url;
-//!
+//! # use suprnova::Request;
+//! # fn req() -> Request { unimplemented!() }
+//! # fn ex() -> Result<(), Box<dyn std::error::Error>> {
+//! # let t = "reset-token";
+//! # let request = req();
 //! let absolute = url::to("/dashboard");
 //! let signed = url::signed_route("password.reset", &[("token", t)])?;
 //! let verdict = url::has_valid_signature(&request);
+//! # let _ = (absolute, signed, verdict);
+//! # Ok(()) }
 //! ```
 
 use crate::FrameworkError;
@@ -47,8 +53,9 @@ use crate::routing::signed::{
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// std::env::set_var("APP_URL", "https://example.com");
+/// ```rust,no_run
+/// // SAFETY: single-threaded doctest; `set_var` is `unsafe` in edition 2024.
+/// unsafe { std::env::set_var("APP_URL", "https://example.com"); }
 /// assert_eq!(suprnova::url::to("/about"), "https://example.com/about");
 /// assert_eq!(
 ///     suprnova::url::to("https://other.example/x"),

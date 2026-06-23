@@ -45,9 +45,26 @@ use crate::mail::Mail;
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::auth_flows::EmailVerification;
 ///
+/// # use suprnova::auth::Authenticatable;
+/// # use suprnova::auth::must_verify_email::MustVerifyEmail;
+/// # use chrono::{DateTime, Utc};
+/// # use std::any::Any;
+/// # use std::sync::Arc;
+/// # struct User { id: String, email: String }
+/// # impl Authenticatable for User {
+/// #     fn get_auth_identifier(&self) -> String { self.id.clone() }
+/// #     fn as_any(&self) -> &dyn Any { self }
+/// #     fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> { self }
+/// # }
+/// # impl MustVerifyEmail for User {
+/// #     fn email(&self) -> &str { &self.email }
+/// #     fn email_verified_at(&self) -> Option<DateTime<Utc>> { None }
+/// #     fn set_email_verified_at(&mut self, _v: Option<DateTime<Utc>>) {}
+/// # }
+/// # async fn ex(user: User, token_from_query: String) -> Result<(), Box<dyn std::error::Error>> {
 /// // After a fresh signup, with the freshly-created user in hand:
 /// EmailVerification::send_link(&user, "https://example.com/verify").await?;
 ///
@@ -57,6 +74,7 @@ use crate::mail::Mail;
 ///
 /// // From the click-through handler:
 /// let user_id = EmailVerification::verify(&token_from_query).await?;
+/// # Ok(()) }
 /// ```
 pub struct EmailVerification;
 

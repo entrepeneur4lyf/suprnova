@@ -140,9 +140,10 @@ pub fn registry() -> &'static NamedLimiterRegistry {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::rate_limit::{Limit, RateLimiter};
-///
+/// # use suprnova::http::HttpResponse;
+/// # async fn ex() -> Result<(), HttpResponse> {
 /// // Register a named limiter at boot. Key by `req.ip()` — that goes
 /// // through the trusted-proxy gating in `Request::ip`, so the bucket
 /// // key reflects the real peer unless the operator has explicitly
@@ -157,6 +158,7 @@ pub fn registry() -> &'static NamedLimiterRegistry {
 ///     return Err(HttpResponse::text("Too many attempts").status(429));
 /// }
 /// RateLimiter::hit("login:1.2.3.4", 60).await?;
+/// # Ok(()) }
 /// ```
 ///
 /// # Security note on bucket keys

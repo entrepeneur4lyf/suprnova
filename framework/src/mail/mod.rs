@@ -138,9 +138,12 @@ impl Mail {
     /// Laravel's `Mail::raw($text, $callback)` where the callback
     /// configures the recipient list.
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use suprnova::Mail;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// Mail::raw("Hello, plain world", |b| b.to("alice@example.org")
     ///     .subject("Hi")).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn raw<F>(text: impl Into<String>, configure: F) -> Result<(), FrameworkError>
     where

@@ -87,7 +87,7 @@ pub(crate) fn session_scope_installed() -> bool {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::session::session;
 ///
 /// if let Some(session) = session() {
@@ -105,7 +105,7 @@ pub fn session() -> Option<SessionData> {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::session::session_mut;
 ///
 /// session_mut(|session| {

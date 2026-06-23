@@ -57,11 +57,11 @@
 //! Apps wire the chain by binding the composite into the App container
 //! under `dyn FeatureSync`:
 //!
-//! ```rust,ignore
-//! use suprnova::{App, features::{CompositeFeatureSync, DatabaseEvaluator, CachedEvaluator, FeatureSync}};
-//! use std::sync::Arc;
-//! use std::time::Duration;
-//!
+//! ```rust,no_run
+//! # use suprnova::{App, features::{CompositeFeatureSync, DatabaseEvaluator, CachedEvaluator, FeatureSync}};
+//! # use std::sync::Arc;
+//! # use std::time::Duration;
+//! # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 //! let database = Arc::new(DatabaseEvaluator::new().await?);
 //! let cached = Arc::new(CachedEvaluator::new(database.clone(), Duration::from_secs(60)));
 //! let composite = Arc::new(CompositeFeatureSync::new(
@@ -69,6 +69,7 @@
 //!     vec![cached.clone() as Arc<dyn FeatureSync>],
 //! ));
 //! App::bind::<dyn FeatureSync>(composite);
+//! # Ok(()) }
 //! ```
 //!
 //! Most apps don't need to do this by hand — [`bootstrap_database_cached`](crate::features::bootstrap_database_cached)

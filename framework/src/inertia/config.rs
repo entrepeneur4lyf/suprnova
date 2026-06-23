@@ -403,19 +403,28 @@ impl InertiaConfig {
     /// resolve once at boot and pass the cached `String` to
     /// [`version`](Self::version):
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use suprnova::InertiaConfig;
+    /// # async fn read_manifest_hash() -> Result<String, Box<dyn std::error::Error>> {
+    /// #     Ok("abc123".to_string())
+    /// # }
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
     /// // In bootstrap:
     /// let manifest_hash = read_manifest_hash().await?;
     /// let cfg = InertiaConfig::new().version(manifest_hash);
+    /// # let _ = cfg;
+    /// # Ok(()) }
     /// ```
     ///
     /// Or wrap an internal cache and panic-recovery in the closure:
     ///
-    /// ```rust,ignore
-    /// use std::sync::Arc;
-    /// use std::sync::atomic::{AtomicPtr, Ordering};
-    /// let cached: Arc<...> = ...;  // your refresh strategy
-    /// InertiaConfig::new().version_with(move || cached.current_hash())
+    /// ```rust,no_run
+    /// # use suprnova::InertiaConfig;
+    /// # use std::sync::Arc;
+    /// # struct Cache;
+    /// # impl Cache { fn current_hash(&self) -> String { String::new() } }
+    /// let cached: Arc<Cache> = Arc::new(Cache);  // your refresh strategy
+    /// InertiaConfig::new().version_with(move || cached.current_hash());
     /// ```
     pub fn version_with<F>(mut self, f: F) -> Self
     where

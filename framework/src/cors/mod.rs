@@ -12,14 +12,16 @@
 //!
 //! # Install it globally
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use suprnova::{global_middleware, CorsConfig, CorsMiddleware};
 //!
+//! # fn ex() {
 //! global_middleware!(CorsMiddleware::new(
 //!     CorsConfig::allow_origins(["https://app.example"])
 //!         .allow_credentials(true)
 //!         .max_age(std::time::Duration::from_secs(600)),
 //! ));
+//! # }
 //! ```
 //!
 //! # Preflight reaches the middleware even on unrouted paths
@@ -40,9 +42,10 @@
 //! treatment; everything else passes through untouched. Patterns support
 //! `*` as a multi-segment wildcard (Laravel's `Str::is` semantics).
 //!
-//! ```rust,ignore
-//! CorsConfig::allow_origins(["https://app.example"])
-//!     .paths(["api/*", "sanctum/csrf-cookie"])
+//! ```rust,no_run
+//! # use suprnova::CorsConfig;
+//! let _cfg = CorsConfig::allow_origins(["https://app.example"])
+//!     .paths(["api/*", "sanctum/csrf-cookie"]);
 //! ```
 //!
 //! With no `paths`, CORS runs on every request (the Suprnova default — the
@@ -54,9 +57,10 @@
 //! based on a header, or only run CORS in production), use
 //! [`CorsConfig::skip_when`]:
 //!
-//! ```rust,ignore
-//! CorsConfig::any_origin()
-//!     .skip_when(|req| req.header("X-Internal").is_some())
+//! ```rust,no_run
+//! # use suprnova::CorsConfig;
+//! let _cfg = CorsConfig::any_origin()
+//!     .skip_when(|req| req.header("X-Internal").is_some());
 //! ```
 //!
 //! Mirrors Laravel's `HandleCors::skipWhen(Closure)` but on the policy
@@ -70,9 +74,10 @@
 //! [`CorsConfig::allow_origin_patterns`]: anchored regexes that, in addition
 //! to the literal [`CorsConfig::allow_origins`] list, count as allowed.
 //!
-//! ```rust,ignore
-//! CorsConfig::allow_origins(["https://app.example"])
-//!     .allow_origin_patterns([r"^https://[a-z0-9-]+\.staging\.example$"])
+//! ```rust,no_run
+//! # use suprnova::CorsConfig;
+//! let _cfg = CorsConfig::allow_origins(["https://app.example"])
+//!     .allow_origin_patterns([r"^https://[a-z0-9-]+\.staging\.example$"]);
 //! ```
 //!
 //! # No permissive default — pick an origin policy explicitly
@@ -290,9 +295,10 @@ impl CorsConfig {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// CorsConfig::allow_origins(["https://app.example"])
-    ///     .paths(["api/*", "sanctum/csrf-cookie"])
+    /// ```rust,no_run
+    /// # use suprnova::CorsConfig;
+    /// let _cfg = CorsConfig::allow_origins(["https://app.example"])
+    ///     .paths(["api/*", "sanctum/csrf-cookie"]);
     /// ```
     pub fn paths<I, S>(mut self, patterns: I) -> Self
     where
@@ -321,9 +327,10 @@ impl CorsConfig {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// CorsConfig::allow_origins(["https://app.example"])
-    ///     .allow_origin_patterns([r"^https://[a-z0-9-]+\.staging\.example$"])
+    /// ```rust,no_run
+    /// # use suprnova::CorsConfig;
+    /// let _cfg = CorsConfig::allow_origins(["https://app.example"])
+    ///     .allow_origin_patterns([r"^https://[a-z0-9-]+\.staging\.example$"]);
     /// ```
     pub fn allow_origin_patterns<I, S>(mut self, patterns: I) -> Self
     where
@@ -353,9 +360,10 @@ impl CorsConfig {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// CorsConfig::any_origin()
-    ///     .skip_when(|req| req.header("X-Internal-Call").is_some())
+    /// ```rust,no_run
+    /// # use suprnova::CorsConfig;
+    /// let _cfg = CorsConfig::any_origin()
+    ///     .skip_when(|req| req.header("X-Internal-Call").is_some());
     /// ```
     pub fn skip_when<F>(mut self, predicate: F) -> Self
     where

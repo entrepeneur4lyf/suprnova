@@ -75,7 +75,8 @@ fn impl_body(max_body_bytes: Option<proc_macro2::TokenStream>) -> proc_macro2::T
 ///
 /// For the best DX, use all three derives together:
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::FormRequestDerive as FormRequest;
 /// #[derive(::suprnova::serde::Deserialize, ::suprnova::validator::Validate, FormRequest)]
 /// pub struct CreateUserRequest {
 ///     #[validate(email)]
@@ -143,7 +144,7 @@ pub fn derive_request_impl(input: TokenStream) -> TokenStream {
 /// This attribute macro provides the cleanest DX by automatically adding
 /// the necessary derives. Just use `#[request]` and you're done:
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::request;
 ///
 /// #[request]
@@ -158,7 +159,7 @@ pub fn derive_request_impl(input: TokenStream) -> TokenStream {
 ///
 /// This expands to:
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// #[derive(::suprnova::serde::Deserialize, ::suprnova::validator::Validate)]
 /// pub struct CreateUserRequest {
 ///     #[validate(email)]

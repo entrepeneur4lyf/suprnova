@@ -3,9 +3,21 @@
 //!
 //! Drop into `ws!()` with the resolved hub and registry:
 //!
-//! ```rust,ignore
+//! ```rust,no_run
+//! # use std::sync::Arc;
+//! # use suprnova::{ws, async_trait, Middleware, Next, Request, Response};
+//! # use suprnova::{BroadcastingWsHandler, BroadcastHub, InMemoryBroadcastHub};
+//! # use suprnova::broadcasting::ChannelRegistry;
+//! # struct SessionMiddleware;
+//! # impl SessionMiddleware { fn new() -> Self { SessionMiddleware } }
+//! # #[async_trait]
+//! # impl Middleware for SessionMiddleware {
+//! #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+//! # }
+//! # let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
+//! # let registry = Arc::new(ChannelRegistry::new());
 //! ws!("/ws/broadcast", BroadcastingWsHandler::new(hub, registry))
-//!     .middleware(SessionMiddleware::new()),
+//!     .middleware(SessionMiddleware::new());
 //! ```
 //!
 //! # Security note
@@ -70,7 +82,12 @@ struct ForwarderEntry {
 /// Construct with `BroadcastingWsHandler::new(hub, registry)` and
 /// register with `Router::ws`:
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use std::sync::Arc;
+/// # use suprnova::{Router, BroadcastingWsHandler, BroadcastHub, InMemoryBroadcastHub};
+/// # use suprnova::broadcasting::ChannelRegistry;
+/// # let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
+/// # let registry = Arc::new(ChannelRegistry::new());
 /// let handler = BroadcastingWsHandler::new(hub.clone(), registry.clone());
 /// let router = Router::new().ws("/ws/broadcast", handler);
 /// ```

@@ -406,8 +406,13 @@ async fn process_claimed_workflow(
 /// Enqueue a workflow by function name with serialized args
 ///
 /// Example:
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use suprnova::{start_workflow, FrameworkError};
+/// # fn my_workflow() {}
+/// # async fn ex() -> Result<(), FrameworkError> {
 /// let handle = start_workflow!(my_workflow, 42, "hello").await?;
+/// # let _ = handle;
+/// # Ok(()) }
 /// ```
 #[macro_export]
 macro_rules! start_workflow {

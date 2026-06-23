@@ -1,7 +1,9 @@
 //! Monotonic counter for seeding unique-per-call factory fields.
 //!
-//! ```ignore
+//! ```rust,no_run
 //! use suprnova::factory::Sequence;
+//! # use suprnova::factory::Factory;
+//! # struct Order { id: i64, total: f64 }
 //!
 //! static ORDER_IDS: Sequence = Sequence::new();
 //!
@@ -11,7 +13,7 @@
 //!     fn definition() -> Order {
 //!         Order {
 //!             id: ORDER_IDS.next(),
-//!             total: Faker.fake(),
+//!             total: 49.99,
 //!         }
 //!     }
 //! }

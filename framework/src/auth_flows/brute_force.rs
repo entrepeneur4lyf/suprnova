@@ -104,9 +104,11 @@ const DEDUP_SWEEP_THRESHOLD: usize = 1024;
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::auth_flows::BruteForce;
-///
+/// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+/// # let email = "user@example.com".to_string();
+/// # let peer_ip = "203.0.113.7".to_string();
 /// // From a failed authenticate() handler:
 /// let status = BruteForce::record_failed_attempt(
 ///     &email,
@@ -119,6 +121,7 @@ const DEDUP_SWEEP_THRESHOLD: usize = 1024;
 ///
 /// // From the post-successful-login bookkeeping path:
 /// BruteForce::reset_attempts(&email).await?;
+/// # Ok(()) }
 /// ```
 pub struct BruteForce;
 
@@ -315,9 +318,11 @@ use std::sync::Arc;
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use suprnova::auth_flows::{BackendErrorPolicy, LoginThrottleMiddleware};
 /// use suprnova::Router;
+/// # use suprnova::{Request, Response, HttpResponse};
+/// # async fn login_handler(_req: Request) -> Response { Ok(HttpResponse::text("ok")) }
 ///
 /// let throttle = LoginThrottleMiddleware::new(|req| {
 ///     // Pull the email from a header your login form populates.
