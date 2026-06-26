@@ -30,6 +30,22 @@ impl MiddlewareChain {
         }
     }
 
+    /// Create a new middleware chain with enough pre-allocated capacity to
+    /// hold `n` entries without re-allocating as middleware is pushed or
+    /// extended into it.
+    ///
+    /// The request hot path builds a chain of `1 (RequestId) + global.len()
+    /// + route.len()` entries on every request. Using [`Self::new()`] there
+    /// forces the backing `Vec` to grow (and copy) two-to-three times as the
+    /// chain is assembled via `push` then `extend` then `extend`. Pre-sizing
+    /// to the known total collapses that to a single allocation, eliminating
+    /// per-request re-allocation overhead.
+    pub fn with_capacity(n: usize) -> Self {
+        Self {
+            middleware: Vec::with_capacity(n),
+        }
+    }
+
     /// Add middleware to the chain
     ///
     /// Middleware are executed in the order they are added.

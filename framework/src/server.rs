@@ -827,8 +827,14 @@ async fn handle_request_inner(
             // if the chain panics — the request scope is gone by then).
             let request_id = crate::logging::request_id::resolve_request_id(&request);
 
-            // Build middleware chain
-            let mut chain = MiddlewareChain::new();
+            // Build middleware chain, pre-sized so the backing Vec
+            // never re-allocates mid-assembly (was 2–3 reallocs per
+            // request with `new()` + push + extend + extend).
+            let global_mw = middleware_registry.global_middleware();
+            let route_middleware = router.get_route_middleware(&effective_method, &pattern);
+            let mut chain = MiddlewareChain::with_capacity(
+                1 + global_mw.len() + route_middleware.len(),
+            );
 
             // 0. RequestId is always outermost so the `request` span it
             //    enters — and every event emitted downstream within it —
@@ -836,7 +842,7 @@ async fn handle_request_inner(
             chain.push(into_boxed(RequestIdMiddleware::with_id(request_id.clone())));
 
             // 1. Add global middleware
-            chain.extend(middleware_registry.global_middleware().iter().cloned());
+            chain.extend(global_mw.iter().cloned());
 
             // 2. Add route-level middleware (already boxed).
             //    Lookup is keyed by `(effective_method, pattern)` — the
@@ -852,7 +858,6 @@ async fn handle_request_inner(
             //        lookup because `/api/posts/42 != /api/posts/{id}`; and
             //    (c) HEAD requests that fall back to GET still pick up
             //        the GET middleware list (auth, CSRF, rate-limit).
-            let route_middleware = router.get_route_middleware(&effective_method, &pattern);
             chain.extend(route_middleware);
 
             // 3. Execute chain with handler, catching panics in middleware
@@ -878,8 +883,11 @@ async fn handle_request_inner(
                     stamp_peer(Request::new(req).with_params(std::collections::HashMap::new()));
                 let request_id = crate::logging::request_id::resolve_request_id(&request);
 
-                // Build middleware chain for fallback
-                let mut chain = MiddlewareChain::new();
+                // Build middleware chain for fallback, pre-sized
+                // (see matched-route branch for rationale).
+                let mut chain = MiddlewareChain::with_capacity(
+                    1 + middleware_registry.global_middleware().len() + fallback_middleware.len(),
+                );
 
                 // 0. RequestId is always outermost (same as the matched-route path).
                 chain.push(into_boxed(RequestIdMiddleware::with_id(request_id.clone())));
@@ -918,9 +926,10 @@ async fn handle_request_inner(
                     stamp_peer(Request::new(req).with_params(std::collections::HashMap::new()));
                 let request_id = crate::logging::request_id::resolve_request_id(&request);
 
-                let mut chain = MiddlewareChain::new();
+                let global_mw = middleware_registry.global_middleware();
+                let mut chain = MiddlewareChain::with_capacity(1 + global_mw.len());
                 chain.push(into_boxed(RequestIdMiddleware::with_id(request_id.clone())));
-                chain.extend(middleware_registry.global_middleware().iter().cloned());
+                chain.extend(global_mw.iter().cloned());
 
                 let not_found: Arc<crate::routing::BoxedHandler> =
                     Arc::new(Box::new(|_req: Request| {
@@ -1165,7 +1174,9 @@ async fn handle_ws_upgrade(
                 >
         }));
 
-        let mut chain = MiddlewareChain::new();
+        let mut chain = MiddlewareChain::with_capacity(
+            1 + middleware_registry.global_middleware().len() + middleware_list.len(),
+        );
         chain.push(into_boxed(RequestIdMiddleware::with_id(request_id.clone())));
         chain.extend(middleware_registry.global_middleware().iter().cloned());
         chain.extend(middleware_list);

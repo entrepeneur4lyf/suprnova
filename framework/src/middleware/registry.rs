@@ -292,7 +292,16 @@ impl MiddlewareRegistry {
         self
     }
 
-    /// Get the list of global middleware
+    /// Get the list of global middleware.
+    ///
+    /// The returned slice is immutable after [`Self::from_global`] /
+    /// [`Self::append`] snapshotted it at server construction time, so
+    /// the request hot path can clone its entries cheaply: each
+    /// [`BoxedMiddleware`] is an `Arc`, so `iter().cloned()` is just a
+    /// refcount bump, not a deep copy. Callers that build a per-request
+    /// [`crate::middleware::MiddlewareChain`] should pair this with
+    /// [`crate::middleware::MiddlewareChain::with_capacity`] to also
+    /// avoid re-allocating the backing `Vec`.
     pub fn global_middleware(&self) -> &[BoxedMiddleware] {
         &self.global
     }
