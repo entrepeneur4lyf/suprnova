@@ -832,9 +832,8 @@ async fn handle_request_inner(
             // request with `new()` + push + extend + extend).
             let global_mw = middleware_registry.global_middleware();
             let route_middleware = router.get_route_middleware(&effective_method, &pattern);
-            let mut chain = MiddlewareChain::with_capacity(
-                1 + global_mw.len() + route_middleware.len(),
-            );
+            let mut chain =
+                MiddlewareChain::with_capacity(1 + global_mw.len() + route_middleware.len());
 
             // 0. RequestId is always outermost so the `request` span it
             //    enters — and every event emitted downstream within it —
