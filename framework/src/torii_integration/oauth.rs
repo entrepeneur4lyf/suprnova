@@ -39,7 +39,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{OnceLock, RwLock},
+    sync::{Arc, OnceLock, RwLock},
     time::Duration,
 };
 
@@ -54,6 +54,7 @@ use crate::{
     session::{session, session_mut},
     torii_integration::{Session, User, instance},
 };
+use apple::signing::AppleKeyPair;
 
 // ── Provider registry ─────────────────────────────────────────────────────────
 
@@ -78,6 +79,17 @@ pub struct OAuthProviderConfig {
     /// framework's integration tests to point the OAuth flow at an
     /// in-process mock server.
     pub endpoints_override: Option<EndpointOverrides>,
+    // ── Apple Sign-In only ───────────────────────────────────────────
+    /// Apple's ECDSA P-256 key pair (loaded from a `.p8` file via
+    /// [`AppleKeyPair::from_file`] / [`AppleKeyPair::from_base64`]). When
+    /// the provider is `"apple"`, the client secret is a JWT minted from
+    /// this key — the static [`client_secret`](Self::client_secret) field
+    /// is unused and may be empty. `None` for github/google.
+    pub apple_key_pair: Option<Arc<AppleKeyPair>>,
+    /// Apple's 10-character Team ID (e.g. `"TEAM123456"`). Required when
+    /// the provider is `"apple"` (it populates the `iss` claim of the
+    /// client-secret JWT). `None` for github/google.
+    pub apple_team_id: Option<String>,
 }
 
 impl OAuthProviderConfig {
@@ -238,6 +250,8 @@ pub struct OAuthKickoff {
 ///     redirect_url: "https://example.com/auth/oauth/github/callback".into(),
 ///     scopes: vec!["user:email".into()],
 ///     endpoints_override: None, // use the well-known GitHub endpoints
+///     apple_key_pair: None,
+///     apple_team_id: None,
 /// });
 ///
 /// // Begin flow:
@@ -381,13 +395,8 @@ impl OAuthAuth {
         // unknown params) and provides defense-in-depth for those that do.
         // `build_authorization_url` appends `response_mode=form_post` for
         // Apple (which requires it) and omits it for everyone else.
-        let authorization_url = build_authorization_url(
-            &self.provider,
-            &endpoints,
-            &config,
-            &state,
-            &challenge,
-        );
+        let authorization_url =
+            build_authorization_url(&self.provider, &endpoints, &config, &state, &challenge);
 
         Ok(OAuthKickoff {
             authorization_url,
@@ -965,7 +974,11 @@ mod tests {
         assert_eq!(ep.authorize, "https://appleid.apple.com/auth/authorize");
         assert_eq!(ep.token, "https://appleid.apple.com/auth/token");
         // Apple has no userinfo endpoint — user data comes from the ID token.
-        assert!(ep.userinfo.is_empty(), "apple userinfo must be empty (use ID token): {:?}", ep.userinfo);
+        assert!(
+            ep.userinfo.is_empty(),
+            "apple userinfo must be empty (use ID token): {:?}",
+            ep.userinfo
+        );
         assert!(ep.emails.is_none(), "apple has no separate emails endpoint");
     }
 
@@ -979,6 +992,8 @@ mod tests {
             redirect_url: "https://app.example/auth/apple/callback".into(),
             scopes: vec!["email".into(), "name".into()],
             endpoints_override: None,
+            apple_key_pair: None,
+            apple_team_id: None,
         }
     }
 
@@ -1005,6 +1020,8 @@ mod tests {
             redirect_url: "https://app.example/cb".into(),
             scopes: vec!["user:email".into()],
             endpoints_override: None,
+            apple_key_pair: None,
+            apple_team_id: None,
         };
         let url = build_authorization_url("github", &ep, &cfg, "st", "ch");
         assert!(

@@ -283,6 +283,8 @@ fn oauth_begin_rejects_when_no_session_mounted() {
         redirect_url: "http://localhost:8000/auth/oauth/github/callback".into(),
         scopes: vec!["user:email".into()],
         endpoints_override: None,
+        apple_key_pair: None,
+        apple_team_id: None,
     });
 
     RT.block_on(async {
@@ -791,6 +793,8 @@ fn oauth_kickoff_returns_authorization_url() {
             redirect_url: "http://localhost:8000/auth/oauth/github/callback".into(),
             scopes: vec!["user:email".into()],
             endpoints_override: None,
+            apple_key_pair: None,
+            apple_team_id: None,
         });
 
         let slot = suprnova::session::new_session_slot_for_test();
@@ -825,6 +829,8 @@ fn oauth_complete_rejects_when_session_has_no_stored_state() {
         redirect_url: "http://localhost:8000/auth/oauth/github/callback".into(),
         scopes: vec!["user:email".into()],
         endpoints_override: None,
+        apple_key_pair: None,
+        apple_team_id: None,
     });
 
     RT.block_on(async {
@@ -880,6 +886,8 @@ fn oauth_complete_rejects_when_state_doesnt_match_session_stored() {
         redirect_url: "http://localhost:8000/auth/oauth/github/callback".into(),
         scopes: vec!["user:email".into()],
         endpoints_override: None,
+        apple_key_pair: None,
+        apple_team_id: None,
     });
 
     RT.block_on(async {
@@ -933,6 +941,8 @@ fn oauth_begin_emits_pkce_challenge_and_stores_verifier_in_session() {
         redirect_url: "http://localhost:8000/auth/oauth/github/callback".into(),
         scopes: vec!["user:email".into()],
         endpoints_override: None,
+        apple_key_pair: None,
+        apple_team_id: None,
     });
 
     use sea_orm::ColumnTrait;
@@ -1118,20 +1128,18 @@ fn oauth_complete_sends_code_verifier_to_token_endpoint() {
         // endpoint table, and we're overriding that anyway.
         let provider_name = "github_pkce_test";
         Auth::oauth(provider_name).configure(
-            suprnova::torii_integration::oauth::OAuthProviderConfig {
-                client_id: "pkce-client".into(),
-                client_secret: "pkce-secret".into(),
-                redirect_url: "http://localhost:8000/auth/oauth/cb".into(),
-                scopes: vec!["user:email".into()],
-                endpoints_override: Some(
-                    suprnova::torii_integration::oauth::EndpointOverrides {
-                        authorize: format!("{base}/authorize"),
-                        token: format!("{base}/token"),
-                        userinfo: format!("{base}/userinfo"),
-                        emails: None,
-                    },
-                ),
-            },
+            suprnova::torii_integration::oauth::OAuthProviderConfig { client_id: "pkce-client".into(),
+            client_secret: "pkce-secret".into(),
+            redirect_url: "http://localhost:8000/auth/oauth/cb".into(),
+            scopes: vec!["user:email".into()],
+            endpoints_override: Some(
+                suprnova::torii_integration::oauth::EndpointOverrides {
+                    authorize: format!("{base}/authorize"),
+                    token: format!("{base}/token"),
+                    userinfo: format!("{base}/userinfo"),
+                    emails: None,
+                },
+            ), apple_key_pair: None, apple_team_id: None, },
         );
 
         use sea_orm::ColumnTrait;
@@ -1229,6 +1237,8 @@ fn oauth_complete_rejects_state_replay_after_ceremony_consumed() {
         redirect_url: "http://localhost:8000/auth/oauth/github/callback".into(),
         scopes: vec!["user:email".into()],
         endpoints_override: None,
+        apple_key_pair: None,
+        apple_team_id: None,
     });
 
     use sea_orm::ColumnTrait;
@@ -1616,6 +1626,8 @@ fn oauth_complete_falls_back_to_user_emails_when_userinfo_email_omitted() {
                     userinfo: format!("{base}/userinfo"),
                     emails: Some(format!("{base}/emails")),
                 }),
+                apple_key_pair: None,
+                apple_team_id: None,
             },
         );
 
@@ -1747,6 +1759,8 @@ fn oauth_complete_refuses_when_no_verified_email_available() {
                     userinfo: format!("{base}/userinfo"),
                     emails: Some(format!("{base}/emails")),
                 }),
+                apple_key_pair: None,
+                apple_team_id: None,
             },
         );
 
@@ -1874,6 +1888,8 @@ fn oauth_complete_refuses_unflagged_userinfo_email_from_unknown_provider() {
                     userinfo: format!("{base}/userinfo"),
                     emails: None,
                 }),
+                apple_key_pair: None,
+                apple_team_id: None,
             },
         );
 

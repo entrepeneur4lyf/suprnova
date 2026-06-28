@@ -848,6 +848,8 @@ impl Auth {
     ///     redirect_url: "http://localhost:8000/auth/oauth/github/callback".into(),
     ///     scopes: vec!["user:email".into()],
     ///     endpoints_override: None, // use the well-known GitHub endpoints
+    ///     apple_key_pair: None,
+    ///     apple_team_id: None,
     /// });
     ///
     /// let kickoff = Auth::oauth("github").begin().await?;
