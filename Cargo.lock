@@ -176,7 +176,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "app"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -7308,7 +7308,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "aes-gcm",
  "ammonia",
@@ -7412,7 +7412,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-cli"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -7438,7 +7438,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-macros"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7453,7 +7453,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-payments-paddle"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7471,7 +7471,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-payments-stripe"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "async-stripe",
  "async-stripe-client-core",
@@ -7496,7 +7496,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-web-push"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",

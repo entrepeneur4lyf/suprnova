@@ -304,29 +304,29 @@ fn apple_jwks() -> Result<&'static apple::jwks::AppleJwksClient, FrameworkError>
     Ok(APPLE_JWKS.get_or_init(|| client))
 }
 
-/// Decide which email to hand to `get_or_create_user` from an Apple ID
-/// token, enforcing the `email_verified` security contract.
+/// Extract the verified email from an Apple ID token, enforcing the
+/// `email_verified` security contract.
 ///
-/// - Verified, non-empty email → use it (first login creates/links the
-///   account; a repeat login that still echoes a verified email is fine
-///   because `get_or_create_user` resolves the existing user by
+/// - Verified, non-empty email → `Some(email)` (first login creates/links;
+///   repeat login that still echoes a verified email is fine because
+///   `get_or_create_user` / the app resolves the existing user by
 ///   `(provider, sub)` first and ignores the email on that path).
-/// - Explicitly **unverified** email → refuse. We never create or link an
-///   account against an unverified address (security contract S3).
-/// - **No** email → Apple omits email after the first authorization.
-///   `get_or_create_user` then resolves the existing user by `sub`; the
-///   empty string is unused on that path.
-fn apple_email_for_upsert(user: &apple::user::AppleUser) -> Result<String, FrameworkError> {
+/// - Explicitly **unverified** email → `Err(401)`. We never hand an
+///   unverified address to account creation/linking (security contract S3).
+/// - **No** email (or empty-but-verified) → `None`. Apple omits email
+///   after the first authorization; the caller resolves the existing user
+///   by `sub` and the email is unused on that path.
+fn apple_verified_email(user: &apple::user::AppleUser) -> Result<Option<String>, FrameworkError> {
     match (&user.email, user.email_verified) {
-        (Some(email), true) if !email.is_empty() => Ok(email.clone()),
+        (Some(email), true) if !email.is_empty() => Ok(Some(email.clone())),
         (Some(_), false) => Err(FrameworkError::Domain {
             message: "Apple ID token email is not verified — refusing account creation/linking"
                 .into(),
             status_code: 401,
         }),
         // `None` email (repeat login) OR an empty-but-verified address:
-        // defer to the `sub` lookup; email is unused when the user exists.
-        _ => Ok(String::new()),
+        // no email to hand to persistence; resolve by `sub` instead.
+        _ => Ok(None),
     }
 }
 
@@ -343,6 +343,44 @@ pub struct OAuthKickoff {
     /// A random CSRF state token. Store in the user's session and verify in
     /// the callback handler against the `state` query parameter.
     pub state: String,
+}
+
+/// A verified Apple Sign-In identity — the framework-owned result of
+/// [`OAuthAuth::verify_apple_identity`].
+///
+/// This is **not** a torii `User` and carries no session. Applications
+/// whose `users` table has a different shape than torii's (e.g. a
+/// bigint PK, a `handle`, onboarding columns) call
+/// `verify_apple_identity` and map/link the identity into their own user
+/// model themselves, rather than using [`OAuthAuth::complete`] which
+/// upserts directly into torii's `users` table.
+///
+/// The `email_verified` contract is enforced inside
+/// `verify_apple_identity`: an unverified email is refused with `401`
+/// before this struct is ever returned, so `email: Some(_)` always
+/// implies `email_verified: true`.
+#[derive(Debug, Clone)]
+pub struct AppleIdentity {
+    /// The provider name — always `"apple"`. Present so a caller routing
+    /// multiple providers through one callback can assert it.
+    pub provider: String,
+    /// Apple's stable, opaque user identifier (`sub` claim). This is the
+    /// primary key for account attribution — NOT the email (which can be
+    /// a private relay address that changes between authorizations).
+    pub subject: String,
+    /// The verified email from the ID token, if Apple included one.
+    /// `None` when Apple omits email (repeat login after the first
+    /// authorization) — the caller resolves the existing user by
+    /// `subject` and the email is unused on that path.
+    pub email: Option<String>,
+    /// Whether Apple marked the email verified. Always `true` when
+    /// `email` is `Some`; `false` only when `email` is `None`
+    /// (informational — Apple doesn't re-send the flag on repeat logins).
+    pub email_verified: bool,
+    /// Whether `email` is an Apple private relay address
+    /// (`@privaterelay.appleid.com`). Apps may use this to show a "hide
+    /// my email" badge or route replies through Apple's relay.
+    pub is_private_email: bool,
 }
 
 // ── Facade ────────────────────────────────────────────────────────────────────
@@ -837,26 +875,56 @@ impl OAuthAuth {
         Ok(payload.pkce_verifier)
     }
 
-    /// Complete the Apple Sign-In callback.
+    /// Verify an Apple Sign-In callback and return the verified identity
+    /// — **without** upserting into torii or creating a session.
     ///
-    /// Reuses the shared ceremony verification (state + single-use +
-    /// provider match) but diverges from the generic OAuth flow because
-    /// Apple is non-standard: the client secret is a JWT minted from an
-    /// ECDSA P-256 key (not a static string), the response mode is
-    /// `form_post`, and the user's identity arrives in a signed ID token
-    /// (not via a userinfo GET). `apple-rs` handles all Apple-specific
-    /// operations; the framework owns ceremony + persistence.
+    /// This is the hook for applications whose `users` table does not
+    /// match torii's schema (e.g. a bigint PK, a `handle`, onboarding
+    /// columns). The app calls this, receives an [`AppleIdentity`], and
+    /// maps/links it into its own user model + issues its own session.
     ///
-    /// Apple does not use PKCE — the `code_verifier` from the ceremony is
-    /// unused here, but the ceremony is still consumed for single-use
-    /// state protection.
-    async fn complete_apple(
+    /// Does:
+    /// 1. Validate `apple_key_pair` + `apple_team_id` **before** consuming
+    ///    the one-use ceremony (so a config fault doesn't burn the state).
+    /// 2. Consume the ceremony (state + single-use + provider match).
+    /// 3. Exchange the authorization code via `apple-rs` (JWT client
+    ///    secret from the ECDSA key pair).
+    /// 4. Verify the ID token via JWKS (signature/issuer/audience/expiry).
+    /// 5. Extract `sub` (stable identifier), enforce `email_verified`
+    ///    (unverified → 401), and build the [`AppleIdentity`].
+    ///
+    /// Does NOT: upsert a user, create a session, or touch torii. The
+    /// caller owns persistence.
+    ///
+    /// # Errors
+    /// - 400: config missing key pair/team id; state missing/mismatched/
+    ///   already consumed; provider mismatch; Apple OAuth `ResponseError`.
+    /// - 401: ID token failed signature/audience/expiry/nonce; JWS
+    ///   missing certificate chain; email present but **unverified**.
+    /// - 502: Apple token response missing `id_token`; JWKS unavailable;
+    ///   Apple HTTP error; ID token missing `sub`.
+    /// - 500: `apple-rs` non-protocol faults (JWT/JSON/key-parse/IO).
+    pub async fn verify_apple_identity(
         &self,
         code: &str,
         state: &str,
-    ) -> Result<(User, Session), FrameworkError> {
+    ) -> Result<AppleIdentity, FrameworkError> {
+        // Defence-in-depth: this method is Apple-specific. A caller who
+        // holds an `Auth::oauth("google")` facade could reach it if Apple
+        // fields happened to be configured on the google config; reject
+        // up front so `AppleIdentity.provider` never lies about being
+        // "apple".
+        if self.provider != "apple" {
+            return Err(FrameworkError::Domain {
+                message: format!(
+                    "verify_apple_identity called on provider '{}' — it is Apple-specific",
+                    self.provider
+                ),
+                status_code: 400,
+            });
+        }
+
         let config = self.config()?;
-        let torii = instance()?;
 
         // Validate Apple-specific config BEFORE consuming the one-use
         // ceremony. A missing key pair / team id is a server-config fault;
@@ -918,28 +986,58 @@ impl OAuthAuth {
         // Apple's `sub` is the stable user identifier — NOT the email
         // (which can be a private relay address that changes). Key
         // account attribution on `sub`.
-        let sub = apple_user
+        let subject = apple_user
             .subject
             .as_deref()
             .filter(|s| !s.is_empty())
+            .map(str::to_string)
             .ok_or_else(|| FrameworkError::Domain {
                 message: "Apple ID token missing `sub` — cannot attribute account".into(),
                 status_code: 502,
             })?;
 
-        // Enforce the email_verified contract and resolve the email to
-        // hand to persistence. Empty string signals "repeat login —
-        // resolve by `sub`" (get_or_create_user finds the existing user
-        // by (provider, sub) and ignores the email on that path).
-        let email = apple_email_for_upsert(&apple_user)?;
+        // Enforce the email_verified contract. Unverified → 401 before
+        // the identity is returned; Some(email) always implies verified.
+        let email = apple_verified_email(&apple_user)?;
+        let email_verified = email.is_some();
 
-        // Upsert the user in torii's store. `get_or_create_user` finds
-        // by (provider, sub) first (repeat login → returns existing,
-        // email ignored); only creates/links when not found, using the
-        // verified email. Failures here are genuine server faults → 500.
+        Ok(AppleIdentity {
+            provider: self.provider.clone(),
+            subject,
+            email,
+            email_verified,
+            is_private_email: apple_user.is_private_email,
+        })
+    }
+
+    /// Complete the Apple Sign-In callback — verify the identity then
+    /// upsert into torii's `users` table + create a session.
+    ///
+    /// Thin wrapper over [`Self::verify_apple_identity`] + torii
+    /// persistence. Use this when your app's `users` table IS torii's
+    /// schema. If your `users` table has a different shape (bigint PK,
+    /// handle, onboarding, …) call [`Self::verify_apple_identity`]
+    /// instead and map/link the identity into your own user model.
+    ///
+    /// Apple does not use PKCE — the `code_verifier` from the ceremony is
+    /// unused here, but the ceremony is still consumed for single-use
+    /// state protection (inside `verify_apple_identity`).
+    async fn complete_apple(
+        &self,
+        code: &str,
+        state: &str,
+    ) -> Result<(User, Session), FrameworkError> {
+        let torii = instance()?;
+        let identity = self.verify_apple_identity(code, state).await?;
+
+        // `get_or_create_user` finds by (provider, sub) first (repeat
+        // login → returns existing, email ignored); only creates/links
+        // when not found, using the verified email. Empty string signals
+        // "no email — resolve by sub". Failures here → 500 (server fault).
+        let email = identity.email.unwrap_or_default();
         let user = torii
             .oauth()
-            .get_or_create_user(&self.provider, sub, &email, None)
+            .get_or_create_user(&self.provider, &identity.subject, &email, None)
             .await
             .map_err(|e| FrameworkError::internal(format!("oauth get_or_create_user: {e}")))?;
         let session = torii
@@ -1293,7 +1391,7 @@ mod tests {
     }
     /// Construct an `AppleUser` with only the email/verified fields set,
     /// everything else `None` / the default enum variant — enough to
-    /// drive `apple_email_for_upsert` and the ID-token gating tests.
+    /// drive `apple_verified_email` and the ID-token gating tests.
     fn apple_user(email: Option<&str>, verified: bool) -> apple::user::AppleUser {
         use apple::user::{AppleUser, RealUserStatus};
         AppleUser {
@@ -1317,13 +1415,16 @@ mod tests {
     #[test]
     fn apple_email_verified_returns_address() {
         let u = apple_user(Some("a@b.com"), true);
-        assert_eq!(apple_email_for_upsert(&u).unwrap(), "a@b.com");
+        assert_eq!(
+            apple_verified_email(&u).unwrap(),
+            Some("a@b.com".to_string())
+        );
     }
 
     #[test]
     fn apple_email_unverified_is_refused_with_401() {
         let u = apple_user(Some("a@b.com"), false);
-        let err = apple_email_for_upsert(&u).unwrap_err();
+        let err = apple_verified_email(&u).unwrap_err();
         assert!(
             matches!(
                 &err,
@@ -1337,18 +1438,18 @@ mod tests {
     }
 
     #[test]
-    fn apple_email_absent_repeat_login_yields_empty() {
-        // Apple omits email after the first authorization. The empty
-        // string defers to the `sub` lookup in get_or_create_user.
+    fn apple_email_absent_repeat_login_yields_none() {
+        // Apple omits email after the first authorization. None signals
+        // "resolve by sub" to the caller.
         let u = apple_user(None, false);
-        assert_eq!(apple_email_for_upsert(&u).unwrap(), "");
+        assert_eq!(apple_verified_email(&u).unwrap(), None);
     }
 
     #[test]
     fn apple_email_empty_but_verified_defers_to_sub() {
         // Edge: empty verified address -> treat as "no email" (repeat login).
         let u = apple_user(Some(""), true);
-        assert_eq!(apple_email_for_upsert(&u).unwrap(), "");
+        assert_eq!(apple_verified_email(&u).unwrap(), None);
     }
 
     #[test]
