@@ -156,7 +156,49 @@ fn provider_endpoints(provider: &str) -> Option<ProviderEndpoints> {
             // `email_verified` directly — no separate emails endpoint.
             emails: None,
         }),
+        "apple" => Some(ProviderEndpoints {
+            authorize: "https://appleid.apple.com/auth/authorize".into(),
+            token: "https://appleid.apple.com/auth/token".into(),
+            // Apple has no userinfo endpoint — the user's email, name,
+            // and `sub` arrive in the signed ID token returned by the
+            // token endpoint. The generic flow must NOT try to GET a
+            // userinfo URL for Apple; the Apple path (Task 5) parses the
+            // ID token via `apple-rs` instead. An empty `userinfo` string
+            // signals "use the ID token" to the Apple branch.
+            userinfo: String::new(),
+            emails: None,
+        }),
         _ => None,
+    }
+}
+
+/// Build the provider authorization URL with PKCE + state.
+///
+/// Apple Sign-In requires `response_mode=form_post`; every other provider
+/// uses the default query response mode, so the param is omitted (sending
+/// it for providers that don't expect it can break their parsing).
+fn build_authorization_url(
+    provider: &str,
+    endpoints: &ProviderEndpoints,
+    config: &OAuthProviderConfig,
+    state: &str,
+    challenge: &str,
+) -> String {
+    let scope = config.scopes.join(" ");
+    let base = format!(
+        "{}?client_id={}&redirect_uri={}&scope={}&state={}&response_type=code\
+         &code_challenge={}&code_challenge_method=S256",
+        endpoints.authorize,
+        urlencoding::encode(&config.client_id),
+        urlencoding::encode(&config.redirect_url),
+        urlencoding::encode(&scope),
+        urlencoding::encode(state),
+        urlencoding::encode(challenge),
+    );
+    if provider == "apple" {
+        format!("{base}&response_mode=form_post")
+    } else {
+        base
     }
 }
 
@@ -337,16 +379,14 @@ impl OAuthAuth {
         // RFC 7636 for `code_challenge_method=S256` flows; sending them
         // for providers that don't enforce PKCE is harmless (they ignore
         // unknown params) and provides defense-in-depth for those that do.
-        let scope = config.scopes.join(" ");
-        let authorization_url = format!(
-            "{}?client_id={}&redirect_uri={}&scope={}&state={}&response_type=code\
-             &code_challenge={}&code_challenge_method=S256",
-            endpoints.authorize,
-            urlencoding::encode(&config.client_id),
-            urlencoding::encode(&config.redirect_url),
-            urlencoding::encode(&scope),
-            urlencoding::encode(&state),
-            urlencoding::encode(&challenge),
+        // `build_authorization_url` appends `response_mode=form_post` for
+        // Apple (which requires it) and omits it for everyone else.
+        let authorization_url = build_authorization_url(
+            &self.provider,
+            &endpoints,
+            &config,
+            &state,
+            &challenge,
         );
 
         Ok(OAuthKickoff {
@@ -912,5 +952,64 @@ mod urlencoding {
             }
         }
         encoded
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apple_well_known_endpoints() {
+        let ep = provider_endpoints("apple").expect("apple must be a well-known provider");
+        assert_eq!(ep.authorize, "https://appleid.apple.com/auth/authorize");
+        assert_eq!(ep.token, "https://appleid.apple.com/auth/token");
+        // Apple has no userinfo endpoint — user data comes from the ID token.
+        assert!(ep.userinfo.is_empty(), "apple userinfo must be empty (use ID token): {:?}", ep.userinfo);
+        assert!(ep.emails.is_none(), "apple has no separate emails endpoint");
+    }
+
+    fn apple_config() -> OAuthProviderConfig {
+        OAuthProviderConfig {
+            client_id: "com.nationx.web".into(),
+            // Apple's client_secret is a JWT minted from the key pair, not a
+            // static string — empty here because Task 2 only exercises URL
+            // construction (the key pair lands in Task 3/4).
+            client_secret: String::new(),
+            redirect_url: "https://app.example/auth/apple/callback".into(),
+            scopes: vec!["email".into(), "name".into()],
+            endpoints_override: None,
+        }
+    }
+
+    #[test]
+    fn apple_authorization_url_uses_form_post() {
+        let ep = provider_endpoints("apple").unwrap();
+        let url = build_authorization_url("apple", &ep, &apple_config(), "st", "ch");
+        assert!(
+            url.contains("response_mode=form_post"),
+            "apple authorize URL must set response_mode=form_post: {url}"
+        );
+        assert!(
+            url.contains("client_id=com.nationx.web"),
+            "apple authorize URL must carry the client_id: {url}"
+        );
+    }
+
+    #[test]
+    fn generic_authorization_url_omits_response_mode() {
+        let ep = provider_endpoints("github").unwrap();
+        let cfg = OAuthProviderConfig {
+            client_id: "gv1".into(),
+            client_secret: "gs".into(),
+            redirect_url: "https://app.example/cb".into(),
+            scopes: vec!["user:email".into()],
+            endpoints_override: None,
+        };
+        let url = build_authorization_url("github", &ep, &cfg, "st", "ch");
+        assert!(
+            !url.contains("response_mode="),
+            "generic providers must not force response_mode: {url}"
+        );
     }
 }
