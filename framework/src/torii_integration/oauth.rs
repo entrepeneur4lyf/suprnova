@@ -62,7 +62,11 @@ use crate::{
     torii_integration::{Session, User, instance},
 };
 use apple::auth::AppleAuth;
-use apple::signing::AppleKeyPair;
+/// Re-exported so applications can build an Apple Sign-In config
+/// (`OAuthProviderConfig::apple_key_pair`) without adding the `apple`
+/// crate as a direct dependency. Construct it via
+/// `AppleKeyPair::from_file` / `AppleKeyPair::from_base64`.
+pub use apple::signing::AppleKeyPair;
 
 // ── Provider registry ─────────────────────────────────────────────────────────
 
