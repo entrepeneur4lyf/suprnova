@@ -192,11 +192,19 @@ fn provider_endpoints(provider: &str) -> Option<ProviderEndpoints> {
     }
 }
 
-/// Build the provider authorization URL with PKCE + state.
+/// Build the provider authorization URL with state (+ PKCE for standard
+/// providers).
 ///
-/// Apple Sign-In requires `response_mode=form_post`; every other provider
-/// uses the default query response mode, so the param is omitted (sending
-/// it for providers that don't expect it can break their parsing).
+/// **Apple Sign-In does not support PKCE** — it authenticates the token
+/// exchange with a JWT client secret, not a `code_verifier`. Sending
+/// `code_challenge` in the authorize URL without a matching `code_verifier`
+/// in the token exchange would make Apple reject the request
+/// (`invalid_request`), so the PKCE params are omitted for `apple` and
+/// `response_mode=form_post` is appended instead (Apple requires form_post).
+/// Standard providers (github, google, …) get RFC 7636 PKCE
+/// (`code_challenge_method=S256`); sending it to providers that don't
+/// enforce PKCE is harmless (they ignore unknown params) and provides
+/// defense-in-depth for those that do.
 fn build_authorization_url(
     provider: &str,
     endpoints: &ProviderEndpoints,
@@ -206,19 +214,21 @@ fn build_authorization_url(
 ) -> String {
     let scope = config.scopes.join(" ");
     let base = format!(
-        "{}?client_id={}&redirect_uri={}&scope={}&state={}&response_type=code\
-         &code_challenge={}&code_challenge_method=S256",
+        "{}?client_id={}&redirect_uri={}&scope={}&state={}&response_type=code",
         endpoints.authorize,
         urlencoding::encode(&config.client_id),
         urlencoding::encode(&config.redirect_url),
         urlencoding::encode(&scope),
         urlencoding::encode(state),
-        urlencoding::encode(challenge),
     );
     if provider == "apple" {
+        // No PKCE (Apple doesn't support it); form_post is required.
         format!("{base}&response_mode=form_post")
     } else {
-        base
+        format!(
+            "{base}&code_challenge={}&code_challenge_method=S256",
+            urlencoding::encode(challenge)
+        )
     }
 }
 
@@ -1242,6 +1252,17 @@ mod tests {
             url.contains("client_id=com.nationx.web"),
             "apple authorize URL must carry the client_id: {url}"
         );
+        // Apple does not support PKCE — code_challenge / code_challenge_method
+        // must NOT appear (sending them without a matching code_verifier in
+        // the token exchange makes Apple reject the request).
+        assert!(
+            !url.contains("code_challenge"),
+            "apple authorize URL must not carry code_challenge (no PKCE): {url}"
+        );
+        assert!(
+            !url.contains("code_challenge_method"),
+            "apple authorize URL must not carry code_challenge_method: {url}"
+        );
     }
 
     #[test]
@@ -1260,6 +1281,10 @@ mod tests {
         assert!(
             !url.contains("response_mode="),
             "generic providers must not force response_mode: {url}"
+        );
+        assert!(
+            url.contains("code_challenge=") && url.contains("code_challenge_method=S256"),
+            "generic providers must carry PKCE code_challenge + S256 method: {url}"
         );
     }
     /// Construct an `AppleUser` with only the email/verified fields set,
