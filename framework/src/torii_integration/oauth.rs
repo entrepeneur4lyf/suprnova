@@ -383,6 +383,35 @@ pub struct AppleIdentity {
     pub is_private_email: bool,
 }
 
+/// A verified generic OAuth identity — the framework-owned result of
+/// [`OAuthAuth::verify_oauth_identity`].
+///
+/// This is the generic-provider equivalent of [`AppleIdentity`]. It
+/// carries the verified identity from a standard OAuth 2.0 / OIDC
+/// provider (Google, GitHub, …) without upserting into torii or creating
+/// a session. Applications whose `users` table has a different shape
+/// than torii's call this and map/link the identity into their own user
+/// model.
+///
+/// The email is always verified: the method checks `email_verified`
+/// (OIDC) or provider-specific conventions (GitHub) and falls back to
+/// the provider's verified-emails endpoint before returning. An
+/// unverified email is never included.
+#[derive(Debug, Clone)]
+pub struct OAuthIdentity {
+    /// The provider name (e.g. `"google"`, `"github"`).
+    pub provider: String,
+    /// The provider's stable user identifier (`sub` for OIDC, `id` for
+    /// GitHub-style). This is the primary key for account attribution.
+    pub subject: String,
+    /// The verified email from the userinfo response, if the provider
+    /// supplied one. Always verified — the method refuses unverified
+    /// emails and falls back to the verified-emails endpoint.
+    pub email: Option<String>,
+    /// The user's display name from the userinfo response, if present.
+    pub name: Option<String>,
+}
+
 // ── Facade ────────────────────────────────────────────────────────────────────
 
 /// Facade for OAuth-based authentication operations.
@@ -558,69 +587,49 @@ impl OAuthAuth {
         })
     }
 
-    /// Complete the OAuth callback flow.
+    /// Verify a generic OAuth callback and return the verified identity,
+    /// without upserting into torii or creating a session.
     ///
-    /// Validates the CSRF state against THIS session's stored value
-    /// (one-time use: the session key is deleted after reading). Reads
-    /// the PKCE `code_verifier` from the session (also one-time use) and
-    /// includes it in the token-exchange POST. Fetches the user's
-    /// profile from the provider and returns the (User, Session) pair.
+    /// This is the generic-provider equivalent of
+    /// [`Self::verify_apple_identity`]. Applications whose `users` table
+    /// does not match torii's schema call this, receive an
+    /// [`OAuthIdentity`], and map/link it into their own user model.
     ///
-    /// # Arguments
+    /// Does: ceremony consume (state + PKCE + provider match), token
+    /// exchange, userinfo fetch, verified-email extraction (OIDC
+    /// `email_verified` or provider-specific convention + verified-emails
+    /// endpoint fallback), and `sub`/`id` extraction.
     ///
-    /// * `code`  - The authorization code from the provider callback.
-    /// * `state` - The CSRF state from the provider callback (must match session).
+    /// Does NOT: upsert a user, create a session, or touch torii.
     ///
     /// # Errors
-    ///
-    /// Caller/protocol errors map to `Domain { status_code: 400 }` — they're
-    /// caller-facing, not server faults. Upstream provider failures (network
-    /// errors, provider 5xx) map to `Domain { status_code: 502 }` — bad
-    /// upstream. `FrameworkError::internal` (500) is never used for a
-    /// protocol problem; it is reserved for torii persistence failures
-    /// (`get_or_create_user` / `create_session`) — genuine server faults.
-    ///
-    /// When `provider == "apple"`, the call delegates to [`Self::complete_apple`],
-    /// which follows the same shape and additionally maps Apple ID-token
-    /// verification failures to `401` and `apple-rs` non-protocol faults
-    /// (JWT/JSON/key-parse/IO) to `internal` (500); see its docs.
-    ///
-    /// - 400: state missing/mismatched, PKCE verifier missing, provider
-    ///   returning a 4xx (e.g. bad client creds, invalid code), provider
-    ///   profile lookup returning a 4xx, payload parse failures.
-    /// - 401: (Apple only) ID token failed signature/audience/expiry/nonce
-    ///   verification, or a JWS missing its certificate chain.
-    /// - 502: HTTP client build failure, network transport errors,
-    ///   provider returning a 5xx, token-endpoint JSON parse failures
-    ///   we can't attribute to the caller, Apple JWKS unavailable.
-    /// - 500: `instance()` failing (torii not initialised), torii's
-    ///   persistence calls, and (Apple only) `apple-rs` faults that are not
-    ///   caller-facing protocol errors — all real server faults the operator
-    ///   must fix.
-    pub async fn complete(
+    /// - 400: state missing/mismatched/already consumed; provider
+    ///   returning a 4xx; payload parse failures.
+    /// - 502: HTTP client build failure; network errors; provider 5xx;
+    ///   token/userinfo JSON parse failures; no verified email; no
+    ///   `sub`/`id` in userinfo.
+    pub async fn verify_oauth_identity(
         &self,
         code: &str,
         state: &str,
-    ) -> Result<(User, Session), FrameworkError> {
+    ) -> Result<OAuthIdentity, FrameworkError> {
+        // Apple has its own non-standard path (JWT client secret, ID
+        // token, no userinfo). Route there instead.
         if self.provider == "apple" {
-            return self.complete_apple(code, state).await;
+            let apple = self.verify_apple_identity(code, state).await?;
+            return Ok(OAuthIdentity {
+                provider: apple.provider,
+                subject: apple.subject,
+                email: apple.email,
+                name: None,
+            });
         }
 
         let config = self.config()?;
         let endpoints = self.endpoints_for(&config)?;
-        let torii = instance()?;
 
         let verifier = self.verify_and_consume_ceremony(state).await?;
 
-        // Both timeouts cap how long a slow or blackholed provider can
-        // tie up the calling task. `connect_timeout` covers DNS +
-        // TCP/TLS handshake; `timeout` is the total per-request budget
-        // (token exchange and userinfo fetch each have their own
-        // `.send()`, so each gets the full budget independently). 30s
-        // matches the framework's outbound HTTP default in
-        // [`crate::http_client`]; OAuth providers are expected to
-        // respond in well under a second, so this is generous but
-        // still bounded.
         let client = Client::builder()
             .user_agent("suprnova-oauth/0.1")
             .connect_timeout(Duration::from_secs(10))
@@ -631,7 +640,6 @@ impl OAuthAuth {
                 status_code: 502,
             })?;
 
-        // Exchange the authorization code for an access token.
         let token_resp = client
             .post(&endpoints.token)
             .header("Accept", "application/json")
@@ -653,7 +661,6 @@ impl OAuthAuth {
         if !token_resp.status().is_success() {
             let provider_status = token_resp.status();
             let body = token_resp.text().await.unwrap_or_default();
-            // Provider 4xx → caller error (400). Provider 5xx → bad upstream (502).
             let outbound_status = if provider_status.is_client_error() {
                 400
             } else {
@@ -674,7 +681,6 @@ impl OAuthAuth {
                     status_code: 502,
                 })?;
 
-        // Fetch the user's profile from the provider.
         let userinfo_resp = client
             .get(&endpoints.userinfo)
             .bearer_auth(&token_data.access_token)
@@ -709,12 +715,7 @@ impl OAuthAuth {
                     status_code: 502,
                 })?;
 
-        // Resolve a stable provider-side identifier. If the provider
-        // sent neither `sub` nor `id`, we cannot safely attribute the
-        // user — refuse the callback rather than collapse to a constant
-        // that would conflate distinct users. 502 because the upstream
-        // produced an unusable payload.
-        let provider_id = profile.id_str().ok_or_else(|| FrameworkError::Domain {
+        let subject = profile.id_str().ok_or_else(|| FrameworkError::Domain {
             message: format!(
                 "oauth provider '{}' returned a userinfo payload with neither `sub` nor `id` — cannot attribute account",
                 self.provider
@@ -722,47 +723,9 @@ impl OAuthAuth {
             status_code: 502,
         })?;
 
-        // Derive the user's email. Identity attribution keys on
-        // `provider_id`, so this is purely the email address recorded
-        // on the torii user row — but it must still be a real,
-        // verified email, never a username or opaque ID:
-        //
-        // 1. If the userinfo response carries `email` and (for OIDC
-        //    providers like Google) `email_verified == true`, use it
-        //    directly.
-        // 2. Otherwise, if the provider exposes a verified-emails
-        //    endpoint (GitHub's `/user/emails`), fetch it and pick
-        //    the primary verified address.
-        // 3. If neither path yields a verified email, refuse the
-        //    callback. We will not write a username, opaque
-        //    provider id, or unverified address into the email
-        //    column.
-        //
-        // Status: 502 because the provider returned a payload we
-        // cannot turn into a valid account identifier; the caller
-        // (browser) did nothing wrong.
         let userinfo_email_is_verified = match self.provider.as_str() {
-            // Google sets `email_verified: true` on every primary
-            // Google account email; OIDC convention. If they ever
-            // emit `false`, ignore the address.
             "google" => profile.email_verified.unwrap_or(false),
-            // GitHub's `/user` endpoint does not include an
-            // `email_verified` flag — if `email` is present, GitHub
-            // has already validated it (only verified emails are
-            // ever returned from `/user`). Treat presence as
-            // verified for GitHub specifically.
             "github" => true,
-            // For provider names the framework does not recognise, fail
-            // closed: trust the userinfo `email` only when the payload
-            // explicitly carries `email_verified: true` (OIDC convention).
-            // A *missing* flag is no longer treated as verified — an
-            // unknown provider that returns an `email` without asserting
-            // it is verified could otherwise be used to link to (or take
-            // over) an existing account keyed on that address. A provider
-            // that cannot emit the flag must instead expose a
-            // verified-emails endpoint (path 2 below), which the caller
-            // falls through to when this is `false`. Both an explicit
-            // `false` and an absent flag reject the userinfo address.
             _ => profile.email_verified.unwrap_or(false),
         };
 
@@ -771,37 +734,64 @@ impl OAuthAuth {
             .as_deref()
             .filter(|e| !e.is_empty() && userinfo_email_is_verified)
         {
-            Some(addr) => addr.to_string(),
-            None => fetch_verified_primary_email(&client, &endpoints, &token_data.access_token)
-                .await?
-                .ok_or_else(|| FrameworkError::Domain {
-                    message: format!(
-                        "oauth provider '{}' did not supply a verified email — \
-                         the OAuth scope must grant verified-email access \
-                         (e.g. `user:email` for GitHub, `openid email` for \
-                         OIDC providers) and the account must have a \
-                         verified primary address",
-                        self.provider
-                    ),
-                    status_code: 502,
-                })?,
+            Some(addr) => Some(addr.to_string()),
+            None => {
+                fetch_verified_primary_email(&client, &endpoints, &token_data.access_token)
+                    .await?
+                    .ok_or_else(|| FrameworkError::Domain {
+                        message: format!(
+                            "oauth provider '{}' did not supply a verified email — \
+                             the OAuth scope must grant verified-email access \
+                             (e.g. `user:email` for GitHub, `openid email` for \
+                             OIDC providers) and the account must have a \
+                             verified primary address",
+                            self.provider
+                        ),
+                        status_code: 502,
+                    })?
+            }
+            .into(),
         };
 
-        // Upsert the user in torii's store. Failures here are genuine
-        // server faults (DB unreachable, schema drift, etc.) so the 500
-        // status code from `FrameworkError::internal` is correct.
+        Ok(OAuthIdentity {
+            provider: self.provider.clone(),
+            subject,
+            email,
+            name: profile.name.clone(),
+        })
+    }
+
+    /// Complete the OAuth callback flow — verify the identity then upsert
+    /// into torii's `users` table + create a session.
+    ///
+    /// Thin wrapper over [`Self::verify_oauth_identity`] + torii
+    /// persistence. Use this when your app's `users` table IS torii's
+    /// schema. If your `users` table has a different shape (bigint PK,
+    /// handle, onboarding, …) call [`Self::verify_oauth_identity`]
+    /// instead and map/link the identity into your own user model.
+    ///
+    pub async fn complete(
+        &self,
+        code: &str,
+        state: &str,
+    ) -> Result<(User, Session), FrameworkError> {
+        if self.provider == "apple" {
+            return self.complete_apple(code, state).await;
+        }
+
+        let torii = instance()?;
+        let identity = self.verify_oauth_identity(code, state).await?;
+
+        let email = identity.email.unwrap_or_default();
         let user = torii
             .oauth()
-            .get_or_create_user(&self.provider, &provider_id, &email, profile.name.clone())
+            .get_or_create_user(&identity.provider, &identity.subject, &email, identity.name)
             .await
             .map_err(|e| FrameworkError::internal(format!("oauth get_or_create_user: {e}")))?;
-
-        // Create a session.
         let session = torii
             .create_session(&user.id, None, None)
             .await
             .map_err(|e| FrameworkError::internal(format!("oauth create_session: {e}")))?;
-
         Ok((user, session))
     }
 
