@@ -23,9 +23,13 @@
 //!
 //! # Supported providers
 //!
-//! Hardcoded well-known endpoints: `github`, `google`. Custom providers (or
-//! self-hosted GitHub Enterprise / Google for Workspaces tenants) can supply
-//! their own endpoints via `OAuthProviderConfig::endpoints_override`.
+//! Hardcoded well-known endpoints: `github`, `google`, and `apple` (Apple
+//! Sign-In). Apple is non-standard — JWT client secret, `form_post`
+//! response mode, identity in a signed ID token — and is handled by a
+//! dedicated `complete_apple()` path backed by the `apple-rs` crate; see
+//! [`OAuthAuth::complete_apple`]. Custom providers (or self-hosted GitHub
+//! Enterprise / Google for Workspaces tenants) can supply their own
+//! endpoints via `OAuthProviderConfig::endpoints_override`.
 //!
 //! # Error mapping
 //!
@@ -33,9 +37,12 @@
 //! provider returning 4xx) surface as `FrameworkError::Domain { 400, .. }`
 //! — they are caller errors, not server errors. Network failures and
 //! provider 5xx surface as `FrameworkError::Domain { 502, .. }` — bad
-//! upstream. We never use `FrameworkError::internal` here, because that
-//! would map to 500 and conflate caller-facing protocol issues with real
-//! server faults.
+//! upstream. `FrameworkError::internal` (500) is reserved for genuine
+//! server faults only — torii persistence failures
+//! (`get_or_create_user` / `create_session`) and, on the Apple path,
+//! `apple-rs` errors that are not caller-facing protocol faults (JWT
+//! encode/decode, key-parse, IO) — so caller-facing protocol issues are
+//! never conflated with real server faults.
 
 use std::{
     collections::HashMap,
@@ -54,6 +61,7 @@ use crate::{
     session::{session, session_mut},
     torii_integration::{Session, User, instance},
 };
+use apple::auth::AppleAuth;
 use apple::signing::AppleKeyPair;
 
 // ── Provider registry ─────────────────────────────────────────────────────────
@@ -211,6 +219,100 @@ fn build_authorization_url(
         format!("{base}&response_mode=form_post")
     } else {
         base
+    }
+}
+
+// ── Apple Sign-In helpers (module-level) ──────────────────────────────────────
+//
+// `complete_apple` (an `OAuthAuth` method, defined with the other OAuth
+// methods) calls these. They are free functions so the pure pieces
+// (error mapping, email_verified gating, JWKS access) are unit-testable
+// without the session/ceremony machinery `complete_apple` wires.
+
+/// Process-global Apple JWKS client. Long-lived so Apple's public keys
+/// are fetched once and cached (1h TTL inside `apple-rs`) rather than
+/// re-fetched on every login. Init is fallible (`AppleJwksClient::new`
+/// builds a reqwest client) so we lazily initialise.
+static APPLE_JWKS: OnceLock<apple::jwks::AppleJwksClient> = OnceLock::new();
+
+/// Map an `apple-rs` error to a `FrameworkError`, picking the HTTP status
+/// that matches who is at fault:
+/// - 401: ID-token validation failure (bad signature / audience / nonce /
+///   expiry) or a JWS missing its certificate chain — caller-facing auth
+///   failure, not a server fault.
+/// - 502: JWKS unavailable or Apple HTTP error — bad upstream.
+/// - 400: OAuth `ResponseError` (invalid_grant, invalid_client, …) —
+///   caller error.
+/// - 500: anything else (JWT/JSON/Base64/PEM/key-parse/IO/time) — a
+///   provider-protocol or local-config fault the operator must inspect.
+fn map_apple_error(err: apple::error::AppleError) -> FrameworkError {
+    use apple::error::AppleError;
+    match err {
+        AppleError::TokenValidationError(msg) => FrameworkError::Domain {
+            message: format!("Apple ID token validation failed: {msg}"),
+            status_code: 401,
+        },
+        AppleError::JwksError(msg) => FrameworkError::Domain {
+            message: format!("Apple JWKS unavailable: {msg}"),
+            status_code: 502,
+        },
+        AppleError::HttpError(msg) => FrameworkError::Domain {
+            message: format!("Apple HTTP error: {msg}"),
+            status_code: 502,
+        },
+        AppleError::ResponseError(re) => FrameworkError::Domain {
+            message: format!("Apple OAuth error: {re}"),
+            status_code: 400,
+        },
+        AppleError::StateMismatchError => FrameworkError::Domain {
+            message: "Apple OAuth state mismatch".into(),
+            status_code: 400,
+        },
+        AppleError::MissingCertificateChain => FrameworkError::Domain {
+            message: "Apple JWS missing certificate chain".into(),
+            status_code: 401,
+        },
+        // Jwt/Json/Base64/Pem/KeyParse/IO/Time/Unrecognised — provider
+        // protocol or local key/config faults: surface as 500 so the
+        // operator's log carries an actionable server-side message.
+        other => FrameworkError::internal(format!("Apple error: {other}")),
+    }
+}
+
+/// Resolve the process-global Apple JWKS client, lazily initialising it.
+fn apple_jwks() -> Result<&'static apple::jwks::AppleJwksClient, FrameworkError> {
+    if let Some(client) = APPLE_JWKS.get() {
+        return Ok(client);
+    }
+    let client = apple::jwks::AppleJwksClient::new().map_err(map_apple_error)?;
+    // Race: another task may have initialised between `get()` and here;
+    // `get_or_init` returns whichever won, dropping our duplicate.
+    Ok(APPLE_JWKS.get_or_init(|| client))
+}
+
+/// Decide which email to hand to `get_or_create_user` from an Apple ID
+/// token, enforcing the `email_verified` security contract.
+///
+/// - Verified, non-empty email → use it (first login creates/links the
+///   account; a repeat login that still echoes a verified email is fine
+///   because `get_or_create_user` resolves the existing user by
+///   `(provider, sub)` first and ignores the email on that path).
+/// - Explicitly **unverified** email → refuse. We never create or link an
+///   account against an unverified address (security contract S3).
+/// - **No** email → Apple omits email after the first authorization.
+///   `get_or_create_user` then resolves the existing user by `sub`; the
+///   empty string is unused on that path.
+fn apple_email_for_upsert(user: &apple::user::AppleUser) -> Result<String, FrameworkError> {
+    match (&user.email, user.email_verified) {
+        (Some(email), true) if !email.is_empty() => Ok(email.clone()),
+        (Some(_), false) => Err(FrameworkError::Domain {
+            message: "Apple ID token email is not verified — refusing account creation/linking"
+                .into(),
+            status_code: 401,
+        }),
+        // `None` email (repeat login) OR an empty-but-verified address:
+        // defer to the `sub` lookup; email is unused when the user exists.
+        _ => Ok(String::new()),
     }
 }
 
@@ -419,95 +521,44 @@ impl OAuthAuth {
     ///
     /// # Errors
     ///
-    /// All caller/protocol errors map to `Domain { status_code: 400 }` —
-    /// they're caller-facing, not server faults. Upstream provider
-    /// failures (network errors, parse errors, provider 5xx) map to
-    /// `Domain { status_code: 502 }`. We never use
-    /// `FrameworkError::internal` here, because that would 500 a
-    /// caller-facing OAuth protocol problem.
+    /// Caller/protocol errors map to `Domain { status_code: 400 }` — they're
+    /// caller-facing, not server faults. Upstream provider failures (network
+    /// errors, provider 5xx) map to `Domain { status_code: 502 }` — bad
+    /// upstream. `FrameworkError::internal` (500) is never used for a
+    /// protocol problem; it is reserved for torii persistence failures
+    /// (`get_or_create_user` / `create_session`) — genuine server faults.
+    ///
+    /// When `provider == "apple"`, the call delegates to [`Self::complete_apple`],
+    /// which follows the same shape and additionally maps Apple ID-token
+    /// verification failures to `401` and `apple-rs` non-protocol faults
+    /// (JWT/JSON/key-parse/IO) to `internal` (500); see its docs.
     ///
     /// - 400: state missing/mismatched, PKCE verifier missing, provider
     ///   returning a 4xx (e.g. bad client creds, invalid code), provider
     ///   profile lookup returning a 4xx, payload parse failures.
+    /// - 401: (Apple only) ID token failed signature/audience/expiry/nonce
+    ///   verification, or a JWS missing its certificate chain.
     /// - 502: HTTP client build failure, network transport errors,
     ///   provider returning a 5xx, token-endpoint JSON parse failures
-    ///   we can't attribute to the caller.
-    /// - 500: only `instance()` failing (torii not initialised) and
-    ///   torii's persistence calls (`get_or_create_user`,
-    ///   `create_session`) — both real server faults the operator must fix.
+    ///   we can't attribute to the caller, Apple JWKS unavailable.
+    /// - 500: `instance()` failing (torii not initialised), torii's
+    ///   persistence calls, and (Apple only) `apple-rs` faults that are not
+    ///   caller-facing protocol errors — all real server faults the operator
+    ///   must fix.
     pub async fn complete(
         &self,
         code: &str,
         state: &str,
     ) -> Result<(User, Session), FrameworkError> {
+        if self.provider == "apple" {
+            return self.complete_apple(code, state).await;
+        }
+
         let config = self.config()?;
         let endpoints = self.endpoints_for(&config)?;
         let torii = instance()?;
 
-        // Session binding: the session that called `begin` is the only
-        // session that can complete the flow. An attacker who steals a
-        // state value but not the session cookie sees an empty session
-        // here and is rejected.
-        let session_state_key = format!("oauth_state_{}", self.provider);
-        let expected_state: Option<String> = session().and_then(|s| s.get(&session_state_key));
-
-        match expected_state.as_deref() {
-            None => {
-                return Err(FrameworkError::Domain {
-                    message:
-                        "OAuth state missing from session — flow not initiated or session expired"
-                            .to_string(),
-                    status_code: 400,
-                });
-            }
-            Some(expected) if expected != state => {
-                return Err(FrameworkError::Domain {
-                    message: "OAuth state mismatch — possible CSRF attack or expired flow"
-                        .to_string(),
-                    status_code: 400,
-                });
-            }
-            _ => {} // state matches the session's stored value
-        }
-
-        // Atomically consume the ceremony keyed by the state echoed
-        // back from the provider. Single-use under concurrency: two
-        // concurrent callbacks with the same `state` both pass the
-        // session check above, but only one wins the atomic DELETE
-        // (rows_affected == 1) and gets the payload; the other gets
-        // `None` and rejects — replay race impossible by construction.
-        let payload: OAuthCeremonyPayload =
-            super::ceremony::consume(state, super::ceremony::kind::OAUTH)
-                .await?
-                .ok_or_else(|| FrameworkError::Domain {
-                    message:
-                        "OAuth state already consumed or expired — replay attempt or stale flow"
-                            .to_string(),
-                    status_code: 400,
-                })?;
-
-        // Best-effort clear the session pointer. The atomic consume
-        // above is the single-use authority; this is janitorial.
-        session_mut(|s| {
-            s.forget(&session_state_key);
-        });
-
-        // Verify the provider in the ceremony matches the facade
-        // instance handling this callback. Prevents a state token
-        // generated for provider A from being consumed by provider B
-        // (defence-in-depth, since the OAuth controller routes
-        // per-provider anyway).
-        if payload.provider != self.provider {
-            return Err(FrameworkError::Domain {
-                message: format!(
-                    "OAuth state was issued for provider '{}' but consumed against '{}'",
-                    payload.provider, self.provider
-                ),
-                status_code: 400,
-            });
-        }
-
-        let verifier = payload.pkce_verifier;
+        let verifier = self.verify_and_consume_ceremony(state).await?;
 
         // Both timeouts cap how long a slow or blackholed provider can
         // tie up the calling task. `connect_timeout` covers DNS +
@@ -699,6 +750,188 @@ impl OAuthAuth {
             .await
             .map_err(|e| FrameworkError::internal(format!("oauth create_session: {e}")))?;
 
+        Ok((user, session))
+    }
+
+    /// Verify the OAuth callback's CSRF `state` against THIS session,
+    /// atomically consume the one-use ceremony, and confirm the
+    /// ceremony's provider matches this facade. Returns the PKCE
+    /// `code_verifier` for the token exchange.
+    ///
+    /// Shared by the generic (github/google) `complete()` and the Apple
+    /// `complete_apple()` path so both enforce the same single-use,
+    /// session-bound, provider-matched ceremony contract.
+    async fn verify_and_consume_ceremony(&self, state: &str) -> Result<String, FrameworkError> {
+        // Session binding: the session that called `begin` is the only
+        // session that can complete the flow. An attacker who steals a
+        // state value but not the session cookie sees an empty session
+        // here and is rejected.
+        let session_state_key = format!("oauth_state_{}", self.provider);
+        let expected_state: Option<String> = session().and_then(|s| s.get(&session_state_key));
+
+        match expected_state.as_deref() {
+            None => {
+                return Err(FrameworkError::Domain {
+                    message:
+                        "OAuth state missing from session — flow not initiated or session expired"
+                            .to_string(),
+                    status_code: 400,
+                });
+            }
+            Some(expected) if expected != state => {
+                return Err(FrameworkError::Domain {
+                    message: "OAuth state mismatch — possible CSRF attack or expired flow"
+                        .to_string(),
+                    status_code: 400,
+                });
+            }
+            _ => {} // state matches the session's stored value
+        }
+
+        // Atomically consume the ceremony keyed by the echoed state.
+        // Single-use under concurrency: two concurrent callbacks with the
+        // same `state` both pass the session check above, but only one
+        // wins the atomic DELETE (rows_affected == 1) and gets the
+        // payload; the other gets `None` and rejects.
+        let payload: OAuthCeremonyPayload =
+            super::ceremony::consume(state, super::ceremony::kind::OAUTH)
+                .await?
+                .ok_or_else(|| FrameworkError::Domain {
+                    message:
+                        "OAuth state already consumed or expired — replay attempt or stale flow"
+                            .to_string(),
+                    status_code: 400,
+                })?;
+
+        // Best-effort clear the session pointer. The atomic consume
+        // above is the single-use authority; this is janitorial.
+        session_mut(|s| {
+            s.forget(&session_state_key);
+        });
+
+        // Defence-in-depth: the ceremony was issued for THIS provider.
+        if payload.provider != self.provider {
+            return Err(FrameworkError::Domain {
+                message: format!(
+                    "OAuth state was issued for provider '{}' but consumed against '{}'",
+                    payload.provider, self.provider
+                ),
+                status_code: 400,
+            });
+        }
+
+        Ok(payload.pkce_verifier)
+    }
+
+    /// Complete the Apple Sign-In callback.
+    ///
+    /// Reuses the shared ceremony verification (state + single-use +
+    /// provider match) but diverges from the generic OAuth flow because
+    /// Apple is non-standard: the client secret is a JWT minted from an
+    /// ECDSA P-256 key (not a static string), the response mode is
+    /// `form_post`, and the user's identity arrives in a signed ID token
+    /// (not via a userinfo GET). `apple-rs` handles all Apple-specific
+    /// operations; the framework owns ceremony + persistence.
+    ///
+    /// Apple does not use PKCE — the `code_verifier` from the ceremony is
+    /// unused here, but the ceremony is still consumed for single-use
+    /// state protection.
+    async fn complete_apple(
+        &self,
+        code: &str,
+        state: &str,
+    ) -> Result<(User, Session), FrameworkError> {
+        let config = self.config()?;
+        let torii = instance()?;
+
+        // Validate Apple-specific config BEFORE consuming the one-use
+        // ceremony. A missing key pair / team id is a server-config fault;
+        // surfacing it after burning the state would force the user
+        // through a fresh `begin()` only to hit the same error.
+        let key_pair = config
+            .apple_key_pair
+            .as_ref()
+            .ok_or_else(|| FrameworkError::Domain {
+                message: "Apple OAuth requires apple_key_pair — load a .p8 via \
+                       AppleKeyPair::from_file / from_base64 at startup"
+                    .into(),
+                status_code: 400,
+            })?;
+        let team_id = config
+            .apple_team_id
+            .as_deref()
+            .ok_or_else(|| FrameworkError::Domain {
+                message: "Apple OAuth requires apple_team_id".into(),
+                status_code: 400,
+            })?;
+
+        // Consume the ceremony (state + single-use + provider match). The
+        // PKCE verifier is unused by Apple but the ceremony is still the
+        // single-use authority.
+        let _verifier = self.verify_and_consume_ceremony(state).await?;
+
+        // Exchange the authorization code for tokens. apple-rs generates
+        // the client-secret JWT from the key pair, POSTs to Apple's token
+        // endpoint, and returns the token response (which carries the
+        // signed `id_token`).
+        let apple_auth =
+            apple::auth::AppleAuthImpl::from_key_pair(&config.client_id, team_id, key_pair.clone())
+                .map_err(map_apple_error)?;
+        let token_response = apple_auth
+            .validate_code_with_redirect_uri(code, &config.redirect_url)
+            .await
+            .map_err(map_apple_error)?;
+
+        // Apple's identity is in the ID token, not a userinfo endpoint.
+        // Verify it via JWKS (signature, issuer, audience, expiry) —
+        // never decode without verification.
+        if token_response.id_token.is_empty() {
+            return Err(FrameworkError::Domain {
+                message: "Apple token response did not include an id_token".into(),
+                status_code: 502,
+            });
+        }
+        let jwks = apple_jwks()?;
+        let apple_user = apple::user::get_user_info_from_id_token(
+            &token_response.id_token,
+            &config.client_id,
+            None,
+            jwks,
+        )
+        .await
+        .map_err(map_apple_error)?;
+
+        // Apple's `sub` is the stable user identifier — NOT the email
+        // (which can be a private relay address that changes). Key
+        // account attribution on `sub`.
+        let sub = apple_user
+            .subject
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| FrameworkError::Domain {
+                message: "Apple ID token missing `sub` — cannot attribute account".into(),
+                status_code: 502,
+            })?;
+
+        // Enforce the email_verified contract and resolve the email to
+        // hand to persistence. Empty string signals "repeat login —
+        // resolve by `sub`" (get_or_create_user finds the existing user
+        // by (provider, sub) and ignores the email on that path).
+        let email = apple_email_for_upsert(&apple_user)?;
+
+        // Upsert the user in torii's store. `get_or_create_user` finds
+        // by (provider, sub) first (repeat login → returns existing,
+        // email ignored); only creates/links when not found, using the
+        // verified email. Failures here are genuine server faults → 500.
+        let user = torii
+            .oauth()
+            .get_or_create_user(&self.provider, sub, &email, None)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("oauth get_or_create_user: {e}")))?;
+        let session = torii
+            .create_session(&user.id, None, None)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("oauth create_session: {e}")))?;
         Ok((user, session))
     }
 
@@ -1027,6 +1260,145 @@ mod tests {
         assert!(
             !url.contains("response_mode="),
             "generic providers must not force response_mode: {url}"
+        );
+    }
+    /// Construct an `AppleUser` with only the email/verified fields set,
+    /// everything else `None` / the default enum variant — enough to
+    /// drive `apple_email_for_upsert` and the ID-token gating tests.
+    fn apple_user(email: Option<&str>, verified: bool) -> apple::user::AppleUser {
+        use apple::user::{AppleUser, RealUserStatus};
+        AppleUser {
+            issuer: None,
+            audience: None,
+            subject: Some("apple-sub".into()),
+            issued_at: None,
+            expiry: None,
+            nonce: None,
+            email: email.map(str::to_string),
+            email_verified: verified,
+            is_private_email: false,
+            real_user_status: RealUserStatus::Unknown,
+            auth_time: None,
+            nonce_supported: None,
+            transfer_sub: None,
+            org_id: None,
+        }
+    }
+
+    #[test]
+    fn apple_email_verified_returns_address() {
+        let u = apple_user(Some("a@b.com"), true);
+        assert_eq!(apple_email_for_upsert(&u).unwrap(), "a@b.com");
+    }
+
+    #[test]
+    fn apple_email_unverified_is_refused_with_401() {
+        let u = apple_user(Some("a@b.com"), false);
+        let err = apple_email_for_upsert(&u).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                FrameworkError::Domain {
+                    status_code: 401,
+                    ..
+                }
+            ),
+            "unverified Apple email must be refused with 401, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn apple_email_absent_repeat_login_yields_empty() {
+        // Apple omits email after the first authorization. The empty
+        // string defers to the `sub` lookup in get_or_create_user.
+        let u = apple_user(None, false);
+        assert_eq!(apple_email_for_upsert(&u).unwrap(), "");
+    }
+
+    #[test]
+    fn apple_email_empty_but_verified_defers_to_sub() {
+        // Edge: empty verified address -> treat as "no email" (repeat login).
+        let u = apple_user(Some(""), true);
+        assert_eq!(apple_email_for_upsert(&u).unwrap(), "");
+    }
+
+    #[test]
+    fn map_apple_error_status_codes() {
+        use apple::error::{AppleError, ErrorResponse, ErrorResponseType};
+
+        // 401 — ID token validation failure.
+        let e = map_apple_error(AppleError::TokenValidationError("bad sig".into()));
+        assert!(
+            matches!(
+                &e,
+                FrameworkError::Domain {
+                    status_code: 401,
+                    ..
+                }
+            ),
+            "TokenValidationError -> 401, got: {e:?}"
+        );
+
+        // 502 — JWKS unavailable.
+        let e = map_apple_error(AppleError::JwksError("offline".into()));
+        assert!(
+            matches!(
+                &e,
+                FrameworkError::Domain {
+                    status_code: 502,
+                    ..
+                }
+            ),
+            "JwksError -> 502, got: {e:?}"
+        );
+
+        // 502 — HTTP error.
+        let e = map_apple_error(AppleError::HttpError("timeout".into()));
+        assert!(
+            matches!(
+                &e,
+                FrameworkError::Domain {
+                    status_code: 502,
+                    ..
+                }
+            ),
+            "HttpError -> 502, got: {e:?}"
+        );
+
+        // 400 — OAuth response error (invalid_grant).
+        let e = map_apple_error(AppleError::ResponseError(ErrorResponse {
+            error_type: ErrorResponseType::InvalidGrant,
+            message: "bad code",
+        }));
+        assert!(
+            matches!(
+                &e,
+                FrameworkError::Domain {
+                    status_code: 400,
+                    ..
+                }
+            ),
+            "ResponseError(InvalidGrant) -> 400, got: {e:?}"
+        );
+
+        // 401 — missing certificate chain.
+        let e = map_apple_error(AppleError::MissingCertificateChain);
+        assert!(
+            matches!(
+                &e,
+                FrameworkError::Domain {
+                    status_code: 401,
+                    ..
+                }
+            ),
+            "MissingCertificateChain -> 401, got: {e:?}"
+        );
+
+        // 500 — JWT/other -> internal (not a Domain caller error).
+        let e = map_apple_error(AppleError::JwtError("boom".into()));
+        assert!(
+            !matches!(&e, FrameworkError::Domain { .. }),
+            "JwtError -> internal (500), got: {e:?}"
         );
     }
 }
