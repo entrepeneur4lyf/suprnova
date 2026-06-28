@@ -51,6 +51,6 @@ getrandom = "0.4.2"
 
 [dev-dependencies]
 # Verify generated keys round-trip through the framework's loader.
-suprnova = { path = "../framework", version = "0.4" }
+suprnova = { path = "../framework", version = "0.5" }
 # Integration tests that invoke the binary with a temp working directory.
 tempfile = "3"
