@@ -29,6 +29,10 @@ pub enum TokenPurpose {
     EmailVerification,
     /// Authorizes setting a new password after a forgot-password request.
     PasswordReset,
+    /// Authorizes a passwordless (magic-link) login. The token is
+    /// emailed as a one-time login link; consuming it authenticates the
+    /// user without a password entry.
+    MagicLink,
 }
 
 impl TokenPurpose {
@@ -37,15 +41,18 @@ impl TokenPurpose {
         match self {
             TokenPurpose::EmailVerification => "email_verification",
             TokenPurpose::PasswordReset => "password_reset",
+            TokenPurpose::MagicLink => "magic_link",
         }
     }
 
-    /// Default lifetime: 24h for verification, 15m for reset (matching
-    /// torii's prior defaults).
+    /// Default lifetime: 24h for verification, 15m for reset, 15m for
+    /// magic-link (matching torii's prior reset default; a magic link
+    /// should be short-lived so a leaked link window is small).
     pub fn default_ttl(self) -> Duration {
         match self {
             TokenPurpose::EmailVerification => Duration::hours(24),
             TokenPurpose::PasswordReset => Duration::minutes(15),
+            TokenPurpose::MagicLink => Duration::minutes(15),
         }
     }
 }
