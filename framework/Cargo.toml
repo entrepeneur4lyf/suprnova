@@ -51,7 +51,7 @@ torii-storage-seaorm = { git = "https://github.com/entrepeneur4lyf/suprnova-tori
 # Apple Sign-In provider — used by torii_integration::oauth for Apple's
 # JWT client secret, ID token verification (JWKS), and form_post flow.
 # `auth` feature only; cloudkit/appstore attack surface is disabled.
-apple = { git = "https://github.com/entrepeneur4lyf/suprnova-apple-rs.git", tag = "v0.3.0", default-features = false, features = ["auth"] }
+apple = { git = "https://github.com/entrepeneur4lyf/suprnova-apple-rs.git", tag = "v0.3.1", default-features = false, features = ["auth"] }
 
 # Pinned to versions sea-orm 1.1.x exposes via `with-rust_decimal` / `with-bigdecimal`.
 # Used by the `pagination` module to round-trip `sea_orm::Value::Decimal` /
