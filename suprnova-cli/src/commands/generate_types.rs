@@ -283,21 +283,45 @@ fn visit_path_into(root: &Path, out: &mut Vec<InertiaPropsStruct>) {
     }
 }
 
-/// Convert a RustType to TypeScript type string
-fn rust_type_to_ts(ty: &RustType) -> String {
+/// Convert a RustType to a TypeScript type string.
+///
+/// A `Custom(name)` keeps its bare name only when the name resolves to a type
+/// the generator actually emits — another InertiaProps/Data struct (`known`) or
+/// one of the current struct's generic parameters (`generics`). Anything else (a
+/// DTO that forgot to derive InertiaProps/Data, an external type the generator
+/// can't see) degrades to `unknown`, so the emitted `.ts` never references an
+/// undeclared identifier that would fail `tsc`/`svelte-check`. `is_resolved_custom`
+/// is the single source of truth shared with the unresolved-ref diagnostic.
+fn rust_type_to_ts(ty: &RustType, known: &HashSet<String>, generics: &[String]) -> String {
     match ty {
         RustType::String => "string".to_string(),
         RustType::Number => "number".to_string(),
         RustType::Bool => "boolean".to_string(),
-        RustType::Option(inner) => format!("{} | null", rust_type_to_ts(inner)),
-        RustType::Vec(inner) => format!("Array<{}>", rust_type_to_ts(inner)),
-        RustType::HashMap(key, val) => {
-            format!("Record<{}, {}>", rust_type_to_ts(key), rust_type_to_ts(val))
+        RustType::Option(inner) => format!("{} | null", rust_type_to_ts(inner, known, generics)),
+        RustType::Vec(inner) => format!("Array<{}>", rust_type_to_ts(inner, known, generics)),
+        RustType::HashMap(key, val) => format!(
+            "Record<{}, {}>",
+            rust_type_to_ts(key, known, generics),
+            rust_type_to_ts(val, known, generics)
+        ),
+        RustType::Field(inner) => format!("{} | null", rust_type_to_ts(inner, known, generics)),
+        RustType::Prop(inner) => rust_type_to_ts(inner, known, generics),
+        RustType::Custom(name) => {
+            if is_resolved_custom(name, known, generics) {
+                name.clone()
+            } else {
+                "unknown".to_string()
+            }
         }
-        RustType::Field(inner) => format!("{} | null", rust_type_to_ts(inner)),
-        RustType::Prop(inner) => rust_type_to_ts(inner),
-        RustType::Custom(name) => name.clone(),
     }
+}
+
+/// Whether a `Custom` type name resolves to something the generated `.ts`
+/// declares: a generated struct, a generic parameter in scope, or the
+/// already-degraded `unknown` placeholder the parser emits for unparseable
+/// types. Everything else is an undeclared reference.
+fn is_resolved_custom(name: &str, known: &HashSet<String>, generics: &[String]) -> bool {
+    name == "unknown" || known.contains(name) || generics.iter().any(|g| g == name)
 }
 
 /// Return the optional marker for a field's TS declaration.
@@ -380,12 +404,78 @@ fn collect_type_deps(ty: &RustType, deps: &mut HashSet<String>, known: &HashSet<
     }
 }
 
+/// A field whose type references something the generator can't emit — not an
+/// InertiaProps/Data struct, not a generic parameter. Reported as a warning; the
+/// field itself is emitted as `unknown` (see `rust_type_to_ts`).
+struct UnresolvedRef {
+    struct_name: String,
+    field_name: String,
+    type_name: String,
+}
+
+/// Walk every generated struct's fields and collect references to custom types
+/// that aren't generated (and aren't generic parameters). Uses the same
+/// `is_resolved_custom` predicate as emission, so the diagnostic and the emitted
+/// `unknown` can never disagree.
+fn collect_unresolved_refs(structs: &[InertiaPropsStruct]) -> Vec<UnresolvedRef> {
+    let known: HashSet<String> = structs.iter().map(|s| s.name.clone()).collect();
+    let mut refs = Vec::new();
+    for s in structs {
+        for f in &s.fields {
+            let mut names = Vec::new();
+            collect_custom_names(&f.ty, &mut names);
+            for name in names {
+                if !is_resolved_custom(&name, &known, &s.type_params) {
+                    refs.push(UnresolvedRef {
+                        struct_name: s.name.clone(),
+                        field_name: f.name.clone(),
+                        type_name: name,
+                    });
+                }
+            }
+        }
+    }
+    refs
+}
+
+/// Gather every `Custom` type name nested anywhere inside a `RustType`.
+fn collect_custom_names(ty: &RustType, out: &mut Vec<String>) {
+    match ty {
+        RustType::Custom(name) => out.push(name.clone()),
+        RustType::Option(inner)
+        | RustType::Vec(inner)
+        | RustType::Field(inner)
+        | RustType::Prop(inner) => collect_custom_names(inner, out),
+        RustType::HashMap(key, val) => {
+            collect_custom_names(key, out);
+            collect_custom_names(val, out);
+        }
+        _ => {}
+    }
+}
+
+/// Print one warning per distinct unresolved prop type, so a missing
+/// `#[derive(InertiaProps)]` surfaces at generation time instead of as a later
+/// `svelte-check` failure on the now-`unknown` field.
+fn warn_unresolved_refs(structs: &[InertiaPropsStruct]) {
+    let mut seen = HashSet::new();
+    for r in collect_unresolved_refs(structs) {
+        if seen.insert(r.type_name.clone()) {
+            ui::warning(&format!(
+                "Prop type `{}` (referenced by `{}.{}`) doesn't derive InertiaProps/Data — \
+                 emitting `unknown`. Derive `InertiaProps` (or `Data`) on it for a precise type.",
+                r.type_name, r.struct_name, r.field_name
+            ));
+        }
+    }
+}
+
 /// Emit paired output + (optionally) input TypeScript interfaces for one struct.
 ///
 /// A paired `<Name>Input` interface is emitted whenever any field carries an
 /// `input_only`, `output_only`, or `lazy` flag — i.e. whenever the input and
 /// output shapes differ.
-fn emit_ts_for_struct(s: &InertiaPropsStruct) -> String {
+fn emit_ts_for_struct(s: &InertiaPropsStruct, known: &HashSet<String>) -> String {
     let has_flags = s
         .fields
         .iter()
@@ -407,7 +497,7 @@ fn emit_ts_for_struct(s: &InertiaPropsStruct) -> String {
             "  {}{}: {};\n",
             f.name,
             optional_marker(&f.ty),
-            rust_type_to_ts(&f.ty)
+            rust_type_to_ts(&f.ty, known, &s.type_params)
         ));
     }
     out.push_str("}\n\n");
@@ -428,7 +518,7 @@ fn emit_ts_for_struct(s: &InertiaPropsStruct) -> String {
                 "  {}{}: {};\n",
                 f.name,
                 optional_marker(&f.ty),
-                rust_type_to_ts(&f.ty)
+                rust_type_to_ts(&f.ty, known, &s.type_params)
             ));
         }
         out.push_str("}\n\n");
@@ -443,13 +533,14 @@ fn emit_ts_for_struct(s: &InertiaPropsStruct) -> String {
 /// the in-memory `generate_types_string` helper call through here.
 pub fn generate_typescript(structs: &[InertiaPropsStruct]) -> String {
     let sorted = topological_sort(structs);
+    let known: HashSet<String> = structs.iter().map(|s| s.name.clone()).collect();
 
     let mut output = String::new();
     output.push_str("// This file is auto-generated by Suprnova. Do not edit manually.\n");
     output.push_str("// Run `suprnova generate-types` to regenerate.\n\n");
 
     for s in sorted {
-        output.push_str(&emit_ts_for_struct(s));
+        output.push_str(&emit_ts_for_struct(s, &known));
     }
 
     output
@@ -491,9 +582,10 @@ pub fn generate_types_string(input: ScanInput) -> String {
 
     // Emit without the file-level header comment so tests get clean output.
     let sorted = topological_sort(&structs);
+    let known: HashSet<String> = structs.iter().map(|s| s.name.clone()).collect();
     let mut output = String::new();
     for s in sorted {
-        output.push_str(&emit_ts_for_struct(s));
+        output.push_str(&emit_ts_for_struct(s, &known));
     }
     output
 }
@@ -505,6 +597,10 @@ pub fn generate_types_to_file(project_path: &Path, output_path: &Path) -> Result
     if structs.is_empty() {
         return Ok(0);
     }
+
+    // Surface prop fields that reference un-generatable types (degraded to
+    // `unknown` in the output) so the missing derive is fixed at the source.
+    warn_unresolved_refs(&structs);
 
     // Ensure output directory exists
     if let Some(parent) = output_path.parent() {

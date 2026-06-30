@@ -85,6 +85,65 @@ fn generic_struct_emits_typescript_generic() {
     assert!(ts.contains("cursor?: string | null"));
 }
 
+// A prop type that ISN'T an InertiaProps/Data struct (here `UserInfo`, which
+// only derives Serialize) is referenced but never emitted. The generator must
+// degrade the reference to `unknown` rather than write a dangling identifier
+// that fails `svelte-check`/`tsc`.
+const UNRESOLVED_SRC: &str = r#"
+#[derive(suprnova::InertiaProps)]
+pub struct DashboardProps {
+    pub user: UserInfo,
+    pub tags: Vec<UserInfo>,
+    pub note: Option<UserInfo>,
+}
+
+#[derive(serde::Serialize)]
+pub struct UserInfo {
+    pub id: i64,
+    pub name: String,
+}
+"#;
+
+#[test]
+fn unresolved_custom_type_degrades_to_unknown() {
+    let ts = generate_types_string(ScanInput::Source(UNRESOLVED_SRC));
+
+    // UserInfo never derives InertiaProps/Data, so no interface is emitted...
+    assert!(!ts.contains("export interface UserInfo"));
+
+    let block = extract_block(&ts, "DashboardProps");
+    // ...and every reference to it degrades to `unknown` — never a bare,
+    // undeclared `UserInfo` identifier.
+    assert!(!block.contains("UserInfo"), "leaked undeclared type: {block}");
+    assert!(block.contains("user: unknown"), "got: {block}");
+    assert!(block.contains("tags: Array<unknown>"), "got: {block}");
+    assert!(block.contains("note: unknown | null"), "got: {block}");
+}
+
+const RESOLVED_NESTED_SRC: &str = r#"
+#[derive(suprnova::InertiaProps)]
+pub struct Page {
+    pub author: Author,
+    pub coauthors: Vec<Author>,
+}
+
+#[derive(suprnova::InertiaProps)]
+pub struct Author {
+    pub name: String,
+}
+"#;
+
+#[test]
+fn resolved_nested_inertia_type_keeps_named_reference() {
+    let ts = generate_types_string(ScanInput::Source(RESOLVED_NESTED_SRC));
+    // Author IS an InertiaProps struct, so it's emitted and the reference stays
+    // a precise named type (not degraded to `unknown`).
+    assert!(ts.contains("export interface Author"));
+    let page = extract_block(&ts, "Page");
+    assert!(page.contains("author: Author"), "got: {page}");
+    assert!(page.contains("coauthors: Array<Author>"), "got: {page}");
+}
+
 #[test]
 fn multi_param_generic() {
     let src = r#"
