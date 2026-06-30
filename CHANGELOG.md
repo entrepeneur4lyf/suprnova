@@ -4,6 +4,22 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record — a version is released when it's
 bumped and pushed, not by cutting a tag. Newest first.
 
+## 0.5.7 — 2026-06-30
+
+### Fixed
+
+- **`generate-types` no longer emits dangling type references.** A prop field
+  whose type is a struct that doesn't derive `InertiaProps`/`Data` (or an
+  external type the generator can't see) was emitted as a bare identifier — e.g.
+  `user: UserInfo` — producing TypeScript that fails `tsc`/`svelte-check`
+  because that interface is never written. Such references now degrade to
+  `unknown` (`user: unknown`; `Vec<T>` → `Array<unknown>`; `Option<T>` →
+  `unknown | null`), so generated output always type-checks, and
+  `generate-types` prints a warning naming the unresolved type and the field
+  that references it, with the fix (derive `InertiaProps`/`Data` on it).
+  Generic parameters and resolved nested InertiaProps/Data types are
+  unaffected.
+
 ## 0.4.0 — 2026-06-22
 
 ### Changed
