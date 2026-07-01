@@ -114,7 +114,10 @@ fn unresolved_custom_type_degrades_to_unknown() {
     let block = extract_block(&ts, "DashboardProps");
     // ...and every reference to it degrades to `unknown` — never a bare,
     // undeclared `UserInfo` identifier.
-    assert!(!block.contains("UserInfo"), "leaked undeclared type: {block}");
+    assert!(
+        !block.contains("UserInfo"),
+        "leaked undeclared type: {block}"
+    );
     assert!(block.contains("user: unknown"), "got: {block}");
     assert!(block.contains("tags: Array<unknown>"), "got: {block}");
     assert!(block.contains("note: unknown | null"), "got: {block}");

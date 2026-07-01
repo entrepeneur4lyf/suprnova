@@ -546,8 +546,9 @@ pub fn generate_typescript(routes: &[GeneratedRoute]) -> String {
             // Generate unique function name for duplicate handlers
             let base_fn_name = &route.definition.handler_fn;
             let fn_name = if let Some(count) = used_names.get(base_fn_name) {
-                // Use route name or path segment to make unique
-                if let Some(name) = &route.definition.name {
+                // Duplicate handler in this module — derive a unique key from the
+                // route name or path, then sanitize it to a valid TS identifier.
+                let raw = if let Some(name) = &route.definition.name {
                     // Use the last part of the route name: "home" from "home", "protected" from name
                     name.split('.')
                         .next_back()
@@ -555,16 +556,13 @@ pub fn generate_typescript(routes: &[GeneratedRoute]) -> String {
                         .to_string()
                 } else {
                     // Use path to create unique name
-                    let path_name = route
-                        .definition
-                        .path
-                        .trim_start_matches('/')
-                        .replace(['/', '{', '}', '-'], "_");
-                    if path_name.is_empty() {
-                        format!("{}_{}", base_fn_name, count + 1)
-                    } else {
-                        path_name
-                    }
+                    route.definition.path.trim_start_matches('/').to_string()
+                };
+                let key = sanitize_route_key(&raw);
+                if key.is_empty() {
+                    format!("{}_{}", base_fn_name, count + 1)
+                } else {
+                    key
                 }
             } else {
                 base_fn_name.clone()
@@ -659,6 +657,31 @@ fn generate_params_interface_name(route: &GeneratedRoute) -> String {
         to_pascal_case(&module),
         to_pascal_case(fn_name)
     )
+}
+
+/// Sanitize an arbitrary string (a route path or route-name segment) into a
+/// valid, unquoted TypeScript identifier for use as an object-property key.
+///
+/// Every character that isn't ASCII-alphanumeric or `_` becomes `_`, and a
+/// leading digit is prefixed with `_`. Without this, a file extension
+/// (`/favicon-16x16.png` -> `favicon_16x16.png`) or a leading digit
+/// (`/2fa` -> `2fa`) would leak into the generated `controllers` object as an
+/// illegal identifier, producing TypeScript that fails `tsc`/`svelte-check`.
+fn sanitize_route_key(s: &str) -> String {
+    let mut out: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if out.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        out.insert(0, '_');
+    }
+    out
 }
 
 /// Convert snake_case to PascalCase
