@@ -4,6 +4,21 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record — a version is released when it's
 bumped and pushed, not by cutting a tag. Newest first.
 
+## 0.5.8 — 2026-06-30
+
+### Fixed
+
+- **`generate-types` route helpers are always valid TypeScript.** When several
+  routes in a module share one handler (e.g. a `static_files::serve` whitelist
+  mapping many favicon/asset URLs), the first kept the handler name and the rest
+  got a key derived from the route path — but the path was only partly
+  sanitized (`/ { } -` → `_`), so a file extension leaked a `.` into the key:
+  `favicon_16x16.png: (...) => ...`. That is member access, not a property name,
+  so `tsc`/`svelte-check` rejected the generated `routes.ts`. Derived keys are
+  now sanitized to legal identifiers — every non-alphanumeric character becomes
+  `_` and a leading digit is prefixed — so `favicon-16x16.png` → `favicon_16x16_png`
+  and `2fa.json` → `_2fa_json`. Unique handler names are untouched.
+
 ## 0.5.7 — 2026-06-30
 
 ### Fixed
