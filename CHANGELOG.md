@@ -47,6 +47,90 @@ bumped and pushed, not by cutting a tag. Newest first.
   Generic parameters and resolved nested InertiaProps/Data types are
   unaffected.
 
+## 0.5.6 — 2026-06-29
+
+### Changed
+
+- **Sign in with Apple: RS256 JWKS verification.** Bump `suprnova-apple-rs` to
+  v0.3.1 — Apple ID tokens are now verified against Apple's published JWKS
+  (RS256) instead of being trusted structurally.
+
+## 0.5.5 — 2026-06-28
+
+### Added
+
+- **`MagicLink` token purpose.** New `MagicLink` variant on the auth-flow
+  `TokenPurpose` enum, for passwordless magic-link sign-in tokens.
+
+## 0.5.4 — 2026-06-28
+
+### Changed
+
+- **Composable OAuth completion.** Split the generic OAuth completion into
+  `verify_oauth_identity` (verify + resolve the identity) and a thin `complete`,
+  so apps can verify an OAuth identity without triggering the full
+  session-completion side effects.
+
+## 0.5.3 — 2026-06-28
+
+### Fixed
+
+- **Correct workspace version metadata.** v0.5.2 was tagged and pushed before
+  its `Cargo.toml` version bump was staged, so the pushed v0.5.2 tag still reads
+  `version = "0.5.1"`. v0.5.3 re-cuts the release with the correct workspace
+  version — no code change (the v0.5.2 OAuth split is unaffected).
+
+## 0.5.2 — 2026-06-28
+
+### Changed
+
+- **Composable Apple completion.** Split Apple Sign-In completion into
+  `verify_apple_identity` + a thin `complete_apple`, mirroring the generic OAuth
+  split. (Note: the pushed v0.5.2 tag carries a stale `0.5.1` version field —
+  fixed in v0.5.3.)
+
+## 0.5.1 — 2026-06-28
+
+### Changed
+
+- **Renamed Apple crate.** Repoint the Apple dependency to the renamed
+  `suprnova-apple-rs` repository.
+
+## 0.5.0 — 2026-06-28
+
+### Added
+
+- **Sign in with Apple.** OAuth token exchange + ID-token verification + user
+  upsert for Apple; Apple well-known endpoints and the `form_post` response
+  mode; Apple-specific fields on `OAuthProviderConfig`; `AppleKeyPair`
+  re-exported so apps configure Apple Sign-In without a direct `apple`
+  dependency.
+
+### Fixed
+
+- Omit PKCE parameters from the Apple authorize URL (Apple rejects the request
+  when they are present).
+
+### Dependencies
+
+- Consume the `torii` magic-auth fix; add `apple-rs` v0.3.0.
+
+## 0.4.1 — 2026-06-26
+
+### Performance
+
+- Pre-size `MiddlewareChain` to eliminate per-request `Vec` reallocations.
+
+### Fixed
+
+- Make the maintenance down-file path collision-proof under parallel test runs.
+
+### Docs
+
+- Compile-check the framework's doc examples (`ignore` → `no_run`); reconcile
+  the distribution notes with the tagged GitHub Releases; ignore the whole
+  `docs/` tree.
+
 ## 0.4.0 — 2026-06-22
 
 ### Changed
