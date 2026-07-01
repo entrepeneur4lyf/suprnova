@@ -33,7 +33,7 @@ registration pattern.
   irrelevant unless `MAIL_DRIVER=ses`). Everything else is optional.
 
 Where a starter `.env` ships a key the framework never reads
-(`MAIL_FROM_ADDRESS`, `MAIL_FROM_NAME`, `FILESYSTEM_DISK`), it's
+(`MAIL_FROM_ADDRESS`, `FILESYSTEM_DISK`), it's
 called out at the end of this chapter.
 
 ## Application
@@ -160,6 +160,7 @@ selected; an unknown driver value logs a `warn!` and falls back to
 |---|---|---|---|
 | `MAIL_DRIVER` | `"log"` | `String` (`log`, `memory`, `smtp`, `ses`, `sendgrid`, `mailgun`, `postmark`, `resend`) | Selects the bootstrap target. |
 | `MAIL_FROM` | none — required by auth-flow facades | `String` | Default from-address for auth-flow facades (`EmailVerification`, `PasswordReset`, `TwoFactor`). Required for those paths; absent it errors at the call site rather than silently falling back to a placeholder that would break DMARC/SPF. |
+| `MAIL_FROM_NAME` | unset | `String` | Optional display name for the auth-flow `From` (since **0.5.9**). When set, the header renders `Name <MAIL_FROM>`; `MAIL_FROM` stays a bare address. Read at send time, so it applies to queued auth-flow mail too. |
 
 ### SMTP (`MAIL_DRIVER=smtp`)
 
@@ -322,11 +323,12 @@ The scaffolded starter `.env` lists a few keys for human-author
 convenience that the framework never consults. They're documented
 here so a reader searching for them isn't left wondering:
 
-- `MAIL_FROM_ADDRESS` and `MAIL_FROM_NAME` — Laravel-style placeholders.
-  The actual from-address the auth-flow facades use is `MAIL_FROM`
-  (covered under Mail). Your own `Mailable` types can read these vars
-  via `env_optional` if you want to keep the Laravel names, but
-  nothing in `suprnova::*` does.
+- `MAIL_FROM_ADDRESS` — a Laravel-style placeholder the framework never
+  consults. The actual from-address the auth-flow facades use is `MAIL_FROM`
+  (covered under Mail). Your own `Mailable` types can read it via
+  `env_optional` if you want to keep the Laravel name, but nothing in
+  `suprnova::*` does. (`MAIL_FROM_NAME` **is** read as of 0.5.9 — see the
+  Mail chapter — so it's no longer listed here.)
 - `FILESYSTEM_DISK` — placeholder for the default disk name. Set the
   default in code via `FilesystemRegistry::set_default(name)` instead.
 

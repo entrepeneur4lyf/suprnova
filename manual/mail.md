@@ -86,6 +86,29 @@ MAIL_RESEND_API_KEY=...
 
 Each HTTP provider also honors a corresponding `MAIL_<PROVIDER>_ENDPOINT` override that points at a regional URL or a mock server (useful for integration tests against `wiremock`).
 
+### Auth-flow sender: `MAIL_FROM` and `MAIL_FROM_NAME`
+
+The built-in auth-flow mailables — email verification, password reset, and the
+password-changed notice — resolve their envelope `From` from the environment
+rather than a hard-coded `from()`:
+
+```env
+MAIL_FROM=no-reply@example.com        # bare address (required by the auth flows; fails closed if unset)
+MAIL_FROM_NAME=Acme Support           # optional display name (since 0.5.9)
+```
+
+- `MAIL_FROM` **must be a bare address.** It is lifted straight into the
+  message's `From`, so a `"Name <addr>"` value would be treated as the entire
+  address and rejected by the transport.
+- `MAIL_FROM_NAME` (optional, added in **0.5.9**) attaches a display name, so the
+  header renders as `Acme Support <no-reply@example.com>`. Unset or blank keeps
+  the previous bare-address behavior. It is read at send time, so it applies to
+  queued auth-flow mail too.
+
+These two variables only affect the framework's own auth-flow mailables. Your
+own `Mailable`s set their sender through `from()` (or the global `always_from`
+default) — see below.
+
 ## The Mailable Trait
 
 Mailables are serializable structs that know how to render themselves. The trait defaults render with `tera::Tera::one_off` against the mailable's serialized fields:

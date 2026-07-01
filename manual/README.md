@@ -23,6 +23,7 @@ those, you'll feel at home.
 | **Look up an env var** | [Environment Variables](env-vars.md) |
 | **Deploy to production** | [Deployment](deployment.md) |
 | **Use named HTTPS dev URLs (passkeys, secure cookies)** | [HTTPS Dev URLs](dev-tls.md) |
+| **Add social login or Sign in with Apple** | [OAuth & Passwordless Login](oauth.md) |
 
 ## Two reading paths
 
