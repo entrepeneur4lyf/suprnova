@@ -4,6 +4,18 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record — a version is released when it's
 bumped and pushed, not by cutting a tag. Newest first.
 
+## 0.5.9 — 2026-07-01
+
+### Added
+
+- **`MAIL_FROM_NAME` — optional display name on auth-flow emails.** The
+  email-verification, password-reset, and password-changed mailables now render
+  their `From` header as `"Name <address>"` when `MAIL_FROM_NAME` is set (read
+  at send time so it survives the queue's serde round-trip). `MAIL_FROM` stays a
+  bare address; leaving `MAIL_FROM_NAME` unset or blank keeps the previous
+  bare-address behavior. No change to any call site — the mailables read the env
+  var themselves.
+
 ## 0.5.8 — 2026-06-30
 
 ### Fixed
