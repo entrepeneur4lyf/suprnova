@@ -32,6 +32,26 @@ use crate::mail::{Address, Mailable};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+/// Read `MAIL_FROM_NAME` for the outgoing display name, treating unset/blank as
+/// "no name". Read at send time so it survives the mailable's serde round-trip
+/// through the queue worker (the mailable stores only the bare `from_address`).
+fn mail_from_name() -> Option<String> {
+    std::env::var("MAIL_FROM_NAME")
+        .ok()
+        .filter(|n| !n.trim().is_empty())
+}
+
+/// Build the envelope `From`, attaching an optional display name so the header
+/// renders as `"Name <email>"` (RFC 5322) instead of a bare address. `MAIL_FROM`
+/// must remain a bare address; the display name comes from `MAIL_FROM_NAME`.
+fn build_from(from_address: &str, from_name: Option<String>) -> Address {
+    let addr = Address::new(from_address);
+    match from_name {
+        Some(name) => addr.with_name(name),
+        None => addr,
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // EmailVerificationMail
 // ──────────────────────────────────────────────────────────────────────
@@ -105,7 +125,7 @@ impl Mailable for EmailVerificationMail {
     }
 
     fn from(&self) -> Option<Address> {
-        Some(Address::new(&self.from_address))
+        Some(build_from(&self.from_address, mail_from_name()))
     }
 }
 
@@ -171,7 +191,7 @@ impl Mailable for PasswordResetMail {
     }
 
     fn from(&self) -> Option<Address> {
-        Some(Address::new(&self.from_address))
+        Some(build_from(&self.from_address, mail_from_name()))
     }
 }
 
@@ -234,7 +254,7 @@ impl Mailable for PasswordChangedMail {
     }
 
     fn from(&self) -> Option<Address> {
-        Some(Address::new(&self.from_address))
+        Some(build_from(&self.from_address, mail_from_name()))
     }
 }
 
@@ -297,5 +317,19 @@ mod tests {
             from_address: "no@reply.com".into(),
         };
         assert_eq!(m.render_subject().unwrap(), "Verify your email for MyCorp");
+    }
+
+    #[test]
+    fn build_from_attaches_display_name() {
+        let a = build_from("shawn@eas4ai.com", Some("Shawn McAllister".into()));
+        assert_eq!(a.to_string(), "Shawn McAllister <shawn@eas4ai.com>");
+    }
+
+    #[test]
+    fn build_from_is_bare_without_name() {
+        assert_eq!(
+            build_from("shawn@eas4ai.com", None).to_string(),
+            "shawn@eas4ai.com"
+        );
     }
 }
